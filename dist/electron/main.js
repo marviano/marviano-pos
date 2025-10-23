@@ -32,58 +32,748 @@ var __importStar = (this && this.__importStar) || (function () {
         return result;
     };
 })();
+var __importDefault = (this && this.__importDefault) || function (mod) {
+    return (mod && mod.__esModule) ? mod : { "default": mod };
+};
 Object.defineProperty(exports, "__esModule", { value: true });
 const electron_1 = require("electron");
+const better_sqlite3_1 = __importDefault(require("better-sqlite3"));
 const path = __importStar(require("path"));
 const isDev = process.env.NODE_ENV === 'development' || !electron_1.app.isPackaged;
-function createWindow() {
-    // Get screen dimensions
-    const { width: screenWidth, height: screenHeight } = electron_1.screen.getPrimaryDisplay().workAreaSize;
-    // Calculate window dimensions (50% of screen width)
-    const windowWidth = Math.floor(screenWidth * 0.5);
-    const windowHeight = Math.floor(480 * 0.9); // Reduce height by 10% (432px)
-    // Create the browser window
-    const mainWindow = new electron_1.BrowserWindow({
-        width: windowWidth,
-        height: windowHeight,
-        minWidth: 600,
-        minHeight: 400,
-        title: 'Marviano POS',
-        frame: false, // Remove window frame (title bar, menu bar, borders)
-        backgroundColor: '#111827', // Dark gray background to match the login page
-        movable: true, // Make window draggable
+// Global references to windows
+let mainWindow = null;
+let customerWindow = null;
+let localDb = null;
+function createWindows() {
+    // Initialize local SQLite (offline storage)
+    try {
+        const dbPath = path.join(electron_1.app.getPath('userData'), 'pos-local.db');
+        console.log('🔍 Initializing SQLite database at:', dbPath);
+        // Ensure the directory exists
+        const dbDir = path.dirname(dbPath);
+        if (!require('fs').existsSync(dbDir)) {
+            require('fs').mkdirSync(dbDir, { recursive: true });
+        }
+        localDb = new better_sqlite3_1.default(dbPath);
+        // Create comprehensive tables for complete POS offline functionality
+        localDb.exec(`
+      -- Core POS Tables
+      CREATE TABLE IF NOT EXISTS users (
+        id INTEGER PRIMARY KEY,
+        email TEXT UNIQUE NOT NULL,
+        password TEXT,
+        name TEXT,
+        googleId TEXT UNIQUE,
+        createdAt TEXT,
+        role_id INTEGER,
+        organization_id INTEGER,
+        updated_at INTEGER
+      );
+      
+      CREATE TABLE IF NOT EXISTS businesses (
+        id INTEGER PRIMARY KEY,
+        name TEXT NOT NULL,
+        permission_name TEXT UNIQUE NOT NULL,
+        organization_id INTEGER,
+        management_group_id INTEGER,
+        image_url TEXT,
+        created_at TEXT,
+        updated_at INTEGER
+      );
+      
+      CREATE TABLE IF NOT EXISTS products (
+        id INTEGER PRIMARY KEY,
+        business_id INTEGER,
+        menu_code TEXT,
+        nama TEXT NOT NULL,
+        satuan TEXT NOT NULL,
+        kategori TEXT NOT NULL,
+        jenis TEXT,
+        keterangan TEXT,
+        harga_beli REAL,
+        ppn REAL,
+        harga_jual INTEGER NOT NULL,
+        harga_khusus REAL,
+        harga_online REAL,
+        fee_kerja REAL,
+        status TEXT DEFAULT 'active',
+        created_at TEXT,
+        updated_at INTEGER,
+        has_customization INTEGER DEFAULT 0
+      );
+      
+      CREATE TABLE IF NOT EXISTS ingredients (
+        id INTEGER PRIMARY KEY,
+        ingredient_code TEXT NOT NULL,
+        nama TEXT NOT NULL,
+        kategori TEXT NOT NULL,
+        satuan_beli TEXT NOT NULL,
+        isi_satuan_beli REAL NOT NULL,
+        satuan_keluar TEXT NOT NULL,
+        harga_beli INTEGER NOT NULL,
+        stok_min INTEGER DEFAULT 0,
+        status TEXT DEFAULT 'active',
+        business_id INTEGER NOT NULL,
+        created_at TEXT,
+        updated_at INTEGER
+      );
+      
+      CREATE TABLE IF NOT EXISTS cogs (
+        id INTEGER PRIMARY KEY,
+        menu_code TEXT,
+        ingredient_code TEXT,
+        amount REAL NOT NULL DEFAULT 0.0,
+        created_at TEXT,
+        updated_at INTEGER
+      );
+      
+      CREATE TABLE IF NOT EXISTS contacts (
+        id INTEGER PRIMARY KEY,
+        no_ktp TEXT UNIQUE,
+        nama TEXT NOT NULL,
+        phone_number TEXT,
+        tgl_lahir TEXT,
+        no_kk TEXT,
+        created_at TEXT,
+        updated_at INTEGER,
+        is_active INTEGER DEFAULT 1,
+        jenis_kelamin TEXT,
+        kota TEXT,
+        kecamatan TEXT,
+        source_id INTEGER,
+        pekerjaan_id INTEGER,
+        source_lainnya TEXT,
+        alamat TEXT,
+        team_id INTEGER
+      );
+      
+      CREATE TABLE IF NOT EXISTS deals (
+        id INTEGER PRIMARY KEY,
+        contact_id INTEGER NOT NULL,
+        user_id INTEGER NOT NULL,
+        business_id INTEGER NOT NULL,
+        activity_date TEXT NOT NULL,
+        product_type TEXT NOT NULL,
+        product_id INTEGER,
+        motorcycle_product_id INTEGER,
+        sales_pipeline_stage TEXT NOT NULL,
+        financing_company TEXT,
+        note TEXT,
+        notes TEXT,
+        created_at TEXT,
+        updated_at INTEGER,
+        team_id INTEGER,
+        followup_count INTEGER DEFAULT 0
+      );
+      
+      CREATE TABLE IF NOT EXISTS deal_products (
+        id INTEGER PRIMARY KEY,
+        deal_id INTEGER NOT NULL,
+        product_id INTEGER NOT NULL,
+        quantity INTEGER DEFAULT 1,
+        unit_price REAL,
+        total_price REAL,
+        notes TEXT,
+        created_at TEXT,
+        updated_at INTEGER
+      );
+      
+      CREATE TABLE IF NOT EXISTS teams (
+        id INTEGER PRIMARY KEY,
+        name TEXT NOT NULL,
+        description TEXT,
+        organization_id INTEGER NOT NULL,
+        team_lead_id INTEGER,
+        business_id INTEGER,
+        color TEXT DEFAULT '#3B82F6',
+        is_active INTEGER DEFAULT 1,
+        created_at TEXT,
+        updated_at INTEGER
+      );
+      
+      CREATE TABLE IF NOT EXISTS roles (
+        id INTEGER PRIMARY KEY,
+        name TEXT UNIQUE NOT NULL,
+        description TEXT,
+        organization_id INTEGER,
+        created_at TEXT,
+        updated_at INTEGER
+      );
+      
+      CREATE TABLE IF NOT EXISTS permissions (
+        id INTEGER PRIMARY KEY,
+        name TEXT UNIQUE NOT NULL,
+        description TEXT,
+        created_at TEXT,
+        category_id INTEGER,
+        organization_id INTEGER,
+        status TEXT DEFAULT 'active'
+      );
+      
+      -- Supporting Tables
+      CREATE TABLE IF NOT EXISTS source (
+        id INTEGER PRIMARY KEY,
+        source_name TEXT UNIQUE NOT NULL,
+        created_at TEXT,
+        updated_at INTEGER
+      );
+      
+      CREATE TABLE IF NOT EXISTS pekerjaan (
+        id INTEGER PRIMARY KEY,
+        nama_pekerjaan TEXT UNIQUE NOT NULL,
+        created_at TEXT,
+        updated_at INTEGER
+      );
+      
+      CREATE TABLE IF NOT EXISTS kartu_keluarga (
+        id INTEGER PRIMARY KEY,
+        no_kk TEXT UNIQUE NOT NULL,
+        created_at TEXT,
+        updated_at INTEGER
+      );
+      
+      CREATE TABLE IF NOT EXISTS leasing_companies (
+        id INTEGER PRIMARY KEY,
+        name TEXT NOT NULL,
+        description TEXT,
+        is_active INTEGER DEFAULT 1,
+        created_at TEXT,
+        updated_at INTEGER
+      );
+      
+      -- Legacy tables for backward compatibility
+      CREATE TABLE IF NOT EXISTS categories (
+        jenis TEXT PRIMARY KEY,
+        updated_at INTEGER
+      );
+      
+      -- Sync status tracking
+      CREATE TABLE IF NOT EXISTS sync_status (
+        key TEXT PRIMARY KEY,
+        last_sync INTEGER,
+        status TEXT
+      );
+      
+      -- Indexes for performance
+      CREATE INDEX IF NOT EXISTS idx_products_jenis ON products(jenis);
+      CREATE INDEX IF NOT EXISTS idx_products_status ON products(status);
+      CREATE INDEX IF NOT EXISTS idx_products_business ON products(business_id);
+      CREATE INDEX IF NOT EXISTS idx_ingredients_business ON ingredients(business_id);
+      CREATE INDEX IF NOT EXISTS idx_contacts_team ON contacts(team_id);
+      CREATE INDEX IF NOT EXISTS idx_deals_contact ON deals(contact_id);
+      CREATE INDEX IF NOT EXISTS idx_deals_user ON deals(user_id);
+      CREATE INDEX IF NOT EXISTS idx_deals_business ON deals(business_id);
+      CREATE INDEX IF NOT EXISTS idx_deal_products_deal ON deal_products(deal_id);
+      CREATE INDEX IF NOT EXISTS idx_users_organization ON users(organization_id);
+      CREATE INDEX IF NOT EXISTS idx_teams_organization ON teams(organization_id);
+    `);
+        console.log('✅ SQLite database initialized successfully');
+    }
+    catch (error) {
+        console.error('❌ Failed to initialize SQLite:', error);
+        localDb = null;
+    }
+    // Get all displays
+    const displays = electron_1.screen.getAllDisplays();
+    const primaryDisplay = electron_1.screen.getPrimaryDisplay();
+    const secondaryDisplay = displays.find(display => display.id !== primaryDisplay.id);
+    console.log('🔍 Detected displays:', displays.length);
+    console.log('🔍 All displays:', displays.map(d => ({ id: d.id, bounds: d.bounds, workArea: d.workArea })));
+    console.log('🔍 Primary display:', primaryDisplay.bounds);
+    if (secondaryDisplay) {
+        console.log('🔍 Secondary display found:', secondaryDisplay.bounds);
+    }
+    else {
+        console.log('❌ No secondary display detected');
+    }
+    // Create main POS window (cashier display)
+    // Start with login size (800x432), will be resized after successful login
+    mainWindow = new electron_1.BrowserWindow({
+        width: 800,
+        height: 432,
+        center: true,
+        minWidth: 800,
+        minHeight: 432,
+        title: 'Marviano POS - Login',
+        frame: false,
+        backgroundColor: '#111827',
+        movable: true,
+        resizable: false, // Don't allow resizing on login
         webPreferences: {
             nodeIntegration: false,
             contextIsolation: true,
             preload: path.join(__dirname, 'preload.js'),
+            devTools: true, // Enable dev tools for debugging
         },
-        show: false, // Don't show until ready
+        show: false,
+    });
+    // Create customer display window if secondary monitor is available
+    if (secondaryDisplay) {
+        console.log('🔍 Creating customer display window...');
+        const customerWindowWidth = Math.floor(secondaryDisplay.workAreaSize.width * 0.9);
+        const customerWindowHeight = Math.floor(secondaryDisplay.workAreaSize.height * 0.9);
+        console.log('🔍 Customer window dimensions:', { width: customerWindowWidth, height: customerWindowHeight });
+        console.log('🔍 Customer window position:', { x: secondaryDisplay.workArea.x, y: secondaryDisplay.workArea.y });
+        customerWindow = new electron_1.BrowserWindow({
+            width: customerWindowWidth,
+            height: customerWindowHeight,
+            x: secondaryDisplay.workArea.x,
+            y: secondaryDisplay.workArea.y,
+            title: 'Marviano POS - Customer Display',
+            frame: false,
+            backgroundColor: '#000000',
+            alwaysOnTop: true,
+            kiosk: false, // Temporarily disable kiosk mode for debugging
+            webPreferences: {
+                nodeIntegration: false,
+                contextIsolation: true,
+                preload: path.join(__dirname, 'preload.js'),
+            },
+            show: false,
+        });
+        console.log('✅ Customer window created successfully');
+        // Load customer display page
+        if (isDev) {
+            setTimeout(async () => {
+                console.log('🔍 Loading customer display page...');
+                // Try ports in order: 3000, 3001, 3002 (3000 is default Next.js port)
+                const tryLoadCustomerURL = async (port) => {
+                    try {
+                        await customerWindow.loadURL(`http://localhost:${port}/customer-display`);
+                        console.log(`✅ Customer display page loaded successfully on port ${port}`);
+                        return true;
+                    }
+                    catch (error) {
+                        console.log(`❌ Failed to load customer display on port ${port}:`, error);
+                        return false;
+                    }
+                };
+                const ports = [3000, 3001, 3002];
+                let loaded = false;
+                for (const port of ports) {
+                    if (await tryLoadCustomerURL(port)) {
+                        loaded = true;
+                        break;
+                    }
+                }
+                if (!loaded) {
+                    console.error('❌ Failed to load customer display on any port');
+                }
+            }, 6000); // Load after main window
+        }
+        else {
+            customerWindow.loadFile(path.join(__dirname, '../out/customer-display.html'));
+        }
+    }
+    else {
+        console.log('❌ Cannot create customer display - no secondary monitor detected');
+    }
+    // Listen for navigation events
+    mainWindow.webContents.on('did-navigate', (event, url) => {
+        const currentURL = new URL(url);
+        console.log('🔍 Navigation detected:', currentURL.pathname);
+        if (currentURL.pathname === '/login') {
+            // Keep login page at 800x432
+            console.log('🔍 Login page detected - setting login window size');
+            mainWindow.setFullScreen(false);
+            mainWindow.setResizable(false);
+            mainWindow.setSize(800, 432);
+            mainWindow.center();
+        }
+        else if (currentURL.pathname === '/' || !currentURL.pathname.includes('/login')) {
+            // Main POS page - set to fullscreen
+            console.log('🔍 Main POS page detected - setting fullscreen');
+            mainWindow.setResizable(true);
+            mainWindow.setFullScreen(true);
+        }
+    });
+    // Also listen for hash changes (for client-side routing)
+    mainWindow.webContents.on('did-navigate-in-page', (event, url) => {
+        const currentURL = new URL(url);
+        console.log('🔍 In-page navigation detected:', currentURL.pathname);
+        if (currentURL.pathname === '/login') {
+            // Keep login page at 800x432
+            console.log('🔍 Login page detected - setting login window size');
+            mainWindow.setFullScreen(false);
+            mainWindow.setResizable(false);
+            mainWindow.setSize(800, 432);
+            mainWindow.center();
+        }
+        else if (currentURL.pathname === '/' || !currentURL.pathname.includes('/login')) {
+            // Main POS page - set to fullscreen
+            console.log('🔍 Main POS page detected - setting fullscreen');
+            mainWindow.setResizable(true);
+            mainWindow.setFullScreen(true);
+        }
+    });
+    // Listen for successful login via IPC - THIS is when we go fullscreen
+    electron_1.ipcMain.handle('login-success', async () => {
+        console.log('🔍 [ELECTRON] Login success IPC received!');
+        console.log('🔍 [ELECTRON] Main window exists:', !!mainWindow);
+        console.log('🔍 [ELECTRON] Main window isDestroyed:', mainWindow?.isDestroyed());
+        console.log('🔍 [ELECTRON] Main window isVisible:', mainWindow?.isVisible());
+        console.log('🔍 [ELECTRON] Main window isFullScreen:', mainWindow?.isFullScreen());
+        if (mainWindow && !mainWindow.isDestroyed()) {
+            console.log('🔍 [ELECTRON] Setting fullscreen in 300ms...');
+            setTimeout(() => {
+                console.log('🔍 [ELECTRON] Now setting fullscreen...');
+                try {
+                    mainWindow.setResizable(true);
+                    console.log('🔍 [ELECTRON] Resizable set to true');
+                    mainWindow.setFullScreen(true);
+                    console.log('🔍 [ELECTRON] Fullscreen set to true');
+                    console.log('🔍 [ELECTRON] Final isFullScreen:', mainWindow.isFullScreen());
+                }
+                catch (error) {
+                    console.error('🔍 [ELECTRON] Error setting fullscreen:', error);
+                }
+            }, 300);
+        }
+        else {
+            console.log('🔍 [ELECTRON] Cannot set fullscreen - window not available');
+        }
+        return { success: true };
+    });
+    // Listen for logout via IPC
+    electron_1.ipcMain.handle('logout', async () => {
+        console.log('🔍 Logout - resizing back to login size');
+        if (mainWindow) {
+            mainWindow.setFullScreen(false);
+            mainWindow.setResizable(false);
+            mainWindow.setSize(800, 432);
+            mainWindow.center();
+        }
+        return { success: true };
+    });
+    // Offline/local DB IPC
+    electron_1.ipcMain.handle('localdb-upsert-categories', async (event, rows) => {
+        if (!localDb)
+            return { success: false };
+        const tx = localDb.transaction((data) => {
+            const stmt = localDb.prepare('INSERT INTO categories (jenis, updated_at) VALUES (?, ?) ON CONFLICT(jenis) DO UPDATE SET updated_at=excluded.updated_at');
+            for (const r of data) {
+                stmt.run(r.jenis, r.updated_at || Date.now());
+            }
+        });
+        tx(rows);
+        return { success: true };
+    });
+    electron_1.ipcMain.handle('localdb-get-categories', async () => {
+        if (!localDb)
+            return [];
+        const stmt = localDb.prepare('SELECT jenis, updated_at FROM categories ORDER BY jenis ASC');
+        return stmt.all();
+    });
+    electron_1.ipcMain.handle('localdb-upsert-products', async (event, rows) => {
+        if (!localDb)
+            return { success: false };
+        const tx = localDb.transaction((data) => {
+            const stmt = localDb.prepare(`INSERT INTO products (
+        id, business_id, menu_code, nama, satuan, kategori, jenis, keterangan,
+        harga_beli, ppn, harga_jual, harga_khusus, harga_online, fee_kerja, status, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        business_id=excluded.business_id,
+        menu_code=excluded.menu_code,
+        nama=excluded.nama,
+        satuan=excluded.satuan,
+        kategori=excluded.kategori,
+        jenis=excluded.jenis,
+        keterangan=excluded.keterangan,
+        harga_beli=excluded.harga_beli,
+        ppn=excluded.ppn,
+        harga_jual=excluded.harga_jual,
+        harga_khusus=excluded.harga_khusus,
+        harga_online=excluded.harga_online,
+        fee_kerja=excluded.fee_kerja,
+        status=excluded.status,
+        updated_at=excluded.updated_at`);
+            for (const r of data) {
+                stmt.run(r.id, r.business_id, r.menu_code, r.nama, r.satuan || '', r.kategori, r.jenis, r.keterangan || null, r.harga_beli || null, r.ppn || null, r.harga_jual, r.harga_khusus || null, r.harga_online || null, r.fee_kerja || null, r.status, Date.now());
+            }
+        });
+        tx(rows);
+        return { success: true };
+    });
+    electron_1.ipcMain.handle('localdb-get-products-by-jenis', async (event, jenis) => {
+        if (!localDb)
+            return [];
+        const stmt = localDb.prepare(`SELECT 
+      id, business_id, menu_code, nama, satuan, kategori, jenis, keterangan,
+      harga_beli, ppn, harga_jual, harga_khusus, harga_online, fee_kerja, status 
+      FROM products WHERE jenis = ? AND status = "active" ORDER BY nama ASC`);
+        return stmt.all(jenis);
+    });
+    electron_1.ipcMain.handle('localdb-get-all-products', async () => {
+        if (!localDb)
+            return [];
+        const stmt = localDb.prepare(`SELECT 
+      id, business_id, menu_code, nama, satuan, kategori, jenis, keterangan,
+      harga_beli, ppn, harga_jual, harga_khusus, harga_online, fee_kerja, status 
+      FROM products WHERE status = "active" ORDER BY nama ASC`);
+        return stmt.all();
+    });
+    electron_1.ipcMain.handle('localdb-update-sync-status', async (event, key, status) => {
+        if (!localDb)
+            return { success: false };
+        const stmt = localDb.prepare('INSERT INTO sync_status (key, last_sync, status) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET last_sync=excluded.last_sync, status=excluded.status');
+        stmt.run(key, Date.now(), status);
+        return { success: true };
+    });
+    electron_1.ipcMain.handle('localdb-get-sync-status', async (event, key) => {
+        if (!localDb)
+            return null;
+        const stmt = localDb.prepare('SELECT * FROM sync_status WHERE key = ?');
+        return stmt.get(key);
+    });
+    // Comprehensive IPC handlers for all POS tables
+    // Users
+    electron_1.ipcMain.handle('localdb-upsert-users', async (event, rows) => {
+        if (!localDb)
+            return { success: false };
+        const tx = localDb.transaction((data) => {
+            const stmt = localDb.prepare(`INSERT INTO users (
+        id, email, password, name, googleId, createdAt, role_id, organization_id, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        email=excluded.email, password=excluded.password, name=excluded.name,
+        googleId=excluded.googleId, createdAt=excluded.createdAt, role_id=excluded.role_id,
+        organization_id=excluded.organization_id, updated_at=excluded.updated_at`);
+            for (const r of data) {
+                stmt.run(r.id, r.email, r.password, r.name, r.googleId, r.createdAt, r.role_id, r.organization_id, Date.now());
+            }
+        });
+        tx(rows);
+        return { success: true };
+    });
+    electron_1.ipcMain.handle('localdb-get-users', async () => {
+        if (!localDb)
+            return [];
+        const stmt = localDb.prepare('SELECT * FROM users ORDER BY name ASC');
+        return stmt.all();
+    });
+    // Businesses
+    electron_1.ipcMain.handle('localdb-upsert-businesses', async (event, rows) => {
+        if (!localDb)
+            return { success: false };
+        const tx = localDb.transaction((data) => {
+            const stmt = localDb.prepare(`INSERT INTO businesses (
+        id, name, permission_name, organization_id, management_group_id, image_url, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        name=excluded.name, permission_name=excluded.permission_name, organization_id=excluded.organization_id,
+        management_group_id=excluded.management_group_id, image_url=excluded.image_url,
+        created_at=excluded.created_at, updated_at=excluded.updated_at`);
+            for (const r of data) {
+                stmt.run(r.id, r.name, r.permission_name, r.organization_id, r.management_group_id, r.image_url, r.created_at, Date.now());
+            }
+        });
+        tx(rows);
+        return { success: true };
+    });
+    electron_1.ipcMain.handle('localdb-get-businesses', async () => {
+        if (!localDb)
+            return [];
+        const stmt = localDb.prepare('SELECT * FROM businesses ORDER BY name ASC');
+        return stmt.all();
+    });
+    // Ingredients
+    electron_1.ipcMain.handle('localdb-upsert-ingredients', async (event, rows) => {
+        if (!localDb)
+            return { success: false };
+        const tx = localDb.transaction((data) => {
+            const stmt = localDb.prepare(`INSERT INTO ingredients (
+        id, ingredient_code, nama, kategori, satuan_beli, isi_satuan_beli, satuan_keluar,
+        harga_beli, stok_min, status, business_id, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        ingredient_code=excluded.ingredient_code, nama=excluded.nama, kategori=excluded.kategori,
+        satuan_beli=excluded.satuan_beli, isi_satuan_beli=excluded.isi_satuan_beli, satuan_keluar=excluded.satuan_keluar,
+        harga_beli=excluded.harga_beli, stok_min=excluded.stok_min, status=excluded.status,
+        business_id=excluded.business_id, created_at=excluded.created_at, updated_at=excluded.updated_at`);
+            for (const r of data) {
+                stmt.run(r.id, r.ingredient_code, r.nama, r.kategori, r.satuan_beli, r.isi_satuan_beli, r.satuan_keluar, r.harga_beli, r.stok_min, r.status, r.business_id, r.created_at, Date.now());
+            }
+        });
+        tx(rows);
+        return { success: true };
+    });
+    electron_1.ipcMain.handle('localdb-get-ingredients', async (event, businessId) => {
+        if (!localDb)
+            return [];
+        if (businessId) {
+            const stmt = localDb.prepare('SELECT * FROM ingredients WHERE business_id = ? AND status = "active" ORDER BY nama ASC');
+            return stmt.all(businessId);
+        }
+        else {
+            const stmt = localDb.prepare('SELECT * FROM ingredients WHERE status = "active" ORDER BY nama ASC');
+            return stmt.all();
+        }
+    });
+    // COGS
+    electron_1.ipcMain.handle('localdb-upsert-cogs', async (event, rows) => {
+        if (!localDb)
+            return { success: false };
+        const tx = localDb.transaction((data) => {
+            const stmt = localDb.prepare(`INSERT INTO cogs (
+        id, menu_code, ingredient_code, amount, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        menu_code=excluded.menu_code, ingredient_code=excluded.ingredient_code,
+        amount=excluded.amount, created_at=excluded.created_at, updated_at=excluded.updated_at`);
+            for (const r of data) {
+                stmt.run(r.id, r.menu_code, r.ingredient_code, r.amount, r.created_at, Date.now());
+            }
+        });
+        tx(rows);
+        return { success: true };
+    });
+    electron_1.ipcMain.handle('localdb-get-cogs', async () => {
+        if (!localDb)
+            return [];
+        const stmt = localDb.prepare('SELECT * FROM cogs ORDER BY menu_code ASC');
+        return stmt.all();
+    });
+    // Contacts
+    electron_1.ipcMain.handle('localdb-upsert-contacts', async (event, rows) => {
+        if (!localDb)
+            return { success: false };
+        const tx = localDb.transaction((data) => {
+            const stmt = localDb.prepare(`INSERT INTO contacts (
+        id, no_ktp, nama, phone_number, tgl_lahir, no_kk, created_at, updated_at,
+        is_active, jenis_kelamin, kota, kecamatan, source_id, pekerjaan_id,
+        source_lainnya, alamat, team_id
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        no_ktp=excluded.no_ktp, nama=excluded.nama, phone_number=excluded.phone_number,
+        tgl_lahir=excluded.tgl_lahir, no_kk=excluded.no_kk, created_at=excluded.created_at,
+        updated_at=excluded.updated_at, is_active=excluded.is_active, jenis_kelamin=excluded.jenis_kelamin,
+        kota=excluded.kota, kecamatan=excluded.kecamatan, source_id=excluded.source_id,
+        pekerjaan_id=excluded.pekerjaan_id, source_lainnya=excluded.source_lainnya,
+        alamat=excluded.alamat, team_id=excluded.team_id`);
+            for (const r of data) {
+                stmt.run(r.id, r.no_ktp, r.nama, r.phone_number, r.tgl_lahir, r.no_kk, r.created_at, Date.now(), r.is_active, r.jenis_kelamin, r.kota, r.kecamatan, r.source_id, r.pekerjaan_id, r.source_lainnya, r.alamat, r.team_id);
+            }
+        });
+        tx(rows);
+        return { success: true };
+    });
+    electron_1.ipcMain.handle('localdb-get-contacts', async (event, teamId) => {
+        if (!localDb)
+            return [];
+        if (teamId) {
+            const stmt = localDb.prepare('SELECT * FROM contacts WHERE team_id = ? AND is_active = 1 ORDER BY nama ASC');
+            return stmt.all(teamId);
+        }
+        else {
+            const stmt = localDb.prepare('SELECT * FROM contacts WHERE is_active = 1 ORDER BY nama ASC');
+            return stmt.all();
+        }
+    });
+    // Teams
+    electron_1.ipcMain.handle('localdb-upsert-teams', async (event, rows) => {
+        if (!localDb)
+            return { success: false };
+        const tx = localDb.transaction((data) => {
+            const stmt = localDb.prepare(`INSERT INTO teams (
+        id, name, description, organization_id, team_lead_id, business_id, color, is_active, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        name=excluded.name, description=excluded.description, organization_id=excluded.organization_id,
+        team_lead_id=excluded.team_lead_id, business_id=excluded.business_id, color=excluded.color,
+        is_active=excluded.is_active, created_at=excluded.created_at, updated_at=excluded.updated_at`);
+            for (const r of data) {
+                stmt.run(r.id, r.name, r.description, r.organization_id, r.team_lead_id, r.business_id, r.color, r.is_active, r.created_at, Date.now());
+            }
+        });
+        tx(rows);
+        return { success: true };
+    });
+    electron_1.ipcMain.handle('localdb-get-teams', async () => {
+        if (!localDb)
+            return [];
+        const stmt = localDb.prepare('SELECT * FROM teams WHERE is_active = 1 ORDER BY name ASC');
+        return stmt.all();
+    });
+    // Supporting tables
+    electron_1.ipcMain.handle('localdb-upsert-source', async (event, rows) => {
+        if (!localDb)
+            return { success: false };
+        const tx = localDb.transaction((data) => {
+            const stmt = localDb.prepare(`INSERT INTO source (id, source_name, created_at, updated_at) 
+        VALUES (?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET
+        source_name=excluded.source_name, created_at=excluded.created_at, updated_at=excluded.updated_at`);
+            for (const r of data) {
+                stmt.run(r.id, r.source_name, r.created_at, Date.now());
+            }
+        });
+        tx(rows);
+        return { success: true };
+    });
+    electron_1.ipcMain.handle('localdb-get-source', async () => {
+        if (!localDb)
+            return [];
+        const stmt = localDb.prepare('SELECT * FROM source ORDER BY source_name ASC');
+        return stmt.all();
+    });
+    electron_1.ipcMain.handle('localdb-upsert-pekerjaan', async (event, rows) => {
+        if (!localDb)
+            return { success: false };
+        const tx = localDb.transaction((data) => {
+            const stmt = localDb.prepare(`INSERT INTO pekerjaan (id, nama_pekerjaan, created_at, updated_at) 
+        VALUES (?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET
+        nama_pekerjaan=excluded.nama_pekerjaan, created_at=excluded.created_at, updated_at=excluded.updated_at`);
+            for (const r of data) {
+                stmt.run(r.id, r.nama_pekerjaan, r.created_at, Date.now());
+            }
+        });
+        tx(rows);
+        return { success: true };
+    });
+    electron_1.ipcMain.handle('localdb-get-pekerjaan', async () => {
+        if (!localDb)
+            return [];
+        const stmt = localDb.prepare('SELECT * FROM pekerjaan ORDER BY nama_pekerjaan ASC');
+        return stmt.all();
     });
     // Load the app - start with login page
     console.log('🔍 isDev:', isDev);
     if (isDev) {
         console.log('🔍 Development mode detected');
         // Wait a bit for Next.js to start, then load the login page
-        setTimeout(() => {
+        setTimeout(async () => {
             console.log('🔍 Loading login page...');
-            // Load the login page directly
-            mainWindow.loadURL('http://localhost:3000/login').then(() => {
-                console.log('✅ Successfully loaded login page');
-                // mainWindow.webContents.openDevTools(); // Commented out to hide dev tools
-            }).catch((error) => {
-                console.error('❌ Failed to load login page:', error);
-                // Fallback to main page if login fails
-                mainWindow.loadURL('http://localhost:3000').catch((fallbackError) => {
-                    console.error('❌ Failed to load fallback page:', fallbackError);
-                });
-            });
-        }, 3000); // Wait for Next.js to be ready
+            // Try port 3001 first (common alternative), then fallback to 3000
+            const tryLoadURL = async (port) => {
+                try {
+                    await mainWindow.loadURL(`http://localhost:${port}/login`);
+                    console.log(`✅ Successfully loaded login page on port ${port}`);
+                    return true;
+                }
+                catch (error) {
+                    console.log(`❌ Failed to load on port ${port}:`, error);
+                    return false;
+                }
+            };
+            // Try ports in order: 3000, 3001, 3002 (3000 is default Next.js port)
+            const ports = [3000, 3001, 3002];
+            let loaded = false;
+            for (const port of ports) {
+                if (await tryLoadURL(port)) {
+                    loaded = true;
+                    break;
+                }
+            }
+            if (!loaded) {
+                console.error('❌ Failed to load on any port');
+            }
+        }, 5000); // Wait longer for Next.js to be ready
     }
     else {
         // In production, load the built Next.js app
         mainWindow.loadFile(path.join(__dirname, '../out/index.html'));
     }
-    // Show window when ready
+    // Show windows when ready
     mainWindow.once('ready-to-show', () => {
         mainWindow.show();
         // Focus on the window
@@ -91,10 +781,24 @@ function createWindow() {
             mainWindow.focus();
         }
     });
+    if (customerWindow) {
+        customerWindow.once('ready-to-show', () => {
+            customerWindow.show();
+        });
+    }
     // Handle window closed
     mainWindow.on('closed', () => {
-        // Dereference the window object
+        mainWindow = null;
+        if (customerWindow) {
+            customerWindow.close();
+            customerWindow = null;
+        }
     });
+    if (customerWindow) {
+        customerWindow.on('closed', () => {
+            customerWindow = null;
+        });
+    }
     // Create application menu
     const template = [
         {
@@ -104,14 +808,18 @@ function createWindow() {
                     label: 'New Order',
                     accelerator: 'CmdOrCtrl+N',
                     click: () => {
-                        mainWindow.webContents.send('menu-new-order');
+                        if (mainWindow) {
+                            mainWindow.webContents.send('menu-new-order');
+                        }
                     },
                 },
                 {
                     label: 'Close',
                     accelerator: 'CmdOrCtrl+W',
                     click: () => {
-                        mainWindow.close();
+                        if (mainWindow) {
+                            mainWindow.close();
+                        }
                     },
                 },
             ],
@@ -143,11 +851,11 @@ function createWindow() {
 }
 // This method will be called when Electron has finished initialization
 electron_1.app.whenReady().then(() => {
-    createWindow();
+    createWindows();
     electron_1.app.on('activate', () => {
-        // On macOS, re-create a window when the dock icon is clicked
+        // On macOS, re-create windows when the dock icon is clicked
         if (electron_1.BrowserWindow.getAllWindows().length === 0) {
-            createWindow();
+            createWindows();
         }
     });
 });
@@ -205,11 +913,93 @@ electron_1.ipcMain.handle('maximize-window', async () => {
     return { success: true };
 });
 electron_1.ipcMain.handle('navigate-to', async (event, path) => {
-    const windows = electron_1.BrowserWindow.getAllWindows();
-    if (windows.length > 0) {
-        const currentURL = windows[0].webContents.getURL();
+    if (mainWindow) {
+        const currentURL = mainWindow.webContents.getURL();
         const baseURL = currentURL.split('/').slice(0, 3).join('/');
-        windows[0].loadURL(`${baseURL}${path}`);
+        mainWindow.loadURL(`${baseURL}${path}`);
     }
     return { success: true };
+});
+// IPC handlers for dual-display communication
+electron_1.ipcMain.handle('update-customer-display', async (event, data) => {
+    if (customerWindow) {
+        customerWindow.webContents.send('order-update', data);
+    }
+    return { success: true };
+});
+electron_1.ipcMain.handle('update-customer-slideshow', async (event, data) => {
+    if (customerWindow) {
+        customerWindow.webContents.send('slideshow-update', data);
+    }
+    return { success: true };
+});
+electron_1.ipcMain.handle('get-customer-display-status', async () => {
+    return {
+        hasCustomerDisplay: customerWindow !== null,
+        isCustomerDisplayVisible: customerWindow ? !customerWindow.isDestroyed() : false
+    };
+});
+// Debug function to manually create customer display
+electron_1.ipcMain.handle('create-customer-display', async () => {
+    if (customerWindow && !customerWindow.isDestroyed()) {
+        customerWindow.show();
+        return { success: true, message: 'Customer display already exists' };
+    }
+    const displays = electron_1.screen.getAllDisplays();
+    const primaryDisplay = electron_1.screen.getPrimaryDisplay();
+    const secondaryDisplay = displays.find(display => display.id !== primaryDisplay.id);
+    if (!secondaryDisplay) {
+        return { success: false, message: 'No secondary display detected' };
+    }
+    const customerWindowWidth = Math.floor(secondaryDisplay.workAreaSize.width * 0.9);
+    const customerWindowHeight = Math.floor(secondaryDisplay.workAreaSize.height * 0.9);
+    customerWindow = new electron_1.BrowserWindow({
+        width: customerWindowWidth,
+        height: customerWindowHeight,
+        x: secondaryDisplay.workArea.x,
+        y: secondaryDisplay.workArea.y,
+        title: 'Marviano POS - Customer Display',
+        frame: false,
+        backgroundColor: '#000000',
+        alwaysOnTop: true,
+        kiosk: false,
+        webPreferences: {
+            nodeIntegration: false,
+            contextIsolation: true,
+            preload: path.join(__dirname, 'preload.js'),
+        },
+        show: false,
+    });
+    // Load customer display page
+    if (isDev) {
+        // Try ports in order: 3000, 3001, 3002 (3000 is default Next.js port)
+        const tryLoadCustomerURL = async (port) => {
+            try {
+                await customerWindow.loadURL(`http://localhost:${port}/customer-display`);
+                customerWindow.show();
+                console.log(`✅ Customer display created and shown on port ${port}`);
+                return true;
+            }
+            catch (error) {
+                console.log(`❌ Failed to load customer display on port ${port}:`, error);
+                return false;
+            }
+        };
+        const ports = [3000, 3001, 3002];
+        let loaded = false;
+        for (const port of ports) {
+            if (await tryLoadCustomerURL(port)) {
+                loaded = true;
+                break;
+            }
+        }
+        if (!loaded) {
+            console.error('❌ Failed to load customer display on any port');
+        }
+    }
+    else {
+        customerWindow.loadFile(path.join(__dirname, '../out/customer-display.html'));
+        customerWindow.show();
+    }
+    return { success: true, message: 'Customer display created successfully' };
 });

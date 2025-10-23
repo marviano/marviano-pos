@@ -41,7 +41,7 @@ export default function LoginPage({ onLogin, onOfflineLogin, onClose }: LoginPag
   };
 
   return (
-    <div className="w-full h-screen flex items-center justify-center bg-gray-900" style={{ WebkitAppRegion: 'drag' }}>
+    <div className="w-full h-screen flex items-center justify-center bg-gray-900 overflow-hidden" style={{ WebkitAppRegion: 'drag' }}>
       <div className="bg-white rounded-2xl shadow-2xl overflow-hidden w-full h-[432px] flex" style={{ WebkitAppRegion: 'drag' }}>
         {/* Left Panel - Branding */}
         <div className="w-1/2 bg-gray-900 relative overflow-hidden">

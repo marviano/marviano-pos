@@ -1,28 +1,45 @@
 'use client';
 
+import { useEffect, useState } from 'react';
+import { useRouter } from 'next/navigation';
 import LoginPage from '@/components/LoginPage';
+import { useAuth } from '@/hooks/useAuth';
 
 export default function Login() {
+  const router = useRouter();
+  const { isAuthenticated, login, loginOffline } = useAuth();
+  const [isClient, setIsClient] = useState(false);
+
+  // Ensure we're on the client side to prevent hydration mismatch
+  useEffect(() => {
+    setIsClient(true);
+  }, []);
+
+  // Redirect to main page if already authenticated
+  useEffect(() => {
+    if (isClient && isAuthenticated) {
+      console.log('🔍 Already authenticated, redirecting to POS');
+      router.replace('/');
+    }
+  }, [isClient, isAuthenticated, router]);
+
   const handleLogin = async (email: string, password: string) => {
-    // Mock login for UI testing
-    console.log('Login attempt:', { email, password });
-    
-    // Simulate login delay
-    await new Promise(resolve => setTimeout(resolve, 1000));
-    
-    if (email && password) {
-      alert(`Login successful!\nEmail: ${email}\nPassword: ${password}`);
-      // In a real app, you would redirect to the main page here
-    } else {
-      throw new Error('Please enter both email and password');
+    try {
+      await login(email, password);
+      // Router will handle redirect via useEffect
+    } catch (error) {
+      console.error('Login failed:', error);
+      throw error;
     }
   };
 
   const handleOfflineLogin = async () => {
-    // Mock offline login for UI testing
-    console.log('Offline login attempt');
-    await new Promise(resolve => setTimeout(resolve, 500));
-    alert('Offline login successful!');
+    try {
+      await loginOffline();
+      // Router will handle redirect via useEffect
+    } catch (error) {
+      console.error('Offline login failed:', error);
+    }
   };
 
   const handleClose = () => {
@@ -33,8 +50,17 @@ export default function Login() {
     }
   };
 
+  // Don't render if already authenticated (will redirect) or during SSR
+  if (!isClient || isAuthenticated) {
+    return (
+      <div className="h-screen bg-gray-900 flex items-center justify-center overflow-hidden">
+        <div className="text-white text-lg">Loading...</div>
+      </div>
+    );
+  }
+
   return (
-    <div className="w-full h-screen bg-gray-900">
+    <div className="w-full h-screen bg-gray-900 overflow-hidden">
       <LoginPage
         onLogin={handleLogin}
         onOfflineLogin={handleOfflineLogin}

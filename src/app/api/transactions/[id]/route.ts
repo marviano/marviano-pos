@@ -1,0 +1,104 @@
+import { NextRequest, NextResponse } from 'next/server';
+import { query } from '../../../../lib/db';
+
+export async function GET(
+  request: NextRequest,
+  { params }: { params: Promise<{ id: string }> }
+) {
+  try {
+    const resolvedParams = await params;
+    const transactionId = parseInt(resolvedParams.id);
+    
+    if (isNaN(transactionId)) {
+      return NextResponse.json(
+        { success: false, message: 'Invalid transaction ID' },
+        { status: 400 }
+      );
+    }
+
+    // Get transaction details with user and business names
+    const transactionQuery = `
+      SELECT 
+        t.*,
+        COALESCE(u.name, 'Unknown User') as user_name,
+        COALESCE(b.name, 'Unknown Business') as business_name,
+        banks.bank_name,
+        cl.account_name as cl_account_name
+      FROM transactions t
+      LEFT JOIN users u ON t.user_id = u.id
+      LEFT JOIN businesses b ON t.business_id = b.id
+      LEFT JOIN banks ON t.bank_id = banks.id
+      LEFT JOIN cl_accounts cl ON t.cl_account_id = cl.id
+      WHERE t.id = ?
+    `;
+
+    const transactionResult = await query(transactionQuery, [transactionId]);
+    
+    if (!transactionResult || transactionResult.length === 0) {
+      return NextResponse.json(
+        { success: false, message: 'Transaction not found' },
+        { status: 404 }
+      );
+    }
+
+    const transaction = transactionResult[0];
+
+    // Get transaction items
+    const itemsQuery = `
+      SELECT 
+        ti.*,
+        p.nama as product_name
+      FROM transaction_items ti
+      LEFT JOIN products p ON ti.product_id = p.id
+      WHERE ti.transaction_id = ?
+      ORDER BY ti.id
+    `;
+
+    const itemsResult = await query(itemsQuery, [transactionId]);
+    
+    // Format the response
+    const transactionData = {
+      id: transaction.id,
+      business_id: transaction.business_id,
+      user_id: transaction.user_id,
+      user_name: transaction.user_name,
+      business_name: transaction.business_name,
+      payment_method: transaction.payment_method,
+      pickup_method: transaction.pickup_method,
+      total_amount: parseFloat(transaction.total_amount),
+      voucher_discount: parseFloat(transaction.voucher_discount || 0),
+      final_amount: parseFloat(transaction.final_amount),
+      amount_received: parseFloat(transaction.amount_received || 0),
+      change_amount: parseFloat(transaction.change_amount || 0),
+      contact_id: transaction.contact_id,
+      customer_name: transaction.customer_name,
+      bank_id: transaction.bank_id,
+      bank_name: transaction.bank_name,
+      card_number: transaction.card_number,
+      cl_account_id: transaction.cl_account_id,
+      cl_account_name: transaction.cl_account_name,
+      created_at: transaction.created_at,
+      items: itemsResult.map((item: any) => ({
+        id: item.id,
+        product_name: item.product_name,
+        quantity: item.quantity,
+        unit_price: parseFloat(item.unit_price),
+        total_price: parseFloat(item.total_price),
+        customizations_json: typeof item.customizations_json === 'string' ? item.customizations_json : JSON.stringify(item.customizations_json),
+        custom_note: item.custom_note
+      }))
+    };
+
+    return NextResponse.json({
+      success: true,
+      transaction: transactionData
+    });
+
+  } catch (error: any) {
+    console.error('Error fetching transaction details:', error);
+    return NextResponse.json(
+      { success: false, message: error.message },
+      { status: 500 }
+    );
+  }
+}
