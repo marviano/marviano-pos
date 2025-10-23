@@ -8,6 +8,8 @@ electron_1.contextBridge.exposeInMainWorld('electronAPI', {
     printReceipt: (data) => electron_1.ipcRenderer.invoke('print-receipt', data),
     openCashDrawer: () => electron_1.ipcRenderer.invoke('open-cash-drawer'),
     playSound: (soundType) => electron_1.ipcRenderer.invoke('play-sound', soundType),
+    // System printers
+    listPrinters: () => electron_1.ipcRenderer.invoke('list-printers'),
     // Window controls
     closeWindow: () => electron_1.ipcRenderer.invoke('close-window'),
     minimizeWindow: () => electron_1.ipcRenderer.invoke('minimize-window'),
@@ -57,6 +59,9 @@ electron_1.contextBridge.exposeInMainWorld('electronAPI', {
     localDbGetSource: () => electron_1.ipcRenderer.invoke('localdb-get-source'),
     localDbUpsertPekerjaan: (rows) => electron_1.ipcRenderer.invoke('localdb-upsert-pekerjaan', rows),
     localDbGetPekerjaan: () => electron_1.ipcRenderer.invoke('localdb-get-pekerjaan'),
+    // Printer configurations
+    localDbSavePrinterConfig: (printerType, systemPrinterName) => electron_1.ipcRenderer.invoke('localdb-save-printer-config', printerType, systemPrinterName),
+    localDbGetPrinterConfigs: () => electron_1.ipcRenderer.invoke('localdb-get-printer-configs'),
     // Customer display event listeners
     onOrderUpdate: (callback) => {
         electron_1.ipcRenderer.on('order-update', (event, data) => callback(data));

@@ -7,6 +7,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   printReceipt: (data: any) => ipcRenderer.invoke('print-receipt', data),
   openCashDrawer: () => ipcRenderer.invoke('open-cash-drawer'),
   playSound: (soundType: string) => ipcRenderer.invoke('play-sound', soundType),
+  // System printers
+  listPrinters: () => ipcRenderer.invoke('list-printers'),
   
   // Window controls
   closeWindow: () => ipcRenderer.invoke('close-window'),
@@ -68,6 +70,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
   localDbGetSource: () => ipcRenderer.invoke('localdb-get-source'),
   localDbUpsertPekerjaan: (rows: any[]) => ipcRenderer.invoke('localdb-upsert-pekerjaan', rows),
   localDbGetPekerjaan: () => ipcRenderer.invoke('localdb-get-pekerjaan'),
+  
+  // Printer configurations
+  localDbSavePrinterConfig: (printerType: string, systemPrinterName: string) => ipcRenderer.invoke('localdb-save-printer-config', printerType, systemPrinterName),
+  localDbGetPrinterConfigs: () => ipcRenderer.invoke('localdb-get-printer-configs'),
   
   // Customer display event listeners
   onOrderUpdate: (callback: (data: any) => void) => {

@@ -7,23 +7,17 @@ const isDev = process.env.NODE_ENV === 'development' || !app.isPackaged;
 // Global references to windows
 let mainWindow: BrowserWindow | null = null;
 let customerWindow: BrowserWindow | null = null;
+let printWindow: BrowserWindow | null = null;
 let localDb: Database.Database | null = null;
 
 function createWindows(): void {
-  // Initialize local SQLite (offline storage)
+  // Initialize local SQLite (offline storage) - TEMPORARILY DISABLED
   try {
-    const dbPath = path.join(app.getPath('userData'), 'pos-local.db');
-    console.log('🔍 Initializing SQLite database at:', dbPath);
+    console.log('🔍 SQLite database temporarily disabled for testing');
+    localDb = null; // Disable database for now
     
-    // Ensure the directory exists
-    const dbDir = path.dirname(dbPath);
-    if (!require('fs').existsSync(dbDir)) {
-      require('fs').mkdirSync(dbDir, { recursive: true });
-    }
-    
-    localDb = new Database(dbPath);
-    
-    // Create comprehensive tables for complete POS offline functionality
+    // Database creation temporarily disabled
+    /*
     localDb.exec(`
       -- Core POS Tables
       CREATE TABLE IF NOT EXISTS users (
@@ -222,6 +216,15 @@ function createWindows(): void {
         status TEXT
       );
       
+      -- Printer configurations
+      CREATE TABLE IF NOT EXISTS printer_configs (
+        id TEXT PRIMARY KEY,
+        printer_type TEXT NOT NULL,
+        system_printer_name TEXT NOT NULL,
+        created_at INTEGER,
+        updated_at INTEGER
+      );
+      
       -- Indexes for performance
       CREATE INDEX IF NOT EXISTS idx_products_jenis ON products(jenis);
       CREATE INDEX IF NOT EXISTS idx_products_status ON products(status);
@@ -235,11 +238,12 @@ function createWindows(): void {
       CREATE INDEX IF NOT EXISTS idx_users_organization ON users(organization_id);
       CREATE INDEX IF NOT EXISTS idx_teams_organization ON teams(organization_id);
     `);
+    */
     
-    console.log('✅ SQLite database initialized successfully');
+    console.log('✅ SQLite database temporarily disabled for testing');
   } catch (error) {
     console.error('❌ Failed to initialize SQLite:', error);
-  localDb = null;
+    localDb = null;
   }
   
   // Get all displays
@@ -715,6 +719,33 @@ function createWindows(): void {
     return stmt.all();
   });
 
+  // Printer configuration handlers
+  ipcMain.handle('localdb-save-printer-config', async (event, printerType: string, systemPrinterName: string) => {
+    if (!localDb) return { success: false };
+    try {
+      const stmt = localDb.prepare(`INSERT INTO printer_configs (id, printer_type, system_printer_name, created_at, updated_at) 
+        VALUES (?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET 
+        system_printer_name=excluded.system_printer_name, updated_at=excluded.updated_at`);
+      const now = Date.now();
+      stmt.run(printerType, printerType, systemPrinterName, now, now);
+      return { success: true };
+    } catch (error) {
+      console.error('Error saving printer config:', error);
+      return { success: false, error: String(error) };
+    }
+  });
+
+  ipcMain.handle('localdb-get-printer-configs', async () => {
+    if (!localDb) return [];
+    try {
+      const stmt = localDb.prepare('SELECT * FROM printer_configs ORDER BY printer_type ASC');
+      return stmt.all();
+    } catch (error) {
+      console.error('Error getting printer configs:', error);
+      return [];
+    }
+  });
+
   // Load the app - start with login page
   console.log('🔍 isDev:', isDev);
   if (isDev) {
@@ -859,10 +890,106 @@ app.on('window-all-closed', () => {
 
 // IPC handlers for POS-specific functionality
 ipcMain.handle('print-receipt', async (event, data) => {
-  // Handle receipt printing
-  console.log('Printing receipt:', data);
-  // Implement actual printing logic here
-  return { success: true };
+  try {
+    console.log('Printing receipt:', data);
+    
+    // Get the sender's webContents to access printing methods
+    const sender = event.sender;
+    
+    if (data.type === 'test') {
+      // Create a hidden window for printing to avoid darkening the main window
+      if (printWindow) {
+        printWindow.close();
+      }
+      
+      printWindow = new BrowserWindow({
+        width: 800,
+        height: 600,
+        show: false, // Hidden window
+        webPreferences: {
+          nodeIntegration: false,
+          contextIsolation: true,
+        }
+      });
+      
+      const printOptions = {
+        silent: true, // Don't show print dialog - print directly
+        printBackground: false,
+        deviceName: data.printerName || undefined
+      };
+      
+      // Create a simple HTML content for the test print
+      const htmlContent = `
+        <html>
+          <head>
+            <title>Test Print</title>
+            <style>
+              body { font-family: Arial, sans-serif; margin: 20px; }
+              .header { text-align: center; font-size: 18px; font-weight: bold; margin-bottom: 20px; }
+              .content { font-size: 14px; line-height: 1.5; }
+              .footer { margin-top: 30px; font-size: 12px; text-align: center; }
+            </style>
+          </head>
+          <body>
+            <div class="header">TEST PRINT - ${data.printerType?.toUpperCase() || 'PRINTER'}</div>
+            <div class="content">
+              <p>This is a test print to verify your printer is working correctly.</p>
+              <p><strong>Printer:</strong> ${data.printerName}</p>
+              <p><strong>Time:</strong> ${new Date().toLocaleString()}</p>
+              <p><strong>Type:</strong> ${data.printerType}</p>
+              <br>
+              <p>If you can see this, your printer is configured correctly!</p>
+            </div>
+            <div class="footer">
+              <p>Marviano POS System - Test Print</p>
+            </div>
+          </body>
+        </html>
+      `;
+      
+      // Load the HTML content in the hidden window
+      await printWindow.loadURL(`data:text/html,${encodeURIComponent(htmlContent)}`);
+      
+      // Wait a moment for the content to load, then print
+      setTimeout(() => {
+        printWindow!.webContents.print(printOptions, (success: boolean, errorType: string) => {
+          if (success) {
+            console.log('✅ Test print sent successfully');
+          } else {
+            console.error('❌ Test print failed:', errorType);
+          }
+          // Close the print window after printing
+          setTimeout(() => {
+            if (printWindow) {
+              printWindow.close();
+              printWindow = null;
+            }
+          }, 1000);
+        });
+      }, 1000);
+      
+      return { success: true };
+    } else {
+      // For regular receipts, implement your receipt printing logic here
+      console.log('Regular receipt printing not implemented yet');
+      return { success: false, error: 'Regular receipt printing not implemented yet' };
+    }
+  } catch (error) {
+    console.error('Error in print-receipt handler:', error);
+    return { success: false, error: String(error) };
+  }
+});
+
+// List available system printers for the renderer
+ipcMain.handle('list-printers', async (event) => {
+  try {
+    const sender = event?.sender;
+    const printers = await sender.getPrintersAsync();
+    return { success: true, printers };
+  } catch (error: any) {
+    console.error('Failed to list printers:', error);
+    return { success: false, error: error?.message || String(error), printers: [] };
+  }
 });
 
 ipcMain.handle('open-cash-drawer', async () => {

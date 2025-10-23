@@ -5,6 +5,8 @@ declare global {
       printReceipt: (data: any) => Promise<any>;
       openCashDrawer: () => Promise<any>;
       playSound: (soundType: string) => Promise<any>;
+      // System printers
+      listPrinters: () => Promise<{ success: boolean; printers: Array<{ name: string; displayName?: string; status?: string; isDefault?: boolean }> }>;
       
       // Window controls
       closeWindow: () => Promise<any>;
@@ -68,6 +70,10 @@ declare global {
       localDbGetSource?: () => Promise<any[]>;
       localDbUpsertPekerjaan?: (rows: any[]) => Promise<{ success: boolean }>;
       localDbGetPekerjaan?: () => Promise<any[]>;
+      
+      // Printer configurations
+      localDbSavePrinterConfig?: (printerType: string, systemPrinterName: string) => Promise<{ success: boolean; error?: string }>;
+      localDbGetPrinterConfigs?: () => Promise<any[]>;
     };
   }
 }

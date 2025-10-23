@@ -32,242 +32,244 @@ var __importStar = (this && this.__importStar) || (function () {
         return result;
     };
 })();
-var __importDefault = (this && this.__importDefault) || function (mod) {
-    return (mod && mod.__esModule) ? mod : { "default": mod };
-};
 Object.defineProperty(exports, "__esModule", { value: true });
 const electron_1 = require("electron");
-const better_sqlite3_1 = __importDefault(require("better-sqlite3"));
 const path = __importStar(require("path"));
 const isDev = process.env.NODE_ENV === 'development' || !electron_1.app.isPackaged;
 // Global references to windows
 let mainWindow = null;
 let customerWindow = null;
+let printWindow = null;
 let localDb = null;
 function createWindows() {
-    // Initialize local SQLite (offline storage)
+    // Initialize local SQLite (offline storage) - TEMPORARILY DISABLED
     try {
-        const dbPath = path.join(electron_1.app.getPath('userData'), 'pos-local.db');
-        console.log('🔍 Initializing SQLite database at:', dbPath);
-        // Ensure the directory exists
-        const dbDir = path.dirname(dbPath);
-        if (!require('fs').existsSync(dbDir)) {
-            require('fs').mkdirSync(dbDir, { recursive: true });
-        }
-        localDb = new better_sqlite3_1.default(dbPath);
-        // Create comprehensive tables for complete POS offline functionality
+        console.log('🔍 SQLite database temporarily disabled for testing');
+        localDb = null; // Disable database for now
+        // Database creation temporarily disabled
+        /*
         localDb.exec(`
-      -- Core POS Tables
-      CREATE TABLE IF NOT EXISTS users (
-        id INTEGER PRIMARY KEY,
-        email TEXT UNIQUE NOT NULL,
-        password TEXT,
-        name TEXT,
-        googleId TEXT UNIQUE,
-        createdAt TEXT,
-        role_id INTEGER,
-        organization_id INTEGER,
-        updated_at INTEGER
-      );
-      
-      CREATE TABLE IF NOT EXISTS businesses (
-        id INTEGER PRIMARY KEY,
-        name TEXT NOT NULL,
-        permission_name TEXT UNIQUE NOT NULL,
-        organization_id INTEGER,
-        management_group_id INTEGER,
-        image_url TEXT,
-        created_at TEXT,
-        updated_at INTEGER
-      );
-      
-      CREATE TABLE IF NOT EXISTS products (
-        id INTEGER PRIMARY KEY,
-        business_id INTEGER,
-        menu_code TEXT,
-        nama TEXT NOT NULL,
-        satuan TEXT NOT NULL,
-        kategori TEXT NOT NULL,
-        jenis TEXT,
-        keterangan TEXT,
-        harga_beli REAL,
-        ppn REAL,
-        harga_jual INTEGER NOT NULL,
-        harga_khusus REAL,
-        harga_online REAL,
-        fee_kerja REAL,
-        status TEXT DEFAULT 'active',
-        created_at TEXT,
-        updated_at INTEGER,
-        has_customization INTEGER DEFAULT 0
-      );
-      
-      CREATE TABLE IF NOT EXISTS ingredients (
-        id INTEGER PRIMARY KEY,
-        ingredient_code TEXT NOT NULL,
-        nama TEXT NOT NULL,
-        kategori TEXT NOT NULL,
-        satuan_beli TEXT NOT NULL,
-        isi_satuan_beli REAL NOT NULL,
-        satuan_keluar TEXT NOT NULL,
-        harga_beli INTEGER NOT NULL,
-        stok_min INTEGER DEFAULT 0,
-        status TEXT DEFAULT 'active',
-        business_id INTEGER NOT NULL,
-        created_at TEXT,
-        updated_at INTEGER
-      );
-      
-      CREATE TABLE IF NOT EXISTS cogs (
-        id INTEGER PRIMARY KEY,
-        menu_code TEXT,
-        ingredient_code TEXT,
-        amount REAL NOT NULL DEFAULT 0.0,
-        created_at TEXT,
-        updated_at INTEGER
-      );
-      
-      CREATE TABLE IF NOT EXISTS contacts (
-        id INTEGER PRIMARY KEY,
-        no_ktp TEXT UNIQUE,
-        nama TEXT NOT NULL,
-        phone_number TEXT,
-        tgl_lahir TEXT,
-        no_kk TEXT,
-        created_at TEXT,
-        updated_at INTEGER,
-        is_active INTEGER DEFAULT 1,
-        jenis_kelamin TEXT,
-        kota TEXT,
-        kecamatan TEXT,
-        source_id INTEGER,
-        pekerjaan_id INTEGER,
-        source_lainnya TEXT,
-        alamat TEXT,
-        team_id INTEGER
-      );
-      
-      CREATE TABLE IF NOT EXISTS deals (
-        id INTEGER PRIMARY KEY,
-        contact_id INTEGER NOT NULL,
-        user_id INTEGER NOT NULL,
-        business_id INTEGER NOT NULL,
-        activity_date TEXT NOT NULL,
-        product_type TEXT NOT NULL,
-        product_id INTEGER,
-        motorcycle_product_id INTEGER,
-        sales_pipeline_stage TEXT NOT NULL,
-        financing_company TEXT,
-        note TEXT,
-        notes TEXT,
-        created_at TEXT,
-        updated_at INTEGER,
-        team_id INTEGER,
-        followup_count INTEGER DEFAULT 0
-      );
-      
-      CREATE TABLE IF NOT EXISTS deal_products (
-        id INTEGER PRIMARY KEY,
-        deal_id INTEGER NOT NULL,
-        product_id INTEGER NOT NULL,
-        quantity INTEGER DEFAULT 1,
-        unit_price REAL,
-        total_price REAL,
-        notes TEXT,
-        created_at TEXT,
-        updated_at INTEGER
-      );
-      
-      CREATE TABLE IF NOT EXISTS teams (
-        id INTEGER PRIMARY KEY,
-        name TEXT NOT NULL,
-        description TEXT,
-        organization_id INTEGER NOT NULL,
-        team_lead_id INTEGER,
-        business_id INTEGER,
-        color TEXT DEFAULT '#3B82F6',
-        is_active INTEGER DEFAULT 1,
-        created_at TEXT,
-        updated_at INTEGER
-      );
-      
-      CREATE TABLE IF NOT EXISTS roles (
-        id INTEGER PRIMARY KEY,
-        name TEXT UNIQUE NOT NULL,
-        description TEXT,
-        organization_id INTEGER,
-        created_at TEXT,
-        updated_at INTEGER
-      );
-      
-      CREATE TABLE IF NOT EXISTS permissions (
-        id INTEGER PRIMARY KEY,
-        name TEXT UNIQUE NOT NULL,
-        description TEXT,
-        created_at TEXT,
-        category_id INTEGER,
-        organization_id INTEGER,
-        status TEXT DEFAULT 'active'
-      );
-      
-      -- Supporting Tables
-      CREATE TABLE IF NOT EXISTS source (
-        id INTEGER PRIMARY KEY,
-        source_name TEXT UNIQUE NOT NULL,
-        created_at TEXT,
-        updated_at INTEGER
-      );
-      
-      CREATE TABLE IF NOT EXISTS pekerjaan (
-        id INTEGER PRIMARY KEY,
-        nama_pekerjaan TEXT UNIQUE NOT NULL,
-        created_at TEXT,
-        updated_at INTEGER
-      );
-      
-      CREATE TABLE IF NOT EXISTS kartu_keluarga (
-        id INTEGER PRIMARY KEY,
-        no_kk TEXT UNIQUE NOT NULL,
-        created_at TEXT,
-        updated_at INTEGER
-      );
-      
-      CREATE TABLE IF NOT EXISTS leasing_companies (
-        id INTEGER PRIMARY KEY,
-        name TEXT NOT NULL,
-        description TEXT,
-        is_active INTEGER DEFAULT 1,
-        created_at TEXT,
-        updated_at INTEGER
-      );
-      
-      -- Legacy tables for backward compatibility
-      CREATE TABLE IF NOT EXISTS categories (
-        jenis TEXT PRIMARY KEY,
-        updated_at INTEGER
-      );
-      
-      -- Sync status tracking
-      CREATE TABLE IF NOT EXISTS sync_status (
-        key TEXT PRIMARY KEY,
-        last_sync INTEGER,
-        status TEXT
-      );
-      
-      -- Indexes for performance
-      CREATE INDEX IF NOT EXISTS idx_products_jenis ON products(jenis);
-      CREATE INDEX IF NOT EXISTS idx_products_status ON products(status);
-      CREATE INDEX IF NOT EXISTS idx_products_business ON products(business_id);
-      CREATE INDEX IF NOT EXISTS idx_ingredients_business ON ingredients(business_id);
-      CREATE INDEX IF NOT EXISTS idx_contacts_team ON contacts(team_id);
-      CREATE INDEX IF NOT EXISTS idx_deals_contact ON deals(contact_id);
-      CREATE INDEX IF NOT EXISTS idx_deals_user ON deals(user_id);
-      CREATE INDEX IF NOT EXISTS idx_deals_business ON deals(business_id);
-      CREATE INDEX IF NOT EXISTS idx_deal_products_deal ON deal_products(deal_id);
-      CREATE INDEX IF NOT EXISTS idx_users_organization ON users(organization_id);
-      CREATE INDEX IF NOT EXISTS idx_teams_organization ON teams(organization_id);
-    `);
-        console.log('✅ SQLite database initialized successfully');
+          -- Core POS Tables
+          CREATE TABLE IF NOT EXISTS users (
+            id INTEGER PRIMARY KEY,
+            email TEXT UNIQUE NOT NULL,
+            password TEXT,
+            name TEXT,
+            googleId TEXT UNIQUE,
+            createdAt TEXT,
+            role_id INTEGER,
+            organization_id INTEGER,
+            updated_at INTEGER
+          );
+          
+          CREATE TABLE IF NOT EXISTS businesses (
+            id INTEGER PRIMARY KEY,
+            name TEXT NOT NULL,
+            permission_name TEXT UNIQUE NOT NULL,
+            organization_id INTEGER,
+            management_group_id INTEGER,
+            image_url TEXT,
+            created_at TEXT,
+            updated_at INTEGER
+          );
+          
+          CREATE TABLE IF NOT EXISTS products (
+            id INTEGER PRIMARY KEY,
+            business_id INTEGER,
+            menu_code TEXT,
+            nama TEXT NOT NULL,
+            satuan TEXT NOT NULL,
+            kategori TEXT NOT NULL,
+            jenis TEXT,
+            keterangan TEXT,
+            harga_beli REAL,
+            ppn REAL,
+            harga_jual INTEGER NOT NULL,
+            harga_khusus REAL,
+            harga_online REAL,
+            fee_kerja REAL,
+            status TEXT DEFAULT 'active',
+            created_at TEXT,
+            updated_at INTEGER,
+            has_customization INTEGER DEFAULT 0
+          );
+          
+          CREATE TABLE IF NOT EXISTS ingredients (
+            id INTEGER PRIMARY KEY,
+            ingredient_code TEXT NOT NULL,
+            nama TEXT NOT NULL,
+            kategori TEXT NOT NULL,
+            satuan_beli TEXT NOT NULL,
+            isi_satuan_beli REAL NOT NULL,
+            satuan_keluar TEXT NOT NULL,
+            harga_beli INTEGER NOT NULL,
+            stok_min INTEGER DEFAULT 0,
+            status TEXT DEFAULT 'active',
+            business_id INTEGER NOT NULL,
+            created_at TEXT,
+            updated_at INTEGER
+          );
+          
+          CREATE TABLE IF NOT EXISTS cogs (
+            id INTEGER PRIMARY KEY,
+            menu_code TEXT,
+            ingredient_code TEXT,
+            amount REAL NOT NULL DEFAULT 0.0,
+            created_at TEXT,
+            updated_at INTEGER
+          );
+          
+          CREATE TABLE IF NOT EXISTS contacts (
+            id INTEGER PRIMARY KEY,
+            no_ktp TEXT UNIQUE,
+            nama TEXT NOT NULL,
+            phone_number TEXT,
+            tgl_lahir TEXT,
+            no_kk TEXT,
+            created_at TEXT,
+            updated_at INTEGER,
+            is_active INTEGER DEFAULT 1,
+            jenis_kelamin TEXT,
+            kota TEXT,
+            kecamatan TEXT,
+            source_id INTEGER,
+            pekerjaan_id INTEGER,
+            source_lainnya TEXT,
+            alamat TEXT,
+            team_id INTEGER
+          );
+          
+          CREATE TABLE IF NOT EXISTS deals (
+            id INTEGER PRIMARY KEY,
+            contact_id INTEGER NOT NULL,
+            user_id INTEGER NOT NULL,
+            business_id INTEGER NOT NULL,
+            activity_date TEXT NOT NULL,
+            product_type TEXT NOT NULL,
+            product_id INTEGER,
+            motorcycle_product_id INTEGER,
+            sales_pipeline_stage TEXT NOT NULL,
+            financing_company TEXT,
+            note TEXT,
+            notes TEXT,
+            created_at TEXT,
+            updated_at INTEGER,
+            team_id INTEGER,
+            followup_count INTEGER DEFAULT 0
+          );
+          
+          CREATE TABLE IF NOT EXISTS deal_products (
+            id INTEGER PRIMARY KEY,
+            deal_id INTEGER NOT NULL,
+            product_id INTEGER NOT NULL,
+            quantity INTEGER DEFAULT 1,
+            unit_price REAL,
+            total_price REAL,
+            notes TEXT,
+            created_at TEXT,
+            updated_at INTEGER
+          );
+          
+          CREATE TABLE IF NOT EXISTS teams (
+            id INTEGER PRIMARY KEY,
+            name TEXT NOT NULL,
+            description TEXT,
+            organization_id INTEGER NOT NULL,
+            team_lead_id INTEGER,
+            business_id INTEGER,
+            color TEXT DEFAULT '#3B82F6',
+            is_active INTEGER DEFAULT 1,
+            created_at TEXT,
+            updated_at INTEGER
+          );
+          
+          CREATE TABLE IF NOT EXISTS roles (
+            id INTEGER PRIMARY KEY,
+            name TEXT UNIQUE NOT NULL,
+            description TEXT,
+            organization_id INTEGER,
+            created_at TEXT,
+            updated_at INTEGER
+          );
+          
+          CREATE TABLE IF NOT EXISTS permissions (
+            id INTEGER PRIMARY KEY,
+            name TEXT UNIQUE NOT NULL,
+            description TEXT,
+            created_at TEXT,
+            category_id INTEGER,
+            organization_id INTEGER,
+            status TEXT DEFAULT 'active'
+          );
+          
+          -- Supporting Tables
+          CREATE TABLE IF NOT EXISTS source (
+            id INTEGER PRIMARY KEY,
+            source_name TEXT UNIQUE NOT NULL,
+            created_at TEXT,
+            updated_at INTEGER
+          );
+          
+          CREATE TABLE IF NOT EXISTS pekerjaan (
+            id INTEGER PRIMARY KEY,
+            nama_pekerjaan TEXT UNIQUE NOT NULL,
+            created_at TEXT,
+            updated_at INTEGER
+          );
+          
+          CREATE TABLE IF NOT EXISTS kartu_keluarga (
+            id INTEGER PRIMARY KEY,
+            no_kk TEXT UNIQUE NOT NULL,
+            created_at TEXT,
+            updated_at INTEGER
+          );
+          
+          CREATE TABLE IF NOT EXISTS leasing_companies (
+            id INTEGER PRIMARY KEY,
+            name TEXT NOT NULL,
+            description TEXT,
+            is_active INTEGER DEFAULT 1,
+            created_at TEXT,
+            updated_at INTEGER
+          );
+          
+          -- Legacy tables for backward compatibility
+          CREATE TABLE IF NOT EXISTS categories (
+            jenis TEXT PRIMARY KEY,
+            updated_at INTEGER
+          );
+          
+          -- Sync status tracking
+          CREATE TABLE IF NOT EXISTS sync_status (
+            key TEXT PRIMARY KEY,
+            last_sync INTEGER,
+            status TEXT
+          );
+          
+          -- Printer configurations
+          CREATE TABLE IF NOT EXISTS printer_configs (
+            id TEXT PRIMARY KEY,
+            printer_type TEXT NOT NULL,
+            system_printer_name TEXT NOT NULL,
+            created_at INTEGER,
+            updated_at INTEGER
+          );
+          
+          -- Indexes for performance
+          CREATE INDEX IF NOT EXISTS idx_products_jenis ON products(jenis);
+          CREATE INDEX IF NOT EXISTS idx_products_status ON products(status);
+          CREATE INDEX IF NOT EXISTS idx_products_business ON products(business_id);
+          CREATE INDEX IF NOT EXISTS idx_ingredients_business ON ingredients(business_id);
+          CREATE INDEX IF NOT EXISTS idx_contacts_team ON contacts(team_id);
+          CREATE INDEX IF NOT EXISTS idx_deals_contact ON deals(contact_id);
+          CREATE INDEX IF NOT EXISTS idx_deals_user ON deals(user_id);
+          CREATE INDEX IF NOT EXISTS idx_deals_business ON deals(business_id);
+          CREATE INDEX IF NOT EXISTS idx_deal_products_deal ON deal_products(deal_id);
+          CREATE INDEX IF NOT EXISTS idx_users_organization ON users(organization_id);
+          CREATE INDEX IF NOT EXISTS idx_teams_organization ON teams(organization_id);
+        `);
+        */
+        console.log('✅ SQLite database temporarily disabled for testing');
     }
     catch (error) {
         console.error('❌ Failed to initialize SQLite:', error);
@@ -736,6 +738,35 @@ function createWindows() {
         const stmt = localDb.prepare('SELECT * FROM pekerjaan ORDER BY nama_pekerjaan ASC');
         return stmt.all();
     });
+    // Printer configuration handlers
+    electron_1.ipcMain.handle('localdb-save-printer-config', async (event, printerType, systemPrinterName) => {
+        if (!localDb)
+            return { success: false };
+        try {
+            const stmt = localDb.prepare(`INSERT INTO printer_configs (id, printer_type, system_printer_name, created_at, updated_at) 
+        VALUES (?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET 
+        system_printer_name=excluded.system_printer_name, updated_at=excluded.updated_at`);
+            const now = Date.now();
+            stmt.run(printerType, printerType, systemPrinterName, now, now);
+            return { success: true };
+        }
+        catch (error) {
+            console.error('Error saving printer config:', error);
+            return { success: false, error: String(error) };
+        }
+    });
+    electron_1.ipcMain.handle('localdb-get-printer-configs', async () => {
+        if (!localDb)
+            return [];
+        try {
+            const stmt = localDb.prepare('SELECT * FROM printer_configs ORDER BY printer_type ASC');
+            return stmt.all();
+        }
+        catch (error) {
+            console.error('Error getting printer configs:', error);
+            return [];
+        }
+    });
     // Load the app - start with login page
     console.log('🔍 isDev:', isDev);
     if (isDev) {
@@ -868,10 +899,101 @@ electron_1.app.on('window-all-closed', () => {
 });
 // IPC handlers for POS-specific functionality
 electron_1.ipcMain.handle('print-receipt', async (event, data) => {
-    // Handle receipt printing
-    console.log('Printing receipt:', data);
-    // Implement actual printing logic here
-    return { success: true };
+    try {
+        console.log('Printing receipt:', data);
+        // Get the sender's webContents to access printing methods
+        const sender = event.sender;
+        if (data.type === 'test') {
+            // Create a hidden window for printing to avoid darkening the main window
+            if (printWindow) {
+                printWindow.close();
+            }
+            printWindow = new electron_1.BrowserWindow({
+                width: 800,
+                height: 600,
+                show: false, // Hidden window
+                webPreferences: {
+                    nodeIntegration: false,
+                    contextIsolation: true,
+                }
+            });
+            const printOptions = {
+                silent: true, // Don't show print dialog - print directly
+                printBackground: false,
+                deviceName: data.printerName || undefined
+            };
+            // Create a simple HTML content for the test print
+            const htmlContent = `
+        <html>
+          <head>
+            <title>Test Print</title>
+            <style>
+              body { font-family: Arial, sans-serif; margin: 20px; }
+              .header { text-align: center; font-size: 18px; font-weight: bold; margin-bottom: 20px; }
+              .content { font-size: 14px; line-height: 1.5; }
+              .footer { margin-top: 30px; font-size: 12px; text-align: center; }
+            </style>
+          </head>
+          <body>
+            <div class="header">TEST PRINT - ${data.printerType?.toUpperCase() || 'PRINTER'}</div>
+            <div class="content">
+              <p>This is a test print to verify your printer is working correctly.</p>
+              <p><strong>Printer:</strong> ${data.printerName}</p>
+              <p><strong>Time:</strong> ${new Date().toLocaleString()}</p>
+              <p><strong>Type:</strong> ${data.printerType}</p>
+              <br>
+              <p>If you can see this, your printer is configured correctly!</p>
+            </div>
+            <div class="footer">
+              <p>Marviano POS System - Test Print</p>
+            </div>
+          </body>
+        </html>
+      `;
+            // Load the HTML content in the hidden window
+            await printWindow.loadURL(`data:text/html,${encodeURIComponent(htmlContent)}`);
+            // Wait a moment for the content to load, then print
+            setTimeout(() => {
+                printWindow.webContents.print(printOptions, (success, errorType) => {
+                    if (success) {
+                        console.log('✅ Test print sent successfully');
+                    }
+                    else {
+                        console.error('❌ Test print failed:', errorType);
+                    }
+                    // Close the print window after printing
+                    setTimeout(() => {
+                        if (printWindow) {
+                            printWindow.close();
+                            printWindow = null;
+                        }
+                    }, 1000);
+                });
+            }, 1000);
+            return { success: true };
+        }
+        else {
+            // For regular receipts, implement your receipt printing logic here
+            console.log('Regular receipt printing not implemented yet');
+            return { success: false, error: 'Regular receipt printing not implemented yet' };
+        }
+    }
+    catch (error) {
+        console.error('Error in print-receipt handler:', error);
+        return { success: false, error: String(error) };
+    }
+});
+// List available system printers for the renderer
+electron_1.ipcMain.handle('list-printers', async (event) => {
+    try {
+        const sender = event?.sender;
+        const printers = await sender.getPrintersAsync();
+        return { success: true, printers };
+    }
+    catch (error) {
+        console.error('Failed to list printers:', error);
+        return { success: false, error: error?.message || String(error), printers: [] };
+    }
 });
 electron_1.ipcMain.handle('open-cash-drawer', async () => {
     // Handle cash drawer opening

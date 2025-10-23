@@ -2,6 +2,7 @@
 
 import { useState, useEffect } from 'react';
 import { Printer, TestTube, CheckCircle, XCircle, AlertCircle, RefreshCw, Download, Settings } from 'lucide-react';
+import PrinterSelector from './PrinterSelector';
 
 interface SystemPrinter {
   name: string;
@@ -47,6 +48,7 @@ export default function PrinterSetup() {
   const [isScanning, setIsScanning] = useState(false);
   const [isTesting, setIsTesting] = useState<string | null>(null);
   const [selectedPrinterForConfig, setSelectedPrinterForConfig] = useState<string | null>(null);
+  const [activeTab, setActiveTab] = useState<'setup' | 'selector'>('selector');
 
   // Load saved printer configurations on component mount
   useEffect(() => {
@@ -252,13 +254,44 @@ export default function PrinterSetup() {
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center justify-between">
-        <div>
-          <h2 className="text-2xl font-bold text-gray-800">Printer Setup</h2>
-          <p className="text-gray-600 mt-1">Configure and test your receipt printers</p>
-        </div>
-        
-        <div className="flex space-x-3">
+      {/* Tab Navigation */}
+      <div className="border-b border-gray-200">
+        <nav className="-mb-px flex space-x-8">
+          <button
+            onClick={() => setActiveTab('selector')}
+            className={`py-2 px-1 border-b-2 font-medium text-sm ${
+              activeTab === 'selector'
+                ? 'border-blue-500 text-blue-600'
+                : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
+            }`}
+          >
+            Printer Selector
+          </button>
+          <button
+            onClick={() => setActiveTab('setup')}
+            className={`py-2 px-1 border-b-2 font-medium text-sm ${
+              activeTab === 'setup'
+                ? 'border-blue-500 text-blue-600'
+                : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
+            }`}
+          >
+            Advanced Setup
+          </button>
+        </nav>
+      </div>
+
+      {/* Tab Content */}
+      {activeTab === 'selector' ? (
+        <PrinterSelector />
+      ) : (
+        <>
+          <div className="flex items-center justify-between">
+            <div>
+              <h2 className="text-2xl font-bold text-gray-800">Advanced Printer Setup</h2>
+              <p className="text-gray-600 mt-1">Configure and test your receipt printers</p>
+            </div>
+            
+            <div className="flex space-x-3">
           <button
             onClick={scanForPrinters}
             disabled={isScanning}
@@ -550,6 +583,8 @@ export default function PrinterSetup() {
           </button>
         </div>
       </div>
+        </>
+      )}
     </div>
   );
 }
