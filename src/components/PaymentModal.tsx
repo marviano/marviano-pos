@@ -37,7 +37,7 @@ interface PaymentModalProps {
   isOnline?: boolean;
 }
 
-type PaymentMethod = 'cash' | 'debit' | 'qr' | 'ewallet' | 'cl' | 'voucher';
+type PaymentMethod = 'cash' | 'debit' | 'qr' | 'ewallet' | 'cl' | 'voucher' | 'gofood' | 'grabfood' | 'shopeefood' | 'tiktok';
 type PickupMethod = 'dine-in' | 'take-away';
 
 export default function PaymentModal({
@@ -64,8 +64,17 @@ export default function PaymentModal({
   const [showBankDropdown, setShowBankDropdown] = useState<boolean>(false);
   const [isProcessing, setIsProcessing] = useState(false);
   const [showConfirmation, setShowConfirmation] = useState(false);
+  
+  // Check if current payment method is an online platform
+  const isOnlinePayment = ['gofood', 'grabfood', 'shopeefood', 'tiktok'].includes(selectedPaymentMethod);
   const [cardNumberError, setCardNumberError] = useState<string>('');
   const cardNumberRef = useRef<HTMLInputElement>(null);
+
+  // Debug bank selection
+  useEffect(() => {
+    console.log('Bank ID changed:', bankId);
+    console.log('Bank search term:', bankSearchTerm);
+  }, [bankId, bankSearchTerm]);
 
   // Calculate order totals
   const calculateOrderTotal = () => {
@@ -120,11 +129,9 @@ export default function PaymentModal({
       currentAmount = preferenceAmount;
       setAmount = setPreferenceAmount;
     } else if (activeInput === 'customer') {
-      // When customer name is focused, redirect numpad input to amount received
-      // This prevents accidentally typing numbers into customer name
-      currentAmount = amountReceived;
-      setAmount = setAmountReceived;
-      setActiveInput('amount'); // Switch focus to amount
+      // When customer name is focused, don't handle numpad input
+      // Let the user type normally in the customer name field
+      return;
     } else {
       currentAmount = amountReceived;
       setAmount = setAmountReceived;
@@ -184,15 +191,16 @@ export default function PaymentModal({
       return;
     }
 
-    // Validate amount received for all payment methods EXCEPT CL
-    if (selectedPaymentMethod !== 'cl' && (!amountReceived || parseFloat(amountReceived) <= 0)) {
+    // Validate amount received for all payment methods EXCEPT CL and online platforms
+    if (selectedPaymentMethod !== 'cl' && !isOnlinePayment && (!amountReceived || parseFloat(amountReceived) <= 0)) {
       alert('Masukkan jumlah yang diterima');
       return;
     }
 
     // Validate debit card information
     if (selectedPaymentMethod === 'debit') {
-      if (!bankId) {
+      console.log('Bank validation - bankId:', bankId, 'type:', typeof bankId);
+      if (!bankId || bankId.trim() === '') {
         alert('Pilih bank');
         return;
       }
@@ -229,14 +237,14 @@ export default function PaymentModal({
         alert('Jumlah voucher tidak boleh melebihi total pesanan');
         return;
       }
-      if (finalTotal > 0 && selectedPaymentMethod !== 'cl' && receivedAmount < finalTotal) {
+      if (finalTotal > 0 && selectedPaymentMethod !== 'cl' && !isOnlinePayment && receivedAmount < finalTotal) {
         alert(`Jumlah yang diterima kurang. Kurang: ${formatPrice(finalTotal - receivedAmount)}`);
         return;
       }
     } else {
       // For payments without voucher, check received amount covers the full order total
-      // EXCEPT for CL payments which don't require cash payment
-      if (selectedPaymentMethod !== 'cl' && receivedAmount < orderTotal) {
+      // EXCEPT for CL payments and online platforms which don't require cash payment
+      if (selectedPaymentMethod !== 'cl' && !isOnlinePayment && receivedAmount < orderTotal) {
         alert(`Jumlah yang diterima kurang. Kurang: ${formatPrice(orderTotal - receivedAmount)}`);
         return;
       }
@@ -259,6 +267,14 @@ export default function PaymentModal({
         selectedClAccount,
         clAccountId,
         clAccountName
+      });
+      
+      console.log('Transaction Data Debug:', {
+        payment_method: selectedPaymentMethod,
+        bank_id: selectedPaymentMethod === 'debit' ? parseInt(bankId) : null,
+        card_number: selectedPaymentMethod === 'debit' ? cardNumber : null,
+        bankId,
+        cardNumber
       });
 
       const transactionData = {
@@ -503,7 +519,7 @@ export default function PaymentModal({
                             }}
                             onBlur={() => {
                               // Small delay to allow clicking on dropdown items
-                              setTimeout(() => setShowBankDropdown(false), 150);
+                              setTimeout(() => setShowBankDropdown(false), 200);
                             }}
                             className={`w-full p-2 text-sm font-medium border rounded-md text-gray-800 bg-white focus:border-blue-400 focus:ring-1 focus:ring-blue-100 ${
                               !bankId ? 'border-red-300 animate-pulse' : 'border-gray-300'
@@ -521,10 +537,16 @@ export default function PaymentModal({
                               ).map(bank => (
                                 <div
                                   key={bank.id}
-                                  onClick={() => {
+                                  onClick={(e) => {
+                                    e.preventDefault();
+                                    e.stopPropagation();
+                                    console.log('Bank selected:', bank.bank_name, 'ID:', bank.id);
                                     setBankId(bank.id.toString());
                                     setBankSearchTerm(bank.bank_name);
                                     setShowBankDropdown(false);
+                                  }}
+                                  onMouseDown={(e) => {
+                                    e.preventDefault(); // Prevent input blur
                                   }}
                                   className="px-3 py-2 hover:bg-blue-50 cursor-pointer border-b border-gray-100"
                                 >
@@ -543,10 +565,16 @@ export default function PaymentModal({
                               ).map(bank => (
                                 <div
                                   key={bank.id}
-                                  onClick={() => {
+                                  onClick={(e) => {
+                                    e.preventDefault();
+                                    e.stopPropagation();
+                                    console.log('Bank selected:', bank.bank_name, 'ID:', bank.id);
                                     setBankId(bank.id.toString());
                                     setBankSearchTerm(bank.bank_name);
                                     setShowBankDropdown(false);
+                                  }}
+                                  onMouseDown={(e) => {
+                                    e.preventDefault(); // Prevent input blur
                                   }}
                                   className="px-3 py-2 hover:bg-blue-50 cursor-pointer border-b border-gray-100"
                                 >
@@ -628,11 +656,27 @@ export default function PaymentModal({
                     id="customer-name-input"
                     type="text"
                     value={customerName}
-                    onChange={(e) => setCustomerName(e.target.value)}
-                    onFocus={() => setActiveInput('customer')}
+                    onChange={(e) => {
+                      console.log('Customer name changed:', e.target.value);
+                      setCustomerName(e.target.value);
+                    }}
+                    onFocus={() => {
+                      console.log('Customer name focused');
+                      setActiveInput('customer');
+                    }}
                     onClick={(e) => {
+                      console.log('Customer name clicked');
                       e.stopPropagation();
                       setActiveInput('customer');
+                      // Ensure the input is focused
+                      setTimeout(() => {
+                        e.target.focus();
+                      }, 10);
+                    }}
+                    onKeyDown={(e) => {
+                      console.log('Customer name keydown:', e.key);
+                      // Prevent numpad from interfering
+                      e.stopPropagation();
                     }}
                     className={`w-full p-3 pr-10 text-base font-semibold border-2 rounded-lg text-gray-800 transition-all duration-300 cursor-text ${
                       activeInput === 'customer' 
@@ -774,9 +818,9 @@ export default function PaymentModal({
                   {isOnline && (
                     <>
                       <button
-                        onClick={() => setSelectedPaymentMethod('qr')}
+                        onClick={() => setSelectedPaymentMethod('gofood')}
                         className={`flex-1 py-2 rounded border transition-all duration-200 ${
-                          selectedPaymentMethod === 'qr'
+                          selectedPaymentMethod === 'gofood'
                             ? 'bg-teal-100 border-teal-400 text-teal-800'
                             : 'bg-gray-50 border-gray-200 text-gray-700 hover:bg-gray-100'
                         }`}
@@ -784,9 +828,9 @@ export default function PaymentModal({
                           <span className="font-medium text-xs">GoFood</span>
                       </button>
                       <button
-                        onClick={() => setSelectedPaymentMethod('ewallet')}
+                        onClick={() => setSelectedPaymentMethod('grabfood')}
                         className={`flex-1 py-2 rounded border transition-all duration-200 ${
-                          selectedPaymentMethod === 'ewallet'
+                          selectedPaymentMethod === 'grabfood'
                             ? 'bg-teal-100 border-teal-400 text-teal-800'
                             : 'bg-gray-50 border-gray-200 text-gray-700 hover:bg-gray-100'
                         }`}
@@ -794,9 +838,9 @@ export default function PaymentModal({
                           <span className="font-medium text-xs">GrabFood</span>
                       </button>
                       <button
-                        onClick={() => setSelectedPaymentMethod('cash')}
+                        onClick={() => setSelectedPaymentMethod('shopeefood')}
                         className={`flex-1 py-2 rounded border transition-all duration-200 ${
-                          selectedPaymentMethod === 'cash'
+                          selectedPaymentMethod === 'shopeefood'
                             ? 'bg-teal-100 border-teal-400 text-teal-800'
                             : 'bg-gray-50 border-gray-200 text-gray-700 hover:bg-gray-100'
                         }`}
@@ -804,9 +848,9 @@ export default function PaymentModal({
                           <span className="font-medium text-xs">ShopeeFood</span>
                       </button>
                       <button
-                        onClick={() => setSelectedPaymentMethod('debit')}
+                        onClick={() => setSelectedPaymentMethod('tiktok')}
                         className={`flex-1 py-2 rounded border transition-all duration-200 ${
-                          selectedPaymentMethod === 'debit'
+                          selectedPaymentMethod === 'tiktok'
                             ? 'bg-teal-100 border-teal-400 text-teal-800'
                             : 'bg-gray-50 border-gray-200 text-gray-700 hover:bg-gray-100'
                         }`}
@@ -836,10 +880,10 @@ export default function PaymentModal({
                     type="text"
                     value={amountReceived ? `Rp ${parseFloat(amountReceived).toLocaleString('id-ID')}` : ''}
                     readOnly
-                    disabled={selectedPaymentMethod === 'cl'}
-                    onClick={() => selectedPaymentMethod !== 'cl' && setActiveInput('amount')}
+                    disabled={selectedPaymentMethod === 'cl' || isOnlinePayment}
+                    onClick={() => selectedPaymentMethod !== 'cl' && !isOnlinePayment && setActiveInput('amount')}
                     className={`w-full p-3 text-base font-semibold border-2 rounded-lg transition-all duration-300 ${
-                      selectedPaymentMethod === 'cl'
+                      selectedPaymentMethod === 'cl' || isOnlinePayment
                         ? 'border-gray-300 bg-gray-100 text-gray-500 cursor-not-allowed opacity-50'
                         : activeInput === 'amount' 
                         ? 'border-blue-400 bg-blue-50 shadow-lg shadow-blue-200 animate-pulse text-gray-800 cursor-pointer' 
@@ -1021,12 +1065,12 @@ export default function PaymentModal({
                   <button
                     onClick={handleConfirmPayment}
                     disabled={isProcessing || 
-                      (selectedPaymentMethod !== 'cl' && selectedPaymentMethod !== 'voucher' && receivedAmount < finalTotal) ||
+                      (selectedPaymentMethod !== 'cl' && !isOnlinePayment && selectedPaymentMethod !== 'voucher' && receivedAmount < finalTotal) ||
                       (selectedPaymentMethod === 'voucher' && (voucherDiscount <= 0 || voucherDiscount > orderTotal))
                     }
                     className={`row-span-2 p-2 rounded-lg font-medium text-xs transition-all duration-200 ${
                       isProcessing || 
-                      (selectedPaymentMethod !== 'cl' && selectedPaymentMethod !== 'voucher' && receivedAmount < finalTotal) ||
+                      (selectedPaymentMethod !== 'cl' && !isOnlinePayment && selectedPaymentMethod !== 'voucher' && receivedAmount < finalTotal) ||
                       (selectedPaymentMethod === 'voucher' && (voucherDiscount <= 0 || voucherDiscount > orderTotal))
                         ? 'bg-gray-400 cursor-not-allowed'
                         : 'bg-green-500 hover:bg-green-600 text-white'

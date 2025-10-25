@@ -16,7 +16,7 @@ interface Transaction {
   user_id: number;
   user_name: string;
   business_name: string;
-  payment_method: 'cash' | 'debit' | 'qr' | 'ewallet' | 'cl' | 'voucher';
+  payment_method: 'cash' | 'debit' | 'qr' | 'ewallet' | 'cl' | 'voucher' | 'gofood' | 'grabfood' | 'shopeefood' | 'tiktok';
   pickup_method: 'dine-in' | 'take-away';
   total_amount: number;
   voucher_discount: number;
@@ -76,7 +76,11 @@ const TransactionDetailModal: React.FC<TransactionDetailModalProps> = ({
       'qr': 'QR Code',
       'ewallet': 'E-Wallet',
       'cl': 'City Ledger',
-      'voucher': 'Voucher'
+      'voucher': 'Voucher',
+      'gofood': 'GoFood',
+      'grabfood': 'GrabFood',
+      'shopeefood': 'ShopeeFood',
+      'tiktok': 'TikTok'
     };
     return labels[method] || method;
   };

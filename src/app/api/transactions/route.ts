@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { query } from '@/lib/db';
 import { generateReceiptNumber } from '@/lib/receiptUtils';
+import { getPaymentMethodId, getPaymentMethodCode } from '@/lib/paymentMethods';
 
 interface TransactionItem {
   product_id: number;
@@ -22,7 +23,7 @@ interface TransactionItem {
 interface TransactionData {
   business_id: number;
   user_id: number;
-  payment_method: 'cash' | 'debit' | 'qr' | 'ewallet' | 'cl' | 'voucher';
+  payment_method: 'cash' | 'debit' | 'qr' | 'ewallet' | 'cl' | 'voucher' | 'gofood' | 'grabfood' | 'shopeefood' | 'tiktok';
   pickup_method: 'dine-in' | 'take-away';
   total_amount: number;
   voucher_discount: number;
@@ -55,6 +56,9 @@ export async function POST(request: NextRequest) {
     const connection = await query('START TRANSACTION');
     
     try {
+      // Get payment method ID
+      const paymentMethodId = await getPaymentMethodId(transactionData.payment_method);
+      
       // Generate receipt number
       const receiptNumber = await generateReceiptNumber(transactionData.business_id, transactionData.transaction_type);
       
@@ -63,7 +67,7 @@ export async function POST(request: NextRequest) {
     INSERT INTO transactions (
       business_id, 
       user_id, 
-      payment_method, 
+      payment_method_id, 
       pickup_method, 
       total_amount, 
       voucher_discount,
@@ -84,7 +88,7 @@ export async function POST(request: NextRequest) {
       `, [
         transactionData.business_id,
         transactionData.user_id,
-        transactionData.payment_method,
+        paymentMethodId,
         transactionData.pickup_method,
         transactionData.total_amount,
         transactionData.voucher_discount,
@@ -209,21 +213,49 @@ export async function GET(request: NextRequest) {
       });
     }
 
-    // Simple query first to test
-    let sql = 'SELECT * FROM transactions';
+    // Query with payment method join
+    let sql = `
+      SELECT 
+        t.id,
+        t.business_id,
+        t.user_id,
+        t.pickup_method,
+        t.total_amount,
+        t.voucher_discount,
+        t.final_amount,
+        t.amount_received,
+        t.change_amount,
+        t.status,
+        t.created_at,
+        t.updated_at,
+        t.contact_id,
+        t.customer_name,
+        t.note,
+        t.bank_name,
+        t.card_number,
+        t.cl_account_id,
+        t.cl_account_name,
+        t.bank_id,
+        t.receipt_number,
+        t.transaction_type,
+        pm.code as payment_method,
+        pm.name as payment_method_name
+      FROM transactions t
+      LEFT JOIN payment_methods pm ON t.payment_method_id = pm.id
+    `;
     const params: any[] = [];
 
     // Add conditions
     const conditions: string[] = [];
     if (businessId) {
-      conditions.push('business_id = ?');
+      conditions.push('t.business_id = ?');
       params.push(parseInt(businessId));
     }
     if (date) {
       // Use date range instead of DATE() function for better prepared statement compatibility
       const startDate = `${date} 00:00:00`;
       const endDate = `${date} 23:59:59`;
-      conditions.push('created_at >= ? AND created_at <= ?');
+      conditions.push('t.created_at >= ? AND t.created_at <= ?');
       params.push(startDate);
       params.push(endDate);
     }
@@ -232,7 +264,7 @@ export async function GET(request: NextRequest) {
       sql += ' WHERE ' + conditions.join(' AND ');
     }
 
-    sql += ' ORDER BY created_at DESC LIMIT ?';
+    sql += ' ORDER BY t.created_at DESC LIMIT ?';
     params.push(parseInt(limit));
 
     console.log('Simple SQL Query:', sql);

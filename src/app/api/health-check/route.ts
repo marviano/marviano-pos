@@ -9,7 +9,7 @@ export async function GET() {
     // Use Promise.race to implement timeout
     const connectionPromise = pool.getConnection();
     const timeoutPromise = new Promise((_, reject) => 
-      setTimeout(() => reject(new Error('Connection timeout')), 2000) // 2 second timeout
+      setTimeout(() => reject(new Error('Connection timeout')), 5000) // 5 second timeout
     );
     
     const connection = await Promise.race([connectionPromise, timeoutPromise]) as any;
@@ -17,7 +17,7 @@ export async function GET() {
     // Test the connection with a simple query
     const queryPromise = connection.query('SELECT 1 as test');
     const queryTimeoutPromise = new Promise((_, reject) => 
-      setTimeout(() => reject(new Error('Query timeout')), 1000) // 1 second timeout
+      setTimeout(() => reject(new Error('Query timeout')), 3000) // 3 second timeout
     );
     
     await Promise.race([queryPromise, queryTimeoutPromise]);

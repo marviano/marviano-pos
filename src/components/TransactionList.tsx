@@ -8,7 +8,7 @@ interface Transaction {
   id: number;
   business_id: number;
   user_id: number;
-  payment_method: 'cash' | 'debit' | 'qr' | 'ewallet' | 'cl' | 'voucher';
+  payment_method: 'cash' | 'debit' | 'qr' | 'ewallet' | 'cl' | 'voucher' | 'gofood' | 'grabfood' | 'shopeefood' | 'tiktok';
   pickup_method: 'dine-in' | 'take-away';
   total_amount: number;
   voucher_discount: number;
@@ -40,7 +40,7 @@ interface TransactionDetail {
   user_id: number;
   user_name: string;
   business_name: string;
-  payment_method: 'cash' | 'debit' | 'qr' | 'ewallet' | 'cl' | 'voucher';
+  payment_method: 'cash' | 'debit' | 'qr' | 'ewallet' | 'cl' | 'voucher' | 'gofood' | 'grabfood' | 'shopeefood' | 'tiktok';
   pickup_method: 'dine-in' | 'take-away';
   total_amount: number;
   voucher_discount: number;
@@ -130,6 +130,10 @@ export default function TransactionList({ businessId = 1 }: TransactionListProps
       }
       
       const data = await response.json();
+      console.log('TransactionList - Fetched transactions:', data.transactions?.slice(0, 3));
+      if (data.transactions?.length > 0) {
+        console.log('First transaction payment method:', data.transactions[0].payment_method);
+      }
       setTransactions(data.transactions || []);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to fetch transactions');
@@ -177,7 +181,11 @@ export default function TransactionList({ businessId = 1 }: TransactionListProps
       'qr': 'QR Code',
       'ewallet': 'E-Wallet',
       'cl': 'City Ledger',
-      'voucher': 'Voucher'
+      'voucher': 'Voucher',
+      'gofood': 'GoFood',
+      'grabfood': 'GrabFood',
+      'shopeefood': 'ShopeeFood',
+      'tiktok': 'TikTok'
     };
     return labels[method] || method;
   };
@@ -190,7 +198,11 @@ export default function TransactionList({ businessId = 1 }: TransactionListProps
       'qr': 'bg-purple-100 text-purple-800',
       'ewallet': 'bg-orange-100 text-orange-800',
       'cl': 'bg-gray-100 text-gray-800',
-      'voucher': 'bg-yellow-100 text-yellow-800'
+      'voucher': 'bg-yellow-100 text-yellow-800',
+      'gofood': 'bg-teal-100 text-teal-800',
+      'grabfood': 'bg-green-100 text-green-800',
+      'shopeefood': 'bg-orange-100 text-orange-800',
+      'tiktok': 'bg-red-100 text-red-800'
     };
     return colors[method] || 'bg-gray-100 text-gray-800';
   };

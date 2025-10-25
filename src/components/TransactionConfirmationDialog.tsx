@@ -31,7 +31,7 @@ interface TransactionConfirmationDialogProps {
   onClose: () => void;
   onConfirm: () => void;
   cartItems: CartItem[];
-  paymentMethod: 'cash' | 'debit' | 'qr' | 'ewallet' | 'cl' | 'voucher';
+  paymentMethod: 'cash' | 'debit' | 'qr' | 'ewallet' | 'cl' | 'voucher' | 'gofood' | 'grabfood' | 'shopeefood' | 'tiktok';
   pickupMethod: 'dine-in' | 'take-away';
   orderTotal: number;
   amountReceived: number;
@@ -67,6 +67,10 @@ export default function TransactionConfirmationDialog({
       case 'ewallet': return 'E-Wallet';
       case 'cl': return 'City Ledger';
       case 'voucher': return 'Voucher';
+      case 'gofood': return 'GoFood';
+      case 'grabfood': return 'GrabFood';
+      case 'shopeefood': return 'ShopeeFood';
+      case 'tiktok': return 'TikTok';
       default: return method;
     }
   };

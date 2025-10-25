@@ -19,16 +19,40 @@ export async function GET(
     // Get transaction details with user and business names
     const transactionQuery = `
       SELECT 
-        t.*,
+        t.id,
+        t.business_id,
+        t.user_id,
+        t.pickup_method,
+        t.total_amount,
+        t.voucher_discount,
+        t.final_amount,
+        t.amount_received,
+        t.change_amount,
+        t.status,
+        t.created_at,
+        t.updated_at,
+        t.contact_id,
+        t.customer_name,
+        t.note,
+        t.bank_name,
+        t.card_number,
+        t.cl_account_id,
+        t.cl_account_name,
+        t.bank_id,
+        t.receipt_number,
+        t.transaction_type,
         COALESCE(u.name, 'Unknown User') as user_name,
         COALESCE(b.name, 'Unknown Business') as business_name,
         banks.bank_name,
-        cl.account_name as cl_account_name
+        cl.account_name as cl_account_name,
+        pm.code as payment_method,
+        pm.name as payment_method_name
       FROM transactions t
       LEFT JOIN users u ON t.user_id = u.id
       LEFT JOIN businesses b ON t.business_id = b.id
       LEFT JOIN banks ON t.bank_id = banks.id
       LEFT JOIN cl_accounts cl ON t.cl_account_id = cl.id
+      LEFT JOIN payment_methods pm ON t.payment_method_id = pm.id
       WHERE t.id = ?
     `;
 
