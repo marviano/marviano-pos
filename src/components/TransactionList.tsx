@@ -64,7 +64,7 @@ interface TransactionListProps {
   businessId?: number;
 }
 
-export default function TransactionList({ businessId = 1 }: TransactionListProps) {
+export default function TransactionList({ businessId = 14 }: TransactionListProps) {
   const [transactions, setTransactions] = useState<Transaction[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -238,9 +238,11 @@ export default function TransactionList({ businessId = 1 }: TransactionListProps
         // Show ALL unique LOCAL dates in the database for debugging
         const allDates = [...new Set(offlineTransactions.map((tx: any) => {
           const localDate = new Date(tx.created_at);
-          return localDate.getFullYear() + '-' + 
+          const dateString = localDate.getFullYear() + '-' + 
             String(localDate.getMonth() + 1).padStart(2, '0') + '-' + 
             String(localDate.getDate()).padStart(2, '0');
+          console.log(`📅 [OFFLINE] Transaction ${tx.id}: raw=${tx.created_at}, parsed=${localDate.toISOString()}, dateString=${dateString}`);
+          return dateString;
         }))].sort();
         console.log('📱 [OFFLINE] Total:', offlineTransactions.length, '| Date range:', fromDate, 'to', toDate, '| Available dates:', allDates);
         
@@ -251,7 +253,11 @@ export default function TransactionList({ businessId = 1 }: TransactionListProps
           const localDateString = localDate.getFullYear() + '-' + 
             String(localDate.getMonth() + 1).padStart(2, '0') + '-' + 
             String(localDate.getDate()).padStart(2, '0');
-          return localDateString >= fromDate && localDateString <= toDate;
+          const isInRange = localDateString >= fromDate && localDateString <= toDate;
+          if (!isInRange && localDateString === '2025-10-27') {
+            console.log(`❌ [OFFLINE] Transaction ${tx.id} excluded: date=${localDateString}, range=${fromDate} to ${toDate}`);
+          }
+          return isInRange;
         });
         
         console.log('📱 [OFFLINE] Found:', filteredTransactions.length, 'transactions from', fromDate, 'to', toDate);

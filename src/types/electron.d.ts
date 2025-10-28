@@ -32,8 +32,8 @@ declare global {
       onSlideshowUpdate?: (callback: (data: any) => void) => void;
       
       // Offline/local DB operations
-      localDbUpsertCategories?: (rows: { jenis: string; updated_at?: number }[]) => Promise<{ success: boolean }>;
-      localDbGetCategories?: () => Promise<{ jenis: string; updated_at: number }[]>;
+      localDbUpsertCategories?: (rows: { category2_name: string; updated_at?: number }[]) => Promise<{ success: boolean }>;
+      localDbGetCategories?: () => Promise<{ category2_name: string; updated_at: number }[]>;
       localDbUpsertProducts?: (rows: any[]) => Promise<{ success: boolean }>;
       localDbGetProductsByJenis?: (jenis: string) => Promise<any[]>;
       localDbGetProductsByCategory2?: (category2Name: string) => Promise<any[]>;

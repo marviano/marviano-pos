@@ -14,41 +14,51 @@ export async function GET(request: NextRequest) {
     const searchParams = request.nextUrl.searchParams;
     const transactionType = searchParams.get('transaction_type') as 'drinks' | 'bakery' | null;
     const online = searchParams.get('online') === 'true';
+    const platform = searchParams.get('platform') as 'gofood' | 'grabfood' | 'shopeefood' | 'tiktok' | null;
 
-    // Base query - fetch all categories from category2 table (including empty ones)
+    // Query to get distinct category2 names from actual products in this business
+    // This dynamically loads categories based on what products exist
     let sql = `
-      SELECT c2.name as category2_name
-      FROM category2 c2
-      WHERE c2.business_id = ? 
-      AND c2.is_active = 1
+      SELECT DISTINCT c2.name as category2_name
+      FROM products p
+      INNER JOIN product_businesses pb ON p.id = pb.product_id
+      LEFT JOIN category2 c2 ON p.category2_id = c2.id
+      WHERE pb.business_id = ?
+      AND p.status = 'active'
+      AND c2.name IS NOT NULL
     `;
     
     const params: any[] = [BUSINESS_ID];
     
-    // Filter by transaction type using category2 names
+    // Filter by transaction type: bakery vs drinks based on category2
     if (transactionType) {
-      if (transactionType === 'drinks') {
-        sql += ` AND c2.name IN ('Ice Cream Cone', 'Sundae', 'Milk Tea')`;
-      } else if (transactionType === 'bakery') {
+      if (transactionType === 'bakery') {
         sql += ` AND c2.name = 'Bakery'`;
+      } else if (transactionType === 'drinks') {
+        // For drinks, include everything except Bakery
+        sql += ` AND c2.name != 'Bakery'`;
       }
     }
 
-    // Online filter: only include categories that have products with harga_online
-    if (online) {
-      sql += ` AND EXISTS (
-        SELECT 1 FROM products p
-        INNER JOIN product_businesses pb ON p.id = pb.product_id
-        WHERE p.category2_id = c2.id
-        AND pb.business_id = ?
-        AND p.status = 'active'
-        AND p.harga_online IS NOT NULL 
-        AND p.harga_online > 0
-      )`;
-      params.push(BUSINESS_ID);
+    // Online/Platform filter: only include categories that have products with prices
+    if (online && platform) {
+      // Filter by platform-specific price columns
+      if (platform === 'gofood') {
+        sql += ` AND p.harga_gofood IS NOT NULL AND p.harga_gofood > 0`;
+      } else if (platform === 'grabfood') {
+        sql += ` AND p.harga_grabfood IS NOT NULL AND p.harga_grabfood > 0`;
+      } else if (platform === 'shopeefood') {
+        sql += ` AND p.harga_shopeefood IS NOT NULL AND p.harga_shopeefood > 0`;
+      } else if (platform === 'tiktok') {
+        sql += ` AND p.harga_tiktok IS NOT NULL AND p.harga_tiktok > 0`;
+      }
+    } else if (online) {
+      // General online filter without platform
+      sql += ` AND p.harga_online IS NOT NULL AND p.harga_online > 0`;
     }
     
-    sql += ' ORDER BY c2.display_order ASC, c2.name ASC';
+    // Some databases may not have display_order; sort by name for safety
+    sql += ' ORDER BY c2.name ASC';
 
     console.log('🔍 Fetching categories:', { business_id: BUSINESS_ID, transactionType, online });
 

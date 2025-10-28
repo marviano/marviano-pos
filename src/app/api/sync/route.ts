@@ -57,7 +57,8 @@ export async function GET() {
           p.id, p.menu_code, p.nama, p.satuan, p.category1_id, p.category2_id,
           c1.name as category1_name, c2.name as category2_name,
           p.keterangan, p.harga_beli, p.ppn, p.harga_jual, p.harga_khusus,
-          p.harga_online, p.fee_kerja, p.image_url, p.status, p.created_at, p.has_customization
+          p.harga_online, p.harga_gofood, p.harga_grabfood, p.harga_shopeefood, p.harga_tiktok,
+          p.fee_kerja, p.image_url, p.status, p.created_at, p.has_customization
         FROM products p
         INNER JOIN product_businesses pb ON p.id = pb.product_id
         LEFT JOIN category1 c1 ON p.category1_id = c1.id
@@ -88,12 +89,12 @@ export async function GET() {
     // Sync Categories (all categories from category2 table, including empty ones)
     try {
       const categories = await query(`
-        SELECT c2.name as jenis
+        SELECT c2.name as category2_name
         FROM category2 c2
         WHERE c2.business_id = ? AND c2.is_active = 1
         ORDER BY c2.display_order ASC, c2.name ASC
       `, [BUSINESS_ID]);
-      syncResults.categories = categories.map((cat: any) => ({ jenis: cat.jenis }));
+      syncResults.categories = categories.map((cat: any) => ({ jenis: cat.category2_name }));
       counts.categories = categories.length;
       console.log(`✅ Synced ${categories.length} categories (including empty ones)`);
     } catch (error) {

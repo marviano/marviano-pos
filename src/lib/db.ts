@@ -61,9 +61,7 @@ export async function query<T = any>(sql: string, params?: any[]): Promise<T> {
           const [results] = await pool.execute(sql, params);
           return results as T;
         } catch (error: any) {
-          console.log(`⚠️ Prepared statement failed (attempt ${attempt}), trying direct query...`);
-          console.log('Error:', error.message);
-          
+          // Silently retry with direct query
           // If prepared statement fails, try direct query (less secure but works)
           if (params && params.length > 0) {
             let directSql = sql;
@@ -71,7 +69,6 @@ export async function query<T = any>(sql: string, params?: any[]): Promise<T> {
               const value = typeof param === 'string' ? `'${param}'` : param;
               directSql = directSql.replace('?', value);
             });
-            console.log('Direct SQL:', directSql);
             const [results] = await pool.query(directSql);
             return results as T;
           } else {

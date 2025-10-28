@@ -39,6 +39,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 const electron_1 = require("electron");
 const better_sqlite3_1 = __importDefault(require("better-sqlite3"));
 const path = __importStar(require("path"));
+const fs = __importStar(require("fs"));
 const isDev = process.env.NODE_ENV === 'development' || !electron_1.app.isPackaged;
 // Global references to windows
 let mainWindow = null;
@@ -68,6 +69,46 @@ function createWindows() {
         }
         catch (e) {
             console.log('⚠️ Migration check failed:', e);
+        }
+        // Schema migration: Ensure platform price columns exist on products
+        try {
+            const productSchema = localDb.prepare(`PRAGMA table_info(products)`).all();
+            const hasHargaGofood = productSchema.some(col => col.name === 'harga_gofood');
+            const hasHargaGrabfood = productSchema.some(col => col.name === 'harga_grabfood');
+            const hasHargaShopeefood = productSchema.some(col => col.name === 'harga_shopeefood');
+            const hasHargaTiktok = productSchema.some(col => col.name === 'harga_tiktok');
+            const hasCategory2Name = productSchema.some(col => col.name === 'category2_name');
+            if (!hasHargaGofood) {
+                console.log('📋 Migrating database: Adding products.harga_gofood column...');
+                localDb.prepare('ALTER TABLE products ADD COLUMN harga_gofood REAL').run();
+            }
+            if (!hasHargaGrabfood) {
+                console.log('📋 Migrating database: Adding products.harga_grabfood column...');
+                localDb.prepare('ALTER TABLE products ADD COLUMN harga_grabfood REAL').run();
+            }
+            if (!hasHargaShopeefood) {
+                console.log('📋 Migrating database: Adding products.harga_shopeefood column...');
+                localDb.prepare('ALTER TABLE products ADD COLUMN harga_shopeefood REAL').run();
+            }
+            if (!hasHargaTiktok) {
+                console.log('📋 Migrating database: Adding products.harga_tiktok column...');
+                localDb.prepare('ALTER TABLE products ADD COLUMN harga_tiktok REAL').run();
+            }
+            if (!hasCategory2Name) {
+                console.log('📋 Migrating database: Adding products.category2_name column...');
+                localDb.prepare('ALTER TABLE products ADD COLUMN category2_name TEXT').run();
+                // Backfill from existing jenis if present
+                try {
+                    localDb.prepare('UPDATE products SET category2_name = jenis WHERE category2_name IS NULL').run();
+                    console.log('✅ Backfilled category2_name from jenis');
+                }
+                catch (e) {
+                    console.log('⚠️ Failed to backfill category2_name from jenis:', e);
+                }
+            }
+        }
+        catch (e) {
+            console.log('⚠️ Products table migration check failed:', e);
         }
         localDb.exec(`
       -- Core POS Tables
@@ -102,12 +143,17 @@ function createWindows() {
         satuan TEXT NOT NULL,
         kategori TEXT NOT NULL,
         jenis TEXT,
+        category2_name TEXT,
         keterangan TEXT,
         harga_beli REAL,
         ppn REAL,
         harga_jual INTEGER NOT NULL,
         harga_khusus REAL,
         harga_online REAL,
+        harga_gofood REAL,
+        harga_grabfood REAL,
+        harga_shopeefood REAL,
+        harga_tiktok REAL,
         fee_kerja REAL,
         status TEXT DEFAULT 'active',
         created_at TEXT,
@@ -422,7 +468,7 @@ function createWindows() {
       
       -- Legacy tables for backward compatibility
       CREATE TABLE IF NOT EXISTS categories (
-        jenis TEXT PRIMARY KEY,
+        category2_name TEXT PRIMARY KEY,
         updated_at INTEGER
       );
       
@@ -742,9 +788,9 @@ function createWindows() {
         if (!localDb)
             return { success: false };
         const tx = localDb.transaction((data) => {
-            const stmt = localDb.prepare('INSERT INTO categories (jenis, updated_at) VALUES (?, ?) ON CONFLICT(jenis) DO UPDATE SET updated_at=excluded.updated_at');
+            const stmt = localDb.prepare('INSERT INTO categories (category2_name, updated_at) VALUES (?, ?) ON CONFLICT(category2_name) DO UPDATE SET updated_at=excluded.updated_at');
             for (const r of data) {
-                stmt.run(r.jenis, r.updated_at || Date.now());
+                stmt.run(r.category2_name, r.updated_at || Date.now());
             }
         });
         tx(rows);
@@ -753,7 +799,7 @@ function createWindows() {
     electron_1.ipcMain.handle('localdb-get-categories', async () => {
         if (!localDb)
             return [];
-        const stmt = localDb.prepare('SELECT jenis, updated_at FROM categories ORDER BY jenis ASC');
+        const stmt = localDb.prepare('SELECT category2_name, updated_at FROM categories ORDER BY category2_name ASC');
         return stmt.all();
     });
     electron_1.ipcMain.handle('localdb-upsert-products', async (event, rows) => {
@@ -761,9 +807,9 @@ function createWindows() {
             return { success: false };
         const tx = localDb.transaction((data) => {
             const stmt = localDb.prepare(`INSERT INTO products (
-        id, business_id, menu_code, nama, satuan, kategori, jenis, keterangan,
-        harga_beli, ppn, harga_jual, harga_khusus, harga_online, fee_kerja, status, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        id, business_id, menu_code, nama, satuan, kategori, jenis, category2_name, keterangan,
+        harga_beli, ppn, harga_jual, harga_khusus, harga_online, harga_gofood, harga_grabfood, harga_shopeefood, harga_tiktok, fee_kerja, status, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET
         business_id=excluded.business_id,
         menu_code=excluded.menu_code,
@@ -771,20 +817,25 @@ function createWindows() {
         satuan=excluded.satuan,
         kategori=excluded.kategori,
         jenis=excluded.jenis,
+        category2_name=excluded.category2_name,
         keterangan=excluded.keterangan,
         harga_beli=excluded.harga_beli,
         ppn=excluded.ppn,
         harga_jual=excluded.harga_jual,
         harga_khusus=excluded.harga_khusus,
         harga_online=excluded.harga_online,
+        harga_gofood=excluded.harga_gofood,
+        harga_grabfood=excluded.harga_grabfood,
+        harga_shopeefood=excluded.harga_shopeefood,
+        harga_tiktok=excluded.harga_tiktok,
         fee_kerja=excluded.fee_kerja,
         status=excluded.status,
         updated_at=excluded.updated_at`);
             for (const r of data) {
                 // Map MySQL columns to SQLite columns
                 const kategori = r.kategori || r.category1_name || '';
-                const jenis = r.jenis || r.category2_name || '';
-                stmt.run(r.id, r.business_id, r.menu_code, r.nama, r.satuan || '', kategori, jenis, r.keterangan || null, r.harga_beli || null, r.ppn || null, r.harga_jual, r.harga_khusus || null, r.harga_online || null, r.fee_kerja || null, r.status, Date.now());
+                const category2Name = r.category2_name || r.jenis || '';
+                stmt.run(r.id, r.business_id, r.menu_code, r.nama, r.satuan || '', kategori, null, category2Name, r.keterangan || null, r.harga_beli || null, r.ppn || null, r.harga_jual, r.harga_khusus || null, r.harga_online || null, r.harga_gofood || null, r.harga_grabfood || null, r.harga_shopeefood || null, r.harga_tiktok || null, r.fee_kerja || null, r.status, Date.now());
             }
         });
         tx(rows);
@@ -794,9 +845,9 @@ function createWindows() {
         if (!localDb)
             return [];
         const stmt = localDb.prepare(`SELECT 
-      id, business_id, menu_code, nama, satuan, kategori, jenis, keterangan,
-      harga_beli, ppn, harga_jual, harga_khusus, harga_online, fee_kerja, status 
-      FROM products WHERE jenis = ? AND status = 'active' ORDER BY nama ASC`);
+      id, business_id, menu_code, nama, satuan, kategori, category2_name, keterangan,
+      harga_beli, ppn, harga_jual, harga_khusus, harga_online, harga_gofood, harga_grabfood, harga_shopeefood, harga_tiktok, fee_kerja, status 
+      FROM products WHERE category2_name = ? AND status = 'active' ORDER BY nama ASC`);
         return stmt.all(jenis);
     });
     // Add the missing method for category2 filtering
@@ -804,9 +855,9 @@ function createWindows() {
         if (!localDb)
             return [];
         const stmt = localDb.prepare(`SELECT 
-      id, business_id, menu_code, nama, satuan, kategori, jenis, keterangan,
-      harga_beli, ppn, harga_jual, harga_khusus, harga_online, fee_kerja, status 
-      FROM products WHERE jenis = ? AND status = 'active' ORDER BY nama ASC`);
+      id, business_id, menu_code, nama, satuan, kategori, category2_name, keterangan,
+      harga_beli, ppn, harga_jual, harga_khusus, harga_online, harga_gofood, harga_grabfood, harga_shopeefood, harga_tiktok, fee_kerja, status 
+      FROM products WHERE category2_name = ? AND status = 'active' ORDER BY nama ASC`);
         return stmt.all(category2Name);
     });
     electron_1.ipcMain.handle('localdb-get-all-products', async () => {
@@ -814,8 +865,8 @@ function createWindows() {
             return [];
         try {
             const stmt = localDb.prepare(`SELECT 
-        id, business_id, menu_code, nama, satuan, kategori, jenis, keterangan,
-        harga_beli, ppn, harga_jual, harga_khusus, harga_online, fee_kerja, status 
+        id, business_id, menu_code, nama, satuan, kategori, category2_name, keterangan,
+        harga_beli, ppn, harga_jual, harga_khusus, harga_online, harga_gofood, harga_grabfood, harga_shopeefood, harga_tiktok, fee_kerja, status 
         FROM products WHERE status = 'active' ORDER BY nama ASC`);
             return stmt.all();
         }
@@ -1904,68 +1955,88 @@ electron_1.app.on('window-all-closed', () => {
 // IPC handlers for POS-specific functionality
 electron_1.ipcMain.handle('print-receipt', async (event, data) => {
     try {
-        console.log('Printing receipt:', data);
-        // Get the sender's webContents to access printing methods
-        const sender = event.sender;
-        if (data.type === 'test') {
-            // Create a hidden window for printing to avoid darkening the main window
-            if (printWindow) {
-                printWindow.close();
-            }
-            printWindow = new electron_1.BrowserWindow({
-                width: 800,
-                height: 600,
-                show: false, // Hidden window
-                webPreferences: {
-                    nodeIntegration: false,
-                    contextIsolation: true,
+        console.log('📄 Printing receipt - Full data received:', JSON.stringify(data, null, 2));
+        let printerName = data.printerName;
+        // If printer name is not specified, try to get it from saved config using printerType
+        if (!printerName && data.printerType && localDb) {
+            console.log('🔍 No printer name specified, fetching from saved config for printer type:', data.printerType);
+            try {
+                // First check what's in the database
+                const allConfigs = localDb.prepare('SELECT * FROM printer_configs').all();
+                console.log('📋 All printer configs in database:', allConfigs);
+                // Get the specific printer config
+                const config = localDb.prepare('SELECT * FROM printer_configs WHERE printer_type = ?').get(data.printerType);
+                console.log('📋 Printer config query result for type', data.printerType, ':', config);
+                if (config && config.system_printer_name) {
+                    printerName = config.system_printer_name;
+                    console.log('✅ Found saved printer:', printerName);
                 }
-            });
-            const printOptions = {
-                silent: true, // Don't show print dialog - print directly
-                printBackground: false,
-                deviceName: data.printerName || undefined
-            };
-            // Create a simple HTML content for the test print
-            const htmlContent = `
-        <html>
-          <head>
-            <title>Test Print</title>
-            <style>
-              body { font-family: Arial, sans-serif; margin: 20px; }
-              .header { text-align: center; font-size: 18px; font-weight: bold; margin-bottom: 20px; }
-              .content { font-size: 14px; line-height: 1.5; }
-              .footer { margin-top: 30px; font-size: 12px; text-align: center; }
-            </style>
-          </head>
-          <body>
-            <div class="header">TEST PRINT - ${data.printerType?.toUpperCase() || 'PRINTER'}</div>
-            <div class="content">
-              <p>This is a test print to verify your printer is working correctly.</p>
-              <p><strong>Printer:</strong> ${data.printerName}</p>
-              <p><strong>Time:</strong> ${new Date().toLocaleString()}</p>
-              <p><strong>Type:</strong> ${data.printerType}</p>
-              <br>
-              <p>If you can see this, your printer is configured correctly!</p>
-            </div>
-            <div class="footer">
-              <p>Marviano POS System - Test Print</p>
-            </div>
-          </body>
-        </html>
-      `;
-            // Load the HTML content in the hidden window
-            await printWindow.loadURL(`data:text/html,${encodeURIComponent(htmlContent)}`);
-            // Wait a moment for the content to load, then print
+                else {
+                    console.log('⚠️ No saved printer config found for type:', data.printerType);
+                    console.log('💡 Available printer configs:', allConfigs.map(c => ({ type: c.printer_type, name: c.system_printer_name })));
+                    // Return early without error if no printer is configured
+                    return { success: false, error: 'No printer configured. Please set up a printer in Settings.' };
+                }
+            }
+            catch (error) {
+                console.error('❌ Error fetching printer config:', error);
+                return { success: false, error: 'Error loading printer configuration.' };
+            }
+        }
+        else if (!printerName && !data.printerType) {
+            console.error('❌ No printerName and no printerType provided!');
+            return { success: false, error: 'No printer specified. Please set up a printer in Settings first.' };
+        }
+        else if (printerName) {
+            console.log('✅ Using provided printer name:', printerName);
+        }
+        // Still no printer name? Try fallback to printerType as printer name
+        if (!printerName) {
+            printerName = data.printerType;
+            console.log('⚠️ Using printerType as fallback printer name:', printerName);
+        }
+        if (!printerName) {
+            console.error('❌ No printer name or type provided in data:', data);
+            return { success: false, error: 'No printer specified. Please set up a printer in Settings first.' };
+        }
+        // Use HTML printing with character-based formatting
+        if (printWindow) {
+            printWindow.close();
+        }
+        printWindow = new electron_1.BrowserWindow({
+            width: 400,
+            height: 600,
+            show: false,
+            webPreferences: {
+                nodeIntegration: false,
+                contextIsolation: true,
+            }
+        });
+        // Generate receipt HTML with character-based width
+        let htmlContent = '';
+        if (data.type === 'test') {
+            htmlContent = generateTestReceiptHTML(printerName);
+        }
+        else {
+            htmlContent = generateReceiptHTML(data);
+        }
+        await printWindow.loadURL(`data:text/html,${encodeURIComponent(htmlContent)}`);
+        const printOptions = {
+            silent: true,
+            printBackground: false,
+            deviceName: printerName,
+        };
+        return new Promise((resolve) => {
             setTimeout(() => {
                 printWindow.webContents.print(printOptions, (success, errorType) => {
                     if (success) {
-                        console.log('✅ Test print sent successfully');
+                        console.log('✅ Print sent successfully');
+                        resolve({ success: true });
                     }
                     else {
-                        console.error('❌ Test print failed:', errorType);
+                        console.error('❌ Print failed:', errorType);
+                        resolve({ success: false, error: errorType });
                     }
-                    // Close the print window after printing
                     setTimeout(() => {
                         if (printWindow) {
                             printWindow.close();
@@ -1973,20 +2044,345 @@ electron_1.ipcMain.handle('print-receipt', async (event, data) => {
                         }
                     }, 1000);
                 });
-            }, 1000);
-            return { success: true };
-        }
-        else {
-            // For regular receipts, implement your receipt printing logic here
-            console.log('Regular receipt printing not implemented yet');
-            return { success: false, error: 'Regular receipt printing not implemented yet' };
-        }
+            }, 500);
+        });
     }
     catch (error) {
-        console.error('Error in print-receipt handler:', error);
+        console.error('❌ Error in print-receipt handler:', error);
         return { success: false, error: String(error) };
     }
 });
+// Get logo as base64 for embedding in receipt
+function getLogoBase64() {
+    try {
+        // Try multiple possible paths
+        const possiblePaths = [
+            path.join(__dirname, '../public/logo/Momoyo.png'),
+            path.join(__dirname, '../public/images/Momoyo.png'),
+            path.join(__dirname, '../../public/logo/Momoyo.png'),
+            path.join(__dirname, '../../public/images/Momoyo.png'),
+        ];
+        console.log('🔍 Looking for logo in paths:', possiblePaths);
+        for (const logoPath of possiblePaths) {
+            if (fs.existsSync(logoPath)) {
+                console.log('✅ Found logo at:', logoPath);
+                const imageBuffer = fs.readFileSync(logoPath);
+                const base64Image = imageBuffer.toString('base64');
+                return `data:image/png;base64,${base64Image}`;
+            }
+        }
+        console.warn('⚠️ Logo not found in any of the checked paths');
+        return '';
+    }
+    catch (error) {
+        console.error('❌ Error loading logo:', error);
+        return '';
+    }
+}
+// Generate test receipt HTML with character-based formatting
+function generateTestReceiptHTML(printerName) {
+    // Use the full receipt format for test print with sample data
+    const orderTime = new Date().toLocaleString('id-ID', { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    const printTime = new Date().toLocaleString('id-ID', { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    const logoDataUri = getLogoBase64();
+    return `
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <style>
+    @page { size: 80mm auto; margin: 0; }
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: 'Arial', 'Helvetica', sans-serif;
+      width: 42ch;
+      max-width: 42ch;
+      font-size: 10pt;
+      font-weight: 500;
+      line-height: 1.4;
+      padding: 5mm 7mm;
+      word-wrap: break-word;
+      overflow-wrap: break-word;
+    }
+    .contact { text-align: center; font-size: 8pt; font-weight: 600; margin-bottom: 3mm; }
+    .logo-container { text-align: center; margin-bottom: 2mm; }
+    .logo { max-width: 100%; height: auto; max-height: 20mm; }
+    .store-name { text-align: center; font-size: 13pt; font-weight: bold; margin-bottom: 2mm; }
+    .branch { text-align: center; font-size: 11pt; font-weight: 600; margin-bottom: 2mm; }
+    .address { text-align: center; font-size: 8pt; font-weight: 500; margin-bottom: 3mm; }
+    .transaction-type { text-align: center; font-size: 10pt; font-weight: 700; margin-bottom: 3mm; }
+    .dashed-line { border-top: 1px dashed #000; margin: 3mm 0; }
+    .info-line { display: flex; justify-content: space-between; margin-bottom: 1mm; }
+    .info-label { font-size: 9pt; font-weight: 500; }
+    .info-value { font-size: 9pt; font-weight: 700; }
+    table { width: 100%; border-collapse: collapse; margin: 2mm 0; font-size: 9pt; }
+    th { text-align: left; font-weight: 700; border-bottom: 1px solid #000; padding: 1mm 0; font-size: 8pt; }
+    td { padding: 1mm 0; font-weight: 500; }
+    .summary-line { display: flex; justify-content: space-between; margin-bottom: 1mm; font-size: 9pt; font-weight: 500; }
+    .summary-label { font-weight: 500; }
+    .summary-value { font-weight: 700; }
+    .footer { margin-top: 5mm; font-size: 8pt; text-align: center; line-height: 1.4; font-weight: 500; }
+  </style>
+</head>
+<body>
+  <div class="contact">silahkan hubungi: 0813-9888-8568</div>
+  
+  ${logoDataUri ? `<div class="logo-container"><img src="${logoDataUri}" class="logo" alt="Momoyo Logo"></div>` : '<div class="store-name">MOMOYO</div>'}
+  <div class="branch">MARVIANO MADIUN 1</div>
+  <div class="address">Jl. Kalimantan no. 21, Kartoharjo<br>Kec. Kartoharjo, Kota Madiun</div>
+  
+  <div class="transaction-type">DINE IN 23</div>
+  
+  <div class="dashed-line"></div>
+  
+  <div class="info-line">
+    <span class="info-label">Nomor Pesanan:</span>
+    <span class="info-value">1970326207362797570</span>
+  </div>
+  <div class="info-line">
+    <span class="info-label">Waktu Pesanan:</span>
+    <span class="info-value">${orderTime}</span>
+  </div>
+  <div class="info-line">
+    <span class="info-label">Waktu Print:</span>
+    <span class="info-value">${printTime}</span>
+  </div>
+  <div class="info-line">
+    <span class="info-label">Operator Kasir:</span>
+    <span class="info-value">Erika Farah</span>
+  </div>
+  <div class="info-line">
+    <span class="info-label">Saluran:</span>
+    <span class="info-value">Toko Offline</span>
+  </div>
+  
+  <div class="dashed-line"></div>
+  
+  <table>
+    <tr>
+      <th style="width: 35%;">Nama Produk</th>
+      <th style="width: 20%; text-align: right;">Harga</th>
+      <th style="width: 15%; text-align: right;">Jumlah</th>
+      <th style="width: 30%; text-align: right;">Subtotal</th>
+    </tr>
+    <tr>
+      <td style="width: 35%; text-align: left;">Croissant</td>
+      <td style="width: 20%; text-align: right;">10.000</td>
+      <td style="width: 15%; text-align: right;">1</td>
+      <td style="width: 30%; text-align: right;">10.000</td>
+    </tr>
+  </table>
+  
+  <div class="dashed-line"></div>
+  
+  <div class="summary-line">
+    <span class="summary-label">Total Pesanan:</span>
+    <span class="summary-value">1</span>
+  </div>
+  <div class="summary-line">
+    <span class="summary-label">Total Harga:</span>
+    <span class="summary-value">10.000</span>
+  </div>
+  <div class="summary-line">
+    <span class="summary-label">Nominal Pendapatan:</span>
+    <span class="summary-value">10.000</span>
+  </div>
+  
+  <div class="dashed-line"></div>
+  
+  <div class="summary-line">
+    <span class="summary-label">Metode Pembayaran:</span>
+    <span class="summary-value">Cash</span>
+  </div>
+  <div class="summary-line">
+    <span class="summary-label">Bayar Jumlah:</span>
+    <span class="summary-value">30.000</span>
+  </div>
+  <div class="summary-line">
+    <span class="summary-label">Kembali Uang Kecil:</span>
+    <span class="summary-value">20.000</span>
+  </div>
+  <div class="summary-line">
+    <span class="summary-label">Pembayaran Sebenarnya:</span>
+    <span class="summary-value">10.000</span>
+  </div>
+  
+  <div class="dashed-line"></div>
+  
+  <div class="footer">
+    <p>Pendapat Anda sangat penting bagi kami.</p>
+    <p>Untuk kritik dan saran silahkan hubungi :</p>
+    <p>0812-1822-2666</p>
+    <p style="margin-top: 5mm;">Untuk layanan kemitraan dan partnership</p>
+  </div>
+</body>
+</html>
+  `;
+}
+// Generate transaction receipt HTML
+function generateReceiptHTML(data) {
+    const items = data.items || [];
+    const total = data.total || data.final_amount || 0;
+    const paymentMethod = data.paymentMethod || 'Cash';
+    const amountReceived = data.amountReceived || 0;
+    const change = data.change || 0;
+    // Calculate total items for summary
+    const totalItems = items.reduce((sum, item) => sum + (item.quantity || 1), 0);
+    // Generate items HTML
+    const itemsHTML = items.map((item) => {
+        // Handle both new format (name, quantity, price, total_price) and old format (product.nama, etc.)
+        const name = item.name || item.product?.nama || '';
+        const qty = item.quantity || 1;
+        const price = item.price || item.unit_price || 0;
+        const subtotal = item.total_price || (price * qty);
+        return `
+      <tr>
+        <td style="width: 35%; text-align: left;">${name}</td>
+        <td style="width: 20%; text-align: right;">${price.toLocaleString('id-ID')}</td>
+        <td style="width: 15%; text-align: right;">${qty}</td>
+        <td style="width: 30%; text-align: right;">${subtotal.toLocaleString('id-ID')}</td>
+      </tr>
+    `;
+    }).join('');
+    const currentDate = new Date(data.date || Date.now());
+    const orderTime = currentDate.toLocaleString('id-ID', { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    const printTime = new Date().toLocaleString('id-ID', { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    // Determine transaction type display (DINE IN / TAKE AWAY)
+    const pickupMethod = data.pickupMethod || 'dine-in';
+    const isDineIn = pickupMethod === 'dine-in';
+    const transactionDisplay = isDineIn ? 'DINE IN' : 'TAKE AWAY';
+    const logoDataUri = getLogoBase64();
+    return `
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <style>
+    @page { size: 80mm auto; margin: 0; }
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: 'Arial', 'Helvetica', sans-serif;
+      width: 42ch;
+      max-width: 42ch;
+      font-size: 10pt;
+      font-weight: 500;
+      line-height: 1.4;
+      padding: 5mm 7mm;
+      word-wrap: break-word;
+      overflow-wrap: break-word;
+    }
+    .contact { text-align: center; font-size: 8pt; font-weight: 600; margin-bottom: 3mm; }
+    .logo-container { text-align: center; margin-bottom: 2mm; }
+    .logo { max-width: 100%; height: auto; max-height: 20mm; }
+    .store-name { text-align: center; font-size: 13pt; font-weight: bold; margin-bottom: 2mm; }
+    .branch { text-align: center; font-size: 11pt; font-weight: 600; margin-bottom: 2mm; }
+    .address { text-align: center; font-size: 8pt; font-weight: 500; margin-bottom: 3mm; }
+    .transaction-type { text-align: center; font-size: 10pt; font-weight: 700; margin-bottom: 3mm; }
+    .dashed-line { border-top: 1px dashed #000; margin: 3mm 0; }
+    .info-line { display: flex; justify-content: space-between; margin-bottom: 1mm; }
+    .info-label { font-size: 9pt; font-weight: 500; }
+    .info-value { font-size: 9pt; font-weight: 700; }
+    table { width: 100%; border-collapse: collapse; margin: 2mm 0; font-size: 9pt; }
+    th { text-align: left; font-weight: 700; border-bottom: 1px solid #000; padding: 1mm 0; font-size: 8pt; }
+    td { padding: 1mm 0; font-weight: 500; }
+    .summary-line { display: flex; justify-content: space-between; margin-bottom: 1mm; font-size: 9pt; font-weight: 500; }
+    .summary-label { font-weight: 500; }
+    .summary-value { font-weight: 700; }
+    .footer { margin-top: 5mm; font-size: 8pt; text-align: center; line-height: 1.4; font-weight: 500; }
+  </style>
+</head>
+<body>
+  <div class="contact">silahkan hubungi: 0813-9888-8568</div>
+  
+  ${logoDataUri ? `<div class="logo-container"><img src="${logoDataUri}" class="logo" alt="Momoyo Logo"></div>` : '<div class="store-name">MOMOYO</div>'}
+  <div class="branch">MARVIANO MADIUN 1</div>
+  <div class="address">Jl. Kalimantan no. 21, Kartoharjo<br>Kec. Kartoharjo, Kota Madiun</div>
+  
+  <div class="transaction-type">${transactionDisplay} ${data.tableNumber || '01'}</div>
+  
+  <div class="dashed-line"></div>
+  
+  <div class="info-line">
+    <span class="info-label">Nomor Pesanan:</span>
+    <span class="info-value">${data.receiptNumber || data.id || 'N/A'}</span>
+  </div>
+  <div class="info-line">
+    <span class="info-label">Waktu Pesanan:</span>
+    <span class="info-value">${orderTime}</span>
+  </div>
+  <div class="info-line">
+    <span class="info-label">Waktu Print:</span>
+    <span class="info-value">${printTime}</span>
+  </div>
+  <div class="info-line">
+    <span class="info-label">Operator Kasir:</span>
+    <span class="info-value">${data.cashier || 'N/A'}</span>
+  </div>
+  <div class="info-line">
+    <span class="info-label">Saluran:</span>
+    <span class="info-value">Toko Offline</span>
+  </div>
+  
+  <div class="dashed-line"></div>
+  
+  <table>
+    <tr>
+      <th style="width: 35%;">Nama Produk</th>
+      <th style="width: 20%; text-align: right;">Harga</th>
+      <th style="width: 15%; text-align: right;">Jumlah</th>
+      <th style="width: 30%; text-align: right;">Subtotal</th>
+    </tr>
+    ${itemsHTML}
+  </table>
+  
+  <div class="dashed-line"></div>
+  
+  <div class="summary-line">
+    <span class="summary-label">Total Pesanan:</span>
+    <span class="summary-value">${totalItems}</span>
+  </div>
+  <div class="summary-line">
+    <span class="summary-label">Total Harga:</span>
+    <span class="summary-value">${total.toLocaleString('id-ID')}</span>
+  </div>
+  <div class="summary-line">
+    <span class="summary-label">Nominal Pendapatan:</span>
+    <span class="summary-value">${total.toLocaleString('id-ID')}</span>
+  </div>
+  
+  <div class="dashed-line"></div>
+  
+  <div class="summary-line">
+    <span class="summary-label">Metode Pembayaran:</span>
+    <span class="summary-value">${paymentMethod}</span>
+  </div>
+  ${amountReceived > 0 ? `
+  <div class="summary-line">
+    <span class="summary-label">Bayar Jumlah:</span>
+    <span class="summary-value">${amountReceived.toLocaleString('id-ID')}</span>
+  </div>
+  <div class="summary-line">
+    <span class="summary-label">Kembali Uang Kecil:</span>
+    <span class="summary-value">${change.toLocaleString('id-ID')}</span>
+  </div>
+  ` : ''}
+  <div class="summary-line">
+    <span class="summary-label">Pembayaran Sebenarnya:</span>
+    <span class="summary-value">${total.toLocaleString('id-ID')}</span>
+  </div>
+  
+  <div class="dashed-line"></div>
+  
+  <div class="footer">
+    <p>Pendapat Anda sangat penting bagi kami.</p>
+    <p>Untuk kritik dan saran silahkan hubungi :</p>
+    <p>0812-1822-2666</p>
+    <p style="margin-top: 5mm;">Untuk layanan kemitraan dan partnership</p>
+  </div>
+</body>
+</html>
+  `;
+}
 // List available system printers for the renderer
 electron_1.ipcMain.handle('list-printers', async (event) => {
     try {

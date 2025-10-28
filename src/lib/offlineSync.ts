@@ -266,7 +266,7 @@ class OfflineSyncService {
           if (data.categories && data.categories.length > 0) {
             await (window as any).electronAPI.localDbUpsertCategories(
               data.categories.map((cat: any) => ({
-                jenis: cat.jenis,
+                category2_name: cat.jenis || cat.category2_name,
                 updated_at: Date.now(),
               }))
             );

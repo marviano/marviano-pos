@@ -77,16 +77,13 @@ export async function POST(request: NextRequest) {
       // Generate receipt number
       const receiptNumber = await generateReceiptNumber(transactionData.business_id, transactionData.transaction_type);
       
-      // Format created_at for MySQL (convert from Unix timestamp if needed)
+      // Format created_at for MySQL (convert to MySQL datetime format)
       let createdAt;
       if (transactionData.created_at) {
-        // If it's a number (Unix timestamp in ms), convert to MySQL datetime
-        if (typeof transactionData.created_at === 'number') {
-          createdAt = new Date(transactionData.created_at).toISOString().slice(0, 19).replace('T', ' ');
-        } else {
-          // If it's already a string, use it
-          createdAt = transactionData.created_at;
-        }
+        // Parse the timestamp and convert to MySQL datetime format
+        const date = new Date(transactionData.created_at);
+        // Format: YYYY-MM-DD HH:MM:SS
+        createdAt = date.toISOString().slice(0, 19).replace('T', ' ');
         console.log('📅 [API] Using provided created_at:', createdAt);
       } else {
         createdAt = new Date().toISOString().slice(0, 19).replace('T', ' ');
@@ -251,7 +248,6 @@ export async function GET(request: NextRequest) {
 
     // First, let's check if transactions table exists
     const tableCheck = await query('SHOW TABLES LIKE "transactions"');
-    console.log('Table check result:', tableCheck);
 
     if (!tableCheck || (tableCheck as any[]).length === 0) {
       return NextResponse.json({
@@ -324,15 +320,11 @@ export async function GET(request: NextRequest) {
     sql += ' ORDER BY t.created_at DESC LIMIT ?';
     params.push(parseInt(limit));
 
-    console.log('Simple SQL Query:', sql);
-    console.log('Parameters:', params);
-
     let transactions;
     try {
       transactions = await query(sql, params);
     } catch (preparedError) {
-      console.log('Prepared statement failed, trying direct query...');
-      console.log('Error:', preparedError);
+      // Silently fallback to direct query
       
       // Build direct query without prepared statement
       let directSql = 'SELECT * FROM transactions';
@@ -353,16 +345,10 @@ export async function GET(request: NextRequest) {
       
       directSql += ` ORDER BY created_at DESC LIMIT ${parseInt(limit)}`;
       
-      console.log('Direct SQL:', directSql);
       transactions = await query(directSql);
     }
     
-    console.log('Raw transactions result:', transactions);
-    console.log('Number of transactions found:', (transactions as any[]).length);
-
-    // Let's also check what transactions exist without any filters
-    const allTransactions = await query('SELECT * FROM transactions ORDER BY created_at DESC LIMIT 5');
-    console.log('Last 5 transactions (any business):', allTransactions);
+    // Removed verbose logging for cleaner output
 
     // Add user and business names if available
     const enrichedTransactions = [];

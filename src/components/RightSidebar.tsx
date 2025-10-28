@@ -15,6 +15,9 @@ interface RightSidebarProps {
 }
 
 export default function RightSidebar({ categories, selectedCategory, onCategorySelect, isLoadingCategories = false }: RightSidebarProps) {
+  // Filter out blank/null categories
+  const validCategories = categories.filter(cat => cat.jenis && cat.jenis.trim() !== '');
+  
   return (
     <div className="w-48 bg-blue-100 flex flex-col h-full">
       {/* Header */}
@@ -30,7 +33,7 @@ export default function RightSidebar({ categories, selectedCategory, onCategoryS
       {/* Category List */}
       <div className="flex-1 overflow-y-auto relative">
         {/* Loading Overlay - Only show when switching categories, not initial load */}
-        {isLoadingCategories && categories.length > 0 && (
+        {isLoadingCategories && validCategories.length > 0 && (
           <div className="absolute inset-0 bg-blue-100/80 z-10 flex items-center justify-center">
             <div className="text-center">
               <div className="inline-block animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600 mb-2"></div>
@@ -40,15 +43,19 @@ export default function RightSidebar({ categories, selectedCategory, onCategoryS
         )}
         
         {/* Show loading message only when no categories are loaded yet */}
-        {categories.length === 0 && isLoadingCategories ? (
+        {validCategories.length === 0 && isLoadingCategories ? (
           <div className="flex items-center justify-center h-32">
             <div className="text-center">
               <div className="inline-block animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600 mb-2"></div>
               <p className="text-gray-600 text-sm">Loading categories...</p>
             </div>
           </div>
+        ) : validCategories.length === 0 ? (
+          <div className="flex items-center justify-center h-32">
+            <p className="text-gray-600 text-sm">No categories available</p>
+          </div>
         ) : (
-          categories.map((category, index) => (
+          validCategories.map((category, index) => (
           <button
             key={index}
             onClick={() => onCategorySelect(category.jenis)}

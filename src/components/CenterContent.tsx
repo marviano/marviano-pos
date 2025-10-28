@@ -19,6 +19,10 @@ interface Product {
   category2_name: string | null;
   harga_jual: number;
   harga_online?: number | null;
+  harga_gofood?: number | null;
+  harga_grabfood?: number | null;
+  harga_shopeefood?: number | null;
+  harga_tiktok?: number | null;
   image_url: string | null;
   status: string;
 }
@@ -48,9 +52,10 @@ interface CenterContentProps {
   transactionType: 'drinks' | 'bakery';
   isLoadingProducts?: boolean;
   isOnline?: boolean;
+  selectedOnlinePlatform?: 'gofood' | 'grabfood' | 'shopeefood' | 'tiktok';
 }
 
-export default function CenterContent({ products, cartItems, setCartItems, transactionType, isLoadingProducts = false, isOnline = false }: CenterContentProps) {
+export default function CenterContent({ products, cartItems, setCartItems, transactionType, isLoadingProducts = false, isOnline = false, selectedOnlinePlatform = 'gofood' }: CenterContentProps) {
   const [showCustomizationModal, setShowCustomizationModal] = useState(false);
   const [showCustomNoteModal, setShowCustomNoteModal] = useState(false);
   const [showEditModal, setShowEditModal] = useState(false);
@@ -103,9 +108,37 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
     return false;
   };
 
+  const getOnlinePriceForPlatform = (product: Product): number | null => {
+    if (!isOnline) return null;
+    switch (selectedOnlinePlatform) {
+      case 'gofood':
+        return product.harga_gofood ?? null;
+      case 'grabfood':
+        return product.harga_grabfood ?? null;
+      case 'shopeefood':
+        return product.harga_shopeefood ?? null;
+      case 'tiktok':
+        return product.harga_tiktok ?? null;
+      default:
+        return null;
+    }
+  };
+
+  const effectiveProductPrice = (product: Product): number => {
+    if (isOnline) {
+      const p = getOnlinePriceForPlatform(product);
+      if (p && p > 0) return p;
+      return 0; // No fallback in online mode
+    }
+    return product.harga_jual;
+  };
+
   const handleProductClick = async (product: Product) => {
-    if (isOnline && (!product.harga_online || product.harga_online <= 0)) {
-      return; // disabled in online mode
+    if (isOnline) {
+      const platformPrice = getOnlinePriceForPlatform(product);
+      if (!platformPrice || platformPrice <= 0) {
+        return; // disabled in online mode for this platform
+      }
     }
     setLoadingProductId(product.id);
     
@@ -233,8 +266,7 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
 
   const totalItems = cartItems.reduce((sum, item) => sum + item.quantity, 0);
   const totalPrice = cartItems.reduce((sum, item) => {
-    // Use harga_online for online tabs, otherwise use harga_jual
-    let itemPrice = isOnline && item.product.harga_online ? item.product.harga_online : item.product.harga_jual;
+    let itemPrice = effectiveProductPrice(item.product);
     
     // Add customization prices
     if (item.customizations) {
@@ -466,8 +498,14 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
                 <p className="text-gray-500">No products available</p>
               </div>
             ) : (
-              products.map((product) => {
-                const isDisabledOnline = isOnline && (!product.harga_online || product.harga_online <= 0);
+            products
+              .filter((product) => {
+                if (!isOnline) return true; // Show all products in offline mode
+                const p = getOnlinePriceForPlatform(product);
+                return !!p && p > 0; // hide products without respected platform price in online mode
+              })
+              .map((product) => {
+                const isDisabledOnline = false;
                 return (
               <button
                 key={product.id}
@@ -528,7 +566,7 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
                   <div className="flex items-baseline">
                     <span className="text-gray-600 text-xs">RP</span>
                     <span className="text-green-600 font-bold text-base ml-1">
-                      {(isOnline ? (product.harga_online || 0) : product.harga_jual).toLocaleString('id-ID')}
+                      {effectiveProductPrice(product).toLocaleString('id-ID')}
                     </span>
                   </div>
                 </div>

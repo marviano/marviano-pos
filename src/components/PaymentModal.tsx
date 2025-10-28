@@ -6,6 +6,7 @@ import TransactionConfirmationDialog from './TransactionConfirmationDialog';
 import { smartSyncService } from '@/lib/smartSync';
 import { offlineSyncService } from '@/lib/offlineSync';
 import { generateTransactionId, generateTransactionItemId } from '@/lib/uuid';
+import { useAuth } from '@/hooks/useAuth';
 
 interface CartItem {
   id: number;
@@ -38,6 +39,7 @@ interface PaymentModalProps {
   onPaymentComplete: () => void;
   transactionType: 'drinks' | 'bakery';
   isOnline?: boolean;
+  selectedOnlinePlatform?: 'gofood' | 'grabfood' | 'shopeefood' | 'tiktok';
 }
 
 type PaymentMethod = 'cash' | 'debit' | 'qr' | 'ewallet' | 'cl' | 'voucher' | 'gofood' | 'grabfood' | 'shopeefood' | 'tiktok';
@@ -49,8 +51,10 @@ export default function PaymentModal({
   cartItems,
   onPaymentComplete,
   transactionType,
-  isOnline = false
+  isOnline = false,
+  selectedOnlinePlatform = 'gofood'
 }: PaymentModalProps) {
+  const { user } = useAuth();
   const [selectedPaymentMethod, setSelectedPaymentMethod] = useState<PaymentMethod>('cash');
   const [selectedPickupMethod, setSelectedPickupMethod] = useState<PickupMethod>('dine-in');
   const [amountReceived, setAmountReceived] = useState<string>('');
@@ -79,10 +83,64 @@ export default function PaymentModal({
     console.log('Bank search term:', bankSearchTerm);
   }, [bankId, bankSearchTerm]);
 
+  // Auto-set pickup method for online orders
+  useEffect(() => {
+    if (isOnline) {
+      setSelectedPickupMethod('take-away');
+    }
+  }, [isOnline]);
+
+  // Auto-set payment method based on selected online platform
+  useEffect(() => {
+    if (isOnline && selectedOnlinePlatform) {
+      console.log('🔧 Setting payment method to platform:', selectedOnlinePlatform);
+      setSelectedPaymentMethod(selectedOnlinePlatform as PaymentMethod);
+      setSelectedPickupMethod('take-away');
+    } else if (!isOnline) {
+      // Reset to default for non-online orders
+      console.log('🔧 Resetting payment method to cash for non-online order');
+      setSelectedPaymentMethod('cash');
+    }
+  }, [isOnline, selectedOnlinePlatform]);
+  
+  // Initialize payment method when modal opens for online orders
+  useEffect(() => {
+    if (isOpen && isOnline && selectedOnlinePlatform) {
+      console.log('🔧 Modal opened - initializing payment method to:', selectedOnlinePlatform);
+      setSelectedPaymentMethod(selectedOnlinePlatform as PaymentMethod);
+      setSelectedPickupMethod('take-away');
+    }
+  }, [isOpen, isOnline, selectedOnlinePlatform]);
+
   // Calculate order totals
+  const getOnlinePriceForPlatform = (product: any): number | null => {
+    if (!isOnline) return null;
+    switch (selectedOnlinePlatform) {
+      case 'gofood':
+        return product.harga_gofood ?? null;
+      case 'grabfood':
+        return product.harga_grabfood ?? null;
+      case 'shopeefood':
+        return product.harga_shopeefood ?? null;
+      case 'tiktok':
+        return product.harga_tiktok ?? null;
+      default:
+        return null;
+    }
+  };
+
+  const effectiveProductPrice = (product: any): number => {
+    if (isOnline) {
+      const p = getOnlinePriceForPlatform(product);
+      if (p && p > 0) return p;
+      return 0; // No fallback in online mode
+    }
+    return product.harga_jual;
+  };
+
   const calculateOrderTotal = () => {
     return cartItems.reduce((sum, item) => {
-      let itemPrice = isOnline && (item.product as any).harga_online ? (item.product as any).harga_online : item.product.harga_jual;
+      let itemPrice = effectiveProductPrice(item.product as any);
       
       // Add customization prices
       if (item.customizations) {
@@ -280,12 +338,23 @@ export default function PaymentModal({
         cardNumber
       });
 
+      // For online orders, force pickup_method to 'take-away'
+      const finalPickupMethod = isOnline ? 'take-away' : selectedPickupMethod;
+      
+      console.log('📝 Transaction data:', {
+        isOnline,
+        selectedOnlinePlatform,
+        payment_method: selectedPaymentMethod,
+        pickup_method: finalPickupMethod,
+        transaction_type: transactionType
+      });
+      
       const transactionData = {
         id: generateTransactionId(), // Generate UUID for transaction
         business_id: 14, // Momoyo Bakery Kalimantan business_id
-        user_id: 1, // This should come from auth context
+        user_id: user?.id ? parseInt(user.id) : 1, // Get user ID from auth context
         payment_method: selectedPaymentMethod,
-        pickup_method: selectedPickupMethod,
+        pickup_method: finalPickupMethod,
         total_amount: orderTotal,
         voucher_discount: voucherDiscount,
         final_amount: finalTotal,
@@ -302,7 +371,27 @@ export default function PaymentModal({
         transaction_type: transactionType,
         payment_method_id: 1, // Default to cash payment method
         items: cartItems.map(item => {
-          let itemPrice = item.product.harga_jual;
+          // For online orders, use platform-specific price, otherwise use harga_jual
+          let basePrice = item.product.harga_jual;
+          
+          if (isOnline && selectedOnlinePlatform) {
+            switch (selectedOnlinePlatform) {
+              case 'gofood':
+                basePrice = item.product.harga_gofood || item.product.harga_jual;
+                break;
+              case 'grabfood':
+                basePrice = item.product.harga_grabfood || item.product.harga_jual;
+                break;
+              case 'shopeefood':
+                basePrice = item.product.harga_shopeefood || item.product.harga_jual;
+                break;
+              case 'tiktok':
+                basePrice = item.product.harga_tiktok || item.product.harga_jual;
+                break;
+            }
+          }
+          
+          let itemPrice = basePrice;
           
           // Add customization prices
           if (item.customizations) {
@@ -390,8 +479,27 @@ export default function PaymentModal({
           };
           
           const transactionItems = cartItems.map(item => {
-            let itemPrice = item.product.harga_jual;
-            
+            // Determine base price depending on platform when online
+            let basePrice = item.product.harga_jual;
+            if (isOnline && selectedOnlinePlatform) {
+              switch (selectedOnlinePlatform) {
+                case 'gofood':
+                  basePrice = item.product.harga_gofood || item.product.harga_jual;
+                  break;
+                case 'grabfood':
+                  basePrice = item.product.harga_grabfood || item.product.harga_jual;
+                  break;
+                case 'shopeefood':
+                  basePrice = item.product.harga_shopeefood || item.product.harga_jual;
+                  break;
+                case 'tiktok':
+                  basePrice = item.product.harga_tiktok || item.product.harga_jual;
+                  break;
+              }
+            }
+
+            let itemPrice = basePrice;
+
             // Add customization prices
             if (item.customizations) {
               item.customizations.forEach(customization => {
@@ -431,6 +539,111 @@ export default function PaymentModal({
         
         // Close confirmation dialog first
         setShowConfirmation(false);
+        
+        // Prepare receipt data for printing
+        const receiptNumber = onlineResult?.receipt_number || 'N/A';
+        const getTableNumber = () => {
+          // Extract table number from receipt number
+          if (typeof receiptNumber === 'number') {
+            return receiptNumber.toString().padStart(2, '0');
+          }
+          return '01';
+        };
+        
+        // Transform cart items to receipt format - use platform price for online orders
+        const receiptItems = cartItems.map(item => {
+          // For online orders, use platform-specific price, otherwise use harga_jual
+          let basePrice = item.product.harga_jual;
+          
+          if (isOnline && selectedOnlinePlatform) {
+            switch (selectedOnlinePlatform) {
+              case 'gofood':
+                basePrice = item.product.harga_gofood || item.product.harga_jual;
+                break;
+              case 'grabfood':
+                basePrice = item.product.harga_grabfood || item.product.harga_jual;
+                break;
+              case 'shopeefood':
+                basePrice = item.product.harga_shopeefood || item.product.harga_jual;
+                break;
+              case 'tiktok':
+                basePrice = item.product.harga_tiktok || item.product.harga_jual;
+                break;
+            }
+          }
+          
+          let itemPrice = basePrice;
+          
+          // Add customization prices
+          if (item.customizations) {
+            item.customizations.forEach(customization => {
+              customization.selected_options.forEach(option => {
+                itemPrice += option.price_adjustment;
+              });
+            });
+          }
+          
+          // Format item name with customizations if any
+          let itemName = item.product.nama;
+          if (item.customizations && item.customizations.length > 0) {
+            const customizationText = item.customizations.map(c => 
+              `${c.customization_name}: ${c.selected_options.map(opt => opt.option_name).join(', ')}`
+            ).join(', ');
+            itemName = `${itemName} (${customizationText})`;
+          }
+          
+          return {
+            name: itemName,
+            quantity: item.quantity,
+            price: itemPrice,
+            total_price: itemPrice * item.quantity
+          };
+        });
+        
+        // Get user info from auth
+        const cashierName = user?.name || 'Kasir';
+        
+        // Prepare receipt print data
+        const printData = {
+          type: 'transaction',
+          printerType: 'receiptPrinter',
+          printerName: '', // Will be auto-determined from saved printer config
+          items: receiptItems,
+          total: finalTotal,
+          paymentMethod: selectedPaymentMethod === 'cash' ? 'Cash' : 
+                        selectedPaymentMethod === 'debit' ? 'Debit Card' :
+                        selectedPaymentMethod === 'qr' ? 'QR Code' :
+                        selectedPaymentMethod === 'ewallet' ? 'E-Wallet' :
+                        selectedPaymentMethod === 'cl' ? 'City Ledger' :
+                        selectedPaymentMethod === 'gofood' ? 'GoFood' :
+                        selectedPaymentMethod === 'grabfood' ? 'GrabFood' :
+                        selectedPaymentMethod === 'shopeefood' ? 'ShopeeFood' :
+                        selectedPaymentMethod === 'tiktok' ? 'TikTok' :
+                        selectedPaymentMethod,
+          amountReceived: receivedAmount,
+          change: Math.max(0, receivedAmount - finalTotal),
+          date: transactionData.created_at,
+          receiptNumber: receiptNumber,
+          tableNumber: getTableNumber(),
+          cashier: cashierName,
+          transactionType: transactionType,
+          pickupMethod: finalPickupMethod // 'dine-in' or 'take-away' (forced to 'take-away' for online)
+        };
+        
+        // Print receipt after successful transaction
+        try {
+          console.log('📄 Printing receipt with data:', printData);
+          const printResult = await window.electronAPI?.printReceipt?.(printData);
+          
+          if (printResult?.success) {
+            console.log('✅ Receipt printed successfully');
+          } else {
+            console.error('❌ Receipt print failed:', printResult?.error);
+          }
+        } catch (printError) {
+          console.error('❌ Error printing receipt:', printError);
+          // Don't block transaction success even if print fails
+        }
         
         // Clear cart and close modal after successful database operation
         onPaymentComplete();
@@ -839,43 +1052,66 @@ export default function PaymentModal({
                   </button>
                 </div>
                 
-                {/* Pickup Method Toggle */}
-                <div className="w-1/2 relative bg-gray-200 rounded-lg p-0.5 flex h-[52px]">
-                  {/* Sliding Background */}
-                  <div
-                    className={`absolute top-0.5 bottom-0.5 left-0.5 w-[calc(50%-0.125rem)] bg-green-100 rounded-lg shadow-sm transition-transform duration-300 ease-in-out ${
-                      selectedPickupMethod === 'dine-in' ? 'translate-x-0' : 'translate-x-full'
-                    }`}
-                  ></div>
-                  
-                  <button
-                    onClick={() => setSelectedPickupMethod('dine-in')}
-                    className={`relative z-10 flex-1 py-1 px-3 rounded-md font-medium text-xs transition-colors duration-300 ${
-                      selectedPickupMethod === 'dine-in'
-                        ? 'text-teal-600'
-                        : 'text-gray-600 hover:text-gray-800'
-                    }`}
-                  >
-                    DINE IN
-                  </button>
-                  
-                  <button
-                    onClick={() => setSelectedPickupMethod('take-away')}
-                    className={`relative z-10 flex-1 py-1 px-3 rounded-md font-medium text-xs transition-colors duration-300 ${
-                      selectedPickupMethod === 'take-away'
-                        ? 'text-teal-600'
-                        : 'text-gray-600 hover:text-gray-800'
-                    }`}
-                  >
-                    TAKE AWAY
-                  </button>
-              </div>
+                {/* Pickup Method Toggle or Display */}
+                {isOnline ? (
+                  <div className="w-1/2 bg-green-50 border-2 border-green-300 rounded-lg p-3">
+                    <div className="flex items-center justify-between">
+                      <span className="text-xs font-semibold text-green-800">Pickup:</span>
+                      <span className="text-xs font-bold text-green-900 uppercase">TAKE AWAY</span>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="w-1/2 relative bg-gray-200 rounded-lg p-0.5 flex h-[52px]">
+                    {/* Sliding Background */}
+                    <div
+                      className={`absolute top-0.5 bottom-0.5 left-0.5 w-[calc(50%-0.125rem)] bg-green-100 rounded-lg shadow-sm transition-transform duration-300 ease-in-out ${
+                        selectedPickupMethod === 'dine-in' ? 'translate-x-0' : 'translate-x-full'
+                      }`}
+                    ></div>
+                    
+                    <button
+                      onClick={() => setSelectedPickupMethod('dine-in')}
+                      className={`relative z-10 flex-1 py-1 px-3 rounded-md font-medium text-xs transition-colors duration-300 ${
+                        selectedPickupMethod === 'dine-in'
+                          ? 'text-teal-600'
+                          : 'text-gray-600 hover:text-gray-800'
+                      }`}
+                    >
+                      DINE IN
+                    </button>
+                    
+                    <button
+                      onClick={() => setSelectedPickupMethod('take-away')}
+                      className={`relative z-10 flex-1 py-1 px-3 rounded-md font-medium text-xs transition-colors duration-300 ${
+                        selectedPickupMethod === 'take-away'
+                          ? 'text-teal-600'
+                          : 'text-gray-600 hover:text-gray-800'
+                      }`}
+                    >
+                      TAKE AWAY
+                    </button>
+                  </div>
+                )}
             </div>
 
               {/* Payment Method Selection */}
               <div>
                 <h3 className="text-sm font-semibold text-gray-800 mb-2">Pilih Metode Pembayaran</h3>
                 <div className="space-y-2">
+                  {/* Show locked platform payment method for online orders */}
+                  {isOnline && selectedOnlinePlatform && (
+                    <div className="p-3 bg-blue-50 border-2 border-blue-300 rounded-lg">
+                      <div className="flex items-center justify-between">
+                        <span className="text-sm font-semibold text-blue-800">Platform:</span>
+                        <span className="text-sm font-bold text-blue-900 uppercase">
+                          {selectedOnlinePlatform === 'gofood' ? 'GoFood' : 
+                           selectedOnlinePlatform === 'grabfood' ? 'GrabFood' : 
+                           selectedOnlinePlatform === 'shopeefood' ? 'ShopeeFood' : 
+                           selectedOnlinePlatform === 'tiktok' ? 'TikTok' : selectedOnlinePlatform}
+                        </span>
+                      </div>
+                    </div>
+                  )}
                   <div className="flex gap-1">
                     {!isOnline && (
                       <>

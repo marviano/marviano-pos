@@ -98,14 +98,17 @@ export default function POSLayout() {
         if (categoriesData.length > 0) {
           console.log('✅ Categories loaded:', categoriesData);
           setCategories(categoriesData);
+          // Always set the first category as selected - this will trigger product loading
           setSelectedCategory(categoriesData[0].jenis);
         } else {
           console.log('⚠️ No categories available');
           setCategories([]);
+          setSelectedCategory(''); // Clear selection if no categories
         }
       } catch (error) {
         console.error('❌ Error loading categories:', error);
         setCategories([]);
+        setSelectedCategory('');
       } finally {
         setIsLoadingCategories(false);
       }
@@ -118,7 +121,7 @@ export default function POSLayout() {
   useEffect(() => {
     const loadProducts = async () => {
       if (!selectedCategory) {
-        // No category selected yet
+        console.log('⚠️ No category selected, skipping product load');
         return;
       }
 
@@ -128,8 +131,7 @@ export default function POSLayout() {
         console.log('📦 Fetching products for category:', selectedCategory, 'tab:', activeKasirTab, 'online:', isOnlineTab);
         // Use smart offline/online mode - only force online for online tab
         const productsData = await fetchProducts(selectedCategory, activeKasirTab, { 
-          isOnline: isOnlineTab, 
-          forceOnline: isOnlineTab // Only force online when explicitly in online tab
+          isOnline: isOnlineTab
         });
         
         console.log('✅ Products loaded:', productsData.length, 'items');

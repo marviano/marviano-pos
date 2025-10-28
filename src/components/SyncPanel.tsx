@@ -185,10 +185,9 @@ export default function SyncPanel({ isOpen, onClose }: SyncPanelProps) {
       });
 
       if (transactionsToUpload.length === 0) {
-        console.log('ℹ️ [SYNC] No transactions to upload');
-        alert('ℹ️ Tidak ada transaksi offline yang perlu diunggah ke cloud.');
-        setSyncStatus(prev => ({ ...prev, syncInProgress: false }));
-        return;
+        console.log('ℹ️ [SYNC] No transactions to upload - proceeding to download step');
+        await updateSyncStatus();
+        return; // Return early but don't fail - allows download step to proceed
       }
 
       console.log(`📤 [SYNC] Uploading ${transactionsToUpload.length} transactions to cloud...`);
@@ -255,6 +254,7 @@ export default function SyncPanel({ isOpen, onClose }: SyncPanelProps) {
       
       // Update status
       await updateSyncStatus();
+      setSyncStatus(prev => ({ ...prev, syncInProgress: false }));
       
       alert('✅ Sinkronisasi lengkap berhasil!\n\n• Transaksi offline telah diunggah ke cloud\n• Data terbaru telah diunduh dari cloud');
       

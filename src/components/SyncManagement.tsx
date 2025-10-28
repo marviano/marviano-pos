@@ -322,10 +322,10 @@ export default function SyncManagement() {
       const localTransactions = await electronAPI.localDbGetUnsyncedTransactions(14);
       
       if (localTransactions.length === 0) {
-        addLog('info', 'ℹ️ No transactions to upload');
-        setSyncStatus(prev => ({ ...prev, syncInProgress: false }));
-        setSyncProgress(0);
-        return;
+        addLog('info', 'ℹ️ No transactions to upload - proceeding to download step');
+        setSyncProgress(50); // Skip to download step
+        await updateSyncStatus();
+        return; // Return early but don't fail - allows download step to proceed
       }
 
       addLog('info', `📤 Uploading ${localTransactions.length} transactions to cloud...`);
