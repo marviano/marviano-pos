@@ -3,6 +3,9 @@
 import { useState, useEffect, useRef } from 'react';
 import { X, Delete } from 'lucide-react';
 import TransactionConfirmationDialog from './TransactionConfirmationDialog';
+import { smartSyncService } from '@/lib/smartSync';
+import { offlineSyncService } from '@/lib/offlineSync';
+import { generateTransactionId, generateTransactionItemId } from '@/lib/uuid';
 
 interface CartItem {
   id: number;
@@ -278,6 +281,7 @@ export default function PaymentModal({
       });
 
       const transactionData = {
+        id: generateTransactionId(), // Generate UUID for transaction
         business_id: 14, // Momoyo Bakery Kalimantan business_id
         user_id: 1, // This should come from auth context
         payment_method: selectedPaymentMethod,
@@ -287,13 +291,16 @@ export default function PaymentModal({
         final_amount: finalTotal,
         amount_received: receivedAmount,
         change_amount: receivedAmount - finalTotal,
+        status: 'completed',
+        created_at: new Date().toISOString(),
         contact_id: null, // Will be used when contact book is integrated
         customer_name: customerName || null,
-        bank_id: selectedPaymentMethod === 'debit' ? parseInt(bankId) : null,
+        bank_id: selectedPaymentMethod === 'debit' && bankId ? parseInt(bankId) : null,
         card_number: selectedPaymentMethod === 'debit' ? cardNumber : null,
         cl_account_id: clAccountId,
         cl_account_name: clAccountName,
         transaction_type: transactionType,
+        payment_method_id: 1, // Default to cash payment method
         items: cartItems.map(item => {
           let itemPrice = item.product.harga_jual;
           
@@ -317,31 +324,136 @@ export default function PaymentModal({
         })
       };
 
-      // Save transaction to database
-      const response = await fetch('/api/transactions', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify(transactionData),
-      });
+      // Save transaction - when online, save to BOTH databases
+      try {
+        const isOnline = offlineSyncService.getStatus().isOnline;
+        
+        let onlineResult = null;
+        let offlineResult = null;
+        
+        // Step 1: Save to online database if connected
+        if (isOnline) {
+          try {
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => controller.abort(), 5000); // 5 second timeout
+            
+            const response = await fetch('/api/transactions', {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+              },
+              body: JSON.stringify(transactionData),
+              signal: controller.signal
+            });
 
-      if (!response.ok) {
-        throw new Error('Failed to save transaction');
+            clearTimeout(timeoutId);
+
+            if (!response.ok) {
+              throw new Error('Failed to save transaction online');
+            }
+
+            onlineResult = await response.json();
+            console.log('✅ Transaction saved to online database:', onlineResult);
+          } catch (error) {
+            console.error('❌ Failed to save to online database:', error);
+            // Continue to offline save even if online save fails
+          }
+        }
+        
+        // Step 2: Save to offline database (always, for redundancy and offline capability)
+        if (typeof window !== 'undefined' && (window as any).electronAPI) {
+          // Map transaction data for SQLite (include all fields needed by local DB)
+          const sqliteTransactionData = {
+            id: transactionData.id,
+            business_id: transactionData.business_id,
+            user_id: transactionData.user_id,
+            payment_method: transactionData.payment_method,
+            pickup_method: transactionData.pickup_method,
+            total_amount: transactionData.total_amount,
+            voucher_discount: transactionData.voucher_discount,
+            final_amount: transactionData.final_amount,
+            amount_received: transactionData.amount_received,
+            change_amount: transactionData.change_amount,
+            status: transactionData.status,
+            created_at: transactionData.created_at,
+            note: null,
+            bank_name: selectedPaymentMethod === 'debit' ? (banks.find(b => b.id.toString() === bankId)?.bank_name || null) : null,
+            contact_id: transactionData.contact_id,
+            customer_name: transactionData.customer_name,
+            bank_id: transactionData.bank_id,
+            card_number: transactionData.card_number,
+            cl_account_id: transactionData.cl_account_id,
+            cl_account_name: transactionData.cl_account_name,
+            receipt_number: onlineResult?.receipt_number || null, // Use receipt number from online save if available
+            transaction_type: transactionData.transaction_type,
+            payment_method_id: transactionData.payment_method_id
+          };
+          
+          const transactionItems = cartItems.map(item => {
+            let itemPrice = item.product.harga_jual;
+            
+            // Add customization prices
+            if (item.customizations) {
+              item.customizations.forEach(customization => {
+                customization.selected_options.forEach(option => {
+                  itemPrice += option.price_adjustment;
+                });
+              });
+            }
+            
+            console.log(`📝 [OFFLINE] Saving item: ${item.product.nama}, customNote: "${item.customNote}"`);
+            
+            return {
+              id: generateTransactionItemId(), // Generate UUID for transaction item
+              transaction_id: transactionData.id,
+              product_id: item.product.id,
+              quantity: item.quantity,
+              unit_price: itemPrice,
+              total_price: itemPrice * item.quantity,
+              customizations_json: item.customizations || null,
+              custom_note: item.customNote || null,
+              created_at: transactionData.created_at
+            };
+          });
+          
+          // Save transaction and items to local database
+          await (window as any).electronAPI.localDbUpsertTransactions([sqliteTransactionData]);
+          await (window as any).electronAPI.localDbUpsertTransactionItems(transactionItems);
+          
+          console.log('✅ Transaction saved to offline database:', sqliteTransactionData);
+          offlineResult = { success: true, transaction: sqliteTransactionData };
+        } else {
+          throw new Error('Offline database not available');
+        }
+        
+        // Use online result if available, otherwise use offline result
+        const result = onlineResult || offlineResult;
+        
+        // Close confirmation dialog first
+        setShowConfirmation(false);
+        
+        // Clear cart and close modal after successful database operation
+        onPaymentComplete();
+        onClose();
+        
+        // Show success message with details about which databases saved
+        const saveDetails = [];
+        if (isOnline && onlineResult) {
+          saveDetails.push('Online');
+        }
+        saveDetails.push('Offline');
+        
+        alert(`Transaksi berhasil disimpan ke: ${saveDetails.join(' & ')} database! ID: ${result.transaction?.id || result.transaction_id || 'N/A'}`);
+        
+      } catch (error) {
+        console.error('❌ Failed to save transaction:', error);
+        
+        // Show error message
+        alert(`Gagal menyimpan transaksi: ${error instanceof Error ? error.message : 'Unknown error'}`);
+          
+        // Close confirmation dialog
+        setShowConfirmation(false);
       }
-
-      const result = await response.json();
-      console.log('Transaction saved:', result);
-      
-      // Close confirmation dialog first
-      setShowConfirmation(false);
-      
-      // Clear cart and close modal after successful database operation
-      onPaymentComplete();
-      onClose();
-      
-      // Show success message
-      alert(`Transaksi berhasil disimpan! ID: ${result.transaction_id}`);
       
     } catch (error) {
       console.error('Payment processing error:', error);
@@ -355,13 +467,45 @@ export default function PaymentModal({
   useEffect(() => {
     const fetchBanks = async () => {
       try {
-        const response = await fetch('/api/banks');
-        if (response.ok) {
+        const banksData = await offlineSyncService.fetchWithFallback(
+          // Online fetch
+          async () => {
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => controller.abort(), 5000); // 5 second timeout
+            
+            try {
+              const response = await fetch('/api/banks', {
+                signal: controller.signal
+              });
+              clearTimeout(timeoutId);
+              
+              if (!response.ok) {
+                throw new Error('Failed to fetch banks online');
+              }
           const data = await response.json();
-          setBanks(data.banks || []);
+              return data.banks || [];
+            } catch (error) {
+              clearTimeout(timeoutId);
+              throw error;
+            }
+          },
+          // Offline fetch
+          async () => {
+            if (typeof window !== 'undefined' && (window as any).electronAPI) {
+              const banks = await (window as any).electronAPI.localDbGetBanks();
+              console.log('📱 [OFFLINE] Fetched banks from local database:', banks.length);
+              return banks;
+            } else {
+              throw new Error('Offline database not available');
         }
+          }
+        );
+        
+        setBanks(banksData);
+        console.log('🏦 Banks loaded:', banksData.length);
       } catch (error) {
         console.error('Failed to fetch banks:', error);
+        setBanks([]); // Set empty array as fallback
       }
     };
     fetchBanks();
@@ -731,92 +875,113 @@ export default function PaymentModal({
               {/* Payment Method Selection */}
               <div>
                 <h3 className="text-sm font-semibold text-gray-800 mb-2">Pilih Metode Pembayaran</h3>
-                <div className="flex gap-1">
-                  {!isOnline && (
-                    <>
-                  <button
-                    onClick={() => setSelectedPaymentMethod('cash')}
-                    className={`flex-1 py-2 rounded border transition-all duration-200 ${
-                      selectedPaymentMethod === 'cash'
-                        ? 'bg-teal-100 border-teal-400 text-teal-800'
-                        : 'bg-gray-50 border-gray-200 text-gray-700 hover:bg-gray-100'
-                    }`}
-                  >
-                      <span className="font-medium text-xs">Cash</span>
-                  </button>
-                  
-                  <button
-                    onClick={() => setSelectedPaymentMethod('debit')}
-                    className={`flex-1 py-2 rounded border transition-all duration-200 ${
-                      selectedPaymentMethod === 'debit'
-                        ? 'bg-teal-100 border-teal-400 text-teal-800'
-                        : 'bg-gray-50 border-gray-200 text-gray-700 hover:bg-gray-100'
-                    }`}
-                  >
-                      <span className="font-medium text-xs">Debit</span>
-                  </button>
-                  
-                  <button
-                    onClick={() => setSelectedPaymentMethod('qr')}
-                    className={`flex-1 py-2 rounded border transition-all duration-200 ${
-                      selectedPaymentMethod === 'qr'
-                        ? 'bg-teal-100 border-teal-400 text-teal-800'
-                        : 'bg-gray-50 border-gray-200 text-gray-700 hover:bg-gray-100'
-                    }`}
-                  >
-                      <span className="font-medium text-xs">QR</span>
-                  </button>
-                  
-                  <button
-                    onClick={() => setSelectedPaymentMethod('ewallet')}
-                    className={`flex-1 py-2 rounded border transition-all duration-200 ${
-                      selectedPaymentMethod === 'ewallet'
-                        ? 'bg-teal-100 border-teal-400 text-teal-800'
-                        : 'bg-gray-50 border-gray-200 text-gray-700 hover:bg-gray-100'
-                    }`}
-                  >
-                      <span className="font-medium text-xs">E-Wallet</span>
-                  </button>
-                  
-                  <button
-                    onClick={() => {
-                      setSelectedPaymentMethod('cl');
-                      // Clear and reset amount input for CL
-                      setAmountReceived('');
-                      // Reset active input since amount field is disabled
-                      setActiveInput('amount');
-                      // Auto-disable voucher when CL is selected
-                      if (isVoucherEnabled) {
-                        setIsVoucherEnabled(false);
-                      }
-                    }}
-                    className={`flex-1 py-2 rounded border transition-all duration-200 ${
-                      selectedPaymentMethod === 'cl'
-                        ? 'bg-purple-100 border-purple-400 text-purple-800'
-                        : 'bg-gray-50 border-gray-200 text-gray-700 hover:bg-gray-100'
-                    }`}
-                  >
-                    <span className="font-medium text-xs">CL</span>
-                  </button>
-                  
-                  <button
-                    onClick={() => setIsVoucherEnabled(!isVoucherEnabled)}
-                    disabled={selectedPaymentMethod === 'cl'}
-                    className={`flex-1 py-2 rounded border transition-all duration-200 ${
-                      selectedPaymentMethod === 'cl'
-                        ? 'bg-gray-100 border-gray-300 text-gray-500 cursor-not-allowed opacity-50'
-                        : isVoucherEnabled
-                        ? 'bg-green-100 border-green-400 text-green-800'
-                        : 'bg-gray-50 border-gray-200 text-gray-700 hover:bg-gray-100'
-                    }`}
-                  >
-                    <span className="font-medium text-xs">Voucher {isVoucherEnabled ? 'ON' : 'OFF'}</span>
-                  </button>
-                  </>
-                  )}
+                <div className="space-y-2">
+                  <div className="flex gap-1">
+                    {!isOnline && (
+                      <>
+                    <button
+                      onClick={() => setSelectedPaymentMethod('cash')}
+                      className={`flex-1 py-2 rounded border transition-all duration-200 ${
+                        selectedPaymentMethod === 'cash'
+                          ? 'bg-teal-100 border-teal-400 text-teal-800'
+                          : 'bg-gray-50 border-gray-200 text-gray-700 hover:bg-gray-100'
+                      }`}
+                    >
+                        <span className="font-medium text-xs">Cash</span>
+                    </button>
+                    
+                    <button
+                      onClick={() => setSelectedPaymentMethod('debit')}
+                      className={`flex-1 py-2 rounded border transition-all duration-200 ${
+                        selectedPaymentMethod === 'debit'
+                          ? 'bg-teal-100 border-teal-400 text-teal-800'
+                          : 'bg-gray-50 border-gray-200 text-gray-700 hover:bg-gray-100'
+                      }`}
+                    >
+                        <span className="font-medium text-xs">Debit</span>
+                    </button>
+                    
+                    <button
+                      onClick={() => setSelectedPaymentMethod('qr')}
+                      className={`flex-1 py-2 rounded border transition-all duration-200 ${
+                        selectedPaymentMethod === 'qr'
+                          ? 'bg-teal-100 border-teal-400 text-teal-800'
+                          : 'bg-gray-50 border-gray-200 text-gray-700 hover:bg-gray-100'
+                      }`}
+                    >
+                        <span className="font-medium text-xs">QR</span>
+                    </button>
+                    
+                    <button
+                      onClick={() => setSelectedPaymentMethod('ewallet')}
+                      className={`flex-1 py-2 rounded border transition-all duration-200 ${
+                        selectedPaymentMethod === 'ewallet'
+                          ? 'bg-teal-100 border-teal-400 text-teal-800'
+                          : 'bg-gray-50 border-gray-200 text-gray-700 hover:bg-gray-100'
+                      }`}
+                    >
+                        <span className="font-medium text-xs">E-Wallet</span>
+                    </button>
+                    
+                    <button
+                      onClick={() => {
+                        setSelectedPaymentMethod('cl');
+                        // Clear and reset amount input for CL
+                        setAmountReceived('');
+                        // Reset active input since amount field is disabled
+                        setActiveInput('amount');
+                        // Auto-disable voucher when CL is selected
+                        if (isVoucherEnabled) {
+                          setIsVoucherEnabled(false);
+                        }
+                      }}
+                      className={`flex-1 py-2 rounded border transition-all duration-200 ${
+                        selectedPaymentMethod === 'cl'
+                          ? 'bg-purple-100 border-purple-400 text-purple-800'
+                          : 'bg-gray-50 border-gray-200 text-gray-700 hover:bg-gray-100'
+                      }`}
+                    >
+                      <span className="font-medium text-xs">CL</span>
+                    </button>
+                    
+                    <button
+                      onClick={() => setIsVoucherEnabled(!isVoucherEnabled)}
+                      disabled={selectedPaymentMethod === 'cl'}
+                      className={`flex-1 py-2 rounded border transition-all duration-200 ${
+                        selectedPaymentMethod === 'cl'
+                          ? 'bg-gray-100 border-gray-300 text-gray-500 cursor-not-allowed opacity-50'
+                          : isVoucherEnabled
+                          ? 'bg-green-100 border-green-400 text-green-800'
+                          : 'bg-gray-50 border-gray-200 text-gray-700 hover:bg-gray-100'
+                      }`}
+                    >
+                      <span className="font-medium text-xs">Voucher {isVoucherEnabled ? 'ON' : 'OFF'}</span>
+                    </button>
+                    
+                    {/* Voucher Amount Input - Inline with payment buttons */}
+                    <div className="flex-[1.5]">
+                      <input
+                        type="text"
+                        value={voucherAmount ? `Rp ${parseFloat(voucherAmount).toLocaleString('id-ID')}` : ''}
+                        readOnly
+                        disabled={!isVoucherEnabled}
+                        onClick={() => isVoucherEnabled && setActiveInput('voucher')}
+                        className={`w-full h-[41px] px-2 text-xs font-semibold border rounded transition-all duration-300 ${
+                          !isVoucherEnabled
+                            ? 'border-gray-300 bg-gray-100 text-gray-500 cursor-not-allowed opacity-50'
+                            : activeInput === 'voucher' 
+                            ? 'border-green-400 bg-green-50 shadow-lg shadow-green-200 animate-pulse text-gray-800 cursor-pointer' 
+                            : 'border-gray-200 bg-gray-50 hover:bg-gray-100 text-gray-800 cursor-pointer'
+                        }`}
+                        placeholder="Rp 0"
+                      />
+                    </div>
+                    </>
+                    )}
+                  </div>
 
                   {isOnline && (
-                    <>
+                    <div className="flex gap-1">
                       <button
                         onClick={() => setSelectedPaymentMethod('gofood')}
                         className={`flex-1 py-2 rounded border transition-all duration-200 ${
@@ -857,7 +1022,7 @@ export default function PaymentModal({
                       >
                           <span className="font-medium text-xs">TikTok</span>
                       </button>
-                    </>
+                    </div>
                   )}
                 </div>
               </div>
@@ -892,36 +1057,6 @@ export default function PaymentModal({
                     placeholder="Rp 0"
                   />
                   </div>
-
-                {/* Voucher Amount Input - Only show when voucher is enabled */}
-                {isVoucherEnabled && (
-                  <div className="mb-2">
-                    <div className="flex items-center justify-between mb-2">
-                      <label className="text-sm font-medium text-gray-700">
-                        Jumlah Voucher
-                      </label>
-                      {voucherDiscount > orderTotal && (
-                        <span className="text-red-600 text-sm font-medium">
-                          Voucher melebihi total pesanan
-                        </span>
-                      )}
-                    </div>
-                    <input
-                      type="text"
-                      value={voucherAmount ? `Rp ${parseFloat(voucherAmount).toLocaleString('id-ID')}` : ''}
-                      readOnly
-                      onClick={() => setActiveInput('voucher')}
-                      className={`w-full p-3 text-base font-semibold border-2 rounded-lg text-gray-800 cursor-pointer transition-all duration-300 ${
-                        activeInput === 'voucher' 
-                          ? 'border-green-400 bg-green-50 shadow-lg shadow-green-200 animate-pulse' 
-                          : 'border-gray-200 bg-gray-50 hover:bg-gray-100'
-                      }`}
-                    placeholder="Rp 0"
-                  />
-                </div>
-                )}
-
-
 
                 {/* Quick Amount Buttons - Show for all except CL */}
                 {selectedPaymentMethod !== 'cl' && (

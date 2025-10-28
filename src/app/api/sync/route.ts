@@ -85,19 +85,17 @@ export async function GET() {
       counts.products = 0;
     }
 
-    // Sync Categories (derived from category2 table)
+    // Sync Categories (all categories from category2 table, including empty ones)
     try {
       const categories = await query(`
-        SELECT DISTINCT c2.name as jenis
-        FROM products p
-        INNER JOIN product_businesses pb ON p.id = pb.product_id
-        LEFT JOIN category2 c2 ON p.category2_id = c2.id
-        WHERE pb.business_id = ? AND p.status = 'active' AND c2.name IS NOT NULL
-        ORDER BY c2.name ASC
+        SELECT c2.name as jenis
+        FROM category2 c2
+        WHERE c2.business_id = ? AND c2.is_active = 1
+        ORDER BY c2.display_order ASC, c2.name ASC
       `, [BUSINESS_ID]);
       syncResults.categories = categories.map((cat: any) => ({ jenis: cat.jenis }));
       counts.categories = categories.length;
-      console.log(`✅ Synced ${categories.length} categories`);
+      console.log(`✅ Synced ${categories.length} categories (including empty ones)`);
     } catch (error) {
       console.warn('⚠️ Failed to sync categories:', error);
       syncResults.categories = [];
@@ -157,53 +155,219 @@ export async function GET() {
       counts.contacts = 0;
     }
 
-    // Sync Teams
+    // Sync Banks
+
+    // Sync Payment Methods
     try {
-      const teams = await query(`
-        SELECT id, name, description, organization_id, team_lead_id, business_id, color, is_active, created_at
-        FROM teams 
+      const paymentMethods = await query(`
+        SELECT id, name, code, description, is_active, requires_additional_info, created_at
+        FROM payment_methods 
         WHERE is_active = 1
         ORDER BY name ASC
       `);
-      syncResults.teams = teams;
-      counts.teams = teams.length;
-      console.log(`✅ Synced ${teams.length} teams`);
+      syncResults.paymentMethods = paymentMethods;
+      counts.paymentMethods = paymentMethods.length;
+      console.log(`✅ Synced ${paymentMethods.length} payment methods`);
     } catch (error) {
-      console.warn('⚠️ Failed to sync teams:', error);
-      syncResults.teams = [];
-      counts.teams = 0;
+      console.warn('⚠️ Failed to sync payment methods:', error);
+      syncResults.paymentMethods = [];
+      counts.paymentMethods = 0;
     }
 
-    // Sync Source
+    // Sync Banks
     try {
-      const source = await query(`
-        SELECT id, source_name, created_at
-        FROM source 
-        ORDER BY source_name ASC
+      const banks = await query(`
+        SELECT id, bank_code, bank_name, is_popular, is_active, created_at
+        FROM banks 
+        WHERE is_active = 1
+        ORDER BY is_popular DESC, bank_name ASC
       `);
-      syncResults.source = source;
-      counts.source = source.length;
-      console.log(`✅ Synced ${source.length} source records`);
+      syncResults.banks = banks;
+      counts.banks = banks.length;
+      console.log(`✅ Synced ${banks.length} banks`);
     } catch (error) {
-      console.warn('⚠️ Failed to sync source:', error);
-      syncResults.source = [];
-      counts.source = 0;
+      console.warn('⚠️ Failed to sync banks:', error);
+      syncResults.banks = [];
+      counts.banks = 0;
     }
 
-    // Sync Pekerjaan
+    // Sync Management Groups
     try {
-      const pekerjaan = await query(`
-        SELECT id, nama_pekerjaan, created_at
-        FROM pekerjaan 
-        ORDER BY nama_pekerjaan ASC
+      const managementGroups = await query(`
+        SELECT id, name, permission_name, description, organization_id, manager_user_id, created_at
+        FROM management_groups 
+        ORDER BY name ASC
       `);
-      syncResults.pekerjaan = pekerjaan;
-      counts.pekerjaan = pekerjaan.length;
-      console.log(`✅ Synced ${pekerjaan.length} pekerjaan records`);
+      syncResults.managementGroups = managementGroups;
+      counts.managementGroups = managementGroups.length;
+      console.log(`✅ Synced ${managementGroups.length} management groups`);
     } catch (error) {
-      console.warn('⚠️ Failed to sync pekerjaan:', error);
-      syncResults.pekerjaan = [];
-      counts.pekerjaan = 0;
+      console.warn('⚠️ Failed to sync management groups:', error);
+      syncResults.managementGroups = [];
+      counts.managementGroups = 0;
+    }
+
+    // Sync Category1
+    try {
+      const category1 = await query(`
+        SELECT id, name, description, display_order, is_active, created_at
+        FROM category1 
+        WHERE is_active = 1
+        ORDER BY display_order ASC, name ASC
+      `);
+      syncResults.category1 = category1;
+      counts.category1 = category1.length;
+      console.log(`✅ Synced ${category1.length} category1 records`);
+    } catch (error) {
+      console.warn('⚠️ Failed to sync category1:', error);
+      syncResults.category1 = [];
+      counts.category1 = 0;
+    }
+
+    // Sync Category2
+    try {
+      const category2 = await query(`
+        SELECT id, name, business_id, description, display_order, is_active, created_at
+        FROM category2 
+        WHERE is_active = 1
+        ORDER BY display_order ASC, name ASC
+      `);
+      syncResults.category2 = category2;
+      counts.category2 = category2.length;
+      console.log(`✅ Synced ${category2.length} category2 records`);
+    } catch (error) {
+      console.warn('⚠️ Failed to sync category2:', error);
+      syncResults.category2 = [];
+      counts.category2 = 0;
+    }
+
+    // Sync CL Accounts
+    try {
+      const clAccounts = await query(`
+        SELECT id, account_code, account_name, contact_info, credit_limit, current_balance,
+               is_active, created_at
+        FROM cl_accounts 
+        WHERE is_active = 1
+        ORDER BY account_name ASC
+      `);
+      syncResults.clAccounts = clAccounts;
+      counts.clAccounts = clAccounts.length;
+      console.log(`✅ Synced ${clAccounts.length} CL accounts`);
+    } catch (error) {
+      console.warn('⚠️ Failed to sync CL accounts:', error);
+      syncResults.clAccounts = [];
+      counts.clAccounts = 0;
+    }
+
+    // Sync Omset (revenue data)
+    try {
+      const omset = await query(`
+        SELECT id, business_id, date, regular, ojol, event, delivery, fitness, pool,
+               user_id, created_at
+        FROM omset 
+        WHERE business_id = ?
+        ORDER BY date DESC
+        LIMIT 100
+      `, [BUSINESS_ID]);
+      syncResults.omset = omset;
+      counts.omset = omset.length;
+      console.log(`✅ Synced ${omset.length} omset records`);
+    } catch (error) {
+      console.warn('⚠️ Failed to sync omset:', error);
+      syncResults.omset = [];
+      counts.omset = 0;
+    }
+
+    // Sync Customization Types
+    try {
+      const customizationTypes = await query(`
+        SELECT id, name, selection_mode, display_order
+        FROM product_customization_types
+        ORDER BY display_order ASC, name ASC
+      `);
+      syncResults.customizationTypes = customizationTypes;
+      counts.customizationTypes = customizationTypes.length;
+      console.log(`✅ Synced ${customizationTypes.length} customization types`);
+    } catch (error) {
+      console.warn('⚠️ Failed to sync customization types:', error);
+      syncResults.customizationTypes = [];
+      counts.customizationTypes = 0;
+    }
+
+    // Sync Customization Options
+    try {
+      const customizationOptions = await query(`
+        SELECT co.id, co.type_id, co.name, co.price_adjustment, co.display_order, co.status
+        FROM product_customization_options co
+        WHERE co.status = 'active'
+        ORDER BY co.type_id, co.display_order ASC, co.name ASC
+      `);
+      syncResults.customizationOptions = customizationOptions;
+      counts.customizationOptions = customizationOptions.length;
+      console.log(`✅ Synced ${customizationOptions.length} customization options`);
+    } catch (error) {
+      console.warn('⚠️ Failed to sync customization options:', error);
+      syncResults.customizationOptions = [];
+      counts.customizationOptions = 0;
+    }
+
+    // Sync Product Customizations
+    try {
+      const productCustomizations = await query(`
+        SELECT pc.id, pc.product_id, pc.customization_type_id
+        FROM product_customizations pc
+        ORDER BY pc.product_id, pc.customization_type_id ASC
+      `);
+      syncResults.productCustomizations = productCustomizations;
+      counts.productCustomizations = productCustomizations.length;
+      console.log(`✅ Synced ${productCustomizations.length} product customizations`);
+    } catch (error) {
+      console.warn('⚠️ Failed to sync product customizations:', error);
+      syncResults.productCustomizations = [];
+      counts.productCustomizations = 0;
+    }
+
+    // Sync Transactions
+    try {
+      const transactions = await query(`
+        SELECT 
+          t.uuid_id as id, t.business_id, t.user_id, pm.code as payment_method, t.pickup_method,
+          t.total_amount, t.voucher_discount, t.final_amount, t.amount_received, t.change_amount,
+          t.status, t.created_at, t.contact_id, t.customer_name, t.note, t.bank_name,
+          t.card_number, t.cl_account_id, t.cl_account_name, t.bank_id, t.receipt_number,
+          t.transaction_type, t.payment_method_id
+        FROM transactions t
+        LEFT JOIN payment_methods pm ON t.payment_method_id = pm.id
+        WHERE t.business_id = ? AND t.status != 'archived'
+        ORDER BY t.created_at DESC
+      `, [BUSINESS_ID]);
+      syncResults.transactions = transactions;
+      counts.transactions = transactions.length;
+      console.log(`✅ Synced ${transactions.length} transactions`);
+    } catch (error) {
+      console.warn('⚠️ Failed to sync transactions:', error);
+      syncResults.transactions = [];
+      counts.transactions = 0;
+    }
+
+    // Sync Transaction Items
+    try {
+      const transactionItems = await query(`
+        SELECT 
+          ti.uuid_id as id, ti.uuid_transaction_id as transaction_id, ti.product_id, ti.quantity,
+          ti.unit_price, ti.total_price, ti.customizations_json, ti.custom_note, ti.created_at
+        FROM transaction_items ti
+        INNER JOIN transactions t ON ti.uuid_transaction_id = t.uuid_id
+        WHERE t.business_id = ?
+        ORDER BY ti.created_at DESC
+      `, [BUSINESS_ID]);
+      syncResults.transactionItems = transactionItems;
+      counts.transactionItems = transactionItems.length;
+      console.log(`✅ Synced ${transactionItems.length} transaction items`);
+    } catch (error) {
+      console.warn('⚠️ Failed to sync transaction items:', error);
+      syncResults.transactionItems = [];
+      counts.transactionItems = 0;
     }
 
     const totalRecords = Object.values(counts).reduce((sum, count) => sum + count, 0);

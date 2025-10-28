@@ -43,18 +43,27 @@ export default function EditItemModal({ isOpen, onClose, cartItem, onUpdate }: E
   const [customNote, setCustomNote] = useState('');
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
-  // Initialize form when modal opens
+  // Initialize form when modal opens - aggressive focus for Electron
   useEffect(() => {
     if (cartItem) {
       setQuantity(cartItem.quantity);
       setCustomNote(cartItem.customNote || '');
       
-      // Focus the textarea after a short delay to ensure it's rendered
-      setTimeout(() => {
-        if (textareaRef.current) {
-          textareaRef.current.focus();
-        }
-      }, 100);
+      // Multiple focus attempts for Electron
+      const focusAttempts = [0, 50, 100, 150, 200];
+      const timers: NodeJS.Timeout[] = [];
+      
+      focusAttempts.forEach(delay => {
+        const timer = setTimeout(() => {
+          if (textareaRef.current) {
+            textareaRef.current.focus();
+            textareaRef.current.click();
+          }
+        }, delay);
+        timers.push(timer);
+      });
+      
+      return () => timers.forEach(timer => clearTimeout(timer));
     }
   }, [cartItem]);
 
@@ -145,14 +154,34 @@ export default function EditItemModal({ isOpen, onClose, cartItem, onUpdate }: E
               ref={textareaRef}
               value={customNote}
               onChange={(e) => setCustomNote(e.target.value)}
-              onClick={(e) => e.stopPropagation()}
-              onFocus={(e) => e.stopPropagation()}
-              onMouseDown={(e) => e.stopPropagation()}
-              className="w-full p-3 border border-gray-300 rounded-lg text-gray-800 bg-white focus:border-blue-400 focus:ring-2 focus:ring-blue-100 resize-none cursor-text"
+              onMouseDown={(e) => {
+                e.stopPropagation();
+                e.preventDefault();
+                e.currentTarget.focus();
+              }}
+              onMouseUp={(e) => {
+                e.stopPropagation();
+                e.currentTarget.focus();
+              }}
+              onClick={(e) => {
+                e.stopPropagation();
+                e.currentTarget.focus();
+              }}
+              onFocus={(e) => {
+                e.stopPropagation();
+                console.log('✅ Custom note (edit modal) focused');
+              }}
+              onBlur={() => {
+                console.log('⚠️ Custom note (edit modal) lost focus');
+              }}
+              style={{ pointerEvents: 'auto' }}
+              className="w-full p-3 border-2 border-gray-300 rounded-lg text-gray-800 bg-white focus:border-blue-500 focus:ring-4 focus:ring-blue-200 resize-none cursor-text"
               placeholder="Add any special instructions or notes for this item..."
               rows={3}
               maxLength={200}
               autoComplete="off"
+              spellCheck={false}
+              tabIndex={1}
             />
             <p className="text-xs text-gray-500 mt-1">
               {customNote.length}/200 characters

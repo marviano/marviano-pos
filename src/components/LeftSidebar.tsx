@@ -17,6 +17,7 @@ interface MenuItem {
   id: number;
   name: string;
   active: boolean;
+  disabled?: boolean; // Add disabled property
 }
 
 interface LeftSidebarProps {
@@ -63,15 +64,18 @@ export default function LeftSidebar({ menuItems, activeMenuItem, onMenuItemClick
         {menuItems.map((item) => (
           <button
             key={item.id}
-            onClick={() => onMenuItemClick(item.name)}
+            onClick={() => !item.disabled && onMenuItemClick(item.name)}
+            disabled={item.disabled}
             className={`w-full flex items-center space-x-3 px-4 py-3 rounded-lg mb-2 transition-colors ${
-              activeMenuItem === item.name
+              item.disabled
+                ? 'text-gray-400 cursor-not-allowed opacity-50'
+                : activeMenuItem === item.name
                 ? 'bg-green-500 text-white'
                 : 'text-white hover:bg-blue-800'
             }`}
           >
             {getIcon(item.name)}
-            <span className="font-medium">{item.name}</span>
+            <span className={`font-medium ${item.disabled ? 'line-through' : ''}`}>{item.name}</span>
           </button>
         ))}
       </div>

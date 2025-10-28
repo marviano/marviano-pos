@@ -2,8 +2,10 @@ import { NextRequest, NextResponse } from 'next/server';
 import { query } from '@/lib/db';
 import { generateReceiptNumber } from '@/lib/receiptUtils';
 import { getPaymentMethodId, getPaymentMethodCode } from '@/lib/paymentMethods';
+import { randomUUID } from 'crypto';
 
 interface TransactionItem {
+  id?: string; // UUID for transaction item
   product_id: number;
   quantity: number;
   unit_price: number;
@@ -21,6 +23,7 @@ interface TransactionItem {
 }
 
 interface TransactionData {
+  id: string; // UUID for transaction
   business_id: number;
   user_id: number;
   payment_method: 'cash' | 'debit' | 'qr' | 'ewallet' | 'cl' | 'voucher' | 'gofood' | 'grabfood' | 'shopeefood' | 'tiktok';
@@ -37,6 +40,7 @@ interface TransactionData {
   cl_account_id?: number | null;
   cl_account_name?: string | null;
   transaction_type: 'drinks' | 'bakery';
+  created_at?: string | number; // Optional - for offline sync to preserve timestamp
   items: TransactionItem[];
 }
 
@@ -44,8 +48,17 @@ export async function POST(request: NextRequest) {
   try {
     const transactionData: TransactionData = await request.json();
     
+    console.log('📥 [API] Received transaction:', {
+      id: transactionData.id,
+      business_id: transactionData.business_id,
+      user_id: transactionData.user_id,
+      payment_method: transactionData.payment_method,
+      items_count: transactionData.items?.length
+    });
+    
     // Validate required fields
     if (!transactionData.business_id || !transactionData.user_id || !transactionData.items || transactionData.items.length === 0) {
+      console.error('❌ [API] Missing required fields');
       return NextResponse.json(
         { error: 'Missing required fields' },
         { status: 400 }
@@ -57,14 +70,33 @@ export async function POST(request: NextRequest) {
     
     try {
       // Get payment method ID
+      console.log('🔍 [API] Getting payment method ID for:', transactionData.payment_method);
       const paymentMethodId = await getPaymentMethodId(transactionData.payment_method);
+      console.log('✅ [API] Payment method ID:', paymentMethodId);
       
       // Generate receipt number
       const receiptNumber = await generateReceiptNumber(transactionData.business_id, transactionData.transaction_type);
       
-      // Insert main transaction record
+      // Format created_at for MySQL (convert from Unix timestamp if needed)
+      let createdAt;
+      if (transactionData.created_at) {
+        // If it's a number (Unix timestamp in ms), convert to MySQL datetime
+        if (typeof transactionData.created_at === 'number') {
+          createdAt = new Date(transactionData.created_at).toISOString().slice(0, 19).replace('T', ' ');
+        } else {
+          // If it's already a string, use it
+          createdAt = transactionData.created_at;
+        }
+        console.log('📅 [API] Using provided created_at:', createdAt);
+      } else {
+        createdAt = new Date().toISOString().slice(0, 19).replace('T', ' ');
+        console.log('📅 [API] Using current time:', createdAt);
+      }
+      
+      // Insert main transaction record using UUID
       const transactionResult = await query(`
     INSERT INTO transactions (
+      uuid_id,
       business_id, 
       user_id, 
       payment_method_id, 
@@ -84,8 +116,9 @@ export async function POST(request: NextRequest) {
       transaction_type,
       status,
       created_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'completed', NOW())
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'completed', ?)
       `, [
+        transactionData.id, // Use UUID from client
         transactionData.business_id,
         transactionData.user_id,
         paymentMethodId,
@@ -102,16 +135,22 @@ export async function POST(request: NextRequest) {
         transactionData.cl_account_id || null,
         transactionData.cl_account_name || null,
         receiptNumber,
-        transactionData.transaction_type
+        transactionData.transaction_type,
+        createdAt // Use provided or current timestamp
       ]);
+      
+      console.log('✅ [API] Transaction inserted successfully with ID:', transactionData.id);
 
-      const transactionId = (transactionResult as any).insertId;
+      // Use the UUID for transaction items
+      const transactionId = transactionData.id;
 
       // Insert transaction items
       for (const item of transactionData.items) {
         await query(`
           INSERT INTO transaction_items (
+            uuid_id,
             transaction_id,
+            uuid_transaction_id,
             product_id,
             quantity,
             unit_price,
@@ -119,9 +158,11 @@ export async function POST(request: NextRequest) {
             customizations_json,
             custom_note,
             created_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, NOW())
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())
         `, [
-          transactionId,
+          item.id || randomUUID(), // Use item UUID or generate one
+          Math.floor(Math.random() * 1000000) + 100000, // Generate integer ID for old transaction_id column
+          transactionId, // UUID for uuid_transaction_id column
           item.product_id,
           item.quantity,
           item.unit_price,
@@ -186,9 +227,14 @@ export async function POST(request: NextRequest) {
     }
 
   } catch (error) {
-    console.error('Error saving transaction:', error);
+    console.error('❌ Error saving transaction:', error);
+    console.error('❌ Error details:', error instanceof Error ? error.message : 'Unknown error');
+    console.error('❌ Error stack:', error instanceof Error ? error.stack : 'No stack');
     return NextResponse.json(
-      { error: 'Failed to save transaction' },
+      { 
+        error: 'Failed to save transaction',
+        details: error instanceof Error ? error.message : 'Unknown error'
+      },
       { status: 500 }
     );
   }
@@ -199,6 +245,8 @@ export async function GET(request: NextRequest) {
     const { searchParams } = new URL(request.url);
     const businessId = searchParams.get('business_id');
     const date = searchParams.get('date');
+    const fromDate = searchParams.get('from_date');
+    const toDate = searchParams.get('to_date');
     const limit = searchParams.get('limit') || '50';
 
     // First, let's check if transactions table exists
@@ -213,10 +261,10 @@ export async function GET(request: NextRequest) {
       });
     }
 
-    // Query with payment method join
+    // Query with payment method join - exclude archived transactions
     let sql = `
       SELECT 
-        t.id,
+        t.uuid_id as id,
         t.business_id,
         t.user_id,
         t.pickup_method,
@@ -242,6 +290,7 @@ export async function GET(request: NextRequest) {
         pm.name as payment_method_name
       FROM transactions t
       LEFT JOIN payment_methods pm ON t.payment_method_id = pm.id
+      WHERE t.status != 'archived'
     `;
     const params: any[] = [];
 
@@ -251,8 +300,16 @@ export async function GET(request: NextRequest) {
       conditions.push('t.business_id = ?');
       params.push(parseInt(businessId));
     }
-    if (date) {
-      // Use date range instead of DATE() function for better prepared statement compatibility
+    // Date filtering - support both single date and date range
+    if (fromDate && toDate) {
+      // Date range filtering
+      const startDate = `${fromDate} 00:00:00`;
+      const endDate = `${toDate} 23:59:59`;
+      conditions.push('t.created_at >= ? AND t.created_at <= ?');
+      params.push(startDate);
+      params.push(endDate);
+    } else if (date) {
+      // Single date filtering (backward compatibility)
       const startDate = `${date} 00:00:00`;
       const endDate = `${date} 23:59:59`;
       conditions.push('t.created_at >= ? AND t.created_at <= ?');
@@ -261,7 +318,7 @@ export async function GET(request: NextRequest) {
     }
 
     if (conditions.length > 0) {
-      sql += ' WHERE ' + conditions.join(' AND ');
+      sql += ' AND ' + conditions.join(' AND ');
     }
 
     sql += ' ORDER BY t.created_at DESC LIMIT ?';

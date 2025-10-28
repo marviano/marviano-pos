@@ -15,7 +15,6 @@ interface SyncStatus {
 }
 
 export function useOfflineSync() {
-  console.log('🎣 [HOOK] useOfflineSync hook initializing...');
   const [status, setStatus] = useState<SyncStatus>({
     isOnline: false, // Start as offline until verified
     internetConnected: false,
@@ -30,9 +29,7 @@ export function useOfflineSync() {
   });
 
   useEffect(() => {
-    console.log('🎣 [HOOK] useOfflineSync useEffect running...');
     // Force connection check when hook initializes
-    console.log('🎣 [HOOK] Calling forceConnectionCheck...');
     offlineSyncService.forceConnectionCheck();
 
     // Subscribe to sync status changes

@@ -38,6 +38,19 @@ export async function fetchProducts(
   transactionType?: 'drinks' | 'bakery',
   options?: { isOnline?: boolean, forceOnline?: boolean }
 ): Promise<Product[]> {
+  console.log('🔍 [FETCH PRODUCTS] Starting fetch with params:', {
+    category2Name,
+    transactionType,
+    options,
+    isElectron: isElectron
+  });
+
+  // If we're in offline mode (isOnline is false), skip API call entirely
+  if (options?.isOnline === false) {
+    console.log('📱 [OFFLINE MODE] Skipping API call, using local database directly');
+    return await fetchFromLocalDatabase(category2Name, transactionType, options);
+  }
+
   try {
     // Try online fetch first
     let url = category2Name ? `/api/products?category2_name=${encodeURIComponent(category2Name)}` : '/api/products';
@@ -47,15 +60,22 @@ export async function fetchProducts(
     if (options?.isOnline) {
       url += (url.includes('?') ? '&' : '?') + `online=true`;
     }
+    
+    console.log('🌐 [ONLINE FETCH] Making API request to:', url);
     const response = await fetch(url, { cache: 'no-store' });
     
+    console.log('🌐 [ONLINE FETCH] Response status:', response.status, response.statusText);
+    
     if (!response.ok) {
-      throw new Error('Network request failed');
+      throw new Error(`Network request failed: ${response.status} ${response.statusText}`);
     }
     
     const data = await response.json();
+    console.log('🌐 [ONLINE FETCH] Response data:', data);
     
     if (data.success && data.products) {
+      console.log('✅ [ONLINE FETCH] Successfully fetched', data.products.length, 'products');
+      
       // If we got online data successfully, cache it locally
       if (isElectron) {
         try {
@@ -69,8 +89,10 @@ export async function fetchProducts(
       return data.products;
     }
     
-    throw new Error('Invalid response format');
+    throw new Error('Invalid response format: ' + JSON.stringify(data));
   } catch (error) {
+    console.error('❌ [ONLINE FETCH] Error occurred:', error);
+    
     // If forceOnline is true, don't fall back to offline data
     if (options?.forceOnline) {
       console.warn('⚠️ Force online mode enabled, but online fetch failed:', error);
@@ -78,19 +100,44 @@ export async function fetchProducts(
     }
     
     console.warn('⚠️ Online fetch failed, using offline data:', error);
-    
+    return await fetchFromLocalDatabase(category2Name, transactionType, options);
+  }
+}
+
+/**
+ * Fetch products from local SQLite database
+ */
+async function fetchFromLocalDatabase(
+  category2Name?: string,
+  transactionType?: 'drinks' | 'bakery',
+  options?: { isOnline?: boolean, forceOnline?: boolean }
+): Promise<Product[]> {
     // Fall back to local SQLite database
     if (isElectron) {
       try {
+        console.log('🔄 [OFFLINE FETCHER] Falling back to local SQLite database');
         let products;
         if (category2Name) {
+          console.log('🔄 [OFFLINE FETCHER] Fetching products by category2:', category2Name);
           products = await (window as any).electronAPI.localDbGetProductsByCategory2(category2Name);
         } else {
+          console.log('🔄 [OFFLINE FETCHER] Fetching all products');
           products = await (window as any).electronAPI.localDbGetAllProducts();
         }
         
+        console.log('📦 [OFFLINE FETCHER] Retrieved products from SQLite:', products ? products.length : 0);
+        
         // Filter by transaction type if specified using category2_name
         if (transactionType) {
+          console.log('🔄 [OFFLINE FETCHER] Filtering by transaction type:', transactionType);
+        console.log('🔄 [OFFLINE FETCHER] Products before filtering:', products.map(p => ({ id: p.id, name: p.nama, category2: p.category2_name })));
+        
+        // TEMPORARY FIX: Show all products when offline to debug the issue
+        if (options?.isOnline === false) {
+          console.log('🔧 [DEBUG] Offline mode detected - showing ALL products for debugging');
+          console.log('📦 [OFFLINE FETCHER] After filtering (DEBUG):', products.length, 'products');
+          console.log('📦 [OFFLINE FETCHER] All products:', products.map(p => ({ id: p.id, name: p.nama, category2: p.category2_name })));
+        } else {
           if (transactionType === 'drinks') {
             products = products.filter((p: Product) => 
               p.category2_name && ['Ice Cream Cone', 'Sundae', 'Milk Tea'].includes(p.category2_name)
@@ -98,14 +145,19 @@ export async function fetchProducts(
           } else if (transactionType === 'bakery') {
             products = products.filter((p: Product) => p.category2_name === 'Bakery');
           }
+          console.log('📦 [OFFLINE FETCHER] After filtering:', products.length, 'products');
+          console.log('📦 [OFFLINE FETCHER] Filtered products:', products.map(p => ({ id: p.id, name: p.nama, category2: p.category2_name })));
+        }
         }
 
         // Apply online-only filter when needed
         if (options?.isOnline) {
+          console.log('🔄 [OFFLINE FETCHER] Applying online-only filter');
           products = products.filter((p: Product) => !!p.harga_online && p.harga_online > 0);
+          console.log('📦 [OFFLINE FETCHER] After online filter:', products.length, 'products');
         }
         
-        console.log('✅ Loaded products from local database:', products.length);
+        console.log('✅ [OFFLINE FETCHER] Returning', products.length, 'products from offline database');
         return products;
       } catch (localError) {
         console.error('❌ Failed to load from local database:', localError);
@@ -114,7 +166,6 @@ export async function fetchProducts(
     
     // If everything fails, return empty array
     return [];
-  }
 }
 
 /**
@@ -124,6 +175,18 @@ export async function fetchCategories(
   transactionType?: 'drinks' | 'bakery',
   options?: { isOnline?: boolean }
 ): Promise<Category[]> {
+  console.log('🔍 [FETCH CATEGORIES] Starting fetch with params:', {
+    transactionType,
+    options,
+    isElectron: isElectron
+  });
+
+  // If we're in offline mode (isOnline is false), skip API call entirely
+  if (options?.isOnline === false) {
+    console.log('📱 [OFFLINE MODE] Skipping API call for categories, using local database directly');
+    return await fetchCategoriesFromLocalDatabase(transactionType, options);
+  }
+
   try {
     // Try online fetch first
     let url = '/api/categories';
@@ -133,15 +196,22 @@ export async function fetchCategories(
     if (options?.isOnline) {
       url += (url.includes('?') ? '&' : '?') + `online=true`;
     }
+    
+    console.log('🌐 [ONLINE FETCH] Making API request to:', url);
     const response = await fetch(url, { cache: 'no-store' });
     
+    console.log('🌐 [ONLINE FETCH] Response status:', response.status, response.statusText);
+    
     if (!response.ok) {
-      throw new Error('Network request failed');
+      throw new Error(`Network request failed: ${response.status} ${response.statusText}`);
     }
     
     const data = await response.json();
+    console.log('🌐 [ONLINE FETCH] Response data:', data);
     
     if (data.success && data.categories) {
+      console.log('✅ [ONLINE FETCH] Successfully fetched', data.categories.length, 'categories');
+      
       // If we got online data successfully, cache it locally
       if (isElectron) {
         try {
@@ -160,10 +230,21 @@ export async function fetchCategories(
       return data.categories;
     }
     
-    throw new Error('Invalid response format');
+    throw new Error('Invalid response format: ' + JSON.stringify(data));
   } catch (error) {
+    console.error('❌ [ONLINE FETCH] Error occurred:', error);
     console.warn('⚠️ Online fetch failed, using offline data:', error);
-    
+    return await fetchCategoriesFromLocalDatabase(transactionType, options);
+  }
+}
+
+/**
+ * Fetch categories from local SQLite database
+ */
+async function fetchCategoriesFromLocalDatabase(
+  transactionType?: 'drinks' | 'bakery',
+  options?: { isOnline?: boolean }
+): Promise<Category[]> {
     // Fall back to local SQLite database
     if (isElectron) {
       try {
@@ -202,7 +283,6 @@ export async function fetchCategories(
     
     // If everything fails, return empty array
     return [];
-  }
 }
 
 /**

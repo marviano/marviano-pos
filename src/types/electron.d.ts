@@ -36,9 +36,27 @@ declare global {
       localDbGetCategories?: () => Promise<{ jenis: string; updated_at: number }[]>;
       localDbUpsertProducts?: (rows: any[]) => Promise<{ success: boolean }>;
       localDbGetProductsByJenis?: (jenis: string) => Promise<any[]>;
+      localDbGetProductsByCategory2?: (category2Name: string) => Promise<any[]>;
       localDbGetAllProducts?: () => Promise<any[]>;
       localDbUpdateSyncStatus?: (key: string, status: string) => Promise<{ success: boolean }>;
       localDbGetSyncStatus?: (key: string) => Promise<{ key: string; last_sync: number; status: string } | null>;
+      
+      // Offline transaction queue
+      localDbQueueOfflineTransaction?: (transactionData: any) => Promise<{ success: boolean; offlineTransactionId?: number; error?: string }>;
+      localDbGetPendingTransactions?: () => Promise<any[]>;
+      localDbMarkTransactionSynced?: (offlineTransactionId: number) => Promise<{ success: boolean }>;
+      localDbMarkTransactionFailed?: (offlineTransactionId: number) => Promise<{ success: boolean }>;
+      
+      // Transaction operations
+      localDbGetTransactions?: (businessId?: number, limit?: number) => Promise<any[]>;
+      localDbUpsertTransactions?: (rows: any[]) => Promise<any>;
+      localDbGetTransactionItems?: (transactionId?: number) => Promise<any[]>;
+      localDbUpsertTransactionItems?: (rows: any[]) => Promise<any>;
+      localDbGetUnsyncedTransactions?: (businessId?: number) => Promise<any[]>;
+      localDbMarkTransactionsSynced?: (transactionIds: string[]) => Promise<any>;
+      localDbArchiveTransactions?: (businessId: number) => Promise<number>;
+      localDbDeleteTransactions?: (businessId: number) => Promise<number>;
+      localDbDeleteTransactionItems?: (businessId: number) => Promise<any>;
       
       // Comprehensive POS table operations
       // Users
@@ -70,6 +88,42 @@ declare global {
       localDbGetSource?: () => Promise<any[]>;
       localDbUpsertPekerjaan?: (rows: any[]) => Promise<{ success: boolean }>;
       localDbGetPekerjaan?: () => Promise<any[]>;
+      
+      // Banks
+      localDbUpsertBanks?: (rows: any[]) => Promise<any>;
+      localDbGetBanks?: () => Promise<any[]>;
+      
+      // Payment Methods
+      localDbUpsertPaymentMethods?: (rows: any[]) => Promise<any>;
+      localDbGetPaymentMethods?: () => Promise<any[]>;
+      
+      // Organizations
+      localDbUpsertOrganizations?: (rows: any[]) => Promise<any>;
+      localDbGetOrganizations?: () => Promise<any[]>;
+      
+      // Management Groups
+      localDbUpsertManagementGroups?: (rows: any[]) => Promise<any>;
+      localDbGetManagementGroups?: () => Promise<any[]>;
+      
+      // Categories
+      localDbUpsertCategory1?: (rows: any[]) => Promise<any>;
+      localDbGetCategory1?: () => Promise<any[]>;
+      localDbUpsertCategory2?: (rows: any[]) => Promise<any>;
+      localDbGetCategory2?: () => Promise<any[]>;
+      
+      // CL Accounts
+      localDbUpsertClAccounts?: (rows: any[]) => Promise<any>;
+      localDbGetClAccounts?: () => Promise<any[]>;
+      
+      // Customization
+      localDbUpsertCustomizationTypes?: (rows: any[]) => Promise<any>;
+      localDbUpsertCustomizationOptions?: (rows: any[]) => Promise<any>;
+      localDbUpsertProductCustomizations?: (rows: any[]) => Promise<any>;
+      localDbGetProductCustomizations?: (productId: number) => Promise<any[]>;
+      
+      // Omset
+      localDbUpsertOmset?: (rows: any[]) => Promise<any>;
+      localDbGetOmset?: (businessId?: number, startDate?: string, endDate?: string) => Promise<any[]>;
       
       // Printer configurations
       localDbSavePrinterConfig?: (printerType: string, systemPrinterName: string) => Promise<{ success: boolean; error?: string }>;

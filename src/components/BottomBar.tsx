@@ -16,10 +16,11 @@ export default function BottomBar() {
         {bottomActions.map((action) => (
           <button
             key={action.id}
-            className="flex flex-col items-center space-y-1 text-gray-600 hover:text-gray-800 transition-colors"
+            disabled
+            className="flex flex-col items-center space-y-1 text-gray-400 cursor-not-allowed opacity-50"
           >
             <action.icon className="w-5 h-5" />
-            <span className="text-xs font-medium">{action.name}</span>
+            <span className="text-xs font-medium line-through">{action.name}</span>
           </button>
         ))}
       </div>

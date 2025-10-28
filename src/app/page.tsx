@@ -4,8 +4,7 @@ import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { useAuth } from '@/hooks/useAuth';
 import POSLayout from '@/components/POSLayout';
-import OfflineIndicator from '@/components/OfflineIndicator';
-import ConnectionDebugPanel from '@/components/ConnectionDebugPanel';
+import OfflineStatus from '@/components/OfflineStatus';
 import { LogOut, Minimize2, X } from 'lucide-react';
 
 export default function Home() {
@@ -42,7 +41,7 @@ export default function Home() {
         <div className="flex items-center space-x-4">
           <h1 className="text-base font-semibold text-gray-800">Momoyo Bakery Kalimantan POS</h1>
           <span className="text-sm text-gray-500">Welcome, {user?.name}</span>
-          <OfflineIndicator />
+          <OfflineStatus />
         </div>
         <div className="flex items-center space-x-2">
           <button
@@ -93,9 +92,6 @@ export default function Home() {
       
       {/* POS Interface */}
       <POSLayout />
-      
-      {/* Debug Panel - Remove this after testing */}
-      <ConnectionDebugPanel />
     </div>
   );
 }

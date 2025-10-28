@@ -8,8 +8,11 @@ import BottomBar from './BottomBar';
 import SlideshowManager from './SlideshowManager';
 import TransactionList from './TransactionList';
 import PrinterSetup from './PrinterSetup';
+import OfflineDebugPanel from './OfflineDebugPanel';
+import SyncManagement from './SyncManagement';
 import { mockMenuItems } from '@/data/mockData';
 import { fetchCategories, fetchProducts } from '@/lib/offlineDataFetcher';
+import { databaseHealthService } from '@/lib/databaseHealth';
 
 interface Category {
   jenis: string;
@@ -44,12 +47,13 @@ export default function POSLayout() {
   const [activeMenuItem, setActiveMenuItem] = useState('Kasir');
   const [activeKasirTab, setActiveKasirTab] = useState<'drinks' | 'bakery'>('drinks');
   const [isOnlineTab, setIsOnlineTab] = useState<boolean>(false);
-  const [activeSettingsTab, setActiveSettingsTab] = useState('slideshow');
+  const [activeSettingsTab, setActiveSettingsTab] = useState('sync');
   const [categories, setCategories] = useState<Category[]>([]); // Start with empty array
   const [isLoadingCategories, setIsLoadingCategories] = useState(true);
   const [products, setProducts] = useState<Product[]>([]); // Start with empty array
   const [isLoadingProducts, setIsLoadingProducts] = useState(true);
   const [isSwitchingCategory, setIsSwitchingCategory] = useState(false);
+  const [databaseStatus, setDatabaseStatus] = useState<string>('Checking...');
 
   // Helper functions to get current cart based on active tab
   const getCurrentCart = () => {
@@ -122,10 +126,10 @@ export default function POSLayout() {
       setIsSwitchingCategory(true);
       try {
         console.log('📦 Fetching products for category:', selectedCategory, 'tab:', activeKasirTab, 'online:', isOnlineTab);
-        // Force online mode to get fresh image URLs from VPS
+        // Use smart offline/online mode - only force online for online tab
         const productsData = await fetchProducts(selectedCategory, activeKasirTab, { 
           isOnline: isOnlineTab, 
-          forceOnline: true 
+          forceOnline: isOnlineTab // Only force online when explicitly in online tab
         });
         
         console.log('✅ Products loaded:', productsData.length, 'items');
@@ -156,11 +160,61 @@ export default function POSLayout() {
     }
   }, [activeKasirTab, isOnlineTab]);
 
+  // Check database health on mount and ensure it's populated
+  useEffect(() => {
+    const checkDatabaseHealth = async () => {
+      try {
+        const status = await databaseHealthService.getStatusMessage();
+        setDatabaseStatus(status);
+        
+        // If database is empty, try to populate it
+        const health = await databaseHealthService.checkDatabaseHealth();
+        if (health.needsSync) {
+          console.log('🔄 Database is empty, performing initial sync...');
+          const success = await databaseHealthService.ensureDatabasePopulated();
+          if (success) {
+            const newStatus = await databaseHealthService.getStatusMessage();
+            setDatabaseStatus(newStatus);
+            console.log('✅ Database populated successfully');
+          } else {
+            setDatabaseStatus('Database sync failed - offline mode may not work');
+            console.warn('⚠️ Failed to populate database');
+          }
+        }
+      } catch (error) {
+        console.error('❌ Error checking database health:', error);
+        setDatabaseStatus('Database health check failed');
+      }
+    };
+
+    checkDatabaseHealth();
+  }, []);
+
   const renderMainContent = () => {
     switch (activeMenuItem) {
       case 'Kasir':
         return (
           <div className="flex-1 flex flex-col h-full">
+            {/* Database Status */}
+            <div className="bg-blue-50 border-b border-blue-200 px-4 py-1">
+              <div className="flex items-center justify-between">
+                <div className="text-xs text-blue-700">
+                  <span className="font-medium">Database:</span> {databaseStatus}
+                </div>
+                <button
+                  onClick={async () => {
+                    setDatabaseStatus('Syncing...');
+                    const success = await databaseHealthService.forceSync();
+                    const newStatus = await databaseHealthService.getStatusMessage();
+                    setDatabaseStatus(newStatus);
+                  }}
+                  className="px-2 py-1 text-xs bg-blue-600 text-white rounded hover:bg-blue-700"
+                >
+                  Sync Now
+                </button>
+              </div>
+            </div>
+            
             {/* Kasir Tabs */}
             <div className="bg-white border-b border-gray-200 px-4 py-2">
               <div className="flex space-x-1 flex-wrap">
@@ -236,13 +290,21 @@ export default function POSLayout() {
       
       case 'Setelan':
         return (
-          <div className="flex-1 p-6 overflow-y-auto">
-            <div className="max-w-6xl mx-auto">
-              <h1 className="text-2xl font-bold text-gray-800 mb-6">Settings</h1>
-              
+          <div className="flex-1 flex flex-col overflow-hidden">
+            <div className="max-w-6xl mx-auto w-full flex flex-col h-full">
               {/* Settings Tabs */}
               <div className="border-b border-gray-200 mb-6">
                 <nav className="-mb-px flex space-x-8">
+                  <button
+                    onClick={() => setActiveSettingsTab('sync')}
+                    className={`py-2 px-1 border-b-2 font-medium text-sm ${
+                      activeSettingsTab === 'sync'
+                        ? 'border-blue-500 text-blue-600'
+                        : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
+                    }`}
+                  >
+                    Sinkronisasi
+                  </button>
                   <button
                     onClick={() => setActiveSettingsTab('slideshow')}
                     className={`py-2 px-1 border-b-2 font-medium text-sm ${
@@ -263,12 +325,26 @@ export default function POSLayout() {
                   >
                     Printer Setup
                   </button>
+                  <button
+                    onClick={() => setActiveSettingsTab('debug')}
+                    className={`py-2 px-1 border-b-2 font-medium text-sm ${
+                      activeSettingsTab === 'debug'
+                        ? 'border-blue-500 text-blue-600'
+                        : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
+                    }`}
+                  >
+                    Offline Debug
+                  </button>
                 </nav>
               </div>
-
+              
               {/* Settings Content */}
-              {activeSettingsTab === 'slideshow' && <SlideshowManager />}
-              {activeSettingsTab === 'printers' && <PrinterSetup />}
+              <div className="flex-1 overflow-y-auto">
+                {activeSettingsTab === 'sync' && <SyncManagement />}
+                {activeSettingsTab === 'slideshow' && <SlideshowManager />}
+                {activeSettingsTab === 'printers' && <PrinterSetup />}
+                {activeSettingsTab === 'debug' && <OfflineDebugPanel />}
+              </div>
             </div>
           </div>
         );

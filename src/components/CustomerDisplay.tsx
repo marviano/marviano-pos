@@ -365,8 +365,8 @@ export default function CustomerDisplay() {
             <button className="px-3 py-1 bg-gray-200 text-gray-700 rounded text-sm font-medium">
               Masuk
             </button>
-            <button className="px-3 py-1 text-gray-500 text-sm font-medium">
-              Mendaftar
+            <button disabled className="px-3 py-1 text-gray-400 text-sm font-medium cursor-not-allowed opacity-50">
+              <span className="line-through">Mendaftar</span>
             </button>
           </div>
           {/* Active Tab Indicator */}

@@ -62,6 +62,55 @@ electron_1.contextBridge.exposeInMainWorld('electronAPI', {
     // Printer configurations
     localDbSavePrinterConfig: (printerType, systemPrinterName) => electron_1.ipcRenderer.invoke('localdb-save-printer-config', printerType, systemPrinterName),
     localDbGetPrinterConfigs: () => electron_1.ipcRenderer.invoke('localdb-get-printer-configs'),
+    // Offline transaction queue
+    localDbQueueOfflineTransaction: (transactionData) => electron_1.ipcRenderer.invoke('localdb-queue-offline-transaction', transactionData),
+    localDbGetPendingTransactions: () => electron_1.ipcRenderer.invoke('localdb-get-pending-transactions'),
+    localDbMarkTransactionSynced: (offlineTransactionId) => electron_1.ipcRenderer.invoke('localdb-mark-transaction-synced', offlineTransactionId),
+    localDbMarkTransactionFailed: (offlineTransactionId) => electron_1.ipcRenderer.invoke('localdb-mark-transaction-failed', offlineTransactionId),
+    // Add missing method
+    localDbGetProductsByCategory2: (category2Name) => electron_1.ipcRenderer.invoke('localdb-get-products-by-category2', category2Name),
+    // Customization handlers
+    localDbUpsertCustomizationTypes: (rows) => electron_1.ipcRenderer.invoke('localdb-upsert-customization-types', rows),
+    localDbUpsertCustomizationOptions: (rows) => electron_1.ipcRenderer.invoke('localdb-upsert-customization-options', rows),
+    localDbUpsertProductCustomizations: (rows) => electron_1.ipcRenderer.invoke('localdb-upsert-product-customizations', rows),
+    localDbGetProductCustomizations: (productId) => electron_1.ipcRenderer.invoke('localdb-get-product-customizations', productId),
+    // New enhanced offline support tables
+    // Transactions
+    localDbUpsertTransactions: (rows) => electron_1.ipcRenderer.invoke('localdb-upsert-transactions', rows),
+    localDbGetTransactions: (businessId, limit) => electron_1.ipcRenderer.invoke('localdb-get-transactions', businessId, limit),
+    localDbArchiveTransactions: (businessId) => electron_1.ipcRenderer.invoke('localdb-archive-transactions', businessId),
+    localDbDeleteTransactions: (businessId) => electron_1.ipcRenderer.invoke('localdb-delete-transactions', businessId),
+    localDbDeleteTransactionItems: (businessId) => electron_1.ipcRenderer.invoke('localdb-delete-transaction-items', businessId),
+    localDbGetUnsyncedTransactions: (businessId) => electron_1.ipcRenderer.invoke('localdb-get-unsynced-transactions', businessId),
+    localDbMarkTransactionsSynced: (transactionIds) => electron_1.ipcRenderer.invoke('localdb-mark-transactions-synced', transactionIds),
+    localDbResetTransactionSync: (transactionId) => electron_1.ipcRenderer.invoke('localdb-reset-transaction-sync', transactionId),
+    // Transaction Items
+    localDbUpsertTransactionItems: (rows) => electron_1.ipcRenderer.invoke('localdb-upsert-transaction-items', rows),
+    localDbGetTransactionItems: (transactionId) => electron_1.ipcRenderer.invoke('localdb-get-transaction-items', transactionId),
+    // Payment Methods
+    localDbUpsertPaymentMethods: (rows) => electron_1.ipcRenderer.invoke('localdb-upsert-payment-methods', rows),
+    localDbGetPaymentMethods: () => electron_1.ipcRenderer.invoke('localdb-get-payment-methods'),
+    // Banks
+    localDbUpsertBanks: (rows) => electron_1.ipcRenderer.invoke('localdb-upsert-banks', rows),
+    localDbGetBanks: () => electron_1.ipcRenderer.invoke('localdb-get-banks'),
+    // Organizations
+    localDbUpsertOrganizations: (rows) => electron_1.ipcRenderer.invoke('localdb-upsert-organizations', rows),
+    localDbGetOrganizations: () => electron_1.ipcRenderer.invoke('localdb-get-organizations'),
+    // Management Groups
+    localDbUpsertManagementGroups: (rows) => electron_1.ipcRenderer.invoke('localdb-upsert-management-groups', rows),
+    localDbGetManagementGroups: () => electron_1.ipcRenderer.invoke('localdb-get-management-groups'),
+    // Category1
+    localDbUpsertCategory1: (rows) => electron_1.ipcRenderer.invoke('localdb-upsert-category1', rows),
+    localDbGetCategory1: () => electron_1.ipcRenderer.invoke('localdb-get-category1'),
+    // Category2
+    localDbUpsertCategory2: (rows) => electron_1.ipcRenderer.invoke('localdb-upsert-category2', rows),
+    localDbGetCategory2: (businessId) => electron_1.ipcRenderer.invoke('localdb-get-category2', businessId),
+    // CL Accounts
+    localDbUpsertClAccounts: (rows) => electron_1.ipcRenderer.invoke('localdb-upsert-cl-accounts', rows),
+    localDbGetClAccounts: () => electron_1.ipcRenderer.invoke('localdb-get-cl-accounts'),
+    // Omset
+    localDbUpsertOmset: (rows) => electron_1.ipcRenderer.invoke('localdb-upsert-omset', rows),
+    localDbGetOmset: (businessId, startDate, endDate) => electron_1.ipcRenderer.invoke('localdb-get-omset', businessId, startDate, endDate),
     // Customer display event listeners
     onOrderUpdate: (callback) => {
         electron_1.ipcRenderer.on('order-update', (event, data) => callback(data));

@@ -7,9 +7,9 @@ export async function GET(
 ) {
   try {
     const resolvedParams = await params;
-    const transactionId = parseInt(resolvedParams.id);
+    const transactionId = resolvedParams.id; // Keep as string for UUID
     
-    if (isNaN(transactionId)) {
+    if (!transactionId) {
       return NextResponse.json(
         { success: false, message: 'Invalid transaction ID' },
         { status: 400 }
@@ -19,7 +19,7 @@ export async function GET(
     // Get transaction details with user and business names
     const transactionQuery = `
       SELECT 
-        t.id,
+        t.uuid_id as id,
         t.business_id,
         t.user_id,
         t.pickup_method,
@@ -53,7 +53,7 @@ export async function GET(
       LEFT JOIN banks ON t.bank_id = banks.id
       LEFT JOIN cl_accounts cl ON t.cl_account_id = cl.id
       LEFT JOIN payment_methods pm ON t.payment_method_id = pm.id
-      WHERE t.id = ?
+      WHERE t.uuid_id = ?
     `;
 
     const transactionResult = await query(transactionQuery, [transactionId]);
@@ -70,12 +70,18 @@ export async function GET(
     // Get transaction items
     const itemsQuery = `
       SELECT 
-        ti.*,
+        ti.uuid_id as id,
+        ti.product_id,
+        ti.quantity,
+        ti.unit_price,
+        ti.total_price,
+        ti.customizations_json,
+        ti.custom_note,
         p.nama as product_name
       FROM transaction_items ti
       LEFT JOIN products p ON ti.product_id = p.id
-      WHERE ti.transaction_id = ?
-      ORDER BY ti.id
+      WHERE ti.uuid_transaction_id = ?
+      ORDER BY ti.uuid_id
     `;
 
     const itemsResult = await query(itemsQuery, [transactionId]);

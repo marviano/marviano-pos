@@ -62,19 +62,23 @@ export async function GET(
       selection_mode: type.selection_mode,
       options: customizationOptions.filter(option => option.type_id === type.id).map(option => ({
         ...option,
-        price_adjustment: Number(option.price_adjustment) // Ensure it's a number
+        price_adjustment: Number(option.price_adjustment)
       }))
     }));
-
-    console.log('API Response customizations:', JSON.stringify(customizations, null, 2));
 
     return NextResponse.json({
       success: true,
       customizations: customizations
     });
 
-  } catch (error) {
-    console.error('❌ Error fetching product customizations:', error);
+  } catch (error: any) {
+    // If it's a connection error, return a different status so the frontend knows to fallback
+    if (error?.code === 'ENETUNREACH' || error?.errno === -4062) {
+      return NextResponse.json(
+        { success: false, error: 'Connection failed - please try offline mode' },
+        { status: 503 } // Service Unavailable
+      );
+    }
     return NextResponse.json(
       {
         success: false,

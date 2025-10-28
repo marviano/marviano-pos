@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { X } from 'lucide-react';
 
 interface Product {
@@ -22,6 +22,28 @@ interface CustomNoteModalProps {
 
 export default function CustomNoteModal({ isOpen, onClose, product, onConfirm }: CustomNoteModalProps) {
   const [customNote, setCustomNote] = useState('');
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+
+  // Force focus on the textarea when modal opens - aggressive approach for Electron
+  useEffect(() => {
+    if (isOpen && textareaRef.current) {
+      // Multiple attempts to ensure focus works in Electron
+      const focusAttempts = [0, 50, 100, 150, 200];
+      const timers: NodeJS.Timeout[] = [];
+      
+      focusAttempts.forEach(delay => {
+        const timer = setTimeout(() => {
+          if (textareaRef.current) {
+            textareaRef.current.focus();
+            textareaRef.current.click(); // Trigger click to ensure activation
+          }
+        }, delay);
+        timers.push(timer);
+      });
+      
+      return () => timers.forEach(timer => clearTimeout(timer));
+    }
+  }, [isOpen]);
 
   const handleConfirm = () => {
     onConfirm(customNote);
@@ -40,10 +62,17 @@ export default function CustomNoteModal({ isOpen, onClose, product, onConfirm }:
     <div 
       className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-50 p-4"
       onClick={handleClose}
+      onMouseDown={(e) => {
+        // Don't let backdrop steal focus
+        if (e.target === e.currentTarget) {
+          e.preventDefault();
+        }
+      }}
     >
       <div 
         className="bg-white rounded-2xl w-full max-w-md shadow-xl"
         onClick={(e) => e.stopPropagation()}
+        onMouseDown={(e) => e.stopPropagation()}
       >
         {/* Header */}
         <div className="flex items-center justify-between p-6 pb-4">
@@ -70,15 +99,37 @@ export default function CustomNoteModal({ isOpen, onClose, product, onConfirm }:
               Custom Note (Optional)
             </label>
             <textarea
+              ref={textareaRef}
               value={customNote}
               onChange={(e) => setCustomNote(e.target.value)}
-              onClick={(e) => e.stopPropagation()}
-              className="w-full p-3 border border-gray-300 rounded-lg text-gray-800 bg-white focus:border-blue-400 focus:ring-2 focus:ring-blue-100 resize-none cursor-text"
+              onMouseDown={(e) => {
+                e.stopPropagation();
+                e.preventDefault();
+                e.currentTarget.focus();
+              }}
+              onMouseUp={(e) => {
+                e.stopPropagation();
+                e.currentTarget.focus();
+              }}
+              onClick={(e) => {
+                e.stopPropagation();
+                e.currentTarget.focus();
+              }}
+              onFocus={(e) => {
+                e.stopPropagation();
+                console.log('✅ Custom note textarea focused');
+              }}
+              onBlur={() => {
+                console.log('⚠️ Custom note textarea lost focus');
+              }}
+              style={{ pointerEvents: 'auto' }}
+              className="w-full p-3 border-2 border-gray-300 rounded-lg text-gray-800 bg-white focus:border-blue-500 focus:ring-4 focus:ring-blue-200 resize-none cursor-text"
               placeholder="Add any special instructions or notes for this item..."
               rows={3}
               maxLength={200}
               autoComplete="off"
-              autoFocus
+              spellCheck={false}
+              tabIndex={1}
             />
             <p className="text-xs text-gray-500 mt-1">
               {customNote.length}/200 characters

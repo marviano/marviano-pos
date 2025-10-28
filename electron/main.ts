@@ -11,13 +11,32 @@ let printWindow: BrowserWindow | null = null;
 let localDb: Database.Database | null = null;
 
 function createWindows(): void {
-  // Initialize local SQLite (offline storage) - TEMPORARILY DISABLED
+  // Initialize local SQLite (offline storage)
   try {
-    console.log('🔍 SQLite database temporarily disabled for testing');
-    localDb = null; // Disable database for now
+    console.log('🔍 Initializing SQLite database for offline support...');
+    const dbPath = path.join(__dirname, '../pos-offline.db');
+    localDb = new Database(dbPath);
     
-    // Database creation temporarily disabled
-    /*
+    // Enable WAL mode for better concurrency
+    localDb.pragma('journal_mode = WAL');
+    localDb.pragma('synchronous = NORMAL');
+    localDb.pragma('cache_size = 10000');
+    localDb.pragma('temp_store = MEMORY');
+    
+    // Schema migration: Add synced_at column if it doesn't exist
+    try {
+      const schemaCheck = localDb.prepare(`PRAGMA table_info(transactions)`).all() as any[];
+      const hasSyncedAt = schemaCheck.some(col => col.name === 'synced_at');
+      
+      if (!hasSyncedAt) {
+        console.log('📋 Migrating database: Adding synced_at column...');
+        localDb.prepare(`ALTER TABLE transactions ADD COLUMN synced_at INTEGER`).run();
+        console.log('✅ Migration complete');
+      }
+    } catch (e) {
+      console.log('⚠️ Migration check failed:', e);
+    }
+    
     localDb.exec(`
       -- Core POS Tables
       CREATE TABLE IF NOT EXISTS users (
@@ -62,6 +81,35 @@ function createWindows(): void {
         created_at TEXT,
         updated_at INTEGER,
         has_customization INTEGER DEFAULT 0
+      );
+      
+      -- Customization tables for offline support
+      CREATE TABLE IF NOT EXISTS product_customization_types (
+        id INTEGER PRIMARY KEY,
+        name TEXT NOT NULL,
+        selection_mode TEXT NOT NULL CHECK (selection_mode IN ('single', 'multiple')),
+        display_order INTEGER DEFAULT 0,
+        updated_at INTEGER
+      );
+      
+      CREATE TABLE IF NOT EXISTS product_customization_options (
+        id INTEGER PRIMARY KEY,
+        type_id INTEGER NOT NULL,
+        name TEXT NOT NULL,
+        price_adjustment REAL DEFAULT 0.0,
+        display_order INTEGER DEFAULT 0,
+        status TEXT DEFAULT 'active' CHECK (status IN ('active', 'inactive')),
+        updated_at INTEGER,
+        FOREIGN KEY (type_id) REFERENCES product_customization_types(id) ON DELETE CASCADE
+      );
+      
+      CREATE TABLE IF NOT EXISTS product_customizations (
+        id INTEGER PRIMARY KEY,
+        product_id INTEGER NOT NULL,
+        customization_type_id INTEGER NOT NULL,
+        updated_at INTEGER,
+        FOREIGN KEY (product_id) REFERENCES products(id) ON DELETE CASCADE,
+        FOREIGN KEY (customization_type_id) REFERENCES product_customization_types(id) ON DELETE CASCADE
       );
       
       CREATE TABLE IF NOT EXISTS ingredients (
@@ -203,6 +251,143 @@ function createWindows(): void {
         updated_at INTEGER
       );
       
+      -- Core missing tables for full offline support
+      CREATE TABLE IF NOT EXISTS transactions (
+        id TEXT PRIMARY KEY,  -- UUID instead of INTEGER
+        business_id INTEGER NOT NULL,
+        user_id INTEGER NOT NULL,
+        payment_method TEXT NOT NULL,
+        pickup_method TEXT NOT NULL,
+        total_amount REAL NOT NULL,
+        voucher_discount REAL DEFAULT 0.0,
+        final_amount REAL NOT NULL,
+        amount_received REAL NOT NULL,
+        change_amount REAL DEFAULT 0.0,
+        status TEXT DEFAULT 'completed',
+        created_at TEXT NOT NULL,
+        updated_at INTEGER,
+        synced_at INTEGER,
+        contact_id INTEGER,
+        customer_name TEXT,
+        note TEXT,
+        bank_name TEXT,
+        card_number TEXT,
+        cl_account_id INTEGER,
+        cl_account_name TEXT,
+        bank_id INTEGER,
+        receipt_number INTEGER,
+        transaction_type TEXT DEFAULT 'drinks',
+        payment_method_id INTEGER NOT NULL
+      );
+      
+      CREATE TABLE IF NOT EXISTS transaction_items (
+        id TEXT PRIMARY KEY,  -- UUID instead of INTEGER
+        transaction_id TEXT NOT NULL,  -- References transaction UUID
+        product_id INTEGER NOT NULL,
+        quantity INTEGER NOT NULL DEFAULT 1,
+        unit_price REAL NOT NULL,
+        total_price REAL NOT NULL,
+        customizations_json TEXT,
+        custom_note TEXT,
+        created_at TEXT NOT NULL,
+        FOREIGN KEY (transaction_id) REFERENCES transactions(id) ON DELETE CASCADE
+      );
+      
+      CREATE TABLE IF NOT EXISTS payment_methods (
+        id INTEGER PRIMARY KEY,
+        name TEXT NOT NULL,
+        code TEXT UNIQUE NOT NULL,
+        description TEXT,
+        is_active INTEGER DEFAULT 1,
+        requires_additional_info INTEGER DEFAULT 0,
+        created_at TEXT,
+        updated_at INTEGER
+      );
+      
+      CREATE TABLE IF NOT EXISTS banks (
+        id INTEGER PRIMARY KEY,
+        bank_code TEXT UNIQUE NOT NULL,
+        bank_name TEXT NOT NULL,
+        is_popular INTEGER DEFAULT 0,
+        is_active INTEGER DEFAULT 1,
+        created_at TEXT
+      );
+      
+      CREATE TABLE IF NOT EXISTS organizations (
+        id INTEGER PRIMARY KEY,
+        name TEXT NOT NULL,
+        slug TEXT UNIQUE NOT NULL,
+        owner_user_id INTEGER NOT NULL,
+        subscription_status TEXT DEFAULT 'trial',
+        subscription_plan TEXT DEFAULT 'basic',
+        trial_ends_at TEXT,
+        created_at TEXT,
+        updated_at INTEGER
+      );
+      
+      CREATE TABLE IF NOT EXISTS management_groups (
+        id INTEGER PRIMARY KEY,
+        name TEXT NOT NULL,
+        permission_name TEXT NOT NULL,
+        description TEXT,
+        organization_id INTEGER NOT NULL,
+        manager_user_id INTEGER,
+        created_at TEXT,
+        updated_at INTEGER
+      );
+      
+      CREATE TABLE IF NOT EXISTS category1 (
+        id INTEGER PRIMARY KEY,
+        name TEXT UNIQUE NOT NULL,
+        description TEXT,
+        display_order INTEGER DEFAULT 0,
+        is_active INTEGER DEFAULT 1,
+        created_at TEXT,
+        updated_at INTEGER
+      );
+      
+      CREATE TABLE IF NOT EXISTS category2 (
+        id INTEGER PRIMARY KEY,
+        name TEXT UNIQUE NOT NULL,
+        business_id INTEGER,
+        description TEXT,
+        display_order INTEGER DEFAULT 0,
+        is_active INTEGER DEFAULT 1,
+        created_at TEXT,
+        updated_at INTEGER,
+        FOREIGN KEY (business_id) REFERENCES businesses(id) ON DELETE CASCADE
+      );
+      
+      CREATE TABLE IF NOT EXISTS cl_accounts (
+        id INTEGER PRIMARY KEY,
+        account_code TEXT UNIQUE NOT NULL,
+        account_name TEXT NOT NULL,
+        contact_info TEXT,
+        credit_limit REAL DEFAULT 0.0,
+        current_balance REAL DEFAULT 0.0,
+        is_active INTEGER DEFAULT 1,
+        created_at TEXT,
+        updated_at INTEGER
+      );
+      
+      CREATE TABLE IF NOT EXISTS omset (
+        id INTEGER PRIMARY KEY,
+        business_id INTEGER NOT NULL,
+        date TEXT NOT NULL,
+        regular INTEGER,
+        ojol INTEGER,
+        event INTEGER,
+        delivery INTEGER,
+        fitness INTEGER,
+        pool INTEGER,
+        user_id INTEGER NOT NULL,
+        created_at TEXT,
+        updated_at INTEGER,
+        UNIQUE(business_id, date),
+        FOREIGN KEY (business_id) REFERENCES businesses(id),
+        FOREIGN KEY (user_id) REFERENCES users(id)
+      );
+      
       -- Legacy tables for backward compatibility
       CREATE TABLE IF NOT EXISTS categories (
         jenis TEXT PRIMARY KEY,
@@ -237,10 +422,119 @@ function createWindows(): void {
       CREATE INDEX IF NOT EXISTS idx_deal_products_deal ON deal_products(deal_id);
       CREATE INDEX IF NOT EXISTS idx_users_organization ON users(organization_id);
       CREATE INDEX IF NOT EXISTS idx_teams_organization ON teams(organization_id);
+      
+      -- Indexes for new tables
+      CREATE INDEX IF NOT EXISTS idx_transactions_business ON transactions(business_id);
+      CREATE INDEX IF NOT EXISTS idx_transactions_user ON transactions(user_id);
+      CREATE INDEX IF NOT EXISTS idx_transactions_date ON transactions(created_at);
+      CREATE INDEX IF NOT EXISTS idx_transactions_status ON transactions(status);
+      CREATE INDEX IF NOT EXISTS idx_transactions_contact ON transactions(contact_id);
+      CREATE INDEX IF NOT EXISTS idx_transactions_cl_account ON transactions(cl_account_id);
+      CREATE INDEX IF NOT EXISTS idx_transactions_bank ON transactions(bank_name);
+      CREATE INDEX IF NOT EXISTS idx_transactions_bank_id ON transactions(bank_id);
+      CREATE INDEX IF NOT EXISTS idx_transactions_receipt_number ON transactions(receipt_number);
+      CREATE INDEX IF NOT EXISTS idx_transactions_transaction_type ON transactions(transaction_type);
+      CREATE INDEX IF NOT EXISTS idx_transactions_daily_receipt ON transactions(business_id, created_at, receipt_number);
+      CREATE INDEX IF NOT EXISTS idx_transactions_payment_method ON transactions(payment_method_id);
+      
+      CREATE INDEX IF NOT EXISTS idx_transaction_items_transaction ON transaction_items(transaction_id);
+      CREATE INDEX IF NOT EXISTS idx_transaction_items_product ON transaction_items(product_id);
+      CREATE INDEX IF NOT EXISTS idx_transaction_items_created ON transaction_items(created_at);
+      
+      CREATE INDEX IF NOT EXISTS idx_payment_methods_code ON payment_methods(code);
+      CREATE INDEX IF NOT EXISTS idx_payment_methods_active ON payment_methods(is_active);
+      
+      CREATE INDEX IF NOT EXISTS idx_banks_code ON banks(bank_code);
+      CREATE INDEX IF NOT EXISTS idx_banks_active ON banks(is_active);
+      CREATE INDEX IF NOT EXISTS idx_banks_popular ON banks(is_popular);
+      
+      CREATE INDEX IF NOT EXISTS idx_organizations_slug ON organizations(slug);
+      CREATE INDEX IF NOT EXISTS idx_organizations_owner ON organizations(owner_user_id);
+      
+      CREATE INDEX IF NOT EXISTS idx_management_groups_organization ON management_groups(organization_id);
+      CREATE INDEX IF NOT EXISTS idx_management_groups_manager ON management_groups(manager_user_id);
+      
+      CREATE INDEX IF NOT EXISTS idx_category1_active ON category1(is_active);
+      CREATE INDEX IF NOT EXISTS idx_category1_display_order ON category1(display_order);
+      
+      CREATE INDEX IF NOT EXISTS idx_category2_active ON category2(is_active);
+      CREATE INDEX IF NOT EXISTS idx_category2_display_order ON category2(display_order);
+      CREATE INDEX IF NOT EXISTS idx_category2_business_id ON category2(business_id);
+      
+      CREATE INDEX IF NOT EXISTS idx_cl_accounts_code ON cl_accounts(account_code);
+      CREATE INDEX IF NOT EXISTS idx_cl_accounts_active ON cl_accounts(is_active);
+      
+      CREATE INDEX IF NOT EXISTS idx_omset_business_date ON omset(business_id, date);
+      CREATE INDEX IF NOT EXISTS idx_omset_date ON omset(date);
+      
+      -- Offline transaction queue for sync when online
+      CREATE TABLE IF NOT EXISTS offline_transactions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        transaction_data TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        sync_status TEXT DEFAULT 'pending',
+        sync_attempts INTEGER DEFAULT 0,
+        last_sync_attempt INTEGER
+      );
+      
+      -- Offline transaction items queue
+      CREATE TABLE IF NOT EXISTS offline_transaction_items (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        offline_transaction_id INTEGER NOT NULL,
+        item_data TEXT NOT NULL,
+        FOREIGN KEY (offline_transaction_id) REFERENCES offline_transactions(id) ON DELETE CASCADE
+      );
+      
+      -- Indexes for offline sync performance
+      CREATE INDEX IF NOT EXISTS idx_offline_transactions_sync ON offline_transactions(sync_status);
+      CREATE INDEX IF NOT EXISTS idx_offline_transactions_created ON offline_transactions(created_at);
     `);
-    */
     
-    console.log('✅ SQLite database temporarily disabled for testing');
+    console.log('✅ SQLite database initialized successfully');
+    console.log('📊 Database file location:', dbPath);
+    console.log('🔍 Testing database connection...');
+    
+    // Test the database connection
+    try {
+      const testResult = localDb.prepare('SELECT 1 as test').get();
+      console.log('✅ Database test query successful:', testResult);
+    } catch (testError) {
+      console.error('❌ Database test query failed:', testError);
+    }
+    
+    // Schema migration: Add missing columns to existing tables
+    try {
+      console.log('🔍 Running schema migrations...');
+      
+      // Check if display_order column exists in product_customization_types
+      const columnsResult = localDb.prepare(`
+        SELECT sql FROM sqlite_master WHERE type='table' AND name='product_customization_types'
+      `).get() as { sql?: string } | undefined;
+      
+      if (columnsResult && columnsResult.sql && !columnsResult.sql.includes('display_order')) {
+        console.log('📝 Adding display_order to product_customization_types...');
+        localDb.prepare('ALTER TABLE product_customization_types ADD COLUMN display_order INTEGER DEFAULT 0').run();
+      }
+      
+      // Check if display_order and status columns exist in product_customization_options
+      const optionsColumnsResult = localDb.prepare(`
+        SELECT sql FROM sqlite_master WHERE type='table' AND name='product_customization_options'
+      `).get() as { sql?: string } | undefined;
+      
+      if (optionsColumnsResult && optionsColumnsResult.sql && !optionsColumnsResult.sql.includes('display_order')) {
+        console.log('📝 Adding display_order to product_customization_options...');
+        localDb.prepare('ALTER TABLE product_customization_options ADD COLUMN display_order INTEGER DEFAULT 0').run();
+      }
+      
+      if (optionsColumnsResult && optionsColumnsResult.sql && !optionsColumnsResult.sql.includes('status')) {
+        console.log('📝 Adding status to product_customization_options...');
+        localDb.prepare('ALTER TABLE product_customization_options ADD COLUMN status TEXT DEFAULT \'active\' CHECK (status IN (\'active\', \'inactive\'))').run();
+      }
+      
+      console.log('✅ Schema migrations completed');
+    } catch (migrationError) {
+      console.error('⚠️ Schema migration error (this is OK for first run):', migrationError);
+    }
   } catch (error) {
     console.error('❌ Failed to initialize SQLite:', error);
     localDb = null;
@@ -469,8 +763,12 @@ function createWindows(): void {
         status=excluded.status,
         updated_at=excluded.updated_at`);
       for (const r of data) {
+        // Map MySQL columns to SQLite columns
+        const kategori = r.kategori || r.category1_name || '';
+        const jenis = r.jenis || r.category2_name || '';
+        
         stmt.run(
-          r.id, r.business_id, r.menu_code, r.nama, r.satuan || '', r.kategori, r.jenis, r.keterangan || null,
+          r.id, r.business_id, r.menu_code, r.nama, r.satuan || '', kategori, jenis, r.keterangan || null,
           r.harga_beli || null, r.ppn || null, r.harga_jual, r.harga_khusus || null, 
           r.harga_online || null, r.fee_kerja || null, r.status, Date.now()
         );
@@ -484,17 +782,134 @@ function createWindows(): void {
     const stmt = localDb.prepare(`SELECT 
       id, business_id, menu_code, nama, satuan, kategori, jenis, keterangan,
       harga_beli, ppn, harga_jual, harga_khusus, harga_online, fee_kerja, status 
-      FROM products WHERE jenis = ? AND status = "active" ORDER BY nama ASC`);
+      FROM products WHERE jenis = ? AND status = 'active' ORDER BY nama ASC`);
     return stmt.all(jenis);
   });
-  ipcMain.handle('localdb-get-all-products', async () => {
+  
+  // Add the missing method for category2 filtering
+  ipcMain.handle('localdb-get-products-by-category2', async (event, category2Name: string) => {
     if (!localDb) return [];
     const stmt = localDb.prepare(`SELECT 
       id, business_id, menu_code, nama, satuan, kategori, jenis, keterangan,
       harga_beli, ppn, harga_jual, harga_khusus, harga_online, fee_kerja, status 
-      FROM products WHERE status = "active" ORDER BY nama ASC`);
-    return stmt.all();
+      FROM products WHERE jenis = ? AND status = 'active' ORDER BY nama ASC`);
+    return stmt.all(category2Name);
   });
+  ipcMain.handle('localdb-get-all-products', async () => {
+    if (!localDb) return [];
+    try {
+          const stmt = localDb.prepare(`SELECT 
+        id, business_id, menu_code, nama, satuan, kategori, jenis, keterangan,
+        harga_beli, ppn, harga_jual, harga_khusus, harga_online, fee_kerja, status 
+        FROM products WHERE status = 'active' ORDER BY nama ASC`);
+    return stmt.all();
+    } catch (error) {
+      console.error('Error getting all products:', error);
+      return [];
+    }
+  });
+  
+  // Customization handlers
+  ipcMain.handle('localdb-upsert-customization-types', async (event, rows: any[]) => {
+    if (!localDb) return { success: false };
+    const tx = localDb.transaction((data: any[]) => {
+      const stmt = localDb!.prepare(`INSERT INTO product_customization_types (
+        id, name, selection_mode, display_order, updated_at
+      ) VALUES (?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        name=excluded.name, selection_mode=excluded.selection_mode,
+        display_order=excluded.display_order, updated_at=excluded.updated_at`);
+      for (const r of data) {
+        stmt.run(r.id, r.name, r.selection_mode, r.display_order || 0, Date.now());
+      }
+    });
+    tx(rows);
+    return { success: true };
+  });
+  
+  ipcMain.handle('localdb-upsert-customization-options', async (event, rows: any[]) => {
+    if (!localDb) return { success: false };
+    const tx = localDb.transaction((data: any[]) => {
+      const stmt = localDb!.prepare(`INSERT INTO product_customization_options (
+        id, type_id, name, price_adjustment, display_order, status, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        type_id=excluded.type_id, name=excluded.name, price_adjustment=excluded.price_adjustment,
+        display_order=excluded.display_order, status=excluded.status, updated_at=excluded.updated_at`);
+      for (const r of data) {
+        stmt.run(r.id, r.type_id, r.name, r.price_adjustment || 0.0, r.display_order || 0, r.status || 'active', Date.now());
+      }
+    });
+    tx(rows);
+    return { success: true };
+  });
+  
+  ipcMain.handle('localdb-upsert-product-customizations', async (event, rows: any[]) => {
+    if (!localDb) return { success: false };
+    const tx = localDb.transaction((data: any[]) => {
+      const stmt = localDb!.prepare(`INSERT INTO product_customizations (
+        id, product_id, customization_type_id, updated_at
+      ) VALUES (?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        product_id=excluded.product_id, customization_type_id=excluded.customization_type_id,
+        updated_at=excluded.updated_at`);
+      for (const r of data) {
+        stmt.run(r.id, r.product_id, r.customization_type_id, Date.now());
+      }
+    });
+    tx(rows);
+    return { success: true };
+  });
+  
+  ipcMain.handle('localdb-get-product-customizations', async (event, productId: number) => {
+    if (!localDb) return [];
+    try {
+      console.log(`🔍 [OFFLINE] Fetching customizations for product ${productId}`);
+      
+      // Get customization types for this product
+      const typesStmt = localDb.prepare(`
+        SELECT DISTINCT ct.id, ct.name, ct.selection_mode, ct.display_order
+        FROM product_customization_types ct
+        INNER JOIN product_customizations pc ON ct.id = pc.customization_type_id
+        WHERE pc.product_id = ?
+        ORDER BY ct.display_order ASC, ct.name ASC
+      `);
+      const types = typesStmt.all(productId) as any[];
+      console.log(`📋 [OFFLINE] Found ${types.length} customization types for product ${productId}`, types);
+      
+      // For each type, get all available options (not just for this product)
+      const customizations = types.map((type: any) => {
+        const optionsStmt = localDb!.prepare(`
+          SELECT co.id, co.type_id, co.name, co.price_adjustment, co.display_order
+          FROM product_customization_options co
+          WHERE co.type_id = ? AND co.status = 'active'
+          ORDER BY co.display_order ASC, co.name ASC
+        `);
+        const options = optionsStmt.all(type.id) as any[];
+        console.log(`📋 [OFFLINE] Type "${type.name}": found ${options.length} options`, options);
+        
+        return {
+          id: type.id,
+          name: type.name,
+          selection_mode: type.selection_mode,
+          options: options.map((option: any) => ({
+            id: option.id,
+            type_id: option.type_id,
+            name: option.name,
+            price_adjustment: Number(option.price_adjustment || 0),
+            display_order: option.display_order
+          }))
+        };
+      });
+      
+      console.log(`✅ [OFFLINE] Returning ${customizations.length} customizations:`, customizations);
+      return customizations;
+    } catch (error) {
+      console.error('❌ Error getting product customizations:', error);
+      return [];
+    }
+  });
+  
   ipcMain.handle('localdb-update-sync-status', async (event, key: string, status: string) => {
     if (!localDb) return { success: false };
     const stmt = localDb.prepare('INSERT INTO sync_status (key, last_sync, status) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET last_sync=excluded.last_sync, status=excluded.status');
@@ -583,10 +998,10 @@ function createWindows(): void {
   ipcMain.handle('localdb-get-ingredients', async (event, businessId?: number) => {
     if (!localDb) return [];
     if (businessId) {
-      const stmt = localDb.prepare('SELECT * FROM ingredients WHERE business_id = ? AND status = "active" ORDER BY nama ASC');
+      const stmt = localDb.prepare('SELECT * FROM ingredients WHERE business_id = ? AND status = \'active\' ORDER BY nama ASC');
       return stmt.all(businessId);
     } else {
-      const stmt = localDb.prepare('SELECT * FROM ingredients WHERE status = "active" ORDER BY nama ASC');
+      const stmt = localDb.prepare('SELECT * FROM ingredients WHERE status = \'active\' ORDER BY nama ASC');
       return stmt.all();
     }
   });
@@ -719,6 +1134,549 @@ function createWindows(): void {
     return stmt.all();
   });
 
+  // New table handlers for enhanced offline support
+  
+  // Transactions
+  ipcMain.handle('localdb-upsert-transactions', async (event, rows: any[]) => {
+    if (!localDb) return { success: false };
+    const tx = localDb.transaction((data: any[]) => {
+      const stmt = localDb!.prepare(`INSERT INTO transactions (
+        id, business_id, user_id, payment_method, pickup_method, total_amount,
+        voucher_discount, final_amount, amount_received, change_amount, status,
+        created_at, updated_at, synced_at, contact_id, customer_name, note, bank_name,
+        card_number, cl_account_id, cl_account_name, bank_id, receipt_number,
+        transaction_type, payment_method_id
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        business_id=excluded.business_id, user_id=excluded.user_id, payment_method=excluded.payment_method,
+        pickup_method=excluded.pickup_method, total_amount=excluded.total_amount, voucher_discount=excluded.voucher_discount,
+        final_amount=excluded.final_amount, amount_received=excluded.amount_received, change_amount=excluded.change_amount,
+        status=excluded.status, created_at=excluded.created_at, updated_at=excluded.updated_at, synced_at=excluded.synced_at,
+        contact_id=excluded.contact_id, customer_name=excluded.customer_name, note=excluded.note,
+        bank_name=excluded.bank_name, card_number=excluded.card_number, cl_account_id=excluded.cl_account_id,
+        cl_account_name=excluded.cl_account_name, bank_id=excluded.bank_id, receipt_number=excluded.receipt_number,
+        transaction_type=excluded.transaction_type, payment_method_id=excluded.payment_method_id`);
+      for (const r of data) {
+        console.log('🔍 [SQLITE] Inserting transaction data:', {
+          id: r.id,
+          business_id: r.business_id,
+          user_id: r.user_id,
+          payment_method: r.payment_method,
+          pickup_method: r.pickup_method,
+          total_amount: r.total_amount,
+          voucher_discount: r.voucher_discount,
+          final_amount: r.final_amount,
+          amount_received: r.amount_received,
+          change_amount: r.change_amount,
+          status: r.status,
+          created_at: r.created_at,
+          contact_id: r.contact_id,
+          customer_name: r.customer_name,
+          note: r.note,
+          bank_name: r.bank_name,
+          card_number: r.card_number,
+          cl_account_id: r.cl_account_id,
+          cl_account_name: r.cl_account_name,
+          bank_id: r.bank_id,
+          receipt_number: r.receipt_number,
+          transaction_type: r.transaction_type,
+          payment_method_id: r.payment_method_id
+        });
+        
+        const params = [
+          r.id,
+          r.business_id,
+          r.user_id,
+          r.payment_method,
+          r.pickup_method,
+          Number(r.total_amount),
+          Number(r.voucher_discount ?? 0.0),
+          Number(r.final_amount),
+          Number(r.amount_received),
+          Number(r.change_amount ?? 0.0),
+          r.status ?? 'completed',
+          r.created_at,
+          Date.now(),
+          r.synced_at ?? null, // Keep existing synced_at or NULL for new unsynced transactions
+          r.contact_id ?? null,
+          r.customer_name ?? null,
+          r.note ?? null,
+          r.bank_name ?? null,
+          r.card_number ?? null,
+          r.cl_account_id ?? null,
+          r.cl_account_name ?? null,
+          r.bank_id ? Number(r.bank_id) : null,
+          r.receipt_number ?? null,
+          r.transaction_type ?? 'drinks',
+          Number(r.payment_method_id)
+        ];
+        
+        console.log('📝 [SQLITE] Calling stmt.run with params:', params);
+        console.log('📊 [SQLITE] Params count:', params.length);
+        
+        // Debug: Get column names from the prepared statement
+        try {
+          const info = stmt.run(...params);
+          console.log('✅ [SQLITE] Insert successful:', info);
+        } catch (err: any) {
+          console.error('❌ [SQLITE] Insert error:', err);
+          console.error('📝 [SQLITE] Error code:', err.code);
+          console.error('📝 [SQLITE] Error message:', err.message);
+          throw err;
+        }
+      }
+    });
+    tx(rows);
+    return { success: true };
+  });
+
+  ipcMain.handle('localdb-get-transactions', async (event, businessId?: number, limit?: number) => {
+    if (!localDb) return [];
+    let query = `
+      SELECT 
+        t.*,
+        CASE 
+          WHEN t.created_at IS NOT NULL THEN
+            ROW_NUMBER() OVER (
+              PARTITION BY DATE(t.created_at), t.business_id
+              ORDER BY t.created_at ASC
+            )
+          ELSE NULL
+        END as receipt_number
+      FROM transactions t
+    `;
+    const params: any[] = [];
+    const conditions: string[] = [];
+    
+    // Exclude archived transactions
+    conditions.push('t.status != \'archived\'');
+    
+    if (businessId) {
+      conditions.push('t.business_id = ?');
+      params.push(businessId);
+    }
+    
+    if (conditions.length > 0) {
+      query += ' WHERE ' + conditions.join(' AND ');
+    }
+    
+    query += ' ORDER BY t.created_at DESC';
+    
+    if (limit) {
+      query += ' LIMIT ?';
+      params.push(limit);
+    }
+    
+    const stmt = localDb.prepare(query);
+    return stmt.all(...params);
+  });
+
+  // Archive transactions
+  ipcMain.handle('localdb-archive-transactions', async (event, businessId: number) => {
+    if (!localDb) return 0;
+    
+    try {
+      const stmt = localDb.prepare(`
+        UPDATE transactions 
+        SET status = 'archived', updated_at = ?
+        WHERE business_id = ? AND status != 'archived'
+      `);
+      
+      const result = stmt.run(Date.now(), businessId);
+      console.log(`✅ [ARCHIVE] Archived ${result.changes} transactions`);
+      return result.changes;
+    } catch (error) {
+      console.error('❌ [ARCHIVE] Failed to archive transactions:', error);
+      throw error;
+    }
+  });
+
+  // Delete transactions permanently
+  ipcMain.handle('localdb-delete-transactions', async (event, businessId: number) => {
+    if (!localDb) return 0;
+    
+    try {
+      const stmt = localDb.prepare(`
+        DELETE FROM transactions 
+        WHERE business_id = ?
+      `);
+      
+      const result = stmt.run(businessId);
+      console.log(`🗑️ [DELETE] Deleted ${result.changes} transactions`);
+      return result.changes;
+    } catch (error) {
+      console.error('❌ [DELETE] Failed to delete transactions:', error);
+      throw error;
+    }
+  });
+
+  // Delete transaction items permanently
+  ipcMain.handle('localdb-delete-transaction-items', async (event, businessId: number) => {
+    if (!localDb) return { success: true };
+    
+    try {
+      // Delete transaction items for the business
+      const stmt = localDb.prepare(`
+        DELETE FROM transaction_items 
+        WHERE transaction_id IN (
+          SELECT id FROM transactions WHERE business_id = ?
+        )
+      `);
+      
+      const result = stmt.run(businessId);
+      console.log(`🗑️ [DELETE] Deleted ${result.changes} transaction items`);
+      return { success: true, deleted: result.changes };
+    } catch (error) {
+      console.error('❌ [DELETE] Failed to delete transaction items:', error);
+      throw error;
+    }
+  });
+  
+  // Get transactions that are not yet synced to cloud
+  ipcMain.handle('localdb-get-unsynced-transactions', async (event, businessId?: number) => {
+    if (!localDb) return [];
+    
+    // For now, return all transactions where receipt_number is null or synced_at is null
+    // This indicates they haven't been synced to cloud yet
+    let query = `
+      SELECT 
+        t.*,
+        CASE 
+          WHEN t.created_at IS NOT NULL THEN
+            ROW_NUMBER() OVER (
+              PARTITION BY DATE(t.created_at), t.business_id
+              ORDER BY t.created_at ASC
+            )
+          ELSE NULL
+        END as receipt_number
+      FROM transactions t
+      WHERE t.synced_at IS NULL
+    `;
+    const params: any[] = [];
+    
+    if (businessId) {
+      query += ' AND t.business_id = ?';
+      params.push(businessId);
+    }
+    
+    query += ' ORDER BY t.created_at DESC';
+    
+    const stmt = localDb.prepare(query);
+    return stmt.all(...params);
+  });
+
+  // Transaction Items
+  ipcMain.handle('localdb-upsert-transaction-items', async (event, rows: any[]) => {
+    if (!localDb) return { success: false };
+    console.log('🔍 [SQLITE] Inserting transaction items:', rows.length);
+    const tx = localDb.transaction((data: any[]) => {
+      const stmt = localDb!.prepare(`INSERT INTO transaction_items (
+        id, transaction_id, product_id, quantity, unit_price, total_price,
+        customizations_json, custom_note, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        transaction_id=excluded.transaction_id, product_id=excluded.product_id, quantity=excluded.quantity,
+        unit_price=excluded.unit_price, total_price=excluded.total_price, customizations_json=excluded.customizations_json,
+        custom_note=excluded.custom_note, created_at=excluded.created_at`);
+      for (const r of data) {
+        console.log('📦 [SQLITE] Item data:', {
+          id: r.id,
+          transaction_id: r.transaction_id,
+          product_id: r.product_id,
+          customizations_json: r.customizations_json,
+          customizations_type: typeof r.customizations_json,
+          custom_note: r.custom_note
+        });
+        
+        // Parse customizations_json if it's already a string, otherwise stringify if it's an object
+        let customizationsJson = null;
+        if (r.customizations_json) {
+          customizationsJson = typeof r.customizations_json === 'string' 
+            ? r.customizations_json 
+            : JSON.stringify(r.customizations_json);
+        }
+        
+        console.log('📦 [SQLITE] Final customizations JSON:', customizationsJson);
+        console.log('📝 [SQLITE] Custom note:', r.custom_note);
+        
+        stmt.run(r.id, r.transaction_id, r.product_id, r.quantity || 1, r.unit_price, r.total_price,
+                customizationsJson, r.custom_note, r.created_at);
+      }
+    });
+    tx(rows);
+    console.log('✅ [SQLITE] Transaction items inserted');
+    return { success: true };
+  });
+
+  ipcMain.handle('localdb-get-transaction-items', async (event, transactionId?: number) => {
+    if (!localDb) return [];
+    if (transactionId) {
+      const stmt = localDb.prepare('SELECT * FROM transaction_items WHERE transaction_id = ? ORDER BY id ASC');
+      return stmt.all(transactionId);
+    } else {
+      const stmt = localDb.prepare('SELECT * FROM transaction_items ORDER BY created_at DESC');
+      return stmt.all();
+    }
+  });
+
+  // Mark transactions as synced
+  ipcMain.handle('localdb-mark-transactions-synced', async (event, transactionIds: string[]) => {
+    if (!localDb || transactionIds.length === 0) return { success: true };
+    
+    try {
+      const stmt = localDb.prepare('UPDATE transactions SET synced_at = ? WHERE id IN (' + transactionIds.map(() => '?').join(',') + ')');
+      stmt.run(Date.now(), ...transactionIds);
+      return { success: true };
+    } catch (error) {
+      console.error('Error marking transactions as synced:', error);
+      return { success: false };
+    }
+  });
+
+  // Reset transaction sync status (set synced_at to NULL)
+  ipcMain.handle('localdb-reset-transaction-sync', async (event, transactionId: string) => {
+    if (!localDb) return { success: false };
+    
+    try {
+      const stmt = localDb.prepare('UPDATE transactions SET synced_at = NULL WHERE id = ?');
+      stmt.run(transactionId);
+      console.log(`🔄 [RESET SYNC] Transaction ${transactionId} synced_at reset to NULL`);
+      return { success: true };
+    } catch (error) {
+      console.error('Error resetting transaction sync status:', error);
+      return { success: false };
+    }
+  });
+
+  // Payment Methods
+  ipcMain.handle('localdb-upsert-payment-methods', async (event, rows: any[]) => {
+    if (!localDb) return { success: false };
+    const tx = localDb.transaction((data: any[]) => {
+      const stmt = localDb!.prepare(`INSERT INTO payment_methods (
+        id, name, code, description, is_active, requires_additional_info, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        name=excluded.name, code=excluded.code, description=excluded.description,
+        is_active=excluded.is_active, requires_additional_info=excluded.requires_additional_info,
+        created_at=excluded.created_at, updated_at=excluded.updated_at`);
+      for (const r of data) {
+        stmt.run(r.id, r.name, r.code, r.description, r.is_active || 1, r.requires_additional_info || 0, r.created_at, Date.now());
+      }
+    });
+    tx(rows);
+    return { success: true };
+  });
+
+  ipcMain.handle('localdb-get-payment-methods', async () => {
+    if (!localDb) return [];
+    const stmt = localDb.prepare('SELECT * FROM payment_methods WHERE is_active = 1 ORDER BY name ASC');
+    return stmt.all();
+  });
+
+  // Banks
+  ipcMain.handle('localdb-upsert-banks', async (event, rows: any[]) => {
+    if (!localDb) return { success: false };
+    const tx = localDb.transaction((data: any[]) => {
+      const stmt = localDb!.prepare(`INSERT INTO banks (
+        id, bank_code, bank_name, is_popular, is_active, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        bank_code=excluded.bank_code, bank_name=excluded.bank_name, is_popular=excluded.is_popular,
+        is_active=excluded.is_active, created_at=excluded.created_at`);
+      for (const r of data) {
+        stmt.run(r.id, r.bank_code, r.bank_name, r.is_popular || 0, r.is_active || 1, r.created_at);
+      }
+    });
+    tx(rows);
+    return { success: true };
+  });
+
+  ipcMain.handle('localdb-get-banks', async () => {
+    if (!localDb) return [];
+    const stmt = localDb.prepare('SELECT * FROM banks WHERE is_active = 1 ORDER BY is_popular DESC, bank_name ASC');
+    return stmt.all();
+  });
+
+  // Organizations
+  ipcMain.handle('localdb-upsert-organizations', async (event, rows: any[]) => {
+    if (!localDb) return { success: false };
+    const tx = localDb.transaction((data: any[]) => {
+      const stmt = localDb!.prepare(`INSERT INTO organizations (
+        id, name, slug, owner_user_id, subscription_status, subscription_plan,
+        trial_ends_at, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        name=excluded.name, slug=excluded.slug, owner_user_id=excluded.owner_user_id,
+        subscription_status=excluded.subscription_status, subscription_plan=excluded.subscription_plan,
+        trial_ends_at=excluded.trial_ends_at, created_at=excluded.created_at, updated_at=excluded.updated_at`);
+      for (const r of data) {
+        stmt.run(r.id, r.name, r.slug, r.owner_user_id, r.subscription_status || 'trial', 
+                r.subscription_plan || 'basic', r.trial_ends_at, r.created_at, Date.now());
+      }
+    });
+    tx(rows);
+    return { success: true };
+  });
+
+  ipcMain.handle('localdb-get-organizations', async () => {
+    if (!localDb) return [];
+    const stmt = localDb.prepare('SELECT * FROM organizations ORDER BY name ASC');
+    return stmt.all();
+  });
+
+  // Management Groups
+  ipcMain.handle('localdb-upsert-management-groups', async (event, rows: any[]) => {
+    if (!localDb) return { success: false };
+    const tx = localDb.transaction((data: any[]) => {
+      const stmt = localDb!.prepare(`INSERT INTO management_groups (
+        id, name, permission_name, description, organization_id, manager_user_id, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        name=excluded.name, permission_name=excluded.permission_name, description=excluded.description,
+        organization_id=excluded.organization_id, manager_user_id=excluded.manager_user_id,
+        created_at=excluded.created_at, updated_at=excluded.updated_at`);
+      for (const r of data) {
+        stmt.run(r.id, r.name, r.permission_name, r.description, r.organization_id, r.manager_user_id, r.created_at, Date.now());
+      }
+    });
+    tx(rows);
+    return { success: true };
+  });
+
+  ipcMain.handle('localdb-get-management-groups', async () => {
+    if (!localDb) return [];
+    const stmt = localDb.prepare('SELECT * FROM management_groups ORDER BY name ASC');
+    return stmt.all();
+  });
+
+  // Category1
+  ipcMain.handle('localdb-upsert-category1', async (event, rows: any[]) => {
+    if (!localDb) return { success: false };
+    const tx = localDb.transaction((data: any[]) => {
+      const stmt = localDb!.prepare(`INSERT INTO category1 (
+        id, name, description, display_order, is_active, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        name=excluded.name, description=excluded.description, display_order=excluded.display_order,
+        is_active=excluded.is_active, created_at=excluded.created_at, updated_at=excluded.updated_at`);
+      for (const r of data) {
+        stmt.run(r.id, r.name, r.description, r.display_order || 0, r.is_active || 1, r.created_at, Date.now());
+      }
+    });
+    tx(rows);
+    return { success: true };
+  });
+
+  ipcMain.handle('localdb-get-category1', async () => {
+    if (!localDb) return [];
+    const stmt = localDb.prepare('SELECT * FROM category1 WHERE is_active = 1 ORDER BY display_order ASC, name ASC');
+    return stmt.all();
+  });
+
+  // Category2
+  ipcMain.handle('localdb-upsert-category2', async (event, rows: any[]) => {
+    if (!localDb) return { success: false };
+    const tx = localDb.transaction((data: any[]) => {
+      const stmt = localDb!.prepare(`INSERT INTO category2 (
+        id, name, business_id, description, display_order, is_active, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        name=excluded.name, business_id=excluded.business_id, description=excluded.description,
+        display_order=excluded.display_order, is_active=excluded.is_active,
+        created_at=excluded.created_at, updated_at=excluded.updated_at`);
+      for (const r of data) {
+        stmt.run(r.id, r.name, r.business_id, r.description, r.display_order || 0, r.is_active || 1, r.created_at, Date.now());
+      }
+    });
+    tx(rows);
+    return { success: true };
+  });
+
+  ipcMain.handle('localdb-get-category2', async (event, businessId?: number) => {
+    if (!localDb) return [];
+    if (businessId) {
+      const stmt = localDb.prepare('SELECT * FROM category2 WHERE business_id = ? AND is_active = 1 ORDER BY display_order ASC, name ASC');
+      return stmt.all(businessId);
+    } else {
+      const stmt = localDb.prepare('SELECT * FROM category2 WHERE is_active = 1 ORDER BY display_order ASC, name ASC');
+      return stmt.all();
+    }
+  });
+
+  // CL Accounts
+  ipcMain.handle('localdb-upsert-cl-accounts', async (event, rows: any[]) => {
+    if (!localDb) return { success: false };
+    const tx = localDb.transaction((data: any[]) => {
+      const stmt = localDb!.prepare(`INSERT INTO cl_accounts (
+        id, account_code, account_name, contact_info, credit_limit, current_balance,
+        is_active, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        account_code=excluded.account_code, account_name=excluded.account_name, contact_info=excluded.contact_info,
+        credit_limit=excluded.credit_limit, current_balance=excluded.current_balance,
+        is_active=excluded.is_active, created_at=excluded.created_at, updated_at=excluded.updated_at`);
+      for (const r of data) {
+        stmt.run(r.id, r.account_code, r.account_name, r.contact_info, r.credit_limit || 0.0, 
+                r.current_balance || 0.0, r.is_active || 1, r.created_at, Date.now());
+      }
+    });
+    tx(rows);
+    return { success: true };
+  });
+
+  ipcMain.handle('localdb-get-cl-accounts', async () => {
+    if (!localDb) return [];
+    const stmt = localDb.prepare('SELECT * FROM cl_accounts WHERE is_active = 1 ORDER BY account_name ASC');
+    return stmt.all();
+  });
+
+  // Omset
+  ipcMain.handle('localdb-upsert-omset', async (event, rows: any[]) => {
+    if (!localDb) return { success: false };
+    const tx = localDb.transaction((data: any[]) => {
+      const stmt = localDb!.prepare(`INSERT INTO omset (
+        id, business_id, date, regular, ojol, event, delivery, fitness, pool,
+        user_id, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(business_id, date) DO UPDATE SET
+        regular=excluded.regular, ojol=excluded.ojol, event=excluded.event, delivery=excluded.delivery,
+        fitness=excluded.fitness, pool=excluded.pool, user_id=excluded.user_id,
+        created_at=excluded.created_at, updated_at=excluded.updated_at`);
+      for (const r of data) {
+        stmt.run(r.id, r.business_id, r.date, r.regular, r.ojol, r.event, r.delivery, 
+                r.fitness, r.pool, r.user_id, r.created_at, Date.now());
+      }
+    });
+    tx(rows);
+    return { success: true };
+  });
+
+  ipcMain.handle('localdb-get-omset', async (event, businessId?: number, startDate?: string, endDate?: string) => {
+    if (!localDb) return [];
+    let query = 'SELECT * FROM omset';
+    const params: any[] = [];
+    
+    if (businessId) {
+      query += ' WHERE business_id = ?';
+      params.push(businessId);
+      
+      if (startDate) {
+        query += ' AND date >= ?';
+        params.push(startDate);
+      }
+      
+      if (endDate) {
+        query += ' AND date <= ?';
+        params.push(endDate);
+      }
+    }
+    
+    query += ' ORDER BY date DESC';
+    
+    const stmt = localDb.prepare(query);
+    return stmt.all(...params);
+  });
+
   // Printer configuration handlers
   ipcMain.handle('localdb-save-printer-config', async (event, printerType: string, systemPrinterName: string) => {
     if (!localDb) return { success: false };
@@ -743,6 +1701,84 @@ function createWindows(): void {
     } catch (error) {
       console.error('Error getting printer configs:', error);
       return [];
+    }
+  });
+
+  // Offline transaction queue management
+  ipcMain.handle('localdb-queue-offline-transaction', async (event, transactionData: any) => {
+    if (!localDb) return { success: false, error: 'Database not available' };
+    try {
+      const stmt = localDb.prepare(`
+        INSERT INTO offline_transactions (transaction_data, created_at, sync_status)
+        VALUES (?, ?, 'pending')
+      `);
+      const result = stmt.run(JSON.stringify(transactionData), Date.now());
+      
+      // Queue transaction items
+      if (transactionData.items && transactionData.items.length > 0) {
+        const itemStmt = localDb.prepare(`
+          INSERT INTO offline_transaction_items (offline_transaction_id, item_data)
+          VALUES (?, ?)
+        `);
+        for (const item of transactionData.items) {
+          itemStmt.run(result.lastInsertRowid, JSON.stringify(item));
+        }
+      }
+      
+      console.log(`✅ Queued offline transaction ${result.lastInsertRowid}`);
+      return { success: true, offlineTransactionId: result.lastInsertRowid };
+    } catch (error) {
+      console.error('Error queueing offline transaction:', error);
+      return { success: false, error: String(error) };
+    }
+  });
+
+  ipcMain.handle('localdb-get-pending-transactions', async () => {
+    if (!localDb) return [];
+    try {
+      const stmt = localDb.prepare(`
+        SELECT id, transaction_data, created_at, sync_attempts, last_sync_attempt
+        FROM offline_transactions 
+        WHERE sync_status = 'pending' 
+        ORDER BY created_at ASC
+        LIMIT 50
+      `);
+      return stmt.all();
+    } catch (error) {
+      console.error('Error getting pending transactions:', error);
+      return [];
+    }
+  });
+
+  ipcMain.handle('localdb-mark-transaction-synced', async (event, offlineTransactionId: number) => {
+    if (!localDb) return { success: false };
+    try {
+      const stmt = localDb.prepare(`
+        UPDATE offline_transactions 
+        SET sync_status = 'synced', last_sync_attempt = ?
+        WHERE id = ?
+      `);
+      stmt.run(Date.now(), offlineTransactionId);
+      return { success: true };
+    } catch (error) {
+      console.error('Error marking transaction as synced:', error);
+      return { success: false, error: String(error) };
+    }
+  });
+
+  ipcMain.handle('localdb-mark-transaction-failed', async (event, offlineTransactionId: number) => {
+    if (!localDb) return { success: false };
+    try {
+      const stmt = localDb.prepare(`
+        UPDATE offline_transactions 
+        SET sync_attempts = sync_attempts + 1, last_sync_attempt = ?
+        WHERE id = ?
+      `);
+      stmt.run(Date.now(), offlineTransactionId);
+      return { success: true };
+    } catch (error) {
+      console.error('Error marking transaction as failed:', error);
+      return { success: false, error: String(error) };
     }
   });
 

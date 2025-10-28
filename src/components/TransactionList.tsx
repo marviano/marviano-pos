@@ -1,11 +1,12 @@
 'use client';
 
-import { useState, useEffect } from 'react';
-import { Calendar, Clock, CreditCard, RefreshCw, Search, Filter, ChevronUp, ChevronDown } from 'lucide-react';
+import { useState, useEffect, useCallback } from 'react';
+import { Calendar, Clock, CreditCard, RefreshCw, Search, Filter, ChevronUp, ChevronDown, Wifi, WifiOff } from 'lucide-react';
 import TransactionDetailModal from './TransactionDetailModal';
+import { offlineSyncService } from '@/lib/offlineSync';
 
 interface Transaction {
-  id: number;
+  id: string; // Changed to string for UUID
   business_id: number;
   user_id: number;
   payment_method: 'cash' | 'debit' | 'qr' | 'ewallet' | 'cl' | 'voucher' | 'gofood' | 'grabfood' | 'shopeefood' | 'tiktok';
@@ -17,6 +18,7 @@ interface Transaction {
   change_amount: number;
   contact_id: number | null;
   customer_name: string | null;
+  note: string | null;
   receipt_number: number | null;
   transaction_type: 'drinks' | 'bakery';
   status: string;
@@ -26,7 +28,7 @@ interface Transaction {
 }
 
 interface TransactionItem {
-  id: number;
+  id: string; // Changed to string for UUID
   product_name: string;
   quantity: number;
   unit_price: number;
@@ -35,7 +37,7 @@ interface TransactionItem {
 }
 
 interface TransactionDetail {
-  id: number;
+  id: string; // Changed to string for UUID
   business_id: number;
   user_id: number;
   user_name: string;
@@ -70,29 +72,90 @@ export default function TransactionList({ businessId = 1 }: TransactionListProps
   const [filterMethod, setFilterMethod] = useState<string>('all');
   const [sortField, setSortField] = useState<string>('created_at');
   const [sortDirection, setSortDirection] = useState<'asc' | 'desc'>('desc');
-  const [selectedDate, setSelectedDate] = useState<string>(new Date().toISOString().split('T')[0]);
+  
+  // Get today's date in UTC+7 timezone
+  const getTodayUTC7 = () => {
+    const now = new Date();
+    const utc7Time = new Date(now.getTime() + (7 * 60 * 60 * 1000));
+    return utc7Time.toISOString().split('T')[0];
+  };
+  
+  const [fromDate, setFromDate] = useState<string>(getTodayUTC7());
+  const [toDate, setToDate] = useState<string>(getTodayUTC7());
   const [selectedTransaction, setSelectedTransaction] = useState<TransactionDetail | null>(null);
   const [isDetailModalOpen, setIsDetailModalOpen] = useState(false);
   const [isLoadingDetail, setIsLoadingDetail] = useState(false);
-  const [loadingTransactionId, setLoadingTransactionId] = useState<number | null>(null);
+  const [loadingTransactionId, setLoadingTransactionId] = useState<string | null>(null);
+  const [copiedUuid, setCopiedUuid] = useState<string | null>(null);
+  const [isOnlineMode, setIsOnlineMode] = useState(false); // Default to offline mode
 
-  // Fetch transaction details
-  const fetchTransactionDetail = async (transactionId: number) => {
+  // Fetch transaction details with offline fallback
+  const fetchTransactionDetail = async (transactionId: string) => {
     setIsLoadingDetail(true);
     try {
+      const response = await offlineSyncService.fetchWithFallback(
+        // Online fetch
+        async () => {
       const response = await fetch(`/api/transactions/${transactionId}`);
-      
       if (!response.ok) {
         throw new Error('Failed to fetch transaction details');
       }
-      
       const data = await response.json();
       if (data.success) {
-        setSelectedTransaction(data.transaction);
-        setIsDetailModalOpen(true);
+            return data.transaction;
       } else {
         throw new Error(data.message || 'Failed to fetch transaction details');
       }
+        },
+        // Offline fetch
+        async () => {
+          if (typeof window === 'undefined' || !(window as any).electronAPI) {
+            throw new Error('Offline database not available');
+          }
+          
+          // Get transaction from local database
+          const transactions = await (window as any).electronAPI.localDbGetTransactions(businessId, 1000);
+          const transaction = transactions.find((tx: any) => tx.id === transactionId);
+          
+          if (!transaction) {
+            throw new Error('Transaction not found in offline database');
+          }
+          
+          // Get transaction items
+          const items = await (window as any).electronAPI.localDbGetTransactionItems(transactionId);
+          
+          // Get all products to map product_id to product_name
+          const products = await (window as any).electronAPI.localDbGetAllProducts();
+          
+          // Get users and businesses to show actual names
+          const users = await (window as any).electronAPI.localDbGetUsers();
+          const businesses = await (window as any).electronAPI.localDbGetBusinesses();
+          
+          const user = users.find((u: any) => u.id === transaction.user_id);
+          const business = businesses.find((b: any) => b.id === transaction.business_id);
+          
+          return {
+            ...transaction,
+            items: items.map((item: any) => {
+              const product = products.find((p: any) => p.id === item.product_id);
+              return {
+                id: item.id,
+                product_name: product?.nama || 'Unknown Product',
+                quantity: item.quantity,
+                unit_price: item.unit_price,
+                total_price: item.total_price,
+                custom_note: item.custom_note,
+                customizations_json: item.customizations_json || null
+              };
+            }),
+            user_name: user?.name || 'Unknown User',
+            business_name: business?.name || 'Unknown Business'
+          };
+        }
+      );
+      
+      setSelectedTransaction(response);
+      setIsDetailModalOpen(true);
     } catch (error: any) {
       console.error('Error fetching transaction details:', error);
       setError(error.message);
@@ -103,7 +166,7 @@ export default function TransactionList({ businessId = 1 }: TransactionListProps
   };
 
   // Handle row click
-  const handleRowClick = (transactionId: number) => {
+  const handleRowClick = (transactionId: string) => {
     setLoadingTransactionId(transactionId);
     setIsLoadingDetail(true);
     setIsDetailModalOpen(true);
@@ -117,36 +180,125 @@ export default function TransactionList({ businessId = 1 }: TransactionListProps
     setLoadingTransactionId(null);
   };
 
-  // Fetch today's transactions
-  const fetchTransactions = async () => {
+  // Handle UUID copy with notification
+  const handleCopyUuid = async (uuid: string) => {
+    try {
+      // Try modern clipboard API
+      if (window.isSecureContext) {
+        await navigator.clipboard.writeText(uuid);
+      } else {
+        // Fallback for non-secure contexts
+        const textArea = document.createElement('textarea');
+        textArea.value = uuid;
+        textArea.style.position = 'fixed';
+        textArea.style.opacity = '0';
+        document.body.appendChild(textArea);
+        textArea.select();
+        document.execCommand('copy');
+        document.body.removeChild(textArea);
+      }
+      setCopiedUuid(uuid);
+      // Auto-hide after 2 seconds
+      setTimeout(() => {
+        setCopiedUuid(null);
+      }, 2000);
+    } catch (error) {
+      console.error('Failed to copy UUID:', error);
+    }
+  };
+
+  // Fetch transactions function
+  const fetchTransactions = useCallback(async () => {
     setIsLoading(true);
     setError(null);
     
     try {
-      const response = await fetch(`/api/transactions?business_id=${businessId}&date=${selectedDate}&limit=100`);
+      let transactionsData: Transaction[];
       
-      if (!response.ok) {
-        throw new Error('Failed to fetch transactions');
+      if (isOnlineMode) {
+        // Fetch from online API only
+        const response = await fetch(`/api/transactions?business_id=${businessId}&from_date=${fromDate}&to_date=${toDate}&limit=1000`);
+        if (!response.ok) {
+          throw new Error('Failed to fetch transactions');
+        }
+        const data = await response.json();
+        transactionsData = data.transactions || [];
+      } else {
+        // Fetch from offline database only
+        if (typeof window === 'undefined' || !(window as any).electronAPI) {
+          throw new Error('Offline database not available');
+        }
+        
+        const offlineTransactions = await (window as any).electronAPI.localDbGetTransactions(businessId, 100);
+        
+        // Get users and businesses to show actual names (fetch once for all transactions)
+        const users = await (window as any).electronAPI.localDbGetUsers();
+        const businesses = await (window as any).electronAPI.localDbGetBusinesses();
+        
+        // Show ALL unique LOCAL dates in the database for debugging
+        const allDates = [...new Set(offlineTransactions.map((tx: any) => {
+          const localDate = new Date(tx.created_at);
+          return localDate.getFullYear() + '-' + 
+            String(localDate.getMonth() + 1).padStart(2, '0') + '-' + 
+            String(localDate.getDate()).padStart(2, '0');
+        }))].sort();
+        console.log('📱 [OFFLINE] Total:', offlineTransactions.length, '| Date range:', fromDate, 'to', toDate, '| Available dates:', allDates);
+        
+        // Filter by date range - need to convert to local date for comparison
+        const filteredTransactions = offlineTransactions.filter((tx: any) => {
+          // Convert UTC to local date for accurate filtering
+          const localDate = new Date(tx.created_at);
+          const localDateString = localDate.getFullYear() + '-' + 
+            String(localDate.getMonth() + 1).padStart(2, '0') + '-' + 
+            String(localDate.getDate()).padStart(2, '0');
+          return localDateString >= fromDate && localDateString <= toDate;
+        });
+        
+        console.log('📱 [OFFLINE] Found:', filteredTransactions.length, 'transactions from', fromDate, 'to', toDate);
+        
+        transactionsData = filteredTransactions.map((tx: any) => {
+          const user = users.find((u: any) => u.id === tx.user_id);
+          const business = businesses.find((b: any) => b.id === tx.business_id);
+          
+          return {
+            id: tx.id,
+            business_id: tx.business_id,
+            user_id: tx.user_id,
+            payment_method: tx.payment_method,
+            pickup_method: tx.pickup_method,
+            total_amount: tx.total_amount,
+            voucher_discount: tx.voucher_discount || 0,
+            final_amount: tx.final_amount,
+            amount_received: tx.amount_received,
+            change_amount: tx.change_amount || 0,
+            contact_id: tx.contact_id,
+            customer_name: tx.customer_name,
+            note: tx.note || null,
+            receipt_number: tx.receipt_number,
+            transaction_type: tx.transaction_type || 'drinks',
+            status: tx.status || 'completed',
+            created_at: tx.created_at,
+            user_name: user?.name || 'Unknown User',
+            business_name: business?.name || 'Unknown Business'
+          };
+        });
+        
       }
       
-      const data = await response.json();
-      console.log('TransactionList - Fetched transactions:', data.transactions?.slice(0, 3));
-      if (data.transactions?.length > 0) {
-        console.log('First transaction payment method:', data.transactions[0].payment_method);
-      }
-      setTransactions(data.transactions || []);
+      setTransactions(transactionsData);
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to fetch transactions');
+      const errorMessage = err instanceof Error ? err.message : 'Failed to fetch transactions';
+      setError(errorMessage);
       console.error('Error fetching transactions:', err);
     } finally {
       setIsLoading(false);
     }
-  };
+  }, [isOnlineMode, fromDate, toDate, businessId]);
 
-  // Load transactions on component mount and when date changes
+  // Fetch transactions on mount and when dependencies change
   useEffect(() => {
     fetchTransactions();
-  }, [businessId, selectedDate]);
+  }, [fetchTransactions]);
 
   // Format price for display
   const formatPrice = (price: number | string) => {
@@ -312,15 +464,39 @@ export default function TransactionList({ businessId = 1 }: TransactionListProps
     <div className="flex-1 flex flex-col bg-white h-full">
       <div className="flex-1 flex flex-col max-w-7xl mx-auto w-full px-3 py-6">
         {/* Header */}
-        <div className="mb-6">
+        <div className="mb-6 flex items-center justify-between">
           <h1 className="text-2xl font-bold text-gray-800">
-            Daftar Transaksi | {new Date(selectedDate).toLocaleDateString('id-ID', {
-              weekday: 'long',
-              year: 'numeric',
-              month: 'long',
-              day: 'numeric'
+            Daftar Transaksi | {new Date(fromDate).toLocaleDateString('id-ID', {
+              day: 'numeric',
+              month: 'short',
+              year: 'numeric'
+            })} - {new Date(toDate).toLocaleDateString('id-ID', {
+              day: 'numeric',
+              month: 'short',
+              year: 'numeric'
             })}
           </h1>
+          
+          {/* Online/Offline Toggle */}
+          <div className="flex items-center gap-3">
+            <span className={`text-sm font-medium ${!isOnlineMode ? 'text-gray-900' : 'text-gray-500'}`}>
+              <WifiOff className="inline w-4 h-4 mr-1" />
+              Offline
+            </span>
+            <label className="relative inline-flex items-center cursor-pointer">
+              <input
+                type="checkbox"
+                checked={isOnlineMode}
+                onChange={(e) => setIsOnlineMode(e.target.checked)}
+                className="sr-only peer"
+              />
+              <div className="w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-blue-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-600"></div>
+            </label>
+            <span className={`text-sm font-medium ${isOnlineMode ? 'text-gray-900' : 'text-gray-500'}`}>
+              <Wifi className="inline w-4 h-4 mr-1" />
+              Online
+            </span>
+          </div>
         </div>
 
         {/* Summary Cards */}
@@ -425,12 +601,22 @@ export default function TransactionList({ businessId = 1 }: TransactionListProps
             />
           </div>
           
-          <input
-            type="date"
-            value={selectedDate}
-            onChange={(e) => setSelectedDate(e.target.value)}
-            className="px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent text-black"
-          />
+          <div className="flex items-center gap-2">
+            <label className="text-sm font-medium text-gray-700">Dari:</label>
+            <input
+              type="date"
+              value={fromDate}
+              onChange={(e) => setFromDate(e.target.value)}
+              className="px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent text-black"
+            />
+            <label className="text-sm font-medium text-gray-700">Sampai:</label>
+            <input
+              type="date"
+              value={toDate}
+              onChange={(e) => setToDate(e.target.value)}
+              className="px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent text-black"
+            />
+          </div>
           
           <div className="relative">
             <Filter className="absolute left-3 top-1/2 transform -translate-y-1/2 text-gray-400 w-4 h-4" />
@@ -465,8 +651,24 @@ export default function TransactionList({ businessId = 1 }: TransactionListProps
           </div>
         )}
 
+        {/* Info Message for Offline Mode */}
+        {!isOnlineMode && transactions.length === 0 && !error && (
+          <div className="bg-blue-50 border border-blue-200 rounded-lg p-4 mb-6 flex-shrink-0">
+            <div className="flex items-center gap-2">
+              <Clock className="w-5 h-5 text-blue-600" />
+              <div>
+                <p className="text-blue-800 font-medium">No transactions found for this date in offline database</p>
+                <p className="text-blue-600 text-sm mt-1">
+                  Try syncing data from online database or select a different date. 
+                  Check console for available dates in offline database.
+                </p>
+              </div>
+            </div>
+          </div>
+        )}
+
         {/* Transactions Table Container */}
-        <div className="flex-1 flex flex-col min-h-0 mb-8">
+        <div className="flex-1 flex flex-col min-h-0 mb-8" style={{ maxHeight: 'calc(100vh - 390px)' }}>
           {filteredTransactions.length === 0 ? (
             <div className="flex-1 flex items-center justify-center">
               <div className="text-center">
@@ -476,18 +678,23 @@ export default function TransactionList({ businessId = 1 }: TransactionListProps
               </div>
             </div>
           ) : (
-            <div className="flex-1 flex flex-col bg-white rounded-lg border border-gray-200 overflow-hidden">
-              <div className="flex-1 overflow-auto pb-8">
-                <table className="w-full">
-                <thead className="bg-gray-50">
+            <div className="flex flex-col bg-white rounded-lg border border-gray-200 overflow-hidden h-full">
+              <div className="overflow-y-auto flex-1">
+                <table className="w-full table-fixed">
+                <thead className="bg-gray-50 sticky top-0 z-10">
                   <tr>
                     <th 
                       className="px-2 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider cursor-pointer hover:bg-gray-100 select-none w-16"
                       onClick={() => handleSort('receipt_number')}
                     >
                       <div className="flex items-center gap-1 text-xs">
-                        <span className="text-xs">Receipt #</span>
+                        <span className="text-xs">#</span>
                         {getSortIcon('receipt_number')}
+                      </div>
+                    </th>
+                    <th className="px-2 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider w-16">
+                      <div className="flex items-center gap-1">
+                        <span className="text-xs">UUID</span>
                       </div>
                     </th>
                     <th 
@@ -571,6 +778,15 @@ export default function TransactionList({ businessId = 1 }: TransactionListProps
                         {getSortIcon('user_name')}
                       </div>
                     </th>
+                    <th 
+                      className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider cursor-pointer hover:bg-gray-100 select-none"
+                      onClick={() => handleSort('note')}
+                    >
+                      <div className="flex items-center gap-1">
+                        Catatan
+                        {getSortIcon('note')}
+                      </div>
+                    </th>
                   </tr>
                 </thead>
                 <tbody className="bg-white divide-y divide-gray-200">
@@ -584,6 +800,20 @@ export default function TransactionList({ businessId = 1 }: TransactionListProps
                         <span className="text-xs font-medium text-blue-600">
                           #{transaction.receipt_number || 'N/A'}
                         </span>
+                      </td>
+                      <td className="px-2 py-4 whitespace-nowrap">
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation(); // Prevent row click
+                            handleCopyUuid(String(transaction.id));
+                          }}
+                          className="p-1 hover:bg-gray-200 rounded transition-colors"
+                          title={`Copy UUID: ${String(transaction.id)}`}
+                        >
+                          <svg className="w-4 h-4 text-gray-500 hover:text-gray-700" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
+                          </svg>
+                        </button>
                       </td>
                       <td className="px-3 py-4 whitespace-nowrap">
                         <span className={`inline-flex px-2 py-1 text-xs font-semibold rounded-full ${
@@ -638,6 +868,11 @@ export default function TransactionList({ businessId = 1 }: TransactionListProps
                           {transaction.user_name || 'Unknown'}
                         </span>
                       </td>
+                      <td className="px-6 py-4 whitespace-nowrap">
+                        <span className="text-xs text-gray-500 italic">
+                          {transaction.note || '-'}
+                        </span>
+                      </td>
                     </tr>
                   ))}
                 </tbody>
@@ -655,6 +890,18 @@ export default function TransactionList({ businessId = 1 }: TransactionListProps
         transaction={selectedTransaction}
         isLoading={isLoadingDetail}
       />
+
+      {/* Copy Notification */}
+      {copiedUuid && (
+        <div className="fixed bottom-8 left-1/2 transform -translate-x-1/2 z-50 animate-fade-in-out">
+          <div className="bg-black text-white px-6 py-3 rounded-lg shadow-lg flex items-center gap-2">
+            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+            </svg>
+            <span className="text-sm font-medium">Copied UUID!</span>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

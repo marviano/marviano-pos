@@ -79,8 +79,6 @@ class OfflineSyncService {
    * Check internet connectivity by testing external endpoints
    */
   private async checkInternetConnectivity(): Promise<{ connected: boolean; endpoint: string | null }> {
-    console.log('🌐 [INTERNET CHECK] Testing internet connectivity...');
-    
     // Only test external endpoints for internet connectivity
     const internetEndpoints = [
       'https://www.google.com/generate_204', // Google's connectivity check
@@ -89,7 +87,6 @@ class OfflineSyncService {
     ];
     
     for (const endpoint of internetEndpoints) {
-      console.log(`🌐 [INTERNET CHECK] Testing: ${endpoint}`);
       try {
         const controller = new AbortController();
         const timeoutId = setTimeout(() => controller.abort(), 4000); // 4 second timeout per endpoint
@@ -104,16 +101,13 @@ class OfflineSyncService {
         clearTimeout(timeoutId);
         
         // For no-cors requests, we can't read response status, but if we don't get an error, we're online
-        console.log(`✅ [INTERNET CHECK] Internet connectivity verified via: ${endpoint}`);
         return { connected: true, endpoint };
         
       } catch (error) {
-        console.log(`❌ [INTERNET CHECK] Failed via ${endpoint}:`, error.message);
         continue;
       }
     }
     
-    console.log('❌ [INTERNET CHECK] No internet connectivity detected');
     return { connected: false, endpoint: null };
   }
 
@@ -121,8 +115,6 @@ class OfflineSyncService {
    * Check local database connectivity
    */
   private async checkDatabaseConnectivity(): Promise<{ connected: boolean; details: string }> {
-    console.log('🗄️ [DATABASE CHECK] Testing local database connectivity...');
-    
     try {
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), 3000); // 3 second timeout
@@ -138,15 +130,12 @@ class OfflineSyncService {
       
       if (response.ok) {
         const data = await response.json();
-        console.log('✅ [DATABASE CHECK] Local database is accessible');
         return { connected: true, details: `Database connected (${data.status})` };
       } else {
-        console.log(`❌ [DATABASE CHECK] Database health check failed: ${response.status}`);
         return { connected: false, details: `Health check failed (${response.status})` };
       }
       
     } catch (error) {
-      console.log('❌ [DATABASE CHECK] Database connectivity failed:', error.message);
       return { connected: false, details: `Connection failed: ${error.message}` };
     }
   }
@@ -155,8 +144,6 @@ class OfflineSyncService {
    * Comprehensive connection check - separates internet vs database connectivity
    */
   private async checkConnection() {
-    console.log('🔍 [CONNECTION CHECK] Starting comprehensive connection test...');
-    
     const startTime = Date.now();
     
     try {
@@ -185,22 +172,21 @@ class OfflineSyncService {
       this.syncStatus.databaseConnected = databaseResult.connected;
       this.syncStatus.isOnline = internetResult.connected; // Only online if we have internet
 
-      // Log status changes
-      console.log(`📊 [CONNECTION CHECK] Status Update (${checkTime}ms):`);
-      console.log(`   Internet: ${wasInternetConnected ? 'ONLINE' : 'OFFLINE'} → ${internetResult.connected ? 'ONLINE' : 'OFFLINE'}`);
-      console.log(`   Database: ${wasDatabaseConnected ? 'ONLINE' : 'OFFLINE'} → ${databaseResult.connected ? 'ONLINE' : 'OFFLINE'}`);
-      console.log(`   Overall:  ${wasOnline ? 'ONLINE' : 'OFFLINE'} → ${internetResult.connected ? 'ONLINE' : 'OFFLINE'}`);
+      // Log status changes (commented out to reduce log flooding)
+      // console.log(`📊 [CONNECTION CHECK] Status Update (${checkTime}ms):`);
+      // console.log(`   Internet: ${wasInternetConnected ? 'ONLINE' : 'OFFLINE'} → ${internetResult.connected ? 'ONLINE' : 'OFFLINE'}`);
+      // console.log(`   Database: ${wasDatabaseConnected ? 'ONLINE' : 'OFFLINE'} → ${databaseResult.connected ? 'ONLINE' : 'OFFLINE'}`);
+      // console.log(`   Overall:  ${wasOnline ? 'ONLINE' : 'OFFLINE'} → ${internetResult.connected ? 'ONLINE' : 'OFFLINE'}`);
 
       // Trigger sync only if we just got internet connectivity back
       if (!wasInternetConnected && this.syncStatus.internetConnected) {
-        console.log('✅ [CONNECTION CHECK] Internet restored - triggering sync');
         this.syncFromOnline();
       }
 
       this.notifyListeners();
       
     } catch (error) {
-      console.log('❌ [CONNECTION CHECK] Connection check failed:', error.message);
+      // console.log('❌ [CONNECTION CHECK] Connection check failed:', error.message);
       
       // Mark everything as failed on error
       this.syncStatus.internetConnected = false;
@@ -239,6 +225,7 @@ class OfflineSyncService {
   /**
    * Sync data from online MySQL to local SQLite - COMPREHENSIVE SYNC
    * Downloads ALL POS tables for complete offline functionality
+   * Uses smart sync to prevent server overload
    */
   async syncFromOnline() {
     if (!isElectron || this.syncStatus.syncInProgress || !this.syncStatus.isOnline) {
@@ -249,6 +236,13 @@ class OfflineSyncService {
     console.log('📥 This will download ALL POS tables for complete offline functionality');
     this.syncStatus.syncInProgress = true;
     this.notifyListeners();
+
+    // Also trigger smart sync for pending transactions
+    try {
+      await smartSyncService.forceSync();
+    } catch (error) {
+      console.warn('⚠️ Smart sync failed:', error);
+    }
 
     try {
       // Use the comprehensive sync endpoint
@@ -284,6 +278,21 @@ class OfflineSyncService {
             console.log(`✅ ${data.products.length} products synced to local database`);
           }
           
+          if (data.customizationTypes && data.customizationTypes.length > 0) {
+            await (window as any).electronAPI.localDbUpsertCustomizationTypes(data.customizationTypes);
+            console.log(`✅ ${data.customizationTypes.length} customization types synced to local database`);
+          }
+          
+          if (data.customizationOptions && data.customizationOptions.length > 0) {
+            await (window as any).electronAPI.localDbUpsertCustomizationOptions(data.customizationOptions);
+            console.log(`✅ ${data.customizationOptions.length} customization options synced to local database`);
+          }
+          
+          if (data.productCustomizations && data.productCustomizations.length > 0) {
+            await (window as any).electronAPI.localDbUpsertProductCustomizations(data.productCustomizations);
+            console.log(`✅ ${data.productCustomizations.length} product customizations synced to local database`);
+          }
+          
           if (data.ingredients && data.ingredients.length > 0) {
             await (window as any).electronAPI.localDbUpsertIngredients(data.ingredients);
             console.log(`✅ ${data.ingredients.length} ingredients synced to local database`);
@@ -312,6 +321,47 @@ class OfflineSyncService {
           if (data.pekerjaan && data.pekerjaan.length > 0) {
             await (window as any).electronAPI.localDbUpsertPekerjaan(data.pekerjaan);
             console.log(`✅ ${data.pekerjaan.length} pekerjaan records synced to local database`);
+          }
+          
+          // Sync new tables for enhanced offline support
+          if (data.paymentMethods && data.paymentMethods.length > 0) {
+            await (window as any).electronAPI.localDbUpsertPaymentMethods(data.paymentMethods);
+            console.log(`✅ ${data.paymentMethods.length} payment methods synced to local database`);
+          }
+          
+          if (data.banks && data.banks.length > 0) {
+            await (window as any).electronAPI.localDbUpsertBanks(data.banks);
+            console.log(`✅ ${data.banks.length} banks synced to local database`);
+          }
+          
+          if (data.organizations && data.organizations.length > 0) {
+            await (window as any).electronAPI.localDbUpsertOrganizations(data.organizations);
+            console.log(`✅ ${data.organizations.length} organizations synced to local database`);
+          }
+          
+          if (data.managementGroups && data.managementGroups.length > 0) {
+            await (window as any).electronAPI.localDbUpsertManagementGroups(data.managementGroups);
+            console.log(`✅ ${data.managementGroups.length} management groups synced to local database`);
+          }
+          
+          if (data.category1 && data.category1.length > 0) {
+            await (window as any).electronAPI.localDbUpsertCategory1(data.category1);
+            console.log(`✅ ${data.category1.length} category1 records synced to local database`);
+          }
+          
+          if (data.category2 && data.category2.length > 0) {
+            await (window as any).electronAPI.localDbUpsertCategory2(data.category2);
+            console.log(`✅ ${data.category2.length} category2 records synced to local database`);
+          }
+          
+          if (data.clAccounts && data.clAccounts.length > 0) {
+            await (window as any).electronAPI.localDbUpsertClAccounts(data.clAccounts);
+            console.log(`✅ ${data.clAccounts.length} CL accounts synced to local database`);
+          }
+          
+          if (data.omset && data.omset.length > 0) {
+            await (window as any).electronAPI.localDbUpsertOmset(data.omset);
+            console.log(`✅ ${data.omset.length} omset records synced to local database`);
           }
           
           // Update sync status
@@ -351,18 +401,12 @@ class OfflineSyncService {
     onlineFetch: () => Promise<T>,
     offlineFetch: () => Promise<T>
   ): Promise<T> {
-    if (this.syncStatus.internetConnected) {
       try {
         const result = await onlineFetch();
         return result;
       } catch (error) {
-        console.warn('⚠️ Online fetch failed, falling back to offline data');
-        // Don't immediately mark as offline - let the connection check handle it
-        console.log('🔄 [FALLBACK] Triggering connection check due to fetch failure');
-        this.checkConnection(); // Re-check connection status
-        return offlineFetch();
-      }
-    } else {
+      console.log('⚠️ fetchWithFallback: Online failed, triggering offline...');
+      this.checkConnection();
       return offlineFetch();
     }
   }
@@ -476,17 +520,17 @@ class OfflineSyncService {
       
       if (response.ok) {
         results.database = { success: true };
-        console.log(`✅ [DEBUG] Database health check - SUCCESS`);
+        // console.log(`✅ [DEBUG] Database health check - SUCCESS`);
       } else {
         results.database = { success: false, error: `HTTP ${response.status}` };
-        console.log(`❌ [DEBUG] Database health check - FAILED: HTTP ${response.status}`);
+        // console.log(`❌ [DEBUG] Database health check - FAILED: HTTP ${response.status}`);
       }
     } catch (error) {
       results.database = { 
         success: false, 
         error: error instanceof Error ? error.message : 'Unknown error' 
       };
-      console.log(`❌ [DEBUG] Database health check - FAILED: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      // console.log(`❌ [DEBUG] Database health check - FAILED: ${error instanceof Error ? error.message : 'Unknown error'}`);
     }
 
     console.log('🧪 [DEBUG] Endpoint test results:', results);

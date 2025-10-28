@@ -1,7 +1,8 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { X, Plus, Minus } from 'lucide-react';
+import { offlineSyncService } from '@/lib/offlineSync';
 
 interface Product {
   id: number;
@@ -55,10 +56,29 @@ export default function ProductCustomizationModal({
   const [quantity, setQuantity] = useState(1);
   const [customNote, setCustomNote] = useState('');
   const [loading, setLoading] = useState(false);
+  const customNoteRef = useRef<HTMLTextAreaElement>(null);
 
   useEffect(() => {
     if (isOpen && product) {
       fetchCustomizations();
+      // Reset quantity and customNote when modal opens
+      setQuantity(1);
+      setCustomNote('');
+      
+      // Aggressive focus for custom note in Electron
+      const focusAttempts = [100, 200, 300, 400];
+      const timers: NodeJS.Timeout[] = [];
+      
+      focusAttempts.forEach(delay => {
+        const timer = setTimeout(() => {
+          if (customNoteRef.current) {
+            customNoteRef.current.focus();
+          }
+        }, delay);
+        timers.push(timer);
+      });
+      
+      return () => timers.forEach(timer => clearTimeout(timer));
     }
   }, [isOpen, product]);
 
@@ -67,19 +87,57 @@ export default function ProductCustomizationModal({
     
     try {
       setLoading(true);
-      const response = await fetch(`/api/products/${product.id}/customizations`);
-      if (response.ok) {
-        const data = await response.json();
-        setCustomizations(data.customizations || []);
+      
+      // Use offline sync service for fallback
+      const customizations = await offlineSyncService.fetchWithFallback(
+        // Online fetch
+        async () => {
+          const controller = new AbortController();
+          const timeoutId = setTimeout(() => controller.abort(), 2000);
+          
+          try {
+            const response = await fetch(`/api/products/${product.id}/customizations`, {
+              signal: controller.signal
+            });
+            clearTimeout(timeoutId);
+            
+            if (!response.ok) {
+              console.log('🌐 API returned non-OK status:', response.status);
+              throw new Error(`HTTP ${response.status}`);
+            }
+            
+            const data = await response.json();
+            return data.customizations || [];
+          } catch (error) {
+            console.log('🌐 Online fetch error:', error);
+            clearTimeout(timeoutId);
+            throw error;
+          }
+        },
+        // Offline fetch
+        async () => {
+          console.log('💾 Attempting offline fallback...');
+          if (typeof window !== 'undefined' && (window as any).electronAPI) {
+            console.log('💾 Calling Electron IPC...');
+            const customizations = await (window as any).electronAPI.localDbGetProductCustomizations(product.id);
+            console.log('💾 Retrieved customizations:', customizations.length);
+            return customizations;
+          } else {
+            throw new Error('Offline database not available');
+          }
+        }
+      );
+      
+      setCustomizations(customizations);
         
         // Initialize selected customizations
-        const initialSelections = data.customizations.map((customization: Customization) => ({
+      const initialSelections = customizations.map((customization: Customization) => ({
           customization_id: customization.id,
           customization_name: customization.name,
           selected_options: []
         }));
         setSelectedCustomizations(initialSelections);
-      }
+      
     } catch (error) {
       console.error('Error fetching customizations:', error);
     } finally {
@@ -175,6 +233,11 @@ export default function ProductCustomizationModal({
     );
     
     onAddToCart(product, validCustomizations, quantity, customNote);
+    
+    // Reset quantity and customNote after adding to cart
+    setQuantity(1);
+    setCustomNote('');
+    
     onClose();
   };
 
@@ -186,10 +249,10 @@ export default function ProductCustomizationModal({
 
   return (
     <div className="fixed inset-0 bg-blue-200/30 backdrop-blur-sm flex items-center justify-center z-50 p-4">
-      <div className="bg-white rounded-2xl max-w-md w-full max-h-[90vh] overflow-y-auto shadow-xl">
+      <div className="bg-white rounded-2xl max-w-4xl w-full max-h-[85vh] overflow-y-auto shadow-xl">
         {/* Header */}
-        <div className="flex items-center justify-between p-6 pb-4">
-          <h2 className="text-xl font-bold text-gray-900">
+        <div className="flex items-center justify-between p-4 pb-3">
+          <h2 className="text-lg font-bold text-gray-900">
             {product.nama}
           </h2>
           <button
@@ -201,29 +264,29 @@ export default function ProductCustomizationModal({
         </div>
 
         {/* Content */}
-        <div className="px-6 pb-4">
+        <div className="px-4 pb-3">
           {loading ? (
             <div className="text-center py-8">
               <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-500 mx-auto mb-4"></div>
               <p className="text-gray-600">Loading customizations...</p>
             </div>
           ) : (
-            <div className="space-y-6">
+            <div className="space-y-4">
               {/* Customizations */}
               {customizations.map((customization) => (
-                <div key={customization.id} className="space-y-3">
-                  <h3 className="font-semibold text-gray-800 text-base">
+                <div key={customization.id} className="space-y-2">
+                  <h3 className="font-semibold text-gray-800 text-sm">
                     {customization.name}
                   </h3>
                   
                   {/* Single selection - horizontal buttons */}
                   {customization.selection_mode === 'single' && (
-                    <div className="flex gap-3">
+                    <div className="flex gap-2">
                       {customization.options.map((option) => (
                         <button
                           key={option.id}
                           onClick={() => handleOptionToggle(customization.id, option)}
-                          className={`px-4 py-3 rounded-xl text-sm font-medium transition-all duration-200 border-2 ${
+                          className={`px-3 py-2 rounded-lg text-sm font-medium transition-all duration-200 border-2 ${
                             isOptionSelected(customization.id, option.id)
                               ? 'bg-teal-100 border-teal-400 text-teal-800 shadow-sm'
                               : 'bg-gray-50 border-gray-200 text-gray-700 hover:bg-gray-100 hover:border-gray-300'
@@ -237,12 +300,12 @@ export default function ProductCustomizationModal({
                   
                   {/* Multiple selection - grid layout */}
                   {customization.selection_mode === 'multiple' && (
-                    <div className="grid grid-cols-2 gap-3">
+                    <div className="grid grid-cols-3 gap-2">
                       {customization.options.map((option) => (
                         <button
                           key={option.id}
                           onClick={() => handleOptionToggle(customization.id, option)}
-                          className={`px-4 py-3 rounded-xl text-sm font-medium transition-all duration-200 border-2 ${
+                          className={`px-2 py-2 rounded-lg text-xs font-medium transition-all duration-200 border-2 ${
                             isOptionSelected(customization.id, option.id)
                               ? 'bg-teal-100 border-teal-400 text-teal-800 shadow-sm'
                               : 'bg-gray-50 border-gray-200 text-gray-700 hover:bg-gray-100 hover:border-gray-300'
@@ -253,7 +316,7 @@ export default function ProductCustomizationModal({
                               {option.price_adjustment > 0 ? '+' : ''}{option.name}
                             </div>
                             {option.price_adjustment !== 0 && (
-                              <div className="text-xs mt-1 font-normal">
+                              <div className="text-xs mt-0.5 font-normal">
                                 {formatPrice(Number(option.price_adjustment) || 0)}
                               </div>
                             )}
@@ -265,68 +328,96 @@ export default function ProductCustomizationModal({
                 </div>
               ))}
 
-              {/* Custom Note Section */}
-              <div className="mb-6">
-                <label className="block text-sm font-medium text-gray-700 mb-2">
-                  Custom Note (Optional)
-                </label>
-                <textarea
-                  value={customNote}
-                  onChange={(e) => setCustomNote(e.target.value)}
-                  className="w-full p-3 border border-gray-300 rounded-lg text-gray-800 bg-white focus:border-blue-400 focus:ring-2 focus:ring-blue-100 resize-none cursor-text"
-                  placeholder="Add any special instructions or notes for this item..."
-                  rows={2}
-                  maxLength={200}
-                  autoComplete="off"
-                />
-                <p className="text-xs text-gray-500 mt-1">
-                  {customNote.length}/200 characters
-                </p>
-              </div>
-
-              {/* Quantity and Total */}
-              <div className="flex items-center justify-between pt-6 border-t border-gray-100">
-                <div className="flex items-center space-x-4">
-                  <button
-                    onClick={() => setQuantity(Math.max(1, quantity - 1))}
-                    className="w-10 h-10 bg-gray-200 hover:bg-gray-300 rounded-full flex items-center justify-center transition-colors"
-                  >
-                    <Minus size={18} className="text-gray-700" />
-                  </button>
-                  <span className="text-xl font-bold w-8 text-center text-black">{quantity}</span>
-                  <button
-                    onClick={() => setQuantity(quantity + 1)}
-                    className="w-10 h-10 bg-teal-100 hover:bg-teal-200 text-teal-700 rounded-full flex items-center justify-center transition-colors"
-                  >
-                    <Plus size={18} />
-                  </button>
-                </div>
-                
-                <div className="text-right">
-                  <span className="text-xl font-bold text-gray-900">
-                    {formatPrice(calculateTotalPrice())}
-                  </span>
-                </div>
-              </div>
             </div>
           )}
         </div>
 
-        {/* Footer */}
-        <div className="flex justify-end gap-3 p-6 pt-4">
-          <button
-            onClick={onClose}
-            className="px-6 py-3 text-gray-600 hover:text-gray-800 transition-colors font-medium"
-          >
-            Batal
-          </button>
-          <button
-            onClick={handleAddToCart}
-            disabled={loading}
-            className="px-6 py-3 bg-teal-500 hover:bg-teal-600 text-white rounded-xl transition-colors disabled:bg-gray-400 font-medium"
-          >
-            Konfirmasi
-          </button>
+        {/* Custom Note Section */}
+        <div className="px-4 pb-3 relative z-10">
+          <label className="block text-xs font-medium text-gray-700 mb-1">
+            Custom Note (Optional)
+          </label>
+          <textarea
+            ref={customNoteRef}
+            id="custom-note-textarea"
+            value={customNote}
+            onChange={(e) => setCustomNote(e.target.value)}
+            onMouseDown={(e) => {
+              e.stopPropagation();
+              e.preventDefault();
+              e.currentTarget.focus();
+            }}
+            onMouseUp={(e) => {
+              e.stopPropagation();
+              e.currentTarget.focus();
+            }}
+            onClick={(e) => {
+              e.stopPropagation();
+              e.currentTarget.focus();
+            }}
+            onFocus={(e) => {
+              e.stopPropagation();
+              console.log('✅ Custom note (customization modal) focused');
+            }}
+            onBlur={() => {
+              console.log('⚠️ Custom note (customization modal) lost focus');
+            }}
+            style={{ pointerEvents: 'auto' }}
+            className="w-full p-2 border-2 border-gray-300 rounded-lg text-sm text-gray-800 bg-white focus:border-blue-500 focus:ring-4 focus:ring-blue-200 resize-none cursor-text focus:outline-none"
+            placeholder="Add any special instructions or notes for this item..."
+            rows={2}
+            maxLength={200}
+            autoComplete="off"
+            spellCheck={false}
+            tabIndex={1}
+          />
+          <p className="text-xs text-gray-500 mt-0.5">
+            {customNote.length}/200 characters
+          </p>
+        </div>
+
+        {/* Footer - All in one line */}
+        <div className="flex items-center justify-between gap-4 px-4 pb-4 pt-3 border-t border-gray-100">
+          {/* Quantity controls */}
+          <div className="flex items-center space-x-3">
+            <button
+              onClick={() => setQuantity(Math.max(1, quantity - 1))}
+              className="w-8 h-8 bg-gray-200 hover:bg-gray-300 rounded-full flex items-center justify-center transition-colors"
+            >
+              <Minus size={16} className="text-gray-700" />
+            </button>
+            <span className="text-lg font-bold w-6 text-center text-black">{quantity}</span>
+            <button
+              onClick={() => setQuantity(quantity + 1)}
+              className="w-8 h-8 bg-teal-100 hover:bg-teal-200 text-teal-700 rounded-full flex items-center justify-center transition-colors"
+            >
+              <Plus size={16} />
+            </button>
+          </div>
+          
+          {/* Total Price */}
+          <div className="text-right flex-1">
+            <span className="text-lg font-bold text-gray-900">
+              {formatPrice(calculateTotalPrice())}
+            </span>
+          </div>
+          
+          {/* Action Buttons */}
+          <div className="flex gap-3">
+            <button
+              onClick={onClose}
+              className="px-6 py-3 text-gray-600 hover:text-gray-800 hover:bg-gray-50 rounded-xl transition-colors font-medium"
+            >
+              Batal
+            </button>
+            <button
+              onClick={handleAddToCart}
+              disabled={loading}
+              className="px-6 py-3 bg-teal-500 hover:bg-teal-600 text-white rounded-xl transition-colors disabled:bg-gray-400 font-medium"
+            >
+              Konfirmasi
+            </button>
+          </div>
         </div>
       </div>
     </div>

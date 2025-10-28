@@ -10,9 +10,7 @@ const dbConfig = {
   waitForConnections: true,
   connectionLimit: 10,
   queueLimit: 0,
-  acquireTimeout: 10000, // 10 seconds to acquire connection
-  timeout: 10000, // 10 seconds query timeout
-  reconnect: true,
+  // Removed invalid MySQL2 options: acquireTimeout, timeout, reconnect
   keepAliveInitialDelay: 0,
   enableKeepAlive: true,
 };

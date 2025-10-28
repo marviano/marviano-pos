@@ -15,15 +15,12 @@ export async function GET(request: NextRequest) {
     const transactionType = searchParams.get('transaction_type') as 'drinks' | 'bakery' | null;
     const online = searchParams.get('online') === 'true';
 
-    // Base query for distinct category2 names from products table using junction table
+    // Base query - fetch all categories from category2 table (including empty ones)
     let sql = `
-      SELECT DISTINCT c2.name as category2_name
-      FROM products p
-      INNER JOIN product_businesses pb ON p.id = pb.product_id
-      LEFT JOIN category2 c2 ON p.category2_id = c2.id
-      WHERE pb.business_id = ? 
-      AND p.status = 'active'
-      AND c2.name IS NOT NULL
+      SELECT c2.name as category2_name
+      FROM category2 c2
+      WHERE c2.business_id = ? 
+      AND c2.is_active = 1
     `;
     
     const params: any[] = [BUSINESS_ID];
@@ -39,10 +36,19 @@ export async function GET(request: NextRequest) {
 
     // Online filter: only include categories that have products with harga_online
     if (online) {
-      sql += ' AND p.harga_online IS NOT NULL AND p.harga_online > 0';
+      sql += ` AND EXISTS (
+        SELECT 1 FROM products p
+        INNER JOIN product_businesses pb ON p.id = pb.product_id
+        WHERE p.category2_id = c2.id
+        AND pb.business_id = ?
+        AND p.status = 'active'
+        AND p.harga_online IS NOT NULL 
+        AND p.harga_online > 0
+      )`;
+      params.push(BUSINESS_ID);
     }
     
-    sql += ' ORDER BY c2.name ASC';
+    sql += ' ORDER BY c2.display_order ASC, c2.name ASC';
 
     console.log('🔍 Fetching categories:', { business_id: BUSINESS_ID, transactionType, online });
 

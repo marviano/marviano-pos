@@ -1,7 +1,7 @@
 import React from 'react';
 
 interface TransactionItem {
-  id: number;
+  id: string; // Changed to string for UUID
   product_name: string;
   quantity: number;
   unit_price: number;
@@ -11,7 +11,7 @@ interface TransactionItem {
 }
 
 interface Transaction {
-  id: number;
+  id: string; // Changed to string for UUID
   business_id: number;
   user_id: number;
   user_name: string;
