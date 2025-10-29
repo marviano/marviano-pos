@@ -17,31 +17,25 @@ interface CustomNoteModalProps {
   isOpen: boolean;
   onClose: () => void;
   product: Product | null;
+  effectivePrice?: number; // Platform-specific price
   onConfirm: (note: string) => void;
 }
 
-export default function CustomNoteModal({ isOpen, onClose, product, onConfirm }: CustomNoteModalProps) {
+export default function CustomNoteModal({ isOpen, onClose, product, effectivePrice, onConfirm }: CustomNoteModalProps) {
   const [customNote, setCustomNote] = useState('');
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   // Force focus on the textarea when modal opens - aggressive approach for Electron
   useEffect(() => {
     if (isOpen && textareaRef.current) {
-      // Multiple attempts to ensure focus works in Electron
-      const focusAttempts = [0, 50, 100, 150, 200];
-      const timers: NodeJS.Timeout[] = [];
+      // Simple focus attempt
+      const timer = setTimeout(() => {
+        if (textareaRef.current) {
+          textareaRef.current.focus();
+        }
+      }, 100);
       
-      focusAttempts.forEach(delay => {
-        const timer = setTimeout(() => {
-          if (textareaRef.current) {
-            textareaRef.current.focus();
-            textareaRef.current.click(); // Trigger click to ensure activation
-          }
-        }, delay);
-        timers.push(timer);
-      });
-      
-      return () => timers.forEach(timer => clearTimeout(timer));
+      return () => clearTimeout(timer);
     }
   }, [isOpen]);
 
@@ -90,7 +84,7 @@ export default function CustomNoteModal({ isOpen, onClose, product, onConfirm }:
           {/* Product Info */}
           <div className="bg-gray-50 rounded-xl p-4 mb-4">
             <h3 className="font-semibold text-gray-800 mb-2">{product.nama}</h3>
-            <p className="text-2xl font-bold text-green-600">Rp {product.harga_jual.toLocaleString('id-ID')}</p>
+            <p className="text-2xl font-bold text-green-600">Rp {(effectivePrice !== undefined ? effectivePrice : product.harga_jual).toLocaleString('id-ID')}</p>
           </div>
 
           {/* Custom Note Section */}
@@ -102,27 +96,10 @@ export default function CustomNoteModal({ isOpen, onClose, product, onConfirm }:
               ref={textareaRef}
               value={customNote}
               onChange={(e) => setCustomNote(e.target.value)}
-              onMouseDown={(e) => {
-                e.stopPropagation();
-                e.preventDefault();
-                e.currentTarget.focus();
-              }}
-              onMouseUp={(e) => {
-                e.stopPropagation();
-                e.currentTarget.focus();
-              }}
               onClick={(e) => {
                 e.stopPropagation();
                 e.currentTarget.focus();
               }}
-              onFocus={(e) => {
-                e.stopPropagation();
-                console.log('✅ Custom note textarea focused');
-              }}
-              onBlur={() => {
-                console.log('⚠️ Custom note textarea lost focus');
-              }}
-              style={{ pointerEvents: 'auto' }}
               className="w-full p-3 border-2 border-gray-300 rounded-lg text-gray-800 bg-white focus:border-blue-500 focus:ring-4 focus:ring-blue-200 resize-none cursor-text"
               placeholder="Add any special instructions or notes for this item..."
               rows={3}

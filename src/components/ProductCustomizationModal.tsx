@@ -42,6 +42,7 @@ interface ProductCustomizationModalProps {
   isOpen: boolean;
   onClose: () => void;
   product: Product | null;
+  effectivePrice?: number; // Platform-specific price
   onAddToCart: (product: Product, customizations: SelectedCustomization[], quantity: number, customNote?: string) => void;
 }
 
@@ -49,6 +50,7 @@ export default function ProductCustomizationModal({
   isOpen,
   onClose,
   product,
+  effectivePrice,
   onAddToCart
 }: ProductCustomizationModalProps) {
   const [customizations, setCustomizations] = useState<Customization[]>([]);
@@ -64,23 +66,31 @@ export default function ProductCustomizationModal({
       // Reset quantity and customNote when modal opens
       setQuantity(1);
       setCustomNote('');
-      
-      // Aggressive focus for custom note in Electron
-      const focusAttempts = [100, 200, 300, 400];
-      const timers: NodeJS.Timeout[] = [];
-      
-      focusAttempts.forEach(delay => {
-        const timer = setTimeout(() => {
+    }
+  }, [isOpen, product]);
+
+  // Aggressive focus handling for custom note textarea
+  useEffect(() => {
+    if (isOpen && customNoteRef.current) {
+      // Multiple attempts to focus with different timeouts
+      const timers = [
+        setTimeout(() => {
           if (customNoteRef.current) {
             customNoteRef.current.focus();
           }
-        }, delay);
-        timers.push(timer);
-      });
+        }, 50),
+        setTimeout(() => {
+          if (customNoteRef.current) {
+            customNoteRef.current.focus();
+          }
+        }, 200),
+      ];
       
-      return () => timers.forEach(timer => clearTimeout(timer));
+      return () => {
+        timers.forEach(timer => clearTimeout(timer));
+      };
     }
-  }, [isOpen, product]);
+  }, [isOpen]);
 
   const fetchCustomizations = async () => {
     if (!product) return;
@@ -200,7 +210,8 @@ export default function ProductCustomizationModal({
   const calculateTotalPrice = () => {
     if (!product) return 0;
     
-    let basePrice = Number(product.harga_jual) || 0;
+    // Use effectivePrice if provided (platform-specific), otherwise fall back to harga_jual
+    let basePrice = effectivePrice !== undefined ? Number(effectivePrice) : Number(product.harga_jual);
     let customizationPrice = 0;
     
     selectedCustomizations.forEach(selection => {
@@ -248,8 +259,25 @@ export default function ProductCustomizationModal({
   if (!isOpen || !product) return null;
 
   return (
-    <div className="fixed inset-0 bg-blue-200/30 backdrop-blur-sm flex items-center justify-center z-50 p-4">
-      <div className="bg-white rounded-2xl max-w-4xl w-full max-h-[85vh] overflow-y-auto shadow-xl">
+    <div 
+      className="fixed inset-0 bg-blue-200/30 backdrop-blur-sm flex items-center justify-center z-50 p-4"
+      onMouseDown={(e) => {
+        // Don't let backdrop steal focus from textarea
+        if (e.target === e.currentTarget) {
+          e.preventDefault();
+        }
+      }}
+      onClick={(e) => {
+        // Don't let backdrop clicks affect the textarea
+        if (e.target === e.currentTarget) {
+          e.preventDefault();
+        }
+      }}
+    >
+      <div 
+        className="bg-white rounded-2xl max-w-4xl w-full max-h-[85vh] overflow-y-auto shadow-xl"
+        onMouseDown={(e) => e.stopPropagation()}
+      >
         {/* Header */}
         <div className="flex items-center justify-between p-4 pb-3">
           <h2 className="text-lg font-bold text-gray-900">
@@ -342,27 +370,25 @@ export default function ProductCustomizationModal({
             id="custom-note-textarea"
             value={customNote}
             onChange={(e) => setCustomNote(e.target.value)}
-            onMouseDown={(e) => {
-              e.stopPropagation();
-              e.preventDefault();
-              e.currentTarget.focus();
-            }}
-            onMouseUp={(e) => {
-              e.stopPropagation();
-              e.currentTarget.focus();
-            }}
             onClick={(e) => {
               e.stopPropagation();
+              // Force focus on click
               e.currentTarget.focus();
             }}
-            onFocus={(e) => {
+            onMouseDown={(e) => {
               e.stopPropagation();
+              // Prevent any default behavior that might steal focus
+              e.preventDefault();
+              // Then focus after preventing default
+              setTimeout(() => {
+                if (customNoteRef.current) {
+                  customNoteRef.current.focus();
+                }
+              }, 0);
+            }}
+            onFocus={() => {
               console.log('✅ Custom note (customization modal) focused');
             }}
-            onBlur={() => {
-              console.log('⚠️ Custom note (customization modal) lost focus');
-            }}
-            style={{ pointerEvents: 'auto' }}
             className="w-full p-2 border-2 border-gray-300 rounded-lg text-sm text-gray-800 bg-white focus:border-blue-500 focus:ring-4 focus:ring-blue-200 resize-none cursor-text focus:outline-none"
             placeholder="Add any special instructions or notes for this item..."
             rows={2}

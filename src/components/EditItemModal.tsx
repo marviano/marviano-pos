@@ -35,10 +35,11 @@ interface EditItemModalProps {
   isOpen: boolean;
   onClose: () => void;
   cartItem: CartItem | null;
+  effectivePrice?: number; // Platform-specific price
   onUpdate: (updatedItem: CartItem) => void;
 }
 
-export default function EditItemModal({ isOpen, onClose, cartItem, onUpdate }: EditItemModalProps) {
+export default function EditItemModal({ isOpen, onClose, cartItem, effectivePrice, onUpdate }: EditItemModalProps) {
   const [quantity, setQuantity] = useState(1);
   const [customNote, setCustomNote] = useState('');
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -49,21 +50,14 @@ export default function EditItemModal({ isOpen, onClose, cartItem, onUpdate }: E
       setQuantity(cartItem.quantity);
       setCustomNote(cartItem.customNote || '');
       
-      // Multiple focus attempts for Electron
-      const focusAttempts = [0, 50, 100, 150, 200];
-      const timers: NodeJS.Timeout[] = [];
+      // Simple focus attempt
+      const timer = setTimeout(() => {
+        if (textareaRef.current) {
+          textareaRef.current.focus();
+        }
+      }, 100);
       
-      focusAttempts.forEach(delay => {
-        const timer = setTimeout(() => {
-          if (textareaRef.current) {
-            textareaRef.current.focus();
-            textareaRef.current.click();
-          }
-        }, delay);
-        timers.push(timer);
-      });
-      
-      return () => timers.forEach(timer => clearTimeout(timer));
+      return () => clearTimeout(timer);
     }
   }, [cartItem]);
 
@@ -120,7 +114,7 @@ export default function EditItemModal({ isOpen, onClose, cartItem, onUpdate }: E
           {/* Product Info */}
           <div className="bg-gray-50 rounded-xl p-4 mb-4">
             <h3 className="font-semibold text-gray-800 mb-2">{cartItem.product.nama}</h3>
-            <p className="text-2xl font-bold text-green-600">Rp {cartItem.product.harga_jual.toLocaleString('id-ID')}</p>
+            <p className="text-2xl font-bold text-green-600">Rp {(effectivePrice !== undefined ? effectivePrice : cartItem.product.harga_jual).toLocaleString('id-ID')}</p>
           </div>
 
           {/* Quantity Section */}
@@ -154,27 +148,10 @@ export default function EditItemModal({ isOpen, onClose, cartItem, onUpdate }: E
               ref={textareaRef}
               value={customNote}
               onChange={(e) => setCustomNote(e.target.value)}
-              onMouseDown={(e) => {
-                e.stopPropagation();
-                e.preventDefault();
-                e.currentTarget.focus();
-              }}
-              onMouseUp={(e) => {
-                e.stopPropagation();
-                e.currentTarget.focus();
-              }}
               onClick={(e) => {
                 e.stopPropagation();
                 e.currentTarget.focus();
               }}
-              onFocus={(e) => {
-                e.stopPropagation();
-                console.log('✅ Custom note (edit modal) focused');
-              }}
-              onBlur={() => {
-                console.log('⚠️ Custom note (edit modal) lost focus');
-              }}
-              style={{ pointerEvents: 'auto' }}
               className="w-full p-3 border-2 border-gray-300 rounded-lg text-gray-800 bg-white focus:border-blue-500 focus:ring-4 focus:ring-blue-200 resize-none cursor-text"
               placeholder="Add any special instructions or notes for this item..."
               rows={3}

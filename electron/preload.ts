@@ -137,6 +137,17 @@ contextBridge.exposeInMainWorld('electronAPI', {
   localDbUpsertOmset: (rows: any[]) => ipcRenderer.invoke('localdb-upsert-omset', rows),
   localDbGetOmset: (businessId?: number, startDate?: string, endDate?: string) => ipcRenderer.invoke('localdb-get-omset', businessId, startDate, endDate),
   
+  // Printer Management (multi-printer system)
+  generateNumericUuid: (businessId: number) => ipcRenderer.invoke('generate-numeric-uuid', businessId),
+  getPrinterCounter: (printerType: string, businessId: number, increment: boolean) => ipcRenderer.invoke('get-printer-counter', printerType, businessId, increment),
+  getPrinter2Mode: () => ipcRenderer.invoke('get-printer2-mode'),
+  setPrinter2Mode: (mode: 'auto' | 'manual') => ipcRenderer.invoke('set-printer2-mode', mode),
+  getPrinter2AutomationSelections: (businessId: number) => ipcRenderer.invoke('get-printer2-automation-selections', businessId),
+  savePrinter2AutomationSelections: (businessId: number, cycleNumber: number, selections: number[]) => ipcRenderer.invoke('save-printer2-automation-selections', businessId, cycleNumber, selections),
+  generateRandomSelections: (cycleNumber: number) => ipcRenderer.invoke('generate-random-selections', cycleNumber),
+  logPrinter2Print: (transactionId: string, printer2ReceiptNumber: number, mode: 'auto' | 'manual', cycleNumber?: number) => ipcRenderer.invoke('log-printer2-print', transactionId, printer2ReceiptNumber, mode, cycleNumber),
+  getPrinter2AuditLog: (fromDate?: string, toDate?: string, limit?: number) => ipcRenderer.invoke('get-printer2-audit-log', fromDate, toDate, limit),
+  
   // Customer display event listeners
   onOrderUpdate: (callback: (data: any) => void) => {
     ipcRenderer.on('order-update', (event, data) => callback(data));

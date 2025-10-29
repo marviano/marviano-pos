@@ -40,12 +40,14 @@ const electron_1 = require("electron");
 const better_sqlite3_1 = __importDefault(require("better-sqlite3"));
 const path = __importStar(require("path"));
 const fs = __importStar(require("fs"));
+const printerManagement_1 = require("./printerManagement");
 const isDev = process.env.NODE_ENV === 'development' || !electron_1.app.isPackaged;
-// Global references to windows
+// Global references to windows and services
 let mainWindow = null;
 let customerWindow = null;
 let printWindow = null;
 let localDb = null;
+let printerService = null;
 function createWindows() {
     // Initialize local SQLite (offline storage)
     try {
@@ -488,6 +490,56 @@ function createWindows() {
         updated_at INTEGER
       );
       
+      -- Printer mode settings
+      CREATE TABLE IF NOT EXISTS printer_mode_settings (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        printer_type TEXT UNIQUE NOT NULL,
+        mode TEXT NOT NULL CHECK (mode IN ('auto', 'manual')),
+        created_at INTEGER,
+        updated_at INTEGER
+      );
+      
+      -- Daily printer counters (reset daily)
+      CREATE TABLE IF NOT EXISTS printer_daily_counters (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        printer_type TEXT NOT NULL,
+        business_id INTEGER NOT NULL,
+        date TEXT NOT NULL,
+        counter INTEGER DEFAULT 0,
+        last_reset_at INTEGER,
+        UNIQUE(printer_type, business_id, date)
+      );
+      
+      -- Printer 2 automation tracking (for auto mode)
+      CREATE TABLE IF NOT EXISTS printer2_automation (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        business_id INTEGER NOT NULL,
+        cycle_number INTEGER NOT NULL,
+        selected_transactions TEXT NOT NULL,
+        created_at INTEGER,
+        UNIQUE(business_id, cycle_number)
+      );
+      
+      -- Printer 2 audit log
+      CREATE TABLE IF NOT EXISTS printer2_audit_log (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        transaction_id TEXT NOT NULL,
+        printer2_receipt_number INTEGER NOT NULL,
+        print_mode TEXT NOT NULL CHECK (print_mode IN ('auto', 'manual')),
+        cycle_number INTEGER,
+        printed_at TEXT NOT NULL,
+        printed_at_epoch INTEGER NOT NULL,
+        FOREIGN KEY (transaction_id) REFERENCES transactions(id)
+      );
+      
+      -- UUID sequence tracker for numeric UUID generation
+      CREATE TABLE IF NOT EXISTS uuid_sequence_tracker (
+        key TEXT PRIMARY KEY,
+        counter INTEGER DEFAULT 0,
+        created_at INTEGER,
+        updated_at INTEGER
+      );
+      
       -- Indexes for performance
       CREATE INDEX IF NOT EXISTS idx_products_jenis ON products(jenis);
       CREATE INDEX IF NOT EXISTS idx_products_status ON products(status);
@@ -518,6 +570,13 @@ function createWindows() {
       CREATE INDEX IF NOT EXISTS idx_transaction_items_transaction ON transaction_items(transaction_id);
       CREATE INDEX IF NOT EXISTS idx_transaction_items_product ON transaction_items(product_id);
       CREATE INDEX IF NOT EXISTS idx_transaction_items_created ON transaction_items(created_at);
+      
+      CREATE INDEX IF NOT EXISTS idx_printer_mode_settings_type ON printer_mode_settings(printer_type);
+      CREATE INDEX IF NOT EXISTS idx_printer_daily_counters_lookup ON printer_daily_counters(printer_type, business_id, date);
+      CREATE INDEX IF NOT EXISTS idx_printer2_automation_lookup ON printer2_automation(business_id, cycle_number);
+      CREATE INDEX IF NOT EXISTS idx_printer2_audit_transaction ON printer2_audit_log(transaction_id);
+      CREATE INDEX IF NOT EXISTS idx_printer2_audit_mode ON printer2_audit_log(print_mode);
+      CREATE INDEX IF NOT EXISTS idx_printer2_audit_date ON printer2_audit_log(printed_at_epoch);
       
       CREATE INDEX IF NOT EXISTS idx_payment_methods_code ON payment_methods(code);
       CREATE INDEX IF NOT EXISTS idx_payment_methods_active ON payment_methods(is_active);
@@ -569,6 +628,11 @@ function createWindows() {
     `);
         console.log('✅ SQLite database initialized successfully');
         console.log('📊 Database file location:', dbPath);
+        // Initialize printer management service
+        if (localDb) {
+            printerService = new printerManagement_1.PrinterManagementService(localDb);
+            console.log('✅ Printer Management Service initialized');
+        }
         console.log('🔍 Testing database connection...');
         // Test the database connection
         try {
@@ -1742,6 +1806,80 @@ function createWindows() {
             return [];
         }
     });
+    // ==================== PRINTER MANAGEMENT IPC HANDLERS ====================
+    // Generate 19-digit numeric UUID
+    electron_1.ipcMain.handle('generate-numeric-uuid', async (event, businessId) => {
+        if (!printerService)
+            return { success: false, error: 'Printer service not available' };
+        try {
+            const uuid = printerService.generateNumericUUID(businessId);
+            return { success: true, uuid };
+        }
+        catch (error) {
+            return { success: false, error: String(error) };
+        }
+    });
+    // Get or increment printer counter
+    electron_1.ipcMain.handle('get-printer-counter', async (event, printerType, businessId, increment = false) => {
+        if (!printerService)
+            return { success: false, counter: 0 };
+        try {
+            const counter = printerService.getPrinterCounter(printerType, businessId, increment);
+            return { success: true, counter };
+        }
+        catch (error) {
+            return { success: false, counter: 0, error: String(error) };
+        }
+    });
+    // Get Printer 2 mode
+    electron_1.ipcMain.handle('get-printer2-mode', async () => {
+        if (!printerService)
+            return { success: true, mode: 'auto' };
+        const mode = printerService.getPrinter2Mode();
+        return { success: true, mode };
+    });
+    // Set Printer 2 mode
+    electron_1.ipcMain.handle('set-printer2-mode', async (event, mode) => {
+        if (!printerService)
+            return { success: false };
+        const result = printerService.setPrinter2Mode(mode);
+        return { success: result };
+    });
+    // Get Printer 2 automation selections
+    electron_1.ipcMain.handle('get-printer2-automation-selections', async (event, businessId) => {
+        if (!printerService)
+            return { success: false, cycleNumber: 0, selections: [] };
+        const result = printerService.getPrinter2AutomationSelections(businessId);
+        return { success: true, ...result };
+    });
+    // Save Printer 2 automation selections
+    electron_1.ipcMain.handle('save-printer2-automation-selections', async (event, businessId, cycleNumber, selections) => {
+        if (!printerService)
+            return { success: false };
+        const result = printerService.savePrinter2AutomationSelections(businessId, cycleNumber, selections);
+        return { success: result };
+    });
+    // Generate random selections
+    electron_1.ipcMain.handle('generate-random-selections', async (event, cycleNumber) => {
+        if (!printerService)
+            return { success: false, selections: [] };
+        const selections = printerService.generateRandomSelections(cycleNumber);
+        return { success: true, selections };
+    });
+    // Log Printer 2 print
+    electron_1.ipcMain.handle('log-printer2-print', async (event, transactionId, printer2ReceiptNumber, mode, cycleNumber) => {
+        if (!printerService)
+            return { success: false };
+        const result = printerService.logPrinter2Print(transactionId, printer2ReceiptNumber, mode, cycleNumber);
+        return { success: result };
+    });
+    // Get Printer 2 audit log
+    electron_1.ipcMain.handle('get-printer2-audit-log', async (event, fromDate, toDate, limit) => {
+        if (!printerService)
+            return { success: false, entries: [] };
+        const entries = printerService.getPrinter2AuditLog(fromDate, toDate, limit || 100);
+        return { success: true, entries };
+    });
     // Offline transaction queue management
     electron_1.ipcMain.handle('localdb-queue-offline-transaction', async (event, transactionData) => {
         if (!localDb)
@@ -2012,13 +2150,30 @@ electron_1.ipcMain.handle('print-receipt', async (event, data) => {
                 contextIsolation: true,
             }
         });
+        // Fetch business name from database if business_id is provided
+        let businessName = 'MARVIANO MADIUN 1'; // Default fallback
+        if (data.business_id && localDb) {
+            try {
+                const business = localDb.prepare('SELECT name FROM businesses WHERE id = ?').get(data.business_id);
+                if (business) {
+                    businessName = business.name;
+                    console.log('✅ Fetched business name:', businessName, 'for business_id:', data.business_id);
+                }
+                else {
+                    console.log('⚠️ Business not found for business_id:', data.business_id);
+                }
+            }
+            catch (error) {
+                console.error('❌ Error fetching business name:', error);
+            }
+        }
         // Generate receipt HTML with character-based width
         let htmlContent = '';
         if (data.type === 'test') {
-            htmlContent = generateTestReceiptHTML(printerName);
+            htmlContent = generateTestReceiptHTML(printerName, businessName);
         }
         else {
-            htmlContent = generateReceiptHTML(data);
+            htmlContent = generateReceiptHTML(data, businessName);
         }
         await printWindow.loadURL(`data:text/html,${encodeURIComponent(htmlContent)}`);
         const printOptions = {
@@ -2027,23 +2182,43 @@ electron_1.ipcMain.handle('print-receipt', async (event, data) => {
             deviceName: printerName,
         };
         return new Promise((resolve) => {
+            const currentWindow = printWindow;
             setTimeout(() => {
-                printWindow.webContents.print(printOptions, (success, errorType) => {
-                    if (success) {
-                        console.log('✅ Print sent successfully');
-                        resolve({ success: true });
+                try {
+                    if (!currentWindow || currentWindow.isDestroyed()) {
+                        console.error('❌ Print window not available when attempting to print');
+                        resolve({ success: false, error: 'Print window unavailable' });
+                        return;
                     }
-                    else {
-                        console.error('❌ Print failed:', errorType);
-                        resolve({ success: false, error: errorType });
-                    }
-                    setTimeout(() => {
-                        if (printWindow) {
-                            printWindow.close();
-                            printWindow = null;
+                    currentWindow.webContents.print(printOptions, (success, errorType) => {
+                        if (success) {
+                            console.log('✅ Print sent successfully');
+                            resolve({ success: true });
                         }
-                    }, 1000);
-                });
+                        else {
+                            console.error('❌ Print failed:', errorType);
+                            resolve({ success: false, error: errorType });
+                        }
+                        setTimeout(() => {
+                            if (currentWindow && !currentWindow.isDestroyed()) {
+                                currentWindow.close();
+                            }
+                            if (printWindow === currentWindow) {
+                                printWindow = null;
+                            }
+                        }, 1000);
+                    });
+                }
+                catch (err) {
+                    console.error('❌ Exception during webContents.print:', err);
+                    resolve({ success: false, error: String(err) });
+                    if (currentWindow && !currentWindow.isDestroyed()) {
+                        currentWindow.close();
+                    }
+                    if (printWindow === currentWindow) {
+                        printWindow = null;
+                    }
+                }
             }, 500);
         });
     }
@@ -2080,10 +2255,20 @@ function getLogoBase64() {
     }
 }
 // Generate test receipt HTML with character-based formatting
-function generateTestReceiptHTML(printerName) {
+function generateTestReceiptHTML(printerName, businessName) {
+    // Format date as YYYY-MM-DD HH:MM:SS
+    const formatDateTime = (date) => {
+        const year = date.getFullYear();
+        const month = String(date.getMonth() + 1).padStart(2, '0');
+        const day = String(date.getDate()).padStart(2, '0');
+        const hours = String(date.getHours()).padStart(2, '0');
+        const minutes = String(date.getMinutes()).padStart(2, '0');
+        const seconds = String(date.getSeconds()).padStart(2, '0');
+        return `${year}-${month}-${day} ${hours}:${minutes}:${seconds}`;
+    };
     // Use the full receipt format for test print with sample data
-    const orderTime = new Date().toLocaleString('id-ID', { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' });
-    const printTime = new Date().toLocaleString('id-ID', { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    const orderTime = formatDateTime(new Date());
+    const printTime = formatDateTime(new Date());
     const logoDataUri = getLogoBase64();
     return `
 <!DOCTYPE html>
@@ -2115,6 +2300,14 @@ function generateTestReceiptHTML(printerName) {
     .info-line { display: flex; justify-content: space-between; margin-bottom: 1mm; }
     .info-label { font-size: 9pt; font-weight: 500; }
     .info-value { font-size: 9pt; font-weight: 700; }
+    .mono-value {
+      font-family: 'Consolas', 'Lucida Console', 'Courier New', monospace;
+      white-space: pre;
+      font-variant-numeric: tabular-nums;
+      -webkit-font-variant-numeric: tabular-nums;
+      font-feature-settings: 'tnum' 1, 'lnum' 1;
+    }
+    .order-number-value { font-size: 9pt; font-weight: 700; }
     table { width: 100%; border-collapse: collapse; margin: 2mm 0; font-size: 9pt; }
     th { text-align: left; font-weight: 700; border-bottom: 1px solid #000; padding: 1mm 0; font-size: 8pt; }
     td { padding: 1mm 0; font-weight: 500; }
@@ -2128,7 +2321,7 @@ function generateTestReceiptHTML(printerName) {
   <div class="contact">silahkan hubungi: 0813-9888-8568</div>
   
   ${logoDataUri ? `<div class="logo-container"><img src="${logoDataUri}" class="logo" alt="Momoyo Logo"></div>` : '<div class="store-name">MOMOYO</div>'}
-  <div class="branch">MARVIANO MADIUN 1</div>
+  <div class="branch">${businessName}</div>
   <div class="address">Jl. Kalimantan no. 21, Kartoharjo<br>Kec. Kartoharjo, Kota Madiun</div>
   
   <div class="transaction-type">DINE IN 23</div>
@@ -2137,15 +2330,15 @@ function generateTestReceiptHTML(printerName) {
   
   <div class="info-line">
     <span class="info-label">Nomor Pesanan:</span>
-    <span class="info-value">1970326207362797570</span>
+    <span class="info-value order-number-value mono-value">1970326207362797570</span>
   </div>
   <div class="info-line">
     <span class="info-label">Waktu Pesanan:</span>
-    <span class="info-value">${orderTime}</span>
+    <span class="info-value mono-value">${orderTime}</span>
   </div>
   <div class="info-line">
     <span class="info-label">Waktu Print:</span>
-    <span class="info-value">${printTime}</span>
+    <span class="info-value mono-value">${printTime}</span>
   </div>
   <div class="info-line">
     <span class="info-label">Operator Kasir:</span>
@@ -2220,7 +2413,7 @@ function generateTestReceiptHTML(printerName) {
   `;
 }
 // Generate transaction receipt HTML
-function generateReceiptHTML(data) {
+function generateReceiptHTML(data, businessName) {
     const items = data.items || [];
     const total = data.total || data.final_amount || 0;
     const paymentMethod = data.paymentMethod || 'Cash';
@@ -2244,9 +2437,19 @@ function generateReceiptHTML(data) {
       </tr>
     `;
     }).join('');
+    // Format date as YYYY-MM-DD HH:MM:SS
+    const formatDateTime = (date) => {
+        const year = date.getFullYear();
+        const month = String(date.getMonth() + 1).padStart(2, '0');
+        const day = String(date.getDate()).padStart(2, '0');
+        const hours = String(date.getHours()).padStart(2, '0');
+        const minutes = String(date.getMinutes()).padStart(2, '0');
+        const seconds = String(date.getSeconds()).padStart(2, '0');
+        return `${year}-${month}-${day} ${hours}:${minutes}:${seconds}`;
+    };
     const currentDate = new Date(data.date || Date.now());
-    const orderTime = currentDate.toLocaleString('id-ID', { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' });
-    const printTime = new Date().toLocaleString('id-ID', { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    const orderTime = formatDateTime(currentDate);
+    const printTime = formatDateTime(new Date());
     // Determine transaction type display (DINE IN / TAKE AWAY)
     const pickupMethod = data.pickupMethod || 'dine-in';
     const isDineIn = pickupMethod === 'dine-in';
@@ -2282,6 +2485,7 @@ function generateReceiptHTML(data) {
     .info-line { display: flex; justify-content: space-between; margin-bottom: 1mm; }
     .info-label { font-size: 9pt; font-weight: 500; }
     .info-value { font-size: 9pt; font-weight: 700; }
+    .order-number-value { font-size: 9pt; font-weight: 700; }
     table { width: 100%; border-collapse: collapse; margin: 2mm 0; font-size: 9pt; }
     th { text-align: left; font-weight: 700; border-bottom: 1px solid #000; padding: 1mm 0; font-size: 8pt; }
     td { padding: 1mm 0; font-weight: 500; }
@@ -2295,24 +2499,24 @@ function generateReceiptHTML(data) {
   <div class="contact">silahkan hubungi: 0813-9888-8568</div>
   
   ${logoDataUri ? `<div class="logo-container"><img src="${logoDataUri}" class="logo" alt="Momoyo Logo"></div>` : '<div class="store-name">MOMOYO</div>'}
-  <div class="branch">MARVIANO MADIUN 1</div>
+  <div class="branch">${businessName}</div>
   <div class="address">Jl. Kalimantan no. 21, Kartoharjo<br>Kec. Kartoharjo, Kota Madiun</div>
   
-  <div class="transaction-type">${transactionDisplay} ${data.tableNumber || '01'}</div>
+  <div class="transaction-type">${transactionDisplay} ${String(data.printer2Counter || data.tableNumber || '01').padStart(2, '0')}</div>
   
   <div class="dashed-line"></div>
   
   <div class="info-line">
     <span class="info-label">Nomor Pesanan:</span>
-    <span class="info-value">${data.receiptNumber || data.id || 'N/A'}</span>
+    <span class="info-value order-number-value mono-value">${data.receiptNumber || data.id || 'N/A'}</span>
   </div>
   <div class="info-line">
     <span class="info-label">Waktu Pesanan:</span>
-    <span class="info-value">${orderTime}</span>
+    <span class="info-value mono-value">${orderTime}</span>
   </div>
   <div class="info-line">
     <span class="info-label">Waktu Print:</span>
-    <span class="info-value">${printTime}</span>
+    <span class="info-value mono-value">${printTime}</span>
   </div>
   <div class="info-line">
     <span class="info-label">Operator Kasir:</span>

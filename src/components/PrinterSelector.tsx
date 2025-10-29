@@ -28,12 +28,58 @@ export default function PrinterSelector() {
   const [isTesting, setIsTesting] = useState<string | null>(null);
   const [saveStatus, setSaveStatus] = useState<'idle' | 'success' | 'error'>('idle');
 
+  // Add state for Printer 2 mode
+  const [printer2Mode, setPrinter2Mode] = useState<'auto' | 'manual'>('auto');
+  const [isSavingMode, setIsSavingMode] = useState(false);
+  const [modeSaveStatus, setModeSaveStatus] = useState<'idle' | 'success' | 'error'>('idle');
+
   // Load saved printer selections and auto-scan printers on component mount
   useEffect(() => {
     loadSavedSelections();
+    loadPrinter2Mode();
     // Auto-scan printers when component mounts
     scanForPrinters();
   }, []);
+
+  const loadPrinter2Mode = async () => {
+    try {
+      if (window.electronAPI?.getPrinter2Mode) {
+        const result = await window.electronAPI.getPrinter2Mode();
+        if (result?.success && result?.mode) {
+          setPrinter2Mode(result.mode);
+          console.log('✅ Loaded Printer 2 mode:', result.mode);
+        }
+      }
+    } catch (error) {
+      console.error('Error loading Printer 2 mode:', error);
+    }
+  };
+
+  const handleModeChange = async (newMode: 'auto' | 'manual') => {
+    setPrinter2Mode(newMode);
+    
+    // Auto-save
+    if (window.electronAPI?.setPrinter2Mode) {
+      setIsSavingMode(true);
+      setModeSaveStatus('idle');
+      
+      try {
+        const result = await window.electronAPI.setPrinter2Mode(newMode);
+        if (result?.success) {
+          setModeSaveStatus('success');
+          console.log('✅ Saved Printer 2 mode:', newMode);
+        } else {
+          setModeSaveStatus('error');
+        }
+      } catch (error) {
+        console.error('Error saving Printer 2 mode:', error);
+        setModeSaveStatus('error');
+      } finally {
+        setIsSavingMode(false);
+        setTimeout(() => setModeSaveStatus('idle'), 3000);
+      }
+    }
+  };
 
   const loadSavedSelections = async () => {
     try {
@@ -211,15 +257,7 @@ Please try:
       const result = await window.electronAPI?.printReceipt?.(testData);
       
       if (result?.success) {
-        alert(`✅ Test print sent successfully to ${printerName}!
-
-Check your printer - it should print a test page now.
-
-If nothing prints:
-1. Check if printer is on and has paper
-2. Check if printer is not paused or offline
-3. Try printing from another app to test the printer
-4. Check Windows printer queue for any errors`);
+        console.log(`✅ Test print sent successfully to ${printerName}`);
       } else {
         alert(`❌ Test print failed to ${printerName}
 
@@ -288,13 +326,13 @@ Please check:
 
       {/* Printer Selection Cards */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-        {/* Receipt Printer */}
+        {/* Printer 1: Receipt Printer */}
         <div className="bg-white rounded-lg border border-gray-200 p-6 shadow-sm">
           <div className="flex items-center justify-between mb-4">
             <div className="flex items-center space-x-3">
               <Printer className="w-6 h-6 text-blue-600" />
               <div>
-                <h3 className="font-semibold text-gray-800">Receipt Printer</h3>
+                <h3 className="font-semibold text-gray-800">Printer 1: Receipt Printer</h3>
                 <p className="text-sm text-gray-500">Standard receipts</p>
               </div>
             </div>
@@ -340,65 +378,13 @@ Please check:
           </div>
         </div>
 
-        {/* Label Printer */}
-        <div className="bg-white rounded-lg border border-gray-200 p-6 shadow-sm">
-          <div className="flex items-center justify-between mb-4">
-            <div className="flex items-center space-x-3">
-              <Printer className="w-6 h-6 text-green-600" />
-              <div>
-                <h3 className="font-semibold text-gray-800">Label Printer</h3>
-                <p className="text-sm text-gray-500">Order labels</p>
-              </div>
-            </div>
-            {getStatusIcon(selectedPrinters.labelPrinter)}
-          </div>
-
-          <div className="space-y-3">
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-2">
-                Select Printer
-              </label>
-              <select
-                value={selectedPrinters.labelPrinter}
-                onChange={(e) => handlePrinterSelection('labelPrinter', e.target.value)}
-                className="w-full border border-gray-300 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-green-500 text-gray-900 bg-white"
-              >
-                <option value="">Choose a printer...</option>
-                {systemPrinters.map((printer) => (
-                  <option key={printer.name} value={printer.name}>
-                    {printer.displayName}
-                  </option>
-                ))}
-              </select>
-            </div>
-
-            <button
-              onClick={() => testPrinter('labelPrinter')}
-              disabled={!selectedPrinters.labelPrinter || isTesting === 'labelPrinter'}
-              className="w-full flex items-center justify-center space-x-2 bg-green-500 hover:bg-green-600 disabled:bg-gray-300 text-white px-3 py-2 rounded-lg transition-colors"
-            >
-              {isTesting === 'labelPrinter' ? (
-                <>
-                  <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
-                  <span>Testing...</span>
-                </>
-              ) : (
-                <>
-                  <TestTube className="w-4 h-4" />
-                  <span>Test Print</span>
-                </>
-              )}
-            </button>
-          </div>
-        </div>
-
-        {/* Receiptize Printer */}
+        {/* Printer 2: Receiptize Printer */}
         <div className="bg-white rounded-lg border border-gray-200 p-6 shadow-sm">
           <div className="flex items-center justify-between mb-4">
             <div className="flex items-center space-x-3">
               <Printer className="w-6 h-6 text-purple-600" />
               <div>
-                <h3 className="font-semibold text-gray-800">Receiptize Printer</h3>
+                <h3 className="font-semibold text-gray-800">Printer 2: Receiptize Printer</h3>
                 <p className="text-sm text-gray-500">Specialized receipts</p>
               </div>
             </div>
@@ -430,6 +416,58 @@ Please check:
               className="w-full flex items-center justify-center space-x-2 bg-green-500 hover:bg-green-600 disabled:bg-gray-300 text-white px-3 py-2 rounded-lg transition-colors"
             >
               {isTesting === 'receiptizePrinter' ? (
+                <>
+                  <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                  <span>Testing...</span>
+                </>
+              ) : (
+                <>
+                  <TestTube className="w-4 h-4" />
+                  <span>Test Print</span>
+                </>
+              )}
+            </button>
+          </div>
+        </div>
+
+        {/* Printer 3: Label Printer */}
+        <div className="bg-white rounded-lg border border-gray-200 p-6 shadow-sm">
+          <div className="flex items-center justify-between mb-4">
+            <div className="flex items-center space-x-3">
+              <Printer className="w-6 h-6 text-green-600" />
+              <div>
+                <h3 className="font-semibold text-gray-800">Printer 3: Label Printer</h3>
+                <p className="text-sm text-gray-500">Order labels</p>
+              </div>
+            </div>
+            {getStatusIcon(selectedPrinters.labelPrinter)}
+          </div>
+
+          <div className="space-y-3">
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-2">
+                Select Printer
+              </label>
+              <select
+                value={selectedPrinters.labelPrinter}
+                onChange={(e) => handlePrinterSelection('labelPrinter', e.target.value)}
+                className="w-full border border-gray-300 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-green-500 text-gray-900 bg-white"
+              >
+                <option value="">Choose a printer...</option>
+                {systemPrinters.map((printer) => (
+                  <option key={printer.name} value={printer.name}>
+                    {printer.displayName}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <button
+              onClick={() => testPrinter('labelPrinter')}
+              disabled={!selectedPrinters.labelPrinter || isTesting === 'labelPrinter'}
+              className="w-full flex items-center justify-center space-x-2 bg-green-500 hover:bg-green-600 disabled:bg-gray-300 text-white px-3 py-2 rounded-lg transition-colors"
+            >
+              {isTesting === 'labelPrinter' ? (
                 <>
                   <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
                   <span>Testing...</span>
@@ -481,74 +519,64 @@ Please check:
         </div>
       )}
 
-      {/* Current Status */}
-      <div className="bg-green-50 border border-green-200 rounded-lg p-6">
-        <h3 className="text-lg font-semibold text-green-800 mb-3">Current Status</h3>
-        <div className="space-y-2 text-sm text-green-700">
-          <div className="flex items-center space-x-2">
-            <span className="font-bold">Detected Printers:</span>
-            <span>{systemPrinters.length} printer(s) found</span>
-          </div>
-          <div className="flex items-center space-x-2">
-            <span className="font-bold">Receipt Printer:</span>
-            <span>{selectedPrinters.receiptPrinter || 'Not selected'}</span>
-          </div>
-          <div className="flex items-center space-x-2">
-            <span className="font-bold">Label Printer:</span>
-            <span>{selectedPrinters.labelPrinter || 'Not selected'}</span>
-          </div>
-          <div className="flex items-center space-x-2">
-            <span className="font-bold">Receiptize Printer:</span>
-            <span>{selectedPrinters.receiptizePrinter || 'Not selected'}</span>
-          </div>
+      {/* Printer 2 Mode Settings */}
+      <div className="bg-purple-50 border border-purple-200 rounded-lg p-6">
+        <h3 className="text-lg font-semibold text-purple-800 mb-3">Mode Printer Receiptize</h3>
+        <p className="text-sm text-purple-700 mb-4">
+          Konfigurasi cara kerja Printer Receiptize (Printer 2) untuk struk audit.
+        </p>
+        
+        <div className="space-y-3">
+          <label className="flex items-center space-x-3 cursor-pointer">
+            <input
+              type="radio"
+              name="printer2Mode"
+              value="auto"
+              checked={printer2Mode === 'auto'}
+              onChange={() => handleModeChange('auto')}
+              className="w-4 h-4 text-purple-600"
+            />
+            <div className="flex-1">
+              <span className="font-medium text-purple-900">Mode Otomatis</span>
+              <p className="text-sm text-purple-700">
+                Otomatis mencetak 3 struk acak dari setiap 10 transaksi (audit sampling)
+              </p>
+            </div>
+          </label>
+          
+          <label className="flex items-center space-x-3 cursor-pointer">
+            <input
+              type="radio"
+              name="printer2Mode"
+              value="manual"
+              checked={printer2Mode === 'manual'}
+              onChange={() => handleModeChange('manual')}
+              className="w-4 h-4 text-purple-600"
+            />
+            <div className="flex-1">
+              <span className="font-medium text-purple-900">Mode Manual</span>
+              <p className="text-sm text-purple-700">
+                Pilih transaksi secara manual untuk dicetak (segera hadir)
+              </p>
+            </div>
+          </label>
         </div>
+        
+        {modeSaveStatus === 'success' && (
+          <div className="mt-4 flex items-center space-x-2 text-green-600">
+            <CheckCircle className="w-4 h-4" />
+            <span className="text-sm">Mode saved successfully</span>
+          </div>
+        )}
+        
+        {modeSaveStatus === 'error' && (
+          <div className="mt-4 flex items-center space-x-2 text-red-600">
+            <XCircle className="w-4 h-4" />
+            <span className="text-sm">Failed to save mode</span>
+          </div>
+        )}
       </div>
 
-      {/* Instructions */}
-      <div className="bg-blue-50 border border-blue-200 rounded-lg p-6">
-        <h3 className="text-lg font-semibold text-blue-800 mb-3">Quick Setup Guide</h3>
-        <div className="space-y-2 text-sm text-blue-700">
-          <div className="flex items-start space-x-2">
-            <span className="font-bold">1.</span>
-            <span>Printers are automatically scanned when you open this page</span>
-          </div>
-          <div className="flex items-start space-x-2">
-            <span className="font-bold">2.</span>
-            <span>Select a printer for each type from the dropdown menus above</span>
-          </div>
-          <div className="flex items-start space-x-2">
-            <span className="font-bold">3.</span>
-            <span>Click "Test Print" to verify each printer works correctly</span>
-          </div>
-          <div className="flex items-start space-x-2">
-            <span className="font-bold">4.</span>
-            <span>Click "Save Printer Selections" to store your choices permanently</span>
-          </div>
-        </div>
-      </div>
-
-      {/* Troubleshooting */}
-      <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-6">
-        <h3 className="text-lg font-semibold text-yellow-800 mb-3">Troubleshooting</h3>
-        <div className="space-y-2 text-sm text-yellow-700">
-          <div className="flex items-start space-x-2">
-            <span className="font-bold">•</span>
-            <span>If no printers appear: Check Windows Settings → Devices → Printers & scanners</span>
-          </div>
-          <div className="flex items-start space-x-2">
-            <span className="font-bold">•</span>
-            <span>If test print fails: Try printing from another app first to test the printer</span>
-          </div>
-          <div className="flex items-start space-x-2">
-            <span className="font-bold">•</span>
-            <span>If app crashes: Make sure you're running the desktop app, not in a browser</span>
-          </div>
-          <div className="flex items-start space-x-2">
-            <span className="font-bold">•</span>
-            <span>Still having issues? Restart the app completely and try again</span>
-          </div>
-        </div>
-      </div>
     </div>
   );
 }

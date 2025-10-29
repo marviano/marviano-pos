@@ -52,10 +52,10 @@ interface CenterContentProps {
   transactionType: 'drinks' | 'bakery';
   isLoadingProducts?: boolean;
   isOnline?: boolean;
-  selectedOnlinePlatform?: 'gofood' | 'grabfood' | 'shopeefood' | 'tiktok';
+  selectedOnlinePlatform?: 'gofood' | 'grabfood' | 'shopeefood' | 'tiktok' | null;
 }
 
-export default function CenterContent({ products, cartItems, setCartItems, transactionType, isLoadingProducts = false, isOnline = false, selectedOnlinePlatform = 'gofood' }: CenterContentProps) {
+export default function CenterContent({ products, cartItems, setCartItems, transactionType, isLoadingProducts = false, isOnline = false, selectedOnlinePlatform = null }: CenterContentProps) {
   const [showCustomizationModal, setShowCustomizationModal] = useState(false);
   const [showCustomNoteModal, setShowCustomNoteModal] = useState(false);
   const [showEditModal, setShowEditModal] = useState(false);
@@ -77,7 +77,8 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
         cartItems: cartItems,
         tabInfo: {
           activeTab: transactionType + (isOnline ? ' (Online)' : ''),
-          isOnline: isOnline
+          isOnline: isOnline,
+          selectedPlatform: selectedOnlinePlatform
         }
       });
     }
@@ -109,7 +110,7 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
   };
 
   const getOnlinePriceForPlatform = (product: Product): number | null => {
-    if (!isOnline) return null;
+    if (!isOnline || !selectedOnlinePlatform) return null;
     switch (selectedOnlinePlatform) {
       case 'gofood':
         return product.harga_gofood ?? null;
@@ -125,16 +126,16 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
   };
 
   const effectiveProductPrice = (product: Product): number => {
-    if (isOnline) {
+    if (isOnline && selectedOnlinePlatform) {
       const p = getOnlinePriceForPlatform(product);
       if (p && p > 0) return p;
-      return 0; // No fallback in online mode
+      return 0; // No fallback in online mode when platform is selected
     }
     return product.harga_jual;
   };
 
   const handleProductClick = async (product: Product) => {
-    if (isOnline) {
+    if (isOnline && selectedOnlinePlatform) {
       const platformPrice = getOnlinePriceForPlatform(product);
       if (!platformPrice || platformPrice <= 0) {
         return; // disabled in online mode for this platform
@@ -235,7 +236,7 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
         id: item.id.toString(),
         name: item.product.nama,
         quantity: item.quantity,
-        price: item.product.harga_jual,
+        price: effectiveProductPrice(item.product),
         status: 'preparing'
       })),
       total: totalPrice,
@@ -338,7 +339,7 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
                     <div className="flex-1">
                       <h4 className="font-medium text-gray-800 text-sm">{item.product.nama}</h4>
                       <p className="text-gray-600 text-xs">
-                        {formatPrice(isOnline && item.product.harga_online ? item.product.harga_online : item.product.harga_jual)} each
+                        {formatPrice(effectiveProductPrice(item.product))} each
                       </p>
                       
                       {/* Customizations */}
@@ -420,7 +421,7 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
                     <span className="text-xs text-gray-500">Subtotal</span>
                     <span className="font-semibold text-green-600">
                       {formatPrice((() => {
-                        let itemPrice = item.product.harga_jual;
+                        let itemPrice = effectiveProductPrice(item.product);
                         if (item.customizations) {
                           item.customizations.forEach(customization => {
                             customization.selected_options.forEach(option => {
@@ -493,18 +494,27 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
         {/* Product Grid - Scrollable with Fixed Height */}
         <div className="overflow-y-auto mb-4" style={{ maxHeight: 'calc(97vh - 200px)' }}>
           <div className="grid grid-cols-3 gap-3">
-            {products.length === 0 && !isLoadingProducts ? (
-              <div className="col-span-3 flex items-center justify-center h-32">
-                <p className="text-gray-500">No products available</p>
-              </div>
-            ) : (
-            products
-              .filter((product) => {
-                if (!isOnline) return true; // Show all products in offline mode
+            {(() => {
+              const filteredProducts = products.filter((product) => {
+                if (!isOnline) return true;
+                if (!selectedOnlinePlatform) return true;
                 const p = getOnlinePriceForPlatform(product);
-                return !!p && p > 0; // hide products without respected platform price in online mode
-              })
-              .map((product) => {
+                return !!p && p > 0;
+              });
+
+              if (filteredProducts.length === 0 && !isLoadingProducts) {
+                return (
+                  <div className="col-span-3 flex items-center justify-center h-32">
+                    <p className="text-gray-500">
+                      {isOnline && selectedOnlinePlatform 
+                        ? `No products available for ${selectedOnlinePlatform}` 
+                        : 'No products available'}
+                    </p>
+                  </div>
+                );
+              }
+
+              return filteredProducts.map((product) => {
                 const isDisabledOnline = false;
                 return (
               <button
@@ -572,8 +582,8 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
                 </div>
               </button>
               );
-              })
-            )}
+              });
+            })()}
           </div>
         </div>
 
@@ -619,6 +629,7 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
           setSelectedProduct(null);
         }}
         product={selectedProduct}
+        effectivePrice={selectedProduct ? effectiveProductPrice(selectedProduct) : undefined}
         onAddToCart={addToCart}
       />
 
@@ -630,6 +641,7 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
         onPaymentComplete={handlePaymentComplete}
         transactionType={transactionType}
         isOnline={isOnline}
+        selectedOnlinePlatform={selectedOnlinePlatform}
       />
 
       {/* Custom Note Modal */}
@@ -640,6 +652,7 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
           setSelectedProduct(null);
         }}
         product={selectedProduct}
+        effectivePrice={selectedProduct ? effectiveProductPrice(selectedProduct) : undefined}
         onConfirm={handleCustomNoteConfirm}
       />
 
@@ -651,6 +664,7 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
           setSelectedCartItem(null);
         }}
         cartItem={selectedCartItem}
+        effectivePrice={selectedCartItem ? effectiveProductPrice(selectedCartItem.product) : undefined}
         onUpdate={handleUpdateItem}
       />
     </div>

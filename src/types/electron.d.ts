@@ -128,6 +128,17 @@ declare global {
       // Printer configurations
       localDbSavePrinterConfig?: (printerType: string, systemPrinterName: string) => Promise<{ success: boolean; error?: string }>;
       localDbGetPrinterConfigs?: () => Promise<any[]>;
+      
+      // Printer Management (new multi-printer system)
+      generateNumericUuid?: (businessId: number) => Promise<{ success: boolean; uuid?: string; error?: string }>;
+      getPrinterCounter?: (printerType: string, businessId: number, increment: boolean) => Promise<{ success: boolean; counter: number; error?: string }>;
+      getPrinter2Mode?: () => Promise<{ success: boolean; mode: 'auto' | 'manual' }>;
+      setPrinter2Mode?: (mode: 'auto' | 'manual') => Promise<{ success: boolean }>;
+      getPrinter2AutomationSelections?: (businessId: number) => Promise<{ success: boolean; cycleNumber: number; selections: number[] }>;
+      savePrinter2AutomationSelections?: (businessId: number, cycleNumber: number, selections: number[]) => Promise<{ success: boolean }>;
+      generateRandomSelections?: (cycleNumber: number) => Promise<{ success: boolean; selections: number[] }>;
+      logPrinter2Print?: (transactionId: string, printer2ReceiptNumber: number, mode: 'auto' | 'manual', cycleNumber?: number) => Promise<{ success: boolean }>;
+      getPrinter2AuditLog?: (fromDate?: string, toDate?: string, limit?: number) => Promise<{ success: boolean; entries: any[] }>;
     };
   }
 }

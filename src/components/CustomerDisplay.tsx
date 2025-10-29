@@ -60,11 +60,19 @@ interface SlideshowImage {
 export default function CustomerDisplay() {
   const [currentOrder, setCurrentOrder] = useState<CurrentOrder | null>(null);
   
-  // Separate carts for each tab, just like the main POS
+  // Separate carts for each tab, just like the main POS - offline
   const [drinksCart, setDrinksCart] = useState<CartItem[]>([]);
   const [bakeryCart, setBakeryCart] = useState<CartItem[]>([]);
-  const [drinksOnlineCart, setDrinksOnlineCart] = useState<CartItem[]>([]);
-  const [bakeryOnlineCart, setBakeryOnlineCart] = useState<CartItem[]>([]);
+  
+  // Separate carts for each platform - online
+  const [drinksGofoodCart, setDrinksGofoodCart] = useState<CartItem[]>([]);
+  const [drinksGrabfoodCart, setDrinksGrabfoodCart] = useState<CartItem[]>([]);
+  const [drinksShopeefoodCart, setDrinksShopeefoodCart] = useState<CartItem[]>([]);
+  const [drinksTiktokCart, setDrinksTiktokCart] = useState<CartItem[]>([]);
+  const [bakeryGofoodCart, setBakeryGofoodCart] = useState<CartItem[]>([]);
+  const [bakeryGrabfoodCart, setBakeryGrabfoodCart] = useState<CartItem[]>([]);
+  const [bakeryShopeefoodCart, setBakeryShopeefoodCart] = useState<CartItem[]>([]);
+  const [bakeryTiktokCart, setBakeryTiktokCart] = useState<CartItem[]>([]);
   
   const [slideshowItems, setSlideshowItems] = useState<SlideshowItem[]>([]);
   const [slideshowImages, setSlideshowImages] = useState<SlideshowImage[]>([]);
@@ -73,25 +81,55 @@ export default function CustomerDisplay() {
   const [isClient, setIsClient] = useState(false);
   const [activeTab, setActiveTab] = useState<string>('drinks');
   const [isOnlineTab, setIsOnlineTab] = useState<boolean>(false);
+  const [selectedOnlinePlatform, setSelectedOnlinePlatform] = useState<'gofood' | 'grabfood' | 'shopeefood' | 'tiktok' | null>(null);
 
-  // Helper functions to get current cart based on active tab
+  // Helper functions to get current cart based on active tab and platform
   const getCurrentCart = (): CartItem[] => {
+    // Offline carts
     if (activeTab === 'drinks' && !isOnlineTab) return drinksCart;
     if (activeTab === 'bakery' && !isOnlineTab) return bakeryCart;
-    if (activeTab === 'drinks (Online)' && isOnlineTab) return drinksOnlineCart;
-    if (activeTab === 'bakery (Online)' && isOnlineTab) return bakeryOnlineCart;
+    
+    // Online carts - Drinks platforms
+    if (activeTab === 'drinks (Online)' && isOnlineTab && selectedOnlinePlatform === 'gofood') return drinksGofoodCart;
+    if (activeTab === 'drinks (Online)' && isOnlineTab && selectedOnlinePlatform === 'grabfood') return drinksGrabfoodCart;
+    if (activeTab === 'drinks (Online)' && isOnlineTab && selectedOnlinePlatform === 'shopeefood') return drinksShopeefoodCart;
+    if (activeTab === 'drinks (Online)' && isOnlineTab && selectedOnlinePlatform === 'tiktok') return drinksTiktokCart;
+    
+    // Online carts - Bakery platforms
+    if (activeTab === 'bakery (Online)' && isOnlineTab && selectedOnlinePlatform === 'gofood') return bakeryGofoodCart;
+    if (activeTab === 'bakery (Online)' && isOnlineTab && selectedOnlinePlatform === 'grabfood') return bakeryGrabfoodCart;
+    if (activeTab === 'bakery (Online)' && isOnlineTab && selectedOnlinePlatform === 'shopeefood') return bakeryShopeefoodCart;
+    if (activeTab === 'bakery (Online)' && isOnlineTab && selectedOnlinePlatform === 'tiktok') return bakeryTiktokCart;
+    
     return drinksCart; // fallback
   };
 
   const setCurrentCart = (newCart: CartItem[]) => {
+    // Offline carts
     if (activeTab === 'drinks' && !isOnlineTab) {
       setDrinksCart(newCart);
     } else if (activeTab === 'bakery' && !isOnlineTab) {
       setBakeryCart(newCart);
-    } else if (activeTab === 'drinks (Online)' && isOnlineTab) {
-      setDrinksOnlineCart(newCart);
-    } else if (activeTab === 'bakery (Online)' && isOnlineTab) {
-      setBakeryOnlineCart(newCart);
+    } 
+    // Online carts - Drinks platforms
+    else if (activeTab === 'drinks (Online)' && isOnlineTab && selectedOnlinePlatform === 'gofood') {
+      setDrinksGofoodCart(newCart);
+    } else if (activeTab === 'drinks (Online)' && isOnlineTab && selectedOnlinePlatform === 'grabfood') {
+      setDrinksGrabfoodCart(newCart);
+    } else if (activeTab === 'drinks (Online)' && isOnlineTab && selectedOnlinePlatform === 'shopeefood') {
+      setDrinksShopeefoodCart(newCart);
+    } else if (activeTab === 'drinks (Online)' && isOnlineTab && selectedOnlinePlatform === 'tiktok') {
+      setDrinksTiktokCart(newCart);
+    }
+    // Online carts - Bakery platforms
+    else if (activeTab === 'bakery (Online)' && isOnlineTab && selectedOnlinePlatform === 'gofood') {
+      setBakeryGofoodCart(newCart);
+    } else if (activeTab === 'bakery (Online)' && isOnlineTab && selectedOnlinePlatform === 'grabfood') {
+      setBakeryGrabfoodCart(newCart);
+    } else if (activeTab === 'bakery (Online)' && isOnlineTab && selectedOnlinePlatform === 'shopeefood') {
+      setBakeryShopeefoodCart(newCart);
+    } else if (activeTab === 'bakery (Online)' && isOnlineTab && selectedOnlinePlatform === 'tiktok') {
+      setBakeryTiktokCart(newCart);
     }
   };
 
@@ -261,10 +299,22 @@ export default function CustomerDisplay() {
             setDrinksCart(data.cartItems);
           } else if (tabName === 'bakery' && !isOnline) {
             setBakeryCart(data.cartItems);
-          } else if (tabName === 'drinks (Online)' && isOnline) {
-            setDrinksOnlineCart(data.cartItems);
-          } else if (tabName === 'bakery (Online)' && isOnline) {
-            setBakeryOnlineCart(data.cartItems);
+          } else if (tabName === 'drinks (Online)' && isOnline && data.tabInfo.selectedPlatform === 'gofood') {
+            setDrinksGofoodCart(data.cartItems);
+          } else if (tabName === 'drinks (Online)' && isOnline && data.tabInfo.selectedPlatform === 'grabfood') {
+            setDrinksGrabfoodCart(data.cartItems);
+          } else if (tabName === 'drinks (Online)' && isOnline && data.tabInfo.selectedPlatform === 'shopeefood') {
+            setDrinksShopeefoodCart(data.cartItems);
+          } else if (tabName === 'drinks (Online)' && isOnline && data.tabInfo.selectedPlatform === 'tiktok') {
+            setDrinksTiktokCart(data.cartItems);
+          } else if (tabName === 'bakery (Online)' && isOnline && data.tabInfo.selectedPlatform === 'gofood') {
+            setBakeryGofoodCart(data.cartItems);
+          } else if (tabName === 'bakery (Online)' && isOnline && data.tabInfo.selectedPlatform === 'grabfood') {
+            setBakeryGrabfoodCart(data.cartItems);
+          } else if (tabName === 'bakery (Online)' && isOnline && data.tabInfo.selectedPlatform === 'shopeefood') {
+            setBakeryShopeefoodCart(data.cartItems);
+          } else if (tabName === 'bakery (Online)' && isOnline && data.tabInfo.selectedPlatform === 'tiktok') {
+            setBakeryTiktokCart(data.cartItems);
           }
         }
         setShowOrderList(true);
@@ -273,6 +323,7 @@ export default function CustomerDisplay() {
         console.log('📱 Customer display received tab update:', data.tabInfo);
         setActiveTab(data.tabInfo.activeTab);
         setIsOnlineTab(data.tabInfo.isOnline);
+        setSelectedOnlinePlatform(data.tabInfo.selectedPlatform || null);
         // Force slideshow to update immediately when tab changes
         setCurrentSlideIndex(0);
       }

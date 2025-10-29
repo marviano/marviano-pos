@@ -5,6 +5,18 @@ import { Calendar, Clock, CreditCard, RefreshCw, Search, Filter, ChevronUp, Chev
 import TransactionDetailModal from './TransactionDetailModal';
 import { offlineSyncService } from '@/lib/offlineSync';
 
+// Format price for display (hoisted to module scope so it can be reused)
+const formatPrice = (price: number | string) => {
+  const numPrice = typeof price === 'string' ? parseFloat(price) : price;
+  if (isNaN(numPrice)) return 'Rp 0';
+  return new Intl.NumberFormat('id-ID', {
+    style: 'currency',
+    currency: 'IDR',
+    minimumFractionDigits: 0,
+    maximumFractionDigits: 0,
+  }).format(numPrice);
+};
+
 interface Transaction {
   id: string; // Changed to string for UUID
   business_id: number;
@@ -88,6 +100,247 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
   const [loadingTransactionId, setLoadingTransactionId] = useState<string | null>(null);
   const [copiedUuid, setCopiedUuid] = useState<string | null>(null);
   const [isOnlineMode, setIsOnlineMode] = useState(false); // Default to offline mode
+
+  // Manual Receiptize reveal state
+  const [showManualReceiptize, setShowManualReceiptize] = useState(false);
+  const [selectedTransactionIds, setSelectedTransactionIds] = useState<Set<string>>(new Set());
+  const [auditLogEntries, setAuditLogEntries] = useState<any[]>([]);
+  const [isLoadingAuditLog, setIsLoadingAuditLog] = useState(false);
+  const [isPrinting, setIsPrinting] = useState(false);
+  const [isPrintCancelled, setIsPrintCancelled] = useState(false);
+  const [manualSearchTerm, setManualSearchTerm] = useState('');
+  const [manualFromDate, setManualFromDate] = useState<string>(getTodayUTC7());
+  const [manualToDate, setManualToDate] = useState<string>(getTodayUTC7());
+  
+  const loadAuditLog = useCallback(async () => {
+    setIsLoadingAuditLog(true);
+    try {
+      if (window.electronAPI?.getPrinter2AuditLog) {
+        const result = await window.electronAPI.getPrinter2AuditLog(manualFromDate, manualToDate, 100);
+        if (result?.success) {
+          setAuditLogEntries(result.entries || []);
+        }
+      }
+    } catch (error) {
+      console.error('Error loading audit log:', error);
+    } finally {
+      setIsLoadingAuditLog(false);
+    }
+  }, [manualFromDate, manualToDate]);
+  
+  const handleOpenManualReceiptize = useCallback(() => {
+    setShowManualReceiptize(true);
+    loadAuditLog();
+  }, [loadAuditLog]);
+  
+  const handleCloseManualReceiptize = useCallback(() => {
+    setShowManualReceiptize(false);
+    setSelectedTransactionIds(new Set());
+    setManualSearchTerm('');
+  }, []);
+  
+  // Reload audit log when dates change and modal is open
+  useEffect(() => {
+    if (showManualReceiptize) {
+      loadAuditLog();
+    }
+  }, [showManualReceiptize, manualFromDate, manualToDate, loadAuditLog]);
+  
+  const handleToggleTransactionSelection = (transactionId: string) => {
+    setSelectedTransactionIds(prev => {
+      const newSet = new Set(prev);
+      if (newSet.has(transactionId)) {
+        newSet.delete(transactionId);
+      } else {
+        newSet.add(transactionId);
+      }
+      return newSet;
+    });
+  };
+  
+  const handleManualPrint = async () => {
+    if (selectedTransactionIds.size === 0) {
+      alert('Pilih setidaknya satu transaksi untuk dicetak');
+      return;
+    }
+    
+    setIsPrinting(true);
+    setIsPrintCancelled(false);
+    try {
+      const transactionIds = Array.from(selectedTransactionIds);
+      const failedPrints: string[] = [];
+      
+      // Helper: timeout wrapper so we don't hang forever on a print
+      const withTimeout = async <T,>(promise: Promise<T>, ms: number): Promise<T> => {
+        return await Promise.race([
+          promise,
+          new Promise<T>((_, reject) => setTimeout(() => reject(new Error('Print timeout')), ms))
+        ]) as T;
+      };
+
+      for (const transactionId of transactionIds) {
+        if (isPrintCancelled) {
+          console.warn('Print cancelled by user. Stopping batch.');
+          break;
+        }
+        try {
+          // Find transaction data
+          const transaction = transactions.find(tx => tx.id === transactionId);
+          if (!transaction) {
+            failedPrints.push(transactionId);
+            continue;
+          }
+          
+          // Get Printer 2 counter and increment (counter increments inside getPrinterCounter when increment=true)
+          let printer2Counter = 1;
+          if (window.electronAPI?.getPrinterCounter) {
+            const counterResult = await window.electronAPI.getPrinterCounter('receiptizePrinter', businessId, true);
+            // Handle both return types: number directly, or { success: boolean, counter: number }
+            if (typeof counterResult === 'number') {
+              printer2Counter = counterResult;
+            } else if (counterResult && typeof counterResult === 'object' && 'counter' in counterResult) {
+              printer2Counter = counterResult.counter || 1;
+            }
+            console.log(`📊 [MANUAL PRINT] Printer 2 counter for transaction ${transactionId}: ${printer2Counter}`);
+          }
+          
+          // Log to audit
+          await window.electronAPI?.logPrinter2Print?.(transactionId, printer2Counter, 'manual');
+          
+          // Get transaction details for printing (without opening modal)
+          setIsLoadingDetail(true);
+          let transactionDetails: any = null;
+          try {
+            const response = await offlineSyncService.fetchWithFallback(
+              async () => {
+                const response = await fetch(`/api/transactions/${transactionId}`);
+                if (!response.ok) throw new Error('Failed to fetch');
+                const data = await response.json();
+                return data.success ? data.transaction : null;
+              },
+              async () => {
+                if (typeof window === 'undefined' || !(window as any).electronAPI) throw new Error('No API');
+                const txs = await (window as any).electronAPI.localDbGetTransactions(businessId, 1000);
+                const tx = txs.find((t: any) => t.id === transactionId);
+                if (!tx) throw new Error('Not found');
+                const items = await (window as any).electronAPI.localDbGetTransactionItems(transactionId);
+                const products = await (window as any).electronAPI.localDbGetAllProducts();
+                const users = await (window as any).electronAPI.localDbGetUsers();
+                const businesses = await (window as any).electronAPI.localDbGetBusinesses();
+                const user = users.find((u: any) => u.id === tx.user_id);
+                const business = businesses.find((b: any) => b.id === tx.business_id);
+                return {
+                  ...tx,
+                  items: items.map((item: any) => {
+                    const product = products.find((p: any) => p.id === item.product_id);
+                    return {
+                      id: item.id,
+                      product_name: product?.nama || 'Unknown',
+                      quantity: item.quantity,
+                      unit_price: item.unit_price,
+                      total_price: item.total_price,
+                      custom_note: item.custom_note,
+                      customizations_json: item.customizations_json || null
+                    };
+                  }),
+                  user_name: user?.name || 'Unknown',
+                  business_name: business?.name || 'Unknown'
+                };
+              }
+            );
+            transactionDetails = response;
+          } catch (error) {
+            console.error(`Error fetching transaction ${transactionId}:`, error);
+          } finally {
+            setIsLoadingDetail(false);
+          }
+          
+          if (!transactionDetails) {
+            failedPrints.push(transactionId);
+            continue;
+          }
+          
+          // Prepare print data - map items to correct format expected by receipt generator
+          // Receipt generator expects: name (not product_name), price (or unit_price), quantity, total_price
+          const mappedItems = (transactionDetails.items || []).map((item: any) => ({
+            name: item.product_name || item.name || 'Unknown Product',
+            quantity: item.quantity || 1,
+            price: item.unit_price || item.price || 0,
+            total_price: item.total_price || ((item.unit_price || item.price || 0) * (item.quantity || 1))
+          }));
+          
+          const printData = {
+            type: 'transaction',
+            printerType: 'receiptizePrinter',
+            printerName: '',
+            business_id: transaction.business_id,
+            items: mappedItems,
+            total: transaction.final_amount,
+            paymentMethod: transaction.payment_method,
+            amountReceived: transaction.amount_received,
+            change: transaction.change_amount || 0,
+            date: transaction.created_at,
+            receiptNumber: transactionId,
+            cashier: transactionDetails.user_name || 'Kasir',
+            pickupMethod: transaction.pickup_method || 'dine-in',
+            printer2Counter: printer2Counter
+          };
+          
+          // Print with small delay
+          await new Promise(resolve => setTimeout(resolve, 500));
+          // If API is missing, treat as failure immediately
+          if (!window.electronAPI?.printReceipt) {
+            throw new Error('Print API unavailable');
+          }
+
+          // Print with 10s timeout per job to avoid getting stuck
+          const printResult = await withTimeout(window.electronAPI.printReceipt(printData), 10000);
+          
+          if (!printResult?.success) {
+            failedPrints.push(transactionId);
+          }
+        } catch (error) {
+          console.error(`Error printing transaction ${transactionId}:`, error);
+          failedPrints.push(transactionId);
+        }
+      }
+      
+      if (isPrintCancelled) {
+        alert('Pencetakan dibatalkan. Anda dapat mencoba lagi.');
+      } else if (failedPrints.length > 0) {
+        const sample = failedPrints.slice(0, 3).join(', ');
+        alert(`Gagal mencetak ${failedPrints.length} transaksi. Contoh ID: ${sample}. Coba lagi untuk melihat error detail di console.`);
+      } else {
+        alert(`Berhasil mencetak ${transactionIds.length} transaksi ke Printer 2`);
+        setSelectedTransactionIds(new Set());
+        loadAuditLog(); // Refresh audit log
+      }
+    } catch (error) {
+      console.error('Error in manual print:', error);
+      alert('Terjadi kesalahan saat mencetak');
+    } finally {
+      setIsPrinting(false);
+    }
+  };
+  
+  // Filter transactions for manual receiptize modal
+  const filteredTransactionsForManual = transactions.filter(tx => {
+    if (manualSearchTerm) {
+      const searchLower = manualSearchTerm.toLowerCase();
+      return (
+        tx.id.toLowerCase().includes(searchLower) ||
+        (tx.user_name && tx.user_name.toLowerCase().includes(searchLower)) ||
+        (tx.receipt_number && tx.receipt_number.toString().includes(searchLower))
+      );
+    }
+    return true;
+  });
+
+  // Build a quick lookup for transactions already printed to Printer 2 (from audit log)
+  const printedTransactionIdSet = new Set(
+    (auditLogEntries || []).map((e: any) => e.transaction_id)
+  );
+  const printedTransactionsForManual = filteredTransactionsForManual.filter(tx => printedTransactionIdSet.has(tx.id));
 
   // Fetch transaction details with offline fallback
   const fetchTransactionDetail = async (transactionId: string) => {
@@ -181,22 +434,51 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
   };
 
   // Handle UUID copy with notification
-  const handleCopyUuid = async (uuid: string) => {
+  const handleCopyUuid = async (uuid: string, event?: React.MouseEvent) => {
     try {
-      // Try modern clipboard API
-      if (window.isSecureContext) {
-        await navigator.clipboard.writeText(uuid);
-      } else {
-        // Fallback for non-secure contexts
-        const textArea = document.createElement('textarea');
-        textArea.value = uuid;
-        textArea.style.position = 'fixed';
-        textArea.style.opacity = '0';
-        document.body.appendChild(textArea);
-        textArea.select();
-        document.execCommand('copy');
-        document.body.removeChild(textArea);
+      // Prevent default to maintain focus
+      if (event) {
+        event.preventDefault();
+        event.stopPropagation();
       }
+      
+      // Use fallback method that works better in Electron
+      const textArea = document.createElement('textarea');
+      textArea.value = uuid;
+      textArea.style.position = 'fixed';
+      textArea.style.left = '-9999px';
+      textArea.style.top = '0';
+      textArea.style.opacity = '0';
+      textArea.setAttribute('readonly', '');
+      document.body.appendChild(textArea);
+      
+      // Focus and select
+      textArea.focus();
+      textArea.select();
+      textArea.setSelectionRange(0, uuid.length);
+      
+      // Try clipboard API first (with focus fix)
+      try {
+        if (window.isSecureContext && navigator.clipboard && navigator.clipboard.writeText) {
+          await navigator.clipboard.writeText(uuid);
+        } else {
+          // Fallback for non-secure contexts
+          const successful = document.execCommand('copy');
+          if (!successful) {
+            throw new Error('execCommand copy failed');
+          }
+        }
+      } catch (clipboardError) {
+        // Final fallback: use execCommand
+        const successful = document.execCommand('copy');
+        if (!successful) {
+          throw new Error('All copy methods failed');
+        }
+      }
+      
+      // Clean up
+      document.body.removeChild(textArea);
+      
       setCopiedUuid(uuid);
       // Auto-hide after 2 seconds
       setTimeout(() => {
@@ -204,6 +486,8 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
       }, 2000);
     } catch (error) {
       console.error('Failed to copy UUID:', error);
+      // Show error to user
+      alert('Gagal menyalin UUID. Silakan salin manual: ' + uuid);
     }
   };
 
@@ -305,19 +589,6 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
   useEffect(() => {
     fetchTransactions();
   }, [fetchTransactions]);
-
-  // Format price for display
-  const formatPrice = (price: number | string) => {
-    const numPrice = typeof price === 'string' ? parseFloat(price) : price;
-    if (isNaN(numPrice)) return 'Rp 0';
-    
-    return new Intl.NumberFormat('id-ID', {
-      style: 'currency',
-      currency: 'IDR',
-      minimumFractionDigits: 0,
-      maximumFractionDigits: 0,
-    }).format(numPrice);
-  };
 
   // Format date for display
   const formatDate = (dateString: string) => {
@@ -441,6 +712,10 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
     ewallet: 0,
     cl: 0,
     voucher: 0,
+    gofood: 0,
+    grabfood: 0,
+    shopeefood: 0,
+    tiktok: 0,
   };
 
   let dineInCount = 0;
@@ -506,41 +781,67 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
         </div>
 
         {/* Summary Cards */}
-        <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-6 flex-shrink-0">
+        <div className="grid grid-cols-1 md:grid-cols-6 gap-4 mb-6 flex-shrink-0">
           {/* Payment Methods Card */}
-          <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-4">
+          <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-4 md:col-span-3">
             <div className="flex items-center gap-2 mb-3">
               <div className="w-3 h-3 bg-blue-500 rounded-full"></div>
               <h3 className="font-semibold text-gray-900 text-sm">Metode Pembayaran</h3>
             </div>
-            <div className="grid grid-cols-2 gap-x-4 gap-y-2">
-              {/* Left Column */}
-              <div className="space-y-2">
+            <div className="grid grid-cols-4 gap-x-3 gap-y-1.5 text-xs">
+              {/* Column 1 */}
+              <div className="space-y-1.5">
                 <div className="flex justify-between">
-                  <span className="text-xs text-gray-600">Cash</span>
-                  <span className="text-xs font-medium text-gray-900">{paymentMethodCounts.cash}</span>
+                  <span className="text-gray-600">Cash</span>
+                  <span className="font-medium text-gray-900">{paymentMethodCounts.cash}</span>
                 </div>
                 <div className="flex justify-between">
-                  <span className="text-xs text-gray-600">Debit</span>
-                  <span className="text-xs font-medium text-gray-900">{paymentMethodCounts.debit}</span>
+                  <span className="text-gray-600">Debit</span>
+                  <span className="font-medium text-gray-900">{paymentMethodCounts.debit}</span>
                 </div>
                 <div className="flex justify-between">
-                  <span className="text-xs text-gray-600">QR</span>
-                  <span className="text-xs font-medium text-gray-900">{paymentMethodCounts.qr}</span>
+                  <span className="text-gray-600">QR</span>
+                  <span className="font-medium text-gray-900">{paymentMethodCounts.qr}</span>
                 </div>
               </div>
               
-              {/* Divider */}
-              <div className="border-l border-gray-200 pl-4">
-                <div className="space-y-2">
-                  <div className="flex justify-between">
-                    <span className="text-xs text-gray-600">E-Wallet</span>
-                    <span className="text-xs font-medium text-gray-900">{paymentMethodCounts.ewallet}</span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span className="text-xs text-gray-600">CL</span>
-                    <span className="text-xs font-medium text-gray-900">{paymentMethodCounts.cl}</span>
-                  </div>
+              {/* Column 2 */}
+              <div className="space-y-1.5">
+                <div className="flex justify-between">
+                  <span className="text-gray-600">E-Wallet</span>
+                  <span className="font-medium text-gray-900">{paymentMethodCounts.ewallet}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-gray-600">CL</span>
+                  <span className="font-medium text-gray-900">{paymentMethodCounts.cl}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-gray-600">GoFood</span>
+                  <span className="font-medium text-gray-900">{paymentMethodCounts.gofood}</span>
+                </div>
+              </div>
+
+              {/* Column 3 */}
+              <div className="space-y-1.5">
+                <div className="flex justify-between">
+                  <span className="text-gray-600">GrabFood</span>
+                  <span className="font-medium text-gray-900">{paymentMethodCounts.grabfood}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-gray-600">ShopeeFood</span>
+                  <span className="font-medium text-gray-900">{paymentMethodCounts.shopeefood}</span>
+                </div>
+              </div>
+
+              {/* Column 4 */}
+              <div className="space-y-1.5">
+                <div className="flex justify-between">
+                  <span className="text-gray-600">TikTok</span>
+                  <span className="font-medium text-gray-900">{paymentMethodCounts.tiktok}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-gray-600">Voucher</span>
+                  <span className="font-medium text-gray-900">{paymentMethodCounts.voucher}</span>
                 </div>
               </div>
             </div>
@@ -583,16 +884,209 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
           </div>
 
           {/* Grand Total Card */}
-          <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-4">
-            <div className="flex items-center gap-2 mb-3">
-              <div className="w-3 h-3 bg-purple-500 rounded-full"></div>
-              <h3 className="font-semibold text-gray-900 text-sm">Grand Total</h3>
-            </div>
-            <div className="text-center">
-              <div className="text-lg font-bold text-gray-900">{formatPrice(totalRevenue)}</div>
+          <GrandTotalCard totalRevenue={totalRevenue} onSecretOpen={handleOpenManualReceiptize} />
+        </div>
+
+        {/* Manual Receiptize Modal */}
+        {showManualReceiptize && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-50">
+            <div className="bg-white w-screen h-screen rounded-none shadow-lg overflow-hidden">
+              <div className="flex items-center justify-between px-4 py-3 border-b border-gray-200">
+                <h3 className="text-lg font-semibold text-gray-900">Manual Receiptize Print</h3>
+                <button onClick={handleCloseManualReceiptize} className="text-gray-600 hover:text-gray-800">✕</button>
+              </div>
+
+              <div className="p-4 space-y-6 h-full flex flex-col">
+                <div className="bg-purple-50 border border-purple-200 rounded-lg p-3">
+                  <p className="text-sm text-purple-800">Pilih transaksi untuk dicetak sebagai struk audit (Printer 2). Cetak manual selalu tersedia, terpisah dari mode otomatis.</p>
+                </div>
+
+                {/* Filters */}
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                  <input type="date" className="border border-gray-300 rounded-lg px-3 py-2 text-black" value={manualFromDate} onChange={(e)=>setManualFromDate(e.target.value)} />
+                  <input type="date" className="border border-gray-300 rounded-lg px-3 py-2 text-black" value={manualToDate} onChange={(e)=>setManualToDate(e.target.value)} />
+                  <input type="text" className="border border-gray-300 rounded-lg px-3 py-2 text-black" placeholder="Cari ID/nota/kasir" value={manualSearchTerm} onChange={(e)=>setManualSearchTerm(e.target.value)} />
+                </div>
+
+                {/* Actions */}
+                <div className="flex items-center justify-between">
+                  <div className="text-sm text-gray-600">
+                    {selectedTransactionIds.size > 0 ? `${selectedTransactionIds.size} transaksi dipilih` : 'Pilih transaksi pada tabel di bawah'}
+                  </div>
+                  <div className="flex gap-2">
+                    {isPrinting && (
+                      <button 
+                        onClick={() => setIsPrintCancelled(true)}
+                        className="px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700"
+                      >
+                        Batalkan
+                      </button>
+                    )}
+                    <button 
+                      onClick={loadAuditLog}
+                      className="px-4 py-2 bg-gray-500 text-white rounded-lg hover:bg-gray-600"
+                    >
+                      Refresh Log
+                    </button>
+                    <button 
+                      onClick={handleManualPrint}
+                      disabled={selectedTransactionIds.size === 0 || isPrinting}
+                      className="px-4 py-2 bg-purple-600 text-white rounded-lg disabled:bg-purple-300"
+                    >
+                      {isPrinting ? 'Mencetak...' : `Print ke Printer 2 (${selectedTransactionIds.size})`}
+                    </button>
+                  </div>
+                </div>
+
+                {/* Tables */}
+                <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 flex-1 min-h-0">
+                  {/* Transaction List */}
+                  <div className="border border-gray-200 rounded-lg overflow-hidden flex flex-col">
+                    <div className="px-3 py-2 border-b border-gray-200 font-medium text-gray-800 bg-gray-50">
+                      Semua Transaksi ({filteredTransactionsForManual.length})
+                    </div>
+                    <div className="h-[calc(100vh-350px)] overflow-y-auto">
+                      {filteredTransactionsForManual.length === 0 ? (
+                        <div className="p-4 text-sm text-gray-600 text-center">Tidak ada transaksi</div>
+                      ) : (
+                        <table className="w-full text-sm">
+                          <thead className="bg-gray-50 sticky top-0">
+                            <tr>
+                              <th className="px-2 py-1 text-left w-8"></th>
+                              <th className="px-2 py-1 text-left">ID</th>
+                              <th className="px-2 py-1 text-left">Waktu</th>
+                              <th className="px-2 py-1 text-right">Total</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {filteredTransactionsForManual.map((tx) => (
+                              <tr key={tx.id} className={`border-b border-gray-100 hover:bg-gray-50 ${printedTransactionIdSet.has(tx.id) ? 'bg-yellow-50' : ''}`}>
+                                <td className="px-2 py-1">
+                                  <input
+                                    type="checkbox"
+                                    checked={selectedTransactionIds.has(tx.id)}
+                                    onChange={() => handleToggleTransactionSelection(tx.id)}
+                                    className="w-4 h-4"
+                                  />
+                                </td>
+                                <td className="px-2 py-1 font-mono text-xs">
+                                  {tx.id}
+                                  {printedTransactionIdSet.has(tx.id) && (
+                                    <span className="ml-2 inline-block px-1.5 py-0.5 text-[10px] rounded bg-yellow-200 text-yellow-900 align-middle">Printed</span>
+                                  )}
+                                </td>
+                                <td className="px-2 py-1 text-xs">{new Date(tx.created_at).toLocaleTimeString('id-ID')}</td>
+                                <td className="px-2 py-1 text-right">{formatPrice(tx.final_amount)}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      )}
+                    </div>
+                    {/* Summary Footer */}
+                    {filteredTransactionsForManual.length > 0 && (
+                      <div className="border-t border-gray-200 bg-gray-50 p-3 space-y-2 flex-shrink-0">
+                        {(() => {
+                          const grandTotal = filteredTransactionsForManual.reduce((sum, tx) => {
+                            const amount = typeof tx.final_amount === 'string' ? parseFloat(tx.final_amount) : tx.final_amount;
+                            return sum + (isNaN(amount) ? 0 : amount);
+                          }, 0);
+                          
+                          return (
+                            <>
+                              <div className="flex justify-between text-sm">
+                                <span className="font-medium text-gray-700">Grand Total (Semua Transaksi):</span>
+                                <span className="font-bold text-gray-900">{formatPrice(grandTotal)}</span>
+                              </div>
+                              <div className="text-xs text-gray-500"></div>
+                            </>
+                          );
+                        })()}
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Audit Log */}
+                  <div className="border border-gray-200 rounded-lg overflow-hidden flex flex-col">
+                    <div className="px-3 py-2 border-b border-gray-200 font-medium text-gray-800 bg-gray-50">
+                      Audit Log ({auditLogEntries.length})
+                    </div>
+                    <div className="h-[calc(100vh-350px)] overflow-y-auto">
+                      {isLoadingAuditLog ? (
+                        <div className="p-4 text-sm text-gray-600 text-center">Memuat...</div>
+                      ) : auditLogEntries.length === 0 ? (
+                        <div className="p-4 text-sm text-gray-600 text-center">Belum ada audit log</div>
+                      ) : (
+                        <table className="w-full text-sm">
+                          <thead className="bg-gray-50 sticky top-0">
+                            <tr>
+                              <th className="px-2 py-1 text-left">P2 #</th>
+                              <th className="px-2 py-1 text-left">Waktu</th>
+                              <th className="px-2 py-1 text-left">Mode</th>
+                              <th className="px-2 py-1 text-left">ID</th>
+                              <th className="px-2 py-1 text-right">Total</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {auditLogEntries.map((entry, idx) => {
+                              const transaction = filteredTransactionsForManual.find(tx => tx.id === entry.transaction_id);
+                              return (
+                                <tr key={idx} className="border-b border-gray-100">
+                                  <td className="px-2 py-1 font-semibold">{entry.printer2_receipt_number}</td>
+                                  <td className="px-2 py-1 text-xs">{new Date(entry.printed_at).toLocaleString('id-ID')}</td>
+                                  <td className="px-2 py-1">
+                                    <span className={`px-2 py-0.5 rounded text-xs ${
+                                      entry.print_mode === 'auto' ? 'bg-blue-100 text-blue-800' : 'bg-purple-100 text-purple-800'
+                                    }`}>
+                                      {entry.print_mode === 'auto' ? 'Auto' : 'Manual'}
+                                    </span>
+                                  </td>
+                                  <td className="px-2 py-1 font-mono text-xs">{entry.transaction_id}</td>
+                                  <td className="px-2 py-1 text-right text-xs">{transaction ? formatPrice(transaction.final_amount) : '-'}</td>
+                                </tr>
+                              );
+                            })}
+                          </tbody>
+                        </table>
+                      )}
+                    </div>
+                    {/* Summary Footer */}
+                    {auditLogEntries.length > 0 && (
+                      <div className="border-t border-gray-200 bg-gray-50 p-3 space-y-2 flex-shrink-0">
+                        {(() => {
+                          const auditLogTransactionIds = new Set(auditLogEntries.map((e: any) => e.transaction_id));
+                          const auditTransactions = filteredTransactionsForManual.filter(tx => auditLogTransactionIds.has(tx.id));
+                          const grandTotal = auditTransactions.reduce((sum, tx) => {
+                            const amount = typeof tx.final_amount === 'string' ? parseFloat(tx.final_amount) : tx.final_amount;
+                            return sum + (isNaN(amount) ? 0 : amount);
+                          }, 0);
+                          const percentage = filteredTransactionsForManual.length > 0 ? ((auditTransactions.length / filteredTransactionsForManual.length) * 100).toFixed(1) : '0.0';
+                          
+                          return (
+                            <>
+                              <div className="flex justify-between text-sm">
+                                <span className="font-medium text-gray-700">Grand Total (Audit Log):</span>
+                                <span className="font-bold text-gray-900">{formatPrice(grandTotal)}</span>
+                              </div>
+                              <div className="flex justify-between text-sm">
+                                <span className="font-medium text-gray-700">Persentase dari Semua Transaksi:</span>
+                                <span className="font-bold text-blue-600">{percentage}%</span>
+                              </div>
+                              <div className="text-xs text-gray-500 mt-1">
+                                {auditTransactions.length} dari {filteredTransactionsForManual.length} transaksi
+                              </div>
+                            </>
+                          );
+                        })()}
+                      </div>
+                    )}
+                  </div>
+
+                </div>
+              </div>
             </div>
           </div>
-        </div>
+        )}
 
         {/* Search and Filter */}
         <div className="flex flex-col sm:flex-row gap-4 mb-6 flex-shrink-0">
@@ -638,6 +1132,10 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
               <option value="ewallet" className="text-black">E-Wallet</option>
               <option value="cl" className="text-black">City Ledger</option>
               <option value="voucher" className="text-black">Voucher</option>
+              <option value="gofood" className="text-black">GoFood</option>
+              <option value="grabfood" className="text-black">GrabFood</option>
+              <option value="shopeefood" className="text-black">ShopeeFood</option>
+              <option value="tiktok" className="text-black">TikTok</option>
             </select>
           </div>
           
@@ -811,7 +1309,7 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
                         <button
                           onClick={(e) => {
                             e.stopPropagation(); // Prevent row click
-                            handleCopyUuid(String(transaction.id));
+                            handleCopyUuid(String(transaction.id), e);
                           }}
                           className="p-1 hover:bg-gray-200 rounded transition-colors"
                           title={`Copy UUID: ${String(transaction.id)}`}
@@ -908,6 +1406,48 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+interface GrandTotalCardProps {
+  totalRevenue: number;
+  onSecretOpen: () => void;
+}
+
+function GrandTotalCard({ totalRevenue, onSecretOpen }: GrandTotalCardProps) {
+  const [clickCount, setClickCount] = useState(0);
+  const [timerId, setTimerId] = useState<number | null>(null);
+
+  const handleClick = () => {
+    const next = clickCount + 1;
+    setClickCount(next);
+    if (next === 1) {
+      const id = window.setTimeout(() => {
+        setClickCount(0);
+        setTimerId(null);
+      }, 3000);
+      setTimerId(id);
+    }
+    if (next >= 5) {
+      if (timerId) {
+        window.clearTimeout(timerId);
+        setTimerId(null);
+      }
+      setClickCount(0);
+      onSecretOpen();
+    }
+  };
+
+  return (
+    <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-4 md:col-span-1 cursor-pointer select-none" onClick={handleClick}>
+      <div className="flex items-center gap-2 mb-3">
+        <div className="w-3 h-3 bg-purple-500 rounded-full"></div>
+        <h3 className="font-semibold text-gray-900 text-sm">Grand Total</h3>
+      </div>
+      <div className="text-center">
+        <div className="text-lg font-bold text-gray-900">{formatPrice(totalRevenue)}</div>
+      </div>
     </div>
   );
 }

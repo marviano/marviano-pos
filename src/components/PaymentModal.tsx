@@ -39,7 +39,7 @@ interface PaymentModalProps {
   onPaymentComplete: () => void;
   transactionType: 'drinks' | 'bakery';
   isOnline?: boolean;
-  selectedOnlinePlatform?: 'gofood' | 'grabfood' | 'shopeefood' | 'tiktok';
+  selectedOnlinePlatform?: 'gofood' | 'grabfood' | 'shopeefood' | 'tiktok' | null;
 }
 
 type PaymentMethod = 'cash' | 'debit' | 'qr' | 'ewallet' | 'cl' | 'voucher' | 'gofood' | 'grabfood' | 'shopeefood' | 'tiktok';
@@ -52,7 +52,7 @@ export default function PaymentModal({
   onPaymentComplete,
   transactionType,
   isOnline = false,
-  selectedOnlinePlatform = 'gofood'
+  selectedOnlinePlatform = null
 }: PaymentModalProps) {
   const { user } = useAuth();
   const [selectedPaymentMethod, setSelectedPaymentMethod] = useState<PaymentMethod>('cash');
@@ -114,7 +114,7 @@ export default function PaymentModal({
 
   // Calculate order totals
   const getOnlinePriceForPlatform = (product: any): number | null => {
-    if (!isOnline) return null;
+    if (!isOnline || !selectedOnlinePlatform) return null;
     switch (selectedOnlinePlatform) {
       case 'gofood':
         return product.harga_gofood ?? null;
@@ -130,10 +130,10 @@ export default function PaymentModal({
   };
 
   const effectiveProductPrice = (product: any): number => {
-    if (isOnline) {
+    if (isOnline && selectedOnlinePlatform) {
       const p = getOnlinePriceForPlatform(product);
       if (p && p > 0) return p;
-      return 0; // No fallback in online mode
+      return 0; // No fallback in online mode when platform is selected
     }
     return product.harga_jual;
   };
@@ -252,8 +252,8 @@ export default function PaymentModal({
       return;
     }
 
-    // Validate amount received for all payment methods EXCEPT CL and online platforms
-    if (selectedPaymentMethod !== 'cl' && !isOnlinePayment && (!amountReceived || parseFloat(amountReceived) <= 0)) {
+    // Validate amount received for all payment methods EXCEPT CL
+    if (selectedPaymentMethod !== 'cl' && (!amountReceived || parseFloat(amountReceived) <= 0)) {
       alert('Masukkan jumlah yang diterima');
       return;
     }
@@ -298,14 +298,14 @@ export default function PaymentModal({
         alert('Jumlah voucher tidak boleh melebihi total pesanan');
         return;
       }
-      if (finalTotal > 0 && selectedPaymentMethod !== 'cl' && !isOnlinePayment && receivedAmount < finalTotal) {
+      if (finalTotal > 0 && selectedPaymentMethod !== 'cl' && receivedAmount < finalTotal) {
         alert(`Jumlah yang diterima kurang. Kurang: ${formatPrice(finalTotal - receivedAmount)}`);
         return;
       }
     } else {
       // For payments without voucher, check received amount covers the full order total
-      // EXCEPT for CL payments and online platforms which don't require cash payment
-      if (selectedPaymentMethod !== 'cl' && !isOnlinePayment && receivedAmount < orderTotal) {
+      // EXCEPT for CL payments which don't require cash payment
+      if (selectedPaymentMethod !== 'cl' && receivedAmount < orderTotal) {
         alert(`Jumlah yang diterima kurang. Kurang: ${formatPrice(orderTotal - receivedAmount)}`);
         return;
       }
@@ -349,8 +349,25 @@ export default function PaymentModal({
         transaction_type: transactionType
       });
       
+      // Generate 19-digit numeric UUID instead of random UUID
+      let transactionId = '';
+      if (window.electronAPI?.generateNumericUuid) {
+        const uuidResult = await window.electronAPI.generateNumericUuid(14); // business_id
+        if (uuidResult?.success && uuidResult?.uuid) {
+          transactionId = uuidResult.uuid;
+          console.log('✅ Generated numeric UUID:', transactionId);
+        } else {
+          // Fallback to old UUID if generation fails
+          transactionId = generateTransactionId();
+          console.warn('⚠️ Failed to generate numeric UUID, using fallback');
+        }
+      } else {
+        transactionId = generateTransactionId();
+        console.warn('⚠️ Numeric UUID generation not available, using fallback');
+      }
+      
       const transactionData = {
-        id: generateTransactionId(), // Generate UUID for transaction
+        id: transactionId,
         business_id: 14, // Momoyo Bakery Kalimantan business_id
         user_id: user?.id ? parseInt(user.id) : 1, // Get user ID from auth context
         payment_method: selectedPaymentMethod,
@@ -369,7 +386,6 @@ export default function PaymentModal({
         cl_account_id: clAccountId,
         cl_account_name: clAccountName,
         transaction_type: transactionType,
-        payment_method_id: 1, // Default to cash payment method
         items: cartItems.map(item => {
           // For online orders, use platform-specific price, otherwise use harga_jual
           let basePrice = item.product.harga_jual;
@@ -451,6 +467,21 @@ export default function PaymentModal({
         
         // Step 2: Save to offline database (always, for redundancy and offline capability)
         if (typeof window !== 'undefined' && (window as any).electronAPI) {
+          // Get payment method ID from local database
+          let paymentMethodId = 1; // Default to cash
+          try {
+            const paymentMethods = await (window as any).electronAPI.localDbGetPaymentMethods();
+            const paymentMethod = paymentMethods.find((pm: any) => pm.code === selectedPaymentMethod);
+            if (paymentMethod) {
+              paymentMethodId = paymentMethod.id;
+              console.log('✅ Found payment method ID:', paymentMethodId, 'for code:', selectedPaymentMethod);
+            } else {
+              console.warn('⚠️ Payment method not found in local DB, defaulting to cash (ID: 1)');
+            }
+          } catch (error) {
+            console.error('❌ Failed to get payment methods from local DB:', error);
+          }
+          
           // Map transaction data for SQLite (include all fields needed by local DB)
           const sqliteTransactionData = {
             id: transactionData.id,
@@ -475,7 +506,7 @@ export default function PaymentModal({
             cl_account_name: transactionData.cl_account_name,
             receipt_number: onlineResult?.receipt_number || null, // Use receipt number from online save if available
             transaction_type: transactionData.transaction_type,
-            payment_method_id: transactionData.payment_method_id
+            payment_method_id: paymentMethodId // Use the looked-up payment method ID from local database
           };
           
           const transactionItems = cartItems.map(item => {
@@ -539,6 +570,16 @@ export default function PaymentModal({
         
         // Close confirmation dialog first
         setShowConfirmation(false);
+        
+        // Get Printer 1 counter and increment
+        let printer1Counter = 1;
+        if (window.electronAPI?.getPrinterCounter) {
+          const counterResult = await window.electronAPI.getPrinterCounter('receiptPrinter', 14, true); // true = increment
+          if (counterResult?.success) {
+            printer1Counter = counterResult.counter;
+            console.log(`✅ Printer 1 counter: ${printer1Counter}`);
+          }
+        }
         
         // Prepare receipt data for printing
         const receiptNumber = onlineResult?.receipt_number || 'N/A';
@@ -608,6 +649,7 @@ export default function PaymentModal({
           type: 'transaction',
           printerType: 'receiptPrinter',
           printerName: '', // Will be auto-determined from saved printer config
+          business_id: transactionData.business_id, // Include business_id for fetching business name
           items: receiptItems,
           total: finalTotal,
           paymentMethod: selectedPaymentMethod === 'cash' ? 'Cash' : 
@@ -623,26 +665,100 @@ export default function PaymentModal({
           amountReceived: receivedAmount,
           change: Math.max(0, receivedAmount - finalTotal),
           date: transactionData.created_at,
-          receiptNumber: receiptNumber,
+          receiptNumber: transactionData.id, // Use 19-digit transaction UUID as nomor pesanan
           tableNumber: getTableNumber(),
           cashier: cashierName,
           transactionType: transactionType,
-          pickupMethod: finalPickupMethod // 'dine-in' or 'take-away' (forced to 'take-away' for online)
+          pickupMethod: finalPickupMethod,
+          printer1Counter: printer1Counter // Store counter separately for reference
         };
         
-        // Print receipt after successful transaction
+        // Print to Printer 1 (always)
         try {
-          console.log('📄 Printing receipt with data:', printData);
+          console.log('📄 Printing to Printer 1, counter:', printer1Counter);
           const printResult = await window.electronAPI?.printReceipt?.(printData);
           
           if (printResult?.success) {
-            console.log('✅ Receipt printed successfully');
+            console.log('✅ Printer 1 printed successfully');
           } else {
-            console.error('❌ Receipt print failed:', printResult?.error);
+            console.error('❌ Printer 1 failed:', printResult?.error);
           }
         } catch (printError) {
-          console.error('❌ Error printing receipt:', printError);
-          // Don't block transaction success even if print fails
+          console.error('❌ Error printing to Printer 1:', printError);
+        }
+        
+        // ========== PRINTER 2 LOGIC ==========
+        // Check if we should print to Printer 2 (Receiptize)
+        if (window.electronAPI?.getPrinter2Mode) {
+          const modeResult = await window.electronAPI.getPrinter2Mode();
+          const printer2Mode = modeResult?.mode || 'auto';
+          console.log(`📊 Printer 2 mode: ${printer2Mode}`);
+          
+          if (printer2Mode === 'auto') {
+            // Get receipt_number for cycle calculation
+            const receiptNum = typeof receiptNumber === 'number' ? receiptNumber : parseInt(receiptNumber) || 0;
+            const cycleNumber = Math.floor((receiptNum - 1) / 10) + 1;
+            const positionInCycle = ((receiptNum - 1) % 10) + 1;
+            
+            console.log(`🔢 Transaction #${receiptNum}, Cycle: ${cycleNumber}, Position in cycle: ${positionInCycle}`);
+            
+            // Get current automation selections
+            const selectionsResult = await window.electronAPI.getPrinter2AutomationSelections(14);
+            let selections = selectionsResult?.selections || [];
+            let currentCycle = selectionsResult?.cycleNumber || 0;
+            
+            // If we're starting a new cycle, generate random selections
+            if (positionInCycle === 1 && cycleNumber > currentCycle) {
+              console.log(`🎲 Starting new cycle ${cycleNumber}, generating random selections...`);
+              const randomResult = await window.electronAPI.generateRandomSelections(cycleNumber);
+              selections = randomResult?.selections || [];
+              await window.electronAPI.savePrinter2AutomationSelections(14, cycleNumber, selections);
+              console.log(`✅ Cycle ${cycleNumber} selections:`, selections);
+            }
+            
+            // Check if current transaction should print to Printer 2
+            if (selections.includes(receiptNum)) {
+              console.log(`✅ Transaction #${receiptNum} selected for Printer 2 (auto mode)`);
+              
+              // Get Printer 2 counter and increment
+              let printer2Counter = 1;
+              if (window.electronAPI?.getPrinterCounter) {
+                const counterResult = await window.electronAPI.getPrinterCounter('receiptizePrinter', 14, true);
+                if (counterResult?.success) {
+                  printer2Counter = counterResult.counter;
+                  console.log(`✅ Printer 2 counter: ${printer2Counter}`);
+                }
+              }
+              
+              // Log to audit
+              await window.electronAPI.logPrinter2Print(transactionData.id, printer2Counter, 'auto', cycleNumber);
+              
+              // Print to Printer 2
+              const printer2Data = {
+                ...printData,
+                printerType: 'receiptizePrinter',
+                receiptNumber: transactionData.id, // Use 19-digit transaction UUID as nomor pesanan
+                printer2Counter: printer2Counter // Store counter separately for reference
+              };
+              
+              try {
+                // Small delay to prevent driver conflicts when sending two back-to-back jobs
+                await new Promise((resolve) => setTimeout(resolve, 2000));
+                console.log('📄 Printing to Printer 2, counter:', printer2Counter);
+                const print2Result = await window.electronAPI?.printReceipt?.(printer2Data);
+                
+                // Silently log success - no message box for Receiptize printer
+                if (print2Result?.success) {
+                  console.log('✅ Printer 2 printed successfully (no user notification)');
+                } else {
+                  console.error('❌ Printer 2 failed:', print2Result?.error);
+                }
+              } catch (print2Error) {
+                console.error('❌ Error printing to Printer 2:', print2Error);
+              }
+            }
+          }
+          // Manual mode: skip auto-printing, user will manually select transactions
         }
         
         // Clear cart and close modal after successful database operation
@@ -759,14 +875,20 @@ export default function PaymentModal({
     setSelectedClAccount('');
     setBankSearchTerm('');
     setShowBankDropdown(false);
-      setSelectedPaymentMethod('cash');
-      setSelectedPickupMethod('dine-in');
+      // Don't reset payment method if it's an online order with a selected platform
+      if (!isOnline || !selectedOnlinePlatform) {
+        setSelectedPaymentMethod('cash');
+      }
+      // Don't reset pickup method if it's an online order
+      if (!isOnline) {
+        setSelectedPickupMethod('dine-in');
+      }
       setActiveInput('amount');
       setIsProcessing(false);
       setShowConfirmation(false);
       setCardNumberError('');
     }
-  }, [isOpen]);
+  }, [isOpen, isOnline, selectedOnlinePlatform]);
 
   if (!isOpen) return null;
 
@@ -1216,50 +1338,6 @@ export default function PaymentModal({
                     )}
                   </div>
 
-                  {isOnline && (
-                    <div className="flex gap-1">
-                      <button
-                        onClick={() => setSelectedPaymentMethod('gofood')}
-                        className={`flex-1 py-2 rounded border transition-all duration-200 ${
-                          selectedPaymentMethod === 'gofood'
-                            ? 'bg-teal-100 border-teal-400 text-teal-800'
-                            : 'bg-gray-50 border-gray-200 text-gray-700 hover:bg-gray-100'
-                        }`}
-                      >
-                          <span className="font-medium text-xs">GoFood</span>
-                      </button>
-                      <button
-                        onClick={() => setSelectedPaymentMethod('grabfood')}
-                        className={`flex-1 py-2 rounded border transition-all duration-200 ${
-                          selectedPaymentMethod === 'grabfood'
-                            ? 'bg-teal-100 border-teal-400 text-teal-800'
-                            : 'bg-gray-50 border-gray-200 text-gray-700 hover:bg-gray-100'
-                        }`}
-                      >
-                          <span className="font-medium text-xs">GrabFood</span>
-                      </button>
-                      <button
-                        onClick={() => setSelectedPaymentMethod('shopeefood')}
-                        className={`flex-1 py-2 rounded border transition-all duration-200 ${
-                          selectedPaymentMethod === 'shopeefood'
-                            ? 'bg-teal-100 border-teal-400 text-teal-800'
-                            : 'bg-gray-50 border-gray-200 text-gray-700 hover:bg-gray-100'
-                        }`}
-                      >
-                          <span className="font-medium text-xs">ShopeeFood</span>
-                      </button>
-                      <button
-                        onClick={() => setSelectedPaymentMethod('tiktok')}
-                        className={`flex-1 py-2 rounded border transition-all duration-200 ${
-                          selectedPaymentMethod === 'tiktok'
-                            ? 'bg-teal-100 border-teal-400 text-teal-800'
-                            : 'bg-gray-50 border-gray-200 text-gray-700 hover:bg-gray-100'
-                        }`}
-                      >
-                          <span className="font-medium text-xs">TikTok</span>
-                      </button>
-                    </div>
-                  )}
                 </div>
               </div>
 
@@ -1281,10 +1359,10 @@ export default function PaymentModal({
                     type="text"
                     value={amountReceived ? `Rp ${parseFloat(amountReceived).toLocaleString('id-ID')}` : ''}
                     readOnly
-                    disabled={selectedPaymentMethod === 'cl' || isOnlinePayment}
-                    onClick={() => selectedPaymentMethod !== 'cl' && !isOnlinePayment && setActiveInput('amount')}
+                    disabled={selectedPaymentMethod === 'cl'}
+                    onClick={() => selectedPaymentMethod !== 'cl' && setActiveInput('amount')}
                     className={`w-full p-3 text-base font-semibold border-2 rounded-lg transition-all duration-300 ${
-                      selectedPaymentMethod === 'cl' || isOnlinePayment
+                      selectedPaymentMethod === 'cl'
                         ? 'border-gray-300 bg-gray-100 text-gray-500 cursor-not-allowed opacity-50'
                         : activeInput === 'amount' 
                         ? 'border-blue-400 bg-blue-50 shadow-lg shadow-blue-200 animate-pulse text-gray-800 cursor-pointer' 
@@ -1298,19 +1376,16 @@ export default function PaymentModal({
                 {selectedPaymentMethod !== 'cl' && (
                 <div className="mb-4">
                   <div className="grid grid-cols-2 gap-2">
+                    {/* Uang Pas button - Sets exact amount */}
                     <button
                         onClick={() => {
-                          if (activeInput === 'voucher') {
-                            setVoucherAmount(prev => (parseFloat(prev || '0') + 10000).toString());
-                          } else {
-                            // Default to amount received for all other cases (amount, customer, preference, etc.)
-                            setAmountReceived(prev => (parseFloat(prev || '0') + 10000).toString());
-                            setActiveInput('amount'); // Set focus back to amount
-                          }
+                          // Uang Pas - Set exact amount needed
+                          setAmountReceived(Math.ceil(finalTotal).toString());
+                          setActiveInput('amount');
                         }}
-                      className="p-2 bg-blue-100 hover:bg-blue-200 text-blue-800 rounded-md text-xs font-medium transition-colors"
+                      className="p-2 bg-green-500 hover:bg-green-600 text-white rounded-md text-xs font-semibold transition-colors shadow-md"
                     >
-                      +Rp 10.000
+                      💰 Uang Pas
                     </button>
                     <button
                         onClick={() => {
@@ -1436,12 +1511,12 @@ export default function PaymentModal({
                   <button
                     onClick={handleConfirmPayment}
                     disabled={isProcessing || 
-                      (selectedPaymentMethod !== 'cl' && !isOnlinePayment && selectedPaymentMethod !== 'voucher' && receivedAmount < finalTotal) ||
+                      (selectedPaymentMethod !== 'cl' && (!amountReceived || parseFloat(amountReceived) <= 0 || receivedAmount < finalTotal)) ||
                       (selectedPaymentMethod === 'voucher' && (voucherDiscount <= 0 || voucherDiscount > orderTotal))
                     }
                     className={`row-span-2 p-2 rounded-lg font-medium text-xs transition-all duration-200 ${
                       isProcessing || 
-                      (selectedPaymentMethod !== 'cl' && !isOnlinePayment && selectedPaymentMethod !== 'voucher' && receivedAmount < finalTotal) ||
+                      (selectedPaymentMethod !== 'cl' && (!amountReceived || parseFloat(amountReceived) <= 0 || receivedAmount < finalTotal)) ||
                       (selectedPaymentMethod === 'voucher' && (voucherDiscount <= 0 || voucherDiscount > orderTotal))
                         ? 'bg-gray-400 cursor-not-allowed'
                         : 'bg-green-500 hover:bg-green-600 text-white'
