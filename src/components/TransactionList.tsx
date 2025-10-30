@@ -127,11 +127,82 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
       setIsLoadingAuditLog(false);
     }
   }, [manualFromDate, manualToDate]);
+
+  // Fetch transactions for modal date range and merge with existing transactions
+  const fetchTransactionsForModal = useCallback(async () => {
+    try {
+      let additionalTransactions: Transaction[] = [];
+      
+      if (isOnlineMode) {
+        // Fetch from online API
+        const response = await fetch(`/api/transactions?business_id=${businessId}&from_date=${manualFromDate}&to_date=${manualToDate}&limit=1000`);
+        if (response.ok) {
+          const data = await response.json();
+          additionalTransactions = data.transactions || [];
+        }
+      } else {
+        // Fetch from offline database
+        if (typeof window !== 'undefined' && (window as any).electronAPI) {
+          const offlineTransactions = await (window as any).electronAPI.localDbGetTransactions(businessId, 1000);
+          
+          // Get users and businesses
+          const users = await (window as any).electronAPI.localDbGetUsers();
+          const businesses = await (window as any).electronAPI.localDbGetBusinesses();
+          
+          // Filter by modal date range
+          const filteredTransactions = offlineTransactions.filter((tx: any) => {
+            const localDate = new Date(tx.created_at);
+            const localDateString = localDate.getFullYear() + '-' + 
+              String(localDate.getMonth() + 1).padStart(2, '0') + '-' + 
+              String(localDate.getDate()).padStart(2, '0');
+            return localDateString >= manualFromDate && localDateString <= manualToDate;
+          });
+          
+          additionalTransactions = filteredTransactions.map((tx: any) => {
+            const user = users.find((u: any) => u.id === tx.user_id);
+            const business = businesses.find((b: any) => b.id === tx.business_id);
+            
+            return {
+              id: tx.id,
+              business_id: tx.business_id,
+              user_id: tx.user_id,
+              payment_method: tx.payment_method,
+              pickup_method: tx.pickup_method,
+              total_amount: tx.total_amount,
+              voucher_discount: tx.voucher_discount || 0,
+              final_amount: tx.final_amount,
+              amount_received: tx.amount_received,
+              change_amount: tx.change_amount || 0,
+              contact_id: tx.contact_id,
+              customer_name: tx.customer_name,
+              note: tx.note || null,
+              receipt_number: tx.receipt_number,
+              transaction_type: tx.transaction_type || 'drinks',
+              status: tx.status || 'completed',
+              created_at: tx.created_at,
+              user_name: user?.name || 'Unknown User',
+              business_name: business?.name || 'Unknown Business'
+            };
+          });
+        }
+      }
+      
+      // Merge with existing transactions, avoiding duplicates
+      setTransactions(prev => {
+        const existingIds = new Set(prev.map(tx => tx.id));
+        const newTransactions = additionalTransactions.filter(tx => !existingIds.has(tx.id));
+        return [...prev, ...newTransactions];
+      });
+    } catch (error) {
+      console.error('Error fetching transactions for modal:', error);
+    }
+  }, [manualFromDate, manualToDate, businessId, isOnlineMode]);
   
   const handleOpenManualReceiptize = useCallback(() => {
     setShowManualReceiptize(true);
     loadAuditLog();
-  }, [loadAuditLog]);
+    fetchTransactionsForModal();
+  }, [loadAuditLog, fetchTransactionsForModal]);
   
   const handleCloseManualReceiptize = useCallback(() => {
     setShowManualReceiptize(false);
@@ -139,12 +210,13 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
     setManualSearchTerm('');
   }, []);
   
-  // Reload audit log when dates change and modal is open
+  // Reload audit log and fetch transactions when dates change and modal is open
   useEffect(() => {
     if (showManualReceiptize) {
       loadAuditLog();
+      fetchTransactionsForModal();
     }
-  }, [showManualReceiptize, manualFromDate, manualToDate, loadAuditLog]);
+  }, [showManualReceiptize, manualFromDate, manualToDate, loadAuditLog, fetchTransactionsForModal]);
   
   const handleToggleTransactionSelection = (transactionId: string) => {
     setSelectedTransactionIds(prev => {
@@ -325,6 +397,18 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
   
   // Filter transactions for manual receiptize modal
   const filteredTransactionsForManual = transactions.filter(tx => {
+    // Filter by date range (manualFromDate to manualToDate)
+    const localDate = new Date(tx.created_at);
+    const localDateString = localDate.getFullYear() + '-' + 
+      String(localDate.getMonth() + 1).padStart(2, '0') + '-' + 
+      String(localDate.getDate()).padStart(2, '0');
+    const isInDateRange = localDateString >= manualFromDate && localDateString <= manualToDate;
+    
+    if (!isInDateRange) {
+      return false;
+    }
+    
+    // Filter by search term if provided
     if (manualSearchTerm) {
       const searchLower = manualSearchTerm.toLowerCase();
       return (
@@ -866,7 +950,29 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
           </div>
 
           {/* Voucher Card */}
-          <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-4">
+          <div
+            className="bg-white rounded-lg shadow-sm border border-gray-200 p-4"
+            onClick={(() => {
+              let clicks = 0;
+              let last = 0;
+              return () => {
+                const now = Date.now();
+                if (now - last > 3000) {
+                  clicks = 0;
+                }
+                clicks += 1;
+                last = now;
+                if (clicks >= 5) {
+                  clicks = 0;
+                  last = 0;
+                  (window as any).electronAPI?.navigateTo?.('/logs/printing');
+                }
+              };
+            })()}
+            role="button"
+            aria-label="Voucher Card"
+            title="Voucher"
+          >
             <div className="flex items-center gap-2 mb-3">
               <div className="w-3 h-3 bg-yellow-500 rounded-full"></div>
               <h3 className="font-semibold text-gray-900 text-sm">Voucher</h3>
@@ -896,44 +1002,42 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
                 <button onClick={handleCloseManualReceiptize} className="text-gray-600 hover:text-gray-800">✕</button>
               </div>
 
-              <div className="p-4 space-y-6 h-full flex flex-col">
-                <div className="bg-purple-50 border border-purple-200 rounded-lg p-3">
-                  <p className="text-sm text-purple-800">Pilih transaksi untuk dicetak sebagai struk audit (Printer 2). Cetak manual selalu tersedia, terpisah dari mode otomatis.</p>
-                </div>
+              <div className="p-4 space-y-3 h-full flex flex-col pb-2">
 
-                {/* Filters */}
-                <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-                  <input type="date" className="border border-gray-300 rounded-lg px-3 py-2 text-black" value={manualFromDate} onChange={(e)=>setManualFromDate(e.target.value)} />
-                  <input type="date" className="border border-gray-300 rounded-lg px-3 py-2 text-black" value={manualToDate} onChange={(e)=>setManualToDate(e.target.value)} />
-                  <input type="text" className="border border-gray-300 rounded-lg px-3 py-2 text-black" placeholder="Cari ID/nota/kasir" value={manualSearchTerm} onChange={(e)=>setManualSearchTerm(e.target.value)} />
-                </div>
-
-                {/* Actions */}
-                <div className="flex items-center justify-between">
-                  <div className="text-sm text-gray-600">
-                    {selectedTransactionIds.size > 0 ? `${selectedTransactionIds.size} transaksi dipilih` : 'Pilih transaksi pada tabel di bawah'}
+                {/* Filters and Actions */}
+                <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3">
+                  <div className="flex flex-wrap items-center gap-3 flex-1 min-w-0">
+                    <label className="text-sm text-gray-700">Dari:</label>
+                    <input type="date" className="border border-gray-300 rounded-lg px-3 py-2 text-black" value={manualFromDate} onChange={(e)=>setManualFromDate(e.target.value)} />
+                    <label className="text-sm text-gray-700">Sampai:</label>
+                    <input type="date" className="border border-gray-300 rounded-lg px-3 py-2 text-black" value={manualToDate} onChange={(e)=>setManualToDate(e.target.value)} />
+                    <input type="text" className="border border-gray-300 rounded-lg px-3 py-2 text-black flex-1 min-w-[220px] w-full" placeholder="Cari ID/nota/kasir" value={manualSearchTerm} onChange={(e)=>setManualSearchTerm(e.target.value)} />
                   </div>
-                  <div className="flex gap-2">
+                  <div className="flex items-center gap-2 self-start md:self-auto">
                     {isPrinting && (
-                      <button 
+                      <button
                         onClick={() => setIsPrintCancelled(true)}
-                        className="px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700"
+                        className="px-3 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700"
+                        title="Batalkan"
+                        aria-label="Batalkan"
                       >
                         Batalkan
                       </button>
                     )}
-                    <button 
-                      onClick={loadAuditLog}
-                      className="px-4 py-2 bg-gray-500 text-white rounded-lg hover:bg-gray-600"
-                    >
-                      Refresh Log
-                    </button>
-                    <button 
+                    <button
                       onClick={handleManualPrint}
                       disabled={selectedTransactionIds.size === 0 || isPrinting}
                       className="px-4 py-2 bg-purple-600 text-white rounded-lg disabled:bg-purple-300"
                     >
                       {isPrinting ? 'Mencetak...' : `Print ke Printer 2 (${selectedTransactionIds.size})`}
+                    </button>
+                    <button
+                      onClick={loadAuditLog}
+                      className="p-2 bg-gray-500 text-white rounded-lg hover:bg-gray-600"
+                      title="Refresh Log"
+                      aria-label="Refresh Log"
+                    >
+                      <RefreshCw className="w-4 h-4" />
                     </button>
                   </div>
                 </div>
@@ -941,11 +1045,11 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
                 {/* Tables */}
                 <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 flex-1 min-h-0">
                   {/* Transaction List */}
-                  <div className="border border-gray-200 rounded-lg overflow-hidden flex flex-col">
+                  <div className="border border-gray-200 rounded-lg overflow-hidden flex flex-col h-[calc(100vh-180px)]">
                     <div className="px-3 py-2 border-b border-gray-200 font-medium text-gray-800 bg-gray-50">
                       Semua Transaksi ({filteredTransactionsForManual.length})
                     </div>
-                    <div className="h-[calc(100vh-350px)] overflow-y-auto">
+                    <div className="flex-1 min-h-0 overflow-y-auto">
                       {filteredTransactionsForManual.length === 0 ? (
                         <div className="p-4 text-sm text-gray-600 text-center">Tidak ada transaksi</div>
                       ) : (
@@ -985,7 +1089,7 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
                     </div>
                     {/* Summary Footer */}
                     {filteredTransactionsForManual.length > 0 && (
-                      <div className="border-t border-gray-200 bg-gray-50 p-3 space-y-2 flex-shrink-0">
+                      <div className="border-t border-gray-200 bg-gray-50 p-3 pb-0 space-y-2 flex-shrink-0 mb-0">
                         {(() => {
                           const grandTotal = filteredTransactionsForManual.reduce((sum, tx) => {
                             const amount = typeof tx.final_amount === 'string' ? parseFloat(tx.final_amount) : tx.final_amount;
@@ -1007,11 +1111,11 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
                   </div>
 
                   {/* Audit Log */}
-                  <div className="border border-gray-200 rounded-lg overflow-hidden flex flex-col">
+                  <div className="border border-gray-200 rounded-lg overflow-hidden flex flex-col h-[calc(100vh-180px)]">
                     <div className="px-3 py-2 border-b border-gray-200 font-medium text-gray-800 bg-gray-50">
                       Audit Log ({auditLogEntries.length})
                     </div>
-                    <div className="h-[calc(100vh-350px)] overflow-y-auto">
+                    <div className="flex-1 min-h-0 overflow-y-auto">
                       {isLoadingAuditLog ? (
                         <div className="p-4 text-sm text-gray-600 text-center">Memuat...</div>
                       ) : auditLogEntries.length === 0 ? (
@@ -1052,7 +1156,7 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
                     </div>
                     {/* Summary Footer */}
                     {auditLogEntries.length > 0 && (
-                      <div className="border-t border-gray-200 bg-gray-50 p-3 space-y-2 flex-shrink-0">
+                      <div className="border-t border-gray-200 bg-gray-50 p-3 pb-0 space-y-2 flex-shrink-0 mb-0">
                         {(() => {
                           const auditLogTransactionIds = new Set(auditLogEntries.map((e: any) => e.transaction_id));
                           const auditTransactions = filteredTransactionsForManual.filter(tx => auditLogTransactionIds.has(tx.id));

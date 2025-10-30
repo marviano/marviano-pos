@@ -529,6 +529,18 @@ function createWindows() {
         cycle_number INTEGER,
         printed_at TEXT NOT NULL,
         printed_at_epoch INTEGER NOT NULL,
+        synced_at INTEGER,
+        FOREIGN KEY (transaction_id) REFERENCES transactions(id)
+      );
+      
+      -- Printer 1 audit log (local)
+      CREATE TABLE IF NOT EXISTS printer1_audit_log (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        transaction_id TEXT NOT NULL,
+        printer1_receipt_number INTEGER NOT NULL,
+        printed_at TEXT NOT NULL,
+        printed_at_epoch INTEGER NOT NULL,
+        synced_at INTEGER,
         FOREIGN KEY (transaction_id) REFERENCES transactions(id)
       );
       
@@ -577,6 +589,9 @@ function createWindows() {
       CREATE INDEX IF NOT EXISTS idx_printer2_audit_transaction ON printer2_audit_log(transaction_id);
       CREATE INDEX IF NOT EXISTS idx_printer2_audit_mode ON printer2_audit_log(print_mode);
       CREATE INDEX IF NOT EXISTS idx_printer2_audit_date ON printer2_audit_log(printed_at_epoch);
+      
+      CREATE INDEX IF NOT EXISTS idx_printer1_audit_transaction ON printer1_audit_log(transaction_id);
+      CREATE INDEX IF NOT EXISTS idx_printer1_audit_date ON printer1_audit_log(printed_at_epoch);
       
       CREATE INDEX IF NOT EXISTS idx_payment_methods_code ON payment_methods(code);
       CREATE INDEX IF NOT EXISTS idx_payment_methods_active ON payment_methods(is_active);
@@ -1400,6 +1415,26 @@ function createWindows() {
       `);
             const result = stmt.run(Date.now(), businessId);
             console.log(`✅ [ARCHIVE] Archived ${result.changes} transactions`);
+            // Also clear related printer audits for archived transactions
+            try {
+                const delP1 = localDb.prepare(`
+          DELETE FROM printer1_audit_log
+          WHERE transaction_id IN (
+            SELECT id FROM transactions WHERE business_id = ? AND status = 'archived'
+          )
+        `);
+                delP1.run(businessId);
+                const delP2 = localDb.prepare(`
+          DELETE FROM printer2_audit_log
+          WHERE transaction_id IN (
+            SELECT id FROM transactions WHERE business_id = ? AND status = 'archived'
+          )
+        `);
+                delP2.run(businessId);
+            }
+            catch (e) {
+                console.warn('⚠️ [ARCHIVE] Failed to clear printer audits for archived transactions:', e);
+            }
             return result.changes;
         }
         catch (error) {
@@ -1412,6 +1447,21 @@ function createWindows() {
         if (!localDb)
             return 0;
         try {
+            // Delete printer audits first
+            const delP1 = localDb.prepare(`
+        DELETE FROM printer1_audit_log 
+        WHERE transaction_id IN (
+          SELECT id FROM transactions WHERE business_id = ?
+        )
+      `);
+            delP1.run(businessId);
+            const delP2 = localDb.prepare(`
+        DELETE FROM printer2_audit_log 
+        WHERE transaction_id IN (
+          SELECT id FROM transactions WHERE business_id = ?
+        )
+      `);
+            delP2.run(businessId);
             const stmt = localDb.prepare(`
         DELETE FROM transactions 
         WHERE business_id = ?
@@ -1879,6 +1929,55 @@ function createWindows() {
             return { success: false, entries: [] };
         const entries = printerService.getPrinter2AuditLog(fromDate, toDate, limit || 100);
         return { success: true, entries };
+    });
+    // Log Printer 1 print
+    electron_1.ipcMain.handle('log-printer1-print', async (event, transactionId, printer1ReceiptNumber) => {
+        if (!printerService)
+            return { success: false };
+        const result = printerService.logPrinter1Print(transactionId, printer1ReceiptNumber);
+        return { success: result };
+    });
+    // Get Printer 1 audit log
+    electron_1.ipcMain.handle('get-printer1-audit-log', async (event, fromDate, toDate, limit) => {
+        if (!printerService)
+            return { success: false, entries: [] };
+        const entries = printerService.getPrinter1AuditLog(fromDate, toDate, limit || 100);
+        return { success: true, entries };
+    });
+    // Get unsynced printer audits (both tables)
+    electron_1.ipcMain.handle('localdb-get-unsynced-printer-audits', async () => {
+        if (!localDb)
+            return { p1: [], p2: [] };
+        try {
+            const p1 = localDb.prepare('SELECT id, transaction_id, printer1_receipt_number, printed_at, printed_at_epoch FROM printer1_audit_log WHERE synced_at IS NULL ORDER BY printed_at_epoch ASC LIMIT 1000').all();
+            const p2 = localDb.prepare('SELECT id, transaction_id, printer2_receipt_number, print_mode, cycle_number, printed_at, printed_at_epoch FROM printer2_audit_log WHERE synced_at IS NULL ORDER BY printed_at_epoch ASC LIMIT 1000').all();
+            return { p1, p2 };
+        }
+        catch (error) {
+            console.error('Error fetching unsynced printer audits:', error);
+            return { p1: [], p2: [] };
+        }
+    });
+    // Mark printer audits as synced
+    electron_1.ipcMain.handle('localdb-mark-printer-audits-synced', async (event, ids) => {
+        if (!localDb)
+            return { success: false };
+        try {
+            const now = Date.now();
+            if (ids?.p1Ids?.length) {
+                const placeholders = ids.p1Ids.map(() => '?').join(',');
+                localDb.prepare(`UPDATE printer1_audit_log SET synced_at = ? WHERE id IN (${placeholders})`).run(now, ...ids.p1Ids);
+            }
+            if (ids?.p2Ids?.length) {
+                const placeholders = ids.p2Ids.map(() => '?').join(',');
+                localDb.prepare(`UPDATE printer2_audit_log SET synced_at = ? WHERE id IN (${placeholders})`).run(now, ...ids.p2Ids);
+            }
+            return { success: true };
+        }
+        catch (error) {
+            console.error('Error marking printer audits synced:', error);
+            return { success: false };
+        }
     });
     // Offline transaction queue management
     electron_1.ipcMain.handle('localdb-queue-offline-transaction', async (event, transactionData) => {
@@ -2502,7 +2601,16 @@ function generateReceiptHTML(data, businessName) {
   <div class="branch">${businessName}</div>
   <div class="address">Jl. Kalimantan no. 21, Kartoharjo<br>Kec. Kartoharjo, Kota Madiun</div>
   
-  <div class="transaction-type">${transactionDisplay} ${String(data.printer2Counter || data.tableNumber || '01').padStart(2, '0')}</div>
+  ${(() => {
+        // Choose per-printer display number: Printer 1 uses printer1Counter, Printer 2 uses printer2Counter
+        // Fall back to tableNumber, then '01'
+        const isReceiptize = data.printerType === 'receiptizePrinter';
+        const number = isReceiptize
+            ? (data.printer2Counter ?? data.tableNumber ?? '01')
+            : (data.printer1Counter ?? data.tableNumber ?? '01');
+        const numStr = String(number).padStart(2, '0');
+        return `<div class="transaction-type">${transactionDisplay} ${numStr}</div>`;
+    })()}
   
   <div class="dashed-line"></div>
   

@@ -121,6 +121,11 @@ electron_1.contextBridge.exposeInMainWorld('electronAPI', {
     generateRandomSelections: (cycleNumber) => electron_1.ipcRenderer.invoke('generate-random-selections', cycleNumber),
     logPrinter2Print: (transactionId, printer2ReceiptNumber, mode, cycleNumber) => electron_1.ipcRenderer.invoke('log-printer2-print', transactionId, printer2ReceiptNumber, mode, cycleNumber),
     getPrinter2AuditLog: (fromDate, toDate, limit) => electron_1.ipcRenderer.invoke('get-printer2-audit-log', fromDate, toDate, limit),
+    logPrinter1Print: (transactionId, printer1ReceiptNumber) => electron_1.ipcRenderer.invoke('log-printer1-print', transactionId, printer1ReceiptNumber),
+    getPrinter1AuditLog: (fromDate, toDate, limit) => electron_1.ipcRenderer.invoke('get-printer1-audit-log', fromDate, toDate, limit),
+    // Printer audit sync helpers
+    localDbGetUnsyncedPrinterAudits: () => electron_1.ipcRenderer.invoke('localdb-get-unsynced-printer-audits'),
+    localDbMarkPrinterAuditsSynced: (ids) => electron_1.ipcRenderer.invoke('localdb-mark-printer-audits-synced', ids),
     // Customer display event listeners
     onOrderUpdate: (callback) => {
         electron_1.ipcRenderer.on('order-update', (event, data) => callback(data));

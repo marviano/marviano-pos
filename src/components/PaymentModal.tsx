@@ -71,6 +71,7 @@ export default function PaymentModal({
   const [showBankDropdown, setShowBankDropdown] = useState<boolean>(false);
   const [isProcessing, setIsProcessing] = useState(false);
   const [showConfirmation, setShowConfirmation] = useState(false);
+  const [printTarget, setPrintTarget] = useState<'receipt' | 'receiptize' | 'both'>('receipt');
   
   // Check if current payment method is an online platform
   const isOnlinePayment = ['gofood', 'grabfood', 'shopeefood', 'tiktok'].includes(selectedPaymentMethod);
@@ -571,9 +572,13 @@ export default function PaymentModal({
         // Close confirmation dialog first
         setShowConfirmation(false);
         
-        // Get Printer 1 counter and increment
+        // Determine user-selected print targets
+        const shouldPrintReceipt = printTarget === 'receipt' || printTarget === 'both';
+        const shouldPrintReceiptize = printTarget === 'receiptize' || printTarget === 'both';
+
+        // Get Printer 1 counter and increment only if printing to receipt printer
         let printer1Counter = 1;
-        if (window.electronAPI?.getPrinterCounter) {
+        if (shouldPrintReceipt && window.electronAPI?.getPrinterCounter) {
           const counterResult = await window.electronAPI.getPrinterCounter('receiptPrinter', 14, true); // true = increment
           if (counterResult?.success) {
             printer1Counter = counterResult.counter;
@@ -592,7 +597,7 @@ export default function PaymentModal({
         };
         
         // Transform cart items to receipt format - use platform price for online orders
-        const receiptItems = cartItems.map(item => {
+        let receiptItems = cartItems.map(item => {
           // For online orders, use platform-specific price, otherwise use harga_jual
           let basePrice = item.product.harga_jual;
           
@@ -640,6 +645,16 @@ export default function PaymentModal({
             total_price: itemPrice * item.quantity
           };
         });
+
+        // Append voucher discount as a negative line on the receipt when applied
+        if (voucherDiscount > 0) {
+          receiptItems.push({
+            name: 'Diskon Voucher',
+            quantity: 1,
+            price: -voucherDiscount,
+            total_price: -voucherDiscount
+          });
+        }
         
         // Get user info from auth
         const cashierName = user?.name || 'Kasir';
@@ -673,92 +688,50 @@ export default function PaymentModal({
           printer1Counter: printer1Counter // Store counter separately for reference
         };
         
-        // Print to Printer 1 (always)
-        try {
-          console.log('📄 Printing to Printer 1, counter:', printer1Counter);
-          const printResult = await window.electronAPI?.printReceipt?.(printData);
-          
-          if (printResult?.success) {
-            console.log('✅ Printer 1 printed successfully');
-          } else {
-            console.error('❌ Printer 1 failed:', printResult?.error);
+        // Print to Printer 1 if selected
+        if (shouldPrintReceipt) {
+          try {
+            console.log('📄 Printing to Printer 1, counter:', printer1Counter);
+            const printResult = await window.electronAPI?.printReceipt?.(printData);
+            if (printResult?.success) {
+              console.log('✅ Printer 1 printed successfully');
+              try {
+                await window.electronAPI?.logPrinter1Print?.(transactionData.id, printer1Counter);
+              } catch (e) {
+                console.warn('⚠️ Failed to log Printer 1 audit:', e);
+              }
+            } else {
+              console.error('❌ Printer 1 failed:', printResult?.error);
+            }
+          } catch (printError) {
+            console.error('❌ Error printing to Printer 1:', printError);
           }
-        } catch (printError) {
-          console.error('❌ Error printing to Printer 1:', printError);
         }
         
-        // ========== PRINTER 2 LOGIC ==========
-        // Check if we should print to Printer 2 (Receiptize)
-        if (window.electronAPI?.getPrinter2Mode) {
-          const modeResult = await window.electronAPI.getPrinter2Mode();
-          const printer2Mode = modeResult?.mode || 'auto';
-          console.log(`📊 Printer 2 mode: ${printer2Mode}`);
-          
-          if (printer2Mode === 'auto') {
-            // Get receipt_number for cycle calculation
-            const receiptNum = typeof receiptNumber === 'number' ? receiptNumber : parseInt(receiptNumber) || 0;
-            const cycleNumber = Math.floor((receiptNum - 1) / 10) + 1;
-            const positionInCycle = ((receiptNum - 1) % 10) + 1;
-            
-            console.log(`🔢 Transaction #${receiptNum}, Cycle: ${cycleNumber}, Position in cycle: ${positionInCycle}`);
-            
-            // Get current automation selections
-            const selectionsResult = await window.electronAPI.getPrinter2AutomationSelections(14);
-            let selections = selectionsResult?.selections || [];
-            let currentCycle = selectionsResult?.cycleNumber || 0;
-            
-            // If we're starting a new cycle, generate random selections
-            if (positionInCycle === 1 && cycleNumber > currentCycle) {
-              console.log(`🎲 Starting new cycle ${cycleNumber}, generating random selections...`);
-              const randomResult = await window.electronAPI.generateRandomSelections(cycleNumber);
-              selections = randomResult?.selections || [];
-              await window.electronAPI.savePrinter2AutomationSelections(14, cycleNumber, selections);
-              console.log(`✅ Cycle ${cycleNumber} selections:`, selections);
-            }
-            
-            // Check if current transaction should print to Printer 2
-            if (selections.includes(receiptNum)) {
-              console.log(`✅ Transaction #${receiptNum} selected for Printer 2 (auto mode)`);
-              
-              // Get Printer 2 counter and increment
-              let printer2Counter = 1;
-              if (window.electronAPI?.getPrinterCounter) {
-                const counterResult = await window.electronAPI.getPrinterCounter('receiptizePrinter', 14, true);
-                if (counterResult?.success) {
-                  printer2Counter = counterResult.counter;
-                  console.log(`✅ Printer 2 counter: ${printer2Counter}`);
-                }
-              }
-              
-              // Log to audit
-              await window.electronAPI.logPrinter2Print(transactionData.id, printer2Counter, 'auto', cycleNumber);
-              
-              // Print to Printer 2
-              const printer2Data = {
-                ...printData,
-                printerType: 'receiptizePrinter',
-                receiptNumber: transactionData.id, // Use 19-digit transaction UUID as nomor pesanan
-                printer2Counter: printer2Counter // Store counter separately for reference
-              };
-              
-              try {
-                // Small delay to prevent driver conflicts when sending two back-to-back jobs
-                await new Promise((resolve) => setTimeout(resolve, 2000));
-                console.log('📄 Printing to Printer 2, counter:', printer2Counter);
-                const print2Result = await window.electronAPI?.printReceipt?.(printer2Data);
-                
-                // Silently log success - no message box for Receiptize printer
-                if (print2Result?.success) {
-                  console.log('✅ Printer 2 printed successfully (no user notification)');
-                } else {
-                  console.error('❌ Printer 2 failed:', print2Result?.error);
-                }
-              } catch (print2Error) {
-                console.error('❌ Error printing to Printer 2:', print2Error);
+        // Printer 2 manual print if selected via confirmation dialog
+        if (shouldPrintReceiptize) {
+          try {
+            let printer2Counter = 1;
+            if (window.electronAPI?.getPrinterCounter) {
+              const counterResult = await window.electronAPI.getPrinterCounter('receiptizePrinter', 14, true);
+              if (counterResult?.success) {
+                printer2Counter = counterResult.counter;
+                console.log(`✅ Printer 2 counter: ${printer2Counter}`);
               }
             }
+            await window.electronAPI?.logPrinter2Print?.(transactionData.id, printer2Counter, 'manual');
+            const printer2Data = { ...printData, printerType: 'receiptizePrinter', receiptNumber: transactionData.id, printer2Counter } as any;
+            await new Promise(r => setTimeout(r, 500));
+            console.log('📄 Printing to Printer 2, counter:', printer2Counter);
+            const print2Result = await window.electronAPI?.printReceipt?.(printer2Data);
+            if (print2Result?.success) {
+              console.log('✅ Printer 2 printed successfully (manual)');
+            } else {
+              console.error('❌ Printer 2 failed:', print2Result?.error);
+            }
+          } catch (print2Error) {
+            console.error('❌ Error printing to Printer 2:', print2Error);
           }
-          // Manual mode: skip auto-printing, user will manually select transactions
         }
         
         // Clear cart and close modal after successful database operation
@@ -1573,6 +1546,8 @@ export default function PaymentModal({
         voucherDiscount={voucherDiscount}
         finalTotal={finalTotal}
         isProcessing={isProcessing}
+        printTarget={printTarget}
+        onChangePrintTarget={setPrintTarget}
       />
     </>
   );

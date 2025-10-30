@@ -7,12 +7,25 @@ import { query } from './db';
  * @param transactionType - 'drinks' or 'bakery'
  * @returns Promise<number> - The next receipt number
  */
-export async function generateReceiptNumber(businessId: number, transactionType: 'drinks' | 'bakery'): Promise<number> {
+export async function generateReceiptNumber(
+  businessId: number,
+  transactionType: 'drinks' | 'bakery',
+  createdAtOverride?: Date | string
+): Promise<number> {
   try {
-    // Get today's date range
-    const today = new Date();
-    const startOfDay = new Date(today.getFullYear(), today.getMonth(), today.getDate());
-    const endOfDay = new Date(today.getFullYear(), today.getMonth(), today.getDate() + 1);
+    // Determine target day from createdAtOverride if provided, else now
+    let basis: Date;
+    if (createdAtOverride) {
+      basis = createdAtOverride instanceof Date ? createdAtOverride : new Date(createdAtOverride);
+      if (isNaN(basis.getTime())) {
+        basis = new Date();
+      }
+    } else {
+      basis = new Date();
+    }
+    // Compute local day range
+    const startOfDay = new Date(basis.getFullYear(), basis.getMonth(), basis.getDate());
+    const endOfDay = new Date(basis.getFullYear(), basis.getMonth(), basis.getDate() + 1);
     
     // Find the highest receipt number for today
     const result = await query(`

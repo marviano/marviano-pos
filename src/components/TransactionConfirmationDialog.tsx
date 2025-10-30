@@ -39,6 +39,10 @@ interface TransactionConfirmationDialogProps {
   voucherDiscount?: number;
   finalTotal?: number;
   isProcessing?: boolean;
+  printTarget: 'receipt' | 'receiptize' | 'both';
+  onChangePrintTarget: (target: 'receipt' | 'receiptize' | 'both') => void;
+  isOnline?: boolean;
+  selectedOnlinePlatform?: 'gofood' | 'grabfood' | 'shopeefood' | 'tiktok' | null;
 }
 
 export default function TransactionConfirmationDialog({
@@ -53,7 +57,11 @@ export default function TransactionConfirmationDialog({
   change,
   voucherDiscount = 0,
   finalTotal = orderTotal,
-  isProcessing = false
+  isProcessing = false,
+  printTarget,
+  onChangePrintTarget,
+  isOnline = false,
+  selectedOnlinePlatform = null
 }: TransactionConfirmationDialogProps) {
   const formatPrice = (price: number) => {
     return `Rp ${price.toLocaleString('id-ID')}`;
@@ -115,7 +123,24 @@ export default function TransactionConfirmationDialog({
             <h3 className="text-lg font-semibold text-gray-800 mb-4">Rincian Pesanan</h3>
             <div className="space-y-3">
               {cartItems.map((item, index) => {
-                let itemPrice = item.product.harga_jual;
+                let basePrice = item.product.harga_jual;
+                if (isOnline && selectedOnlinePlatform) {
+                  switch (selectedOnlinePlatform) {
+                    case 'gofood':
+                      basePrice = (item.product as any).harga_gofood || item.product.harga_jual;
+                      break;
+                    case 'grabfood':
+                      basePrice = (item.product as any).harga_grabfood || item.product.harga_jual;
+                      break;
+                    case 'shopeefood':
+                      basePrice = (item.product as any).harga_shopeefood || item.product.harga_jual;
+                      break;
+                    case 'tiktok':
+                      basePrice = (item.product as any).harga_tiktok || item.product.harga_jual;
+                      break;
+                  }
+                }
+                let itemPrice = basePrice;
                 
                 // Add customization prices
                 if (item.customizations) {
@@ -165,6 +190,43 @@ export default function TransactionConfirmationDialog({
               <p className="text-green-700">{getPickupMethodLabel(pickupMethod)}</p>
             </div>
           </div>
+
+        {/* Print Target Selection */}
+        <div className="bg-purple-50 rounded-xl p-4">
+          <h4 className="font-semibold text-purple-800 mb-2">Tujuan Cetak</h4>
+          <div className="flex flex-col sm:flex-row gap-2">
+            <label className={`px-3 py-2 rounded-lg border cursor-pointer text-sm ${printTarget === 'receipt' ? 'bg-white border-purple-400 text-purple-800' : 'bg-white border-gray-300 text-gray-700'}`}>
+              <input
+                type="radio"
+                name="print-target"
+                className="mr-2"
+                checked={printTarget === 'receipt'}
+                onChange={() => onChangePrintTarget('receipt')}
+              />
+              receipt printer
+            </label>
+            <label className={`px-3 py-2 rounded-lg border cursor-pointer text-sm ${printTarget === 'receiptize' ? 'bg-white border-purple-400 text-purple-800' : 'bg-white border-gray-300 text-gray-700'}`}>
+              <input
+                type="radio"
+                name="print-target"
+                className="mr-2"
+                checked={printTarget === 'receiptize'}
+                onChange={() => onChangePrintTarget('receiptize')}
+              />
+              receiptize printer
+            </label>
+            <label className={`px-3 py-2 rounded-lg border cursor-pointer text-sm ${printTarget === 'both' ? 'bg-white border-purple-400 text-purple-800' : 'bg-white border-gray-300 text-gray-700'}`}>
+              <input
+                type="radio"
+                name="print-target"
+                className="mr-2"
+                checked={printTarget === 'both'}
+                onChange={() => onChangePrintTarget('both')}
+              />
+              cetak keduanya
+            </label>
+          </div>
+        </div>
 
           {/* Amount Summary */}
           <div className="bg-gray-50 rounded-xl p-4">

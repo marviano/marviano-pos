@@ -183,6 +183,57 @@ class PrinterManagementService {
         }
     }
     /**
+     * Log Printer 1 print to audit
+     */
+    logPrinter1Print(transactionId, printer1ReceiptNumber) {
+        try {
+            const now = new Date().toISOString();
+            this.db.prepare('INSERT INTO printer1_audit_log (transaction_id, printer1_receipt_number, printed_at, printed_at_epoch) ' +
+                'VALUES (?, ?, ?, ?)')
+                .run(transactionId, printer1ReceiptNumber, now, Date.now());
+            console.log(`✅ Logged Printer 1 print: Transaction ${transactionId}, Receipt #${printer1ReceiptNumber}`);
+            return true;
+        }
+        catch (error) {
+            console.error('Error logging printer1 print:', error);
+            return false;
+        }
+    }
+    /**
+     * Get Printer 1 audit log entries
+     */
+    getPrinter1AuditLog(fromDate, toDate, limit = 100) {
+        try {
+            let query = 'SELECT * FROM printer1_audit_log';
+            const params = [];
+            if (fromDate || toDate) {
+                const conditions = [];
+                if (fromDate) {
+                    const fromEpoch = new Date(fromDate).getTime();
+                    conditions.push('printed_at_epoch >= ?');
+                    params.push(fromEpoch);
+                }
+                if (toDate) {
+                    const toEpoch = new Date(toDate + 'T23:59:59').getTime();
+                    conditions.push('printed_at_epoch <= ?');
+                    params.push(toEpoch);
+                }
+                if (conditions.length > 0) {
+                    query += ' WHERE ' + conditions.join(' AND ');
+                }
+            }
+            query += ' ORDER BY printed_at_epoch DESC LIMIT ?';
+            params.push(limit);
+            const results = this.db.prepare(query).all(...params);
+            console.log(`✅ Retrieved ${results.length} printer1 audit log entries`);
+            return results;
+        }
+        catch (error) {
+            console.error('Error getting printer1 audit log:', error);
+            return [];
+        }
+    }
+    /**
      * Get Printer 2 audit log entries
      */
     getPrinter2AuditLog(fromDate, toDate, limit = 100) {

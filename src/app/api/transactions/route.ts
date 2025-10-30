@@ -74,8 +74,17 @@ export async function POST(request: NextRequest) {
       const paymentMethodId = await getPaymentMethodId(transactionData.payment_method);
       console.log('✅ [API] Payment method ID:', paymentMethodId);
       
-      // Generate receipt number
-      const receiptNumber = await generateReceiptNumber(transactionData.business_id, transactionData.transaction_type);
+      // Generate receipt number based on sale date (created_at if provided)
+      let createdAtBasis: Date | undefined = undefined;
+      if (transactionData.created_at) {
+        const d = new Date(transactionData.created_at);
+        if (!isNaN(d.getTime())) createdAtBasis = d;
+      }
+      const receiptNumber = await generateReceiptNumber(
+        transactionData.business_id,
+        transactionData.transaction_type,
+        createdAtBasis
+      );
       
       // Format created_at for MySQL (convert to MySQL datetime format)
       let createdAt;
@@ -225,12 +234,17 @@ export async function POST(request: NextRequest) {
 
   } catch (error) {
     console.error('❌ Error saving transaction:', error);
-    console.error('❌ Error details:', error instanceof Error ? error.message : 'Unknown error');
-    console.error('❌ Error stack:', error instanceof Error ? error.stack : 'No stack');
+    const message = error instanceof Error ? error.message : String(error);
+    // Idempotency: if duplicate uuid_id, treat as success
+    if (message && message.toLowerCase().includes('duplicate entry')) {
+      console.warn('ℹ️ Duplicate uuid_id detected; treating as idempotent success');
+      // Echo minimal success; client has the uuid and can fetch if needed
+      return NextResponse.json({ success: true, message: 'Duplicate ignored (idempotent)' }, { status: 200 });
+    }
     return NextResponse.json(
       { 
         error: 'Failed to save transaction',
-        details: error instanceof Error ? error.message : 'Unknown error'
+        details: message || 'Unknown error'
       },
       { status: 500 }
     );

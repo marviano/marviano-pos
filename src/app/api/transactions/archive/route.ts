@@ -19,6 +19,20 @@ export async function POST(request: NextRequest) {
       WHERE business_id = ? AND status != 'archived'
     `, [business_id]);
 
+    // Also delete printer audits for these transactions to purge test data (skip if table missing)
+    try {
+      await query(`
+        DELETE pa FROM printer_audits pa
+        INNER JOIN transactions t ON pa.transaction_uuid = t.uuid_id
+        WHERE t.business_id = ? AND t.status = 'archived'
+      `, [business_id]);
+    } catch (e: any) {
+      const msg = String(e?.message || e);
+      if (!msg.includes("doesn't exist") && !msg.toLowerCase().includes('no such table')) {
+        throw e;
+      }
+    }
+
     const archivedCount = (result as any).affectedRows || 0;
 
     return NextResponse.json({

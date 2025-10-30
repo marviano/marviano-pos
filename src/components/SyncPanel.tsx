@@ -173,16 +173,16 @@ export default function SyncPanel({ isOpen, onClose }: SyncPanelProps) {
     try {
       console.log('🔄 [SYNC] Starting upload of offline transactions to cloud...');
       
-      // Get pending transactions from local database
+      // Get only UNSYNCED transactions from local database
       const electronAPI = (window as any).electronAPI;
-      const localTransactions = await electronAPI.localDbGetTransactions(1, 1000); // Get all transactions
-      
-      // Filter transactions that might not be on cloud (you can add more sophisticated logic here)
-      const transactionsToUpload = localTransactions.filter((tx: any) => {
-        // For now, upload all transactions. In production, you might want to check timestamps
-        // or add a sync_status field to track what's been uploaded
-        return true;
-      });
+      // Prefer dedicated helper if available; otherwise fallback to filter by synced_at
+      let transactionsToUpload: any[] = [];
+      if (electronAPI.localDbGetUnsyncedTransactions) {
+        transactionsToUpload = await electronAPI.localDbGetUnsyncedTransactions(14);
+      } else {
+        const localTransactions = await electronAPI.localDbGetTransactions(14, 1000);
+        transactionsToUpload = localTransactions.filter((tx: any) => !tx.synced_at);
+      }
 
       if (transactionsToUpload.length === 0) {
         console.log('ℹ️ [SYNC] No transactions to upload - proceeding to download step');
@@ -192,7 +192,7 @@ export default function SyncPanel({ isOpen, onClose }: SyncPanelProps) {
 
       console.log(`📤 [SYNC] Uploading ${transactionsToUpload.length} transactions to cloud...`);
 
-      // Upload transactions to cloud
+      // Upload transactions to cloud (idempotent on server)
       for (const transaction of transactionsToUpload) {
         try {
           const response = await fetch('/api/transactions', {
@@ -205,6 +205,10 @@ export default function SyncPanel({ isOpen, onClose }: SyncPanelProps) {
 
           if (response.ok) {
             console.log(`✅ Transaction ${transaction.id} uploaded successfully`);
+            // Mark as synced locally if helper exists
+            if (electronAPI.localDbMarkTransactionsSyncedByIds) {
+              await electronAPI.localDbMarkTransactionsSyncedByIds([transaction.id]);
+            }
           } else {
             console.warn(`⚠️ Failed to upload transaction ${transaction.id}: ${response.status}`);
           }
@@ -244,10 +248,34 @@ export default function SyncPanel({ isOpen, onClose }: SyncPanelProps) {
     try {
       console.log('🔄 [SYNC] Starting full bidirectional sync...');
       
-      // Step 1: Upload offline transactions to cloud
+      // Step 1: Upload printer audits first
+      try {
+        const electronAPI = (window as any).electronAPI;
+        if (electronAPI?.localDbGetUnsyncedPrinterAudits) {
+          const audits = await electronAPI.localDbGetUnsyncedPrinterAudits();
+          const hasAudits = (audits?.p1?.length || 0) + (audits?.p2?.length || 0) > 0;
+          if (hasAudits) {
+            const res = await fetch('/api/printer-audits', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ printer1: audits.p1, printer2: audits.p2 })
+            });
+            if (res.ok && electronAPI?.localDbMarkPrinterAuditsSynced) {
+              await electronAPI.localDbMarkPrinterAuditsSynced({
+                p1Ids: audits.p1.map((r: any) => r.id),
+                p2Ids: audits.p2.map((r: any) => r.id)
+              });
+            }
+          }
+        }
+      } catch (e) {
+        console.warn('⚠️ [SYNC] Printer audits upload failed (continuing):', e);
+      }
+
+      // Step 2: Upload offline transactions to cloud
       await syncToCloud();
       
-      // Step 2: Download latest data from cloud
+      // Step 3: Download latest data from cloud
       await syncFromCloud();
       
       console.log('🎉 [SYNC] Full bidirectional sync completed!');

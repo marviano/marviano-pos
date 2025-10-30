@@ -80,6 +80,8 @@ export default function SyncManagement() {
   const [isDeleting, setIsDeleting] = useState(false);
   const [activePasswordAction, setActivePasswordAction] = useState<'archive' | 'delete' | null>(null);
   const [showDangerZone, setShowDangerZone] = useState(false);
+  const [showGatePasswordModal, setShowGatePasswordModal] = useState(false);
+  const [gatePasswordInput, setGatePasswordInput] = useState('');
   const [orphanedTransactions, setOrphanedTransactions] = useState<OfflineTransaction[]>([]);
   const [showOrphanedData, setShowOrphanedData] = useState(false);
   const logsEndRef = useRef<HTMLDivElement>(null);
@@ -482,7 +484,11 @@ export default function SyncManagement() {
 
   // Archive all transactions
   const archiveAllTransactions = async () => {
+    // Close all modals immediately upon confirm
     setShowPasswordModal(false);
+    setShowArchiveModal(false);
+    setShowGatePasswordModal(false);
+    setShowDangerZone(false);
     setIsArchiving(true);
     addLog('info', '🚀 Starting archive process...');
     
@@ -512,7 +518,7 @@ export default function SyncManagement() {
       
       addLog('success', '🎉 Archive process completed!');
       await fetchTransactionCounts();
-      setShowArchiveModal(false);
+      // already closed at confirm time
     } catch (error) {
       addLog('error', `❌ Archive failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
     } finally {
@@ -523,7 +529,7 @@ export default function SyncManagement() {
 
   // Handle password verification
   const handlePasswordSubmit = () => {
-    if (passwordInput === 'Yureka3862!') {
+    if (passwordInput === 'magnumopus2761') {
       setShowPasswordModal(false);
       if (activePasswordAction === 'archive') {
         setShowArchiveModal(true);
@@ -552,7 +558,11 @@ export default function SyncManagement() {
 
   // Delete all transactions permanently
   const deleteAllTransactions = async () => {
+    // Close all modals immediately upon confirm
     setShowDeleteModal(false);
+    setShowPasswordModal(false);
+    setShowGatePasswordModal(false);
+    setShowDangerZone(false);
     setIsDeleting(true);
     addLog('info', '🗑️ Starting permanent deletion process...');
     
@@ -591,6 +601,14 @@ export default function SyncManagement() {
       addLog('error', `❌ Deletion failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
     } finally {
       setIsDeleting(false);
+      // Close all related modals after deletion
+      setShowDeleteModal(false);
+      setShowArchiveModal(false);
+      setShowPasswordModal(false);
+      setShowGatePasswordModal(false);
+      setShowDangerZone(false);
+      setPasswordInput('');
+      setGatePasswordInput('');
     }
   };
 
@@ -743,7 +761,7 @@ export default function SyncManagement() {
     <div className="flex-1 flex flex-col bg-white h-full relative">
       {/* Floating Danger Zone Button - Bottom Right */}
       <button
-        onClick={() => setShowDangerZone(!showDangerZone)}
+        onClick={() => setShowGatePasswordModal(true)}
         className="fixed bottom-4 right-4 z-40 flex items-center justify-center w-8 h-8 bg-red-600 text-white rounded-full hover:bg-red-700 transition-colors shadow-lg hover:shadow-xl"
         title="Danger Zone"
       >
@@ -1161,6 +1179,64 @@ export default function SyncManagement() {
       )}
 
       {/* Password Modal */}
+      {/* Gate Password Modal (to open Danger Zone) */}
+      {showGatePasswordModal && (
+        <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-50">
+          <div className="bg-white rounded-lg shadow-xl p-6 max-w-md w-full mx-4">
+            <div className="mb-4">
+              <label className="block text-sm font-medium text-gray-700 mb-2">Password</label>
+              <input
+                type="password"
+                value={gatePasswordInput}
+                onChange={(e) => setGatePasswordInput(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') {
+                    if (gatePasswordInput === 'magnumopus2761') {
+                      setShowGatePasswordModal(false);
+                      setGatePasswordInput('');
+                      setShowDangerZone(true);
+                    } else {
+                      addLog('error', '❌ Incorrect password');
+                      setGatePasswordInput('');
+                    }
+                  }
+                }}
+                className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-red-500 focus:border-transparent"
+                placeholder="Enter password..."
+                autoFocus
+              />
+            </div>
+            <div className="flex gap-3">
+              <button
+                onClick={() => {
+                  setShowGatePasswordModal(false);
+                  setGatePasswordInput('');
+                }}
+                className="flex-1 px-4 py-2 border border-gray-300 rounded-lg text-gray-700 hover:bg-gray-50 transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={() => {
+                  if (gatePasswordInput === 'magnumopus2761') {
+                    setShowGatePasswordModal(false);
+                    setGatePasswordInput('');
+                    setShowDangerZone(true);
+                  } else {
+                    addLog('error', '❌ Incorrect password');
+                    setGatePasswordInput('');
+                  }
+                }}
+                className="flex-1 px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 transition-colors"
+              >
+                Continue
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Password Modal */}
       {showPasswordModal && (
         <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-50">
           <div className="bg-white rounded-lg shadow-xl p-6 max-w-md w-full mx-4">
@@ -1329,8 +1405,7 @@ export default function SyncManagement() {
                     <AlertTriangle className="w-6 h-6 text-red-600" />
                   </div>
                   <div>
-                    <h3 className="text-xl font-bold text-gray-900">⚠️ Danger Zone</h3>
-                    <p className="text-sm text-gray-600">Archive or permanently delete all transactions</p>
+                    <h3 className="text-xl font-bold text-gray-900">Danger Zone</h3>
                   </div>
                 </div>
                 <button
@@ -1352,13 +1427,29 @@ export default function SyncManagement() {
                     </div>
                     <div className="bg-white p-2 rounded border border-orange-200 font-mono text-xs overflow-x-auto">
                       <div className="text-orange-700">-- Offline SQLite:</div>
-                      <div className="text-gray-800 whitespace-pre-wrap">UPDATE transactions 
+                      <div className="text-gray-800 whitespace-pre-wrap">UPDATE transactions
 SET status = 'archived', updated_at = {Date.now()}
-WHERE business_id = 14 AND status != 'archived'</div>
+WHERE business_id = 14 AND status != 'archived';
+
+-- Purge local printer audits for archived transactions
+DELETE FROM printer1_audit_log
+WHERE transaction_id IN (
+  SELECT id FROM transactions WHERE business_id = 14 AND status = 'archived'
+);
+
+DELETE FROM printer2_audit_log
+WHERE transaction_id IN (
+  SELECT id FROM transactions WHERE business_id = 14 AND status = 'archived'
+);</div>
                       <div className="text-orange-700 mt-2">-- Online MySQL:</div>
-                      <div className="text-gray-800 whitespace-pre-wrap">UPDATE transactions 
+                      <div className="text-gray-800 whitespace-pre-wrap">UPDATE transactions
 SET status = 'archived', updated_at = NOW()
-WHERE business_id = 14 AND status != 'archived'</div>
+WHERE business_id = 14 AND status != 'archived';
+
+-- Purge server printer audits for archived transactions
+DELETE pa FROM printer_audits pa
+INNER JOIN transactions t ON pa.transaction_uuid = t.uuid_id
+WHERE t.business_id = 14 AND t.status = 'archived';</div>
                     </div>
                   </div>
                   <div className="border-t border-red-200 pt-3">
@@ -1368,20 +1459,39 @@ WHERE business_id = 14 AND status != 'archived'</div>
                     </div>
                     <div className="bg-white p-2 rounded border border-red-300 font-mono text-xs overflow-x-auto">
                       <div className="text-red-700">-- Offline SQLite:</div>
-                      <div className="text-red-900 whitespace-pre-wrap">DELETE FROM transaction_items 
+                      <div className="text-red-900 whitespace-pre-wrap">-- Delete local printer audits first
+DELETE FROM printer1_audit_log
 WHERE transaction_id IN (
   SELECT id FROM transactions WHERE business_id = 14
-)
+);
 
-DELETE FROM transactions 
-WHERE business_id = 14</div>
+DELETE FROM printer2_audit_log
+WHERE transaction_id IN (
+  SELECT id FROM transactions WHERE business_id = 14
+);
+
+-- Then delete items and transactions
+DELETE FROM transaction_items
+WHERE transaction_id IN (
+  SELECT id FROM transactions WHERE business_id = 14
+);
+
+DELETE FROM transactions
+WHERE business_id = 14;</div>
                       <div className="text-red-700 mt-2">-- Online MySQL:</div>
-                      <div className="text-red-900 whitespace-pre-wrap">DELETE ti FROM transaction_items ti
+                      <div className="text-red-900 whitespace-pre-wrap">-- Delete items first
+DELETE ti FROM transaction_items ti
 INNER JOIN transactions t ON ti.uuid_transaction_id = t.uuid_id
-WHERE t.business_id = 14
+WHERE t.business_id = 14;
 
-DELETE FROM transactions 
-WHERE business_id = 14</div>
+-- Delete server printer audits
+DELETE pa FROM printer_audits pa
+INNER JOIN transactions t ON pa.transaction_uuid = t.uuid_id
+WHERE t.business_id = 14;
+
+-- Then delete transactions
+DELETE FROM transactions
+WHERE business_id = 14;</div>
                     </div>
                   </div>
                 </div>

@@ -19,6 +19,20 @@ export async function POST(request: NextRequest) {
       WHERE t.business_id = ?
     `, [business_id]);
 
+  // Then delete printer audits (skip if table doesn't exist)
+  try {
+    await query(`
+      DELETE pa FROM printer_audits pa
+      INNER JOIN transactions t ON pa.transaction_uuid = t.uuid_id
+      WHERE t.business_id = ?
+    `, [business_id]);
+  } catch (e: any) {
+    const msg = String(e?.message || e);
+    if (!msg.includes("doesn't exist") && !msg.toLowerCase().includes('no such table')) {
+      throw e;
+    }
+  }
+
     // Then delete transactions
     const result = await query(`
       DELETE FROM transactions 

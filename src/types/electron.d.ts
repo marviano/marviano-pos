@@ -139,6 +139,8 @@ declare global {
       generateRandomSelections?: (cycleNumber: number) => Promise<{ success: boolean; selections: number[] }>;
       logPrinter2Print?: (transactionId: string, printer2ReceiptNumber: number, mode: 'auto' | 'manual', cycleNumber?: number) => Promise<{ success: boolean }>;
       getPrinter2AuditLog?: (fromDate?: string, toDate?: string, limit?: number) => Promise<{ success: boolean; entries: any[] }>;
+      logPrinter1Print?: (transactionId: string, printer1ReceiptNumber: number) => Promise<{ success: boolean }>;
+      getPrinter1AuditLog?: (fromDate?: string, toDate?: string, limit?: number) => Promise<{ success: boolean; entries: any[] }>;
     };
   }
 }
