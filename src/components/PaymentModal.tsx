@@ -768,6 +768,70 @@ export default function PaymentModal({
           }
         }
         
+        // Print labels for each order item (only for drinks)
+        try {
+          // Only print labels for drinks transaction type
+          if (transactionType !== 'drinks') {
+            console.log('⏭️ Skipping label printing for bakery items');
+          } else {
+            // Get the counter to use (from the selected printer)
+            let labelCounter = printer1Counter;
+            if (!shouldPrintReceipt && shouldPrintReceiptize && window.electronAPI?.getPrinterCounter) {
+              const counterResult = await window.electronAPI.getPrinterCounter('receiptizePrinter', 14, false); // Don't increment
+              if (counterResult?.success) {
+                labelCounter = counterResult.counter;
+              }
+            }
+            
+            // Calculate total items for numbering (sum of all quantities)
+            const totalItems = cartItems.reduce((sum, item) => sum + item.quantity, 0);
+            
+            // Track current item number across all items
+            let currentItemNumber = 0;
+            
+            // Print label for each unit of each cart item
+            for (const item of cartItems) {
+              // Build customization text
+              let customizationText = '';
+              if (item.customizations && item.customizations.length > 0) {
+                customizationText = item.customizations.map(c => 
+                  `${c.customization_name}: ${c.selected_options.map(opt => opt.option_name).join(', ')}`
+                ).join(', ');
+              }
+              
+              // Print one label per quantity
+              for (let qty = 0; qty < item.quantity; qty++) {
+                currentItemNumber++;
+                
+                // Prepare label data
+                const labelData = {
+                  printerType: 'labelPrinter',
+                  counter: labelCounter,
+                  itemNumber: currentItemNumber,
+                  totalItems: totalItems,
+                  pickupMethod: finalPickupMethod,
+                  productName: item.product.nama,
+                  customizations: customizationText,
+                  customNote: item.customNote || '',
+                  orderTime: transactionData.created_at
+                };
+                
+                // Print label with delay between prints
+                await new Promise(resolve => setTimeout(resolve, 300));
+                const labelResult = await window.electronAPI?.printLabel?.(labelData);
+                if (labelResult?.success) {
+                  console.log(`✅ Label ${currentItemNumber}/${totalItems} printed successfully`);
+                } else {
+                  console.error(`❌ Label print failed:`, labelResult?.error);
+                }
+              }
+            }
+          }
+        } catch (labelError) {
+          console.error('❌ Error printing labels:', labelError);
+          // Don't fail the transaction if label printing fails
+        }
+        
         // Clear cart and close modal after successful database operation
         onPaymentComplete();
         onClose();

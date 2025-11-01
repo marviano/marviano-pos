@@ -6,6 +6,7 @@ const electron_1 = require("electron");
 electron_1.contextBridge.exposeInMainWorld('electronAPI', {
     // POS functionality
     printReceipt: (data) => electron_1.ipcRenderer.invoke('print-receipt', data),
+    printLabel: (data) => electron_1.ipcRenderer.invoke('print-label', data),
     openCashDrawer: () => electron_1.ipcRenderer.invoke('open-cash-drawer'),
     playSound: (soundType) => electron_1.ipcRenderer.invoke('play-sound', soundType),
     // System printers

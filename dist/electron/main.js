@@ -2442,6 +2442,105 @@ electron_1.ipcMain.handle('print-receipt', async (event, data) => {
         return { success: false, error: String(error) };
     }
 });
+// IPC handler for printing labels
+electron_1.ipcMain.handle('print-label', async (event, data) => {
+    try {
+        console.log('🏷️ Printing label - Full data received:', JSON.stringify(data, null, 2));
+        let printerName = data.printerName;
+        // If printer name is not specified, try to get it from saved config
+        if (!printerName && data.printerType && localDb) {
+            console.log('🔍 No printer name specified, fetching from saved config for printer type:', data.printerType);
+            try {
+                const config = localDb.prepare('SELECT * FROM printer_configs WHERE printer_type = ?').get(data.printerType);
+                console.log('📋 Printer config query result for type', data.printerType, ':', config);
+                if (config && config.system_printer_name) {
+                    printerName = config.system_printer_name;
+                    console.log('✅ Found saved printer:', printerName);
+                }
+                else {
+                    console.log('⚠️ No saved printer config found for type:', data.printerType);
+                    return { success: false, error: 'No label printer configured.' };
+                }
+            }
+            catch (error) {
+                console.error('❌ Error fetching printer config:', error);
+                return { success: false, error: 'Error loading printer configuration.' };
+            }
+        }
+        if (!printerName) {
+            console.error('❌ No printer name provided!');
+            return { success: false, error: 'No printer specified.' };
+        }
+        // Close existing print window if any
+        if (printWindow) {
+            printWindow.close();
+        }
+        // Create new print window
+        printWindow = new electron_1.BrowserWindow({
+            width: 400,
+            height: 600,
+            show: true,
+            webPreferences: {
+                nodeIntegration: false,
+                contextIsolation: true,
+            }
+        });
+        // Generate label HTML
+        const htmlContent = generateLabelHTML(data);
+        await printWindow.loadURL(`data:text/html,${encodeURIComponent(htmlContent)}`);
+        const printOptions = {
+            silent: true,
+            printBackground: false,
+            deviceName: printerName,
+        };
+        return new Promise((resolve) => {
+            const currentWindow = printWindow;
+            setTimeout(() => {
+                try {
+                    if (!currentWindow || currentWindow.isDestroyed()) {
+                        console.error('❌ Print window not available when attempting to print label');
+                        resolve({ success: false, error: 'Print window unavailable' });
+                        return;
+                    }
+                    currentWindow.webContents.print(printOptions, (success, errorType) => {
+                        if (success) {
+                            console.log('✅ Label sent successfully');
+                            resolve({ success: true });
+                        }
+                        else {
+                            console.error('❌ Label print failed:', errorType);
+                            resolve({ success: false, error: errorType });
+                        }
+                        setTimeout(() => {
+                            if (currentWindow && !currentWindow.isDestroyed()) {
+                                currentWindow.close();
+                            }
+                            if (printWindow === currentWindow) {
+                                printWindow = null;
+                            }
+                        }, 5000);
+                    });
+                }
+                catch (err) {
+                    console.error('❌ Exception during webContents.print:', err);
+                    resolve({ success: false, error: String(err) });
+                    setTimeout(() => {
+                        if (currentWindow && !currentWindow.isDestroyed()) {
+                            currentWindow.close();
+                        }
+                        if (printWindow === currentWindow) {
+                            printWindow = null;
+                        }
+                    }, 5000);
+                }
+            }, 500);
+        });
+    }
+    catch (error) {
+        console.error('❌ Error in print-label handler:', error);
+        return { success: false, error: String(error) };
+    }
+});
 // Get logo as base64 for embedding in receipt
 function getLogoBase64() {
     try {
@@ -2674,6 +2773,108 @@ function generateTestLabelHTML(printerName) {
     <div class="customer-name">Austin</div>
     <div class="item-name">Matcha Latte Hot</div>
   </div>
+</body>
+</html>
+  `;
+}
+// Generate label HTML for order items
+function generateLabelHTML(data) {
+    const formatDateTime = (date) => {
+        const year = date.getFullYear();
+        const month = String(date.getMonth() + 1).padStart(2, '0');
+        const day = String(date.getDate()).padStart(2, '0');
+        const hours = String(date.getHours()).padStart(2, '0');
+        const minutes = String(date.getMinutes()).padStart(2, '0');
+        const seconds = String(date.getSeconds()).padStart(2, '0');
+        return `${year}-${month}-${day} ${hours}:${minutes}:${seconds}`;
+    };
+    const counter = data.counter || 0;
+    const itemNumber = data.itemNumber || 0;
+    const totalItems = data.totalItems || 0;
+    const pickupMethod = data.pickupMethod || 'dine-in';
+    const productName = data.productName || '';
+    const customizations = data.customizations || '';
+    const customNote = data.customNote || '';
+    const orderTime = data.orderTime ? formatDateTime(new Date(data.orderTime)) : formatDateTime(new Date());
+    const pickupLabel = pickupMethod === 'dine-in' ? 'DINE IN' : 'TAKE AWAY';
+    return `
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <style>
+    @page { 
+      size: 40mm auto; 
+      margin: 0;
+    }
+    * { 
+      margin: 0; 
+      padding: 0; 
+      box-sizing: border-box; 
+      color: black; 
+    }
+    body {
+      font-family: 'Arial', 'Helvetica', sans-serif;
+      width: 21ch;
+      max-width: 21ch;
+      font-size: 8pt;
+      font-weight: 600;
+      line-height: 1.4;
+      padding: 3mm;
+      word-wrap: break-word;
+      overflow-wrap: break-word;
+      color: black;
+    }
+    .row {
+      display: flex;
+      justify-content: space-between;
+    }
+    .counter {
+      font-size: 9pt;
+      font-weight: 700;
+    }
+    .pickup {
+      text-align: center;
+      font-size: 8pt;
+      font-weight: 700;
+      text-transform: uppercase;
+    }
+    .product {
+      text-align: center;
+      font-size: 8pt;
+      font-weight: 600;
+    }
+    .customizations {
+      text-align: center;
+      font-size: 8pt;
+      font-weight: 600;
+    }
+    .custom-note {
+      text-align: center;
+      font-size: 8pt;
+      font-weight: 600;
+    }
+    .number {
+      font-size: 9pt;
+      font-weight: 700;
+    }
+    .time {
+      text-align: left;
+      font-size: 7pt;
+      font-weight: 500;
+    }
+  </style>
+</head>
+<body>
+  <div class="row">
+    <div class="counter">${counter}</div>
+    <div class="number">${itemNumber}/${totalItems}</div>
+  </div>
+  <div class="pickup">${pickupLabel}</div>
+  <div class="product">${productName}</div>
+  ${customizations ? `<div class="customizations">${customizations}</div>` : ''}
+  ${customNote ? `<div class="custom-note">${customNote}</div>` : ''}
+  <div class="time">${orderTime}</div>
 </body>
 </html>
   `;

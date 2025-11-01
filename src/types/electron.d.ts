@@ -3,6 +3,7 @@ declare global {
     electronAPI: {
       // POS functionality
       printReceipt: (data: any) => Promise<any>;
+      printLabel: (data: any) => Promise<any>;
       openCashDrawer: () => Promise<any>;
       playSound: (soundType: string) => Promise<any>;
       // System printers

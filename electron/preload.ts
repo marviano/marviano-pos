@@ -5,6 +5,7 @@ import { contextBridge, ipcRenderer } from 'electron';
 contextBridge.exposeInMainWorld('electronAPI', {
   // POS functionality
   printReceipt: (data: any) => ipcRenderer.invoke('print-receipt', data),
+  printLabel: (data: any) => ipcRenderer.invoke('print-label', data),
   openCashDrawer: () => ipcRenderer.invoke('open-cash-drawer'),
   playSound: (soundType: string) => ipcRenderer.invoke('play-sound', soundType),
   // System printers
