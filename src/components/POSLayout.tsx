@@ -62,7 +62,6 @@ export default function POSLayout() {
   const [products, setProducts] = useState<Product[]>([]); // Start with empty array
   const [isLoadingProducts, setIsLoadingProducts] = useState(true);
   const [isSwitchingCategory, setIsSwitchingCategory] = useState(false);
-  const [databaseStatus, setDatabaseStatus] = useState<string>('Checking...');
 
   // Helper functions to get current cart based on active tab and platform
   const getCurrentCart = () => {
@@ -216,57 +215,61 @@ export default function POSLayout() {
   useEffect(() => {
     const checkDatabaseHealth = async () => {
       try {
-        const status = await databaseHealthService.getStatusMessage();
-        setDatabaseStatus(status);
-        
         // If database is empty, try to populate it
         const health = await databaseHealthService.checkDatabaseHealth();
         if (health.needsSync) {
           console.log('🔄 Database is empty, performing initial sync...');
           const success = await databaseHealthService.ensureDatabasePopulated();
           if (success) {
-            const newStatus = await databaseHealthService.getStatusMessage();
-            setDatabaseStatus(newStatus);
             console.log('✅ Database populated successfully');
           } else {
-            setDatabaseStatus('Database sync failed - offline mode may not work');
             console.warn('⚠️ Failed to populate database');
           }
         }
       } catch (error) {
         console.error('❌ Error checking database health:', error);
-        setDatabaseStatus('Database health check failed');
       }
     };
 
     checkDatabaseHealth();
   }, []);
 
+  // Listen for data sync events to refresh categories and products
+  useEffect(() => {
+    const handleDataSynced = async () => {
+      console.log('🔄 Data synced event received, refreshing categories and products...');
+      setIsLoadingCategories(true);
+      setIsLoadingProducts(true);
+      
+      try {
+        const refreshedCategories = await fetchCategories(activeKasirTab, { isOnline: isOnlineTab });
+        const validCategories = refreshedCategories.filter(cat => cat.jenis && cat.jenis.trim() !== '');
+        setCategories(validCategories);
+        
+        if (validCategories.length > 0 && validCategories[0].jenis) {
+          setSelectedCategory(validCategories[0].jenis);
+          const refreshedProducts = await fetchProducts(validCategories[0].jenis, activeKasirTab, { isOnline: isOnlineTab });
+          setProducts(refreshedProducts);
+        }
+      } catch (error) {
+        console.error('❌ Error refreshing after sync:', error);
+      } finally {
+        setIsLoadingCategories(false);
+        setIsLoadingProducts(false);
+      }
+    };
+
+    window.addEventListener('dataSynced', handleDataSynced);
+    return () => {
+      window.removeEventListener('dataSynced', handleDataSynced);
+    };
+  }, [activeKasirTab, isOnlineTab]);
+
   const renderMainContent = () => {
     switch (activeMenuItem) {
       case 'Kasir':
         return (
           <div className="flex-1 flex flex-col h-full">
-            {/* Database Status */}
-            <div className="bg-blue-50 border-b border-blue-200 px-4 py-1">
-              <div className="flex items-center justify-between">
-                <div className="text-xs text-blue-700">
-                  <span className="font-medium">Database:</span> {databaseStatus}
-                </div>
-                <button
-                  onClick={async () => {
-                    setDatabaseStatus('Syncing...');
-                    const success = await databaseHealthService.forceSync();
-                    const newStatus = await databaseHealthService.getStatusMessage();
-                    setDatabaseStatus(newStatus);
-                  }}
-                  className="px-2 py-1 text-xs bg-blue-600 text-white rounded hover:bg-blue-700"
-                >
-                  Sync Now
-                </button>
-              </div>
-            </div>
-            
             {/* Kasir Tabs */}
             <div className="bg-white border-b border-gray-200 px-4 py-2">
               <div className="flex space-x-1 flex-wrap">
@@ -297,18 +300,15 @@ export default function POSLayout() {
                     ? 'bg-blue-600'
                     : 'bg-gray-100'
                 }`}>
-                  <button
-                    onClick={() => { setActiveKasirTab('drinks'); setIsOnlineTab(true); }}
-                    className={`px-4 py-2 font-medium transition-colors ${
+                  <div
+                    className={`px-4 py-2 font-medium cursor-default ${
                       activeKasirTab === 'drinks' && isOnlineTab
                         ? 'text-white'
                         : 'text-gray-700'
                     }`}
                   >
                     🥤 Drinks (Online)
-                  </button>
-                  
-                  <div className="h-8 w-px bg-gray-400"></div>
+                  </div>
                   
                   <div className="flex h-full">
                     <button
@@ -360,18 +360,15 @@ export default function POSLayout() {
                     ? 'bg-blue-600'
                     : 'bg-gray-100'
                 }`}>
-                  <button
-                    onClick={() => { setActiveKasirTab('bakery'); setIsOnlineTab(true); }}
-                    className={`px-4 py-2 font-medium transition-colors ${
+                  <div
+                    className={`px-4 py-2 font-medium cursor-default ${
                       activeKasirTab === 'bakery' && isOnlineTab
                         ? 'text-white'
                         : 'text-gray-700'
                     }`}
                   >
                     🥖 Bakery (Online)
-                  </button>
-                  
-                  <div className="h-8 w-px bg-gray-400"></div>
+                  </div>
                   
                   <div className="flex h-full">
                   <button

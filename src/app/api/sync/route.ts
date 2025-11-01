@@ -58,7 +58,7 @@ export async function GET() {
           c1.name as category1_name, c2.name as category2_name,
           p.keterangan, p.harga_beli, p.ppn, p.harga_jual, p.harga_khusus,
           p.harga_online, p.harga_gofood, p.harga_grabfood, p.harga_shopeefood, p.harga_tiktok,
-          p.fee_kerja, p.image_url, p.status, p.created_at, p.has_customization
+          p.fee_kerja, p.image_url, p.status, p.created_at, p.has_customization, p.is_bundle
         FROM products p
         INNER JOIN product_businesses pb ON p.id = pb.product_id
         LEFT JOIN category1 c1 ON p.category1_id = c1.id
@@ -328,6 +328,27 @@ export async function GET() {
       counts.productCustomizations = 0;
     }
 
+    // Sync Bundle Items
+    try {
+      const bundleItems = await query(`
+        SELECT 
+          bi.id, bi.bundle_product_id, bi.category2_id, bi.required_quantity, bi.display_order,
+          bi.created_at, c2.name as category2_name
+        FROM bundle_items bi
+        LEFT JOIN category2 c2 ON bi.category2_id = c2.id
+        INNER JOIN product_businesses pb ON bi.bundle_product_id = pb.product_id
+        WHERE pb.business_id = ?
+        ORDER BY bi.bundle_product_id, bi.display_order ASC
+      `, [BUSINESS_ID]);
+      syncResults.bundleItems = bundleItems;
+      counts.bundleItems = bundleItems.length;
+      console.log(`✅ Synced ${bundleItems.length} bundle items`);
+    } catch (error) {
+      console.warn('⚠️ Failed to sync bundle items:', error);
+      syncResults.bundleItems = [];
+      counts.bundleItems = 0;
+    }
+
     // Sync Transactions
     try {
       const transactions = await query(`
@@ -356,7 +377,7 @@ export async function GET() {
       const transactionItems = await query(`
         SELECT 
           ti.uuid_id as id, ti.uuid_transaction_id as transaction_id, ti.product_id, ti.quantity,
-          ti.unit_price, ti.total_price, ti.customizations_json, ti.custom_note, ti.created_at
+          ti.unit_price, ti.total_price, ti.customizations_json, ti.custom_note, ti.bundle_selections_json, ti.created_at
         FROM transaction_items ti
         INNER JOIN transactions t ON ti.uuid_transaction_id = t.uuid_id
         WHERE t.business_id = ?

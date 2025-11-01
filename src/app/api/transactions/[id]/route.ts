@@ -77,6 +77,7 @@ export async function GET(
         ti.total_price,
         ti.customizations_json,
         ti.custom_note,
+        ti.bundle_selections_json,
         p.nama as product_name
       FROM transaction_items ti
       LEFT JOIN products p ON ti.product_id = p.id
@@ -115,7 +116,8 @@ export async function GET(
         unit_price: parseFloat(item.unit_price),
         total_price: parseFloat(item.total_price),
         customizations_json: typeof item.customizations_json === 'string' ? item.customizations_json : JSON.stringify(item.customizations_json),
-        custom_note: item.custom_note
+        custom_note: item.custom_note,
+        bundle_selections_json: typeof item.bundle_selections_json === 'string' ? item.bundle_selections_json : JSON.stringify(item.bundle_selections_json)
       }))
     };
 

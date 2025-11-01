@@ -8,6 +8,16 @@ import { offlineSyncService } from '@/lib/offlineSync';
 import { generateTransactionId, generateTransactionItemId } from '@/lib/uuid';
 import { useAuth } from '@/hooks/useAuth';
 
+interface BundleSelection {
+  category2_id: number;
+  category2_name: string;
+  selectedProducts: {
+    id: number;
+    nama: string;
+  }[];
+  requiredQuantity: number;
+}
+
 interface CartItem {
   id: number;
   product: {
@@ -18,6 +28,10 @@ interface CartItem {
     kategori: string;
     harga_jual: number;
     status: string;
+    harga_gofood?: number;
+    harga_grabfood?: number;
+    harga_shopeefood?: number;
+    harga_tiktok?: number;
   };
   quantity: number;
   customizations?: {
@@ -30,6 +44,7 @@ interface CartItem {
     }[];
   }[];
   customNote?: string;
+  bundleSelections?: BundleSelection[];
 }
 
 interface PaymentModalProps {
@@ -425,7 +440,8 @@ export default function PaymentModal({
             unit_price: itemPrice,
             total_price: itemPrice * item.quantity,
             customizations: item.customizations,
-            customNote: item.customNote || undefined
+            customNote: item.customNote || undefined,
+            bundleSelections: item.bundleSelections || undefined
           };
         })
       };
@@ -552,6 +568,7 @@ export default function PaymentModal({
               total_price: itemPrice * item.quantity,
               customizations_json: item.customizations || null,
               custom_note: item.customNote || null,
+              bundle_selections_json: item.bundleSelections ? JSON.stringify(item.bundleSelections) : null,
               created_at: transactionData.created_at
             };
           });
@@ -573,8 +590,8 @@ export default function PaymentModal({
         setShowConfirmation(false);
         
         // Determine user-selected print targets
-        const shouldPrintReceipt = printTarget === 'receipt' || printTarget === 'both';
-        const shouldPrintReceiptize = printTarget === 'receiptize' || printTarget === 'both';
+        const shouldPrintReceipt = printTarget === 'receipt';
+        const shouldPrintReceiptize = printTarget === 'receiptize';
 
         // Get Printer 1 counter and increment only if printing to receipt printer
         let printer1Counter = 1;
@@ -597,7 +614,9 @@ export default function PaymentModal({
         };
         
         // Transform cart items to receipt format - use platform price for online orders
-        let receiptItems = cartItems.map(item => {
+        let receiptItems: any[] = [];
+        
+        cartItems.forEach(item => {
           // For online orders, use platform-specific price, otherwise use harga_jual
           let basePrice = item.product.harga_jual;
           
@@ -638,12 +657,27 @@ export default function PaymentModal({
             itemName = `${itemName} (${customizationText})`;
           }
           
-          return {
+          // Add main bundle item
+          receiptItems.push({
             name: itemName,
             quantity: item.quantity,
             price: itemPrice,
             total_price: itemPrice * item.quantity
-          };
+          });
+          
+          // Add bundle selections as sub-items
+          if (item.bundleSelections && item.bundleSelections.length > 0) {
+            item.bundleSelections.forEach(bundleSel => {
+              bundleSel.selectedProducts.forEach(selectedProduct => {
+                receiptItems.push({
+                  name: `  └ ${selectedProduct.nama}`,
+                  quantity: item.quantity, // Same quantity as the bundle
+                  price: 0,
+                  total_price: 0
+                });
+              });
+            });
+          }
         });
 
         // Append voucher discount as a negative line on the receipt when applied
@@ -1548,6 +1582,7 @@ export default function PaymentModal({
         isProcessing={isProcessing}
         printTarget={printTarget}
         onChangePrintTarget={setPrintTarget}
+        customerName={customerName}
       />
     </>
   );

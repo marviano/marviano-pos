@@ -6,6 +6,7 @@ import ProductCustomizationModal from './ProductCustomizationModal';
 import CustomNoteModal from './CustomNoteModal';
 import EditItemModal from './EditItemModal';
 import PaymentModal from './PaymentModal';
+import BundleSelectionModal from './BundleSelectionModal';
 import { offlineSyncService } from '@/lib/offlineSync';
 
 interface Product {
@@ -25,6 +26,7 @@ interface Product {
   harga_tiktok?: number | null;
   image_url: string | null;
   status: string;
+  is_bundle?: number | boolean;
 }
 
 interface SelectedCustomization {
@@ -37,12 +39,26 @@ interface SelectedCustomization {
   }[];
 }
 
+interface BundleSelection {
+  category2_id: number;
+  category2_name: string;
+  selectedProducts: {
+    id: number;
+    nama: string;
+    image_url: string | null;
+    category2_id: number | null;
+    category2_name: string | null;
+  }[];
+  requiredQuantity: number;
+}
+
 interface CartItem {
   id: number;
   product: Product;
   quantity: number;
   customizations?: SelectedCustomization[];
   customNote?: string;
+  bundleSelections?: BundleSelection[];
 }
 
 interface CenterContentProps {
@@ -59,10 +75,12 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
   const [showCustomizationModal, setShowCustomizationModal] = useState(false);
   const [showCustomNoteModal, setShowCustomNoteModal] = useState(false);
   const [showEditModal, setShowEditModal] = useState(false);
+  const [showBundleModal, setShowBundleModal] = useState(false);
   const [selectedProduct, setSelectedProduct] = useState<Product | null>(null);
   const [selectedCartItem, setSelectedCartItem] = useState<CartItem | null>(null);
   const [loadingProductId, setLoadingProductId] = useState<number | null>(null);
   const [showPaymentModal, setShowPaymentModal] = useState(false);
+  const [bundleItems, setBundleItems] = useState<any[]>([]);
   // Send order updates to customer display
   const sendOrderUpdate = (orderData: any) => {
     if (window.electronAPI && window.electronAPI.updateCustomerDisplay) {
@@ -144,48 +162,87 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
     setLoadingProductId(product.id);
     
     try {
-      const hasCustomizations = await checkProductCustomizations(product);
+      // Check if product is a bundle
+      const isBundle = product.is_bundle === 1 || product.is_bundle === true;
       
-      if (hasCustomizations) {
-        setSelectedProduct(product);
-        setShowCustomizationModal(true);
+      if (isBundle) {
+        // Fetch bundle items
+        try {
+          const bundleItemsData = await offlineSyncService.fetchWithFallback(
+            async () => {
+              const response = await fetch(`/api/products/${product.id}/bundle-items`, {
+                signal: AbortSignal.timeout(5000)
+              });
+              if (!response.ok) throw new Error('Failed to fetch bundle items');
+              const data = await response.json();
+              return data.bundleItems || [];
+            },
+            async () => {
+              if (typeof window !== 'undefined' && (window as any).electronAPI) {
+                return await (window as any).electronAPI.localDbGetBundleItems(product.id);
+              }
+              return [];
+            }
+          );
+          
+          setBundleItems(bundleItemsData);
+          setSelectedProduct(product);
+          setShowBundleModal(true);
+        } catch (error) {
+          console.error('Error fetching bundle items:', error);
+          alert('Gagal memuat detail bundle. Silakan coba lagi.');
+        }
       } else {
-        // Show custom note modal for products without customizations
-        setSelectedProduct(product);
-        setShowCustomNoteModal(true);
+        // Regular product flow
+        const hasCustomizations = await checkProductCustomizations(product);
+        
+        if (hasCustomizations) {
+          setSelectedProduct(product);
+          setShowCustomizationModal(true);
+        } else {
+          // Show custom note modal for products without customizations
+          setSelectedProduct(product);
+          setShowCustomNoteModal(true);
+        }
       }
     } finally {
       setLoadingProductId(null);
     }
   };
 
-  const addToCart = (product: Product, customizations?: SelectedCustomization[], quantity: number = 1, customNote?: string) => {
-    // Check if this is a basic product (no customizations and no custom note)
+  const addToCart = (product: Product, customizations?: SelectedCustomization[], quantity: number = 1, customNote?: string, bundleSelections?: BundleSelection[]) => {
+    // Check if this is a basic product (no customizations, no custom note, no bundle)
     const hasCustomizations = customizations && customizations.length > 0;
     const hasCustomNote = customNote && customNote.trim() !== '';
+    const isBundle = bundleSelections && bundleSelections.length > 0;
     
     let existingItem: CartItem | undefined;
     
-    if (!hasCustomizations && !hasCustomNote) {
+    // For bundles, always create new cart item (each bundle selection is unique)
+    if (isBundle) {
+      existingItem = undefined;
+    } else if (!hasCustomizations && !hasCustomNote) {
       // For basic products (no customizations, no notes), find any existing item of the same product
       // regardless of customizations or notes, as long as it's also a basic product
       existingItem = cartItems.find(item => 
         item.product.id === product.id && 
         (!item.customizations || item.customizations.length === 0) &&
-        (!item.customNote || item.customNote.trim() === '')
+        (!item.customNote || item.customNote.trim() === '') &&
+        (!item.bundleSelections || item.bundleSelections.length === 0)
       );
     } else {
       // For products with customizations or notes, match exactly
       existingItem = cartItems.find(item => 
         item.product.id === product.id && 
         JSON.stringify(item.customizations) === JSON.stringify(customizations) &&
-        item.customNote === customNote
+        item.customNote === customNote &&
+        (!item.bundleSelections || item.bundleSelections.length === 0)
       );
     }
     
     let newCartItems: CartItem[];
     
-    if (existingItem) {
+    if (existingItem && !isBundle) {
       newCartItems = cartItems.map(item => 
         item.id === existingItem!.id
           ? { ...item, quantity: item.quantity + quantity }
@@ -197,7 +254,8 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
         product, 
         quantity, 
         customizations: customizations || [],
-        customNote: customNote || undefined
+        customNote: customNote || undefined,
+        bundleSelections: bundleSelections || undefined
       }];
     }
     
@@ -210,6 +268,12 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
   const handleCustomNoteConfirm = (note: string) => {
     if (selectedProduct) {
       addToCart(selectedProduct, undefined, 1, note);
+    }
+  };
+
+  const handleBundleConfirm = (bundleSelections: BundleSelection[]) => {
+    if (selectedProduct) {
+      addToCart(selectedProduct, undefined, 1, undefined, bundleSelections);
     }
   };
 
@@ -374,6 +438,25 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
                             <span className="text-gray-500">Note:</span>
                             <span className="text-gray-700 ml-1 italic">"{item.customNote}"</span>
                           </div>
+                        </div>
+                      )}
+                      
+                      {/* Bundle Selections */}
+                      {item.bundleSelections && item.bundleSelections.length > 0 && (
+                        <div className="mt-2 space-y-2">
+                          <div className="text-xs font-semibold text-purple-700">Bundle Items:</div>
+                          {item.bundleSelections.map((bundleSel, idx) => (
+                            <div key={idx} className="ml-2 border-l-2 border-purple-300 pl-2">
+                              <div className="text-xs font-medium text-purple-600">
+                                {bundleSel.category2_name} ({bundleSel.selectedProducts.length}/{bundleSel.requiredQuantity}):
+                              </div>
+                              <div className="ml-2 mt-1 space-y-0.5">
+                                {bundleSel.selectedProducts.map((p) => (
+                                  <div key={p.id} className="text-xs text-gray-600">• {p.nama}</div>
+                                ))}
+                              </div>
+                            </div>
+                          ))}
                         </div>
                       )}
                     </div>
@@ -667,6 +750,25 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
         effectivePrice={selectedCartItem ? effectiveProductPrice(selectedCartItem.product) : undefined}
         onUpdate={handleUpdateItem}
       />
+
+      {/* Bundle Selection Modal */}
+      {selectedProduct && (
+        <BundleSelectionModal
+          isOpen={showBundleModal}
+          onClose={() => {
+            setShowBundleModal(false);
+            setSelectedProduct(null);
+            setBundleItems([]);
+          }}
+          onConfirm={handleBundleConfirm}
+          bundleProduct={{
+            id: selectedProduct.id,
+            nama: selectedProduct.nama,
+            harga_jual: selectedProduct.harga_jual
+          }}
+          bundleItems={bundleItems}
+        />
+      )}
     </div>
   );
 }

@@ -74,6 +74,9 @@ electron_1.contextBridge.exposeInMainWorld('electronAPI', {
     localDbUpsertCustomizationOptions: (rows) => electron_1.ipcRenderer.invoke('localdb-upsert-customization-options', rows),
     localDbUpsertProductCustomizations: (rows) => electron_1.ipcRenderer.invoke('localdb-upsert-product-customizations', rows),
     localDbGetProductCustomizations: (productId) => electron_1.ipcRenderer.invoke('localdb-get-product-customizations', productId),
+    // Bundle handlers
+    localDbGetBundleItems: (productId) => electron_1.ipcRenderer.invoke('localdb-get-bundle-items', productId),
+    localDbUpsertBundleItems: (rows) => electron_1.ipcRenderer.invoke('localdb-upsert-bundle-items', rows),
     // New enhanced offline support tables
     // Transactions
     localDbUpsertTransactions: (rows) => electron_1.ipcRenderer.invoke('localdb-upsert-transactions', rows),

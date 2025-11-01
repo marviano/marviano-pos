@@ -3,6 +3,16 @@
 import { useState } from 'react';
 import { CheckCircle, XCircle, AlertTriangle } from 'lucide-react';
 
+interface BundleSelection {
+  category2_id: number;
+  category2_name: string;
+  selectedProducts: {
+    id: number;
+    nama: string;
+  }[];
+  requiredQuantity: number;
+}
+
 interface CartItem {
   id: number;
   product: {
@@ -24,6 +34,7 @@ interface CartItem {
       price_adjustment: number;
     }[];
   }[];
+  bundleSelections?: BundleSelection[];
 }
 
 interface TransactionConfirmationDialogProps {
@@ -43,6 +54,7 @@ interface TransactionConfirmationDialogProps {
   onChangePrintTarget: (target: 'receipt' | 'receiptize' | 'both') => void;
   isOnline?: boolean;
   selectedOnlinePlatform?: 'gofood' | 'grabfood' | 'shopeefood' | 'tiktok' | null;
+  customerName?: string;
 }
 
 export default function TransactionConfirmationDialog({
@@ -61,7 +73,8 @@ export default function TransactionConfirmationDialog({
   printTarget,
   onChangePrintTarget,
   isOnline = false,
-  selectedOnlinePlatform = null
+  selectedOnlinePlatform = null,
+  customerName = ''
 }: TransactionConfirmationDialogProps) {
   const formatPrice = (price: number) => {
     return `Rp ${price.toLocaleString('id-ID')}`;
@@ -104,7 +117,6 @@ export default function TransactionConfirmationDialog({
             </div>
             <div>
               <h2 className="text-xl font-bold text-gray-900">Konfirmasi Transaksi</h2>
-              <p className="text-sm text-gray-600">Periksa detail transaksi sebelum melanjutkan</p>
             </div>
           </div>
           <button
@@ -168,6 +180,21 @@ export default function TransactionConfirmationDialog({
                             ))}
                           </div>
                         )}
+                        {item.bundleSelections && item.bundleSelections.length > 0 && (
+                          <div className="mt-2 text-xs text-purple-600">
+                            <div className="font-semibold mb-1">Bundle Items:</div>
+                            {item.bundleSelections.map((bundleSel, idx) => (
+                              <div key={idx} className="ml-2 mb-1">
+                                <span className="font-medium">{bundleSel.category2_name}:</span>
+                                <ul className="ml-3 mt-0.5">
+                                  {bundleSel.selectedProducts.map(p => (
+                                    <li key={p.id}>• {p.nama}</li>
+                                  ))}
+                                </ul>
+                              </div>
+                            ))}
+                          </div>
+                        )}
                       </div>
                     </div>
                     <div className="font-semibold text-gray-800">
@@ -191,9 +218,17 @@ export default function TransactionConfirmationDialog({
             </div>
           </div>
 
+          {/* Customer Name */}
+          {customerName && (
+            <div className="bg-orange-50 rounded-xl p-4">
+              <h4 className="font-semibold text-orange-800 mb-2">Nama Pelanggan</h4>
+              <p className="text-orange-700">{customerName}</p>
+            </div>
+          )}
+
         {/* Print Target Selection */}
         <div className="bg-purple-50 rounded-xl p-4">
-          <h4 className="font-semibold text-purple-800 mb-2">Tujuan Cetak</h4>
+          <h4 className="font-semibold text-purple-800 mb-2">Jenis Pelanggan</h4>
           <div className="flex flex-col sm:flex-row gap-2">
             <label className={`px-3 py-2 rounded-lg border cursor-pointer text-sm ${printTarget === 'receipt' ? 'bg-white border-purple-400 text-purple-800' : 'bg-white border-gray-300 text-gray-700'}`}>
               <input
@@ -203,7 +238,7 @@ export default function TransactionConfirmationDialog({
                 checked={printTarget === 'receipt'}
                 onChange={() => onChangePrintTarget('receipt')}
               />
-              receipt printer
+              OJOL
             </label>
             <label className={`px-3 py-2 rounded-lg border cursor-pointer text-sm ${printTarget === 'receiptize' ? 'bg-white border-purple-400 text-purple-800' : 'bg-white border-gray-300 text-gray-700'}`}>
               <input
@@ -213,17 +248,7 @@ export default function TransactionConfirmationDialog({
                 checked={printTarget === 'receiptize'}
                 onChange={() => onChangePrintTarget('receiptize')}
               />
-              receiptize printer
-            </label>
-            <label className={`px-3 py-2 rounded-lg border cursor-pointer text-sm ${printTarget === 'both' ? 'bg-white border-purple-400 text-purple-800' : 'bg-white border-gray-300 text-gray-700'}`}>
-              <input
-                type="radio"
-                name="print-target"
-                className="mr-2"
-                checked={printTarget === 'both'}
-                onChange={() => onChangePrintTarget('both')}
-              />
-              cetak keduanya
+              Walk In
             </label>
           </div>
         </div>

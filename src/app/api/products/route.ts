@@ -44,7 +44,7 @@ export async function GET(request: NextRequest) {
         c1.name as category1_name, c2.name as category2_name,
         p.keterangan, p.harga_beli, p.ppn, p.harga_jual, p.harga_khusus,
         p.harga_online, p.harga_gofood, p.harga_grabfood, p.harga_shopeefood, p.harga_tiktok,
-        p.fee_kerja, p.image_url, p.status
+        p.fee_kerja, p.image_url, p.status, p.is_bundle
       FROM products p
       INNER JOIN product_businesses pb ON p.id = pb.product_id
       LEFT JOIN category1 c1 ON p.category1_id = c1.id
@@ -64,7 +64,7 @@ export async function GET(request: NextRequest) {
     // Filter by transaction type using category2 names
     if (transactionType) {
       if (transactionType === 'drinks') {
-        sql += ` AND c2.name IN ('Ice Cream Cone', 'Sundae', 'Milk Tea', 'Iced Coffee')`;
+        sql += ` AND c2.name IN ('Ice Cream Cone', 'Sundae', 'Milk Tea', 'Iced Coffee', 'Egg Waffle', 'Aren Milk Tea')`;
       } else if (transactionType === 'bakery') {
         sql += ` AND c2.name = 'Bakery'`;
       }

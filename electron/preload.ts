@@ -90,6 +90,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
   localDbUpsertProductCustomizations: (rows: any[]) => ipcRenderer.invoke('localdb-upsert-product-customizations', rows),
   localDbGetProductCustomizations: (productId: number) => ipcRenderer.invoke('localdb-get-product-customizations', productId),
   
+  // Bundle handlers
+  localDbGetBundleItems: (productId: number) => ipcRenderer.invoke('localdb-get-bundle-items', productId),
+  localDbUpsertBundleItems: (rows: any[]) => ipcRenderer.invoke('localdb-upsert-bundle-items', rows),
+  
   // New enhanced offline support tables
   // Transactions
   localDbUpsertTransactions: (rows: any[]) => ipcRenderer.invoke('localdb-upsert-transactions', rows),

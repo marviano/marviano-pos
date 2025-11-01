@@ -80,6 +80,7 @@ function createWindows() {
             const hasHargaShopeefood = productSchema.some(col => col.name === 'harga_shopeefood');
             const hasHargaTiktok = productSchema.some(col => col.name === 'harga_tiktok');
             const hasCategory2Name = productSchema.some(col => col.name === 'category2_name');
+            const hasIsBundle = productSchema.some(col => col.name === 'is_bundle');
             if (!hasHargaGofood) {
                 console.log('📋 Migrating database: Adding products.harga_gofood column...');
                 localDb.prepare('ALTER TABLE products ADD COLUMN harga_gofood REAL').run();
@@ -108,9 +109,47 @@ function createWindows() {
                     console.log('⚠️ Failed to backfill category2_name from jenis:', e);
                 }
             }
+            if (!hasIsBundle) {
+                console.log('📋 Migrating database: Adding products.is_bundle column...');
+                localDb.prepare('ALTER TABLE products ADD COLUMN is_bundle INTEGER DEFAULT 0').run();
+            }
         }
         catch (e) {
             console.log('⚠️ Products table migration check failed:', e);
+        }
+        // Schema migration: Bundle feature tables
+        try {
+            // Check if bundle_items table exists
+            const bundleItemsExists = localDb.prepare(`
+          SELECT name FROM sqlite_master WHERE type='table' AND name='bundle_items'
+        `).get();
+            if (!bundleItemsExists) {
+                console.log('📋 Migrating database: Creating bundle_items table...');
+                localDb.prepare(`
+            CREATE TABLE bundle_items (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              bundle_product_id INTEGER NOT NULL,
+              category2_id INTEGER NOT NULL,
+              required_quantity INTEGER NOT NULL DEFAULT 1,
+              display_order INTEGER DEFAULT 0,
+              created_at TEXT,
+              updated_at INTEGER,
+              FOREIGN KEY (bundle_product_id) REFERENCES products(id) ON DELETE CASCADE,
+              FOREIGN KEY (category2_id) REFERENCES category2(id) ON DELETE CASCADE
+            )
+          `).run();
+                console.log('✅ Created bundle_items table');
+            }
+            // Check if transaction_items has bundle_selections_json column
+            const transactionItemsSchema = localDb.prepare(`PRAGMA table_info(transaction_items)`).all();
+            const hasBundleSelections = transactionItemsSchema.some(col => col.name === 'bundle_selections_json');
+            if (!hasBundleSelections) {
+                console.log('📋 Migrating database: Adding transaction_items.bundle_selections_json column...');
+                localDb.prepare('ALTER TABLE transaction_items ADD COLUMN bundle_selections_json TEXT').run();
+            }
+        }
+        catch (e) {
+            console.log('⚠️ Bundle feature migration check failed:', e);
         }
         localDb.exec(`
       -- Core POS Tables
@@ -181,6 +220,18 @@ function createWindows() {
         status TEXT DEFAULT 'active' CHECK (status IN ('active', 'inactive')),
         updated_at INTEGER,
         FOREIGN KEY (type_id) REFERENCES product_customization_types(id) ON DELETE CASCADE
+      );
+      
+      CREATE TABLE IF NOT EXISTS bundle_items (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        bundle_product_id INTEGER NOT NULL,
+        category2_id INTEGER NOT NULL,
+        required_quantity INTEGER NOT NULL DEFAULT 1,
+        display_order INTEGER DEFAULT 0,
+        created_at TEXT,
+        updated_at INTEGER,
+        FOREIGN KEY (bundle_product_id) REFERENCES products(id) ON DELETE CASCADE,
+        FOREIGN KEY (category2_id) REFERENCES category2(id) ON DELETE CASCADE
       );
       
       CREATE TABLE IF NOT EXISTS product_customizations (
@@ -369,6 +420,7 @@ function createWindows() {
         total_price REAL NOT NULL,
         customizations_json TEXT,
         custom_note TEXT,
+        bundle_selections_json TEXT,
         created_at TEXT NOT NULL,
         FOREIGN KEY (transaction_id) REFERENCES transactions(id) ON DELETE CASCADE
       );
@@ -887,8 +939,8 @@ function createWindows() {
         const tx = localDb.transaction((data) => {
             const stmt = localDb.prepare(`INSERT INTO products (
         id, business_id, menu_code, nama, satuan, kategori, jenis, category2_name, keterangan,
-        harga_beli, ppn, harga_jual, harga_khusus, harga_online, harga_gofood, harga_grabfood, harga_shopeefood, harga_tiktok, fee_kerja, status, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        harga_beli, ppn, harga_jual, harga_khusus, harga_online, harga_gofood, harga_grabfood, harga_shopeefood, harga_tiktok, fee_kerja, status, is_bundle, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET
         business_id=excluded.business_id,
         menu_code=excluded.menu_code,
@@ -909,12 +961,14 @@ function createWindows() {
         harga_tiktok=excluded.harga_tiktok,
         fee_kerja=excluded.fee_kerja,
         status=excluded.status,
+        is_bundle=excluded.is_bundle,
         updated_at=excluded.updated_at`);
             for (const r of data) {
                 // Map MySQL columns to SQLite columns
                 const kategori = r.kategori || r.category1_name || '';
                 const category2Name = r.category2_name || r.jenis || '';
-                stmt.run(r.id, r.business_id, r.menu_code, r.nama, r.satuan || '', kategori, null, category2Name, r.keterangan || null, r.harga_beli || null, r.ppn || null, r.harga_jual, r.harga_khusus || null, r.harga_online || null, r.harga_gofood || null, r.harga_grabfood || null, r.harga_shopeefood || null, r.harga_tiktok || null, r.fee_kerja || null, r.status, Date.now());
+                const isBundle = r.is_bundle === 1 || r.is_bundle === true ? 1 : 0;
+                stmt.run(r.id, r.business_id, r.menu_code, r.nama, r.satuan || '', kategori, null, category2Name, r.keterangan || null, r.harga_beli || null, r.ppn || null, r.harga_jual, r.harga_khusus || null, r.harga_online || null, r.harga_gofood || null, r.harga_grabfood || null, r.harga_shopeefood || null, r.harga_tiktok || null, r.fee_kerja || null, r.status, isBundle, Date.now());
             }
         });
         tx(rows);
@@ -925,7 +979,7 @@ function createWindows() {
             return [];
         const stmt = localDb.prepare(`SELECT 
       id, business_id, menu_code, nama, satuan, kategori, category2_name, keterangan,
-      harga_beli, ppn, harga_jual, harga_khusus, harga_online, harga_gofood, harga_grabfood, harga_shopeefood, harga_tiktok, fee_kerja, status 
+      harga_beli, ppn, harga_jual, harga_khusus, harga_online, harga_gofood, harga_grabfood, harga_shopeefood, harga_tiktok, fee_kerja, status, is_bundle
       FROM products WHERE category2_name = ? AND status = 'active' ORDER BY nama ASC`);
         return stmt.all(jenis);
     });
@@ -935,7 +989,7 @@ function createWindows() {
             return [];
         const stmt = localDb.prepare(`SELECT 
       id, business_id, menu_code, nama, satuan, kategori, category2_name, keterangan,
-      harga_beli, ppn, harga_jual, harga_khusus, harga_online, harga_gofood, harga_grabfood, harga_shopeefood, harga_tiktok, fee_kerja, status 
+      harga_beli, ppn, harga_jual, harga_khusus, harga_online, harga_gofood, harga_grabfood, harga_shopeefood, harga_tiktok, fee_kerja, status, is_bundle
       FROM products WHERE category2_name = ? AND status = 'active' ORDER BY nama ASC`);
         return stmt.all(category2Name);
     });
@@ -945,7 +999,7 @@ function createWindows() {
         try {
             const stmt = localDb.prepare(`SELECT 
         id, business_id, menu_code, nama, satuan, kategori, category2_name, keterangan,
-        harga_beli, ppn, harga_jual, harga_khusus, harga_online, harga_gofood, harga_grabfood, harga_shopeefood, harga_tiktok, fee_kerja, status 
+        harga_beli, ppn, harga_jual, harga_khusus, harga_online, harga_gofood, harga_grabfood, harga_shopeefood, harga_tiktok, fee_kerja, status, is_bundle
         FROM products WHERE status = 'active' ORDER BY nama ASC`);
             return stmt.all();
         }
@@ -1001,6 +1055,62 @@ function createWindows() {
         updated_at=excluded.updated_at`);
             for (const r of data) {
                 stmt.run(r.id, r.product_id, r.customization_type_id, Date.now());
+            }
+        });
+        tx(rows);
+        return { success: true };
+    });
+    // Bundle items handlers
+    electron_1.ipcMain.handle('localdb-get-bundle-items', async (event, productId) => {
+        if (!localDb)
+            return [];
+        try {
+            const bundleItems = localDb.prepare(`
+        SELECT 
+          bi.id,
+          bi.bundle_product_id,
+          bi.category2_id,
+          bi.required_quantity,
+          bi.display_order,
+          c2.name AS category2_name
+        FROM bundle_items bi
+        LEFT JOIN category2 c2 ON bi.category2_id = c2.id
+        WHERE bi.bundle_product_id = ?
+        ORDER BY bi.display_order ASC
+      `).all(productId);
+            return bundleItems.map(item => ({
+                id: item.id,
+                bundle_product_id: item.bundle_product_id,
+                category2_id: item.category2_id,
+                category2_name: item.category2_name,
+                required_quantity: item.required_quantity,
+                display_order: item.display_order
+            }));
+        }
+        catch (error) {
+            console.error('Error fetching bundle items:', error);
+            return [];
+        }
+    });
+    electron_1.ipcMain.handle('localdb-upsert-bundle-items', async (event, rows) => {
+        if (!localDb)
+            return { success: false };
+        const tx = localDb.transaction((data) => {
+            const stmt = localDb.prepare(`
+        INSERT INTO bundle_items (
+          id, bundle_product_id, category2_id, required_quantity, display_order, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+          bundle_product_id = excluded.bundle_product_id,
+          category2_id = excluded.category2_id,
+          required_quantity = excluded.required_quantity,
+          display_order = excluded.display_order,
+          updated_at = excluded.updated_at
+      `);
+            for (const r of data) {
+                const createdAt = r.created_at || new Date().toISOString();
+                const updatedAt = Date.now();
+                stmt.run(r.id, r.bundle_product_id, r.category2_id, r.required_quantity, r.display_order, createdAt, updatedAt);
             }
         });
         tx(rows);
@@ -2269,7 +2379,13 @@ electron_1.ipcMain.handle('print-receipt', async (event, data) => {
         // Generate receipt HTML with character-based width
         let htmlContent = '';
         if (data.type === 'test') {
-            htmlContent = generateTestReceiptHTML(printerName, businessName);
+            // Check if this is for a label printer
+            if (data.printerType === 'labelPrinter') {
+                htmlContent = generateTestLabelHTML(printerName);
+            }
+            else {
+                htmlContent = generateTestReceiptHTML(printerName, businessName);
+            }
         }
         else {
             htmlContent = generateReceiptHTML(data, businessName);
@@ -2506,6 +2622,57 @@ function generateTestReceiptHTML(printerName, businessName) {
     <p>Untuk kritik dan saran silahkan hubungi :</p>
     <p>0812-1822-2666</p>
     <p style="margin-top: 5mm;">Untuk layanan kemitraan dan partnership</p>
+  </div>
+</body>
+</html>
+  `;
+}
+// Generate test label HTML for 40x30mm label printer
+function generateTestLabelHTML(printerName) {
+    return `
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <style>
+    @page { size: 40mm auto; margin: 0; }
+    * { margin: 0; padding: 0; box-sizing: border-box; color: black; }
+    body {
+      font-family: 'Arial', 'Helvetica', sans-serif;
+      width: 21ch;
+      max-width: 21ch;
+      font-size: 10pt;
+      font-weight: 600;
+      line-height: 1.4;
+      padding: 3mm;
+      word-wrap: break-word;
+      overflow-wrap: break-word;
+      color: black;
+    }
+    .label-content {
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      align-items: center;
+      text-align: center;
+      padding: 2mm 0;
+    }
+    .customer-name {
+      font-size: 14pt;
+      font-weight: 700;
+      margin-bottom: 2mm;
+      text-transform: uppercase;
+    }
+    .item-name {
+      font-size: 11pt;
+      font-weight: 600;
+    }
+  </style>
+</head>
+<body>
+  <div class="label-content">
+    <div class="customer-name">Austin</div>
+    <div class="item-name">Matcha Latte Hot</div>
   </div>
 </body>
 </html>

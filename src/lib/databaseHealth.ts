@@ -139,6 +139,66 @@ class DatabaseHealthService {
     try {
       const response = await fetch('/api/sync');
       if (response.ok) {
+        const jsonData = await response.json();
+        const data = jsonData.data || jsonData;
+        
+        // Save to local database
+        const isElectron = typeof window !== 'undefined' && (window as any).electronAPI;
+        if (isElectron) {
+          const electronAPI = (window as any).electronAPI;
+          
+          if (data.products && data.products.length > 0) {
+            await electronAPI.localDbUpsertProducts(data.products);
+            console.log(`✅ ${data.products.length} products synced to local database`);
+          }
+          
+          if (data.bundleItems && data.bundleItems.length > 0) {
+            await electronAPI.localDbUpsertBundleItems(data.bundleItems);
+            console.log(`✅ ${data.bundleItems.length} bundle items synced to local database`);
+          }
+          
+          if (data.transactions && data.transactions.length > 0) {
+            const transactionsWithSyncStatus = data.transactions.map((tx: any) => ({
+              ...tx,
+              synced_at: Date.now()
+            }));
+            await electronAPI.localDbUpsertTransactions(transactionsWithSyncStatus);
+            console.log(`✅ ${data.transactions.length} transactions synced to local database`);
+          }
+          
+          if (data.paymentMethods && data.paymentMethods.length > 0) {
+            await electronAPI.localDbUpsertPaymentMethods(data.paymentMethods);
+          }
+          
+          if (data.banks && data.banks.length > 0) {
+            await electronAPI.localDbUpsertBanks(data.banks);
+          }
+          
+          if (data.organizations && data.organizations.length > 0) {
+            await electronAPI.localDbUpsertOrganizations(data.organizations);
+          }
+          
+          if (data.managementGroups && data.managementGroups.length > 0) {
+            await electronAPI.localDbUpsertManagementGroups(data.managementGroups);
+          }
+          
+          if (data.category1 && data.category1.length > 0) {
+            await electronAPI.localDbUpsertCategory1(data.category1);
+          }
+          
+          if (data.category2 && data.category2.length > 0) {
+            await electronAPI.localDbUpsertCategory2(data.category2);
+          }
+          
+          if (data.clAccounts && data.clAccounts.length > 0) {
+            await electronAPI.localDbUpsertClAccounts(data.clAccounts);
+          }
+          
+          if (data.omset && data.omset.length > 0) {
+            await electronAPI.localDbUpsertOmset(data.omset);
+          }
+        }
+        
         console.log('✅ [DB HEALTH] Force sync completed');
         return true;
       } else {

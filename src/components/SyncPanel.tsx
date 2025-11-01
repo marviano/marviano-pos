@@ -70,7 +70,8 @@ export default function SyncPanel({ isOpen, onClose }: SyncPanelProps) {
         throw new Error(`HTTP ${response.status}: ${response.statusText}`);
       }
       
-      const data = await response.json();
+      const jsonData = await response.json();
+      const data = jsonData.data || jsonData; // Support both response structures
       console.log('📥 [SYNC] Received data from cloud:', {
         products: data.products?.length || 0,
         transactions: data.transactions?.length || 0,
@@ -81,6 +82,7 @@ export default function SyncPanel({ isOpen, onClose }: SyncPanelProps) {
         category1: data.category1?.length || 0,
         category2: data.category2?.length || 0,
         clAccounts: data.clAccounts?.length || 0,
+        bundleItems: data.bundleItems?.length || 0,
         omset: data.omset?.length || 0
       });
 
@@ -90,6 +92,11 @@ export default function SyncPanel({ isOpen, onClose }: SyncPanelProps) {
       if (data.products && data.products.length > 0) {
         await electronAPI.localDbUpsertProducts(data.products);
         console.log(`✅ ${data.products.length} products synced to local database`);
+      }
+      
+      if (data.bundleItems && data.bundleItems.length > 0) {
+        await electronAPI.localDbUpsertBundleItems(data.bundleItems);
+        console.log(`✅ ${data.bundleItems.length} bundle items synced to local database`);
       }
       
       if (data.transactions && data.transactions.length > 0) {

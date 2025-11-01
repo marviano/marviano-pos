@@ -157,7 +157,8 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
                 unit_price: item.unit_price,
                 total_price: item.total_price,
                 custom_note: item.custom_note,
-                customizations_json: item.customizations_json || null
+                customizations_json: item.customizations_json || null,
+                bundle_selections_json: item.bundle_selections_json || null
               };
             }),
             user_name: user?.name || 'Unknown User',

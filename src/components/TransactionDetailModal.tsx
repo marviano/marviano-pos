@@ -8,6 +8,7 @@ interface TransactionItem {
   total_price: number;
   custom_note?: string;
   customizations_json?: string;
+  bundle_selections_json?: string;
 }
 
 interface Transaction {
@@ -372,6 +373,35 @@ const TransactionDetailModal: React.FC<TransactionDetailModalProps> = ({
                               </p>
                             </div>
                           )}
+                          
+                          {/* Bundle Selections Display */}
+                          {item.bundle_selections_json && item.bundle_selections_json !== 'null' && (() => {
+                            try {
+                              const bundleSelections = JSON.parse(item.bundle_selections_json);
+                              if (!bundleSelections || bundleSelections.length === 0) return null;
+                              
+                              return (
+                                <div className="mt-2 space-y-2">
+                                  <div className="text-xs font-semibold text-purple-700">Bundle Items:</div>
+                                  {bundleSelections.map((bundleSel: any, idx: number) => (
+                                    <div key={idx} className="ml-2 border-l-2 border-purple-300 pl-2">
+                                      <div className="text-xs font-medium text-purple-600">
+                                        {bundleSel.category2_name} ({bundleSel.selectedProducts?.length || 0}/{bundleSel.requiredQuantity}):
+                                      </div>
+                                      <div className="ml-2 mt-1 space-y-0.5">
+                                        {bundleSel.selectedProducts?.map((p: any) => (
+                                          <div key={p.id} className="text-xs text-gray-600">• {p.nama}</div>
+                                        ))}
+                                      </div>
+                                    </div>
+                                  ))}
+                                </div>
+                              );
+                            } catch (e) {
+                              console.error('Error parsing bundle selections:', e);
+                              return null;
+                            }
+                          })()}
                         </div>
                       </td>
                       <td className="py-3 px-3 text-center">

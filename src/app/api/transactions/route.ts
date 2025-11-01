@@ -20,6 +20,7 @@ interface TransactionItem {
     }[];
   }[];
   customNote?: string;
+  bundleSelections?: any[];
 }
 
 interface TransactionData {
@@ -163,8 +164,9 @@ export async function POST(request: NextRequest) {
             total_price,
             customizations_json,
             custom_note,
+            bundle_selections_json,
             created_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())
         `, [
           item.id || randomUUID(), // Use item UUID or generate one
           Math.floor(Math.random() * 1000000) + 100000, // Generate integer ID for old transaction_id column
@@ -174,7 +176,8 @@ export async function POST(request: NextRequest) {
           item.unit_price,
           item.total_price,
           item.customizations ? JSON.stringify(item.customizations) : null,
-          item.customNote || null
+          item.customNote || null,
+          item.bundleSelections ? JSON.stringify(item.bundleSelections) : null
         ]);
       }
 

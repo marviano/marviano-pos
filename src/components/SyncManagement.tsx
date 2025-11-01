@@ -293,6 +293,11 @@ export default function SyncManagement() {
         addLog('success', `✅ ${data.clAccounts.length} CL accounts synced to local database`);
       }
       
+      if (data.bundleItems && data.bundleItems.length > 0) {
+        await electronAPI.localDbUpsertBundleItems(data.bundleItems);
+        addLog('success', `✅ ${data.bundleItems.length} bundle items synced to local database`);
+      }
+      
       addLog('success', '🎉 Full database sync completed successfully!');
       
       // Update status and refresh counts
