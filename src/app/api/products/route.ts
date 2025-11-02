@@ -61,12 +61,14 @@ export async function GET(request: NextRequest) {
       params.push(category2Name);
     }
     
-    // Filter by transaction type using category2 names
+    // Filter by transaction type using category1 names
     if (transactionType) {
       if (transactionType === 'drinks') {
-        sql += ` AND c2.name IN ('Ice Cream Cone', 'Sundae', 'Milk Tea', 'Iced Coffee', 'Egg Waffle', 'Aren Milk Tea')`;
+        // For drinks, include category1 = 'Minuman' OR 'Dessert'
+        sql += ` AND c1.name IN ('Minuman', 'Dessert')`;
       } else if (transactionType === 'bakery') {
-        sql += ` AND c2.name = 'Bakery'`;
+        // Include products with category1 = 'Bakery'
+        sql += ` AND c1.name = 'Bakery'`;
       }
     }
 

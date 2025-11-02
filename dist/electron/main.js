@@ -2834,23 +2834,23 @@ function generateLabelHTML(data) {
       font-weight: 700;
     }
     .pickup {
-      text-align: center;
+      text-align: left;
       font-size: 8pt;
       font-weight: 700;
       text-transform: uppercase;
     }
     .product {
-      text-align: center;
+      text-align: left;
       font-size: 8pt;
       font-weight: 600;
     }
     .customizations {
-      text-align: center;
+      text-align: left;
       font-size: 8pt;
       font-weight: 600;
     }
     .custom-note {
-      text-align: center;
+      text-align: left;
       font-size: 8pt;
       font-weight: 600;
     }

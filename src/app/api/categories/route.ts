@@ -30,13 +30,14 @@ export async function GET(request: NextRequest) {
     
     const params: any[] = [BUSINESS_ID];
     
-    // Filter by transaction type: bakery vs drinks based on category2
+    // Filter by transaction type: bakery vs drinks based on category1
     if (transactionType) {
       if (transactionType === 'bakery') {
-        sql += ` AND c2.name = 'Bakery'`;
+        // Include products with category1 = 'Bakery'
+        sql += ` AND c1.name = 'Bakery'`;
       } else if (transactionType === 'drinks') {
-        // For drinks, include everything except Bakery
-        sql += ` AND c2.name != 'Bakery'`;
+        // For drinks, include category1 = 'Minuman' OR 'Dessert'
+        sql += ` AND c1.name IN ('Minuman', 'Dessert')`;
       }
     }
 
