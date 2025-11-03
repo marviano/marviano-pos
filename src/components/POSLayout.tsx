@@ -30,7 +30,6 @@ interface Product {
   category2_name: string | null;
   harga_jual: number;
   harga_khusus: number | null;
-  harga_online: number | null;
   image_url: string | null;
   status: string;
 }

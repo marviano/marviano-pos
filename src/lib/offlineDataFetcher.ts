@@ -19,7 +19,6 @@ interface Product {
   ppn: number | null;
   harga_jual: number;
   harga_khusus: number | null;
-  harga_online: number | null;
   harga_gofood: number | null;
   harga_grabfood: number | null;
   harga_shopeefood: number | null;
@@ -134,9 +133,10 @@ async function fetchFromLocalDatabase(
         
         console.log('📦 [OFFLINE FETCHER] Retrieved products from SQLite:', products ? products.length : 0);
 
-        // Normalize local rows to API shape: ensure category2_name exists (banish 'jenis')
+        // Normalize local rows to API shape: ensure category1_name and category2_name exist
         products = (products || []).map((p: any) => ({
           ...p,
+          category1_name: p.category1_name ?? p.kategori ?? null, // SQLite uses 'kategori' for category1
           category2_name: p.category2_name ?? p.jenis ?? null,
         }));
         
@@ -146,32 +146,40 @@ async function fetchFromLocalDatabase(
           console.log('🔍 [DEBUG] First product keys:', Object.keys(products[0]));
         }
 
-        // Filter by transaction type if specified
+        // When no specific category is selected, only show products with valid category2_name
+        // This ensures consistency with categories API (which only shows categories with non-null names)
+        if (!category2Name) {
+          products = products.filter((p: Product) => p.category2_name && p.category2_name.trim() !== '');
+        }
+
+        // Filter by transaction type if specified - using category1_name to match API logic
         if (transactionType) {
           console.log('🔄 [OFFLINE FETCHER] Filtering by transaction type:', transactionType);
           console.log('🔄 [OFFLINE FETCHER] Products before filtering:', products.map(p => ({ 
             id: p.id, 
             name: p.nama, 
-            category2_name: p.category2_name,
-            jenis: undefined 
+            category1_name: p.category1_name,
+            category2_name: p.category2_name
           })));
           
-          // Filter by transaction type: bakery vs drinks (dynamic, not hard-coded)
+          // Filter by transaction type: bakery vs drinks - match API logic using category1_name
           if (transactionType === 'drinks') {
-            products = products.filter((p: Product) => p.category2_name && p.category2_name !== 'Bakery');
+            products = products.filter((p: Product) => 
+              p.category1_name && (p.category1_name === 'Minuman' || p.category1_name === 'Dessert')
+            );
           } else if (transactionType === 'bakery') {
-            products = products.filter((p: Product) => p.category2_name === 'Bakery');
+            products = products.filter((p: Product) => p.category1_name === 'Bakery');
           }
           console.log('📦 [OFFLINE FETCHER] After filtering:', products.length, 'products');
           console.log('📦 [OFFLINE FETCHER] Filtered products:', products.map(p => ({ 
             id: p.id, 
             name: p.nama, 
-            category2_name: p.category2_name,
-            jenis: undefined
+            category1_name: p.category1_name,
+            category2_name: p.category2_name
           })));
         }
 
-        // Apply platform filter when in online mode (offline DB)
+        // Apply online/platform filter when in online mode (offline DB)
         if (options?.isOnline && options?.platform) {
           console.log('🔄 [OFFLINE FETCHER] Applying platform filter for', options.platform);
           products = products.filter((p: Product) => {
@@ -179,10 +187,11 @@ async function fetchFromLocalDatabase(
             if (options.platform === 'grabfood') return !!p.harga_grabfood && p.harga_grabfood > 0;
             if (options.platform === 'shopeefood') return !!p.harga_shopeefood && p.harga_shopeefood > 0;
             if (options.platform === 'tiktok') return !!p.harga_tiktok && p.harga_tiktok > 0;
-            return true;
+            return false;
           });
           console.log('📦 [OFFLINE FETCHER] After platform filter:', products.length, 'products');
         }
+        // Note: If online=true but no platform specified, show all products (no harga_online filter)
         
         console.log('✅ [OFFLINE FETCHER] Returning', products.length, 'products from offline database');
         return products;
@@ -278,28 +287,46 @@ async function fetchCategoriesFromLocalDatabase(
     // Fall back to local SQLite database
     if (isElectron) {
       try {
-        // Get distinct categories from actual products in the database
-        // This dynamically loads categories based on what products exist
-        const categories = await (window as any).electronAPI.localDbGetCategories();
+        // Get all products first - we need to filter by category1_name to match API logic
+        let allProducts = await (window as any).electronAPI.localDbGetAllProducts();
         
-        // Get all products to filter categories by actual product existence
-        const allProducts = await (window as any).electronAPI.localDbGetAllProducts();
+        // Normalize local rows to API shape: ensure category1_name and category2_name exist
+        allProducts = (allProducts || []).map((p: any) => ({
+          ...p,
+          category1_name: p.category1_name ?? p.kategori ?? null, // SQLite uses 'kategori' for category1
+          category2_name: p.category2_name ?? p.jenis ?? null,
+        }));
         
-        // Filter by transaction type: bakery vs drinks
-        let filteredCategories = categories;
+        // Filter products by transaction type using category1_name (matching API logic)
+        let filteredProducts = allProducts;
         if (transactionType) {
           if (transactionType === 'bakery') {
-            filteredCategories = categories.filter((cat: any) => cat.category2_name === 'Bakery');
+            filteredProducts = allProducts.filter((p: any) => p.category1_name === 'Bakery');
           } else if (transactionType === 'drinks') {
-            // For drinks, include everything except Bakery
-            filteredCategories = categories.filter((cat: any) => cat.category2_name !== 'Bakery');
+            // For drinks, include products where category1_name is 'Minuman' or 'Dessert'
+            filteredProducts = allProducts.filter((p: any) => 
+              p.category1_name && (p.category1_name === 'Minuman' || p.category1_name === 'Dessert')
+            );
           }
         }
+        
+        // Get distinct category2 names from filtered products (matching API logic)
+        const category2Set = new Set<string>();
+        filteredProducts.forEach((p: any) => {
+          if (p.category2_name && p.category2_name.trim() !== '') {
+            category2Set.add(p.category2_name);
+          }
+        });
+        
+        // Convert to array of category objects
+        let filteredCategories = Array.from(category2Set).map((catName: string) => ({
+          category2_name: catName
+        }));
 
-        // Apply online/platform filter if needed
+        // Apply online/platform filter if needed - use filteredProducts (already filtered by transaction type)
         if (options?.isOnline && options?.platform) {
-          // Only show categories that have products with the platform price
-          const productsWithPlatformPrice = allProducts.filter((p: any) => {
+          // Only show categories that have products with the platform price (within filtered products)
+          const productsWithPlatformPrice = filteredProducts.filter((p: any) => {
             if (options.platform === 'gofood') return p.harga_gofood && p.harga_gofood > 0;
             if (options.platform === 'grabfood') return p.harga_grabfood && p.harga_grabfood > 0;
             if (options.platform === 'shopeefood') return p.harga_shopeefood && p.harga_shopeefood > 0;
@@ -307,14 +334,18 @@ async function fetchCategoriesFromLocalDatabase(
             return false;
           });
           
-          const categoriesWithProducts = new Set(productsWithPlatformPrice.map((p: any) => p.category2_name));
-          filteredCategories = filteredCategories.filter((cat: any) => categoriesWithProducts.has(cat.category2_name));
-        } else if (options?.isOnline) {
-          // General online filter
-          const productsWithOnlinePrice = allProducts.filter((p: any) => p.harga_online && p.harga_online > 0);
-          const categoriesWithProducts = new Set(productsWithOnlinePrice.map((p: any) => p.category2_name));
-          filteredCategories = filteredCategories.filter((cat: any) => categoriesWithProducts.has(cat.category2_name));
+          const category2SetWithPrice = new Set<string>();
+          productsWithPlatformPrice.forEach((p: any) => {
+            if (p.category2_name && p.category2_name.trim() !== '') {
+              category2SetWithPrice.add(p.category2_name);
+            }
+          });
+          
+          filteredCategories = filteredCategories.filter((cat: any) => 
+            category2SetWithPrice.has(cat.category2_name)
+          );
         }
+        // Note: If online=true but no platform specified, show all categories (no harga_online filter)
         
         // Transform to match expected format
         const formattedCategories = filteredCategories.map((cat: any, index: number) => ({
@@ -339,5 +370,6 @@ async function fetchCategoriesFromLocalDatabase(
 export function hasOfflineSupport(): boolean {
   return isElectron;
 }
+
 
 

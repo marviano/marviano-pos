@@ -19,7 +19,6 @@ interface Product {
   category1_name: string | null;
   category2_name: string | null;
   harga_jual: number;
-  harga_online?: number | null;
   harga_gofood?: number | null;
   harga_grabfood?: number | null;
   harga_shopeefood?: number | null;

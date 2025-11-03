@@ -14,6 +14,7 @@
     "electron-dev": "concurrently \"npm run dev\" \"wait-on http://localhost:3000 && electron .\"",
     "electron-pack": "npm run build && electron-builder",
     "build-electron": "tsc -p electron/tsconfig.json",
+    "rebuild-native": "@electron/rebuild -f -w better-sqlite3",
     "dist": "npm run build-electron && npm run build && electron-builder --publish=never"
   },
   "dependencies": {
@@ -27,6 +28,7 @@
     "react-dom": "19.1.0"
   },
   "devDependencies": {
+    "@electron/rebuild": "^4.0.1",
     "@eslint/eslintrc": "^3",
     "@tailwindcss/postcss": "^4",
     "@types/bcryptjs": "^2.4.6",
@@ -38,6 +40,7 @@
     "concurrently": "^9.2.1",
     "electron": "^38.2.2",
     "electron-builder": "^26.0.12",
+    "electron-rebuild": "^3.2.9",
     "eslint": "^9",
     "eslint-config-next": "15.5.4",
     "tailwindcss": "^4",

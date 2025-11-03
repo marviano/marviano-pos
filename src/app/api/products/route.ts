@@ -19,7 +19,6 @@ interface ProductRow {
   ppn: number | null;
   harga_jual: number;
   harga_khusus: number | null;
-  harga_online: number | null;
   harga_gofood: number | null;
   harga_grabfood: number | null;
   harga_shopeefood: number | null;
@@ -43,7 +42,7 @@ export async function GET(request: NextRequest) {
         p.id, p.menu_code, p.nama, p.satuan, p.category1_id, p.category2_id,
         c1.name as category1_name, c2.name as category2_name,
         p.keterangan, p.harga_beli, p.ppn, p.harga_jual, p.harga_khusus,
-        p.harga_online, p.harga_gofood, p.harga_grabfood, p.harga_shopeefood, p.harga_tiktok,
+        p.harga_gofood, p.harga_grabfood, p.harga_shopeefood, p.harga_tiktok,
         p.fee_kerja, p.image_url, p.status, p.is_bundle
       FROM products p
       INNER JOIN product_businesses pb ON p.id = pb.product_id
@@ -59,6 +58,10 @@ export async function GET(request: NextRequest) {
     if (category2Name) {
       sql += ' AND c2.name = ?';
       params.push(category2Name);
+    } else {
+      // When no specific category is selected, only show products with valid category2_name
+      // This ensures consistency with categories API (which only shows categories with non-null names)
+      sql += ' AND c2.name IS NOT NULL';
     }
     
     // Filter by transaction type using category1 names
@@ -72,8 +75,9 @@ export async function GET(request: NextRequest) {
       }
     }
 
-    // Platform filter: when specified, only include products with respective platform price > 0
-    if (platform) {
+    // Online/Platform filter: when specified, only include products with respective prices
+    if (online && platform) {
+      // Filter by platform-specific price columns
       if (platform === 'gofood') {
         sql += ' AND p.harga_gofood IS NOT NULL AND p.harga_gofood > 0';
       } else if (platform === 'grabfood') {
@@ -84,6 +88,7 @@ export async function GET(request: NextRequest) {
         sql += ' AND p.harga_tiktok IS NOT NULL AND p.harga_tiktok > 0';
       }
     }
+    // Note: If online=true but no platform specified, show all products (no harga_online filter)
 
     sql += ' ORDER BY p.nama ASC';
 
@@ -97,7 +102,6 @@ export async function GET(request: NextRequest) {
       harga_jual: Number(product.harga_jual) || 0,
       harga_beli: product.harga_beli ? Number(product.harga_beli) : null,
       harga_khusus: product.harga_khusus ? Number(product.harga_khusus) : null,
-      harga_online: product.harga_online ? Number(product.harga_online) : null,
       harga_gofood: product.harga_gofood ? Number(product.harga_gofood) : null,
       harga_grabfood: product.harga_grabfood ? Number(product.harga_grabfood) : null,
       harga_shopeefood: product.harga_shopeefood ? Number(product.harga_shopeefood) : null,

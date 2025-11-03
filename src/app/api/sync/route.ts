@@ -57,7 +57,7 @@ export async function GET() {
           p.id, p.menu_code, p.nama, p.satuan, p.category1_id, p.category2_id,
           c1.name as category1_name, c2.name as category2_name,
           p.keterangan, p.harga_beli, p.ppn, p.harga_jual, p.harga_khusus,
-          p.harga_online, p.harga_gofood, p.harga_grabfood, p.harga_shopeefood, p.harga_tiktok,
+          p.harga_gofood, p.harga_grabfood, p.harga_shopeefood, p.harga_tiktok,
           p.fee_kerja, p.image_url, p.status, p.created_at, p.has_customization, p.is_bundle
         FROM products p
         INNER JOIN product_businesses pb ON p.id = pb.product_id

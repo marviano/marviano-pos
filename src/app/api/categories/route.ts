@@ -22,6 +22,7 @@ export async function GET(request: NextRequest) {
       SELECT DISTINCT c2.name as category2_name
       FROM products p
       INNER JOIN product_businesses pb ON p.id = pb.product_id
+      LEFT JOIN category1 c1 ON p.category1_id = c1.id
       LEFT JOIN category2 c2 ON p.category2_id = c2.id
       WHERE pb.business_id = ?
       AND p.status = 'active'
@@ -53,10 +54,8 @@ export async function GET(request: NextRequest) {
       } else if (platform === 'tiktok') {
         sql += ` AND p.harga_tiktok IS NOT NULL AND p.harga_tiktok > 0`;
       }
-    } else if (online) {
-      // General online filter without platform
-      sql += ` AND p.harga_online IS NOT NULL AND p.harga_online > 0`;
     }
+    // Note: If online=true but no platform specified, show all products (no harga_online filter)
     
     // Some databases may not have display_order; sort by name for safety
     sql += ' ORDER BY c2.name ASC';
