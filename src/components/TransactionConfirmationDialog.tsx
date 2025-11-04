@@ -7,8 +7,11 @@ interface BundleSelection {
   category2_id: number;
   category2_name: string;
   selectedProducts: {
-    id: number;
-    nama: string;
+    product: {
+      id: number;
+      nama: string;
+    };
+    quantity: number;
   }[];
   requiredQuantity: number;
 }
@@ -183,16 +186,19 @@ export default function TransactionConfirmationDialog({
                         {item.bundleSelections && item.bundleSelections.length > 0 && (
                           <div className="mt-2 text-xs text-purple-600">
                             <div className="font-semibold mb-1">Bundle Items:</div>
-                            {item.bundleSelections.map((bundleSel, idx) => (
-                              <div key={idx} className="ml-2 mb-1">
-                                <span className="font-medium">{bundleSel.category2_name}:</span>
-                                <ul className="ml-3 mt-0.5">
-                                  {bundleSel.selectedProducts.map(p => (
-                                    <li key={p.id}>• {p.nama}</li>
-                                  ))}
-                                </ul>
-                              </div>
-                            ))}
+                            {item.bundleSelections.map((bundleSel, idx) => {
+                              const totalQuantity = bundleSel.selectedProducts.reduce((sum, sp) => sum + sp.quantity, 0);
+                              return (
+                                <div key={idx} className="ml-2 mb-1">
+                                  <span className="font-medium">{bundleSel.category2_name} ({totalQuantity}/{bundleSel.requiredQuantity}):</span>
+                                  <ul className="ml-3 mt-0.5">
+                                    {bundleSel.selectedProducts.map((sp, spIdx) => (
+                                      <li key={spIdx}>• {sp.product.nama} {sp.quantity > 1 ? `×${sp.quantity}` : ''}</li>
+                                    ))}
+                                  </ul>
+                                </div>
+                              );
+                            })}
                           </div>
                         )}
                       </div>

@@ -159,6 +159,37 @@ contextBridge.exposeInMainWorld('electronAPI', {
   localDbGetUnsyncedPrinterAudits: () => ipcRenderer.invoke('localdb-get-unsynced-printer-audits'),
   localDbMarkPrinterAuditsSynced: (ids: { p1Ids: number[]; p2Ids: number[] }) => ipcRenderer.invoke('localdb-mark-printer-audits-synced', ids),
   
+  // Shifts
+  localDbGetActiveShift: (userId: number, businessId?: number) => ipcRenderer.invoke('localdb-get-active-shift', userId, businessId),
+  localDbCreateShift: (shiftData: {
+    uuid_id: string;
+    business_id: number;
+    user_id: number;
+    user_name: string;
+    modal_awal: number;
+  }) => ipcRenderer.invoke('localdb-create-shift', shiftData),
+  localDbEndShift: (shiftId: number) => ipcRenderer.invoke('localdb-end-shift', shiftId),
+  localDbGetShiftStatistics: (userId: number, shiftStart: string, shiftEnd: string | null, businessId?: number) => ipcRenderer.invoke('localdb-get-shift-statistics', userId, shiftStart, shiftEnd, businessId),
+  localDbGetPaymentBreakdown: (userId: number, shiftStart: string, shiftEnd: string | null, businessId?: number) => ipcRenderer.invoke('localdb-get-payment-breakdown', userId, shiftStart, shiftEnd, businessId),
+  localDbGetCashSummary: (userId: number, shiftStart: string, shiftEnd: string | null, businessId?: number) => ipcRenderer.invoke('localdb-get-cash-summary', userId, shiftStart, shiftEnd, businessId),
+  localDbGetUnsyncedShifts: (businessId?: number) => ipcRenderer.invoke('localdb-get-unsynced-shifts', businessId),
+  localDbMarkShiftsSynced: (shiftIds: number[]) => ipcRenderer.invoke('localdb-mark-shifts-synced', shiftIds),
+  localDbCheckTodayTransactions: (userId: number, shiftStart: string, businessId?: number) => ipcRenderer.invoke('localdb-check-today-transactions', userId, shiftStart, businessId),
+  localDbUpdateShiftStart: (shiftId: number, newStartTime: string) => ipcRenderer.invoke('localdb-update-shift-start', shiftId, newStartTime),
+  localDbGetProductSales: (userId: number, shiftStart: string, shiftEnd: string | null, businessId?: number) => ipcRenderer.invoke('localdb-get-product-sales', userId, shiftStart, shiftEnd, businessId),
+  printShiftBreakdown: (data: {
+    user_name: string;
+    shift_start: string;
+    shift_end: string | null;
+    modal_awal: number;
+    statistics: { order_count: number; total_amount: number };
+    productSales: Array<{ product_name: string; total_quantity: number; total_subtotal: number }>;
+    paymentBreakdown: Array<{ payment_method_name: string; transaction_count: number }>;
+    cashSummary: { cash_shift: number; cash_whole_day: number; total_cash_in_cashier: number };
+    business_id?: number;
+    printerType?: string;
+  }) => ipcRenderer.invoke('print-shift-breakdown', data),
+  
   // Customer display event listeners
   onOrderUpdate: (callback: (data: any) => void) => {
     ipcRenderer.on('order-update', (event, data) => callback(data));

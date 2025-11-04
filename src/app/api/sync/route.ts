@@ -260,25 +260,6 @@ export async function GET() {
       counts.clAccounts = 0;
     }
 
-    // Sync Omset (revenue data)
-    try {
-      const omset = await query(`
-        SELECT id, business_id, date, regular, ojol, event, delivery, fitness, pool,
-               user_id, created_at
-        FROM omset 
-        WHERE business_id = ?
-        ORDER BY date DESC
-        LIMIT 100
-      `, [BUSINESS_ID]);
-      syncResults.omset = omset;
-      counts.omset = omset.length;
-      console.log(`✅ Synced ${omset.length} omset records`);
-    } catch (error) {
-      console.warn('⚠️ Failed to sync omset:', error);
-      syncResults.omset = [];
-      counts.omset = 0;
-    }
-
     // Sync Customization Types
     try {
       const customizationTypes = await query(`
@@ -390,6 +371,56 @@ export async function GET() {
       console.warn('⚠️ Failed to sync transaction items:', error);
       syncResults.transactionItems = [];
       counts.transactionItems = 0;
+    }
+
+    // Sync Printer Audit Logs - Printer 1
+    try {
+      const printer1Audits = await query(`
+        SELECT 
+          transaction_id,
+          printer1_receipt_number,
+          printed_at,
+          printed_at_epoch
+        FROM printer1_audit_log
+        WHERE transaction_id IN (
+          SELECT uuid_id FROM transactions WHERE business_id = ?
+        )
+        ORDER BY printed_at_epoch DESC
+        LIMIT 1000
+      `, [BUSINESS_ID]);
+      syncResults.printer1Audits = printer1Audits;
+      counts.printer1Audits = printer1Audits.length;
+      console.log(`✅ Synced ${printer1Audits.length} Printer 1 audit logs`);
+    } catch (error) {
+      console.warn('⚠️ Failed to sync Printer 1 audits (may not exist):', error);
+      syncResults.printer1Audits = [];
+      counts.printer1Audits = 0;
+    }
+
+    // Sync Printer Audit Logs - Printer 2
+    try {
+      const printer2Audits = await query(`
+        SELECT 
+          transaction_id,
+          printer2_receipt_number,
+          print_mode,
+          cycle_number,
+          printed_at,
+          printed_at_epoch
+        FROM printer2_audit_log
+        WHERE transaction_id IN (
+          SELECT uuid_id FROM transactions WHERE business_id = ?
+        )
+        ORDER BY printed_at_epoch DESC
+        LIMIT 1000
+      `, [BUSINESS_ID]);
+      syncResults.printer2Audits = printer2Audits;
+      counts.printer2Audits = printer2Audits.length;
+      console.log(`✅ Synced ${printer2Audits.length} Printer 2 audit logs`);
+    } catch (error) {
+      console.warn('⚠️ Failed to sync Printer 2 audits (may not exist):', error);
+      syncResults.printer2Audits = [];
+      counts.printer2Audits = 0;
     }
 
     const totalRecords = Object.values(counts).reduce((sum, count) => sum + count, 0);

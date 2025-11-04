@@ -138,6 +138,14 @@ class SmartSyncService {
         }
       }
 
+      // Also sync printer audits
+      try {
+        const { offlineSyncService } = await import('./offlineSync');
+        await offlineSyncService.syncPrinterAudits();
+      } catch (error) {
+        console.warn('⚠️ [SMART SYNC] Printer audit sync failed:', error);
+      }
+
       this.consecutiveFailures = 0;
       this.lastSyncTime = Date.now();
       console.log('✅ [SMART SYNC] Sync completed successfully');

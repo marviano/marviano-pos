@@ -194,9 +194,6 @@ class DatabaseHealthService {
             await electronAPI.localDbUpsertClAccounts(data.clAccounts);
           }
           
-          if (data.omset && data.omset.length > 0) {
-            await electronAPI.localDbUpsertOmset(data.omset);
-          }
         }
         
         console.log('✅ [DB HEALTH] Force sync completed');

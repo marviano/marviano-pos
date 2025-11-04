@@ -130,6 +130,19 @@ electron_1.contextBridge.exposeInMainWorld('electronAPI', {
     // Printer audit sync helpers
     localDbGetUnsyncedPrinterAudits: () => electron_1.ipcRenderer.invoke('localdb-get-unsynced-printer-audits'),
     localDbMarkPrinterAuditsSynced: (ids) => electron_1.ipcRenderer.invoke('localdb-mark-printer-audits-synced', ids),
+    // Shifts
+    localDbGetActiveShift: (userId, businessId) => electron_1.ipcRenderer.invoke('localdb-get-active-shift', userId, businessId),
+    localDbCreateShift: (shiftData) => electron_1.ipcRenderer.invoke('localdb-create-shift', shiftData),
+    localDbEndShift: (shiftId) => electron_1.ipcRenderer.invoke('localdb-end-shift', shiftId),
+    localDbGetShiftStatistics: (userId, shiftStart, shiftEnd, businessId) => electron_1.ipcRenderer.invoke('localdb-get-shift-statistics', userId, shiftStart, shiftEnd, businessId),
+    localDbGetPaymentBreakdown: (userId, shiftStart, shiftEnd, businessId) => electron_1.ipcRenderer.invoke('localdb-get-payment-breakdown', userId, shiftStart, shiftEnd, businessId),
+    localDbGetCashSummary: (userId, shiftStart, shiftEnd, businessId) => electron_1.ipcRenderer.invoke('localdb-get-cash-summary', userId, shiftStart, shiftEnd, businessId),
+    localDbGetUnsyncedShifts: (businessId) => electron_1.ipcRenderer.invoke('localdb-get-unsynced-shifts', businessId),
+    localDbMarkShiftsSynced: (shiftIds) => electron_1.ipcRenderer.invoke('localdb-mark-shifts-synced', shiftIds),
+    localDbCheckTodayTransactions: (userId, shiftStart, businessId) => electron_1.ipcRenderer.invoke('localdb-check-today-transactions', userId, shiftStart, businessId),
+    localDbUpdateShiftStart: (shiftId, newStartTime) => electron_1.ipcRenderer.invoke('localdb-update-shift-start', shiftId, newStartTime),
+    localDbGetProductSales: (userId, shiftStart, shiftEnd, businessId) => electron_1.ipcRenderer.invoke('localdb-get-product-sales', userId, shiftStart, shiftEnd, businessId),
+    printShiftBreakdown: (data) => electron_1.ipcRenderer.invoke('print-shift-breakdown', data),
     // Customer display event listeners
     onOrderUpdate: (callback) => {
         electron_1.ipcRenderer.on('order-update', (event, data) => callback(data));

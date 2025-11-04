@@ -126,6 +126,57 @@ declare global {
       localDbUpsertOmset?: (rows: any[]) => Promise<any>;
       localDbGetOmset?: (businessId?: number, startDate?: string, endDate?: string) => Promise<any[]>;
       
+      // Shifts
+      localDbGetActiveShift?: (userId: number, businessId?: number) => Promise<any | null>;
+      localDbCreateShift?: (shiftData: {
+        uuid_id: string;
+        business_id: number;
+        user_id: number;
+        user_name: string;
+        modal_awal: number;
+      }) => Promise<{ success: boolean; error?: string }>;
+      localDbEndShift?: (shiftId: number) => Promise<{ success: boolean; error?: string }>;
+      localDbGetShiftStatistics?: (userId: number, shiftStart: string, shiftEnd: string | null, businessId?: number) => Promise<{
+        order_count: number;
+        total_amount: number;
+      }>;
+      localDbGetPaymentBreakdown?: (userId: number, shiftStart: string, shiftEnd: string | null, businessId?: number) => Promise<Array<{
+        payment_method_name: string;
+        payment_method_code: string;
+        transaction_count: number;
+      }>>;
+      localDbGetCashSummary?: (userId: number, shiftStart: string, shiftEnd: string | null, businessId?: number) => Promise<{
+        cash_shift: number;
+        cash_whole_day: number;
+      }>;
+      localDbGetUnsyncedShifts?: (businessId?: number) => Promise<any[]>;
+      localDbMarkShiftsSynced?: (shiftIds: number[]) => Promise<{ success: boolean }>;
+      localDbCheckTodayTransactions?: (userId: number, shiftStart: string, businessId?: number) => Promise<{
+        hasTransactions: boolean;
+        count: number;
+        earliestTime: string | null;
+      }>;
+      localDbUpdateShiftStart?: (shiftId: number, newStartTime: string) => Promise<{ success: boolean; error?: string }>;
+      localDbGetProductSales?: (userId: number, shiftStart: string, shiftEnd: string | null, businessId?: number) => Promise<Array<{
+        product_id: number;
+        product_name: string;
+        product_code: string;
+        total_quantity: number;
+        total_subtotal: number;
+      }>>;
+      printShiftBreakdown?: (data: {
+        user_name: string;
+        shift_start: string;
+        shift_end: string | null;
+        modal_awal: number;
+        statistics: { order_count: number; total_amount: number };
+        productSales: Array<{ product_name: string; total_quantity: number; total_subtotal: number }>;
+        paymentBreakdown: Array<{ payment_method_name: string; transaction_count: number }>;
+        cashSummary: { cash_shift: number; cash_whole_day: number; total_cash_in_cashier: number };
+        business_id?: number;
+        printerType?: string;
+      }) => Promise<{ success: boolean; error?: string }>;
+      
       // Printer configurations
       localDbSavePrinterConfig?: (printerType: string, systemPrinterName: string) => Promise<{ success: boolean; error?: string }>;
       localDbGetPrinterConfigs?: () => Promise<any[]>;
