@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import { X, Check, AlertCircle } from 'lucide-react';
+import { X, Check, Plus, Minus } from 'lucide-react';
 import { offlineSyncService } from '@/lib/offlineSync';
 
 interface Product {
@@ -21,10 +21,15 @@ interface BundleItem {
   display_order: number;
 }
 
+interface SelectedProductWithQuantity {
+  product: Product;
+  quantity: number;
+}
+
 interface BundleSelection {
   category2_id: number;
   category2_name: string;
-  selectedProducts: Product[];
+  selectedProducts: SelectedProductWithQuantity[];
   requiredQuantity: number;
 }
 
@@ -57,7 +62,7 @@ export default function BundleSelectionModal({
       const initialSelections: BundleSelection[] = bundleItems.map(item => ({
         category2_id: item.category2_id,
         category2_name: item.category2_name || '',
-        selectedProducts: [],
+        selectedProducts: [], // Array of { product, quantity }
         requiredQuantity: item.required_quantity
       }));
       setSelections(initialSelections);
@@ -102,13 +107,24 @@ export default function BundleSelectionModal({
                 }
               );
               
-              productsByCategory[item.category2_id] = products.map((p: any) => ({
-                id: p.id,
-                nama: p.nama,
-                image_url: p.image_url,
-                category2_id: p.category2_id,
-                category2_name: p.category2_name
-              }));
+              // Filter out bundle products and the bundle product itself
+              const filteredProducts = products
+                .filter((p: any) => {
+                  // Exclude bundle products
+                  const isBundle = p.is_bundle === 1 || p.is_bundle === true;
+                  // Exclude the bundle product itself
+                  const isBundleProduct = p.id === bundleProduct.id;
+                  return !isBundle && !isBundleProduct;
+                })
+                .map((p: any) => ({
+                  id: p.id,
+                  nama: p.nama,
+                  image_url: p.image_url,
+                  category2_id: p.category2_id,
+                  category2_name: p.category2_name
+                }));
+              
+              productsByCategory[item.category2_id] = filteredProducts;
             } catch (error) {
               console.error(`Error fetching products for category ${item.category2_id}:`, error);
               productsByCategory[item.category2_id] = [];
@@ -127,54 +143,75 @@ export default function BundleSelectionModal({
     }
   }, [isOpen, bundleItems]);
 
-  const toggleProductSelection = (category2Id: number, product: Product) => {
+  const getTotalQuantity = (category2Id: number): number => {
+    const categorySelection = selections.find(s => s.category2_id === category2Id);
+    if (!categorySelection) return 0;
+    return categorySelection.selectedProducts.reduce((sum, sp) => sum + sp.quantity, 0);
+  };
+
+  const getProductQuantity = (category2Id: number, productId: number): number => {
+    const categorySelection = selections.find(s => s.category2_id === category2Id);
+    if (!categorySelection) return 0;
+    const selectedProduct = categorySelection.selectedProducts.find(sp => sp.product.id === productId);
+    return selectedProduct?.quantity || 0;
+  };
+
+  const updateProductQuantity = (category2Id: number, product: Product, delta: number) => {
     setSelections(prev => {
       const categorySelection = prev.find(s => s.category2_id === category2Id);
       if (!categorySelection) return prev;
 
-      const isSelected = categorySelection.selectedProducts.some(p => p.id === product.id);
-      
-      if (isSelected) {
-        // Remove product
-        return prev.map(s =>
-          s.category2_id === category2Id
-            ? {
-                ...s,
-                selectedProducts: s.selectedProducts.filter(p => p.id !== product.id)
-              }
-            : s
-        );
-      } else {
-        // Add product (check if limit reached)
-        if (categorySelection.selectedProducts.length >= categorySelection.requiredQuantity) {
-          return prev; // Can't add more
-        }
-        
-        return prev.map(s =>
-          s.category2_id === category2Id
-            ? {
-                ...s,
-                selectedProducts: [...s.selectedProducts, product]
-              }
-            : s
-        );
+      // Calculate current totals from prev state
+      const currentTotalQuantity = categorySelection.selectedProducts.reduce((sum, sp) => sum + sp.quantity, 0);
+      const existingProduct = categorySelection.selectedProducts.find(sp => sp.product.id === product.id);
+      const currentQuantity = existingProduct?.quantity || 0;
+      const newQuantity = currentQuantity + delta;
+
+      // Check if we can add more
+      if (delta > 0 && currentTotalQuantity >= categorySelection.requiredQuantity) {
+        return prev; // Can't add more, limit reached
       }
+
+      // Can't go below 0
+      if (newQuantity < 0) {
+        return prev;
+      }
+
+      return prev.map(s => {
+        if (s.category2_id !== category2Id) return s;
+
+        const existingIndex = s.selectedProducts.findIndex(sp => sp.product.id === product.id);
+
+        if (newQuantity === 0) {
+          // Remove product if quantity becomes 0
+          return {
+            ...s,
+            selectedProducts: s.selectedProducts.filter(sp => sp.product.id !== product.id)
+          };
+        } else if (existingIndex >= 0) {
+          // Update existing quantity
+          const updated = [...s.selectedProducts];
+          updated[existingIndex] = { ...updated[existingIndex], quantity: newQuantity };
+          return {
+            ...s,
+            selectedProducts: updated
+          };
+        } else {
+          // Add new product with quantity 1
+          return {
+            ...s,
+            selectedProducts: [...s.selectedProducts, { product, quantity: 1 }]
+          };
+        }
+      });
     });
   };
 
-  const isProductSelected = (category2Id: number, productId: number): boolean => {
-    const categorySelection = selections.find(s => s.category2_id === category2Id);
-    return categorySelection?.selectedProducts.some(p => p.id === productId) || false;
-  };
-
-  const canSelectMore = (category2Id: number): boolean => {
-    const categorySelection = selections.find(s => s.category2_id === category2Id);
-    if (!categorySelection) return false;
-    return categorySelection.selectedProducts.length < categorySelection.requiredQuantity;
-  };
-
   const isSelectionComplete = (): boolean => {
-    return selections.every(s => s.selectedProducts.length === s.requiredQuantity);
+    return selections.every(s => {
+      const totalQuantity = getTotalQuantity(s.category2_id);
+      return totalQuantity === s.requiredQuantity;
+    });
   };
 
   const handleConfirm = () => {
@@ -196,7 +233,6 @@ export default function BundleSelectionModal({
         <div className="flex items-center justify-between p-6 border-b border-gray-200 flex-shrink-0">
           <div>
             <h2 className="text-2xl font-bold text-gray-900">{bundleProduct.nama}</h2>
-            <p className="text-sm text-gray-600 mt-1">Pilih produk untuk setiap kategori</p>
           </div>
           <button
             onClick={onClose}
@@ -219,35 +255,23 @@ export default function BundleSelectionModal({
             sortedBundleItems.map((item, index) => {
               const categorySelection = selections.find(s => s.category2_id === item.category2_id);
               const products = categoryProducts[item.category2_id] || [];
-              const selectedCount = categorySelection?.selectedProducts.length || 0;
-              const isComplete = selectedCount === item.required_quantity;
+              const totalQuantity = getTotalQuantity(item.category2_id);
+              const isComplete = totalQuantity === item.required_quantity;
 
               return (
                 <div key={item.id} className="bg-gray-50 rounded-xl p-4">
-                  <div className="flex items-center justify-between mb-4">
-                    <div>
-                      <h3 className="text-lg font-semibold text-gray-800">
-                        {item.category2_name || `Kategori ${index + 1}`}
-                      </h3>
-                      <p className="text-sm text-gray-600 mt-1">
-                        Pilih {item.required_quantity} produk
-                      </p>
-                    </div>
-                    <div className={`px-3 py-1 rounded-full text-sm font-medium ${
-                      isComplete 
-                        ? 'bg-green-100 text-green-800' 
-                        : 'bg-yellow-100 text-yellow-800'
-                    }`}>
-                      {selectedCount} / {item.required_quantity}
-                    </div>
+                  <div className="mb-4">
+                    <h3 className="text-lg font-semibold text-gray-800 inline-flex items-center gap-2">
+                      <span>{item.category2_name || `Kategori ${index + 1}`}</span>
+                      <span className={`px-3 py-1 rounded-full text-sm font-medium ${
+                        isComplete 
+                          ? 'bg-green-100 text-green-800' 
+                          : 'bg-yellow-100 text-yellow-800'
+                      }`}>
+                        {totalQuantity} / {item.required_quantity}
+                      </span>
+                    </h3>
                   </div>
-
-                  {!isComplete && (
-                    <div className="mb-3 flex items-center gap-2 text-sm text-orange-600 bg-orange-50 px-3 py-2 rounded-lg">
-                      <AlertCircle className="w-4 h-4" />
-                      <span>Pilih {item.required_quantity - selectedCount} produk lagi</span>
-                    </div>
-                  )}
 
                   {products.length === 0 ? (
                     <div className="text-center py-8 text-gray-500">
@@ -256,48 +280,85 @@ export default function BundleSelectionModal({
                   ) : (
                     <div className="grid grid-cols-3 gap-3">
                       {products.map((product) => {
-                        const isSelected = isProductSelected(item.category2_id, product.id);
-                        const canSelect = canSelectMore(item.category2_id) || isSelected;
+                        const currentQuantity = getProductQuantity(item.category2_id, product.id);
+                        const totalQuantity = getTotalQuantity(item.category2_id);
+                        const canAddMore = totalQuantity < item.required_quantity;
+                        const hasQuantity = currentQuantity > 0;
 
                         return (
-                          <button
+                          <div
                             key={product.id}
-                            onClick={() => toggleProductSelection(item.category2_id, product)}
-                            disabled={!canSelect && !isSelected}
-                            className={`relative bg-white rounded-lg border-2 p-3 text-left transition-all ${
-                              isSelected
+                            className={`relative bg-white rounded-lg border-2 p-3 transition-all ${
+                              hasQuantity
                                 ? 'border-green-500 bg-green-50 shadow-md'
-                                : canSelect
-                                ? 'border-gray-200 hover:border-blue-300 hover:shadow-sm'
-                                : 'border-gray-100 bg-gray-50 opacity-50 cursor-not-allowed'
+                                : canAddMore
+                                ? 'border-gray-200 hover:border-blue-300'
+                                : 'border-gray-100 bg-gray-50 opacity-50'
                             }`}
                           >
-                            {isSelected && (
-                              <div className="absolute top-2 right-2 w-6 h-6 bg-green-500 rounded-full flex items-center justify-center">
-                                <Check className="w-4 h-4 text-white" />
+                            {hasQuantity && (
+                              <div className="absolute top-2 right-2 bg-green-500 text-white rounded-full w-6 h-6 flex items-center justify-center text-xs font-bold">
+                                {currentQuantity}
                               </div>
                             )}
                             
-                            <div className="w-full aspect-square bg-gray-50 rounded-lg mb-2 flex items-center justify-center overflow-hidden">
+                            <div className="w-full h-24 bg-gray-50 rounded-lg mb-2 flex items-center justify-center overflow-hidden">
                               {product.image_url ? (
                                 <img
                                   src={product.image_url}
                                   alt={product.nama}
-                                  className="w-full h-full object-contain"
+                                  className="h-full w-auto object-contain"
                                   onError={(e) => {
                                     const target = e.target as HTMLImageElement;
                                     target.style.display = 'none';
                                   }}
                                 />
                               ) : (
-                                <span className="text-gray-400 text-2xl">📦</span>
+                                <span className="text-gray-400 text-xl">📦</span>
                               )}
                             </div>
                             
-                            <h4 className="font-medium text-gray-800 text-sm leading-tight">
+                            <h4 className="font-medium text-gray-800 text-sm leading-tight mb-2">
                               {product.nama}
                             </h4>
-                          </button>
+
+                            {/* Quantity Controls */}
+                            <div className="flex items-center w-full">
+                              <button
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  updateProductQuantity(item.category2_id, product, -1);
+                                }}
+                                disabled={!hasQuantity}
+                                className={`flex-1 py-2 rounded-l flex items-center justify-center transition-colors ${
+                                  hasQuantity
+                                    ? 'bg-red-500 hover:bg-red-600 text-white'
+                                    : 'bg-gray-200 text-gray-400 cursor-not-allowed'
+                                }`}
+                              >
+                                <Minus className="w-4 h-4" />
+                              </button>
+                              
+                              <span className="text-sm font-semibold text-gray-700 min-w-[40px] text-center py-2 bg-gray-50">
+                                {currentQuantity}
+                              </span>
+                              
+                              <button
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  updateProductQuantity(item.category2_id, product, 1);
+                                }}
+                                disabled={!canAddMore}
+                                className={`flex-1 py-2 rounded-r flex items-center justify-center transition-colors ${
+                                  canAddMore
+                                    ? 'bg-blue-500 hover:bg-blue-600 text-white'
+                                    : 'bg-gray-200 text-gray-400 cursor-not-allowed'
+                                }`}
+                              >
+                                <Plus className="w-4 h-4" />
+                              </button>
+                            </div>
+                          </div>
                         );
                       })}
                     </div>

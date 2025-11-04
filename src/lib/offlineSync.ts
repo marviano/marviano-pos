@@ -244,6 +244,13 @@ class OfflineSyncService {
       console.warn('⚠️ Smart sync failed:', error);
     }
 
+    // Also trigger printer audit sync
+    try {
+      await this.syncPrinterAudits();
+    } catch (error) {
+      console.warn('⚠️ Printer audit sync failed:', error);
+    }
+
     try {
       // Use the comprehensive sync endpoint
       const syncResponse = await fetch('/api/sync');
@@ -359,11 +366,6 @@ class OfflineSyncService {
             console.log(`✅ ${data.clAccounts.length} CL accounts synced to local database`);
           }
           
-          if (data.omset && data.omset.length > 0) {
-            await (window as any).electronAPI.localDbUpsertOmset(data.omset);
-            console.log(`✅ ${data.omset.length} omset records synced to local database`);
-          }
-          
           // Update sync status
           this.syncStatus.lastSync = Date.now();
           await (window as any).electronAPI.localDbUpdateSyncStatus(
@@ -408,6 +410,56 @@ class OfflineSyncService {
       console.log('⚠️ fetchWithFallback: Online failed, triggering offline...');
       this.checkConnection();
       return offlineFetch();
+    }
+  }
+
+  /**
+   * Sync printer audit logs to server
+   */
+  async syncPrinterAudits() {
+    if (!isElectron || !this.syncStatus.isOnline) {
+      return;
+    }
+
+    try {
+      console.log('🔄 [PRINTER AUDIT SYNC] Starting printer audit log sync...');
+      
+      // Get unsynced printer audits from local database
+      const unsyncedAudits = await (window as any).electronAPI.localDbGetUnsyncedPrinterAudits();
+      
+      if (!unsyncedAudits || (unsyncedAudits.p1.length === 0 && unsyncedAudits.p2.length === 0)) {
+        console.log('✅ [PRINTER AUDIT SYNC] No printer audits to sync');
+        return;
+      }
+
+      console.log(`📦 [PRINTER AUDIT SYNC] Found ${unsyncedAudits.p1.length} Printer 1 and ${unsyncedAudits.p2.length} Printer 2 audits to sync`);
+
+      // Send to server
+      const response = await fetch('/api/printer-audits', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          printer1Audits: unsyncedAudits.p1,
+          printer2Audits: unsyncedAudits.p2
+        }),
+      });
+
+      if (response.ok) {
+        const result = await response.json();
+        console.log('✅ [PRINTER AUDIT SYNC] Printer audits synced successfully:', result);
+
+        // Mark as synced locally
+        const p1Ids = unsyncedAudits.p1.map((a: any) => a.id);
+        const p2Ids = unsyncedAudits.p2.map((a: any) => a.id);
+        await (window as any).electronAPI.localDbMarkPrinterAuditsSynced({ p1Ids, p2Ids });
+        console.log('✅ [PRINTER AUDIT SYNC] Marked printer audits as synced locally');
+      } else {
+        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+      }
+    } catch (error) {
+      console.error('❌ [PRINTER AUDIT SYNC] Failed to sync printer audits:', error);
     }
   }
 

@@ -12,8 +12,11 @@ interface BundleSelection {
   category2_id: number;
   category2_name: string;
   selectedProducts: {
-    id: number;
-    nama: string;
+    product: {
+      id: number;
+      nama: string;
+    };
+    quantity: number;
   }[];
   requiredQuantity: number;
 }
@@ -648,13 +651,21 @@ export default function PaymentModal({
             });
           }
           
-          // Format item name with customizations if any
+          // Format item name with customizations and custom note if any
           let itemName = item.product.nama;
           if (item.customizations && item.customizations.length > 0) {
             const customizationText = item.customizations.map(c => 
               `${c.customization_name}: ${c.selected_options.map(opt => opt.option_name).join(', ')}`
             ).join(', ');
             itemName = `${itemName} (${customizationText})`;
+          }
+          // Add custom note if exists
+          if (item.customNote) {
+            if (itemName.includes('(')) {
+              itemName = `${itemName}, ${item.customNote})`;
+            } else {
+              itemName = `${itemName} (${item.customNote})`;
+            }
           }
           
           // Add main bundle item
@@ -668,10 +679,12 @@ export default function PaymentModal({
           // Add bundle selections as sub-items
           if (item.bundleSelections && item.bundleSelections.length > 0) {
             item.bundleSelections.forEach(bundleSel => {
-              bundleSel.selectedProducts.forEach(selectedProduct => {
+              bundleSel.selectedProducts.forEach(sp => {
+                // Multiply by bundle quantity and selected product quantity
+                const totalQty = item.quantity * sp.quantity;
                 receiptItems.push({
-                  name: `  └ ${selectedProduct.nama}`,
-                  quantity: item.quantity, // Same quantity as the bundle
+                  name: `  └ ${sp.product.nama}${sp.quantity > 1 ? ` (×${sp.quantity})` : ''}`,
+                  quantity: totalQty,
                   price: 0,
                   total_price: 0
                 });
@@ -768,61 +781,184 @@ export default function PaymentModal({
           }
         }
         
-        // Print labels for each order item (only for drinks)
+        // Print labels for each order item
         try {
-          // Only print labels for drinks transaction type
-          if (transactionType !== 'drinks') {
-            console.log('⏭️ Skipping label printing for bakery items');
-          } else {
-            // Get the counter to use (from the selected printer)
-            let labelCounter = printer1Counter;
-            if (!shouldPrintReceipt && shouldPrintReceiptize && window.electronAPI?.getPrinterCounter) {
-              const counterResult = await window.electronAPI.getPrinterCounter('receiptizePrinter', 14, false); // Don't increment
-              if (counterResult?.success) {
-                labelCounter = counterResult.counter;
+          // Get the counter to use (from the selected printer)
+          let labelCounter = printer1Counter;
+          if (!shouldPrintReceipt && shouldPrintReceiptize && window.electronAPI?.getPrinterCounter) {
+            const counterResult = await window.electronAPI.getPrinterCounter('receiptizePrinter', 14, false); // Don't increment
+            if (counterResult?.success) {
+              labelCounter = counterResult.counter;
+            }
+          }
+          
+          // Calculate total items for numbering
+          // For bundles: count each selected product × quantity
+          // For regular products: count the item quantity
+          const totalItems = cartItems.reduce((sum, item) => {
+            if (item.bundleSelections && item.bundleSelections.length > 0) {
+              // For bundles, count all selected products
+              let bundleItemCount = 0;
+              for (const bundleSel of item.bundleSelections) {
+                for (const selectedProduct of bundleSel.selectedProducts) {
+                  bundleItemCount += selectedProduct.quantity;
+                }
+              }
+              return sum + (bundleItemCount * item.quantity);
+            } else {
+              // For regular products
+              return sum + item.quantity;
+            }
+          }, 0);
+          
+          // Track current item number across all items
+          let currentItemNumber = 0;
+          
+          // Helper function to split customizations into chunks that fit on a label
+          // Each label can roughly fit 60-80 characters of customizations
+          const MAX_CUSTOMIZATION_LENGTH_PER_LABEL = 70;
+          
+          const splitCustomizations = (customizationText: string): string[] => {
+            if (!customizationText || customizationText.length <= MAX_CUSTOMIZATION_LENGTH_PER_LABEL) {
+              return [customizationText];
+            }
+            
+            // Split by '/' to preserve individual options
+            const parts = customizationText.split('/');
+            const chunks: string[] = [];
+            let currentChunk = '';
+            
+            for (const part of parts) {
+              // If adding this part would exceed limit, start new chunk
+              const wouldExceed = currentChunk 
+                ? (currentChunk + '/' + part).length > MAX_CUSTOMIZATION_LENGTH_PER_LABEL
+                : part.length > MAX_CUSTOMIZATION_LENGTH_PER_LABEL;
+              
+              if (wouldExceed && currentChunk) {
+                chunks.push(currentChunk);
+                currentChunk = part;
+              } else if (wouldExceed && !currentChunk) {
+                // Single part is too long, split it further (by word or character)
+                const words = part.split(' ');
+                let wordChunk = '';
+                for (const word of words) {
+                  if ((wordChunk + ' ' + word).length > MAX_CUSTOMIZATION_LENGTH_PER_LABEL && wordChunk) {
+                    chunks.push(wordChunk.trim());
+                    wordChunk = word;
+                  } else {
+                    wordChunk = wordChunk ? wordChunk + ' ' + word : word;
+                  }
+                }
+                if (wordChunk) {
+                  currentChunk = wordChunk;
+                }
+              } else {
+                currentChunk = currentChunk ? currentChunk + '/' + part : part;
               }
             }
             
-            // Calculate total items for numbering (sum of all quantities)
-            const totalItems = cartItems.reduce((sum, item) => sum + item.quantity, 0);
+            if (currentChunk) {
+              chunks.push(currentChunk);
+            }
             
-            // Track current item number across all items
-            let currentItemNumber = 0;
+            return chunks.length > 0 ? chunks : [customizationText];
+          };
+          
+          // Print label for each unit of each cart item
+          for (const item of cartItems) {
+            // Check if this is a bundle product
+            const isBundle = item.bundleSelections && item.bundleSelections.length > 0;
             
-            // Print label for each unit of each cart item
-            for (const item of cartItems) {
-              // Build customization text
-              let customizationText = '';
+            if (isBundle) {
+              // For bundle products, print labels for each selected product
+              for (const bundleSel of item.bundleSelections!) {
+                for (const selectedProduct of bundleSel.selectedProducts) {
+                  // Calculate total quantity (bundle quantity × selected product quantity)
+                  const totalQty = item.quantity * selectedProduct.quantity;
+                  
+                  // Print one label per unit of each selected product
+                  for (let qty = 0; qty < totalQty; qty++) {
+                    currentItemNumber++;
+                    
+                    // Prepare label data for bundle selected product
+                    const labelData = {
+                      printerType: 'labelPrinter',
+                      counter: labelCounter,
+                      itemNumber: currentItemNumber,
+                      totalItems: totalItems,
+                      pickupMethod: finalPickupMethod,
+                      productName: selectedProduct.product.nama,
+                      customizations: '', // Bundle selected products don't have customizations
+                      customNote: '', 
+                      orderTime: transactionData.created_at,
+                      labelContinuation: undefined
+                    };
+                    
+                    // Print label with delay between prints
+                    await new Promise(resolve => setTimeout(resolve, 300));
+                    const labelResult = await window.electronAPI?.printLabel?.(labelData);
+                    if (labelResult?.success) {
+                      console.log(`✅ Bundle label ${currentItemNumber}/${totalItems} for ${selectedProduct.product.nama} printed successfully`);
+                    } else {
+                      console.error(`❌ Bundle label print failed:`, labelResult?.error);
+                    }
+                  }
+                }
+              }
+            } else {
+              // For regular products (non-bundle), use existing logic
+              // Build customization text - format as xxx/xxx/xxx
+              let allOptions: string[] = [];
               if (item.customizations && item.customizations.length > 0) {
-                customizationText = item.customizations.map(c => 
-                  `${c.customization_name}: ${c.selected_options.map(opt => opt.option_name).join(', ')}`
-                ).join(', ');
+                item.customizations.forEach(c => {
+                  c.selected_options.forEach(opt => {
+                    allOptions.push(opt.option_name);
+                  });
+                });
               }
               
-              // Print one label per quantity
+              // Add custom note if exists
+              if (item.customNote) {
+                allOptions.push(item.customNote);
+              }
+              
+              const customizationText = allOptions.join('/');
+              
+              // Split customizations into chunks if too long
+              const customizationChunks = splitCustomizations(customizationText);
+              
+              // Print one label per quantity, and if customizations are split, multiple labels per unit
               for (let qty = 0; qty < item.quantity; qty++) {
                 currentItemNumber++;
                 
-                // Prepare label data
-                const labelData = {
-                  printerType: 'labelPrinter',
-                  counter: labelCounter,
-                  itemNumber: currentItemNumber,
-                  totalItems: totalItems,
-                  pickupMethod: finalPickupMethod,
-                  productName: item.product.nama,
-                  customizations: customizationText,
-                  customNote: item.customNote || '',
-                  orderTime: transactionData.created_at
-                };
-                
-                // Print label with delay between prints
-                await new Promise(resolve => setTimeout(resolve, 300));
-                const labelResult = await window.electronAPI?.printLabel?.(labelData);
-                if (labelResult?.success) {
-                  console.log(`✅ Label ${currentItemNumber}/${totalItems} printed successfully`);
-                } else {
-                  console.error(`❌ Label print failed:`, labelResult?.error);
+                // Print each chunk as a separate label
+                for (let chunkIndex = 0; chunkIndex < customizationChunks.length; chunkIndex++) {
+                  const isMultiLabel = customizationChunks.length > 1;
+                  const labelNumber = chunkIndex + 1;
+                  const totalLabels = customizationChunks.length;
+                  
+                  // Prepare label data
+                  const labelData = {
+                    printerType: 'labelPrinter',
+                    counter: labelCounter,
+                    itemNumber: currentItemNumber,
+                    totalItems: totalItems,
+                    pickupMethod: finalPickupMethod,
+                    productName: item.product.nama,
+                    customizations: customizationChunks[chunkIndex],
+                    customNote: '', // No longer used separately
+                    orderTime: transactionData.created_at,
+                    labelContinuation: isMultiLabel ? `${labelNumber}/${totalLabels}` : undefined
+                  };
+                  
+                  // Print label with delay between prints
+                  await new Promise(resolve => setTimeout(resolve, 300));
+                  const labelResult = await window.electronAPI?.printLabel?.(labelData);
+                  if (labelResult?.success) {
+                    console.log(`✅ Label ${currentItemNumber}/${totalItems}${isMultiLabel ? ` (part ${labelNumber}/${totalLabels})` : ''} printed successfully`);
+                  } else {
+                    console.error(`❌ Label print failed:`, labelResult?.error);
+                  }
                 }
               }
             }
@@ -835,15 +971,6 @@ export default function PaymentModal({
         // Clear cart and close modal after successful database operation
         onPaymentComplete();
         onClose();
-        
-        // Show success message with details about which databases saved
-        const saveDetails = [];
-        if (isOnline && onlineResult) {
-          saveDetails.push('Online');
-        }
-        saveDetails.push('Offline');
-        
-        alert(`Transaksi berhasil disimpan ke: ${saveDetails.join(' & ')} database! ID: ${result.transaction?.id || result.transaction_id || 'N/A'}`);
         
       } catch (error) {
         console.error('❌ Failed to save transaction:', error);
@@ -1220,7 +1347,8 @@ export default function PaymentModal({
                       setActiveInput('customer');
                       // Ensure the input is focused
                       setTimeout(() => {
-                        e.target.focus();
+                        const input = document.getElementById('customer-name-input') as HTMLInputElement;
+                        input?.focus();
                       }, 10);
                     }}
                     onKeyDown={(e) => {

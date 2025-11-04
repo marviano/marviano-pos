@@ -42,11 +42,14 @@ interface BundleSelection {
   category2_id: number;
   category2_name: string;
   selectedProducts: {
-    id: number;
-    nama: string;
-    image_url: string | null;
-    category2_id: number | null;
-    category2_name: string | null;
+    product: {
+      id: number;
+      nama: string;
+      image_url: string | null;
+      category2_id: number | null;
+      category2_name: string | null;
+    };
+    quantity: number;
   }[];
   requiredQuantity: number;
 }
@@ -347,7 +350,7 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
   return (
     <div className="flex-1 bg-gray-50 flex">
       {/* Left Side - Cart Area */}
-      <div className="w-[40%] p-4 flex flex-col h-full overflow-hidden">
+      <div className="w-[40%] p-4 flex flex-col relative" style={{ height: 'calc(100vh - 80px)', maxHeight: 'calc(100vh - 80px)' }}>
         {/* Top Navigation */}
         <div className="flex items-center justify-between mb-6 flex-shrink-0">
           <div className="flex space-x-2">
@@ -376,8 +379,8 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
           </button>
         </div>
 
-        {/* Cart Items Area - Scrollable */}
-        <div className="flex-[0.93] overflow-y-auto mb-4 min-h-0">
+        {/* Cart Items Area - Scrollable with Padding for Summary */}
+        <div className="flex-1 overflow-y-auto mb-4" style={{ minHeight: 0, paddingBottom: '220px' }}>
           {/* Empty Cart Indicator */}
           {cartItems.length === 0 && (
             <div className="text-center py-12">
@@ -444,18 +447,23 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
                       {item.bundleSelections && item.bundleSelections.length > 0 && (
                         <div className="mt-2 space-y-2">
                           <div className="text-xs font-semibold text-purple-700">Bundle Items:</div>
-                          {item.bundleSelections.map((bundleSel, idx) => (
-                            <div key={idx} className="ml-2 border-l-2 border-purple-300 pl-2">
-                              <div className="text-xs font-medium text-purple-600">
-                                {bundleSel.category2_name} ({bundleSel.selectedProducts.length}/{bundleSel.requiredQuantity}):
+                          {item.bundleSelections.map((bundleSel, idx) => {
+                            const totalQuantity = bundleSel.selectedProducts.reduce((sum, sp) => sum + sp.quantity, 0);
+                            return (
+                              <div key={idx} className="ml-2 border-l-2 border-purple-300 pl-2">
+                                <div className="text-xs font-medium text-purple-600">
+                                  {bundleSel.category2_name} ({totalQuantity}/{bundleSel.requiredQuantity}):
+                                </div>
+                                <div className="ml-2 mt-1 space-y-0.5">
+                                  {bundleSel.selectedProducts.map((sp, spIdx) => (
+                                    <div key={spIdx} className="text-xs text-gray-600">
+                                      • {sp.product.nama} {sp.quantity > 1 ? `×${sp.quantity}` : ''}
+                                    </div>
+                                  ))}
+                                </div>
                               </div>
-                              <div className="ml-2 mt-1 space-y-0.5">
-                                {bundleSel.selectedProducts.map((p) => (
-                                  <div key={p.id} className="text-xs text-gray-600">• {p.nama}</div>
-                                ))}
-                              </div>
-                            </div>
-                          ))}
+                            );
+                          })}
                         </div>
                       )}
                     </div>
@@ -521,8 +529,8 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
           )}
         </div>
 
-        {/* Cart Summary - Sticky at Bottom */}
-        <div className="bg-white rounded-lg border border-gray-200 p-4 flex-shrink-0">
+        {/* Cart Summary - Sticky at Bottom of Viewport */}
+        <div className="bg-white rounded-lg border border-gray-200 p-4 flex-shrink-0" style={{ position: 'sticky', bottom: '16px', zIndex: 10 }}>
           <div className="space-y-2 text-sm">
             <div className="flex justify-between">
               <span className="text-black">Harga produk asli</span>
@@ -598,6 +606,7 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
 
               return filteredProducts.map((product) => {
                 const isDisabledOnline = false;
+                const isBundle = product.is_bundle === 1 || product.is_bundle === true;
                 return (
               <button
                 key={product.id}
@@ -611,6 +620,13 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
                 {loadingProductId === product.id && (
                   <div className="absolute inset-0 bg-white/80 rounded-lg flex items-center justify-center z-10">
                     <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600"></div>
+                  </div>
+                )}
+                
+                {/* Bundle Badge */}
+                {isBundle && (
+                  <div className="absolute top-2 right-2 bg-purple-500 text-white px-2 py-1 rounded-full text-xs font-semibold z-10">
+                    Bundle
                   </div>
                 )}
                 

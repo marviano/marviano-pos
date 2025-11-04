@@ -10,6 +10,7 @@ import TransactionList from './TransactionList';
 import PrinterSetup from './PrinterSetup';
 import OfflineDebugPanel from './OfflineDebugPanel';
 import SyncManagement from './SyncManagement';
+import GantiShift from './GantiShift';
 import { mockMenuItems } from '@/data/mockData';
 import { fetchCategories, fetchProducts } from '@/lib/offlineDataFetcher';
 import { databaseHealthService } from '@/lib/databaseHealth';
@@ -441,6 +442,9 @@ export default function POSLayout() {
       
       case 'Daftar Transaksi':
         return <TransactionList businessId={14} />;
+      
+      case 'Ganti Shift':
+        return <GantiShift />;
       
       case 'Setelan':
         return (

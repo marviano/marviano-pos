@@ -144,11 +144,6 @@ export default function SyncPanel({ isOpen, onClose }: SyncPanelProps) {
         console.log(`✅ ${data.clAccounts.length} CL accounts synced to local database`);
       }
       
-      if (data.omset && data.omset.length > 0) {
-        await electronAPI.localDbUpsertOmset(data.omset);
-        console.log(`✅ ${data.omset.length} omset records synced to local database`);
-      }
-
       console.log('🎉 [SYNC] Full database sync completed successfully!');
       
       // Update status
@@ -225,6 +220,14 @@ export default function SyncPanel({ isOpen, onClose }: SyncPanelProps) {
       }
 
       console.log('🎉 [SYNC] Offline transactions upload completed!');
+      
+      // Also sync printer audit logs
+      try {
+        await offlineSyncService.syncPrinterAudits();
+        console.log('✅ [SYNC] Printer audit logs synced');
+      } catch (error) {
+        console.warn('⚠️ [SYNC] Printer audit sync failed:', error);
+      }
       
       // Update status
       await updateSyncStatus();

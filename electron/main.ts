@@ -491,6 +491,24 @@ function createWindows(): void {
         FOREIGN KEY (user_id) REFERENCES users(id)
       );
       
+      -- Shifts table for cashier shift tracking
+      CREATE TABLE IF NOT EXISTS shifts (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        uuid_id TEXT UNIQUE NOT NULL,
+        business_id INTEGER NOT NULL,
+        user_id INTEGER NOT NULL,
+        user_name TEXT NOT NULL,
+        shift_start TEXT NOT NULL,
+        shift_end TEXT,
+        modal_awal REAL NOT NULL DEFAULT 0.0,
+        status TEXT DEFAULT 'active' CHECK (status IN ('active', 'completed', 'cancelled')),
+        created_at TEXT NOT NULL,
+        updated_at INTEGER,
+        synced_at INTEGER,
+        FOREIGN KEY (business_id) REFERENCES businesses(id) ON DELETE CASCADE,
+        FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+      );
+      
       -- Legacy tables for backward compatibility
       CREATE TABLE IF NOT EXISTS categories (
         category2_name TEXT PRIMARY KEY,
@@ -1737,6 +1755,401 @@ function createWindows(): void {
     }
   });
 
+  // ========== SHIFTS IPC HANDLERS ==========
+  
+  // Get active shift for a user
+  ipcMain.handle('localdb-get-active-shift', async (event, userId: number, businessId: number = 14) => {
+    if (!localDb) return null;
+    try {
+      const stmt = localDb.prepare(`
+        SELECT * FROM shifts 
+        WHERE user_id = ? AND business_id = ? AND status = 'active' 
+        ORDER BY shift_start DESC 
+        LIMIT 1
+      `);
+      const shift = stmt.get(userId, businessId) as any;
+      return shift || null;
+    } catch (error) {
+      console.error('Error getting active shift:', error);
+      return null;
+    }
+  });
+
+  // Create a new shift
+  ipcMain.handle('localdb-create-shift', async (event, shiftData: {
+    uuid_id: string;
+    business_id: number;
+    user_id: number;
+    user_name: string;
+    modal_awal: number;
+  }) => {
+    if (!localDb) return { success: false, error: 'Database not available' };
+    try {
+      const now = new Date().toISOString();
+      const stmt = localDb.prepare(`
+        INSERT INTO shifts (
+          uuid_id, business_id, user_id, user_name, shift_start, 
+          modal_awal, status, created_at, updated_at, synced_at
+        ) VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?, NULL)
+      `);
+      
+      stmt.run(
+        shiftData.uuid_id,
+        shiftData.business_id,
+        shiftData.user_id,
+        shiftData.user_name,
+        now,
+        shiftData.modal_awal,
+        now,
+        Date.now()
+      );
+      
+      console.log(`✅ [SHIFTS] Created shift ${shiftData.uuid_id} for user ${shiftData.user_id}`);
+      return { success: true };
+    } catch (error) {
+      console.error('Error creating shift:', error);
+      return { success: false, error: String(error) };
+    }
+  });
+
+  // End a shift
+  ipcMain.handle('localdb-end-shift', async (event, shiftId: number) => {
+    if (!localDb) return { success: false, error: 'Database not available' };
+    try {
+      const now = new Date().toISOString();
+      const stmt = localDb.prepare(`
+        UPDATE shifts 
+        SET shift_end = ?, status = 'completed', updated_at = ?
+        WHERE id = ? AND status = 'active'
+      `);
+      
+      const result = stmt.run(now, Date.now(), shiftId);
+      
+      if (result.changes === 0) {
+        return { success: false, error: 'Shift not found or already ended' };
+      }
+      
+      console.log(`✅ [SHIFTS] Ended shift ${shiftId}`);
+      return { success: true };
+    } catch (error) {
+      console.error('Error ending shift:', error);
+      return { success: false, error: String(error) };
+    }
+  });
+
+  // Get shift statistics
+  ipcMain.handle('localdb-get-shift-statistics', async (event, userId: number, shiftStart: string, shiftEnd: string | null, businessId: number = 14) => {
+    if (!localDb) return {
+      order_count: 0,
+      total_amount: 0
+    };
+    
+    try {
+      // Order count query
+      let orderCountQuery = `
+        SELECT COUNT(*) as order_count
+        FROM transactions
+        WHERE user_id = ? AND business_id = ? 
+        AND datetime(created_at) >= datetime(?)
+        AND status = 'completed'
+      `;
+      const orderParams: any[] = [userId, businessId, shiftStart];
+      
+      if (shiftEnd) {
+        orderCountQuery += ' AND datetime(created_at) <= datetime(?)';
+        orderParams.push(shiftEnd);
+      }
+      
+      const orderStmt = localDb.prepare(orderCountQuery);
+      const orderResult = orderStmt.get(...orderParams) as { order_count: number };
+      
+      // Total amount query
+      let totalQuery = `
+        SELECT COALESCE(SUM(final_amount), 0) as total_amount
+        FROM transactions
+        WHERE user_id = ? AND business_id = ?
+        AND datetime(created_at) >= datetime(?)
+        AND status = 'completed'
+      `;
+      const totalParams: any[] = [userId, businessId, shiftStart];
+      
+      if (shiftEnd) {
+        totalQuery += ' AND datetime(created_at) <= datetime(?)';
+        totalParams.push(shiftEnd);
+      }
+      
+      const totalStmt = localDb.prepare(totalQuery);
+      const totalResult = totalStmt.get(...totalParams) as { total_amount: number };
+      
+      return {
+        order_count: orderResult.order_count || 0,
+        total_amount: totalResult.total_amount || 0
+      };
+    } catch (error) {
+      console.error('Error getting shift statistics:', error);
+      return {
+        order_count: 0,
+        total_amount: 0
+      };
+    }
+  });
+
+  // Get payment method breakdown
+  ipcMain.handle('localdb-get-payment-breakdown', async (event, userId: number, shiftStart: string, shiftEnd: string | null, businessId: number = 14) => {
+    if (!localDb) return [];
+    
+    try {
+      let query = `
+        SELECT 
+          pm.name as payment_method_name,
+          pm.code as payment_method_code,
+          COUNT(t.id) as transaction_count
+        FROM transactions t
+        LEFT JOIN payment_methods pm ON t.payment_method_id = pm.id
+        WHERE t.user_id = ? AND t.business_id = ?
+        AND datetime(t.created_at) >= datetime(?)
+        AND t.status = 'completed'
+      `;
+      const params: any[] = [userId, businessId, shiftStart];
+      
+      if (shiftEnd) {
+        query += ' AND datetime(t.created_at) <= datetime(?)';
+        params.push(shiftEnd);
+      }
+      
+      query += ' GROUP BY pm.id, pm.name, pm.code ORDER BY transaction_count DESC';
+      
+      const stmt = localDb.prepare(query);
+      return stmt.all(...params);
+    } catch (error) {
+      console.error('Error getting payment breakdown:', error);
+      return [];
+    }
+  });
+
+  // Get cash summary (shift + whole day)
+  ipcMain.handle('localdb-get-cash-summary', async (event, userId: number, shiftStart: string, shiftEnd: string | null, businessId: number = 14) => {
+    if (!localDb) return {
+      cash_shift: 0,
+      cash_whole_day: 0
+    };
+    
+    try {
+      // Get cash payment method ID
+      const cashMethodStmt = localDb.prepare('SELECT id FROM payment_methods WHERE code = ? LIMIT 1');
+      const cashMethod = cashMethodStmt.get('cash') as { id: number } | undefined;
+      
+      if (!cashMethod) {
+        return { cash_shift: 0, cash_whole_day: 0 };
+      }
+      
+      // Cash received during shift
+      let shiftQuery = `
+        SELECT COALESCE(SUM(final_amount), 0) as cash_total
+        FROM transactions t
+        WHERE t.user_id = ? AND t.business_id = ?
+        AND datetime(t.created_at) >= datetime(?)
+        AND t.payment_method_id = ?
+        AND t.status = 'completed'
+      `;
+      const shiftParams: any[] = [userId, businessId, shiftStart, cashMethod.id];
+      
+      if (shiftEnd) {
+        shiftQuery += ' AND datetime(t.created_at) <= datetime(?)';
+        shiftParams.push(shiftEnd);
+      }
+      
+      const shiftStmt = localDb.prepare(shiftQuery);
+      const shiftResult = shiftStmt.get(...shiftParams) as { cash_total: number };
+      
+      // Cash received whole day (GMT+7 - extract date from shift_start)
+      // shiftStart is in UTC (ISO format)
+      // We need to find the GMT+7 day boundaries
+      const shiftDate = new Date(shiftStart);
+      const gmt7Offset = 7 * 60 * 60 * 1000; // +7 hours in milliseconds
+      
+      // Convert to GMT+7 time
+      const gmt7Time = new Date(shiftDate.getTime() + gmt7Offset);
+      const year = gmt7Time.getUTCFullYear();
+      const month = gmt7Time.getUTCMonth();
+      const day = gmt7Time.getUTCDate();
+      
+      // Create day boundaries in GMT+7 (00:00:00 and 23:59:59.999)
+      const dayStartGMT7 = new Date(Date.UTC(year, month, day, 0, 0, 0, 0));
+      const dayEndGMT7 = new Date(Date.UTC(year, month, day, 23, 59, 59, 999));
+      
+      // Convert back to UTC for SQLite queries (subtract GMT+7 offset)
+      const dayStart = new Date(dayStartGMT7.getTime() - gmt7Offset);
+      const dayEnd = new Date(dayEndGMT7.getTime() - gmt7Offset);
+      
+      const wholeDayStmt = localDb.prepare(`
+        SELECT COALESCE(SUM(final_amount), 0) as cash_total
+        FROM transactions t
+        WHERE t.business_id = ?
+        AND datetime(t.created_at) >= datetime(?)
+        AND datetime(t.created_at) <= datetime(?)
+        AND t.payment_method_id = ?
+        AND t.status = 'completed'
+      `);
+      
+      const wholeDayResult = wholeDayStmt.get(
+        businessId,
+        dayStart.toISOString(),
+        dayEnd.toISOString(),
+        cashMethod.id
+      ) as { cash_total: number };
+      
+      return {
+        cash_shift: shiftResult.cash_total || 0,
+        cash_whole_day: wholeDayResult.cash_total || 0
+      };
+    } catch (error) {
+      console.error('Error getting cash summary:', error);
+      return {
+        cash_shift: 0,
+        cash_whole_day: 0
+      };
+    }
+  });
+
+  // Get unsynced shifts
+  ipcMain.handle('localdb-get-unsynced-shifts', async (event, businessId?: number) => {
+    if (!localDb) return [];
+    try {
+      let query = 'SELECT * FROM shifts WHERE synced_at IS NULL';
+      const params: any[] = [];
+      
+      if (businessId) {
+        query += ' AND business_id = ?';
+        params.push(businessId);
+      }
+      
+      query += ' ORDER BY created_at ASC';
+      
+      const stmt = localDb.prepare(query);
+      return stmt.all(...params);
+    } catch (error) {
+      console.error('Error getting unsynced shifts:', error);
+      return [];
+    }
+  });
+
+  // Mark shifts as synced
+  ipcMain.handle('localdb-mark-shifts-synced', async (event, shiftIds: number[]) => {
+    if (!localDb || shiftIds.length === 0) return { success: true };
+    try {
+      const placeholders = shiftIds.map(() => '?').join(',');
+      const stmt = localDb.prepare(`UPDATE shifts SET synced_at = ? WHERE id IN (${placeholders})`);
+      stmt.run(Date.now(), ...shiftIds);
+      return { success: true };
+    } catch (error) {
+      console.error('Error marking shifts as synced:', error);
+      return { success: false };
+    }
+  });
+
+  // Check for transactions before shift start (today)
+  ipcMain.handle('localdb-check-today-transactions', async (event, userId: number, shiftStart: string, businessId: number = 14) => {
+    if (!localDb) return { hasTransactions: false, count: 0, earliestTime: null };
+    
+    try {
+      // Get start of day in GMT+7
+      const shiftDate = new Date(shiftStart);
+      const gmt7Offset = 7 * 60 * 60 * 1000;
+      const localTime = new Date(shiftDate.getTime() + gmt7Offset);
+      const year = localTime.getUTCFullYear();
+      const month = localTime.getUTCMonth();
+      const day = localTime.getUTCDate();
+      
+      const dayStartUTC = new Date(Date.UTC(year, month, day, 0, 0, 0, 0));
+      const dayStart = new Date(dayStartUTC.getTime() - gmt7Offset);
+      
+      // Check for transactions before shift_start but on the same day
+      const checkStmt = localDb.prepare(`
+        SELECT COUNT(*) as count, MIN(created_at) as earliest_time
+        FROM transactions
+        WHERE user_id = ? 
+        AND business_id = ?
+        AND datetime(created_at) >= datetime(?)
+        AND datetime(created_at) < datetime(?)
+        AND status = 'completed'
+      `);
+      
+      const result = checkStmt.get(userId, businessId, dayStart.toISOString(), shiftStart) as { count: number; earliest_time: string | null };
+      
+      return {
+        hasTransactions: (result.count || 0) > 0,
+        count: result.count || 0,
+        earliestTime: result.earliest_time
+      };
+    } catch (error) {
+      console.error('Error checking today transactions:', error);
+      return { hasTransactions: false, count: 0, earliestTime: null };
+    }
+  });
+
+  // Update shift start time to include earlier transactions
+  ipcMain.handle('localdb-update-shift-start', async (event, shiftId: number, newStartTime: string) => {
+    if (!localDb) return { success: false, error: 'Database not available' };
+    
+    try {
+      const stmt = localDb.prepare(`
+        UPDATE shifts 
+        SET shift_start = ?, updated_at = ?
+        WHERE id = ? AND status = 'active'
+      `);
+      
+      const result = stmt.run(newStartTime, Date.now(), shiftId);
+      
+      if (result.changes === 0) {
+        return { success: false, error: 'Shift not found or not active' };
+      }
+      
+      console.log(`✅ [SHIFTS] Updated shift ${shiftId} start time to ${newStartTime}`);
+      return { success: true };
+    } catch (error) {
+      console.error('Error updating shift start time:', error);
+      return { success: false, error: String(error) };
+    }
+  });
+
+  // Get product sales breakdown for shift
+  ipcMain.handle('localdb-get-product-sales', async (event, userId: number, shiftStart: string, shiftEnd: string | null, businessId: number = 14) => {
+    if (!localDb) return [];
+    
+    try {
+      let query = `
+        SELECT 
+          p.id as product_id,
+          p.nama as product_name,
+          p.menu_code as product_code,
+          SUM(ti.quantity) as total_quantity,
+          SUM(ti.total_price) as total_subtotal
+        FROM transaction_items ti
+        INNER JOIN transactions t ON ti.transaction_id = t.id
+        INNER JOIN products p ON ti.product_id = p.id
+        WHERE t.user_id = ?
+        AND t.business_id = ?
+        AND datetime(t.created_at) >= datetime(?)
+        AND t.status = 'completed'
+      `;
+      const params: any[] = [userId, businessId, shiftStart];
+      
+      if (shiftEnd) {
+        query += ' AND datetime(t.created_at) <= datetime(?)';
+        params.push(shiftEnd);
+      }
+      
+      query += ' GROUP BY p.id, p.nama, p.menu_code ORDER BY total_subtotal DESC';
+      
+      const stmt = localDb.prepare(query);
+      return stmt.all(...params);
+    } catch (error) {
+      console.error('Error getting product sales:', error);
+      return [];
+    }
+  });
+  
   // Payment Methods
   ipcMain.handle('localdb-upsert-payment-methods', async (event, rows: any[]) => {
     if (!localDb) return { success: false };
@@ -2489,19 +2902,43 @@ ipcMain.handle('print-label', async (event, data) => {
     let printerName = data.printerName;
     
     // If printer name is not specified, try to get it from saved config
-    if (!printerName && data.printerType && localDb) {
+    if (!printerName) {
+      if (!data.printerType) {
+        console.error('❌ No printer type provided!');
+        return { success: false, error: 'No printer specified.' };
+      }
+      
+      if (!localDb) {
+        console.error('❌ Local database not available!');
+        return { success: false, error: 'Database not available.' };
+      }
+      
       console.log('🔍 No printer name specified, fetching from saved config for printer type:', data.printerType);
+      
+      // First, list all available configs for debugging
+      try {
+        const allConfigs = localDb.prepare('SELECT * FROM printer_configs').all() as any[];
+        console.log('📋 All printer configs in database:', JSON.stringify(allConfigs, null, 2));
+      } catch (e) {
+        console.error('Failed to list all configs:', e);
+      }
+      
       try {
         const config = localDb.prepare('SELECT * FROM printer_configs WHERE printer_type = ?').get(data.printerType) as any;
-        console.log('📋 Printer config query result for type', data.printerType, ':', config);
+        console.log('📋 Printer config query result for type', data.printerType, ':', JSON.stringify(config, null, 2));
         
-        if (config && config.system_printer_name) {
-          printerName = config.system_printer_name;
-          console.log('✅ Found saved printer:', printerName);
-        } else {
+        if (!config) {
           console.log('⚠️ No saved printer config found for type:', data.printerType);
-          return { success: false, error: 'No label printer configured.' };
+          return { success: false, error: 'Label printer not configured. Please set up a valid printer in Settings.' };
         }
+        
+        if (!config.system_printer_name || config.system_printer_name.trim() === '') {
+          console.log('⚠️ Printer config found but system_printer_name is empty:', config);
+          return { success: false, error: 'Label printer not configured. Please set up a valid printer in Settings.' };
+        }
+        
+        printerName = config.system_printer_name;
+        console.log('✅ Found saved printer:', printerName);
       } catch (error) {
         console.error('❌ Error fetching printer config:', error);
         return { success: false, error: 'Error loading printer configuration.' };
@@ -2659,7 +3096,7 @@ function generateTestReceiptHTML(printerName: string, businessName: string): str
     .logo { max-width: 100%; height: auto; max-height: 20mm; }
     .store-name { text-align: center; font-size: 13pt; font-weight: bold; margin-bottom: 2mm; }
     .branch { text-align: center; font-size: 11pt; font-weight: 600; margin-bottom: 2mm; }
-    .address { text-align: center; font-size: 8pt; font-weight: 500; margin-bottom: 3mm; }
+    .address { text-align: center; font-size: 8pt; font-weight: 500; margin-bottom: 3mm; max-width: 100%; line-height: 1.5; }
     .transaction-type { text-align: center; font-size: 10pt; font-weight: 700; margin-bottom: 3mm; }
     .dashed-line { border-top: 1px dashed #000; margin: 3mm 0; }
     .info-line { display: flex; justify-content: space-between; margin-bottom: 1mm; }
@@ -2679,7 +3116,7 @@ function generateTestReceiptHTML(printerName: string, businessName: string): str
     .summary-line { display: flex; justify-content: space-between; margin-bottom: 1mm; font-size: 9pt; font-weight: 500; }
     .summary-label { font-weight: 500; }
     .summary-value { font-weight: 700; }
-    .footer { margin-top: 5mm; font-size: 8pt; text-align: center; line-height: 1.4; font-weight: 500; }
+    .footer { margin-top: 5mm; font-size: 8pt; text-align: left; line-height: 1.4; font-weight: 500; }
   </style>
 </head>
 <body>
@@ -2718,16 +3155,19 @@ function generateTestReceiptHTML(printerName: string, businessName: string): str
   
   <table>
     <tr>
-      <th style="width: 35%;">Nama Produk</th>
-      <th style="width: 20%; text-align: right;">Harga</th>
-      <th style="width: 15%; text-align: right;">Jumlah</th>
-      <th style="width: 30%; text-align: right;">Subtotal</th>
+      <th style="width: 30%;">Nama Produk</th>
+      <th style="width: 25%; text-align: right;">Harga</th>
+      <th style="width: 20%; text-align: right;">Jumlah</th>
+      <th style="width: 25%; text-align: right;">Subtotal</th>
     </tr>
     <tr>
-      <td style="width: 35%; text-align: left;">Croissant</td>
-      <td style="width: 20%; text-align: right;">10.000</td>
-      <td style="width: 15%; text-align: right;">1</td>
-      <td style="width: 30%; text-align: right;">10.000</td>
+      <td colspan="4" style="text-align: left; padding-bottom: 0.5mm;">Croissant</td>
+    </tr>
+    <tr>
+      <td style="width: 30%;"></td>
+      <td style="width: 25%; text-align: right; padding-top: 0;">10.000</td>
+      <td style="width: 20%; text-align: right; padding-top: 0;">1</td>
+      <td style="width: 25%; text-align: right; padding-top: 0;">10.000</td>
     </tr>
   </table>
   
@@ -2848,7 +3288,7 @@ function generateLabelHTML(data: any): string {
   const pickupMethod = data.pickupMethod || 'dine-in';
   const productName = data.productName || '';
   const customizations = data.customizations || '';
-  const customNote = data.customNote || '';
+  const labelContinuation = data.labelContinuation || '';
   const orderTime = data.orderTime ? formatDateTime(new Date(data.orderTime)) : formatDateTime(new Date());
   
   const pickupLabel = pickupMethod === 'dine-in' ? 'DINE IN' : 'TAKE AWAY';
@@ -2871,19 +3311,31 @@ function generateLabelHTML(data: any): string {
     }
     body {
       font-family: 'Arial', 'Helvetica', sans-serif;
-      width: 21ch;
-      max-width: 21ch;
+      width: 22ch;
+      max-width: 22ch;
       font-size: 8pt;
       font-weight: 600;
       line-height: 1.4;
-      padding: 3mm;
+      padding: 3mm 0 3mm 3mm;
       word-wrap: break-word;
       overflow-wrap: break-word;
       color: black;
+      display: flex;
+      flex-direction: column;
+      height: 100%;
+      min-height: 100%;
+    }
+    .content {
+      flex: 1;
     }
     .row {
-      display: flex;
-      justify-content: space-between;
+      display: table;
+      width: calc(100% + 3mm);
+      table-layout: fixed;
+      margin-right: -3mm;
+    }
+    .row > div {
+      display: table-cell;
     }
     .counter {
       font-size: 9pt;
@@ -2891,28 +3343,34 @@ function generateLabelHTML(data: any): string {
     }
     .pickup {
       text-align: left;
-      font-size: 8pt;
+      font-size: 7pt;
       font-weight: 700;
       text-transform: uppercase;
     }
     .product {
       text-align: left;
-      font-size: 8pt;
+      font-size: 7pt;
       font-weight: 600;
     }
     .customizations {
       text-align: left;
-      font-size: 8pt;
-      font-weight: 600;
-    }
-    .custom-note {
-      text-align: left;
-      font-size: 8pt;
-      font-weight: 600;
+      font-size: 7pt;
+      font-weight: 500;
     }
     .number {
       font-size: 9pt;
       font-weight: 700;
+      text-align: right;
+    }
+    .continuation {
+      font-size: 7pt;
+      font-weight: 600;
+      color: #666;
+      text-align: center;
+    }
+    .footer {
+      margin-top: auto;
+      padding-top: 2mm;
     }
     .time {
       text-align: left;
@@ -2922,15 +3380,19 @@ function generateLabelHTML(data: any): string {
   </style>
 </head>
 <body>
-  <div class="row">
-    <div class="counter">${counter}</div>
-    <div class="number">${itemNumber}/${totalItems}</div>
+  <div class="content">
+    <div class="row">
+      <div class="counter">${counter}</div>
+      ${labelContinuation ? `<div class="continuation">${labelContinuation}</div>` : '<div class="continuation"></div>'}
+      <div class="number">${itemNumber}/${totalItems}</div>
+    </div>
+    <div class="pickup">${pickupLabel}</div>
+    <div class="product">${productName}</div>
+    ${customizations ? `<div class="customizations">${customizations}</div>` : ''}
   </div>
-  <div class="pickup">${pickupLabel}</div>
-  <div class="product">${productName}</div>
-  ${customizations ? `<div class="customizations">${customizations}</div>` : ''}
-  ${customNote ? `<div class="custom-note">${customNote}</div>` : ''}
-  <div class="time">${orderTime}</div>
+  <div class="footer">
+    <div class="time">${orderTime}</div>
+  </div>
 </body>
 </html>
   `;
@@ -2957,10 +3419,13 @@ function generateReceiptHTML(data: any, businessName: string): string {
     
     return `
       <tr>
-        <td style="width: 35%; text-align: left;">${name}</td>
-        <td style="width: 20%; text-align: right;">${price.toLocaleString('id-ID')}</td>
-        <td style="width: 15%; text-align: right;">${qty}</td>
-        <td style="width: 30%; text-align: right;">${subtotal.toLocaleString('id-ID')}</td>
+        <td colspan="4" style="text-align: left; padding-bottom: 0.5mm;">${name}</td>
+      </tr>
+      <tr>
+        <td style="width: 30%;"></td>
+        <td style="width: 25%; text-align: right; padding-top: 0;">${price.toLocaleString('id-ID')}</td>
+        <td style="width: 20%; text-align: right; padding-top: 0;">${qty}</td>
+        <td style="width: 25%; text-align: right; padding-top: 0;">${subtotal.toLocaleString('id-ID')}</td>
       </tr>
     `;
   }).join('');
@@ -3010,7 +3475,7 @@ function generateReceiptHTML(data: any, businessName: string): string {
     .logo { max-width: 100%; height: auto; max-height: 20mm; }
     .store-name { text-align: center; font-size: 13pt; font-weight: bold; margin-bottom: 2mm; }
     .branch { text-align: center; font-size: 11pt; font-weight: 600; margin-bottom: 2mm; }
-    .address { text-align: center; font-size: 8pt; font-weight: 500; margin-bottom: 3mm; }
+    .address { text-align: center; font-size: 8pt; font-weight: 500; margin-bottom: 3mm; max-width: 100%; line-height: 1.5; }
     .transaction-type { text-align: center; font-size: 10pt; font-weight: 700; margin-bottom: 3mm; }
     .dashed-line { border-top: 1px dashed #000; margin: 3mm 0; }
     .info-line { display: flex; justify-content: space-between; margin-bottom: 1mm; }
@@ -3023,7 +3488,7 @@ function generateReceiptHTML(data: any, businessName: string): string {
     .summary-line { display: flex; justify-content: space-between; margin-bottom: 1mm; font-size: 9pt; font-weight: 500; }
     .summary-label { font-weight: 500; }
     .summary-value { font-weight: 700; }
-    .footer { margin-top: 5mm; font-size: 8pt; text-align: center; line-height: 1.4; font-weight: 500; }
+    .footer { margin-top: 5mm; font-size: 8pt; text-align: left; line-height: 1.4; font-weight: 500; }
   </style>
 </head>
 <body>
@@ -3071,10 +3536,10 @@ function generateReceiptHTML(data: any, businessName: string): string {
   
   <table>
     <tr>
-      <th style="width: 35%;">Nama Produk</th>
-      <th style="width: 20%; text-align: right;">Harga</th>
-      <th style="width: 15%; text-align: right;">Jumlah</th>
-      <th style="width: 30%; text-align: right;">Subtotal</th>
+      <th style="width: 30%;">Nama Produk</th>
+      <th style="width: 25%; text-align: right;">Harga</th>
+      <th style="width: 20%; text-align: right;">Jumlah</th>
+      <th style="width: 25%; text-align: right;">Subtotal</th>
     </tr>
     ${itemsHTML}
   </table>
@@ -3127,6 +3592,344 @@ function generateReceiptHTML(data: any, businessName: string): string {
 </html>
   `;
 }
+
+// Generate shift breakdown report HTML for printing
+function generateShiftBreakdownHTML(shiftData: {
+  user_name: string;
+  shift_start: string;
+  shift_end: string | null;
+  modal_awal: number;
+  statistics: { order_count: number; total_amount: number };
+  productSales: Array<{ product_name: string; total_quantity: number; total_subtotal: number }>;
+  paymentBreakdown: Array<{ payment_method_name: string; transaction_count: number }>;
+  cashSummary: { cash_shift: number; cash_whole_day: number; total_cash_in_cashier: number };
+  businessName?: string;
+}): string {
+  const formatDateTime = (dateString: string): string => {
+    const date = new Date(dateString);
+    const gmt7Date = new Date(date.getTime() + (7 * 60 * 60 * 1000));
+    const year = gmt7Date.getUTCFullYear();
+    const month = String(gmt7Date.getUTCMonth() + 1).padStart(2, '0');
+    const day = String(gmt7Date.getUTCDate()).padStart(2, '0');
+    const hours = String(gmt7Date.getUTCHours()).padStart(2, '0');
+    const minutes = String(gmt7Date.getUTCMinutes()).padStart(2, '0');
+    const seconds = String(gmt7Date.getUTCSeconds()).padStart(2, '0');
+    return `${year}-${month}-${day} ${hours}:${minutes}:${seconds}`;
+  };
+
+  const printTime = formatDateTime(new Date().toISOString());
+  const shiftStartTime = formatDateTime(shiftData.shift_start);
+  const shiftEndTime = shiftData.shift_end ? formatDateTime(shiftData.shift_end) : 'Masih Berlangsung';
+
+  // Generate product sales table rows
+  const productRows = shiftData.productSales.map(product => `
+    <tr>
+      <td style="text-align: left; padding: 1mm 0;">${product.product_name}</td>
+      <td style="text-align: right; padding: 1mm 0;">${product.total_quantity}</td>
+      <td style="text-align: right; padding: 1mm 0;">${product.total_subtotal.toLocaleString('id-ID')}</td>
+    </tr>
+  `).join('');
+
+  const totalProductQty = shiftData.productSales.reduce((sum, p) => sum + p.total_quantity, 0);
+  const totalProductSubtotal = shiftData.productSales.reduce((sum, p) => sum + p.total_subtotal, 0);
+
+  // Generate payment method rows
+  const paymentRows = shiftData.paymentBreakdown.map(payment => `
+    <tr>
+      <td style="text-align: left; padding: 1mm 0;">${payment.payment_method_name || 'N/A'}</td>
+      <td style="text-align: right; padding: 1mm 0;">${payment.transaction_count}</td>
+    </tr>
+  `).join('');
+
+  const totalPaymentCount = shiftData.paymentBreakdown.reduce((sum, p) => sum + p.transaction_count, 0);
+
+  return `
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <style>
+    @page { size: 80mm auto; margin: 0; }
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: 'Arial', 'Helvetica', sans-serif;
+      width: 42ch;
+      max-width: 42ch;
+      font-size: 9pt;
+      font-weight: 500;
+      line-height: 1.4;
+      padding: 5mm 7mm;
+      word-wrap: break-word;
+      overflow-wrap: break-word;
+    }
+    .header {
+      text-align: center;
+      margin-bottom: 4mm;
+    }
+    .title {
+      font-size: 11pt;
+      font-weight: 700;
+      margin-bottom: 2mm;
+    }
+    .business-name {
+      font-size: 10pt;
+      font-weight: 600;
+      margin-bottom: 1mm;
+    }
+    .divider {
+      border-top: 1px dashed #000;
+      margin: 3mm 0;
+    }
+    .info-line {
+      display: flex;
+      justify-content: space-between;
+      margin-bottom: 1mm;
+      font-size: 8pt;
+    }
+    .info-label {
+      font-weight: 500;
+    }
+    .info-value {
+      font-weight: 700;
+    }
+    .section-title {
+      font-size: 9pt;
+      font-weight: 700;
+      margin: 3mm 0 2mm 0;
+      text-align: center;
+      text-decoration: underline;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 2mm 0;
+      font-size: 8pt;
+    }
+    th {
+      text-align: left;
+      font-weight: 700;
+      border-bottom: 1px solid #000;
+      padding: 1mm 0;
+      font-size: 8pt;
+    }
+    th.right, td.right {
+      text-align: right;
+    }
+    td {
+      padding: 1mm 0;
+      font-weight: 500;
+    }
+    .total-row {
+      border-top: 2px solid #000;
+      font-weight: 700;
+      background-color: #f0f0f0;
+    }
+    .summary {
+      margin-top: 3mm;
+      font-size: 8pt;
+    }
+    .summary-line {
+      display: flex;
+      justify-content: space-between;
+      margin-bottom: 1mm;
+    }
+    .summary-label {
+      font-weight: 500;
+    }
+    .summary-value {
+      font-weight: 700;
+    }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <div class="title">LAPORAN SHIFT</div>
+    <div class="business-name">${shiftData.businessName || 'Momoyo Bakery Kalimantan'}</div>
+  </div>
+
+  <div class="divider"></div>
+
+  <div class="info-line">
+    <span class="info-label">Cashier:</span>
+    <span class="info-value">${shiftData.user_name}</span>
+  </div>
+  <div class="info-line">
+    <span class="info-label">Shift Start:</span>
+    <span class="info-value">${shiftStartTime}</span>
+  </div>
+  <div class="info-line">
+    <span class="info-label">Shift End:</span>
+    <span class="info-value">${shiftEndTime}</span>
+  </div>
+  <div class="info-line">
+    <span class="info-label">Modal Awal:</span>
+    <span class="info-value">${shiftData.modal_awal.toLocaleString('id-ID')}</span>
+  </div>
+
+  <div class="divider"></div>
+
+  <div class="section-title">PRODUCT SALES BREAKDOWN</div>
+  <table>
+    <thead>
+      <tr>
+        <th>Product</th>
+        <th class="right">Qty</th>
+        <th class="right">Subtotal</th>
+      </tr>
+    </thead>
+    <tbody>
+      ${productRows || '<tr><td colSpan="3" style="text-align: center;">Tidak ada produk</td></tr>'}
+      <tr class="total-row">
+        <td>TOTAL</td>
+        <td class="right">${totalProductQty}</td>
+        <td class="right">${totalProductSubtotal.toLocaleString('id-ID')}</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <div class="divider"></div>
+
+  <div class="section-title">PAYMENT METHOD BREAKDOWN</div>
+  <table>
+    <thead>
+      <tr>
+        <th>Payment Method</th>
+        <th class="right">Count</th>
+      </tr>
+    </thead>
+    <tbody>
+      ${paymentRows || '<tr><td colSpan="2" style="text-align: center;">Tidak ada transaksi</td></tr>'}
+      <tr class="total-row">
+        <td>TOTAL</td>
+        <td class="right">${totalPaymentCount}</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <div class="divider"></div>
+
+  <div class="summary">
+    <div class="summary-line">
+      <span class="summary-label">Total Pesanan:</span>
+      <span class="summary-value">${shiftData.statistics.order_count}</span>
+    </div>
+    <div class="summary-line">
+      <span class="summary-label">Total Transaksi:</span>
+      <span class="summary-value">${shiftData.statistics.total_amount.toLocaleString('id-ID')}</span>
+    </div>
+    <div class="summary-line">
+      <span class="summary-label">Cash (Shift):</span>
+      <span class="summary-value">${shiftData.cashSummary.cash_shift.toLocaleString('id-ID')}</span>
+    </div>
+    <div class="summary-line">
+      <span class="summary-label">Cash (Hari):</span>
+      <span class="summary-value">${shiftData.cashSummary.cash_whole_day.toLocaleString('id-ID')}</span>
+    </div>
+    <div class="summary-line">
+      <span class="summary-label">Cash in Cashier:</span>
+      <span class="summary-value">${shiftData.cashSummary.total_cash_in_cashier.toLocaleString('id-ID')}</span>
+    </div>
+  </div>
+
+  <div class="divider"></div>
+
+  <div class="info-line" style="margin-top: 3mm;">
+    <span class="info-label">Waktu Print:</span>
+    <span class="info-value">${printTime}</span>
+  </div>
+</body>
+</html>
+  `;
+}
+
+// Print shift breakdown report
+ipcMain.handle('print-shift-breakdown', async (event, data: {
+  user_name: string;
+  shift_start: string;
+  shift_end: string | null;
+  modal_awal: number;
+  statistics: { order_count: number; total_amount: number };
+  productSales: Array<{ product_name: string; total_quantity: number; total_subtotal: number }>;
+  paymentBreakdown: Array<{ payment_method_name: string; transaction_count: number }>;
+  cashSummary: { cash_shift: number; cash_whole_day: number; total_cash_in_cashier: number };
+  business_id?: number;
+  printerType?: string;
+}) => {
+  try {
+    let printerName = data.printerType || 'receiptPrinter';
+    
+    // Get printer name from config if printerType is provided
+    if (data.printerType && localDb) {
+      try {
+        const config = localDb.prepare('SELECT * FROM printer_configs WHERE printer_type = ?').get(data.printerType) as any;
+        if (config && config.system_printer_name) {
+          printerName = config.system_printer_name;
+        }
+      } catch (error) {
+        console.error('Error fetching printer config:', error);
+      }
+    }
+
+    // Fetch business name
+    let businessName = 'Momoyo Bakery Kalimantan';
+    if (data.business_id && localDb) {
+      try {
+        const business = localDb.prepare('SELECT name FROM businesses WHERE id = ?').get(data.business_id) as { name: string } | undefined;
+        if (business) {
+          businessName = business.name;
+        }
+      } catch (error) {
+        console.error('Error fetching business name:', error);
+      }
+    }
+
+    // Generate HTML
+    const htmlContent = generateShiftBreakdownHTML({
+      ...data,
+      businessName
+    });
+
+    // Close existing print window if any
+    if (printWindow) {
+      printWindow.close();
+    }
+
+    // Create new print window
+    printWindow = new BrowserWindow({
+      width: 400,
+      height: 600,
+      show: false,
+      webPreferences: {
+        nodeIntegration: false,
+        contextIsolation: true,
+      }
+    });
+
+    await printWindow.loadURL(`data:text/html,${encodeURIComponent(htmlContent)}`);
+
+    const printOptions = {
+      silent: true,
+      printBackground: false,
+      deviceName: printerName,
+    };
+
+    await printWindow.webContents.print(printOptions);
+    
+    // Close print window after a delay
+    setTimeout(() => {
+      if (printWindow) {
+        printWindow.close();
+        printWindow = null;
+      }
+    }, 1000);
+
+    console.log('✅ [SHIFT PRINT] Shift breakdown printed successfully');
+    return { success: true };
+  } catch (error) {
+    console.error('❌ [SHIFT PRINT] Error printing shift breakdown:', error);
+    return { success: false, error: String(error) };
+  }
+});
 
 // List available system printers for the renderer
 ipcMain.handle('list-printers', async (event) => {

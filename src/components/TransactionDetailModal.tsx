@@ -383,18 +383,34 @@ const TransactionDetailModal: React.FC<TransactionDetailModalProps> = ({
                               return (
                                 <div className="mt-2 space-y-2">
                                   <div className="text-xs font-semibold text-purple-700">Bundle Items:</div>
-                                  {bundleSelections.map((bundleSel: any, idx: number) => (
-                                    <div key={idx} className="ml-2 border-l-2 border-purple-300 pl-2">
-                                      <div className="text-xs font-medium text-purple-600">
-                                        {bundleSel.category2_name} ({bundleSel.selectedProducts?.length || 0}/{bundleSel.requiredQuantity}):
+                                  {bundleSelections.map((bundleSel: any, idx: number) => {
+                                    // Support both old format (array of products) and new format (array of {product, quantity})
+                                    const selectedProducts = bundleSel.selectedProducts || [];
+                                    const isNewFormat = selectedProducts.length > 0 && selectedProducts[0]?.product;
+                                    const totalQuantity = isNewFormat 
+                                      ? selectedProducts.reduce((sum: number, sp: any) => sum + (sp.quantity || 0), 0)
+                                      : selectedProducts.length;
+                                    
+                                    return (
+                                      <div key={idx} className="ml-2 border-l-2 border-purple-300 pl-2">
+                                        <div className="text-xs font-medium text-purple-600">
+                                          {bundleSel.category2_name} ({totalQuantity}/{bundleSel.requiredQuantity}):
+                                        </div>
+                                        <div className="ml-2 mt-1 space-y-0.5">
+                                          {isNewFormat 
+                                            ? selectedProducts.map((sp: any, spIdx: number) => (
+                                                <div key={spIdx} className="text-xs text-gray-600">
+                                                  • {sp.product?.nama || ''} {sp.quantity > 1 ? `×${sp.quantity}` : ''}
+                                                </div>
+                                              ))
+                                            : selectedProducts.map((p: any, pIdx: number) => (
+                                                <div key={pIdx} className="text-xs text-gray-600">• {p.nama}</div>
+                                              ))
+                                          }
+                                        </div>
                                       </div>
-                                      <div className="ml-2 mt-1 space-y-0.5">
-                                        {bundleSel.selectedProducts?.map((p: any) => (
-                                          <div key={p.id} className="text-xs text-gray-600">• {p.nama}</div>
-                                        ))}
-                                      </div>
-                                    </div>
-                                  ))}
+                                    );
+                                  })}
                                 </div>
                               );
                             } catch (e) {

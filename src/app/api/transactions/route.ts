@@ -181,43 +181,6 @@ export async function POST(request: NextRequest) {
         ]);
       }
 
-      // Update daily revenue in omset table (only for non-CL transactions)
-      if (transactionData.payment_method !== 'cl') {
-        const today = new Date().toISOString().split('T')[0];
-        
-        // Check if omset record exists for today
-        const existingOmset = await query(`
-          SELECT id, regular FROM omset 
-          WHERE business_id = ? AND date = ?
-        `, [transactionData.business_id, today]);
-
-        if (existingOmset && (existingOmset as any[]).length > 0) {
-          // Update existing record with final amount (after voucher discount)
-          await query(`
-            UPDATE omset 
-            SET regular = regular + ?, updated_at = NOW()
-            WHERE business_id = ? AND date = ?
-          `, [transactionData.final_amount, transactionData.business_id, today]);
-        } else {
-          // Create new record with final amount (after voucher discount)
-          await query(`
-            INSERT INTO omset (
-              business_id,
-              date,
-              regular,
-              user_id,
-              created_at,
-              updated_at
-            ) VALUES (?, ?, ?, ?, NOW(), NOW())
-          `, [
-            transactionData.business_id,
-            today,
-            transactionData.final_amount,
-            transactionData.user_id
-          ]);
-        }
-      }
-
       // Commit transaction
       await query('COMMIT');
 
