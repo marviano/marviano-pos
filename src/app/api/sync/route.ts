@@ -335,7 +335,7 @@ export async function GET() {
       const transactions = await query(`
         SELECT 
           t.uuid_id as id, t.business_id, t.user_id, pm.code as payment_method, t.pickup_method,
-          t.total_amount, t.voucher_discount, t.final_amount, t.amount_received, t.change_amount,
+          t.total_amount, t.voucher_discount, t.voucher_type, t.voucher_value, t.voucher_label, t.final_amount, t.amount_received, t.change_amount,
           t.status, t.created_at, t.contact_id, t.customer_name, t.note, t.bank_name,
           t.card_number, t.cl_account_id, t.cl_account_name, t.bank_id, t.receipt_number,
           t.transaction_type, t.payment_method_id

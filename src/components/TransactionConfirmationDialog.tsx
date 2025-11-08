@@ -67,6 +67,9 @@ interface TransactionConfirmationDialogProps {
   isOnline?: boolean;
   selectedOnlinePlatform?: 'gofood' | 'grabfood' | 'shopeefood' | 'tiktok' | null;
   customerName?: string;
+  promotionLabel?: string;
+  promotionType?: 'none' | 'percent' | 'nominal' | 'free';
+  promotionValue?: number | null;
 }
 
 export default function TransactionConfirmationDialog({
@@ -86,7 +89,10 @@ export default function TransactionConfirmationDialog({
   onChangePrintTarget,
   isOnline = false,
   selectedOnlinePlatform = null,
-  customerName = ''
+  customerName = '',
+  promotionLabel = '',
+  promotionType = 'none',
+  promotionValue = null
 }: TransactionConfirmationDialogProps) {
   const formatPrice = (price: number) => {
     return `Rp ${price.toLocaleString('id-ID')}`;
@@ -323,8 +329,19 @@ export default function TransactionConfirmationDialog({
                 <span className="font-medium text-gray-800">{formatPrice(orderTotal)}</span>
               </div>
               {voucherDiscount > 0 && (
-                <div className="flex justify-between">
-                  <span className="text-green-600">Diskon Voucher</span>
+                <div className="flex justify-between items-start">
+                  <div className="flex flex-col">
+                    <span className="text-green-600">Diskon Voucher</span>
+                    {promotionLabel && (
+                      <span className="text-xs text-green-500 font-medium">{promotionLabel}</span>
+                    )}
+                    {promotionType === 'percent' && promotionValue && (
+                      <span className="text-[11px] text-green-500">Diskon {promotionValue}%</span>
+                    )}
+                    {promotionType === 'free' && (
+                      <span className="text-[11px] text-green-500">Gratis 100%</span>
+                    )}
+                  </div>
                   <span className="font-medium text-green-600">-{formatPrice(voucherDiscount)}</span>
                 </div>
               )}

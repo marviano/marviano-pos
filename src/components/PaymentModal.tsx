@@ -8,16 +8,6 @@ import { offlineSyncService } from '@/lib/offlineSync';
 import { generateTransactionId, generateTransactionItemId } from '@/lib/uuid';
 import { useAuth } from '@/hooks/useAuth';
 
-interface SelectedCustomization {
-  customization_id: number;
-  customization_name: string;
-  selected_options: {
-    option_id: number;
-    option_name: string;
-    price_adjustment: number;
-  }[];
-}
-
 interface BundleSelection {
   category2_id: number;
   category2_name: string;
@@ -26,8 +16,7 @@ interface BundleSelection {
       id: number;
       nama: string;
     };
-    customizations?: SelectedCustomization[];
-    customNote?: string;
+    quantity: number;
   }[];
   requiredQuantity: number;
 }
@@ -48,7 +37,15 @@ interface CartItem {
     harga_tiktok?: number;
   };
   quantity: number;
-  customizations?: SelectedCustomization[];
+  customizations?: {
+    customization_id: number;
+    customization_name: string;
+    selected_options: {
+      option_id: number;
+      option_name: string;
+      price_adjustment: number;
+    }[];
+  }[];
   customNote?: string;
   bundleSelections?: BundleSelection[];
 }
@@ -64,6 +61,7 @@ interface PaymentModalProps {
 }
 
 type PaymentMethod = 'cash' | 'debit' | 'qr' | 'ewallet' | 'cl' | 'voucher' | 'gofood' | 'grabfood' | 'shopeefood' | 'tiktok';
+type PromotionSelection = 'none' | 'percent_30' | 'percent_35' | 'percent_50' | 'custom' | 'free';
 type PickupMethod = 'dine-in' | 'take-away';
 
 export default function PaymentModal({
@@ -79,10 +77,10 @@ export default function PaymentModal({
   const [selectedPaymentMethod, setSelectedPaymentMethod] = useState<PaymentMethod>('cash');
   const [selectedPickupMethod, setSelectedPickupMethod] = useState<PickupMethod>('dine-in');
   const [amountReceived, setAmountReceived] = useState<string>('');
-  const [voucherAmount, setVoucherAmount] = useState<string>('');
+  const [customVoucherAmount, setCustomVoucherAmount] = useState<string>('');
   const [preferenceAmount, setPreferenceAmount] = useState<string>('');
   const [customerName, setCustomerName] = useState<string>('');
-  const [isVoucherEnabled, setIsVoucherEnabled] = useState(false);
+  const [promotionSelection, setPromotionSelection] = useState<PromotionSelection>('none');
   const [activeInput, setActiveInput] = useState<'amount' | 'voucher' | 'preference' | 'customer'>('amount');
   const [bankId, setBankId] = useState<string>('');
   const [cardNumber, setCardNumber] = useState<string>('');
@@ -94,52 +92,16 @@ export default function PaymentModal({
   const [showConfirmation, setShowConfirmation] = useState(false);
   const [printTarget, setPrintTarget] = useState<'receipt' | 'receiptize' | 'both'>('receipt');
   
-  const sumCustomizationPrice = (customizations?: SelectedCustomization[]) => {
-    if (!customizations || customizations.length === 0) return 0;
-    return customizations.reduce((sum, customization) => {
-      const optionTotal = customization.selected_options.reduce((optionSum, option) => optionSum + option.price_adjustment, 0);
-      return sum + optionTotal;
-    }, 0);
-  };
-
-  const calculateBundleCustomizationCharge = (bundleSelections?: BundleSelection[]) => {
-    if (!bundleSelections || bundleSelections.length === 0) return 0;
-
-    return bundleSelections.reduce((bundleSum, bundleSelection) => {
-      const selectionTotal = bundleSelection.selectedProducts.reduce((productSum, selectedProduct) => {
-        const perUnitAdjustment = sumCustomizationPrice(selectedProduct.customizations);
-        return productSum + perUnitAdjustment;
-      }, 0);
-      return bundleSum + selectionTotal;
-    }, 0);
-  };
-
-  const joinCustomizationDetails = (customizations?: SelectedCustomization[], note?: string) => {
-    const details: string[] = [];
-    if (customizations && customizations.length > 0) {
-      customizations.forEach((customization) => {
-        customization.selected_options.forEach((option) => {
-          details.push(option.option_name);
-        });
-      });
-    }
-    if (note && note.trim()) {
-      details.push(`Note: ${note.trim()}`);
-    }
-    if (details.length === 0) return '';
-    return details.join(' / ');
-  };
-
   // Check if current payment method is an online platform
-  const isOnlinePayment = ['gofood', 'grabfood', 'shopeefood', 'tiktok'].includes(selectedPaymentMethod);
   const [cardNumberError, setCardNumberError] = useState<string>('');
   const cardNumberRef = useRef<HTMLInputElement>(null);
-
-  // Debug bank selection
-  useEffect(() => {
-    console.log('Bank ID changed:', bankId);
-    console.log('Bank search term:', bankSearchTerm);
-  }, [bankId, bankSearchTerm]);
+  const promotionOptions: Array<{ id: PromotionSelection; label: string }> = [
+    { id: 'percent_30', label: 'Diskon 30%' },
+    { id: 'percent_35', label: 'Diskon 35%' },
+    { id: 'percent_50', label: 'Diskon 50%' },
+    { id: 'custom', label: 'Custom Nominal' },
+    { id: 'free', label: 'FREE' }
+  ];
 
   // Auto-set pickup method for online orders
   useEffect(() => {
@@ -151,12 +113,10 @@ export default function PaymentModal({
   // Auto-set payment method based on selected online platform
   useEffect(() => {
     if (isOnline && selectedOnlinePlatform) {
-      console.log('🔧 Setting payment method to platform:', selectedOnlinePlatform);
       setSelectedPaymentMethod(selectedOnlinePlatform as PaymentMethod);
       setSelectedPickupMethod('take-away');
     } else if (!isOnline) {
       // Reset to default for non-online orders
-      console.log('🔧 Resetting payment method to cash for non-online order');
       setSelectedPaymentMethod('cash');
     }
   }, [isOnline, selectedOnlinePlatform]);
@@ -164,7 +124,6 @@ export default function PaymentModal({
   // Initialize payment method when modal opens for online orders
   useEffect(() => {
     if (isOpen && isOnline && selectedOnlinePlatform) {
-      console.log('🔧 Modal opened - initializing payment method to:', selectedOnlinePlatform);
       setSelectedPaymentMethod(selectedOnlinePlatform as PaymentMethod);
       setSelectedPickupMethod('take-away');
     }
@@ -208,8 +167,6 @@ export default function PaymentModal({
           });
         });
       }
-
-      itemPrice += calculateBundleCustomizationCharge(item.bundleSelections);
       
       return sum + (itemPrice * item.quantity);
     }, 0);
@@ -217,14 +174,116 @@ export default function PaymentModal({
 
   const originalPrice = calculateOrderTotal();
   const preferenceAmountValue = parseFloat(preferenceAmount) || 0;
-  const voucherDiscount = isVoucherEnabled ? (parseFloat(voucherAmount) || 0) : 0;
   const orderTotal = originalPrice + preferenceAmountValue;
+
+  const promotionDetails = (() => {
+    switch (promotionSelection) {
+      case 'percent_30':
+        return { type: 'percent' as const, value: 30, label: 'Diskon 30%', discount: Math.round(orderTotal * 0.3) };
+      case 'percent_35':
+        return { type: 'percent' as const, value: 35, label: 'Diskon 35%', discount: Math.round(orderTotal * 0.35) };
+      case 'percent_50':
+        return { type: 'percent' as const, value: 50, label: 'Diskon 50%', discount: Math.round(orderTotal * 0.5) };
+      case 'custom': {
+        const nominal = parseFloat(customVoucherAmount) || 0;
+        const effectiveNominal = Math.min(nominal, orderTotal);
+        const labelValue = effectiveNominal > 0
+          ? `Voucher Custom Rp ${effectiveNominal.toLocaleString('id-ID')}`
+          : 'Voucher Custom';
+        return { type: 'nominal' as const, value: effectiveNominal, label: labelValue, discount: effectiveNominal };
+      }
+      case 'free':
+        return { type: 'free' as const, value: null, label: 'Gratis 100%', discount: orderTotal };
+      default:
+        return { type: 'none' as const, value: null, label: '', discount: 0 };
+    }
+  })();
+
+  const voucherDiscount = Math.min(orderTotal, Math.max(0, promotionDetails.discount || 0));
   const finalTotal = Math.max(0, orderTotal - voucherDiscount); // Ensure total doesn't go negative
   const receivedAmount = parseFloat(amountReceived) || 0;
   const shortage = Math.max(0, finalTotal - receivedAmount);
+  const promotionLabel = promotionDetails.label;
+  const promotionType = promotionDetails.type;
+  const promotionValue = promotionDetails.value;
+  const isPromotionApplied = promotionSelection !== 'none' && voucherDiscount > 0;
+  const requiresCashInput = selectedPaymentMethod !== 'cl' && finalTotal > 0;
+  const promotionsDisabled = selectedPaymentMethod === 'cl';
+  const hasEnteredAmount = amountReceived !== '' && parseFloat(amountReceived) > 0;
+  const amountIsSufficient = !requiresCashInput || receivedAmount >= finalTotal;
+  const hasValidCustomPromotion = promotionsDisabled || promotionSelection !== 'custom' || ((promotionValue ?? 0) > 0);
+  const hasValidDiscount = promotionsDisabled || !(promotionSelection !== 'none' && voucherDiscount <= 0 && orderTotal > 0);
+  const voucherMethodValid = !(selectedPaymentMethod === 'voucher' && finalTotal > 0 && voucherDiscount <= 0);
+  const isConfirmDisabled =
+    isProcessing ||
+    !hasValidCustomPromotion ||
+    !hasValidDiscount ||
+    !voucherMethodValid ||
+    (requiresCashInput && (!hasEnteredAmount || !amountIsSufficient));
 
   const formatPrice = (price: number) => {
     return `Rp ${price.toLocaleString('id-ID')}`;
+  };
+
+  const updateAmountString = (currentAmount: string, input: string, clampTo?: number): string => {
+    const base = currentAmount || '';
+
+    if (input === 'clear') {
+      return '';
+    }
+
+    if (input === 'backspace') {
+      if (base.length <= 1) {
+        return '';
+      }
+      return base.slice(0, -1);
+    }
+
+    if (input === '00' || input === '000') {
+      const newAmountStr = base + input;
+      if (newAmountStr.length <= 9) {
+        if (clampTo !== undefined) {
+          const numeric = parseFloat(newAmountStr);
+          if (Number.isNaN(numeric) || numeric <= 0) {
+            return '';
+          }
+          const clamped = Math.min(clampTo, numeric);
+          return clamped.toFixed(0);
+        }
+        return newAmountStr;
+      }
+      return base;
+    }
+
+    if (/^\d$/.test(input)) {
+      if (base === '' || base === '0') {
+        if (clampTo !== undefined) {
+          const numeric = parseFloat(input);
+          if (Number.isNaN(numeric) || numeric <= 0) {
+            return '';
+          }
+          const clamped = Math.min(clampTo, numeric);
+          return clamped.toFixed(0);
+        }
+        return input;
+      }
+
+      const newAmountStr = base + input;
+      if (newAmountStr.length <= 9) {
+        if (clampTo !== undefined) {
+          const numeric = parseFloat(newAmountStr);
+          if (Number.isNaN(numeric) || numeric <= 0) {
+            return '';
+          }
+          const clamped = Math.min(clampTo, numeric);
+          return clamped.toFixed(0);
+        }
+        return newAmountStr;
+      }
+      return base;
+    }
+
+    return base;
   };
 
   const handleCardNumberChange = (value: string) => {
@@ -239,69 +298,70 @@ export default function PaymentModal({
   };
 
   const handleKeypadInput = (value: string) => {
-    // Target the currently active input field
-    let currentAmount = '';
-    let setAmount = setAmountReceived;
-    
-    if (activeInput === 'voucher') {
-      currentAmount = voucherAmount;
-      setAmount = setVoucherAmount;
-    } else if (activeInput === 'preference') {
-      currentAmount = preferenceAmount;
-      setAmount = setPreferenceAmount;
-    } else if (activeInput === 'customer') {
-      // When customer name is focused, don't handle numpad input
-      // Let the user type normally in the customer name field
+    if (activeInput === 'customer') {
+      // Let the user type manually for customer input
       return;
-    } else {
-      currentAmount = amountReceived;
-      setAmount = setAmountReceived;
     }
 
-    if (value === 'clear') {
-      setAmount('');
-    } else if (value === 'backspace') {
-      setAmount(prev => {
-        const currentStr = prev || '0';
-        if (currentStr.length <= 1) {
+    if (activeInput === 'voucher') {
+      if (promotionSelection !== 'custom') {
+        setPromotionSelection('custom');
+        setCustomVoucherAmount('');
+      }
+      setCustomVoucherAmount(prev => updateAmountString(prev, value, orderTotal));
+      return;
+    }
+
+    if (activeInput === 'preference') {
+      setPreferenceAmount(prev => updateAmountString(prev, value));
+      return;
+    }
+
+    setAmountReceived(prev => updateAmountString(prev, value));
+  };
+
+  const applyQuickIncrement = (increment: number) => {
+    if (activeInput === 'voucher') {
+      if (promotionSelection !== 'custom') {
+        setPromotionSelection('custom');
+        setCustomVoucherAmount('');
+      }
+      setCustomVoucherAmount(prev => {
+        const current = parseFloat(prev || '0');
+        const next = Math.min(orderTotal, current + increment);
+        if (next <= 0) {
           return '';
         }
-        return currentStr.slice(0, -1);
+        return next.toFixed(0);
       });
-    } else {
-      // Single digit input - append digit
-      if (['0', '1', '2', '3', '4', '5', '6', '7', '8', '9'].includes(value)) {
-        const currentStr = currentAmount || '0';
-        
-        // If current is 0, replace it with the new digit
-        if (currentStr === '0') {
-          setAmount(value);
-        } else {
-          // Append the digit
-          const newAmountStr = currentStr + value;
-          
-          // Limit to max 9 digits
-          if (newAmountStr.length <= 9) {
-            setAmount(newAmountStr);
-          }
-        }
-      } else if (value === '00') {
-        // 00 button - append 00
-        const currentStr = currentAmount || '';
-        const newAmountStr = currentStr + '00';
-        
-        if (newAmountStr.length <= 9) {
-          setAmount(newAmountStr);
-        }
-      } else if (value === '000') {
-        // 000 button - append 000
-        const currentStr = currentAmount || '';
-        const newAmountStr = currentStr + '000';
-        
-        if (newAmountStr.length <= 9) {
-          setAmount(newAmountStr);
-        }
+      return;
+    }
+
+    setAmountReceived(prev => {
+      const current = parseFloat(prev || '0');
+      const next = current + increment;
+      if (next <= 0) {
+        return '';
       }
+      return next.toFixed(0);
+    });
+    setActiveInput('amount');
+  };
+
+  const handlePromotionSelect = (selection: PromotionSelection) => {
+    if (selection === 'none' || promotionSelection === selection) {
+      setPromotionSelection('none');
+      setCustomVoucherAmount('');
+      setActiveInput('amount');
+      return;
+    }
+
+    setPromotionSelection(selection);
+    if (selection === 'custom') {
+      setActiveInput('voucher');
+    } else {
+      setActiveInput('amount');
+      setCustomVoucherAmount('');
     }
   };
 
@@ -312,15 +372,8 @@ export default function PaymentModal({
       return;
     }
 
-    // Validate amount received for all payment methods EXCEPT CL
-    if (selectedPaymentMethod !== 'cl' && (!amountReceived || parseFloat(amountReceived) <= 0)) {
-      alert('Masukkan jumlah yang diterima');
-      return;
-    }
-
     // Validate debit card information
     if (selectedPaymentMethod === 'debit') {
-      console.log('Bank validation - bankId:', bankId, 'type:', typeof bankId);
       if (!bankId || bankId.trim() === '') {
         alert('Pilih bank');
         return;
@@ -348,25 +401,32 @@ export default function PaymentModal({
       }
     }
 
-    // Check voucher validation if voucher is enabled
-    if (isVoucherEnabled) {
-      if (voucherDiscount <= 0) {
-        alert('Masukkan jumlah voucher yang valid');
+    // Validate promotion selection
+    if (promotionSelection === 'custom') {
+      if ((promotionValue ?? 0) <= 0) {
+        alert('Masukkan nominal voucher custom yang valid');
         return;
       }
-      if (voucherDiscount > orderTotal) {
-        alert('Jumlah voucher tidak boleh melebihi total pesanan');
+    }
+
+    if (promotionSelection !== 'none' && voucherDiscount <= 0 && orderTotal > 0) {
+      alert('Diskon voucher belum valid');
+      return;
+    }
+
+    if (selectedPaymentMethod === 'voucher' && finalTotal > 0 && voucherDiscount <= 0) {
+      alert('Gunakan diskon atau ubah metode pembayaran dari Voucher');
+      return;
+    }
+
+    if (requiresCashInput) {
+      if (!hasEnteredAmount) {
+        alert('Masukkan jumlah yang diterima');
         return;
       }
-      if (finalTotal > 0 && selectedPaymentMethod !== 'cl' && receivedAmount < finalTotal) {
+
+      if (!amountIsSufficient) {
         alert(`Jumlah yang diterima kurang. Kurang: ${formatPrice(finalTotal - receivedAmount)}`);
-        return;
-      }
-    } else {
-      // For payments without voucher, check received amount covers the full order total
-      // EXCEPT for CL payments which don't require cash payment
-      if (selectedPaymentMethod !== 'cl' && receivedAmount < orderTotal) {
-        alert(`Jumlah yang diterima kurang. Kurang: ${formatPrice(orderTotal - receivedAmount)}`);
         return;
       }
     }
@@ -382,32 +442,19 @@ export default function PaymentModal({
       // Prepare transaction data
       const clAccountId = selectedPaymentMethod === 'cl' ? parseInt(selectedClAccount.substring(2)) : null;
       const clAccountName = selectedPaymentMethod === 'cl' ? selectedClAccount.split(' - ')[1] : null;
-      
-      console.log('CL Account Debug:', {
-        selectedPaymentMethod,
-        selectedClAccount,
-        clAccountId,
-        clAccountName
-      });
-      
-      console.log('Transaction Data Debug:', {
-        payment_method: selectedPaymentMethod,
-        bank_id: selectedPaymentMethod === 'debit' ? parseInt(bankId) : null,
-        card_number: selectedPaymentMethod === 'debit' ? cardNumber : null,
-        bankId,
-        cardNumber
-      });
-
       // For online orders, force pickup_method to 'take-away'
       const finalPickupMethod = isOnline ? 'take-away' : selectedPickupMethod;
       
-      console.log('📝 Transaction data:', {
-        isOnline,
-        selectedOnlinePlatform,
-        payment_method: selectedPaymentMethod,
-        pickup_method: finalPickupMethod,
-        transaction_type: transactionType
-      });
+      const voucherTypeForPayload = promotionType;
+      const voucherValueForPayload =
+        promotionType === 'percent'
+          ? promotionValue ?? null
+          : promotionType === 'nominal'
+            ? voucherDiscount
+            : promotionType === 'free'
+              ? 100
+              : null;
+      const voucherLabelForPayload = promotionLabel || null;
       
       // Generate 19-digit numeric UUID instead of random UUID
       let transactionId = '';
@@ -415,7 +462,6 @@ export default function PaymentModal({
         const uuidResult = await window.electronAPI.generateNumericUuid(14); // business_id
         if (uuidResult?.success && uuidResult?.uuid) {
           transactionId = uuidResult.uuid;
-          console.log('✅ Generated numeric UUID:', transactionId);
         } else {
           // Fallback to old UUID if generation fails
           transactionId = generateTransactionId();
@@ -434,6 +480,9 @@ export default function PaymentModal({
         pickup_method: finalPickupMethod,
         total_amount: orderTotal,
         voucher_discount: voucherDiscount,
+        voucher_type: voucherTypeForPayload,
+        voucher_value: voucherValueForPayload,
+        voucher_label: voucherLabelForPayload,
         final_amount: finalTotal,
         amount_received: receivedAmount,
         change_amount: receivedAmount - finalTotal,
@@ -470,8 +519,13 @@ export default function PaymentModal({
           let itemPrice = basePrice;
           
           // Add customization prices
-          itemPrice += sumCustomizationPrice(item.customizations);
-          itemPrice += calculateBundleCustomizationCharge(item.bundleSelections);
+          if (item.customizations) {
+            item.customizations.forEach(customization => {
+              customization.selected_options.forEach(option => {
+                itemPrice += option.price_adjustment;
+              });
+            });
+          }
           
           return {
             product_id: item.product.id,
@@ -514,7 +568,6 @@ export default function PaymentModal({
             }
 
             onlineResult = await response.json();
-            console.log('✅ Transaction saved to online database:', onlineResult);
           } catch (error) {
             console.error('❌ Failed to save to online database:', error);
             // Continue to offline save even if online save fails
@@ -530,7 +583,6 @@ export default function PaymentModal({
             const paymentMethod = paymentMethods.find((pm: any) => pm.code === selectedPaymentMethod);
             if (paymentMethod) {
               paymentMethodId = paymentMethod.id;
-              console.log('✅ Found payment method ID:', paymentMethodId, 'for code:', selectedPaymentMethod);
             } else {
               console.warn('⚠️ Payment method not found in local DB, defaulting to cash (ID: 1)');
             }
@@ -547,6 +599,9 @@ export default function PaymentModal({
             pickup_method: transactionData.pickup_method,
             total_amount: transactionData.total_amount,
             voucher_discount: transactionData.voucher_discount,
+            voucher_type: transactionData.voucher_type,
+            voucher_value: transactionData.voucher_value,
+            voucher_label: transactionData.voucher_label,
             final_amount: transactionData.final_amount,
             amount_received: transactionData.amount_received,
             change_amount: transactionData.change_amount,
@@ -588,10 +643,13 @@ export default function PaymentModal({
             let itemPrice = basePrice;
 
             // Add customization prices
-            itemPrice += sumCustomizationPrice(item.customizations);
-            itemPrice += calculateBundleCustomizationCharge(item.bundleSelections);
-            
-            console.log(`📝 [OFFLINE] Saving item: ${item.product.nama}, customNote: "${item.customNote}"`);
+            if (item.customizations) {
+              item.customizations.forEach(customization => {
+                customization.selected_options.forEach(option => {
+                  itemPrice += option.price_adjustment;
+                });
+              });
+            }
             
             return {
               id: generateTransactionItemId(), // Generate UUID for transaction item
@@ -611,7 +669,6 @@ export default function PaymentModal({
           await (window as any).electronAPI.localDbUpsertTransactions([sqliteTransactionData]);
           await (window as any).electronAPI.localDbUpsertTransactionItems(transactionItems);
           
-          console.log('✅ Transaction saved to offline database:', sqliteTransactionData);
           offlineResult = { success: true, transaction: sqliteTransactionData };
         } else {
           throw new Error('Offline database not available');
@@ -633,7 +690,6 @@ export default function PaymentModal({
           const counterResult = await window.electronAPI.getPrinterCounter('receiptPrinter', 14, true); // true = increment
           if (counterResult?.success) {
             printer1Counter = counterResult.counter;
-            console.log(`✅ Printer 1 counter: ${printer1Counter}`);
           }
         }
         
@@ -674,8 +730,13 @@ export default function PaymentModal({
           let itemPrice = basePrice;
           
           // Add customization prices
-          itemPrice += sumCustomizationPrice(item.customizations);
-          itemPrice += calculateBundleCustomizationCharge(item.bundleSelections);
+          if (item.customizations) {
+            item.customizations.forEach(customization => {
+              customization.selected_options.forEach(option => {
+                itemPrice += option.price_adjustment;
+              });
+            });
+          }
           
           // Format item name with customizations and custom note if any
           let itemName = item.product.nama;
@@ -706,12 +767,10 @@ export default function PaymentModal({
           if (item.bundleSelections && item.bundleSelections.length > 0) {
             item.bundleSelections.forEach(bundleSel => {
               bundleSel.selectedProducts.forEach(sp => {
-                const totalQty = item.quantity;
-                const customizationText = joinCustomizationDetails(sp.customizations, sp.customNote);
-                const subItemName = `  └ ${sp.product.nama}` +
-                  (customizationText ? ` (${customizationText})` : '');
+                // Multiply by bundle quantity and selected product quantity
+                const totalQty = item.quantity * sp.quantity;
                 receiptItems.push({
-                  name: subItemName,
+                  name: `  └ ${sp.product.nama}${sp.quantity > 1 ? ` (×${sp.quantity})` : ''}`,
                   quantity: totalQty,
                   price: 0,
                   total_price: 0
@@ -724,7 +783,7 @@ export default function PaymentModal({
         // Append voucher discount as a negative line on the receipt when applied
         if (voucherDiscount > 0) {
           receiptItems.push({
-            name: 'Diskon Voucher',
+            name: promotionLabel ? `Diskon Voucher (${promotionLabel})` : 'Diskon Voucher',
             quantity: 1,
             price: -voucherDiscount,
             total_price: -voucherDiscount
@@ -766,10 +825,8 @@ export default function PaymentModal({
         // Print to Printer 1 if selected
         if (shouldPrintReceipt) {
           try {
-            console.log('📄 Printing to Printer 1, counter:', printer1Counter);
             const printResult = await window.electronAPI?.printReceipt?.(printData);
             if (printResult?.success) {
-              console.log('✅ Printer 1 printed successfully');
               try {
                 await window.electronAPI?.logPrinter1Print?.(transactionData.id, printer1Counter);
               } catch (e) {
@@ -791,16 +848,13 @@ export default function PaymentModal({
               const counterResult = await window.electronAPI.getPrinterCounter('receiptizePrinter', 14, true);
               if (counterResult?.success) {
                 printer2Counter = counterResult.counter;
-                console.log(`✅ Printer 2 counter: ${printer2Counter}`);
               }
             }
             await window.electronAPI?.logPrinter2Print?.(transactionData.id, printer2Counter, 'manual');
             const printer2Data = { ...printData, printerType: 'receiptizePrinter', receiptNumber: transactionData.id, printer2Counter } as any;
             await new Promise(r => setTimeout(r, 500));
-            console.log('📄 Printing to Printer 2, counter:', printer2Counter);
             const print2Result = await window.electronAPI?.printReceipt?.(printer2Data);
             if (print2Result?.success) {
-              console.log('✅ Printer 2 printed successfully (manual)');
             } else {
               console.error('❌ Printer 2 failed:', print2Result?.error);
             }
@@ -901,8 +955,8 @@ export default function PaymentModal({
               // For bundle products, print labels for each selected product
               for (const bundleSel of item.bundleSelections!) {
                 for (const selectedProduct of bundleSel.selectedProducts) {
-                  const totalQty = item.quantity;
-                  const customizationText = joinCustomizationDetails(selectedProduct.customizations, selectedProduct.customNote);
+                  // Calculate total quantity (bundle quantity × selected product quantity)
+                  const totalQty = item.quantity * selectedProduct.quantity;
                   
                   // Print one label per unit of each selected product
                   for (let qty = 0; qty < totalQty; qty++) {
@@ -916,7 +970,7 @@ export default function PaymentModal({
                       totalItems: totalItems,
                       pickupMethod: finalPickupMethod,
                       productName: selectedProduct.product.nama,
-                      customizations: customizationText,
+                      customizations: '', // Bundle selected products don't have customizations
                       customNote: '', 
                       orderTime: transactionData.created_at,
                       labelContinuation: undefined
@@ -925,9 +979,7 @@ export default function PaymentModal({
                     // Print label with delay between prints
                     await new Promise(resolve => setTimeout(resolve, 300));
                     const labelResult = await window.electronAPI?.printLabel?.(labelData);
-                    if (labelResult?.success) {
-                      console.log(`✅ Bundle label ${currentItemNumber}/${totalItems} for ${selectedProduct.product.nama} printed successfully`);
-                    } else {
+                    if (!labelResult?.success) {
                       console.error(`❌ Bundle label print failed:`, labelResult?.error);
                     }
                   }
@@ -982,9 +1034,7 @@ export default function PaymentModal({
                   // Print label with delay between prints
                   await new Promise(resolve => setTimeout(resolve, 300));
                   const labelResult = await window.electronAPI?.printLabel?.(labelData);
-                  if (labelResult?.success) {
-                    console.log(`✅ Label ${currentItemNumber}/${totalItems}${isMultiLabel ? ` (part ${labelNumber}/${totalLabels})` : ''} printed successfully`);
-                  } else {
+                  if (!labelResult?.success) {
                     console.error(`❌ Label print failed:`, labelResult?.error);
                   }
                 }
@@ -1048,7 +1098,6 @@ export default function PaymentModal({
           async () => {
             if (typeof window !== 'undefined' && (window as any).electronAPI) {
               const banks = await (window as any).electronAPI.localDbGetBanks();
-              console.log('📱 [OFFLINE] Fetched banks from local database:', banks.length);
               return banks;
             } else {
               throw new Error('Offline database not available');
@@ -1057,7 +1106,6 @@ export default function PaymentModal({
         );
         
         setBanks(banksData);
-        console.log('🏦 Banks loaded:', banksData.length);
       } catch (error) {
         console.error('Failed to fetch banks:', error);
         setBanks([]); // Set empty array as fallback
@@ -1092,14 +1140,14 @@ export default function PaymentModal({
   useEffect(() => {
     if (isOpen) {
       setAmountReceived('');
-    setVoucherAmount('');
-    setPreferenceAmount('');
-    setCustomerName('');
-    setIsVoucherEnabled(false);
-    setBankId('');
-    setCardNumber('');
-    setSelectedClAccount('');
-    setBankSearchTerm('');
+      setCustomVoucherAmount('');
+      setPreferenceAmount('');
+      setCustomerName('');
+      setPromotionSelection('none');
+      setBankId('');
+      setCardNumber('');
+      setSelectedClAccount('');
+      setBankSearchTerm('');
     setShowBankDropdown(false);
       // Don't reset payment method if it's an online order with a selected platform
       if (!isOnline || !selectedOnlinePlatform) {
@@ -1137,6 +1185,92 @@ export default function PaymentModal({
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-8 h-full">
             {/* Left Side - Bill Details and Pickup Method */}
             <div className="space-y-8">
+              {/* Customer Name and Pickup Method */}
+              <div className="bg-white rounded-xl p-4 border border-gray-200 shadow-sm">
+                <div className="flex gap-4 items-center">
+                  <div className="w-1/2 relative z-10">
+                    <input
+                      id="customer-name-input"
+                      type="text"
+                      value={customerName}
+                      onChange={(e) => {
+                        setCustomerName(e.target.value);
+                      }}
+                      onFocus={() => {
+                        setActiveInput('customer');
+                      }}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setActiveInput('customer');
+                        // Ensure the input is focused
+                        setTimeout(() => {
+                          const input = document.getElementById('customer-name-input') as HTMLInputElement;
+                          input?.focus();
+                        }, 10);
+                      }}
+                      onKeyDown={(e) => {
+                        // Prevent numpad from interfering
+                        e.stopPropagation();
+                      }}
+                      className={`w-full p-3 pr-10 text-base font-semibold border-2 rounded-lg text-gray-800 transition-all duration-300 cursor-text ${
+                        activeInput === 'customer' 
+                          ? 'border-purple-400 bg-purple-50 shadow-lg shadow-purple-200' 
+                          : 'border-gray-200 bg-gray-50 hover:bg-gray-100'
+                      }`}
+                      placeholder="Nama Pelanggan"
+                      autoComplete="off"
+                    />
+                    <button
+                      disabled
+                      className="absolute right-2 top-1/2 transform -translate-y-1/2 px-2 py-1 bg-gray-200 rounded cursor-not-allowed opacity-50"
+                      title="Contact Book (Coming Soon)"
+                    >
+                      <span className="text-xs font-medium text-black">👥</span>
+                    </button>
+                  </div>
+                  
+                  {/* Pickup Method Toggle or Display */}
+                  {isOnline ? (
+                    <div className="w-1/2 bg-green-50 border-2 border-green-300 rounded-lg p-3">
+                      <div className="flex items-center justify-between">
+                        <span className="text-xs font-semibold text-green-800">Pickup:</span>
+                        <span className="text-xs font-bold text-green-900 uppercase">TAKE AWAY</span>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="w-1/2 relative bg-gray-200 rounded-lg p-0.5 flex h-[52px]">
+                      {/* Sliding Background */}
+                      <div
+                        className={`absolute top-0.5 bottom-0.5 left-0.5 w-[calc(50%-0.125rem)] bg-green-100 rounded-lg shadow-sm transition-transform duration-300 ease-in-out ${
+                          selectedPickupMethod === 'dine-in' ? 'translate-x-0' : 'translate-x-full'
+                        }`}
+                      ></div>
+                      
+                      <button
+                        onClick={() => setSelectedPickupMethod('dine-in')}
+                        className={`relative z-10 flex-1 py-1 px-3 rounded-md font-medium text-xs transition-colors duration-300 ${
+                          selectedPickupMethod === 'dine-in'
+                            ? 'text-teal-600'
+                            : 'text-gray-600 hover:text-gray-800'
+                        }`}
+                      >
+                        DINE IN
+                      </button>
+                      
+                      <button
+                        onClick={() => setSelectedPickupMethod('take-away')}
+                        className={`relative z-10 flex-1 py-1 px-3 rounded-md font-medium text-xs transition-colors duration-300 ${
+                          selectedPickupMethod === 'take-away'
+                            ? 'text-teal-600'
+                            : 'text-gray-600 hover:text-gray-800'
+                        }`}
+                      >
+                        TAKE AWAY
+                      </button>
+                    </div>
+                  )}
+                </div>
+              </div>
               {/* Bill Details */}
               <div className="bg-gray-50 rounded-xl p-6">
                 <h3 className="text-lg font-semibold text-gray-800 mb-4">Rincian Tagihan</h3>
@@ -1163,8 +1297,13 @@ export default function PaymentModal({
                     </div>
                   </div>
                   {voucherDiscount > 0 && (
-                    <div className="flex justify-between">
-                      <span className="text-green-600">Diskon Voucher</span>
+                    <div className="flex justify-between items-start">
+                      <div className="flex flex-col">
+                        <span className="text-green-600">Diskon Voucher</span>
+                        {promotionLabel && (
+                          <span className="text-[11px] text-green-500 font-medium">{promotionLabel}</span>
+                        )}
+                      </div>
                       <span className="font-medium text-green-600">-{formatPrice(voucherDiscount)}</span>
                     </div>
                   )}
@@ -1245,7 +1384,6 @@ export default function PaymentModal({
                                   onClick={(e) => {
                                     e.preventDefault();
                                     e.stopPropagation();
-                                    console.log('Bank selected:', bank.bank_name, 'ID:', bank.id);
                                     setBankId(bank.id.toString());
                                     setBankSearchTerm(bank.bank_name);
                                     setShowBankDropdown(false);
@@ -1273,7 +1411,6 @@ export default function PaymentModal({
                                   onClick={(e) => {
                                     e.preventDefault();
                                     e.stopPropagation();
-                                    console.log('Bank selected:', bank.bank_name, 'ID:', bank.id);
                                     setBankId(bank.id.toString());
                                     setBankSearchTerm(bank.bank_name);
                                     setShowBankDropdown(false);
@@ -1355,94 +1492,6 @@ export default function PaymentModal({
             {/* Right Side - Keypad */}
             <div className="space-y-4">
               {/* Customer Name Input and Pickup Toggle */}
-              <div className="flex gap-4 items-center">
-                <div className="w-1/2 relative z-10">
-                  <input
-                    id="customer-name-input"
-                    type="text"
-                    value={customerName}
-                    onChange={(e) => {
-                      console.log('Customer name changed:', e.target.value);
-                      setCustomerName(e.target.value);
-                    }}
-                    onFocus={() => {
-                      console.log('Customer name focused');
-                      setActiveInput('customer');
-                    }}
-                    onClick={(e) => {
-                      console.log('Customer name clicked');
-                      e.stopPropagation();
-                      setActiveInput('customer');
-                      // Ensure the input is focused
-                      setTimeout(() => {
-                        const input = document.getElementById('customer-name-input') as HTMLInputElement;
-                        input?.focus();
-                      }, 10);
-                    }}
-                    onKeyDown={(e) => {
-                      console.log('Customer name keydown:', e.key);
-                      // Prevent numpad from interfering
-                      e.stopPropagation();
-                    }}
-                    className={`w-full p-3 pr-10 text-base font-semibold border-2 rounded-lg text-gray-800 transition-all duration-300 cursor-text ${
-                      activeInput === 'customer' 
-                        ? 'border-purple-400 bg-purple-50 shadow-lg shadow-purple-200' 
-                        : 'border-gray-200 bg-gray-50 hover:bg-gray-100'
-                    }`}
-                    placeholder="Nama Pelanggan"
-                    autoComplete="off"
-                  />
-                  <button
-                    disabled
-                    className="absolute right-2 top-1/2 transform -translate-y-1/2 px-2 py-1 bg-gray-200 rounded cursor-not-allowed opacity-50"
-                    title="Contact Book (Coming Soon)"
-                  >
-                    <span className="text-xs font-medium text-black">👥</span>
-                  </button>
-                </div>
-                
-                {/* Pickup Method Toggle or Display */}
-                {isOnline ? (
-                  <div className="w-1/2 bg-green-50 border-2 border-green-300 rounded-lg p-3">
-                    <div className="flex items-center justify-between">
-                      <span className="text-xs font-semibold text-green-800">Pickup:</span>
-                      <span className="text-xs font-bold text-green-900 uppercase">TAKE AWAY</span>
-                    </div>
-                  </div>
-                ) : (
-                  <div className="w-1/2 relative bg-gray-200 rounded-lg p-0.5 flex h-[52px]">
-                    {/* Sliding Background */}
-                    <div
-                      className={`absolute top-0.5 bottom-0.5 left-0.5 w-[calc(50%-0.125rem)] bg-green-100 rounded-lg shadow-sm transition-transform duration-300 ease-in-out ${
-                        selectedPickupMethod === 'dine-in' ? 'translate-x-0' : 'translate-x-full'
-                      }`}
-                    ></div>
-                    
-                    <button
-                      onClick={() => setSelectedPickupMethod('dine-in')}
-                      className={`relative z-10 flex-1 py-1 px-3 rounded-md font-medium text-xs transition-colors duration-300 ${
-                        selectedPickupMethod === 'dine-in'
-                          ? 'text-teal-600'
-                          : 'text-gray-600 hover:text-gray-800'
-                      }`}
-                    >
-                      DINE IN
-                    </button>
-                    
-                    <button
-                      onClick={() => setSelectedPickupMethod('take-away')}
-                      className={`relative z-10 flex-1 py-1 px-3 rounded-md font-medium text-xs transition-colors duration-300 ${
-                        selectedPickupMethod === 'take-away'
-                          ? 'text-teal-600'
-                          : 'text-gray-600 hover:text-gray-800'
-                      }`}
-                    >
-                      TAKE AWAY
-                    </button>
-                  </div>
-                )}
-            </div>
-
               {/* Payment Method Selection */}
               <div>
                 <h3 className="text-sm font-semibold text-gray-800 mb-2">Pilih Metode Pembayaran</h3>
@@ -1515,9 +1564,10 @@ export default function PaymentModal({
                         setAmountReceived('');
                         // Reset active input since amount field is disabled
                         setActiveInput('amount');
-                        // Auto-disable voucher when CL is selected
-                        if (isVoucherEnabled) {
-                          setIsVoucherEnabled(false);
+                        // Clear promotion when CL is selected
+                        if (promotionSelection !== 'none') {
+                          setPromotionSelection('none');
+                          setCustomVoucherAmount('');
                         }
                       }}
                       className={`flex-1 py-2 rounded border transition-all duration-200 ${
@@ -1528,45 +1578,83 @@ export default function PaymentModal({
                     >
                       <span className="font-medium text-xs">CL</span>
                     </button>
-                    
-                    <button
-                      onClick={() => setIsVoucherEnabled(!isVoucherEnabled)}
-                      disabled={selectedPaymentMethod === 'cl'}
-                      className={`flex-1 py-2 rounded border transition-all duration-200 ${
-                        selectedPaymentMethod === 'cl'
-                          ? 'bg-gray-100 border-gray-300 text-gray-500 cursor-not-allowed opacity-50'
-                          : isVoucherEnabled
-                          ? 'bg-green-100 border-green-400 text-green-800'
-                          : 'bg-gray-50 border-gray-200 text-gray-700 hover:bg-gray-100'
-                      }`}
-                    >
-                      <span className="font-medium text-xs">Voucher {isVoucherEnabled ? 'ON' : 'OFF'}</span>
-                    </button>
-                    
-                    {/* Voucher Amount Input - Inline with payment buttons */}
-                    <div className="flex-[1.5]">
-                      <input
-                        type="text"
-                        value={voucherAmount ? `Rp ${parseFloat(voucherAmount).toLocaleString('id-ID')}` : ''}
-                        readOnly
-                        disabled={!isVoucherEnabled}
-                        onClick={() => isVoucherEnabled && setActiveInput('voucher')}
-                        className={`w-full h-[41px] px-2 text-xs font-semibold border rounded transition-all duration-300 ${
-                          !isVoucherEnabled
-                            ? 'border-gray-300 bg-gray-100 text-gray-500 cursor-not-allowed opacity-50'
-                            : activeInput === 'voucher' 
-                            ? 'border-green-400 bg-green-50 shadow-lg shadow-green-200 animate-pulse text-gray-800 cursor-pointer' 
-                            : 'border-gray-200 bg-gray-50 hover:bg-gray-100 text-gray-800 cursor-pointer'
-                        }`}
-                        placeholder="Rp 0"
-                      />
-                    </div>
                     </>
                     )}
                   </div>
 
                 </div>
               </div>
+              {!isOnline && (
+                <div className={`space-y-2 ${promotionsDisabled ? 'opacity-60' : ''}`}>
+                  <div className="flex flex-wrap gap-2 mt-3">
+                    {promotionOptions.map(option => (
+                      <button
+                        key={option.id}
+                        onClick={() => !promotionsDisabled && handlePromotionSelect(option.id)}
+                        disabled={promotionsDisabled}
+                        className={`px-3 py-2 rounded-lg border text-xs font-medium transition-colors ${
+                          promotionSelection === option.id && !promotionsDisabled
+                            ? 'bg-green-100 border-green-400 text-green-800 shadow-sm'
+                            : promotionsDisabled
+                              ? 'bg-gray-100 border-gray-200 text-gray-400 cursor-not-allowed'
+                              : 'bg-white border-gray-300 text-gray-700 hover:bg-gray-100'
+                        }`}
+                      >
+                        {option.label}
+                      </button>
+                    ))}
+                    {promotionSelection !== 'none' && (
+                      <button
+                        onClick={() => !promotionsDisabled && handlePromotionSelect('none')}
+                        disabled={promotionsDisabled}
+                        className={`px-3 py-2 rounded-lg border text-xs font-medium ${
+                          promotionsDisabled
+                            ? 'bg-gray-100 border-gray-200 text-gray-400 cursor-not-allowed'
+                            : 'bg-white border-gray-200 text-gray-500 hover:bg-gray-100'
+                        }`}
+                      >
+                        Hapus Promo
+                      </button>
+                    )}
+                  </div>
+                  {promotionsDisabled && (
+                    <p className="text-[11px] text-gray-500">
+                      Promo tidak tersedia untuk pembayaran City Ledger.
+                    </p>
+                  )}
+                  {!promotionsDisabled && promotionSelection === 'custom' && (
+                    <div className="max-w-xs">
+                      <label className="block text-xs font-medium text-gray-600 mb-1">
+                        Nominal Voucher Custom
+                      </label>
+                      <input
+                        type="text"
+                        value={
+                          promotionValue && promotionValue > 0
+                            ? `Rp ${promotionValue.toLocaleString('id-ID')}`
+                            : ''
+                        }
+                        readOnly
+                        onClick={() => setActiveInput('voucher')}
+                        className={`w-full px-3 py-2 text-sm font-semibold border-2 rounded-lg transition-all duration-300 ${
+                          activeInput === 'voucher'
+                            ? 'border-green-400 bg-green-50 shadow-lg shadow-green-200 animate-pulse text-gray-800 cursor-pointer'
+                            : 'border-gray-200 bg-white hover:bg-gray-50 text-gray-800 cursor-pointer'
+                        }`}
+                        placeholder="Rp 0"
+                      />
+                      <p className="text-[11px] text-gray-500 mt-1">
+                        Gunakan keypad di kanan untuk memasukkan nominal voucher.
+                      </p>
+                    </div>
+                  )}
+                  {!promotionsDisabled && isPromotionApplied && promotionLabel && (
+                    <p className="text-xs text-green-700 font-medium">
+                      Promo terpilih: {promotionLabel}
+                    </p>
+                  )}
+                </div>
+              )}
 
               {/* Amount Input and Shortage */}
               <div>
@@ -1615,43 +1703,19 @@ export default function PaymentModal({
                       💰 Uang Pas
                     </button>
                     <button
-                        onClick={() => {
-                          if (activeInput === 'voucher') {
-                            setVoucherAmount(prev => (parseFloat(prev || '0') + 20000).toString());
-                          } else {
-                            // Default to amount received for all other cases (amount, customer, preference, etc.)
-                            setAmountReceived(prev => (parseFloat(prev || '0') + 20000).toString());
-                            setActiveInput('amount'); // Set focus back to amount
-                          }
-                        }}
+                        onClick={() => applyQuickIncrement(20000)}
                       className="p-2 bg-blue-100 hover:bg-blue-200 text-blue-800 rounded-md text-xs font-medium transition-colors"
                     >
                       +Rp 20.000
                     </button>
                     <button
-                        onClick={() => {
-                          if (activeInput === 'voucher') {
-                            setVoucherAmount(prev => (parseFloat(prev || '0') + 50000).toString());
-                          } else {
-                            // Default to amount received for all other cases (amount, customer, preference, etc.)
-                            setAmountReceived(prev => (parseFloat(prev || '0') + 50000).toString());
-                            setActiveInput('amount'); // Set focus back to amount
-                          }
-                        }}
+                        onClick={() => applyQuickIncrement(50000)}
                       className="p-2 bg-blue-100 hover:bg-blue-200 text-blue-800 rounded-md text-xs font-medium transition-colors"
                     >
                       +Rp 50.000
                     </button>
                     <button
-                        onClick={() => {
-                          if (activeInput === 'voucher') {
-                            setVoucherAmount(prev => (parseFloat(prev || '0') + 100000).toString());
-                          } else {
-                            // Default to amount received for all other cases (amount, customer, preference, etc.)
-                            setAmountReceived(prev => (parseFloat(prev || '0') + 100000).toString());
-                            setActiveInput('amount'); // Set focus back to amount
-                          }
-                        }}
+                        onClick={() => applyQuickIncrement(100000)}
                       className="p-2 bg-blue-100 hover:bg-blue-200 text-blue-800 rounded-md text-xs font-medium transition-colors"
                     >
                       +Rp 100.000
@@ -1664,24 +1728,24 @@ export default function PaymentModal({
 
                 {/* Numeric Keypad */}
                 <div className="grid grid-cols-4 gap-2">
-                  {/* Row 1: 1, 2, 3, backspace */}
+                  {/* Row 1: 7, 8, 9, backspace */}
                   <button
-                    onClick={() => handleKeypadInput('1')}
+                    onClick={() => handleKeypadInput('7')}
                     className="p-3 bg-white border-2 border-gray-200 rounded-lg text-base font-semibold text-gray-800 hover:bg-gray-50 transition-colors"
                   >
-                    1
+                    7
                   </button>
                   <button
-                    onClick={() => handleKeypadInput('2')}
+                    onClick={() => handleKeypadInput('8')}
                     className="p-3 bg-white border-2 border-gray-200 rounded-lg text-base font-semibold text-gray-800 hover:bg-gray-50 transition-colors"
                   >
-                    2
+                    8
                   </button>
                   <button
-                    onClick={() => handleKeypadInput('3')}
+                    onClick={() => handleKeypadInput('9')}
                     className="p-3 bg-white border-2 border-gray-200 rounded-lg text-base font-semibold text-gray-800 hover:bg-gray-50 transition-colors"
                   >
-                    3
+                    9
                   </button>
                   <button
                     onClick={() => handleKeypadInput('backspace')}
@@ -1690,7 +1754,7 @@ export default function PaymentModal({
                     <Delete size={16} />
                   </button>
                   
-                  {/* Row 2: 4, 5, 6, Hapus Semu */}
+                  {/* Row 2: 4, 5, 6, Hapus Semua */}
                   <button
                     onClick={() => handleKeypadInput('4')}
                     className="p-3 bg-white border-2 border-gray-200 rounded-lg text-base font-semibold text-gray-800 hover:bg-gray-50 transition-colors"
@@ -1716,35 +1780,30 @@ export default function PaymentModal({
                     Hapus Semua
                   </button>
                   
-                  {/* Row 3: 7, 8, 9, Konfirmasi (spans 2 rows) */}
+                  {/* Row 3: 1, 2, 3, Konfirmasi (spans 2 rows) */}
                   <button
-                    onClick={() => handleKeypadInput('7')}
+                    onClick={() => handleKeypadInput('1')}
                     className="p-3 bg-white border-2 border-gray-200 rounded-lg text-base font-semibold text-gray-800 hover:bg-gray-50 transition-colors"
                   >
-                    7
+                    1
                   </button>
                   <button
-                    onClick={() => handleKeypadInput('8')}
+                    onClick={() => handleKeypadInput('2')}
                     className="p-3 bg-white border-2 border-gray-200 rounded-lg text-base font-semibold text-gray-800 hover:bg-gray-50 transition-colors"
                   >
-                    8
+                    2
                   </button>
                   <button
-                    onClick={() => handleKeypadInput('9')}
+                    onClick={() => handleKeypadInput('3')}
                     className="p-3 bg-white border-2 border-gray-200 rounded-lg text-base font-semibold text-gray-800 hover:bg-gray-50 transition-colors"
                   >
-                    9
+                    3
                   </button>
                   <button
                     onClick={handleConfirmPayment}
-                    disabled={isProcessing || 
-                      (selectedPaymentMethod !== 'cl' && (!amountReceived || parseFloat(amountReceived) <= 0 || receivedAmount < finalTotal)) ||
-                      (selectedPaymentMethod === 'voucher' && (voucherDiscount <= 0 || voucherDiscount > orderTotal))
-                    }
+                    disabled={isConfirmDisabled}
                     className={`row-span-2 p-2 rounded-lg font-medium text-xs transition-all duration-200 ${
-                      isProcessing || 
-                      (selectedPaymentMethod !== 'cl' && (!amountReceived || parseFloat(amountReceived) <= 0 || receivedAmount < finalTotal)) ||
-                      (selectedPaymentMethod === 'voucher' && (voucherDiscount <= 0 || voucherDiscount > orderTotal))
+                      isConfirmDisabled
                         ? 'bg-gray-400 cursor-not-allowed'
                         : 'bg-green-500 hover:bg-green-600 text-white'
                     }`}
@@ -1798,6 +1857,9 @@ export default function PaymentModal({
         amountReceived={receivedAmount}
         change={receivedAmount - finalTotal}
         voucherDiscount={voucherDiscount}
+        promotionLabel={promotionLabel}
+        promotionType={promotionType}
+        promotionValue={promotionValue ?? null}
         finalTotal={finalTotal}
         isProcessing={isProcessing}
         printTarget={printTarget}

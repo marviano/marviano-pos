@@ -37,6 +37,9 @@ interface Transaction {
   created_at: string;
   user_name?: string;
   business_name?: string;
+  voucher_type?: 'none' | 'percent' | 'nominal' | 'free';
+  voucher_value?: number | null;
+  voucher_label?: string | null;
 }
 
 interface TransactionItem {
@@ -70,6 +73,9 @@ interface TransactionDetail {
   cl_account_name?: string | null;
   created_at: string;
   items: TransactionItem[];
+  voucher_type?: 'none' | 'percent' | 'nominal' | 'free';
+  voucher_value?: number | null;
+  voucher_label?: string | null;
 }
 
 interface TransactionListProps {
@@ -266,7 +272,13 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
           throw new Error('Failed to fetch transactions');
         }
         const data = await response.json();
-        transactionsData = data.transactions || [];
+        transactionsData = (data.transactions || []).map((tx: any) => ({
+          ...tx,
+          voucher_value: tx.voucher_value !== undefined && tx.voucher_value !== null ? parseFloat(tx.voucher_value) : null,
+          voucher_discount: tx.voucher_discount !== undefined && tx.voucher_discount !== null ? parseFloat(tx.voucher_discount) : 0,
+          voucher_type: tx.voucher_type || 'none',
+          voucher_label: tx.voucher_label || null
+        }));
       } else {
         // Fetch from offline database only
         if (typeof window === 'undefined' || !(window as any).electronAPI) {
@@ -318,6 +330,9 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
             pickup_method: tx.pickup_method,
             total_amount: tx.total_amount,
             voucher_discount: tx.voucher_discount || 0,
+            voucher_type: tx.voucher_type || 'none',
+            voucher_value: tx.voucher_value !== undefined && tx.voucher_value !== null ? Number(tx.voucher_value) : null,
+            voucher_label: tx.voucher_label || null,
             final_amount: tx.final_amount,
             amount_received: tx.amount_received,
             change_amount: tx.change_amount || 0,
@@ -425,7 +440,8 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
         transaction.user_name?.toLowerCase().includes(searchTerm.toLowerCase()) ||
         transaction.customer_name?.toLowerCase().includes(searchTerm.toLowerCase()) ||
         transaction.payment_method.toLowerCase().includes(searchTerm.toLowerCase()) ||
-        transaction.receipt_number?.toString().includes(searchTerm);
+        transaction.receipt_number?.toString().includes(searchTerm) ||
+        transaction.voucher_label?.toLowerCase().includes(searchTerm.toLowerCase());
       
       const matchesFilter = filterMethod === 'all' || transaction.payment_method === filterMethod;
       
@@ -931,9 +947,16 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
                       </td>
                       <td className="px-6 py-4 whitespace-nowrap">
                         {transaction.voucher_discount > 0 ? (
-                          <span className="text-xs text-green-600 font-medium">
-                            -{formatPrice(transaction.voucher_discount)}
-                          </span>
+                          <div className="flex flex-col">
+                            <span className="text-xs text-green-600 font-medium">
+                              -{formatPrice(transaction.voucher_discount)}
+                            </span>
+                            {transaction.voucher_label && (
+                              <span className="text-[10px] text-green-500 font-medium">
+                                {transaction.voucher_label}
+                              </span>
+                            )}
+                          </div>
                         ) : (
                           <span className="text-xs text-gray-400">-</span>
                         )}

@@ -5,6 +5,13 @@ import * as fs from 'fs';
 import { PrinterManagementService } from './printerManagement';
 
 const isDev = process.env.NODE_ENV === 'development' || !app.isPackaged;
+const shouldLog = process.env.POS_DEBUG_LOGS === 'true';
+
+if (!shouldLog) {
+  console.log = () => {};
+  console.info = () => {};
+  console.debug = () => {};
+}
 
 // Global references to windows and services
 let mainWindow: BrowserWindow | null = null;
@@ -35,6 +42,21 @@ function createWindows(): void {
         console.log('📋 Migrating database: Adding synced_at column...');
         localDb.prepare(`ALTER TABLE transactions ADD COLUMN synced_at INTEGER`).run();
         console.log('✅ Migration complete');
+      }
+      const hasVoucherType = schemaCheck.some(col => col.name === 'voucher_type');
+      if (!hasVoucherType) {
+        console.log('📋 Migrating database: Adding transactions.voucher_type column...');
+        localDb.prepare(`ALTER TABLE transactions ADD COLUMN voucher_type TEXT DEFAULT 'none'`).run();
+      }
+      const hasVoucherValue = schemaCheck.some(col => col.name === 'voucher_value');
+      if (!hasVoucherValue) {
+        console.log('📋 Migrating database: Adding transactions.voucher_value column...');
+        localDb.prepare(`ALTER TABLE transactions ADD COLUMN voucher_value REAL`).run();
+      }
+      const hasVoucherLabel = schemaCheck.some(col => col.name === 'voucher_label');
+      if (!hasVoucherLabel) {
+        console.log('📋 Migrating database: Adding transactions.voucher_label column...');
+        localDb.prepare(`ALTER TABLE transactions ADD COLUMN voucher_label TEXT`).run();
       }
     } catch (e) {
       console.log('⚠️ Migration check failed:', e);
@@ -170,7 +192,8 @@ function createWindows(): void {
         status TEXT DEFAULT 'active',
         created_at TEXT,
         updated_at INTEGER,
-        has_customization INTEGER DEFAULT 0
+        has_customization INTEGER DEFAULT 0,
+        is_bundle INTEGER DEFAULT 0
       );
       
       -- Customization tables for offline support
@@ -362,6 +385,9 @@ function createWindows(): void {
         pickup_method TEXT NOT NULL,
         total_amount REAL NOT NULL,
         voucher_discount REAL DEFAULT 0.0,
+        voucher_type TEXT DEFAULT 'none',
+        voucher_value REAL,
+        voucher_label TEXT,
         final_amount REAL NOT NULL,
         amount_received REAL NOT NULL,
         change_amount REAL DEFAULT 0.0,
@@ -1414,14 +1440,15 @@ function createWindows(): void {
     const tx = localDb.transaction((data: any[]) => {
       const stmt = localDb!.prepare(`INSERT INTO transactions (
         id, business_id, user_id, payment_method, pickup_method, total_amount,
-        voucher_discount, final_amount, amount_received, change_amount, status,
+        voucher_discount, voucher_type, voucher_value, voucher_label, final_amount, amount_received, change_amount, status,
         created_at, updated_at, synced_at, contact_id, customer_name, note, bank_name,
         card_number, cl_account_id, cl_account_name, bank_id, receipt_number,
         transaction_type, payment_method_id
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET
         business_id=excluded.business_id, user_id=excluded.user_id, payment_method=excluded.payment_method,
         pickup_method=excluded.pickup_method, total_amount=excluded.total_amount, voucher_discount=excluded.voucher_discount,
+        voucher_type=excluded.voucher_type, voucher_value=excluded.voucher_value, voucher_label=excluded.voucher_label,
         final_amount=excluded.final_amount, amount_received=excluded.amount_received, change_amount=excluded.change_amount,
         status=excluded.status, created_at=excluded.created_at, updated_at=excluded.updated_at, synced_at=excluded.synced_at,
         contact_id=excluded.contact_id, customer_name=excluded.customer_name, note=excluded.note,
@@ -1437,6 +1464,9 @@ function createWindows(): void {
           pickup_method: r.pickup_method,
           total_amount: r.total_amount,
           voucher_discount: r.voucher_discount,
+          voucher_type: r.voucher_type,
+          voucher_value: r.voucher_value,
+          voucher_label: r.voucher_label,
           final_amount: r.final_amount,
           amount_received: r.amount_received,
           change_amount: r.change_amount,
@@ -1463,6 +1493,9 @@ function createWindows(): void {
           r.pickup_method,
           Number(r.total_amount),
           Number(r.voucher_discount ?? 0.0),
+          r.voucher_type ?? 'none',
+          r.voucher_value !== undefined && r.voucher_value !== null ? Number(r.voucher_value) : null,
+          r.voucher_label ?? null,
           Number(r.final_amount),
           Number(r.amount_received),
           Number(r.change_amount ?? 0.0),
@@ -2959,7 +2992,7 @@ ipcMain.handle('print-label', async (event, data) => {
     printWindow = new BrowserWindow({
       width: 400,
       height: 600,
-      show: true,
+      show: false,
       webPreferences: {
         nodeIntegration: false,
         contextIsolation: true,

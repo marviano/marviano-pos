@@ -35,6 +35,9 @@ interface Transaction {
   cl_account_name?: string | null;
   created_at: string;
   items: TransactionItem[];
+  voucher_type?: 'none' | 'percent' | 'nominal' | 'free';
+  voucher_value?: number | null;
+  voucher_label?: string | null;
 }
 
 interface TransactionDetailModalProps {
@@ -168,6 +171,11 @@ const TransactionDetailModal: React.FC<TransactionDetailModalProps> = ({
                 <p className="text-xl font-bold text-red-600">
                   -{formatPrice(transaction.voucher_discount)}
                 </p>
+                {transaction.voucher_label && (
+                  <p className="text-xs text-red-500 font-medium mt-1">
+                    {transaction.voucher_label}
+                  </p>
+                )}
               </div>
               <div className="text-center">
                 <p className="text-sm font-medium text-gray-600">Total Bayar</p>
@@ -221,6 +229,14 @@ const TransactionDetailModal: React.FC<TransactionDetailModalProps> = ({
                 <p className="text-sm font-medium text-gray-600">Metode Pengambilan</p>
                 <p className="text-base text-gray-900">
                   {getPickupMethodLabel(transaction.pickup_method)}
+                </p>
+              </div>
+              <div>
+                <p className="text-sm font-medium text-gray-600">Promo</p>
+                <p className="text-base text-gray-900">
+                  {transaction.voucher_discount > 0
+                    ? (transaction.voucher_label || 'Diskon Voucher')
+                    : 'Tidak ada promo'}
                 </p>
               </div>
               

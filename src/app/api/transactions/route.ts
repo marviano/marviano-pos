@@ -31,6 +31,9 @@ interface TransactionData {
   pickup_method: 'dine-in' | 'take-away';
   total_amount: number;
   voucher_discount: number;
+  voucher_type?: 'none' | 'percent' | 'nominal' | 'free';
+  voucher_value?: number | null;
+  voucher_label?: string | null;
   final_amount: number;
   amount_received: number;
   change_amount: number;
@@ -49,14 +52,6 @@ export async function POST(request: NextRequest) {
   try {
     const transactionData: TransactionData = await request.json();
     
-    console.log('📥 [API] Received transaction:', {
-      id: transactionData.id,
-      business_id: transactionData.business_id,
-      user_id: transactionData.user_id,
-      payment_method: transactionData.payment_method,
-      items_count: transactionData.items?.length
-    });
-    
     // Validate required fields
     if (!transactionData.business_id || !transactionData.user_id || !transactionData.items || transactionData.items.length === 0) {
       console.error('❌ [API] Missing required fields');
@@ -71,9 +66,7 @@ export async function POST(request: NextRequest) {
     
     try {
       // Get payment method ID
-      console.log('🔍 [API] Getting payment method ID for:', transactionData.payment_method);
       const paymentMethodId = await getPaymentMethodId(transactionData.payment_method);
-      console.log('✅ [API] Payment method ID:', paymentMethodId);
       
       // Generate receipt number based on sale date (created_at if provided)
       let createdAtBasis: Date | undefined = undefined;
@@ -94,10 +87,10 @@ export async function POST(request: NextRequest) {
         const date = new Date(transactionData.created_at);
         // Format: YYYY-MM-DD HH:MM:SS
         createdAt = date.toISOString().slice(0, 19).replace('T', ' ');
-        console.log('📅 [API] Using provided created_at:', createdAt);
+        // Use provided timestamp
       } else {
         createdAt = new Date().toISOString().slice(0, 19).replace('T', ' ');
-        console.log('📅 [API] Using current time:', createdAt);
+        // Default to current time
       }
       
       // Insert main transaction record using UUID
@@ -110,6 +103,9 @@ export async function POST(request: NextRequest) {
       pickup_method, 
       total_amount, 
       voucher_discount,
+      voucher_type,
+      voucher_value,
+      voucher_label,
       final_amount,
       amount_received, 
       change_amount,
@@ -123,7 +119,7 @@ export async function POST(request: NextRequest) {
       transaction_type,
       status,
       created_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'completed', ?)
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `, [
         transactionData.id, // Use UUID from client
         transactionData.business_id,
@@ -132,6 +128,9 @@ export async function POST(request: NextRequest) {
         transactionData.pickup_method,
         transactionData.total_amount,
         transactionData.voucher_discount,
+        transactionData.voucher_type || 'none',
+        transactionData.voucher_value ?? null,
+        transactionData.voucher_label || null,
         transactionData.final_amount,
         transactionData.amount_received,
         transactionData.change_amount,
@@ -143,10 +142,10 @@ export async function POST(request: NextRequest) {
         transactionData.cl_account_name || null,
         receiptNumber,
         transactionData.transaction_type,
+        transactionData.status || 'completed',
         createdAt // Use provided or current timestamp
       ]);
       
-      console.log('✅ [API] Transaction inserted successfully with ID:', transactionData.id);
 
       // Use the UUID for transaction items
       const transactionId = transactionData.id;
@@ -246,6 +245,9 @@ export async function GET(request: NextRequest) {
         t.pickup_method,
         t.total_amount,
         t.voucher_discount,
+        t.voucher_type,
+        t.voucher_value,
+        t.voucher_label,
         t.final_amount,
         t.amount_received,
         t.change_amount,
@@ -342,7 +344,7 @@ export async function GET(request: NextRequest) {
             userName = (userResult as any[])[0].name;
           }
         } catch (e) {
-          console.log('Could not fetch user name:', e);
+          // Ignore lookup issues; fallback handled below
         }
 
         // Get business name
@@ -353,7 +355,7 @@ export async function GET(request: NextRequest) {
             businessName = (businessResult as any[])[0].name;
           }
         } catch (e) {
-          console.log('Could not fetch business name:', e);
+          // Ignore lookup issues; fallback handled below
         }
 
         enrichedTransactions.push({

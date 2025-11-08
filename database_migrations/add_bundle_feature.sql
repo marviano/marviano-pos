@@ -24,3 +24,5 @@ CREATE TABLE IF NOT EXISTS bundle_items (
 ALTER TABLE transaction_items ADD COLUMN bundle_selections_json JSON DEFAULT NULL COMMENT 'JSON array storing selected products for bundle items';
 
 
+
+
