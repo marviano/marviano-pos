@@ -1,8 +1,10 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import { X, Check, Plus, Minus } from 'lucide-react';
+import { X, Check, Plus, Minus, SlidersHorizontal, MessageCircle } from 'lucide-react';
 import { offlineSyncService } from '@/lib/offlineSync';
+import BundleProductCustomizationModal, { SelectedCustomization } from './BundleProductCustomizationModal';
+import CustomNoteModal from './CustomNoteModal';
 
 interface Product {
   id: number;
@@ -10,6 +12,7 @@ interface Product {
   image_url: string | null;
   category2_id: number | null;
   category2_name: string | null;
+  has_customization?: number | boolean;
 }
 
 interface BundleItem {
@@ -21,15 +24,17 @@ interface BundleItem {
   display_order: number;
 }
 
-interface SelectedProductWithQuantity {
+interface SelectedBundleProduct {
+  key: string;
   product: Product;
-  quantity: number;
+  customizations?: SelectedCustomization[];
+  customNote?: string;
 }
 
 interface BundleSelection {
   category2_id: number;
   category2_name: string;
-  selectedProducts: SelectedProductWithQuantity[];
+  selectedProducts: SelectedBundleProduct[];
   requiredQuantity: number;
 }
 
@@ -55,6 +60,17 @@ export default function BundleSelectionModal({
   const [selections, setSelections] = useState<BundleSelection[]>([]);
   const [categoryProducts, setCategoryProducts] = useState<{ [key: number]: Product[] }>({});
   const [loading, setLoading] = useState(false);
+  const [customizationTarget, setCustomizationTarget] = useState<{
+    category2Id: number;
+    product: Product;
+    instanceKey: string;
+    customizations: SelectedCustomization[];
+  } | null>(null);
+  const [noteTarget, setNoteTarget] = useState<{
+    category2Id: number;
+    instanceKey: string;
+    note: string;
+  } | null>(null);
 
   // Initialize selections from bundleItems
   useEffect(() => {
@@ -121,7 +137,8 @@ export default function BundleSelectionModal({
                   nama: p.nama,
                   image_url: p.image_url,
                   category2_id: p.category2_id,
-                  category2_name: p.category2_name
+                  category2_name: p.category2_name,
+                  has_customization: p.has_customization
                 }));
               
               productsByCategory[item.category2_id] = filteredProducts;
@@ -146,65 +163,121 @@ export default function BundleSelectionModal({
   const getTotalQuantity = (category2Id: number): number => {
     const categorySelection = selections.find(s => s.category2_id === category2Id);
     if (!categorySelection) return 0;
-    return categorySelection.selectedProducts.reduce((sum, sp) => sum + sp.quantity, 0);
+    return categorySelection.selectedProducts.length;
   };
 
   const getProductQuantity = (category2Id: number, productId: number): number => {
     const categorySelection = selections.find(s => s.category2_id === category2Id);
     if (!categorySelection) return 0;
-    const selectedProduct = categorySelection.selectedProducts.find(sp => sp.product.id === productId);
-    return selectedProduct?.quantity || 0;
+    return categorySelection.selectedProducts.filter(sp => sp.product.id === productId).length;
   };
 
-  const updateProductQuantity = (category2Id: number, product: Product, delta: number) => {
+  const addProductInstance = (category2Id: number, product: Product) => {
     setSelections(prev => {
       const categorySelection = prev.find(s => s.category2_id === category2Id);
       if (!categorySelection) return prev;
 
-      // Calculate current totals from prev state
-      const currentTotalQuantity = categorySelection.selectedProducts.reduce((sum, sp) => sum + sp.quantity, 0);
-      const existingProduct = categorySelection.selectedProducts.find(sp => sp.product.id === product.id);
-      const currentQuantity = existingProduct?.quantity || 0;
-      const newQuantity = currentQuantity + delta;
-
-      // Check if we can add more
-      if (delta > 0 && currentTotalQuantity >= categorySelection.requiredQuantity) {
-        return prev; // Can't add more, limit reached
-      }
-
-      // Can't go below 0
-      if (newQuantity < 0) {
+      if (categorySelection.selectedProducts.length >= categorySelection.requiredQuantity) {
         return prev;
       }
 
-      return prev.map(s => {
-        if (s.category2_id !== category2Id) return s;
+      const instanceKey = `${category2Id}-${product.id}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 
-        const existingIndex = s.selectedProducts.findIndex(sp => sp.product.id === product.id);
-
-        if (newQuantity === 0) {
-          // Remove product if quantity becomes 0
-          return {
-            ...s,
-            selectedProducts: s.selectedProducts.filter(sp => sp.product.id !== product.id)
-          };
-        } else if (existingIndex >= 0) {
-          // Update existing quantity
-          const updated = [...s.selectedProducts];
-          updated[existingIndex] = { ...updated[existingIndex], quantity: newQuantity };
-          return {
-            ...s,
-            selectedProducts: updated
-          };
-        } else {
-          // Add new product with quantity 1
-          return {
-            ...s,
-            selectedProducts: [...s.selectedProducts, { product, quantity: 1 }]
-          };
-        }
+      return prev.map(selection => {
+        if (selection.category2_id !== category2Id) return selection;
+        return {
+          ...selection,
+          selectedProducts: [
+            ...selection.selectedProducts,
+            { key: instanceKey, product }
+          ]
+        };
       });
     });
+  };
+
+  const removeProductInstance = (category2Id: number, instanceKey: string) => {
+    setSelections(prev =>
+      prev.map(selection =>
+        selection.category2_id === category2Id
+          ? {
+              ...selection,
+              selectedProducts: selection.selectedProducts.filter(sp => sp.key !== instanceKey)
+            }
+          : selection
+      )
+    );
+  };
+
+  const openCustomizationModal = (category2Id: number, product: Product, instanceKey: string) => {
+    const categorySelection = selections.find((s) => s.category2_id === category2Id);
+    const existingProduct = categorySelection?.selectedProducts.find((sp) => sp.key === instanceKey);
+
+    setCustomizationTarget({
+      category2Id,
+      product,
+      instanceKey,
+      customizations: existingProduct?.customizations || []
+    });
+  };
+
+  const handleCustomizationSave = (customizations: SelectedCustomization[]) => {
+    if (!customizationTarget) return;
+    setSelections((prev) =>
+      prev.map((selection) => {
+        if (selection.category2_id !== customizationTarget.category2Id) return selection;
+        return {
+          ...selection,
+          selectedProducts: selection.selectedProducts.map((sp) =>
+            sp.key === customizationTarget.instanceKey
+              ? {
+                  ...sp,
+                  customizations: customizations.length > 0 ? customizations : undefined
+                }
+              : sp
+          )
+        };
+      })
+    );
+    setCustomizationTarget(null);
+  };
+
+  const closeCustomizationModal = () => {
+    setCustomizationTarget(null);
+  };
+
+  const openNoteModal = (category2Id: number, instanceKey: string, note?: string) => {
+    setNoteTarget({
+      category2Id,
+      instanceKey,
+      note: note || ''
+    });
+  };
+
+  const handleNoteSave = (note: string) => {
+    if (!noteTarget) return;
+    setSelections(prev =>
+      prev.map(selection =>
+        selection.category2_id === noteTarget.category2Id
+          ? {
+              ...selection,
+              selectedProducts: selection.selectedProducts.map(sp =>
+                sp.key === noteTarget.instanceKey
+                  ? {
+                      ...sp,
+                      customNote: note.trim() ? note.trim() : undefined
+                    }
+                  : sp
+              )
+            }
+          : selection
+      )
+    );
+    setNoteTarget(null);
+  };
+
+  const formatPrice = (price: number) => {
+    return `Rp ${Number(price).toLocaleString('id-ID')}`;
   };
 
   const isSelectionComplete = (): boolean => {
@@ -281,9 +354,18 @@ export default function BundleSelectionModal({
                     <div className="grid grid-cols-3 gap-3">
                       {products.map((product) => {
                         const currentQuantity = getProductQuantity(item.category2_id, product.id);
-                        const totalQuantity = getTotalQuantity(item.category2_id);
-                        const canAddMore = totalQuantity < item.required_quantity;
+                        const totalQuantityForCategory = getTotalQuantity(item.category2_id);
+                        const canAddMore = totalQuantityForCategory < item.required_quantity;
                         const hasQuantity = currentQuantity > 0;
+                        const categorySelection = selections.find(s => s.category2_id === item.category2_id);
+                        const selectedInstances = categorySelection?.selectedProducts.filter(sp => sp.product.id === product.id) || [];
+                        const hasCustomizationFlag = product.has_customization === 1 || product.has_customization === true;
+                        const hasExistingCustomizations = selectedInstances.some(
+                          sp =>
+                            (sp.customizations && sp.customizations.length > 0) ||
+                            (sp.customNote && sp.customNote.trim() !== '')
+                        );
+                        const canCustomize = hasCustomizationFlag || product.has_customization === undefined || product.has_customization === null || hasExistingCustomizations;
 
                         return (
                           <div
@@ -296,9 +378,15 @@ export default function BundleSelectionModal({
                                 : 'border-gray-100 bg-gray-50 opacity-50'
                             }`}
                           >
+                            {hasQuantity && selectedInstances.some(sp => (sp.customizations && sp.customizations.length > 0) || (sp.customNote && sp.customNote.trim() !== '')) && (
+                              <div className="absolute top-2 left-2 bg-purple-500 text-white text-[10px] font-semibold px-2 py-0.5 rounded-full shadow-sm">
+                                Custom
+                              </div>
+                            )}
+
                             {hasQuantity && (
-                              <div className="absolute top-2 right-2 bg-green-500 text-white rounded-full w-6 h-6 flex items-center justify-center text-xs font-bold">
-                                {currentQuantity}
+                              <div className="absolute top-2 right-2 bg-green-500 text-white rounded-full px-2 py-0.5 flex items-center justify-center text-[10px] font-bold">
+                                x{currentQuantity}
                               </div>
                             )}
                             
@@ -327,7 +415,10 @@ export default function BundleSelectionModal({
                               <button
                                 onClick={(e) => {
                                   e.stopPropagation();
-                                  updateProductQuantity(item.category2_id, product, -1);
+                                  if (selectedInstances.length > 0) {
+                                    const targetKey = selectedInstances[selectedInstances.length - 1].key;
+                                    removeProductInstance(item.category2_id, targetKey);
+                                  }
                                 }}
                                 disabled={!hasQuantity}
                                 className={`flex-1 py-2 rounded-l flex items-center justify-center transition-colors ${
@@ -346,7 +437,7 @@ export default function BundleSelectionModal({
                               <button
                                 onClick={(e) => {
                                   e.stopPropagation();
-                                  updateProductQuantity(item.category2_id, product, 1);
+                                  addProductInstance(item.category2_id, product);
                                 }}
                                 disabled={!canAddMore}
                                 className={`flex-1 py-2 rounded-r flex items-center justify-center transition-colors ${
@@ -358,6 +449,80 @@ export default function BundleSelectionModal({
                                 <Plus className="w-4 h-4" />
                               </button>
                             </div>
+
+                            {selectedInstances.length > 0 && (
+                              <div className="mt-3 space-y-2">
+                                {selectedInstances.map(sp => (
+                                  <div key={sp.key} className="border border-gray-200 rounded-lg p-2 space-y-2 bg-white shadow-sm">
+                                    <div className="flex items-center justify-between text-xs text-gray-600">
+                                      <span>Instance</span>
+                                      <div className="flex items-center gap-2">
+                                        <button
+                                          onClick={(e) => {
+                                            e.stopPropagation();
+                                            openNoteModal(item.category2_id, sp.key, sp.customNote);
+                                          }}
+                                          className="flex items-center gap-1 px-2 py-1 rounded border border-blue-200 text-blue-600 hover:bg-blue-50 transition text-[11px] font-semibold"
+                                        >
+                                          <MessageCircle className="w-3 h-3" />
+                                          {sp.customNote ? 'Edit Note' : 'Add Note'}
+                                        </button>
+                                        <button
+                                          onClick={(e) => {
+                                            e.stopPropagation();
+                                            removeProductInstance(item.category2_id, sp.key);
+                                          }}
+                                          className="text-red-500 hover:text-red-600 text-xs font-semibold"
+                                        >
+                                          Remove
+                                        </button>
+                                      </div>
+                                    </div>
+
+                                    {canCustomize && (
+                                      <button
+                                        onClick={(e) => {
+                                          e.stopPropagation();
+                                          openCustomizationModal(item.category2_id, product, sp.key);
+                                        }}
+                                        className="w-full flex items-center justify-center gap-2 rounded-lg border border-purple-200 bg-purple-50 py-2 text-xs font-semibold text-purple-700 hover:bg-purple-100"
+                                      >
+                                        <SlidersHorizontal className="w-4 h-4" />
+                                        {sp.customizations && sp.customizations.length > 0 ? 'Edit Customization' : 'Set Customization'}
+                                      </button>
+                                    )}
+
+                                    {sp.customizations && sp.customizations.length > 0 && (
+                                      <div className="text-[11px] text-gray-600 space-y-1">
+                                        {sp.customizations.map(customization => (
+                                          <div key={customization.customization_id}>
+                                            <div className="font-semibold text-gray-700">{customization.customization_name}</div>
+                                            <ul className="ml-3 list-disc">
+                                              {customization.selected_options.map(option => (
+                                                <li key={option.option_id}>
+                                                  {option.option_name}
+                                                  {option.price_adjustment !== 0 && (
+                                                    <span className={`ml-1 ${option.price_adjustment > 0 ? 'text-green-600' : 'text-red-600'}`}>
+                                                      ({option.price_adjustment > 0 ? '+' : ''}{formatPrice(option.price_adjustment)})
+                                                    </span>
+                                                  )}
+                                                </li>
+                                              ))}
+                                            </ul>
+                                          </div>
+                                        ))}
+                                      </div>
+                                    )}
+
+                                    {sp.customNote && (
+                                      <div className="text-[11px] text-gray-600">
+                                        <span className="font-semibold text-gray-700">Note:</span> {sp.customNote}
+                                      </div>
+                                    )}
+                                  </div>
+                                ))}
+                              </div>
+                            )}
                           </div>
                         );
                       })}
@@ -391,6 +556,22 @@ export default function BundleSelectionModal({
           </button>
         </div>
       </div>
+
+      <BundleProductCustomizationModal
+        isOpen={!!customizationTarget}
+        product={customizationTarget?.product || null}
+        initialCustomizations={customizationTarget?.customizations}
+        onClose={closeCustomizationModal}
+        onSave={handleCustomizationSave}
+      />
+
+      <CustomNoteModal
+        isOpen={!!noteTarget}
+        onClose={() => setNoteTarget(null)}
+        initialNote={noteTarget?.note || ''}
+        onConfirm={handleNoteSave}
+        product={noteTarget ? selections.flatMap(sel => sel.selectedProducts).find(sp => sp.key === noteTarget.instanceKey)?.product || null : null}
+      />
     </div>
   );
 }

@@ -388,7 +388,7 @@ const TransactionDetailModal: React.FC<TransactionDetailModalProps> = ({
                                     const selectedProducts = bundleSel.selectedProducts || [];
                                     const isNewFormat = selectedProducts.length > 0 && selectedProducts[0]?.product;
                                     const totalQuantity = isNewFormat 
-                                      ? selectedProducts.reduce((sum: number, sp: any) => sum + (sp.quantity || 0), 0)
+                                      ? selectedProducts.reduce((sum: number, sp: any) => sum + (sp.quantity ?? 1), 0)
                                       : selectedProducts.length;
                                     
                                     return (
@@ -399,8 +399,36 @@ const TransactionDetailModal: React.FC<TransactionDetailModalProps> = ({
                                         <div className="ml-2 mt-1 space-y-0.5">
                                           {isNewFormat 
                                             ? selectedProducts.map((sp: any, spIdx: number) => (
-                                                <div key={spIdx} className="text-xs text-gray-600">
-                                                  • {sp.product?.nama || ''} {sp.quantity > 1 ? `×${sp.quantity}` : ''}
+                                                <div key={spIdx} className="text-xs text-gray-600 space-y-1">
+                                                  <div>• {sp.product?.nama || ''}</div>
+                                                  {sp.customizations && Array.isArray(sp.customizations) && sp.customizations.length > 0 && (
+                                                    <div className="ml-4 text-[11px] text-gray-500">
+                                                      {sp.customizations.map((customization: any) => (
+                                                        <div key={customization.customization_id || customization.id} className="mt-0.5">
+                                                          <div className="font-medium text-gray-600">
+                                                            {customization.customization_name || customization.name}
+                                                          </div>
+                                                          <div className="ml-2 space-y-0.5">
+                                                            {(customization.selected_options || []).map((opt: any, optIdx: number) => (
+                                                              <div key={opt.option_id || opt.id || optIdx} className="flex items-center justify-between">
+                                                                <span>• {opt.option_name || opt.name}</span>
+                                                                {opt.price_adjustment ? (
+                                                                  <span className={`text-[10px] ${opt.price_adjustment > 0 ? 'text-green-600' : 'text-red-600'}`}>
+                                                                    {opt.price_adjustment > 0 ? '+' : ''}{formatPrice(opt.price_adjustment)}
+                                                                  </span>
+                                                                ) : null}
+                                                              </div>
+                                                            ))}
+                                                          </div>
+                                                        </div>
+                                                      ))}
+                                                    </div>
+                                                  )}
+                                                  {sp.customNote && (
+                                                    <div className="ml-4 text-[11px] text-purple-600 italic">
+                                                      Note: {sp.customNote}
+                                                    </div>
+                                                  )}
                                                 </div>
                                               ))
                                             : selectedProducts.map((p: any, pIdx: number) => (

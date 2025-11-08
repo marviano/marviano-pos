@@ -11,7 +11,16 @@ interface BundleSelection {
       id: number;
       nama: string;
     };
-    quantity: number;
+    customizations?: {
+      customization_id: number;
+      customization_name: string;
+      selected_options: {
+        option_id: number;
+        option_name: string;
+        price_adjustment: number;
+      }[];
+    }[];
+    customNote?: string;
   }[];
   requiredQuantity: number;
 }
@@ -81,6 +90,29 @@ export default function TransactionConfirmationDialog({
 }: TransactionConfirmationDialogProps) {
   const formatPrice = (price: number) => {
     return `Rp ${price.toLocaleString('id-ID')}`;
+  };
+
+  const sumCustomizationPrice = (customizations?: CartItem['customizations']) => {
+    if (!customizations || customizations.length === 0) return 0;
+    return customizations.reduce((sum, customization) => {
+      const optionTotal = customization.selected_options.reduce((optionSum, option) => optionSum + option.price_adjustment, 0);
+      return sum + optionTotal;
+    }, 0);
+  };
+
+  const calculateBundleCustomizationCharge = (bundleSelections?: BundleSelection[]) => {
+    if (!bundleSelections || bundleSelections.length === 0) return 0;
+
+    return bundleSelections.reduce((bundleSum, bundleSelection) => {
+      const selectionTotal = bundleSelection.selectedProducts.reduce((productSum, selectedProduct) => {
+        const perUnitAdjustment = selectedProduct.customizations?.reduce((sum, customization) => {
+          const optionTotal = customization.selected_options.reduce((optionSum, option) => optionSum + option.price_adjustment, 0);
+          return sum + optionTotal;
+        }, 0) || 0;
+        return productSum + perUnitAdjustment;
+      }, 0);
+      return bundleSum + selectionTotal;
+    }, 0);
   };
 
   const getPaymentMethodLabel = (method: string) => {
@@ -156,15 +188,8 @@ export default function TransactionConfirmationDialog({
                   }
                 }
                 let itemPrice = basePrice;
-                
-                // Add customization prices
-                if (item.customizations) {
-                  item.customizations.forEach(customization => {
-                    customization.selected_options.forEach(option => {
-                      itemPrice += option.price_adjustment;
-                    });
-                  });
-                }
+                itemPrice += sumCustomizationPrice(item.customizations);
+                itemPrice += calculateBundleCustomizationCharge(item.bundleSelections);
                 
                 const totalItemPrice = itemPrice * item.quantity;
                 
@@ -187,13 +212,43 @@ export default function TransactionConfirmationDialog({
                           <div className="mt-2 text-xs text-purple-600">
                             <div className="font-semibold mb-1">Bundle Items:</div>
                             {item.bundleSelections.map((bundleSel, idx) => {
-                              const totalQuantity = bundleSel.selectedProducts.reduce((sum, sp) => sum + sp.quantity, 0);
+                              const totalQuantity = bundleSel.selectedProducts.length;
                               return (
                                 <div key={idx} className="ml-2 mb-1">
                                   <span className="font-medium">{bundleSel.category2_name} ({totalQuantity}/{bundleSel.requiredQuantity}):</span>
-                                  <ul className="ml-3 mt-0.5">
+                                  <ul className="ml-3 mt-0.5 space-y-1">
                                     {bundleSel.selectedProducts.map((sp, spIdx) => (
-                                      <li key={spIdx}>• {sp.product.nama} {sp.quantity > 1 ? `×${sp.quantity}` : ''}</li>
+                                      <li key={spIdx} className="text-gray-700">
+                                        <div>• {sp.product.nama}</div>
+                                        {sp.customizations && sp.customizations.length > 0 && (
+                                          <div className="ml-4 text-[11px] text-gray-500 space-y-1">
+                                            {sp.customizations.map((customization) => (
+                                              <div key={customization.customization_id}>
+                                                <div className="font-medium text-gray-600">
+                                                  {customization.customization_name}
+                                                </div>
+                                                <div className="ml-2 space-y-0.5">
+                                                  {customization.selected_options.map(option => (
+                                                    <div key={option.option_id} className="flex items-center justify-between">
+                                                      <span>• {option.option_name}</span>
+                                                      {option.price_adjustment !== 0 && (
+                                                        <span className={`text-[10px] ${option.price_adjustment > 0 ? 'text-green-600' : 'text-red-600'}`}>
+                                                          {option.price_adjustment > 0 ? '+' : ''}{formatPrice(option.price_adjustment)}
+                                                        </span>
+                                                      )}
+                                                    </div>
+                                                  ))}
+                                                </div>
+                                              </div>
+                                            ))}
+                                          </div>
+                                        )}
+                                        {sp.customNote && (
+                                          <div className="ml-4 text-[11px] text-purple-600 italic">
+                                            Note: {sp.customNote}
+                                          </div>
+                                        )}
+                                      </li>
                                     ))}
                                   </ul>
                                 </div>
