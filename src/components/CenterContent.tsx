@@ -42,6 +42,7 @@ interface BundleSelection {
   category2_id: number;
   category2_name: string;
   selectedProducts: {
+    key?: string;
     product: {
       id: number;
       nama: string;
@@ -49,7 +50,8 @@ interface BundleSelection {
       category2_id: number | null;
       category2_name: string | null;
     };
-    quantity: number;
+    customizations?: SelectedCustomization[];
+    customNote?: string;
   }[];
   requiredQuantity: number;
 }
@@ -102,6 +104,26 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
         }
       });
     }
+  };
+
+  const sumCustomizationPrice = (customizations?: SelectedCustomization[]) => {
+    if (!customizations || customizations.length === 0) return 0;
+    return customizations.reduce((sum, customization) => {
+      const optionTotal = customization.selected_options.reduce((optionSum, option) => optionSum + option.price_adjustment, 0);
+      return sum + optionTotal;
+    }, 0);
+  };
+
+  const calculateBundleCustomizationCharge = (bundleSelections?: BundleSelection[]) => {
+    if (!bundleSelections || bundleSelections.length === 0) return 0;
+
+    return bundleSelections.reduce((bundleSum, bundleSelection) => {
+      const selectionTotal = bundleSelection.selectedProducts.reduce((productSum, selectedProduct) => {
+        const perUnitAdjustment = sumCustomizationPrice(selectedProduct.customizations);
+        return productSum + perUnitAdjustment;
+      }, 0);
+      return bundleSum + selectionTotal;
+    }, 0);
   };
 
   const checkProductCustomizations = async (product: Product) => {
@@ -275,7 +297,15 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
 
   const handleBundleConfirm = (bundleSelections: BundleSelection[]) => {
     if (selectedProduct) {
-      addToCart(selectedProduct, undefined, 1, undefined, bundleSelections);
+      const sanitizedSelections = bundleSelections.map(selection => ({
+        ...selection,
+        selectedProducts: selection.selectedProducts.map(sp => ({
+          product: sp.product,
+          customizations: sp.customizations,
+          customNote: sp.customNote
+        }))
+      }));
+      addToCart(selectedProduct, undefined, 1, undefined, sanitizedSelections);
     }
   };
 
@@ -302,7 +332,14 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
         id: item.id.toString(),
         name: item.product.nama,
         quantity: item.quantity,
-        price: effectiveProductPrice(item.product),
+        price: (() => {
+          let itemPrice = effectiveProductPrice(item.product);
+          itemPrice += sumCustomizationPrice(item.customizations);
+          if (item.bundleSelections) {
+            itemPrice += calculateBundleCustomizationCharge(item.bundleSelections);
+          }
+          return itemPrice;
+        })(),
         status: 'preparing'
       })),
       total: totalPrice,
@@ -342,6 +379,11 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
           itemPrice += option.price_adjustment;
         });
       });
+    }
+
+    // Add bundle customization prices per bundle unit
+    if (item.bundleSelections) {
+      itemPrice += calculateBundleCustomizationCharge(item.bundleSelections);
     }
     
     return sum + (itemPrice * item.quantity);
@@ -448,16 +490,42 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
                         <div className="mt-2 space-y-2">
                           <div className="text-xs font-semibold text-purple-700">Bundle Items:</div>
                           {item.bundleSelections.map((bundleSel, idx) => {
-                            const totalQuantity = bundleSel.selectedProducts.reduce((sum, sp) => sum + sp.quantity, 0);
+                            const totalQuantity = bundleSel.selectedProducts.length;
                             return (
                               <div key={idx} className="ml-2 border-l-2 border-purple-300 pl-2">
                                 <div className="text-xs font-medium text-purple-600">
                                   {bundleSel.category2_name} ({totalQuantity}/{bundleSel.requiredQuantity}):
                                 </div>
-                                <div className="ml-2 mt-1 space-y-0.5">
+                                <div className="ml-2 mt-1 space-y-1">
                                   {bundleSel.selectedProducts.map((sp, spIdx) => (
-                                    <div key={spIdx} className="text-xs text-gray-600">
-                                      • {sp.product.nama} {sp.quantity > 1 ? `×${sp.quantity}` : ''}
+                                    <div key={spIdx} className="text-xs text-gray-600 border border-gray-200 rounded px-2 py-1 bg-white space-y-1">
+                                      <div className="font-medium text-gray-700">• {sp.product.nama}</div>
+                                      {sp.customizations && sp.customizations.length > 0 && (
+                                        <div className="ml-3 text-[11px] text-gray-500 space-y-0.5">
+                                          {sp.customizations.map((customization) => (
+                                            <div key={customization.customization_id}>
+                                              <div className="font-semibold text-gray-600">{customization.customization_name}</div>
+                                              <ul className="ml-3 list-disc">
+                                                {customization.selected_options.map(option => (
+                                                  <li key={option.option_id}>
+                                                    {option.option_name}
+                                                    {option.price_adjustment !== 0 && (
+                                                      <span className={`ml-1 ${option.price_adjustment > 0 ? 'text-green-600' : 'text-red-600'}`}>
+                                                        ({option.price_adjustment > 0 ? '+' : ''}{formatPrice(option.price_adjustment)})
+                                                      </span>
+                                                    )}
+                                                  </li>
+                                                ))}
+                                              </ul>
+                                            </div>
+                                          ))}
+                                        </div>
+                                      )}
+                                      {sp.customNote && (
+                                        <div className="text-[11px] text-gray-500 italic">
+                                          Note: "{sp.customNote}"
+                                        </div>
+                                      )}
                                     </div>
                                   ))}
                                 </div>
@@ -513,11 +581,10 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
                       {formatPrice((() => {
                         let itemPrice = effectiveProductPrice(item.product);
                         if (item.customizations) {
-                          item.customizations.forEach(customization => {
-                            customization.selected_options.forEach(option => {
-                              itemPrice += option.price_adjustment;
-                            });
-                          });
+                          itemPrice += sumCustomizationPrice(item.customizations);
+                        }
+                        if (item.bundleSelections) {
+                          itemPrice += calculateBundleCustomizationCharge(item.bundleSelections);
                         }
                         return itemPrice * item.quantity;
                       })())}

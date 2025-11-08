@@ -84,7 +84,9 @@ export default function CustomNoteModal({ isOpen, onClose, product, effectivePri
           {/* Product Info */}
           <div className="bg-gray-50 rounded-xl p-4 mb-4">
             <h3 className="font-semibold text-gray-800 mb-2">{product.nama}</h3>
-            <p className="text-2xl font-bold text-green-600">Rp {(effectivePrice !== undefined ? effectivePrice : product.harga_jual).toLocaleString('id-ID')}</p>
+            <p className="text-2xl font-bold text-green-600">
+              Rp {Number(effectivePrice ?? product.harga_jual ?? 0).toLocaleString('id-ID')}
+            </p>
           </div>
 
           {/* Custom Note Section */}

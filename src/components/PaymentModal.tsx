@@ -8,6 +8,16 @@ import { offlineSyncService } from '@/lib/offlineSync';
 import { generateTransactionId, generateTransactionItemId } from '@/lib/uuid';
 import { useAuth } from '@/hooks/useAuth';
 
+interface SelectedCustomization {
+  customization_id: number;
+  customization_name: string;
+  selected_options: {
+    option_id: number;
+    option_name: string;
+    price_adjustment: number;
+  }[];
+}
+
 interface BundleSelection {
   category2_id: number;
   category2_name: string;
@@ -16,7 +26,8 @@ interface BundleSelection {
       id: number;
       nama: string;
     };
-    quantity: number;
+    customizations?: SelectedCustomization[];
+    customNote?: string;
   }[];
   requiredQuantity: number;
 }
@@ -37,15 +48,7 @@ interface CartItem {
     harga_tiktok?: number;
   };
   quantity: number;
-  customizations?: {
-    customization_id: number;
-    customization_name: string;
-    selected_options: {
-      option_id: number;
-      option_name: string;
-      price_adjustment: number;
-    }[];
-  }[];
+  customizations?: SelectedCustomization[];
   customNote?: string;
   bundleSelections?: BundleSelection[];
 }
@@ -91,6 +94,42 @@ export default function PaymentModal({
   const [showConfirmation, setShowConfirmation] = useState(false);
   const [printTarget, setPrintTarget] = useState<'receipt' | 'receiptize' | 'both'>('receipt');
   
+  const sumCustomizationPrice = (customizations?: SelectedCustomization[]) => {
+    if (!customizations || customizations.length === 0) return 0;
+    return customizations.reduce((sum, customization) => {
+      const optionTotal = customization.selected_options.reduce((optionSum, option) => optionSum + option.price_adjustment, 0);
+      return sum + optionTotal;
+    }, 0);
+  };
+
+  const calculateBundleCustomizationCharge = (bundleSelections?: BundleSelection[]) => {
+    if (!bundleSelections || bundleSelections.length === 0) return 0;
+
+    return bundleSelections.reduce((bundleSum, bundleSelection) => {
+      const selectionTotal = bundleSelection.selectedProducts.reduce((productSum, selectedProduct) => {
+        const perUnitAdjustment = sumCustomizationPrice(selectedProduct.customizations);
+        return productSum + perUnitAdjustment;
+      }, 0);
+      return bundleSum + selectionTotal;
+    }, 0);
+  };
+
+  const joinCustomizationDetails = (customizations?: SelectedCustomization[], note?: string) => {
+    const details: string[] = [];
+    if (customizations && customizations.length > 0) {
+      customizations.forEach((customization) => {
+        customization.selected_options.forEach((option) => {
+          details.push(option.option_name);
+        });
+      });
+    }
+    if (note && note.trim()) {
+      details.push(`Note: ${note.trim()}`);
+    }
+    if (details.length === 0) return '';
+    return details.join(' / ');
+  };
+
   // Check if current payment method is an online platform
   const isOnlinePayment = ['gofood', 'grabfood', 'shopeefood', 'tiktok'].includes(selectedPaymentMethod);
   const [cardNumberError, setCardNumberError] = useState<string>('');
@@ -169,6 +208,8 @@ export default function PaymentModal({
           });
         });
       }
+
+      itemPrice += calculateBundleCustomizationCharge(item.bundleSelections);
       
       return sum + (itemPrice * item.quantity);
     }, 0);
@@ -429,13 +470,8 @@ export default function PaymentModal({
           let itemPrice = basePrice;
           
           // Add customization prices
-          if (item.customizations) {
-            item.customizations.forEach(customization => {
-              customization.selected_options.forEach(option => {
-                itemPrice += option.price_adjustment;
-              });
-            });
-          }
+          itemPrice += sumCustomizationPrice(item.customizations);
+          itemPrice += calculateBundleCustomizationCharge(item.bundleSelections);
           
           return {
             product_id: item.product.id,
@@ -552,13 +588,8 @@ export default function PaymentModal({
             let itemPrice = basePrice;
 
             // Add customization prices
-            if (item.customizations) {
-              item.customizations.forEach(customization => {
-                customization.selected_options.forEach(option => {
-                  itemPrice += option.price_adjustment;
-                });
-              });
-            }
+            itemPrice += sumCustomizationPrice(item.customizations);
+            itemPrice += calculateBundleCustomizationCharge(item.bundleSelections);
             
             console.log(`📝 [OFFLINE] Saving item: ${item.product.nama}, customNote: "${item.customNote}"`);
             
@@ -643,13 +674,8 @@ export default function PaymentModal({
           let itemPrice = basePrice;
           
           // Add customization prices
-          if (item.customizations) {
-            item.customizations.forEach(customization => {
-              customization.selected_options.forEach(option => {
-                itemPrice += option.price_adjustment;
-              });
-            });
-          }
+          itemPrice += sumCustomizationPrice(item.customizations);
+          itemPrice += calculateBundleCustomizationCharge(item.bundleSelections);
           
           // Format item name with customizations and custom note if any
           let itemName = item.product.nama;
@@ -680,10 +706,12 @@ export default function PaymentModal({
           if (item.bundleSelections && item.bundleSelections.length > 0) {
             item.bundleSelections.forEach(bundleSel => {
               bundleSel.selectedProducts.forEach(sp => {
-                // Multiply by bundle quantity and selected product quantity
-                const totalQty = item.quantity * sp.quantity;
+                const totalQty = item.quantity;
+                const customizationText = joinCustomizationDetails(sp.customizations, sp.customNote);
+                const subItemName = `  └ ${sp.product.nama}` +
+                  (customizationText ? ` (${customizationText})` : '');
                 receiptItems.push({
-                  name: `  └ ${sp.product.nama}${sp.quantity > 1 ? ` (×${sp.quantity})` : ''}`,
+                  name: subItemName,
                   quantity: totalQty,
                   price: 0,
                   total_price: 0
@@ -873,8 +901,8 @@ export default function PaymentModal({
               // For bundle products, print labels for each selected product
               for (const bundleSel of item.bundleSelections!) {
                 for (const selectedProduct of bundleSel.selectedProducts) {
-                  // Calculate total quantity (bundle quantity × selected product quantity)
-                  const totalQty = item.quantity * selectedProduct.quantity;
+                  const totalQty = item.quantity;
+                  const customizationText = joinCustomizationDetails(selectedProduct.customizations, selectedProduct.customNote);
                   
                   // Print one label per unit of each selected product
                   for (let qty = 0; qty < totalQty; qty++) {
@@ -888,7 +916,7 @@ export default function PaymentModal({
                       totalItems: totalItems,
                       pickupMethod: finalPickupMethod,
                       productName: selectedProduct.product.nama,
-                      customizations: '', // Bundle selected products don't have customizations
+                      customizations: customizationText,
                       customNote: '', 
                       orderTime: transactionData.created_at,
                       labelContinuation: undefined
