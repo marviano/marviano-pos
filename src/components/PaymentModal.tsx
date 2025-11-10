@@ -90,7 +90,6 @@ export default function PaymentModal({
   const [showBankDropdown, setShowBankDropdown] = useState<boolean>(false);
   const [isProcessing, setIsProcessing] = useState(false);
   const [showConfirmation, setShowConfirmation] = useState(false);
-  const [printTarget, setPrintTarget] = useState<'receipt' | 'receiptize' | 'both'>('receipt');
   
   // Check if current payment method is an online platform
   const [cardNumberError, setCardNumberError] = useState<string>('');
@@ -444,7 +443,7 @@ export default function PaymentModal({
     setShowConfirmation(true);
   };
 
-  const handleFinalConfirm = async () => {
+  const handleFinalConfirm = async (target: 'receipt' | 'receiptize') => {
     setIsProcessing(true);
     
     try {
@@ -696,8 +695,21 @@ export default function PaymentModal({
         setShowConfirmation(false);
         
         // Determine user-selected print targets
-        const shouldPrintReceipt = printTarget === 'receipt';
-        const shouldPrintReceiptize = printTarget === 'receiptize';
+        const shouldPrintReceipt = target === 'receipt';
+        const shouldPrintReceiptize = target === 'receiptize';
+
+        // Fetch global display counter (used to hide multiple printers)
+        let globalCounter = 1;
+        if (window.electronAPI?.getPrinterCounter) {
+          try {
+            const globalCounterResult = await window.electronAPI.getPrinterCounter('globalPrinter', 14, true);
+            if (globalCounterResult?.success && typeof globalCounterResult.counter === 'number') {
+              globalCounter = globalCounterResult.counter;
+            }
+          } catch (counterError) {
+            console.warn('⚠️ Failed to increment global printer counter:', counterError);
+          }
+        }
 
         // Get Printer 1 counter and increment only if printing to receipt printer
         let printer1Counter = 1;
@@ -838,7 +850,8 @@ export default function PaymentModal({
           cashier: cashierName,
           transactionType: transactionType,
           pickupMethod: finalPickupMethod,
-          printer1Counter: printer1Counter // Store counter separately for reference
+          printer1Counter: printer1Counter, // Store counter separately for reference
+          globalCounter
         };
         
         // Print to Printer 1 if selected
@@ -847,7 +860,7 @@ export default function PaymentModal({
             const printResult = await window.electronAPI?.printReceipt?.(printData);
             if (printResult?.success) {
               try {
-                await window.electronAPI?.logPrinter1Print?.(transactionData.id, printer1Counter);
+                await window.electronAPI?.logPrinter1Print?.(transactionData.id, printer1Counter, globalCounter);
               } catch (e) {
                 console.warn('⚠️ Failed to log Printer 1 audit:', e);
               }
@@ -869,7 +882,7 @@ export default function PaymentModal({
                 printer2Counter = counterResult.counter;
               }
             }
-            await window.electronAPI?.logPrinter2Print?.(transactionData.id, printer2Counter, 'manual');
+            await window.electronAPI?.logPrinter2Print?.(transactionData.id, printer2Counter, 'manual', undefined, globalCounter);
             const printer2Data = { ...printData, printerType: 'receiptizePrinter', receiptNumber: transactionData.id, printer2Counter } as any;
             await new Promise(r => setTimeout(r, 500));
             const print2Result = await window.electronAPI?.printReceipt?.(printer2Data);
@@ -1893,8 +1906,6 @@ export default function PaymentModal({
         promotionValue={promotionValue ?? null}
         finalTotal={finalTotal}
         isProcessing={isProcessing}
-        printTarget={printTarget}
-        onChangePrintTarget={setPrintTarget}
         customerName={customerName}
       />
     </>

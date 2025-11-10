@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { 
   RefreshCw, 
   Cloud, 
@@ -21,6 +21,7 @@ import {
 } from 'lucide-react';
 import { offlineSyncService } from '@/lib/offlineSync';
 import { smartSyncService } from '@/lib/smartSync';
+import { restorePrinterStateFromCloud } from '@/lib/printerSyncUtils';
 
 interface SyncLog {
   id: string;
@@ -84,6 +85,8 @@ export default function SyncManagement() {
   const [gatePasswordInput, setGatePasswordInput] = useState('');
   const [orphanedTransactions, setOrphanedTransactions] = useState<OfflineTransaction[]>([]);
   const [showOrphanedData, setShowOrphanedData] = useState(false);
+  const [dangerFrom, setDangerFrom] = useState<string>('');
+  const [dangerTo, setDangerTo] = useState<string>('');
   const logsEndRef = useRef<HTMLDivElement>(null);
 
   // Check if we're in Electron environment
@@ -214,6 +217,7 @@ export default function SyncManagement() {
       // Save to local database - use jsonData.data (syncResults)
       const electronAPI = (window as any).electronAPI;
       const data = jsonData.data; // Access the actual sync results
+      const targetBusinessId = Number(jsonData.businessId ?? 14);
       
       if (data.products && data.products.length > 0) {
         await electronAPI.localDbUpsertProducts(data.products);
@@ -257,6 +261,8 @@ export default function SyncManagement() {
       } else {
         addLog('info', 'ℹ️ No transaction items to download from cloud');
       }
+
+      await restorePrinterStateFromCloud(data, electronAPI, targetBusinessId);
       
       if (data.paymentMethods && data.paymentMethods.length > 0) {
         await electronAPI.localDbUpsertPaymentMethods(data.paymentMethods);
@@ -498,11 +504,16 @@ export default function SyncManagement() {
     setShowGatePasswordModal(false);
     setShowDangerZone(false);
     setIsArchiving(true);
-    addLog('info', '🚀 Starting archive process...');
+    const rangeSuffix = hasDangerRange ? ` (range: ${rangeDescription})` : '';
+    addLog('info', `🚀 Starting archive process${rangeSuffix}...`);
     
     try {
-      const archiveCount = await (window as any).electronAPI.localDbArchiveTransactions(14);
-      addLog('success', `✅ Archived ${archiveCount} offline transactions`);
+      const archiveCount = await (window as any).electronAPI.localDbArchiveTransactions({
+        businessId: 14,
+        from: dangerRange.fromIso,
+        to: dangerRange.toIso
+      });
+      addLog('success', `✅ Archived ${archiveCount} offline transactions${rangeSuffix}`);
       
       // Also archive online transactions
       try {
@@ -511,12 +522,12 @@ export default function SyncManagement() {
           headers: {
             'Content-Type': 'application/json',
           },
-          body: JSON.stringify({ business_id: 14 })
+          body: JSON.stringify({ business_id: 14, from: dangerRange.fromIso, to: dangerRange.toIso })
         });
         
         if (response.ok) {
           const data = await response.json();
-          addLog('success', `✅ Archived ${data.archived} online transactions`);
+          addLog('success', `✅ Archived ${data.archived} online transactions${rangeSuffix}`);
         } else {
           addLog('warning', '⚠️ Could not archive online transactions (may be offline)');
         }
@@ -524,6 +535,10 @@ export default function SyncManagement() {
         addLog('warning', '⚠️ Could not archive online transactions');
       }
       
+      const resetCounters = await (window as any).electronAPI.localDbResetPrinterDailyCounters(14);
+      if (resetCounters?.success) {
+        addLog('info', '🧹 Reset offline printer daily counters');
+      }
       addLog('success', '🎉 Archive process completed!');
       await fetchTransactionCounts();
       // already closed at confirm time
@@ -572,16 +587,26 @@ export default function SyncManagement() {
     setShowGatePasswordModal(false);
     setShowDangerZone(false);
     setIsDeleting(true);
-    addLog('info', '🗑️ Starting permanent deletion process...');
+    const rangeSuffix = hasDangerRange ? ` (range: ${rangeDescription})` : '';
+    addLog('info', `🗑️ Starting permanent deletion process${rangeSuffix}...`);
     
     try {
       // Delete from offline database
-      const deleteCount = await (window as any).electronAPI.localDbDeleteTransactions(14);
-      addLog('success', `✅ Deleted ${deleteCount} offline transactions permanently`);
+      const deleteCount = await (window as any).electronAPI.localDbDeleteTransactions({
+        businessId: 14,
+        from: dangerRange.fromIso,
+        to: dangerRange.toIso
+      });
+      addLog('success', `✅ Deleted ${deleteCount} offline transactions permanently${rangeSuffix}`);
       
       // Delete transaction items
-      await (window as any).electronAPI.localDbDeleteTransactionItems(14);
-      addLog('success', '✅ Deleted offline transaction items');
+      const itemsResult = await (window as any).electronAPI.localDbDeleteTransactionItems({
+        businessId: 14,
+        from: dangerRange.fromIso,
+        to: dangerRange.toIso
+      });
+      const deletedItems = itemsResult?.deleted ?? 0;
+      addLog('success', `✅ Deleted ${deletedItems} offline transaction items`);
       
       // Delete from online database
       try {
@@ -590,12 +615,12 @@ export default function SyncManagement() {
           headers: {
             'Content-Type': 'application/json',
           },
-          body: JSON.stringify({ business_id: 14 })
+          body: JSON.stringify({ business_id: 14, from: dangerRange.fromIso, to: dangerRange.toIso })
         });
         
         if (response.ok) {
           const data = await response.json();
-          addLog('success', `✅ Deleted ${data.deleted} online transactions permanently`);
+          addLog('success', `✅ Deleted ${data.deleted} online transactions permanently${rangeSuffix}`);
         } else {
           addLog('warning', '⚠️ Could not delete online transactions (may be offline)');
         }
@@ -603,6 +628,10 @@ export default function SyncManagement() {
         addLog('warning', '⚠️ Could not delete online transactions');
       }
       
+      const resetCounters = await (window as any).electronAPI.localDbResetPrinterDailyCounters(14);
+      if (resetCounters?.success) {
+        addLog('info', '🧹 Reset offline printer daily counters');
+      }
       addLog('success', '🎉 Permanent deletion process completed!');
       await fetchTransactionCounts();
     } catch (error) {
@@ -764,6 +793,179 @@ export default function SyncManagement() {
       default: return 'text-blue-800 bg-blue-50';
     }
   };
+
+  const convertUtc7ToUtcDate = (
+    year: number,
+    month: number,
+    day: number,
+    hour: number,
+    minute: number,
+    isEnd: boolean
+  ): Date => {
+    const seconds = isEnd ? 59 : 0;
+    const milliseconds = isEnd ? 999 : 0;
+    // Interpret provided components as UTC+7, convert to UTC by subtracting 7 hours
+    const utcMillis = Date.UTC(year, month - 1, day, hour - 7, minute, seconds, milliseconds);
+    return new Date(utcMillis);
+  };
+
+  const normalizeDateInput = (value: string | null | undefined, isEnd: boolean): string | null => {
+    if (!value) return null;
+    const trimmed = value.trim();
+    if (!trimmed) return null;
+
+    const dateOnlyMatch = trimmed.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    if (dateOnlyMatch) {
+      const [, y, m, d] = dateOnlyMatch.map(Number);
+      const date = convertUtc7ToUtcDate(y, m, d, isEnd ? 23 : 0, isEnd ? 59 : 0, isEnd);
+      return date.toISOString();
+    }
+
+    const dateTimeMatch = trimmed.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})$/);
+    if (dateTimeMatch) {
+      const [, y, m, d, h, min] = dateTimeMatch.map(Number);
+      const date = convertUtc7ToUtcDate(y, m, d, h, min, isEnd);
+      return date.toISOString();
+    }
+
+    // Fall back to native parsing (allows explicit timezone strings)
+    const parsed = new Date(trimmed);
+    if (Number.isNaN(parsed.getTime())) return null;
+    if (isEnd) {
+      parsed.setUTCMilliseconds(999);
+      parsed.setUTCSeconds(59);
+    }
+    return parsed.toISOString();
+  };
+
+  const dangerRange = useMemo(() => {
+    const fromIso = normalizeDateInput(dangerFrom, false);
+    const toIso = normalizeDateInput(dangerTo, true);
+    return { fromIso, toIso };
+  }, [dangerFrom, dangerTo]);
+
+  const hasDangerRange = Boolean(dangerRange.fromIso || dangerRange.toIso);
+
+  const formatHumanDateTime = (iso: string | null) => {
+    if (!iso) return '';
+    const date = new Date(iso);
+    if (Number.isNaN(date.getTime())) return '';
+    return date.toLocaleString('id-ID', {
+      day: '2-digit',
+      month: 'short',
+      year: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+      timeZone: 'Asia/Jakarta',
+      timeZoneName: 'short'
+    });
+  };
+
+  const rangeDescription = hasDangerRange
+    ? `${dangerRange.fromIso ? formatHumanDateTime(dangerRange.fromIso) : 'Awal'} → ${dangerRange.toIso ? formatHumanDateTime(dangerRange.toIso) : 'Akhir'} (UTC+7)`
+    : 'Semua tanggal (UTC+7)';
+
+  const formatSqlPreviewDate = (iso: string | null) => {
+    if (!iso) return '';
+    const jakarta = new Date(new Date(iso).getTime() + (7 * 60 * 60 * 1000));
+    const pad = (num: number) => num.toString().padStart(2, '0');
+    const jakartaString = `${jakarta.getUTCFullYear()}-${pad(jakarta.getUTCMonth() + 1)}-${pad(jakarta.getUTCDate())} ${pad(jakarta.getUTCHours())}:${pad(jakarta.getUTCMinutes())}:${pad(jakarta.getUTCSeconds())}`;
+    return `${iso} /* UTC+7: ${jakartaString} */`;
+  };
+
+  const buildSqlWherePreview = (alias?: string, statusCondition?: string) => {
+    const prefix = alias ? `${alias}.` : '';
+    const clauses: string[] = [`${prefix}business_id = 14`];
+    if (dangerRange.fromIso) {
+      clauses.push(`${prefix}created_at >= '${formatSqlPreviewDate(dangerRange.fromIso)}'`);
+    }
+    if (dangerRange.toIso) {
+      clauses.push(`${prefix}created_at <= '${formatSqlPreviewDate(dangerRange.toIso)}'`);
+    }
+    if (statusCondition) {
+      clauses.push(statusCondition);
+    }
+    return clauses.join('\n  AND ');
+  };
+
+  const UPDATED_AT_PLACEHOLDER = '<current_epoch_ms>';
+
+  const offlineArchivePreview = useMemo(() => {
+    const baseWhere = buildSqlWherePreview('', "status != 'archived'");
+    const archivedWhere = buildSqlWherePreview('', "status = 'archived'");
+    return `UPDATE transactions
+SET status = 'archived', updated_at = ${UPDATED_AT_PLACEHOLDER}
+WHERE ${baseWhere};
+
+-- Purge local printer audits for archived transactions
+DELETE FROM printer1_audit_log
+WHERE transaction_id IN (
+  SELECT id FROM transactions
+  WHERE ${archivedWhere}
+);
+
+DELETE FROM printer2_audit_log
+WHERE transaction_id IN (
+  SELECT id FROM transactions
+  WHERE ${archivedWhere}
+);`;
+  }, [dangerRange.fromIso, dangerRange.toIso]);
+
+  const onlineArchivePreview = useMemo(() => {
+    const baseWhere = buildSqlWherePreview('t', "t.status != 'archived'");
+    const archivedWhere = buildSqlWherePreview('t', "t.status = 'archived'");
+    return `UPDATE transactions
+SET status = 'archived', updated_at = NOW()
+WHERE ${baseWhere};
+
+DELETE pa FROM printer_audits pa
+INNER JOIN transactions t ON pa.transaction_uuid = t.uuid_id
+WHERE ${archivedWhere};`;
+  }, [dangerRange.fromIso, dangerRange.toIso]);
+
+  const offlineDeletePreview = useMemo(() => {
+    const baseWhere = buildSqlWherePreview();
+    return `-- Delete local printer audits first
+DELETE FROM printer1_audit_log
+WHERE transaction_id IN (
+  SELECT id FROM transactions
+  WHERE ${baseWhere}
+);
+
+DELETE FROM printer2_audit_log
+WHERE transaction_id IN (
+  SELECT id FROM transactions
+  WHERE ${baseWhere}
+);
+
+-- Then delete items and transactions
+DELETE FROM transaction_items
+WHERE transaction_id IN (
+  SELECT id FROM transactions
+  WHERE ${baseWhere}
+);
+
+DELETE FROM transactions
+WHERE ${baseWhere};`;
+  }, [dangerRange.fromIso, dangerRange.toIso]);
+
+  const onlineDeletePreview = useMemo(() => {
+    const aliasWhere = buildSqlWherePreview('t');
+    const baseWhere = buildSqlWherePreview();
+    return `-- Delete items first
+DELETE ti FROM transaction_items ti
+INNER JOIN transactions t ON ti.uuid_transaction_id = t.uuid_id
+WHERE ${aliasWhere};
+
+-- Delete server printer audits
+DELETE pa FROM printer_audits pa
+INNER JOIN transactions t ON pa.transaction_uuid = t.uuid_id
+WHERE ${aliasWhere};
+
+-- Then delete transactions
+DELETE FROM transactions
+WHERE ${baseWhere};`;
+  }, [dangerRange.fromIso, dangerRange.toIso]);
 
   return (
     <div className="flex-1 flex flex-col bg-white h-full relative">
@@ -1303,12 +1505,19 @@ export default function SyncManagement() {
               </div>
               <div>
                 <h3 className="text-xl font-bold text-gray-900">Confirm Archive</h3>
-                <p className="text-sm text-gray-500">This action will archive ALL transactions</p>
+                <p className="text-sm text-gray-500">
+                  {hasDangerRange
+                    ? `This will archive transactions created within ${rangeDescription}.`
+                    : 'This will archive every transaction for this business.'}
+                </p>
               </div>
             </div>
             <div className="bg-red-50 border border-red-200 rounded-lg p-4 mb-4">
               <p className="text-sm text-red-800">
-                <strong>Warning:</strong> This will archive all transactions for business ID 14. Archived transactions will be hidden from the transaction list but data will be preserved.
+                <strong>Warning:</strong>{' '}
+                {hasDangerRange
+                  ? `Only transactions between ${rangeDescription} will be archived. They will be hidden but still stored.`
+                  : 'This will archive all transactions for business ID 14. Archived transactions will be hidden from the transaction list but preserved.'}
               </p>
             </div>
             <div className="flex gap-3">
@@ -1357,12 +1566,16 @@ export default function SyncManagement() {
                 <p className="text-sm text-gray-500">This action cannot be undone</p>
               </div>
             </div>
-            <div className="bg-red-50 border border-red-200 rounded-lg p-4 mb-4">
+              <div className="bg-red-50 border border-red-200 rounded-lg p-4 mb-4">
               <p className="text-sm text-red-800 font-medium mb-2">
                 <strong>WARNING: This will PERMANENTLY DELETE:</strong>
               </p>
               <ul className="text-sm text-red-700 list-disc list-inside space-y-1">
-                <li>All transactions for business ID 14</li>
+                <li>
+                  {hasDangerRange
+                    ? `Transactions for business ID 14 between ${rangeDescription}`
+                    : 'All transactions for business ID 14'}
+                </li>
                 <li>All transaction items</li>
                 <li>Data in both online and offline databases</li>
                 <li>This action CANNOT be undone</li>
@@ -1424,6 +1637,48 @@ export default function SyncManagement() {
                 </button>
               </div>
 
+              {/* Range Filters */}
+              <div className="mb-6">
+                <h4 className="font-semibold text-gray-900 mb-3">Filter by Transaction Date</h4>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <label className="flex flex-col text-sm text-gray-700">
+                    <span className="mb-1">From (created_at)</span>
+                    <input
+                      type="datetime-local"
+                      value={dangerFrom}
+                      onChange={(e) => setDangerFrom(e.target.value)}
+                      className="px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-red-500 focus:border-transparent text-black"
+                    />
+                  </label>
+                  <label className="flex flex-col text-sm text-gray-700">
+                    <span className="mb-1">To (created_at)</span>
+                    <input
+                      type="datetime-local"
+                      value={dangerTo}
+                      onChange={(e) => setDangerTo(e.target.value)}
+                      className="px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-red-500 focus:border-transparent text-black"
+                    />
+                  </label>
+                </div>
+                <div className="flex items-center gap-3 mt-3">
+                  <button
+                    onClick={() => {
+                      setDangerFrom('');
+                      setDangerTo('');
+                    }}
+                    className="px-3 py-1.5 text-sm border border-gray-300 rounded-lg text-gray-700 hover:bg-gray-100 transition-colors"
+                  >
+                    Reset Range
+                  </button>
+                  <span className="text-xs text-gray-600">
+                    Leave both fields blank to target all dates. Range applies to transaction <code>created_at</code>.
+                  </span>
+                </div>
+                <div className="mt-2 text-xs text-gray-500">
+                  Target range: <span className="font-medium text-gray-700">{rangeDescription}</span>
+                </div>
+              </div>
+
               {/* Information Box */}
               <div className="bg-gradient-to-r from-red-50 to-orange-50 rounded-lg p-4 border border-red-200 mb-6">
                 <h4 className="font-semibold text-gray-900 mb-3">SQL Queries to be Executed:</h4>
@@ -1435,29 +1690,9 @@ export default function SyncManagement() {
                     </div>
                     <div className="bg-white p-2 rounded border border-orange-200 font-mono text-xs overflow-x-auto">
                       <div className="text-orange-700">-- Offline SQLite:</div>
-                      <div className="text-gray-800 whitespace-pre-wrap">UPDATE transactions
-SET status = 'archived', updated_at = {Date.now()}
-WHERE business_id = 14 AND status != 'archived';
-
--- Purge local printer audits for archived transactions
-DELETE FROM printer1_audit_log
-WHERE transaction_id IN (
-  SELECT id FROM transactions WHERE business_id = 14 AND status = 'archived'
-);
-
-DELETE FROM printer2_audit_log
-WHERE transaction_id IN (
-  SELECT id FROM transactions WHERE business_id = 14 AND status = 'archived'
-);</div>
+                      <pre className="text-gray-800 whitespace-pre-wrap">{offlineArchivePreview}</pre>
                       <div className="text-orange-700 mt-2">-- Online MySQL:</div>
-                      <div className="text-gray-800 whitespace-pre-wrap">UPDATE transactions
-SET status = 'archived', updated_at = NOW()
-WHERE business_id = 14 AND status != 'archived';
-
--- Purge server printer audits for archived transactions
-DELETE pa FROM printer_audits pa
-INNER JOIN transactions t ON pa.transaction_uuid = t.uuid_id
-WHERE t.business_id = 14 AND t.status = 'archived';</div>
+                      <pre className="text-gray-800 whitespace-pre-wrap">{onlineArchivePreview}</pre>
                     </div>
                   </div>
                   <div className="border-t border-red-200 pt-3">
@@ -1467,39 +1702,9 @@ WHERE t.business_id = 14 AND t.status = 'archived';</div>
                     </div>
                     <div className="bg-white p-2 rounded border border-red-300 font-mono text-xs overflow-x-auto">
                       <div className="text-red-700">-- Offline SQLite:</div>
-                      <div className="text-red-900 whitespace-pre-wrap">-- Delete local printer audits first
-DELETE FROM printer1_audit_log
-WHERE transaction_id IN (
-  SELECT id FROM transactions WHERE business_id = 14
-);
-
-DELETE FROM printer2_audit_log
-WHERE transaction_id IN (
-  SELECT id FROM transactions WHERE business_id = 14
-);
-
--- Then delete items and transactions
-DELETE FROM transaction_items
-WHERE transaction_id IN (
-  SELECT id FROM transactions WHERE business_id = 14
-);
-
-DELETE FROM transactions
-WHERE business_id = 14;</div>
+                      <pre className="text-red-900 whitespace-pre-wrap">{offlineDeletePreview}</pre>
                       <div className="text-red-700 mt-2">-- Online MySQL:</div>
-                      <div className="text-red-900 whitespace-pre-wrap">-- Delete items first
-DELETE ti FROM transaction_items ti
-INNER JOIN transactions t ON ti.uuid_transaction_id = t.uuid_id
-WHERE t.business_id = 14;
-
--- Delete server printer audits
-DELETE pa FROM printer_audits pa
-INNER JOIN transactions t ON pa.transaction_uuid = t.uuid_id
-WHERE t.business_id = 14;
-
--- Then delete transactions
-DELETE FROM transactions
-WHERE business_id = 14;</div>
+                      <pre className="text-red-900 whitespace-pre-wrap">{onlineDeletePreview}</pre>
                     </div>
                   </div>
                 </div>
@@ -1512,7 +1717,7 @@ WHERE business_id = 14;</div>
                   className="w-full flex items-center justify-center gap-2 px-6 py-3 bg-orange-600 text-white rounded-lg hover:bg-orange-700 transition-colors font-medium"
                 >
                   <Archive className="w-5 h-5" />
-                  Archive All Transactions
+                  Archive Matching Transactions
                 </button>
                 
                 <button
@@ -1520,7 +1725,7 @@ WHERE business_id = 14;</div>
                   className="w-full flex items-center justify-center gap-2 px-6 py-3 bg-red-600 text-white rounded-lg hover:bg-red-700 transition-colors font-medium"
                 >
                   <Trash2 className="w-5 h-5" />
-                  Delete All Transactions (Permanent)
+                  Delete Matching Transactions (Permanent)
                 </button>
               </div>
             </div>

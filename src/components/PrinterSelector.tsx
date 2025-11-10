@@ -23,6 +23,11 @@ export default function PrinterSelector() {
     labelPrinter: '',
     receiptizePrinter: ''
   });
+  const [marginOffsets, setMarginOffsets] = useState<Record<keyof PrinterSelection, number>>({
+    receiptPrinter: 0,
+    labelPrinter: 0,
+    receiptizePrinter: 0
+  });
   const [isScanning, setIsScanning] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [isTesting, setIsTesting] = useState<string | null>(null);
@@ -91,22 +96,45 @@ export default function PrinterSelector() {
           labelPrinter: '',
           receiptizePrinter: ''
         };
+        const margins: Record<keyof PrinterSelection, number> = {
+          receiptPrinter: 0,
+          labelPrinter: 0,
+          receiptizePrinter: 0
+        };
         
         configs.forEach((config: any) => {
+          let marginAdjustMm = 0;
+          if (config.extra_settings) {
+            try {
+              const extra = typeof config.extra_settings === 'string'
+                ? JSON.parse(config.extra_settings)
+                : config.extra_settings;
+              if (extra && typeof extra.marginAdjustMm === 'number' && !Number.isNaN(extra.marginAdjustMm)) {
+                marginAdjustMm = extra.marginAdjustMm;
+              }
+            } catch (parseError) {
+              console.error('Failed to parse extra_settings for printer config:', parseError);
+            }
+          }
+          
           switch (config.printer_type) {
             case 'receiptPrinter':
               selections.receiptPrinter = config.system_printer_name;
+              margins.receiptPrinter = marginAdjustMm;
               break;
             case 'labelPrinter':
               selections.labelPrinter = config.system_printer_name;
+              margins.labelPrinter = marginAdjustMm;
               break;
             case 'receiptizePrinter':
               selections.receiptizePrinter = config.system_printer_name;
+              margins.receiptizePrinter = marginAdjustMm;
               break;
           }
         });
         
         setSelectedPrinters(selections);
+        setMarginOffsets(margins);
         return;
       }
       
@@ -115,6 +143,19 @@ export default function PrinterSelector() {
       if (saved) {
         const selections = JSON.parse(saved);
         setSelectedPrinters(selections);
+      }
+      const savedMargins = localStorage.getItem('printer-margin-offsets');
+      if (savedMargins) {
+        try {
+          const margins = JSON.parse(savedMargins);
+          setMarginOffsets((prev) => ({
+            receiptPrinter: typeof margins.receiptPrinter === 'number' ? margins.receiptPrinter : prev.receiptPrinter,
+            labelPrinter: typeof margins.labelPrinter === 'number' ? margins.labelPrinter : prev.labelPrinter,
+            receiptizePrinter: typeof margins.receiptizePrinter === 'number' ? margins.receiptizePrinter : prev.receiptizePrinter,
+          }));
+        } catch (marginError) {
+          console.error('Failed to parse printer-margin-offsets from localStorage:', marginError);
+        }
       }
     } catch (error) {
       console.error('Error loading saved printer selections:', error);
@@ -128,22 +169,28 @@ export default function PrinterSelector() {
     try {
       // Save to database
       const savePromises = [];
+      const buildExtraSettings = (printerType: keyof PrinterSelection) => {
+        const marginAdjust = marginOffsets[printerType];
+        return {
+          marginAdjustMm: typeof marginAdjust === 'number' && !Number.isNaN(marginAdjust) ? marginAdjust : 0,
+        };
+      };
       
       if (selections.receiptPrinter) {
         savePromises.push(
-          window.electronAPI?.localDbSavePrinterConfig?.('receiptPrinter', selections.receiptPrinter)
+          window.electronAPI?.localDbSavePrinterConfig?.('receiptPrinter', selections.receiptPrinter, buildExtraSettings('receiptPrinter'))
         );
       }
       
       if (selections.labelPrinter) {
         savePromises.push(
-          window.electronAPI?.localDbSavePrinterConfig?.('labelPrinter', selections.labelPrinter)
+          window.electronAPI?.localDbSavePrinterConfig?.('labelPrinter', selections.labelPrinter, buildExtraSettings('labelPrinter'))
         );
       }
       
       if (selections.receiptizePrinter) {
         savePromises.push(
-          window.electronAPI?.localDbSavePrinterConfig?.('receiptizePrinter', selections.receiptizePrinter)
+          window.electronAPI?.localDbSavePrinterConfig?.('receiptizePrinter', selections.receiptizePrinter, buildExtraSettings('receiptizePrinter'))
         );
       }
       
@@ -157,6 +204,7 @@ export default function PrinterSelector() {
         setSaveStatus('success');
         // Also save to localStorage as backup
         localStorage.setItem('printer-selections', JSON.stringify(selections));
+        localStorage.setItem('printer-margin-offsets', JSON.stringify(marginOffsets));
       }
       
       // Reset success status after 3 seconds
@@ -232,6 +280,20 @@ Please try:
     }));
   };
 
+  const handleMarginChange = (printerType: keyof PrinterSelection, value: number) => {
+    setMarginOffsets(prev => ({
+      ...prev,
+      [printerType]: value
+    }));
+  };
+
+  const resetMargin = (printerType: keyof PrinterSelection) => {
+    setMarginOffsets(prev => ({
+      ...prev,
+      [printerType]: 0
+    }));
+  };
+
   const handleSave = () => {
     saveSelections(selectedPrinters);
   };
@@ -251,6 +313,7 @@ Please try:
         type: 'test',
         printerType: printerType,
         printerName: printerName,
+        marginAdjustMm: marginOffsets[printerType],
         content: `TEST PRINT - ${printerType.toUpperCase()}\n\nThis is a test print to verify your printer is working correctly.\n\nPrinter: ${printerName}\nTime: ${new Date().toLocaleString()}\n\nIf you can see this, your printer is configured correctly!`
       };
       
@@ -358,6 +421,34 @@ Please check:
               </select>
             </div>
 
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-2">
+                Left Offset (mm)
+              </label>
+              <input
+                type="range"
+                min={-5}
+                max={5}
+                step={0.5}
+                value={marginOffsets.receiptPrinter}
+                onChange={(e) => handleMarginChange('receiptPrinter', Number(e.target.value))}
+                className="w-full"
+              />
+              <div className="mt-1 flex items-center justify-between text-xs text-gray-500">
+                <span>{marginOffsets.receiptPrinter.toFixed(1)} mm</span>
+                <button
+                  type="button"
+                  onClick={() => resetMargin('receiptPrinter')}
+                  className="text-blue-600 hover:text-blue-700"
+                >
+                  Reset
+                </button>
+              </div>
+              <p className="mt-2 text-xs text-gray-500">
+                Positive values shift content left; negative values shift it right. Save after adjusting.
+              </p>
+            </div>
+
             <button
               onClick={() => testPrinter('receiptPrinter')}
               disabled={!selectedPrinters.receiptPrinter || isTesting === 'receiptPrinter'}
@@ -410,6 +501,34 @@ Please check:
               </select>
             </div>
 
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-2">
+                Left Offset (mm)
+              </label>
+              <input
+                type="range"
+                min={-5}
+                max={5}
+                step={0.5}
+                value={marginOffsets.receiptizePrinter}
+                onChange={(e) => handleMarginChange('receiptizePrinter', Number(e.target.value))}
+                className="w-full"
+              />
+              <div className="mt-1 flex items-center justify-between text-xs text-gray-500">
+                <span>{marginOffsets.receiptizePrinter.toFixed(1)} mm</span>
+                <button
+                  type="button"
+                  onClick={() => resetMargin('receiptizePrinter')}
+                  className="text-purple-600 hover:text-purple-700"
+                >
+                  Reset
+                </button>
+              </div>
+              <p className="mt-2 text-xs text-gray-500">
+                Positive values shift content left; negative values shift it right. Save after adjusting.
+              </p>
+            </div>
+
             <button
               onClick={() => testPrinter('receiptizePrinter')}
               disabled={!selectedPrinters.receiptizePrinter || isTesting === 'receiptizePrinter'}
@@ -460,6 +579,34 @@ Please check:
                   </option>
                 ))}
               </select>
+            </div>
+
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-2">
+                Left Offset (mm)
+              </label>
+              <input
+                type="range"
+                min={-5}
+                max={5}
+                step={0.5}
+                value={marginOffsets.labelPrinter}
+                onChange={(e) => handleMarginChange('labelPrinter', Number(e.target.value))}
+                className="w-full"
+              />
+              <div className="mt-1 flex items-center justify-between text-xs text-gray-500">
+                <span>{marginOffsets.labelPrinter.toFixed(1)} mm</span>
+                <button
+                  type="button"
+                  onClick={() => resetMargin('labelPrinter')}
+                  className="text-green-600 hover:text-green-700"
+                >
+                  Reset
+                </button>
+              </div>
+              <p className="mt-2 text-xs text-gray-500">
+                Offset is applied to label layouts when supported. Save after adjusting.
+              </p>
             </div>
 
             <button

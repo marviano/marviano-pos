@@ -4,6 +4,7 @@ import { query } from '@/lib/db';
 interface PrinterAuditLogP1 {
   transaction_id: string;
   printer1_receipt_number: number;
+  global_counter?: number | null;
   printed_at: string;
   printed_at_epoch: number;
 }
@@ -13,6 +14,7 @@ interface PrinterAuditLogP2 {
   printer2_receipt_number: number;
   print_mode: 'auto' | 'manual';
   cycle_number?: number;
+  global_counter?: number | null;
   printed_at: string;
   printed_at_epoch: number;
 }
@@ -39,20 +41,23 @@ export async function POST(request: NextRequest) {
     try {
       // Insert Printer 1 audit logs
       if (printer1Audits && printer1Audits.length > 0) {
-        for (const audit of printer1Audits) {
+        for (const audit of printer1Audits as PrinterAuditLogP1[]) {
           await query(`
             INSERT INTO printer1_audit_log (
               transaction_id,
               printer1_receipt_number,
+              global_counter,
               printed_at,
               printed_at_epoch
-            ) VALUES (?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?)
             ON DUPLICATE KEY UPDATE
               printed_at = VALUES(printed_at),
-              printed_at_epoch = VALUES(printed_at_epoch)
+              printed_at_epoch = VALUES(printed_at_epoch),
+              global_counter = VALUES(global_counter)
           `, [
             audit.transaction_id,
             audit.printer1_receipt_number,
+            audit.global_counter ?? null,
             audit.printed_at,
             audit.printed_at_epoch
           ]);
@@ -62,26 +67,29 @@ export async function POST(request: NextRequest) {
 
       // Insert Printer 2 audit logs
       if (printer2Audits && printer2Audits.length > 0) {
-        for (const audit of printer2Audits) {
+        for (const audit of printer2Audits as PrinterAuditLogP2[]) {
           await query(`
             INSERT INTO printer2_audit_log (
               transaction_id,
               printer2_receipt_number,
               print_mode,
               cycle_number,
+              global_counter,
               printed_at,
               printed_at_epoch
-            ) VALUES (?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
             ON DUPLICATE KEY UPDATE
               printed_at = VALUES(printed_at),
               printed_at_epoch = VALUES(printed_at_epoch),
               print_mode = VALUES(print_mode),
-              cycle_number = VALUES(cycle_number)
+              cycle_number = VALUES(cycle_number),
+              global_counter = VALUES(global_counter)
           `, [
             audit.transaction_id,
             audit.printer2_receipt_number,
             audit.print_mode,
             audit.cycle_number || null,
+            audit.global_counter ?? null,
             audit.printed_at,
             audit.printed_at_epoch
           ]);
@@ -117,6 +125,7 @@ export async function POST(request: NextRequest) {
     );
   }
 }
+
 
 
 

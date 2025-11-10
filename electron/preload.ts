@@ -73,7 +73,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   localDbGetPekerjaan: () => ipcRenderer.invoke('localdb-get-pekerjaan'),
   
   // Printer configurations
-  localDbSavePrinterConfig: (printerType: string, systemPrinterName: string) => ipcRenderer.invoke('localdb-save-printer-config', printerType, systemPrinterName),
+  localDbSavePrinterConfig: (printerType: string, systemPrinterName: string, extraSettings?: any) => 
+    ipcRenderer.invoke('localdb-save-printer-config', printerType, systemPrinterName, extraSettings),
   localDbGetPrinterConfigs: () => ipcRenderer.invoke('localdb-get-printer-configs'),
   
   // Offline transaction queue
@@ -99,9 +100,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // Transactions
   localDbUpsertTransactions: (rows: any[]) => ipcRenderer.invoke('localdb-upsert-transactions', rows),
   localDbGetTransactions: (businessId?: number, limit?: number) => ipcRenderer.invoke('localdb-get-transactions', businessId, limit),
-  localDbArchiveTransactions: (businessId: number) => ipcRenderer.invoke('localdb-archive-transactions', businessId),
-  localDbDeleteTransactions: (businessId: number) => ipcRenderer.invoke('localdb-delete-transactions', businessId),
-  localDbDeleteTransactionItems: (businessId: number) => ipcRenderer.invoke('localdb-delete-transaction-items', businessId),
+  localDbArchiveTransactions: (payload: { businessId: number; from?: string | null; to?: string | null }) =>
+    ipcRenderer.invoke('localdb-archive-transactions', payload),
+  localDbDeleteTransactions: (payload: { businessId: number; from?: string | null; to?: string | null }) =>
+    ipcRenderer.invoke('localdb-delete-transactions', payload),
+  localDbDeleteTransactionItems: (payload: { businessId: number; from?: string | null; to?: string | null }) =>
+    ipcRenderer.invoke('localdb-delete-transaction-items', payload),
   localDbGetUnsyncedTransactions: (businessId?: number) => ipcRenderer.invoke('localdb-get-unsynced-transactions', businessId),
   localDbMarkTransactionsSynced: (transactionIds: string[]) => ipcRenderer.invoke('localdb-mark-transactions-synced', transactionIds),
   localDbResetTransactionSync: (transactionId: string) => ipcRenderer.invoke('localdb-reset-transaction-sync', transactionId),
@@ -150,12 +154,18 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getPrinter2AutomationSelections: (businessId: number) => ipcRenderer.invoke('get-printer2-automation-selections', businessId),
   savePrinter2AutomationSelections: (businessId: number, cycleNumber: number, selections: number[]) => ipcRenderer.invoke('save-printer2-automation-selections', businessId, cycleNumber, selections),
   generateRandomSelections: (cycleNumber: number) => ipcRenderer.invoke('generate-random-selections', cycleNumber),
-  logPrinter2Print: (transactionId: string, printer2ReceiptNumber: number, mode: 'auto' | 'manual', cycleNumber?: number) => ipcRenderer.invoke('log-printer2-print', transactionId, printer2ReceiptNumber, mode, cycleNumber),
+  logPrinter2Print: (transactionId: string, printer2ReceiptNumber: number, mode: 'auto' | 'manual', cycleNumber?: number, globalCounter?: number) =>
+    ipcRenderer.invoke('log-printer2-print', transactionId, printer2ReceiptNumber, mode, cycleNumber, globalCounter),
   getPrinter2AuditLog: (fromDate?: string, toDate?: string, limit?: number) => ipcRenderer.invoke('get-printer2-audit-log', fromDate, toDate, limit),
-  logPrinter1Print: (transactionId: string, printer1ReceiptNumber: number) => ipcRenderer.invoke('log-printer1-print', transactionId, printer1ReceiptNumber),
+  logPrinter1Print: (transactionId: string, printer1ReceiptNumber: number, globalCounter?: number) =>
+    ipcRenderer.invoke('log-printer1-print', transactionId, printer1ReceiptNumber, globalCounter),
   getPrinter1AuditLog: (fromDate?: string, toDate?: string, limit?: number) => ipcRenderer.invoke('get-printer1-audit-log', fromDate, toDate, limit),
 
   // Printer audit sync helpers
+  localDbUpsertPrinterAudits: (printerType: 'receipt' | 'receiptize', rows: any[]) => ipcRenderer.invoke('localdb-upsert-printer-audits', { printerType, rows }),
+  localDbUpsertPrinterDailyCounters: (rows: Array<{ printer_type: string; business_id: number; date: string; counter: number }>) =>
+    ipcRenderer.invoke('localdb-upsert-printer-daily-counters', rows),
+  localDbResetPrinterDailyCounters: (businessId: number) => ipcRenderer.invoke('localdb-reset-printer-daily-counters', businessId),
   localDbGetUnsyncedPrinterAudits: () => ipcRenderer.invoke('localdb-get-unsynced-printer-audits'),
   localDbMarkPrinterAuditsSynced: (ids: { p1Ids: number[]; p2Ids: number[] }) => ipcRenderer.invoke('localdb-mark-printer-audits-synced', ids),
   

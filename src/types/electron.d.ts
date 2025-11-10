@@ -55,9 +55,9 @@ declare global {
       localDbUpsertTransactionItems?: (rows: any[]) => Promise<any>;
       localDbGetUnsyncedTransactions?: (businessId?: number) => Promise<any[]>;
       localDbMarkTransactionsSynced?: (transactionIds: string[]) => Promise<any>;
-      localDbArchiveTransactions?: (businessId: number) => Promise<number>;
-      localDbDeleteTransactions?: (businessId: number) => Promise<number>;
-      localDbDeleteTransactionItems?: (businessId: number) => Promise<any>;
+      localDbArchiveTransactions?: (payload: { businessId: number; from?: string | null; to?: string | null }) => Promise<number>;
+      localDbDeleteTransactions?: (payload: { businessId: number; from?: string | null; to?: string | null }) => Promise<number>;
+      localDbDeleteTransactionItems?: (payload: { businessId: number; from?: string | null; to?: string | null }) => Promise<{ success: boolean; deleted?: number }>;
       
       // Comprehensive POS table operations
       // Users
@@ -178,7 +178,7 @@ declare global {
       }) => Promise<{ success: boolean; error?: string }>;
       
       // Printer configurations
-      localDbSavePrinterConfig?: (printerType: string, systemPrinterName: string) => Promise<{ success: boolean; error?: string }>;
+      localDbSavePrinterConfig?: (printerType: string, systemPrinterName: string, extraSettings?: any) => Promise<{ success: boolean; error?: string }>;
       localDbGetPrinterConfigs?: () => Promise<any[]>;
       
       // Printer Management (new multi-printer system)
@@ -189,10 +189,13 @@ declare global {
       getPrinter2AutomationSelections?: (businessId: number) => Promise<{ success: boolean; cycleNumber: number; selections: number[] }>;
       savePrinter2AutomationSelections?: (businessId: number, cycleNumber: number, selections: number[]) => Promise<{ success: boolean }>;
       generateRandomSelections?: (cycleNumber: number) => Promise<{ success: boolean; selections: number[] }>;
-      logPrinter2Print?: (transactionId: string, printer2ReceiptNumber: number, mode: 'auto' | 'manual', cycleNumber?: number) => Promise<{ success: boolean }>;
+      logPrinter2Print?: (transactionId: string, printer2ReceiptNumber: number, mode: 'auto' | 'manual', cycleNumber?: number, globalCounter?: number | null) => Promise<{ success: boolean }>;
       getPrinter2AuditLog?: (fromDate?: string, toDate?: string, limit?: number) => Promise<{ success: boolean; entries: any[] }>;
-      logPrinter1Print?: (transactionId: string, printer1ReceiptNumber: number) => Promise<{ success: boolean }>;
+      logPrinter1Print?: (transactionId: string, printer1ReceiptNumber: number, globalCounter?: number | null) => Promise<{ success: boolean }>;
       getPrinter1AuditLog?: (fromDate?: string, toDate?: string, limit?: number) => Promise<{ success: boolean; entries: any[] }>;
+      localDbUpsertPrinterAudits?: (printerType: 'receipt' | 'receiptize', rows: any[]) => Promise<{ success: boolean; count?: number; error?: string }>;
+      localDbUpsertPrinterDailyCounters?: (rows: Array<{ printer_type: string; business_id: number; date: string; counter: number }>) => Promise<{ success: boolean; count?: number; error?: string }>;
+      localDbResetPrinterDailyCounters?: (businessId: number) => Promise<{ success: boolean }>;
     };
   }
 }

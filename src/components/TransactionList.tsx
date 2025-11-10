@@ -90,6 +90,10 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
   const [filterMethod, setFilterMethod] = useState<string>('all');
   const [sortField, setSortField] = useState<string>('created_at');
   const [sortDirection, setSortDirection] = useState<'asc' | 'desc'>('desc');
+  const [receiptizePrintedIds, setReceiptizePrintedIds] = useState<Set<string>>(() => new Set());
+  const [receiptizeCounters, setReceiptizeCounters] = useState<Record<string, number>>({});
+  const [refreshSuccessCount, setRefreshSuccessCount] = useState(0);
+  const [showAllTransactions, setShowAllTransactions] = useState(false);
   
   // Get today's date in UTC+7 timezone
   const getTodayUTC7 = () => {
@@ -257,8 +261,53 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
     }
   };
 
+  interface ReceiptizeFetchResult {
+    success: boolean;
+    ids: Set<string>;
+    counters: Record<string, number>;
+  }
+
+  const fetchReceiptizePrintedIds = useCallback(async (): Promise<ReceiptizeFetchResult> => {
+    if (typeof window === 'undefined' || !(window as any).electronAPI?.getPrinter2AuditLog) {
+      console.warn('Receiptize audit log API unavailable');
+      return { success: false, ids: new Set<string>(), counters: {} };
+    }
+
+    try {
+      const response = await (window as any).electronAPI.getPrinter2AuditLog(fromDate, toDate, 2000);
+      const entries = Array.isArray(response?.entries) ? response.entries : [];
+      const ids = new Set<string>();
+      const latestCounters: Record<string, { counter: number; epoch: number }> = {};
+
+      for (const entry of entries) {
+        if (entry?.transaction_id == null) continue;
+        const txId = String(entry.transaction_id);
+        ids.add(txId);
+
+        const counterValue = Number(entry.printer2_receipt_number);
+        const epochValue = Number(entry.printed_at_epoch ?? 0);
+        if (Number.isNaN(counterValue)) continue;
+
+        const existing = latestCounters[txId];
+        if (!existing || epochValue >= existing.epoch) {
+          latestCounters[txId] = { counter: counterValue, epoch: epochValue };
+        }
+      }
+
+      const counters: Record<string, number> = {};
+      Object.entries(latestCounters).forEach(([txId, info]) => {
+        counters[txId] = info.counter;
+      });
+
+      return { success: true, ids, counters };
+    } catch (err) {
+      console.error('Failed to fetch Receiptize audit log:', err);
+      return { success: false, ids: new Set<string>(), counters: {} };
+    }
+  }, [fromDate, toDate]);
+
   // Fetch transactions function
-  const fetchTransactions = useCallback(async () => {
+  const fetchTransactions = useCallback(async (): Promise<boolean> => {
     setIsLoading(true);
     setError(null);
     
@@ -351,18 +400,52 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
       }
       
       setTransactions(transactionsData);
+
+      const receiptizeResult = await fetchReceiptizePrintedIds();
+      setReceiptizePrintedIds(receiptizeResult.ids);
+      setReceiptizeCounters(receiptizeResult.counters);
+
+      if (!receiptizeResult.success) {
+        setError(prev => prev ?? 'Failed to fetch Receiptize print history');
+        return false;
+      }
+
+      return true;
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : 'Failed to fetch transactions';
       setError(errorMessage);
       console.error('Error fetching transactions:', err);
+      return false;
     } finally {
       setIsLoading(false);
     }
-  }, [isOnlineMode, fromDate, toDate, businessId]);
+  }, [isOnlineMode, fromDate, toDate, businessId, fetchReceiptizePrintedIds]);
 
   // Fetch transactions on mount and when dependencies change
   useEffect(() => {
     fetchTransactions();
+  }, [fetchTransactions]);
+
+  useEffect(() => {
+    setShowAllTransactions(false);
+    setRefreshSuccessCount(0);
+    setReceiptizeCounters({});
+    setReceiptizePrintedIds(new Set<string>());
+  }, [businessId, fromDate, toDate, isOnlineMode]);
+
+  const handleRefresh = useCallback(async () => {
+    const success = await fetchTransactions();
+    if (!success) {
+      return;
+    }
+
+    setRefreshSuccessCount(prev => {
+      const next = Math.min(prev + 1, 5);
+      if (next >= 5) {
+        setShowAllTransactions(true);
+      }
+      return next;
+    });
   }, [fetchTransactions]);
 
   // Format date for display
@@ -435,8 +518,22 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
     }
   };
 
+  // Apply Receiptize filter unless full list unlocked
+  const baseTransactions = showAllTransactions
+    ? transactions
+    : transactions.filter(transaction => receiptizePrintedIds.has(String(transaction.id)));
+
+  const resolveReceiptSequence = (tx: Transaction) => {
+    const txId = String(tx.id);
+    const receiptizeCounter = receiptizeCounters[txId];
+    if (typeof receiptizeCounter === 'number' && receiptizeCounter > 0) {
+      return receiptizeCounter;
+    }
+    return typeof tx.receipt_number === 'number' ? tx.receipt_number : 0;
+  };
+
   // Filter and sort transactions
-  const filteredTransactions = transactions
+  const filteredTransactions = baseTransactions
     .filter(transaction => {
       const matchesSearch = searchTerm === '' || 
         transaction.user_name?.toLowerCase().includes(searchTerm.toLowerCase()) ||
@@ -454,7 +551,10 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
       let bValue: any = b[sortField as keyof Transaction];
 
       // Handle different data types
-      if (sortField === 'id' || sortField === 'total_amount' || sortField === 'voucher_discount' || sortField === 'final_amount' || sortField === 'amount_received' || sortField === 'change_amount') {
+      if (sortField === 'receipt_number') {
+        aValue = resolveReceiptSequence(a);
+        bValue = resolveReceiptSequence(b);
+      } else if (sortField === 'id' || sortField === 'total_amount' || sortField === 'voucher_discount' || sortField === 'final_amount' || sortField === 'amount_received' || sortField === 'change_amount') {
         aValue = typeof aValue === 'string' ? parseFloat(aValue) : aValue;
         bValue = typeof bValue === 'string' ? parseFloat(bValue) : bValue;
       } else if (sortField === 'created_at') {
@@ -745,7 +845,7 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
           </div>
           
           <button
-            onClick={fetchTransactions}
+            onClick={handleRefresh}
             className="flex items-center space-x-2 bg-blue-500 hover:bg-blue-600 text-white px-4 py-2 rounded-lg transition-colors"
           >
             <RefreshCw className="w-4 h-4" />
@@ -797,7 +897,7 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
                       onClick={() => handleSort('receipt_number')}
                     >
                       <div className="flex items-center gap-1 text-xs">
-                        <span className="text-xs">#</span>
+                        <span className="text-xs">{showAllTransactions ? '#' : 'Receiptize #'}</span>
                         {getSortIcon('receipt_number')}
                       </div>
                     </th>
@@ -907,7 +1007,17 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
                     >
                       <td className="px-2 py-4 whitespace-nowrap">
                         <span className="text-xs font-medium text-blue-600">
-                          #{transaction.receipt_number || 'N/A'}
+                          {(() => {
+                            const txId = String(transaction.id);
+                            const receiptizeCounter = receiptizeCounters[txId];
+                            if (typeof receiptizeCounter === 'number' && receiptizeCounter > 0) {
+                              return `#${receiptizeCounter}`;
+                            }
+                            if (showAllTransactions) {
+                              return transaction.receipt_number ? `#${transaction.receipt_number}` : '#N/A';
+                            }
+                            return '#N/A';
+                          })()}
                         </span>
                       </td>
                       <td className="px-2 py-4 whitespace-nowrap">

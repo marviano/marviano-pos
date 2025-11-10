@@ -4,6 +4,7 @@ import React, { useState } from 'react';
 import { RefreshCw, Cloud, CloudOff, CheckCircle, AlertCircle, Upload, Download } from 'lucide-react';
 import { offlineSyncService } from '@/lib/offlineSync';
 import { smartSyncService } from '@/lib/smartSync';
+import { restorePrinterStateFromCloud } from '@/lib/printerSyncUtils';
 
 interface SyncStatus {
   isOnline: boolean;
@@ -80,6 +81,7 @@ export default function SyncButton({ className = '', showDetails = true }: SyncB
       
       const jsonData = await response.json();
       const data = jsonData.data || jsonData; // Support both response structures
+      const targetBusinessId = Number(jsonData.businessId ?? 14);
       console.log('📥 [SYNC] Received data from cloud:', {
         products: data.products?.length || 0,
         transactions: data.transactions?.length || 0,
@@ -151,6 +153,8 @@ export default function SyncButton({ className = '', showDetails = true }: SyncB
         await electronAPI.localDbUpsertClAccounts(data.clAccounts);
         console.log(`✅ ${data.clAccounts.length} CL accounts synced to local database`);
       }
+
+      await restorePrinterStateFromCloud(data, electronAPI, targetBusinessId);
       
       console.log('🎉 [SYNC] Full database sync completed successfully!');
       

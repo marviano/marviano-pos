@@ -10,6 +10,31 @@ export class PrinterManagementService {
 
   constructor(database: Database.Database) {
     this.db = database;
+    this.ensureGlobalCounterColumns();
+  }
+
+  private ensureGlobalCounterColumns() {
+    try {
+      const printer1Cols = this.db.prepare(`PRAGMA table_info(printer1_audit_log)`).all() as any[];
+      const hasPrinter1Global = printer1Cols.some(col => col.name === 'global_counter');
+      if (!hasPrinter1Global) {
+        this.db.prepare(`ALTER TABLE printer1_audit_log ADD COLUMN global_counter INTEGER`).run();
+        console.log('📋 Added printer1_audit_log.global_counter column');
+      }
+    } catch (error) {
+      console.error('Error ensuring printer1_audit_log.global_counter column:', error);
+    }
+
+    try {
+      const printer2Cols = this.db.prepare(`PRAGMA table_info(printer2_audit_log)`).all() as any[];
+      const hasPrinter2Global = printer2Cols.some(col => col.name === 'global_counter');
+      if (!hasPrinter2Global) {
+        this.db.prepare(`ALTER TABLE printer2_audit_log ADD COLUMN global_counter INTEGER`).run();
+        console.log('📋 Added printer2_audit_log.global_counter column');
+      }
+    } catch (error) {
+      console.error('Error ensuring printer2_audit_log.global_counter column:', error);
+    }
   }
 
   /**
@@ -184,12 +209,20 @@ export class PrinterManagementService {
   /**
    * Log Printer 2 print to audit
    */
-  logPrinter2Print(transactionId: string, printer2ReceiptNumber: number, mode: 'auto' | 'manual', cycleNumber?: number): boolean {
+  logPrinter2Print(transactionId: string, printer2ReceiptNumber: number, mode: 'auto' | 'manual', cycleNumber?: number, globalCounter?: number): boolean {
     try {
       const now = new Date().toISOString();
-      this.db.prepare('INSERT INTO printer2_audit_log (transaction_id, printer2_receipt_number, print_mode, cycle_number, printed_at, printed_at_epoch) ' +
-        'VALUES (?, ?, ?, ?, ?, ?)')
-        .run(transactionId, printer2ReceiptNumber, mode, cycleNumber || null, now, Date.now());
+      this.db.prepare('INSERT INTO printer2_audit_log (transaction_id, printer2_receipt_number, print_mode, cycle_number, global_counter, printed_at, printed_at_epoch) ' +
+        'VALUES (?, ?, ?, ?, ?, ?, ?)')
+        .run(
+          transactionId,
+          printer2ReceiptNumber,
+          mode,
+          cycleNumber || null,
+          typeof globalCounter === 'number' ? globalCounter : null,
+          now,
+          Date.now()
+        );
       
       console.log(`✅ Logged Printer 2 print: Transaction ${transactionId}, Receipt #${printer2ReceiptNumber}, Mode: ${mode}`);
       return true;
@@ -202,12 +235,18 @@ export class PrinterManagementService {
   /**
    * Log Printer 1 print to audit
    */
-  logPrinter1Print(transactionId: string, printer1ReceiptNumber: number): boolean {
+  logPrinter1Print(transactionId: string, printer1ReceiptNumber: number, globalCounter?: number): boolean {
     try {
       const now = new Date().toISOString();
-      this.db.prepare('INSERT INTO printer1_audit_log (transaction_id, printer1_receipt_number, printed_at, printed_at_epoch) ' +
-        'VALUES (?, ?, ?, ?)')
-        .run(transactionId, printer1ReceiptNumber, now, Date.now());
+      this.db.prepare('INSERT INTO printer1_audit_log (transaction_id, printer1_receipt_number, global_counter, printed_at, printed_at_epoch) ' +
+        'VALUES (?, ?, ?, ?, ?)')
+        .run(
+          transactionId,
+          printer1ReceiptNumber,
+          typeof globalCounter === 'number' ? globalCounter : null,
+          now,
+          Date.now()
+        );
       console.log(`✅ Logged Printer 1 print: Transaction ${transactionId}, Receipt #${printer1ReceiptNumber}`);
       return true;
     } catch (error) {

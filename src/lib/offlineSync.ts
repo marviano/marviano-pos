@@ -1,3 +1,5 @@
+import { restorePrinterStateFromCloud } from './printerSyncUtils';
+
 /**
  * Offline Sync Service
  * Handles data synchronization between online MySQL and offline SQLite database
@@ -258,6 +260,7 @@ class OfflineSyncService {
         const syncData = await syncResponse.json();
         if (syncData.success && syncData.data) {
           const { data, counts } = syncData;
+          const targetBusinessId = Number(syncData.businessId ?? 14);
           
           // Cache all tables to local SQLite
           if (data.users && data.users.length > 0) {
@@ -365,6 +368,8 @@ class OfflineSyncService {
             await (window as any).electronAPI.localDbUpsertClAccounts(data.clAccounts);
             console.log(`✅ ${data.clAccounts.length} CL accounts synced to local database`);
           }
+          
+          await restorePrinterStateFromCloud(data, (window as any).electronAPI, targetBusinessId);
           
           // Update sync status
           this.syncStatus.lastSync = Date.now();

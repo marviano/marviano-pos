@@ -587,6 +587,7 @@ function createWindows() {
         id TEXT PRIMARY KEY,
         printer_type TEXT NOT NULL,
         system_printer_name TEXT NOT NULL,
+        extra_settings TEXT,
         created_at INTEGER,
         updated_at INTEGER
       );
@@ -628,6 +629,7 @@ function createWindows() {
         printer2_receipt_number INTEGER NOT NULL,
         print_mode TEXT NOT NULL CHECK (print_mode IN ('auto', 'manual')),
         cycle_number INTEGER,
+        global_counter INTEGER,
         printed_at TEXT NOT NULL,
         printed_at_epoch INTEGER NOT NULL,
         synced_at INTEGER,
@@ -639,6 +641,7 @@ function createWindows() {
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         transaction_id TEXT NOT NULL,
         printer1_receipt_number INTEGER NOT NULL,
+        global_counter INTEGER,
         printed_at TEXT NOT NULL,
         printed_at_epoch INTEGER NOT NULL,
         synced_at INTEGER,
@@ -761,6 +764,13 @@ function createWindows() {
         // Schema migration: Add missing columns to existing tables
         try {
             console.log('🔍 Running schema migrations...');
+            // Ensure printer_configs.extra_settings column exists for per-printer settings
+            const printerConfigSchema = localDb.prepare(`PRAGMA table_info(printer_configs)`).all();
+            const hasExtraSettingsColumn = printerConfigSchema.some(col => col.name === 'extra_settings');
+            if (!hasExtraSettingsColumn) {
+                console.log('📝 Adding extra_settings column to printer_configs...');
+                localDb.prepare('ALTER TABLE printer_configs ADD COLUMN extra_settings TEXT').run();
+            }
             // Check if display_order column exists in product_customization_types
             const columnsResult = localDb.prepare(`
         SELECT sql FROM sqlite_master WHERE type='table' AND name='product_customization_types'
@@ -1570,34 +1580,64 @@ function createWindows() {
         const stmt = localDb.prepare(query);
         return stmt.all(...params);
     });
+    const ensureIsoString = (value) => {
+        if (!value)
+            return null;
+        const date = new Date(value);
+        if (Number.isNaN(date.getTime()))
+            return null;
+        return date.toISOString();
+    };
+    const buildTransactionFilter = (businessId, startIso, endIso, alias) => {
+        const prefix = alias ? `${alias}.` : '';
+        const conditions = [`${prefix}business_id = ?`];
+        const params = [businessId];
+        if (startIso) {
+            conditions.push(`${prefix}created_at >= ?`);
+            params.push(startIso);
+        }
+        if (endIso) {
+            conditions.push(`${prefix}created_at <= ?`);
+            params.push(endIso);
+        }
+        return { clause: conditions.join(' AND '), params };
+    };
     // Archive transactions
-    electron_1.ipcMain.handle('localdb-archive-transactions', async (event, businessId) => {
+    electron_1.ipcMain.handle('localdb-archive-transactions', async (event, payload) => {
         if (!localDb)
             return 0;
+        const businessId = payload?.businessId;
+        if (!businessId)
+            return 0;
+        const startIso = ensureIsoString(payload.from);
+        const endIso = ensureIsoString(payload.to);
         try {
-            const stmt = localDb.prepare(`
+            const { clause: baseClause, params } = buildTransactionFilter(businessId, startIso, endIso);
+            const timestamp = Date.now();
+            const updateStmt = localDb.prepare(`
         UPDATE transactions 
         SET status = 'archived', updated_at = ?
-        WHERE business_id = ? AND status != 'archived'
+        WHERE ${baseClause} AND status != 'archived'
       `);
-            const result = stmt.run(Date.now(), businessId);
+            const result = updateStmt.run(timestamp, ...params);
             console.log(`✅ [ARCHIVE] Archived ${result.changes} transactions`);
             // Also clear related printer audits for archived transactions
             try {
+                const archivedClause = `${baseClause} AND status = 'archived'`;
                 const delP1 = localDb.prepare(`
           DELETE FROM printer1_audit_log
           WHERE transaction_id IN (
-            SELECT id FROM transactions WHERE business_id = ? AND status = 'archived'
+            SELECT id FROM transactions WHERE ${archivedClause}
           )
         `);
-                delP1.run(businessId);
+                delP1.run(...params);
                 const delP2 = localDb.prepare(`
           DELETE FROM printer2_audit_log
           WHERE transaction_id IN (
-            SELECT id FROM transactions WHERE business_id = ? AND status = 'archived'
+            SELECT id FROM transactions WHERE ${archivedClause}
           )
         `);
-                delP2.run(businessId);
+                delP2.run(...params);
             }
             catch (e) {
                 console.warn('⚠️ [ARCHIVE] Failed to clear printer audits for archived transactions:', e);
@@ -1610,30 +1650,36 @@ function createWindows() {
         }
     });
     // Delete transactions permanently
-    electron_1.ipcMain.handle('localdb-delete-transactions', async (event, businessId) => {
+    electron_1.ipcMain.handle('localdb-delete-transactions', async (event, payload) => {
         if (!localDb)
             return 0;
+        const businessId = payload?.businessId;
+        if (!businessId)
+            return 0;
+        const startIso = ensureIsoString(payload.from);
+        const endIso = ensureIsoString(payload.to);
         try {
+            const { clause: baseClause, params } = buildTransactionFilter(businessId, startIso, endIso);
             // Delete printer audits first
             const delP1 = localDb.prepare(`
         DELETE FROM printer1_audit_log 
         WHERE transaction_id IN (
-          SELECT id FROM transactions WHERE business_id = ?
+          SELECT id FROM transactions WHERE ${baseClause}
         )
       `);
-            delP1.run(businessId);
+            delP1.run(...params);
             const delP2 = localDb.prepare(`
         DELETE FROM printer2_audit_log 
         WHERE transaction_id IN (
-          SELECT id FROM transactions WHERE business_id = ?
+          SELECT id FROM transactions WHERE ${baseClause}
         )
       `);
-            delP2.run(businessId);
+            delP2.run(...params);
             const stmt = localDb.prepare(`
         DELETE FROM transactions 
-        WHERE business_id = ?
+        WHERE ${baseClause}
       `);
-            const result = stmt.run(businessId);
+            const result = stmt.run(...params);
             console.log(`🗑️ [DELETE] Deleted ${result.changes} transactions`);
             return result.changes;
         }
@@ -1643,18 +1689,23 @@ function createWindows() {
         }
     });
     // Delete transaction items permanently
-    electron_1.ipcMain.handle('localdb-delete-transaction-items', async (event, businessId) => {
+    electron_1.ipcMain.handle('localdb-delete-transaction-items', async (event, payload) => {
         if (!localDb)
             return { success: true };
+        const businessId = payload?.businessId;
+        if (!businessId)
+            return { success: true };
+        const startIso = ensureIsoString(payload.from);
+        const endIso = ensureIsoString(payload.to);
         try {
-            // Delete transaction items for the business
+            const { clause: baseClause, params } = buildTransactionFilter(businessId, startIso, endIso);
             const stmt = localDb.prepare(`
         DELETE FROM transaction_items 
         WHERE transaction_id IN (
-          SELECT id FROM transactions WHERE business_id = ?
+          SELECT id FROM transactions WHERE ${baseClause}
         )
       `);
-            const result = stmt.run(businessId);
+            const result = stmt.run(...params);
             console.log(`🗑️ [DELETE] Deleted ${result.changes} transaction items`);
             return { success: true, deleted: result.changes };
         }
@@ -2343,15 +2394,32 @@ function createWindows() {
         return stmt.all(...params);
     });
     // Printer configuration handlers
-    electron_1.ipcMain.handle('localdb-save-printer-config', async (event, printerType, systemPrinterName) => {
+    electron_1.ipcMain.handle('localdb-save-printer-config', async (event, printerType, systemPrinterName, extraSettings) => {
         if (!localDb)
             return { success: false };
         try {
-            const stmt = localDb.prepare(`INSERT INTO printer_configs (id, printer_type, system_printer_name, created_at, updated_at) 
-        VALUES (?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET 
-        system_printer_name=excluded.system_printer_name, updated_at=excluded.updated_at`);
+            let extraSettingsJson = null;
+            if (extraSettings !== undefined && extraSettings !== null) {
+                if (typeof extraSettings === 'string') {
+                    extraSettingsJson = extraSettings.trim() === '' ? null : extraSettings;
+                }
+                else if (typeof extraSettings === 'object') {
+                    try {
+                        extraSettingsJson = JSON.stringify(extraSettings);
+                    }
+                    catch (jsonError) {
+                        console.warn('⚠️ Failed to serialize extraSettings, falling back to null:', jsonError);
+                        extraSettingsJson = null;
+                    }
+                }
+            }
+            const stmt = localDb.prepare(`INSERT INTO printer_configs (id, printer_type, system_printer_name, extra_settings, created_at, updated_at) 
+        VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET 
+        system_printer_name=excluded.system_printer_name,
+        extra_settings=excluded.extra_settings,
+        updated_at=excluded.updated_at`);
             const now = Date.now();
-            stmt.run(printerType, printerType, systemPrinterName, now, now);
+            stmt.run(printerType, printerType, systemPrinterName, extraSettingsJson, now, now);
             return { success: true };
         }
         catch (error) {
@@ -2432,10 +2500,10 @@ function createWindows() {
         return { success: true, selections };
     });
     // Log Printer 2 print
-    electron_1.ipcMain.handle('log-printer2-print', async (event, transactionId, printer2ReceiptNumber, mode, cycleNumber) => {
+    electron_1.ipcMain.handle('log-printer2-print', async (event, transactionId, printer2ReceiptNumber, mode, cycleNumber, globalCounter) => {
         if (!printerService)
             return { success: false };
-        const result = printerService.logPrinter2Print(transactionId, printer2ReceiptNumber, mode, cycleNumber);
+        const result = printerService.logPrinter2Print(transactionId, printer2ReceiptNumber, mode, cycleNumber, globalCounter);
         return { success: result };
     });
     // Get Printer 2 audit log
@@ -2446,10 +2514,10 @@ function createWindows() {
         return { success: true, entries };
     });
     // Log Printer 1 print
-    electron_1.ipcMain.handle('log-printer1-print', async (event, transactionId, printer1ReceiptNumber) => {
+    electron_1.ipcMain.handle('log-printer1-print', async (event, transactionId, printer1ReceiptNumber, globalCounter) => {
         if (!printerService)
             return { success: false };
-        const result = printerService.logPrinter1Print(transactionId, printer1ReceiptNumber);
+        const result = printerService.logPrinter1Print(transactionId, printer1ReceiptNumber, globalCounter);
         return { success: result };
     });
     // Get Printer 1 audit log
@@ -2464,8 +2532,8 @@ function createWindows() {
         if (!localDb)
             return { p1: [], p2: [] };
         try {
-            const p1 = localDb.prepare('SELECT id, transaction_id, printer1_receipt_number, printed_at, printed_at_epoch FROM printer1_audit_log WHERE synced_at IS NULL ORDER BY printed_at_epoch ASC LIMIT 1000').all();
-            const p2 = localDb.prepare('SELECT id, transaction_id, printer2_receipt_number, print_mode, cycle_number, printed_at, printed_at_epoch FROM printer2_audit_log WHERE synced_at IS NULL ORDER BY printed_at_epoch ASC LIMIT 1000').all();
+            const p1 = localDb.prepare('SELECT id, transaction_id, printer1_receipt_number, global_counter, printed_at, printed_at_epoch FROM printer1_audit_log WHERE synced_at IS NULL ORDER BY printed_at_epoch ASC LIMIT 1000').all();
+            const p2 = localDb.prepare('SELECT id, transaction_id, printer2_receipt_number, print_mode, cycle_number, global_counter, printed_at, printed_at_epoch FROM printer2_audit_log WHERE synced_at IS NULL ORDER BY printed_at_epoch ASC LIMIT 1000').all();
             return { p1, p2 };
         }
         catch (error) {
@@ -2492,6 +2560,107 @@ function createWindows() {
         catch (error) {
             console.error('Error marking printer audits synced:', error);
             return { success: false };
+        }
+    });
+    // Upsert printer audit logs downloaded from cloud
+    electron_1.ipcMain.handle('localdb-upsert-printer-audits', async (event, payload) => {
+        if (!localDb)
+            return { success: false };
+        if (!payload?.rows?.length)
+            return { success: true, count: 0 };
+        const now = Date.now();
+        const { printerType, rows } = payload;
+        try {
+            const tx = localDb.transaction((data) => {
+                if (printerType === 'receipt') {
+                    const deleteStmt = localDb.prepare('DELETE FROM printer1_audit_log WHERE transaction_id = ? AND printer1_receipt_number = ? AND printed_at_epoch = ?');
+                    const insertStmt = localDb.prepare(`
+            INSERT INTO printer1_audit_log (transaction_id, printer1_receipt_number, global_counter, printed_at, printed_at_epoch, synced_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+          `);
+                    for (const row of data) {
+                        const transactionId = String(row.transaction_id);
+                        const receiptNumber = Number(row.printer1_receipt_number);
+                        const printedAtEpoch = Number(row.printed_at_epoch ?? (row.printed_at ? new Date(row.printed_at).getTime() : 0));
+                        if (!transactionId || Number.isNaN(receiptNumber) || Number.isNaN(printedAtEpoch)) {
+                            continue;
+                        }
+                        deleteStmt.run(transactionId, receiptNumber, printedAtEpoch);
+                        insertStmt.run(transactionId, receiptNumber, typeof row.global_counter === 'number' ? row.global_counter : null, row.printed_at ?? new Date(printedAtEpoch).toISOString(), printedAtEpoch, now);
+                    }
+                }
+                else {
+                    const deleteStmt = localDb.prepare('DELETE FROM printer2_audit_log WHERE transaction_id = ? AND printer2_receipt_number = ? AND printed_at_epoch = ?');
+                    const insertStmt = localDb.prepare(`
+            INSERT INTO printer2_audit_log (transaction_id, printer2_receipt_number, print_mode, cycle_number, global_counter, printed_at, printed_at_epoch, synced_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+          `);
+                    for (const row of data) {
+                        const transactionId = String(row.transaction_id);
+                        const receiptNumber = Number(row.printer2_receipt_number);
+                        const printedAtEpoch = Number(row.printed_at_epoch ?? (row.printed_at ? new Date(row.printed_at).getTime() : 0));
+                        if (!transactionId || Number.isNaN(receiptNumber) || Number.isNaN(printedAtEpoch)) {
+                            continue;
+                        }
+                        deleteStmt.run(transactionId, receiptNumber, printedAtEpoch);
+                        insertStmt.run(transactionId, receiptNumber, row.print_mode ?? 'manual', row.cycle_number ?? null, typeof row.global_counter === 'number' ? row.global_counter : null, row.printed_at ?? new Date(printedAtEpoch).toISOString(), printedAtEpoch, now);
+                    }
+                }
+            });
+            tx(rows);
+            return { success: true, count: rows.length };
+        }
+        catch (error) {
+            console.error('Error upserting printer audits:', error);
+            return { success: false, error: String(error) };
+        }
+    });
+    // Upsert printer daily counters downloaded from cloud
+    electron_1.ipcMain.handle('localdb-upsert-printer-daily-counters', async (event, counters) => {
+        if (!localDb)
+            return { success: false };
+        if (!Array.isArray(counters) || counters.length === 0) {
+            return { success: true, count: 0 };
+        }
+        try {
+            const tx = localDb.transaction((rows) => {
+                const stmt = localDb.prepare(`
+          INSERT INTO printer_daily_counters (printer_type, business_id, date, counter, last_reset_at)
+          VALUES (?, ?, ?, ?, ?)
+          ON CONFLICT(printer_type, business_id, date)
+          DO UPDATE SET counter = excluded.counter, last_reset_at = excluded.last_reset_at
+        `);
+                const now = Date.now();
+                for (const row of rows) {
+                    if (!row?.printer_type || !row?.date)
+                        continue;
+                    const counterValue = Number(row.counter ?? 0);
+                    stmt.run(row.printer_type, Number(row.business_id ?? 0), row.date, counterValue, now);
+                }
+            });
+            tx(counters);
+            return { success: true, count: counters.length };
+        }
+        catch (error) {
+            console.error('Error upserting printer counters:', error);
+            return { success: false, error: String(error) };
+        }
+    });
+    electron_1.ipcMain.handle('localdb-reset-printer-daily-counters', async (event, businessId) => {
+        if (!localDb)
+            return { success: false };
+        try {
+            const stmt = localDb.prepare(`
+        DELETE FROM printer_daily_counters
+        WHERE business_id = ?
+      `);
+            stmt.run(businessId);
+            console.log(`🧹 [RESET] Cleared printer_daily_counters for business ${businessId}`);
+            return { success: true };
+        }
+        catch (error) {
+            console.error('❌ [RESET] Failed to clear printer_daily_counters:', error);
+            return { success: false, error: String(error) };
         }
     });
     // Offline transaction queue management
@@ -2709,24 +2878,39 @@ electron_1.ipcMain.handle('print-receipt', async (event, data) => {
     try {
         console.log('📄 Printing receipt - Full data received:', JSON.stringify(data, null, 2));
         let printerName = data.printerName;
-        // If printer name is not specified, try to get it from saved config using printerType
-        if (!printerName && data.printerType && localDb) {
-            console.log('🔍 No printer name specified, fetching from saved config for printer type:', data.printerType);
+        let marginAdjustMm = typeof data.marginAdjustMm === 'number' && !Number.isNaN(data.marginAdjustMm)
+            ? data.marginAdjustMm
+            : undefined;
+        let printerConfig = null;
+        if (data.printerType && localDb) {
+            console.log('🔍 Resolving printer configuration for type:', data.printerType);
             try {
-                // First check what's in the database
                 const allConfigs = localDb.prepare('SELECT * FROM printer_configs').all();
                 console.log('📋 All printer configs in database:', allConfigs);
-                // Get the specific printer config
-                const config = localDb.prepare('SELECT * FROM printer_configs WHERE printer_type = ?').get(data.printerType);
-                console.log('📋 Printer config query result for type', data.printerType, ':', config);
-                if (config && config.system_printer_name) {
-                    printerName = config.system_printer_name;
+                printerConfig = localDb.prepare('SELECT * FROM printer_configs WHERE printer_type = ?')
+                    .get(data.printerType);
+                console.log('📋 Printer config query result for type', data.printerType, ':', printerConfig);
+                if (!printerName && printerConfig && printerConfig.system_printer_name) {
+                    printerName = printerConfig.system_printer_name;
                     console.log('✅ Found saved printer:', printerName);
                 }
-                else {
-                    console.log('⚠️ No saved printer config found for type:', data.printerType);
+                if (marginAdjustMm === undefined && printerConfig && printerConfig.extra_settings) {
+                    try {
+                        const extra = typeof printerConfig.extra_settings === 'string'
+                            ? JSON.parse(printerConfig.extra_settings)
+                            : printerConfig.extra_settings;
+                        if (extra && typeof extra.marginAdjustMm === 'number' && !Number.isNaN(extra.marginAdjustMm)) {
+                            marginAdjustMm = extra.marginAdjustMm;
+                            console.log('🎚️ Loaded marginAdjustMm from saved settings:', marginAdjustMm);
+                        }
+                    }
+                    catch (parseError) {
+                        console.warn('⚠️ Failed to parse extra_settings for printer config:', parseError);
+                    }
+                }
+                if (!printerName) {
+                    console.log('⚠️ No system printer configured for type:', data.printerType);
                     console.log('💡 Available printer configs:', allConfigs.map(c => ({ type: c.printer_type, name: c.system_printer_name })));
-                    // Return early without error if no printer is configured
                     return { success: false, error: 'No printer configured. Please set up a printer in Settings.' };
                 }
             }
@@ -2781,6 +2965,10 @@ electron_1.ipcMain.handle('print-receipt', async (event, data) => {
                 console.error('❌ Error fetching business name:', error);
             }
         }
+        const clampedMarginAdjustMm = typeof marginAdjustMm === 'number' && !Number.isNaN(marginAdjustMm)
+            ? Math.max(-5, Math.min(5, marginAdjustMm))
+            : 0;
+        const receiptFormattingOptions = { marginAdjustMm: clampedMarginAdjustMm };
         // Generate receipt HTML with character-based width
         let htmlContent = '';
         if (data.type === 'test') {
@@ -2789,11 +2977,11 @@ electron_1.ipcMain.handle('print-receipt', async (event, data) => {
                 htmlContent = generateTestLabelHTML(printerName);
             }
             else {
-                htmlContent = generateTestReceiptHTML(printerName, businessName);
+                htmlContent = generateTestReceiptHTML(printerName, businessName, receiptFormattingOptions);
             }
         }
         else {
-            htmlContent = generateReceiptHTML(data, businessName);
+            htmlContent = generateReceiptHTML(data, businessName, receiptFormattingOptions);
         }
         await printWindow.loadURL(`data:text/html,${encodeURIComponent(htmlContent)}`);
         const printOptions = {
@@ -2992,7 +3180,12 @@ function getLogoBase64() {
     }
 }
 // Generate test receipt HTML with character-based formatting
-function generateTestReceiptHTML(printerName, businessName) {
+function generateTestReceiptHTML(printerName, businessName, options) {
+    const marginAdjust = options?.marginAdjustMm ?? 0;
+    const baseLeftPadding = 7;
+    const baseRightPadding = 7;
+    const leftPadding = Math.max(0, baseLeftPadding - marginAdjust);
+    const rightPadding = Math.max(0, baseRightPadding + marginAdjust);
     // Format date as YYYY-MM-DD HH:MM:SS
     const formatDateTime = (date) => {
         const year = date.getFullYear();
@@ -3022,7 +3215,7 @@ function generateTestReceiptHTML(printerName, businessName) {
       font-size: 10pt;
       font-weight: 500;
       line-height: 1.4;
-      padding: 5mm 7mm;
+      padding: 5mm ${rightPadding.toFixed(2)}mm 5mm ${leftPadding.toFixed(2)}mm;
       word-wrap: break-word;
       overflow-wrap: break-word;
     }
@@ -3328,7 +3521,12 @@ function generateLabelHTML(data) {
   `;
 }
 // Generate transaction receipt HTML
-function generateReceiptHTML(data, businessName) {
+function generateReceiptHTML(data, businessName, options) {
+    const marginAdjust = options?.marginAdjustMm ?? 0;
+    const baseLeftPadding = 7;
+    const baseRightPadding = 7;
+    const leftPadding = Math.max(0, baseLeftPadding - marginAdjust);
+    const rightPadding = Math.max(0, baseRightPadding + marginAdjust);
     const items = data.items || [];
     const total = data.total || data.final_amount || 0;
     const paymentMethod = data.paymentMethod || 'Cash';
@@ -3388,7 +3586,7 @@ function generateReceiptHTML(data, businessName) {
       font-size: 10pt;
       font-weight: 500;
       line-height: 1.4;
-      padding: 5mm 7mm;
+      padding: 5mm ${rightPadding.toFixed(2)}mm 5mm ${leftPadding.toFixed(2)}mm;
       word-wrap: break-word;
       overflow-wrap: break-word;
     }
@@ -3424,9 +3622,8 @@ function generateReceiptHTML(data, businessName) {
         // Choose per-printer display number: Printer 1 uses printer1Counter, Printer 2 uses printer2Counter
         // Fall back to tableNumber, then '01'
         const isReceiptize = data.printerType === 'receiptizePrinter';
-        const number = isReceiptize
-            ? (data.printer2Counter ?? data.tableNumber ?? '01')
-            : (data.printer1Counter ?? data.tableNumber ?? '01');
+        const displayCounter = data.globalCounter ?? (isReceiptize ? data.printer2Counter : data.printer1Counter);
+        const number = displayCounter ?? data.tableNumber ?? '01';
         const numStr = String(number).padStart(2, '0');
         return `<div class="transaction-type">${transactionDisplay} ${numStr}</div>`;
     })()}

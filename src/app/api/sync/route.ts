@@ -410,14 +410,22 @@ export async function GET() {
           return;
         }
 
+        const hasGlobalCounter = await tableHasColumn(tableName, 'global_counter');
+        const selectFields: string[] = [
+          `${transactionColumn} AS transaction_id`,
+          tableName === 'printer1_audit_log' ? 'printer1_receipt_number' : 'printer2_receipt_number',
+        ];
+        if (tableName === 'printer2_audit_log') {
+          selectFields.push('print_mode', 'cycle_number');
+        }
+        if (hasGlobalCounter) {
+          selectFields.push('global_counter');
+        }
+        selectFields.push('printed_at', 'printed_at_epoch');
+
         const audits = await query(`
           SELECT 
-            ${transactionColumn} AS transaction_id,
-            ${tableName === 'printer1_audit_log' ? 'printer1_receipt_number' : 'printer2_receipt_number'},
-            ${tableName === 'printer2_audit_log' ? 'print_mode,' : ''}
-            ${tableName === 'printer2_audit_log' ? 'cycle_number,' : ''}
-            printed_at,
-            printed_at_epoch
+            ${selectFields.join(', ')}
           FROM ${tableName}
           WHERE ${transactionColumn} IN (
             SELECT uuid_id FROM transactions WHERE business_id = ?

@@ -1,8 +1,23 @@
 -- MySQL Migration for Bundle Feature
 -- This adds support for bundle products that allow customers to select items from multiple categories
 
--- Step 1: Add is_bundle flag to products table
-ALTER TABLE products ADD COLUMN is_bundle TINYINT(1) DEFAULT 0 COMMENT 'Whether this product is a bundle';
+SET @schema_name := DATABASE();
+
+-- Step 1: Add is_bundle flag to products table if it does not exist
+SET @sql := IF (
+  EXISTS (
+    SELECT 1
+    FROM INFORMATION_SCHEMA.COLUMNS
+    WHERE TABLE_SCHEMA = @schema_name
+      AND TABLE_NAME = 'products'
+      AND COLUMN_NAME = 'is_bundle'
+  ),
+  'SELECT "is_bundle column already exists" AS info',
+  'ALTER TABLE products ADD COLUMN is_bundle TINYINT(1) DEFAULT 0 COMMENT ''Whether this product is a bundle'''
+);
+PREPARE stmt FROM @sql;
+EXECUTE stmt;
+DEALLOCATE PREPARE stmt;
 
 -- Step 2: Create bundle_items table to define bundle structure
 CREATE TABLE IF NOT EXISTS bundle_items (
@@ -21,8 +36,17 @@ CREATE TABLE IF NOT EXISTS bundle_items (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='Defines the structure of bundle products';
 
 -- Step 3: Add bundle_selections_json column to transaction_items to store selected bundle items
-ALTER TABLE transaction_items ADD COLUMN bundle_selections_json JSON DEFAULT NULL COMMENT 'JSON array storing selected products for bundle items';
-
-
-
-
+SET @sql := IF (
+  EXISTS (
+    SELECT 1
+    FROM INFORMATION_SCHEMA.COLUMNS
+    WHERE TABLE_SCHEMA = @schema_name
+      AND TABLE_NAME = 'transaction_items'
+      AND COLUMN_NAME = 'bundle_selections_json'
+  ),
+  'SELECT "bundle_selections_json column already exists" AS info',
+  'ALTER TABLE transaction_items ADD COLUMN bundle_selections_json JSON DEFAULT NULL COMMENT ''JSON array storing selected products for bundle items'''
+);
+PREPARE stmt FROM @sql;
+EXECUTE stmt;
+DEALLOCATE PREPARE stmt;

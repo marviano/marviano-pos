@@ -1,6 +1,5 @@
 'use client';
 
-import { useState } from 'react';
 import { CheckCircle, XCircle, AlertTriangle } from 'lucide-react';
 
 interface BundleSelection {
@@ -52,7 +51,7 @@ interface CartItem {
 interface TransactionConfirmationDialogProps {
   isOpen: boolean;
   onClose: () => void;
-  onConfirm: () => void;
+  onConfirm: (target: 'receipt' | 'receiptize') => void;
   cartItems: CartItem[];
   paymentMethod: 'cash' | 'debit' | 'qr' | 'ewallet' | 'cl' | 'voucher' | 'qpon' | 'gofood' | 'grabfood' | 'shopeefood' | 'tiktok';
   pickupMethod: 'dine-in' | 'take-away';
@@ -62,8 +61,6 @@ interface TransactionConfirmationDialogProps {
   voucherDiscount?: number;
   finalTotal?: number;
   isProcessing?: boolean;
-  printTarget: 'receipt' | 'receiptize' | 'both';
-  onChangePrintTarget: (target: 'receipt' | 'receiptize' | 'both') => void;
   isOnline?: boolean;
   selectedOnlinePlatform?: 'qpon' | 'gofood' | 'grabfood' | 'shopeefood' | 'tiktok' | null;
   customerName?: string;
@@ -85,8 +82,6 @@ export default function TransactionConfirmationDialog({
   voucherDiscount = 0,
   finalTotal = orderTotal,
   isProcessing = false,
-  printTarget,
-  onChangePrintTarget,
   isOnline = false,
   selectedOnlinePlatform = null,
   customerName = '',
@@ -297,33 +292,6 @@ export default function TransactionConfirmationDialog({
             </div>
           )}
 
-        {/* Print Target Selection */}
-        <div className="bg-purple-50 rounded-xl p-4">
-          <h4 className="font-semibold text-purple-800 mb-2">Jenis Pelanggan</h4>
-          <div className="flex flex-col sm:flex-row gap-2">
-            <label className={`px-3 py-2 rounded-lg border cursor-pointer text-sm ${printTarget === 'receipt' ? 'bg-white border-purple-400 text-purple-800' : 'bg-white border-gray-300 text-gray-700'}`}>
-              <input
-                type="radio"
-                name="print-target"
-                className="mr-2"
-                checked={printTarget === 'receipt'}
-                onChange={() => onChangePrintTarget('receipt')}
-              />
-              OJOL
-            </label>
-            <label className={`px-3 py-2 rounded-lg border cursor-pointer text-sm ${printTarget === 'receiptize' ? 'bg-white border-purple-400 text-purple-800' : 'bg-white border-gray-300 text-gray-700'}`}>
-              <input
-                type="radio"
-                name="print-target"
-                className="mr-2"
-                checked={printTarget === 'receiptize'}
-                onChange={() => onChangePrintTarget('receiptize')}
-              />
-              Walk In
-            </label>
-          </div>
-        </div>
-
           {/* Amount Summary */}
           <div className="bg-gray-50 rounded-xl p-4">
             <h3 className="text-lg font-semibold text-gray-800 mb-4">Rincian Pembayaran</h3>
@@ -394,7 +362,13 @@ export default function TransactionConfirmationDialog({
             Batal
           </button>
           <button
-            onClick={onConfirm}
+            onClick={(event) => {
+              if (isProcessing) return;
+              const rect = event.currentTarget.getBoundingClientRect();
+              const clickX = event.clientX - rect.left;
+              const target = clickX <= rect.width / 2 ? 'receipt' : 'receiptize';
+              onConfirm(target);
+            }}
             disabled={isProcessing}
             className="px-6 py-3 bg-green-500 hover:bg-green-600 text-white rounded-xl font-medium transition-colors disabled:opacity-50 flex items-center space-x-2"
           >
