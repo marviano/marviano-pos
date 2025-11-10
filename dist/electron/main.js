@@ -100,6 +100,7 @@ function createWindows() {
             const hasHargaGrabfood = productSchema.some(col => col.name === 'harga_grabfood');
             const hasHargaShopeefood = productSchema.some(col => col.name === 'harga_shopeefood');
             const hasHargaTiktok = productSchema.some(col => col.name === 'harga_tiktok');
+            const hasHargaQpon = productSchema.some(col => col.name === 'harga_qpon');
             const hasCategory2Name = productSchema.some(col => col.name === 'category2_name');
             const hasIsBundle = productSchema.some(col => col.name === 'is_bundle');
             if (!hasHargaGofood) {
@@ -117,6 +118,10 @@ function createWindows() {
             if (!hasHargaTiktok) {
                 console.log('📋 Migrating database: Adding products.harga_tiktok column...');
                 localDb.prepare('ALTER TABLE products ADD COLUMN harga_tiktok REAL').run();
+            }
+            if (!hasHargaQpon) {
+                console.log('📋 Migrating database: Adding products.harga_qpon column...');
+                localDb.prepare('ALTER TABLE products ADD COLUMN harga_qpon REAL').run();
             }
             if (!hasCategory2Name) {
                 console.log('📋 Migrating database: Adding products.category2_name column...');
@@ -212,6 +217,7 @@ function createWindows() {
         harga_jual INTEGER NOT NULL,
         harga_khusus REAL,
         harga_online REAL,
+        harga_qpon REAL,
         harga_gofood REAL,
         harga_grabfood REAL,
         harga_shopeefood REAL,
@@ -982,8 +988,8 @@ function createWindows() {
         const tx = localDb.transaction((data) => {
             const stmt = localDb.prepare(`INSERT INTO products (
         id, business_id, menu_code, nama, satuan, kategori, jenis, category2_name, keterangan,
-        harga_beli, ppn, harga_jual, harga_khusus, harga_online, harga_gofood, harga_grabfood, harga_shopeefood, harga_tiktok, fee_kerja, status, is_bundle, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        harga_beli, ppn, harga_jual, harga_khusus, harga_online, harga_qpon, harga_gofood, harga_grabfood, harga_shopeefood, harga_tiktok, fee_kerja, status, is_bundle, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET
         business_id=excluded.business_id,
         menu_code=excluded.menu_code,
@@ -998,6 +1004,7 @@ function createWindows() {
         harga_jual=excluded.harga_jual,
         harga_khusus=excluded.harga_khusus,
         harga_online=excluded.harga_online,
+        harga_qpon=excluded.harga_qpon,
         harga_gofood=excluded.harga_gofood,
         harga_grabfood=excluded.harga_grabfood,
         harga_shopeefood=excluded.harga_shopeefood,
@@ -1011,7 +1018,7 @@ function createWindows() {
                 const kategori = r.kategori || r.category1_name || '';
                 const category2Name = r.category2_name || r.jenis || '';
                 const isBundle = r.is_bundle === 1 || r.is_bundle === true ? 1 : 0;
-                stmt.run(r.id, r.business_id, r.menu_code, r.nama, r.satuan || '', kategori, null, category2Name, r.keterangan || null, r.harga_beli || null, r.ppn || null, r.harga_jual, r.harga_khusus || null, r.harga_online || null, r.harga_gofood || null, r.harga_grabfood || null, r.harga_shopeefood || null, r.harga_tiktok || null, r.fee_kerja || null, r.status, isBundle, Date.now());
+                stmt.run(r.id, r.business_id, r.menu_code, r.nama, r.satuan || '', kategori, null, category2Name, r.keterangan || null, r.harga_beli || null, r.ppn || null, r.harga_jual, r.harga_khusus || null, r.harga_online || null, r.harga_qpon || null, r.harga_gofood || null, r.harga_grabfood || null, r.harga_shopeefood || null, r.harga_tiktok || null, r.fee_kerja || null, r.status, isBundle, Date.now());
             }
         });
         tx(rows);
@@ -1022,7 +1029,7 @@ function createWindows() {
             return [];
         const stmt = localDb.prepare(`SELECT 
       id, business_id, menu_code, nama, satuan, kategori, category2_name, keterangan,
-      harga_beli, ppn, harga_jual, harga_khusus, harga_online, harga_gofood, harga_grabfood, harga_shopeefood, harga_tiktok, fee_kerja, status, is_bundle
+      harga_beli, ppn, harga_jual, harga_khusus, harga_online, harga_qpon, harga_gofood, harga_grabfood, harga_shopeefood, harga_tiktok, fee_kerja, status, is_bundle
       FROM products WHERE category2_name = ? AND status = 'active' ORDER BY nama ASC`);
         return stmt.all(jenis);
     });
@@ -1032,7 +1039,7 @@ function createWindows() {
             return [];
         const stmt = localDb.prepare(`SELECT 
       id, business_id, menu_code, nama, satuan, kategori, category2_name, keterangan,
-      harga_beli, ppn, harga_jual, harga_khusus, harga_online, harga_gofood, harga_grabfood, harga_shopeefood, harga_tiktok, fee_kerja, status, is_bundle
+      harga_beli, ppn, harga_jual, harga_khusus, harga_online, harga_qpon, harga_gofood, harga_grabfood, harga_shopeefood, harga_tiktok, fee_kerja, status, is_bundle
       FROM products WHERE category2_name = ? AND status = 'active' ORDER BY nama ASC`);
         return stmt.all(category2Name);
     });
@@ -1042,7 +1049,7 @@ function createWindows() {
         try {
             const stmt = localDb.prepare(`SELECT 
         id, business_id, menu_code, nama, satuan, kategori, category2_name, keterangan,
-        harga_beli, ppn, harga_jual, harga_khusus, harga_online, harga_gofood, harga_grabfood, harga_shopeefood, harga_tiktok, fee_kerja, status, is_bundle
+        harga_beli, ppn, harga_jual, harga_khusus, harga_online, harga_qpon, harga_gofood, harga_grabfood, harga_shopeefood, harga_tiktok, fee_kerja, status, is_bundle
         FROM products WHERE status = 'active' ORDER BY nama ASC`);
             return stmt.all();
         }
@@ -1693,11 +1700,12 @@ function createWindows() {
         const tx = localDb.transaction((data) => {
             const stmt = localDb.prepare(`INSERT INTO transaction_items (
         id, transaction_id, product_id, quantity, unit_price, total_price,
-        customizations_json, custom_note, created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        customizations_json, bundle_selections_json, custom_note, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET
         transaction_id=excluded.transaction_id, product_id=excluded.product_id, quantity=excluded.quantity,
         unit_price=excluded.unit_price, total_price=excluded.total_price, customizations_json=excluded.customizations_json,
+        bundle_selections_json=excluded.bundle_selections_json,
         custom_note=excluded.custom_note, created_at=excluded.created_at`);
             for (const r of data) {
                 console.log('📦 [SQLITE] Item data:', {
@@ -1715,9 +1723,15 @@ function createWindows() {
                         ? r.customizations_json
                         : JSON.stringify(r.customizations_json);
                 }
+                let bundleSelectionsJson = null;
+                if (r.bundle_selections_json) {
+                    bundleSelectionsJson = typeof r.bundle_selections_json === 'string'
+                        ? r.bundle_selections_json
+                        : JSON.stringify(r.bundle_selections_json);
+                }
                 console.log('📦 [SQLITE] Final customizations JSON:', customizationsJson);
                 console.log('📝 [SQLITE] Custom note:', r.custom_note);
-                stmt.run(r.id, r.transaction_id, r.product_id, r.quantity || 1, r.unit_price, r.total_price, customizationsJson, r.custom_note, r.created_at);
+                stmt.run(r.id, r.transaction_id, r.product_id, r.quantity || 1, r.unit_price, r.total_price, customizationsJson, bundleSelectionsJson, r.custom_note, r.created_at);
             }
         });
         tx(rows);

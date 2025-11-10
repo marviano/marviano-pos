@@ -57,7 +57,7 @@ export async function GET() {
           p.id, p.menu_code, p.nama, p.satuan, p.category1_id, p.category2_id,
           c1.name as category1_name, c2.name as category2_name,
           p.keterangan, p.harga_beli, p.ppn, p.harga_jual, p.harga_khusus,
-          p.harga_gofood, p.harga_grabfood, p.harga_shopeefood, p.harga_tiktok,
+          p.harga_gofood, p.harga_grabfood, p.harga_shopeefood, p.harga_tiktok, p.harga_qpon,
           p.fee_kerja, p.image_url, p.status, p.created_at, p.has_customization, p.is_bundle
         FROM products p
         INNER JOIN product_businesses pb ON p.id = pb.product_id
@@ -373,55 +373,71 @@ export async function GET() {
       counts.transactionItems = 0;
     }
 
-    // Sync Printer Audit Logs - Printer 1
-    try {
-      const printer1Audits = await query(`
-        SELECT 
-          transaction_id,
-          printer1_receipt_number,
-          printed_at,
-          printed_at_epoch
-        FROM printer1_audit_log
-        WHERE transaction_id IN (
-          SELECT uuid_id FROM transactions WHERE business_id = ?
-        )
-        ORDER BY printed_at_epoch DESC
-        LIMIT 1000
-      `, [BUSINESS_ID]);
-      syncResults.printer1Audits = printer1Audits;
-      counts.printer1Audits = printer1Audits.length;
-      console.log(`✅ Synced ${printer1Audits.length} Printer 1 audit logs`);
-    } catch (error) {
-      console.warn('⚠️ Failed to sync Printer 1 audits (may not exist):', error);
-      syncResults.printer1Audits = [];
-      counts.printer1Audits = 0;
-    }
+    // Helper utilities for optional tables
+    const tableExists = async (tableName: string) => {
+      const result = await query<any[]>(`SHOW TABLES LIKE ?`, [tableName]);
+      return Array.isArray(result) && result.length > 0;
+    };
 
-    // Sync Printer Audit Logs - Printer 2
-    try {
-      const printer2Audits = await query(`
-        SELECT 
-          transaction_id,
-          printer2_receipt_number,
-          print_mode,
-          cycle_number,
-          printed_at,
-          printed_at_epoch
-        FROM printer2_audit_log
-        WHERE transaction_id IN (
-          SELECT uuid_id FROM transactions WHERE business_id = ?
-        )
-        ORDER BY printed_at_epoch DESC
-        LIMIT 1000
-      `, [BUSINESS_ID]);
-      syncResults.printer2Audits = printer2Audits;
-      counts.printer2Audits = printer2Audits.length;
-      console.log(`✅ Synced ${printer2Audits.length} Printer 2 audit logs`);
-    } catch (error) {
-      console.warn('⚠️ Failed to sync Printer 2 audits (may not exist):', error);
-      syncResults.printer2Audits = [];
-      counts.printer2Audits = 0;
-    }
+    const tableHasColumn = async (tableName: 'printer1_audit_log' | 'printer2_audit_log', columnName: string) => {
+      const result = await query<any[]>(`SHOW COLUMNS FROM ${tableName} LIKE ?`, [columnName]);
+      return Array.isArray(result) && result.length > 0;
+    };
+
+    const getTransactionIdColumn = async (tableName: 'printer1_audit_log' | 'printer2_audit_log') => {
+      if (await tableHasColumn(tableName, 'transaction_id')) return 'transaction_id';
+      if (await tableHasColumn(tableName, 'uuid_transaction_id')) return 'uuid_transaction_id';
+      return null;
+    };
+
+    const trySyncPrinterAudits = async (
+      tableName: 'printer1_audit_log' | 'printer2_audit_log',
+      targetKey: 'printer1Audits' | 'printer2Audits'
+    ) => {
+      try {
+        if (!(await tableExists(tableName))) {
+          console.info(`ℹ️ Skipping ${tableName}: table not found`);
+          syncResults[targetKey] = [];
+          counts[targetKey] = 0;
+          return;
+        }
+
+        const transactionColumn = await getTransactionIdColumn(tableName);
+        if (!transactionColumn) {
+          console.info(`ℹ️ Skipping ${tableName}: transaction reference column missing`);
+          syncResults[targetKey] = [];
+          counts[targetKey] = 0;
+          return;
+        }
+
+        const audits = await query(`
+          SELECT 
+            ${transactionColumn} AS transaction_id,
+            ${tableName === 'printer1_audit_log' ? 'printer1_receipt_number' : 'printer2_receipt_number'},
+            ${tableName === 'printer2_audit_log' ? 'print_mode,' : ''}
+            ${tableName === 'printer2_audit_log' ? 'cycle_number,' : ''}
+            printed_at,
+            printed_at_epoch
+          FROM ${tableName}
+          WHERE ${transactionColumn} IN (
+            SELECT uuid_id FROM transactions WHERE business_id = ?
+          )
+          ORDER BY printed_at_epoch DESC
+          LIMIT 1000
+        `, [BUSINESS_ID]);
+
+        syncResults[targetKey] = audits;
+        counts[targetKey] = audits.length;
+        console.log(`✅ Synced ${audits.length} ${tableName.replace('_', ' ')} records`);
+      } catch (error) {
+        console.warn(`⚠️ Failed to sync ${tableName}:`, error);
+        syncResults[targetKey] = [];
+        counts[targetKey] = 0;
+      }
+    };
+
+    await trySyncPrinterAudits('printer1_audit_log', 'printer1Audits');
+    await trySyncPrinterAudits('printer2_audit_log', 'printer2Audits');
 
     const totalRecords = Object.values(counts).reduce((sum, count) => sum + count, 0);
     console.log(`🎉 Comprehensive sync completed: ${totalRecords} total records synced`);

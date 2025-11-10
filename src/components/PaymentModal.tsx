@@ -35,6 +35,7 @@ interface CartItem {
     harga_grabfood?: number;
     harga_shopeefood?: number;
     harga_tiktok?: number;
+    harga_qpon?: number;
   };
   quantity: number;
   customizations?: {
@@ -57,10 +58,10 @@ interface PaymentModalProps {
   onPaymentComplete: () => void;
   transactionType: 'drinks' | 'bakery';
   isOnline?: boolean;
-  selectedOnlinePlatform?: 'gofood' | 'grabfood' | 'shopeefood' | 'tiktok' | null;
+  selectedOnlinePlatform?: 'qpon' | 'gofood' | 'grabfood' | 'shopeefood' | 'tiktok' | null;
 }
 
-type PaymentMethod = 'cash' | 'debit' | 'qr' | 'ewallet' | 'cl' | 'voucher' | 'gofood' | 'grabfood' | 'shopeefood' | 'tiktok';
+type PaymentMethod = 'cash' | 'debit' | 'qr' | 'ewallet' | 'cl' | 'voucher' | 'qpon' | 'gofood' | 'grabfood' | 'shopeefood' | 'tiktok';
 type PromotionSelection = 'none' | 'percent_30' | 'percent_35' | 'percent_50' | 'custom' | 'free';
 type PickupMethod = 'dine-in' | 'take-away';
 
@@ -84,7 +85,6 @@ export default function PaymentModal({
   const [activeInput, setActiveInput] = useState<'amount' | 'voucher' | 'preference' | 'customer'>('amount');
   const [bankId, setBankId] = useState<string>('');
   const [cardNumber, setCardNumber] = useState<string>('');
-  const [selectedClAccount, setSelectedClAccount] = useState<string>('');
   const [banks, setBanks] = useState<Array<{id: number, bank_code: string, bank_name: string, is_popular: boolean}>>([]);
   const [bankSearchTerm, setBankSearchTerm] = useState<string>('');
   const [showBankDropdown, setShowBankDropdown] = useState<boolean>(false);
@@ -102,6 +102,12 @@ export default function PaymentModal({
     { id: 'custom', label: 'Custom Nominal' },
     { id: 'free', label: 'FREE' }
   ];
+
+  const trimmedCustomerName = customerName.trim();
+  const isCustomerNameRequired = selectedPaymentMethod === 'cl';
+  const isCustomerNameMissing = isCustomerNameRequired && trimmedCustomerName.length === 0;
+  const isDebitInfoIncomplete = selectedPaymentMethod === 'debit' && (!bankId || !cardNumber);
+  const isClInfoIncomplete = selectedPaymentMethod === 'cl' && isCustomerNameMissing;
 
   // Auto-set pickup method for online orders
   useEffect(() => {
@@ -133,6 +139,8 @@ export default function PaymentModal({
   const getOnlinePriceForPlatform = (product: any): number | null => {
     if (!isOnline || !selectedOnlinePlatform) return null;
     switch (selectedOnlinePlatform) {
+      case 'qpon':
+        return product.harga_qpon ?? null;
       case 'gofood':
         return product.harga_gofood ?? null;
       case 'grabfood':
@@ -219,7 +227,8 @@ export default function PaymentModal({
     !hasValidCustomPromotion ||
     !hasValidDiscount ||
     !voucherMethodValid ||
-    (requiresCashInput && (!hasEnteredAmount || !amountIsSufficient));
+    (requiresCashInput && (!hasEnteredAmount || !amountIsSufficient)) ||
+    (selectedPaymentMethod === 'cl' && trimmedCustomerName === '');
 
   const formatPrice = (price: number) => {
     return `Rp ${price.toLocaleString('id-ID')}`;
@@ -393,10 +402,10 @@ export default function PaymentModal({
       }
     }
 
-    // Validate CL account selection
+    // Validate City Ledger customer name
     if (selectedPaymentMethod === 'cl') {
-      if (!selectedClAccount) {
-        alert('Pilih akun City Ledger');
+      if (trimmedCustomerName === '') {
+        alert('Masukkan nama pelanggan untuk City Ledger');
         return;
       }
     }
@@ -440,8 +449,8 @@ export default function PaymentModal({
     
     try {
       // Prepare transaction data
-      const clAccountId = selectedPaymentMethod === 'cl' ? parseInt(selectedClAccount.substring(2)) : null;
-      const clAccountName = selectedPaymentMethod === 'cl' ? selectedClAccount.split(' - ')[1] : null;
+      const clAccountId = null;
+      const clAccountName = selectedPaymentMethod === 'cl' ? (trimmedCustomerName || null) : null;
       // For online orders, force pickup_method to 'take-away'
       const finalPickupMethod = isOnline ? 'take-away' : selectedPickupMethod;
       
@@ -489,7 +498,7 @@ export default function PaymentModal({
         status: 'completed',
         created_at: new Date().toISOString(),
         contact_id: null, // Will be used when contact book is integrated
-        customer_name: customerName || null,
+        customer_name: trimmedCustomerName || null,
         bank_id: selectedPaymentMethod === 'debit' && bankId ? parseInt(bankId) : null,
         card_number: selectedPaymentMethod === 'debit' ? cardNumber : null,
         cl_account_id: clAccountId,
@@ -501,6 +510,9 @@ export default function PaymentModal({
           
           if (isOnline && selectedOnlinePlatform) {
             switch (selectedOnlinePlatform) {
+              case 'qpon':
+                basePrice = item.product.harga_qpon || item.product.harga_jual;
+                break;
               case 'gofood':
                 basePrice = item.product.harga_gofood || item.product.harga_jual;
                 break;
@@ -625,6 +637,9 @@ export default function PaymentModal({
             let basePrice = item.product.harga_jual;
             if (isOnline && selectedOnlinePlatform) {
               switch (selectedOnlinePlatform) {
+              case 'qpon':
+                basePrice = item.product.harga_qpon || item.product.harga_jual;
+                break;
                 case 'gofood':
                   basePrice = item.product.harga_gofood || item.product.harga_jual;
                   break;
@@ -712,6 +727,9 @@ export default function PaymentModal({
           
           if (isOnline && selectedOnlinePlatform) {
             switch (selectedOnlinePlatform) {
+              case 'qpon':
+                basePrice = item.product.harga_qpon || item.product.harga_jual;
+                break;
               case 'gofood':
                 basePrice = item.product.harga_gofood || item.product.harga_jual;
                 break;
@@ -806,6 +824,7 @@ export default function PaymentModal({
                         selectedPaymentMethod === 'qr' ? 'QR Code' :
                         selectedPaymentMethod === 'ewallet' ? 'E-Wallet' :
                         selectedPaymentMethod === 'cl' ? 'City Ledger' :
+                        selectedPaymentMethod === 'qpon' ? 'Qpon' :
                         selectedPaymentMethod === 'gofood' ? 'GoFood' :
                         selectedPaymentMethod === 'grabfood' ? 'GrabFood' :
                         selectedPaymentMethod === 'shopeefood' ? 'ShopeeFood' :
@@ -1146,7 +1165,6 @@ export default function PaymentModal({
       setPromotionSelection('none');
       setBankId('');
       setCardNumber('');
-      setSelectedClAccount('');
       setBankSearchTerm('');
     setShowBankDropdown(false);
       // Don't reset payment method if it's an online order with a selected platform
@@ -1213,13 +1231,20 @@ export default function PaymentModal({
                         e.stopPropagation();
                       }}
                       className={`w-full p-3 pr-10 text-base font-semibold border-2 rounded-lg text-gray-800 transition-all duration-300 cursor-text ${
-                        activeInput === 'customer' 
-                          ? 'border-purple-400 bg-purple-50 shadow-lg shadow-purple-200' 
-                          : 'border-gray-200 bg-gray-50 hover:bg-gray-100'
+                        isCustomerNameMissing
+                          ? 'border-red-400 bg-red-50 shadow-lg shadow-red-100 animate-pulse'
+                          : activeInput === 'customer' 
+                            ? 'border-purple-400 bg-purple-50 shadow-lg shadow-purple-200' 
+                            : 'border-gray-200 bg-gray-50 hover:bg-gray-100'
                       }`}
                       placeholder="Nama Pelanggan"
                       autoComplete="off"
                     />
+                  {isCustomerNameMissing && (
+                    <p className="mt-1 text-xs font-semibold text-red-600">
+                      Nama pelanggan wajib diisi untuk City Ledger.
+                    </p>
+                  )}
                     <button
                       disabled
                       className="absolute right-2 top-1/2 transform -translate-y-1/2 px-2 py-1 bg-gray-200 rounded cursor-not-allowed opacity-50"
@@ -1328,18 +1353,18 @@ export default function PaymentModal({
               {/* Payment Method Specific Inputs */}
               {(selectedPaymentMethod === 'debit' || selectedPaymentMethod === 'cl') && (
                 <div className={`rounded-xl p-4 ${
-                  (selectedPaymentMethod === 'debit' && (!bankId || !cardNumber)) || 
-                  (selectedPaymentMethod === 'cl' && !selectedClAccount)
+                  isDebitInfoIncomplete || 
+                  isClInfoIncomplete
                     ? 'bg-red-50 border-2 border-red-300 animate-pulse' 
                     : 'bg-gray-50'
                 }`}>
                   <h3 className={`text-lg font-semibold mb-4 ${
-                    (selectedPaymentMethod === 'debit' && (!bankId || !cardNumber)) || 
-                    (selectedPaymentMethod === 'cl' && !selectedClAccount)
+                    isDebitInfoIncomplete || 
+                    isClInfoIncomplete
                       ? 'text-red-800' 
                       : 'text-gray-800'
                   }`}>
-                    {selectedPaymentMethod === 'debit' ? 'Informasi Debit Card' : 'Pilih Akun City Ledger'}
+                    {selectedPaymentMethod === 'debit' ? 'Informasi Debit Card' : 'Informasi City Ledger'}
                   </h3>
                   
                   {selectedPaymentMethod === 'debit' && (
@@ -1462,27 +1487,32 @@ export default function PaymentModal({
                   )}
                   
                   {selectedPaymentMethod === 'cl' && (
-              <div>
-                      <label className="block text-xs font-medium text-gray-700 mb-1">
-                        Pilih Akun City Ledger
-                      </label>
-                      <select
-                        value={selectedClAccount}
-                        onChange={(e) => setSelectedClAccount(e.target.value)}
-                        onFocus={() => {
-                          // Clear any active input when focusing on CL account
-                          setActiveInput('amount');
-                        }}
-                        className={`w-full p-2 text-sm font-medium border rounded-md text-gray-800 bg-white focus:border-blue-400 focus:ring-1 focus:ring-blue-100 ${
-                          !selectedClAccount ? 'border-red-300 animate-pulse' : 'border-gray-300'
-                        }`}
+                    <div className="space-y-3">
+                      <p className="text-sm text-gray-700">
+                        Nama pelanggan yang kamu isi akan disimpan sebagai referensi City Ledger.
+                      </p>
+                      <div
+                        className={`rounded-lg border border-dashed ${
+                          trimmedCustomerName ? 'border-purple-300 bg-purple-50/60' : 'border-red-300 bg-red-50/70'
+                        } p-3 text-xs`}
                       >
-                        <option value="">Pilih akun...</option>
-                        <option value="CL001">CL001 - Sony Hendarto</option>
-                        <option value="CL002">CL002 - Jenny Sulistiowati</option>
-                        <option value="CL003">CL003 - Sebastian Putra Hendarto</option>
-                        <option value="CL004">CL004 - Larasati Putri Hendarto</option>
-                      </select>
+                        <p className="font-semibold text-gray-700">Nama pelanggan saat ini:</p>
+                        <p
+                          className={`mt-1 text-base font-bold ${
+                            trimmedCustomerName ? 'text-purple-800' : 'text-red-600'
+                          }`}
+                        >
+                          {trimmedCustomerName || 'Belum diisi'}
+                        </p>
+                      </div>
+                      <p className="text-xs text-gray-600">
+                        Pastikan pelanggan memahami bahwa transaksi ini dicatat sebagai hutang (City Ledger).
+                      </p>
+                      {isCustomerNameMissing && (
+                        <p className="text-xs font-semibold text-red-600">
+                          Silakan isi nama pelanggan untuk melanjutkan pembayaran City Ledger.
+                        </p>
+                      )}
                     </div>
                   )}
                 </div>
@@ -1502,7 +1532,8 @@ export default function PaymentModal({
                       <div className="flex items-center justify-between">
                         <span className="text-sm font-semibold text-blue-800">Platform:</span>
                         <span className="text-sm font-bold text-blue-900 uppercase">
-                          {selectedOnlinePlatform === 'gofood' ? 'GoFood' : 
+                          {selectedOnlinePlatform === 'qpon' ? 'Qpon' : 
+                           selectedOnlinePlatform === 'gofood' ? 'GoFood' : 
                            selectedOnlinePlatform === 'grabfood' ? 'GrabFood' : 
                            selectedOnlinePlatform === 'shopeefood' ? 'ShopeeFood' : 
                            selectedOnlinePlatform === 'tiktok' ? 'TikTok' : selectedOnlinePlatform}
@@ -1562,8 +1593,8 @@ export default function PaymentModal({
                         setSelectedPaymentMethod('cl');
                         // Clear and reset amount input for CL
                         setAmountReceived('');
-                        // Reset active input since amount field is disabled
-                        setActiveInput('amount');
+                        // Pindahkan fokus ke input nama pelanggan karena wajib diisi
+                        setActiveInput('customer');
                         // Clear promotion when CL is selected
                         if (promotionSelection !== 'none') {
                           setPromotionSelection('none');
@@ -1869,3 +1900,4 @@ export default function PaymentModal({
     </>
   );
 }
+

@@ -69,10 +69,12 @@ export default function CustomerDisplay() {
   const [drinksGrabfoodCart, setDrinksGrabfoodCart] = useState<CartItem[]>([]);
   const [drinksShopeefoodCart, setDrinksShopeefoodCart] = useState<CartItem[]>([]);
   const [drinksTiktokCart, setDrinksTiktokCart] = useState<CartItem[]>([]);
+  const [drinksQponCart, setDrinksQponCart] = useState<CartItem[]>([]);
   const [bakeryGofoodCart, setBakeryGofoodCart] = useState<CartItem[]>([]);
   const [bakeryGrabfoodCart, setBakeryGrabfoodCart] = useState<CartItem[]>([]);
   const [bakeryShopeefoodCart, setBakeryShopeefoodCart] = useState<CartItem[]>([]);
   const [bakeryTiktokCart, setBakeryTiktokCart] = useState<CartItem[]>([]);
+  const [bakeryQponCart, setBakeryQponCart] = useState<CartItem[]>([]);
   
   const [slideshowItems, setSlideshowItems] = useState<SlideshowItem[]>([]);
   const [slideshowImages, setSlideshowImages] = useState<SlideshowImage[]>([]);
@@ -81,7 +83,7 @@ export default function CustomerDisplay() {
   const [isClient, setIsClient] = useState(false);
   const [activeTab, setActiveTab] = useState<string>('drinks');
   const [isOnlineTab, setIsOnlineTab] = useState<boolean>(false);
-  const [selectedOnlinePlatform, setSelectedOnlinePlatform] = useState<'gofood' | 'grabfood' | 'shopeefood' | 'tiktok' | null>(null);
+  const [selectedOnlinePlatform, setSelectedOnlinePlatform] = useState<'qpon' | 'gofood' | 'grabfood' | 'shopeefood' | 'tiktok' | null>(null);
 
   // Helper functions to get current cart based on active tab and platform
   const getCurrentCart = (): CartItem[] => {
@@ -90,12 +92,14 @@ export default function CustomerDisplay() {
     if (activeTab === 'bakery' && !isOnlineTab) return bakeryCart;
     
     // Online carts - Drinks platforms
+    if (activeTab === 'drinks (Online)' && isOnlineTab && selectedOnlinePlatform === 'qpon') return drinksQponCart;
     if (activeTab === 'drinks (Online)' && isOnlineTab && selectedOnlinePlatform === 'gofood') return drinksGofoodCart;
     if (activeTab === 'drinks (Online)' && isOnlineTab && selectedOnlinePlatform === 'grabfood') return drinksGrabfoodCart;
     if (activeTab === 'drinks (Online)' && isOnlineTab && selectedOnlinePlatform === 'shopeefood') return drinksShopeefoodCart;
     if (activeTab === 'drinks (Online)' && isOnlineTab && selectedOnlinePlatform === 'tiktok') return drinksTiktokCart;
     
     // Online carts - Bakery platforms
+    if (activeTab === 'bakery (Online)' && isOnlineTab && selectedOnlinePlatform === 'qpon') return bakeryQponCart;
     if (activeTab === 'bakery (Online)' && isOnlineTab && selectedOnlinePlatform === 'gofood') return bakeryGofoodCart;
     if (activeTab === 'bakery (Online)' && isOnlineTab && selectedOnlinePlatform === 'grabfood') return bakeryGrabfoodCart;
     if (activeTab === 'bakery (Online)' && isOnlineTab && selectedOnlinePlatform === 'shopeefood') return bakeryShopeefoodCart;
@@ -112,7 +116,9 @@ export default function CustomerDisplay() {
       setBakeryCart(newCart);
     } 
     // Online carts - Drinks platforms
-    else if (activeTab === 'drinks (Online)' && isOnlineTab && selectedOnlinePlatform === 'gofood') {
+    else if (activeTab === 'drinks (Online)' && isOnlineTab && selectedOnlinePlatform === 'qpon') {
+      setDrinksQponCart(newCart);
+    } else if (activeTab === 'drinks (Online)' && isOnlineTab && selectedOnlinePlatform === 'gofood') {
       setDrinksGofoodCart(newCart);
     } else if (activeTab === 'drinks (Online)' && isOnlineTab && selectedOnlinePlatform === 'grabfood') {
       setDrinksGrabfoodCart(newCart);
@@ -122,7 +128,9 @@ export default function CustomerDisplay() {
       setDrinksTiktokCart(newCart);
     }
     // Online carts - Bakery platforms
-    else if (activeTab === 'bakery (Online)' && isOnlineTab && selectedOnlinePlatform === 'gofood') {
+    else if (activeTab === 'bakery (Online)' && isOnlineTab && selectedOnlinePlatform === 'qpon') {
+      setBakeryQponCart(newCart);
+    } else if (activeTab === 'bakery (Online)' && isOnlineTab && selectedOnlinePlatform === 'gofood') {
       setBakeryGofoodCart(newCart);
     } else if (activeTab === 'bakery (Online)' && isOnlineTab && selectedOnlinePlatform === 'grabfood') {
       setBakeryGrabfoodCart(newCart);
@@ -188,7 +196,7 @@ export default function CustomerDisplay() {
         {
           id: '1',
           title: 'Online Drinks',
-          description: 'Order Drinks Online - GoFood, GrabFood',
+          description: 'Order Drinks Online - GoFood, GrabFood, ShopeeFood, TikTok, Qpon',
           image: '/images/online-drinks-1.jpg',
           duration: 5
         },
@@ -212,7 +220,7 @@ export default function CustomerDisplay() {
         {
           id: '1',
           title: 'Online Bakery',
-          description: 'Order Bakery Items Online - ShopeeFood, TikTok',
+          description: 'Order Bakery Items Online - ShopeeFood, TikTok, Qpon',
           image: '/images/online-bakery-1.jpg',
           duration: 5
         },
@@ -299,6 +307,8 @@ export default function CustomerDisplay() {
             setDrinksCart(data.cartItems);
           } else if (tabName === 'bakery' && !isOnline) {
             setBakeryCart(data.cartItems);
+          } else if (tabName === 'drinks (Online)' && isOnline && data.tabInfo.selectedPlatform === 'qpon') {
+            setDrinksQponCart(data.cartItems);
           } else if (tabName === 'drinks (Online)' && isOnline && data.tabInfo.selectedPlatform === 'gofood') {
             setDrinksGofoodCart(data.cartItems);
           } else if (tabName === 'drinks (Online)' && isOnline && data.tabInfo.selectedPlatform === 'grabfood') {
@@ -307,6 +317,8 @@ export default function CustomerDisplay() {
             setDrinksShopeefoodCart(data.cartItems);
           } else if (tabName === 'drinks (Online)' && isOnline && data.tabInfo.selectedPlatform === 'tiktok') {
             setDrinksTiktokCart(data.cartItems);
+          } else if (tabName === 'bakery (Online)' && isOnline && data.tabInfo.selectedPlatform === 'qpon') {
+            setBakeryQponCart(data.cartItems);
           } else if (tabName === 'bakery (Online)' && isOnline && data.tabInfo.selectedPlatform === 'gofood') {
             setBakeryGofoodCart(data.cartItems);
           } else if (tabName === 'bakery (Online)' && isOnline && data.tabInfo.selectedPlatform === 'grabfood') {

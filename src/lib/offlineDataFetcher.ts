@@ -23,6 +23,7 @@ interface Product {
   harga_grabfood: number | null;
   harga_shopeefood: number | null;
   harga_tiktok: number | null;
+  harga_qpon: number | null;
   fee_kerja: number | null;
   image_url: string | null;
   status: 'active' | 'inactive';
@@ -39,7 +40,7 @@ interface Category {
 export async function fetchProducts(
   category2Name?: string,
   transactionType?: 'drinks' | 'bakery',
-  options?: { isOnline?: boolean, forceOnline?: boolean, platform?: 'gofood' | 'grabfood' | 'shopeefood' | 'tiktok' }
+  options?: { isOnline?: boolean, forceOnline?: boolean, platform?: 'qpon' | 'gofood' | 'grabfood' | 'shopeefood' | 'tiktok' }
 ): Promise<Product[]> {
   console.log('🔍 [FETCH PRODUCTS] Starting fetch with params:', {
     category2Name,
@@ -116,7 +117,7 @@ export async function fetchProducts(
 async function fetchFromLocalDatabase(
   category2Name?: string,
   transactionType?: 'drinks' | 'bakery',
-  options?: { isOnline?: boolean, forceOnline?: boolean, platform?: 'gofood' | 'grabfood' | 'shopeefood' | 'tiktok' }
+  options?: { isOnline?: boolean, forceOnline?: boolean, platform?: 'qpon' | 'gofood' | 'grabfood' | 'shopeefood' | 'tiktok' }
 ): Promise<Product[]> {
     // Fall back to local SQLite database
     if (isElectron) {
@@ -183,6 +184,7 @@ async function fetchFromLocalDatabase(
         if (options?.isOnline && options?.platform) {
           console.log('🔄 [OFFLINE FETCHER] Applying platform filter for', options.platform);
           products = products.filter((p: Product) => {
+            if (options.platform === 'qpon') return !!p.harga_qpon && p.harga_qpon > 0;
             if (options.platform === 'gofood') return !!p.harga_gofood && p.harga_gofood > 0;
             if (options.platform === 'grabfood') return !!p.harga_grabfood && p.harga_grabfood > 0;
             if (options.platform === 'shopeefood') return !!p.harga_shopeefood && p.harga_shopeefood > 0;
@@ -209,7 +211,7 @@ async function fetchFromLocalDatabase(
  */
 export async function fetchCategories(
   transactionType?: 'drinks' | 'bakery',
-  options?: { isOnline?: boolean, platform?: 'gofood' | 'grabfood' | 'shopeefood' | 'tiktok' }
+  options?: { isOnline?: boolean, platform?: 'qpon' | 'gofood' | 'grabfood' | 'shopeefood' | 'tiktok' }
 ): Promise<Category[]> {
   console.log('🔍 [FETCH CATEGORIES] Starting fetch with params:', {
     transactionType,
@@ -282,7 +284,7 @@ export async function fetchCategories(
  */
 async function fetchCategoriesFromLocalDatabase(
   transactionType?: 'drinks' | 'bakery',
-  options?: { isOnline?: boolean, platform?: 'gofood' | 'grabfood' | 'shopeefood' | 'tiktok' }
+  options?: { isOnline?: boolean, platform?: 'qpon' | 'gofood' | 'grabfood' | 'shopeefood' | 'tiktok' }
 ): Promise<Category[]> {
     // Fall back to local SQLite database
     if (isElectron) {
@@ -327,6 +329,7 @@ async function fetchCategoriesFromLocalDatabase(
         if (options?.isOnline && options?.platform) {
           // Only show categories that have products with the platform price (within filtered products)
           const productsWithPlatformPrice = filteredProducts.filter((p: any) => {
+            if (options.platform === 'qpon') return p.harga_qpon && p.harga_qpon > 0;
             if (options.platform === 'gofood') return p.harga_gofood && p.harga_gofood > 0;
             if (options.platform === 'grabfood') return p.harga_grabfood && p.harga_grabfood > 0;
             if (options.platform === 'shopeefood') return p.harga_shopeefood && p.harga_shopeefood > 0;

@@ -47,7 +47,7 @@ export async function GET(
         COALESCE(u.name, 'Unknown User') as user_name,
         COALESCE(b.name, 'Unknown Business') as business_name,
         banks.bank_name,
-        cl.account_name as cl_account_name,
+        COALESCE(t.cl_account_name, cl.account_name) as cl_account_name,
         pm.code as payment_method,
         pm.name as payment_method_name
       FROM transactions t

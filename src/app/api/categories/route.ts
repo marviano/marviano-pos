@@ -14,7 +14,7 @@ export async function GET(request: NextRequest) {
     const searchParams = request.nextUrl.searchParams;
     const transactionType = searchParams.get('transaction_type') as 'drinks' | 'bakery' | null;
     const online = searchParams.get('online') === 'true';
-    const platform = searchParams.get('platform') as 'gofood' | 'grabfood' | 'shopeefood' | 'tiktok' | null;
+    const platform = searchParams.get('platform') as 'qpon' | 'gofood' | 'grabfood' | 'shopeefood' | 'tiktok' | null;
 
     // Query to get distinct category2 names from actual products in this business
     // This dynamically loads categories based on what products exist
@@ -45,7 +45,9 @@ export async function GET(request: NextRequest) {
     // Online/Platform filter: only include categories that have products with prices
     if (online && platform) {
       // Filter by platform-specific price columns
-      if (platform === 'gofood') {
+      if (platform === 'qpon') {
+        sql += ` AND p.harga_qpon IS NOT NULL AND p.harga_qpon > 0`;
+      } else if (platform === 'gofood') {
         sql += ` AND p.harga_gofood IS NOT NULL AND p.harga_gofood > 0`;
       } else if (platform === 'grabfood') {
         sql += ` AND p.harga_grabfood IS NOT NULL AND p.harga_grabfood > 0`;

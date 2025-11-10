@@ -21,7 +21,7 @@ interface Transaction {
   id: string; // Changed to string for UUID
   business_id: number;
   user_id: number;
-  payment_method: 'cash' | 'debit' | 'qr' | 'ewallet' | 'cl' | 'voucher' | 'gofood' | 'grabfood' | 'shopeefood' | 'tiktok';
+  payment_method: 'cash' | 'debit' | 'qr' | 'ewallet' | 'cl' | 'voucher' | 'qpon' | 'gofood' | 'grabfood' | 'shopeefood' | 'tiktok';
   pickup_method: 'dine-in' | 'take-away';
   total_amount: number;
   voucher_discount: number;
@@ -57,7 +57,7 @@ interface TransactionDetail {
   user_id: number;
   user_name: string;
   business_name: string;
-  payment_method: 'cash' | 'debit' | 'qr' | 'ewallet' | 'cl' | 'voucher' | 'gofood' | 'grabfood' | 'shopeefood' | 'tiktok';
+  payment_method: 'cash' | 'debit' | 'qr' | 'ewallet' | 'cl' | 'voucher' | 'qpon' | 'gofood' | 'grabfood' | 'shopeefood' | 'tiktok';
   pickup_method: 'dine-in' | 'take-away';
   total_amount: number;
   voucher_discount: number;
@@ -386,6 +386,7 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
       'ewallet': 'E-Wallet',
       'cl': 'City Ledger',
       'voucher': 'Voucher',
+      'qpon': 'Qpon',
       'gofood': 'GoFood',
       'grabfood': 'GrabFood',
       'shopeefood': 'ShopeeFood',
@@ -403,6 +404,7 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
       'ewallet': 'bg-orange-100 text-orange-800',
       'cl': 'bg-gray-100 text-gray-800',
       'voucher': 'bg-yellow-100 text-yellow-800',
+      'qpon': 'bg-indigo-100 text-indigo-800',
       'gofood': 'bg-teal-100 text-teal-800',
       'grabfood': 'bg-green-100 text-green-800',
       'shopeefood': 'bg-orange-100 text-orange-800',
@@ -488,6 +490,7 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
     ewallet: 0,
     cl: 0,
     voucher: 0,
+    qpon: 0,
     gofood: 0,
     grabfood: 0,
     shopeefood: 0,
@@ -616,6 +619,10 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
                   <span className="font-medium text-gray-900">{paymentMethodCounts.tiktok}</span>
                 </div>
                 <div className="flex justify-between">
+                  <span className="text-gray-600">Qpon</span>
+                  <span className="font-medium text-gray-900">{paymentMethodCounts.qpon}</span>
+                </div>
+                <div className="flex justify-between">
                   <span className="text-gray-600">Voucher</span>
                   <span className="font-medium text-gray-900">{paymentMethodCounts.voucher}</span>
                 </div>
@@ -732,6 +739,7 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
               <option value="gofood" className="text-black">GoFood</option>
               <option value="grabfood" className="text-black">GrabFood</option>
               <option value="shopeefood" className="text-black">ShopeeFood</option>
+              <option value="qpon" className="text-black">Qpon</option>
               <option value="tiktok" className="text-black">TikTok</option>
             </select>
           </div>

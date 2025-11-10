@@ -17,7 +17,7 @@ interface Transaction {
   user_id: number;
   user_name: string;
   business_name: string;
-  payment_method: 'cash' | 'debit' | 'qr' | 'ewallet' | 'cl' | 'voucher' | 'gofood' | 'grabfood' | 'shopeefood' | 'tiktok';
+  payment_method: 'cash' | 'debit' | 'qr' | 'ewallet' | 'cl' | 'voucher' | 'qpon' | 'gofood' | 'grabfood' | 'shopeefood' | 'tiktok';
   pickup_method: 'dine-in' | 'take-away';
   total_amount: number;
   voucher_discount: number;
@@ -81,6 +81,7 @@ const TransactionDetailModal: React.FC<TransactionDetailModalProps> = ({
       'ewallet': 'E-Wallet',
       'cl': 'City Ledger',
       'voucher': 'Voucher',
+      'qpon': 'Qpon',
       'gofood': 'GoFood',
       'grabfood': 'GrabFood',
       'shopeefood': 'ShopeeFood',
@@ -265,7 +266,7 @@ const TransactionDetailModal: React.FC<TransactionDetailModalProps> = ({
                 <div className="md:col-span-2">
                   <p className="text-sm font-medium text-gray-600">Akun City Ledger</p>
                   <p className="text-base text-gray-900">
-                    {transaction.cl_account_name || 'Tidak ada informasi akun'}
+                    {transaction.cl_account_name || transaction.customer_name || 'Tidak ada informasi akun'}
                   </p>
                 </div>
               )}

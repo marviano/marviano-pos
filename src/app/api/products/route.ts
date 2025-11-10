@@ -19,6 +19,7 @@ interface ProductRow {
   ppn: number | null;
   harga_jual: number;
   harga_khusus: number | null;
+  harga_qpon: number | null;
   harga_gofood: number | null;
   harga_grabfood: number | null;
   harga_shopeefood: number | null;
@@ -34,7 +35,7 @@ export async function GET(request: NextRequest) {
     const category2Name = searchParams.get('category2_name');
     const transactionType = searchParams.get('transaction_type') as 'drinks' | 'bakery' | null;
     const online = searchParams.get('online') === 'true';
-    const platform = searchParams.get('platform') as 'gofood' | 'grabfood' | 'shopeefood' | 'tiktok' | null;
+    const platform = searchParams.get('platform') as 'qpon' | 'gofood' | 'grabfood' | 'shopeefood' | 'tiktok' | null;
 
     // Base query using junction table and normalized categories
     let sql = `
@@ -42,7 +43,7 @@ export async function GET(request: NextRequest) {
         p.id, p.menu_code, p.nama, p.satuan, p.category1_id, p.category2_id,
         c1.name as category1_name, c2.name as category2_name,
         p.keterangan, p.harga_beli, p.ppn, p.harga_jual, p.harga_khusus,
-        p.harga_gofood, p.harga_grabfood, p.harga_shopeefood, p.harga_tiktok,
+        p.harga_qpon, p.harga_gofood, p.harga_grabfood, p.harga_shopeefood, p.harga_tiktok,
         p.fee_kerja, p.image_url, p.status, p.is_bundle
       FROM products p
       INNER JOIN product_businesses pb ON p.id = pb.product_id
@@ -78,7 +79,9 @@ export async function GET(request: NextRequest) {
     // Online/Platform filter: when specified, only include products with respective prices
     if (online && platform) {
       // Filter by platform-specific price columns
-      if (platform === 'gofood') {
+      if (platform === 'qpon') {
+        sql += ' AND p.harga_qpon IS NOT NULL AND p.harga_qpon > 0';
+      } else if (platform === 'gofood') {
         sql += ' AND p.harga_gofood IS NOT NULL AND p.harga_gofood > 0';
       } else if (platform === 'grabfood') {
         sql += ' AND p.harga_grabfood IS NOT NULL AND p.harga_grabfood > 0';
@@ -102,6 +105,7 @@ export async function GET(request: NextRequest) {
       harga_jual: Number(product.harga_jual) || 0,
       harga_beli: product.harga_beli ? Number(product.harga_beli) : null,
       harga_khusus: product.harga_khusus ? Number(product.harga_khusus) : null,
+      harga_qpon: product.harga_qpon ? Number(product.harga_qpon) : null,
       harga_gofood: product.harga_gofood ? Number(product.harga_gofood) : null,
       harga_grabfood: product.harga_grabfood ? Number(product.harga_grabfood) : null,
       harga_shopeefood: product.harga_shopeefood ? Number(product.harga_shopeefood) : null,

@@ -54,7 +54,7 @@ interface TransactionConfirmationDialogProps {
   onClose: () => void;
   onConfirm: () => void;
   cartItems: CartItem[];
-  paymentMethod: 'cash' | 'debit' | 'qr' | 'ewallet' | 'cl' | 'voucher' | 'gofood' | 'grabfood' | 'shopeefood' | 'tiktok';
+  paymentMethod: 'cash' | 'debit' | 'qr' | 'ewallet' | 'cl' | 'voucher' | 'qpon' | 'gofood' | 'grabfood' | 'shopeefood' | 'tiktok';
   pickupMethod: 'dine-in' | 'take-away';
   orderTotal: number;
   amountReceived: number;
@@ -65,7 +65,7 @@ interface TransactionConfirmationDialogProps {
   printTarget: 'receipt' | 'receiptize' | 'both';
   onChangePrintTarget: (target: 'receipt' | 'receiptize' | 'both') => void;
   isOnline?: boolean;
-  selectedOnlinePlatform?: 'gofood' | 'grabfood' | 'shopeefood' | 'tiktok' | null;
+  selectedOnlinePlatform?: 'qpon' | 'gofood' | 'grabfood' | 'shopeefood' | 'tiktok' | null;
   customerName?: string;
   promotionLabel?: string;
   promotionType?: 'none' | 'percent' | 'nominal' | 'free';
@@ -129,6 +129,7 @@ export default function TransactionConfirmationDialog({
       case 'ewallet': return 'E-Wallet';
       case 'cl': return 'City Ledger';
       case 'voucher': return 'Voucher';
+      case 'qpon': return 'Qpon';
       case 'gofood': return 'GoFood';
       case 'grabfood': return 'GrabFood';
       case 'shopeefood': return 'ShopeeFood';
@@ -179,6 +180,9 @@ export default function TransactionConfirmationDialog({
                 let basePrice = item.product.harga_jual;
                 if (isOnline && selectedOnlinePlatform) {
                   switch (selectedOnlinePlatform) {
+                    case 'qpon':
+                      basePrice = (item.product as any).harga_qpon || item.product.harga_jual;
+                      break;
                     case 'gofood':
                       basePrice = (item.product as any).harga_gofood || item.product.harga_jual;
                       break;

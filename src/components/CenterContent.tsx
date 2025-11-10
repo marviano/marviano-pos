@@ -19,6 +19,7 @@ interface Product {
   category1_name: string | null;
   category2_name: string | null;
   harga_jual: number;
+  harga_qpon?: number | null;
   harga_gofood?: number | null;
   harga_grabfood?: number | null;
   harga_shopeefood?: number | null;
@@ -72,7 +73,7 @@ interface CenterContentProps {
   transactionType: 'drinks' | 'bakery';
   isLoadingProducts?: boolean;
   isOnline?: boolean;
-  selectedOnlinePlatform?: 'gofood' | 'grabfood' | 'shopeefood' | 'tiktok' | null;
+  selectedOnlinePlatform?: 'qpon' | 'gofood' | 'grabfood' | 'shopeefood' | 'tiktok' | null;
 }
 
 export default function CenterContent({ products, cartItems, setCartItems, transactionType, isLoadingProducts = false, isOnline = false, selectedOnlinePlatform = null }: CenterContentProps) {
@@ -104,6 +105,14 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
         }
       });
     }
+  };
+
+  const PLATFORM_LABELS: Record<'qpon' | 'gofood' | 'grabfood' | 'shopeefood' | 'tiktok', string> = {
+    qpon: 'Qpon',
+    gofood: 'GoFood',
+    grabfood: 'GrabFood',
+    shopeefood: 'ShopeeFood',
+    tiktok: 'TikTok'
   };
 
   const sumCustomizationPrice = (customizations?: SelectedCustomization[]) => {
@@ -154,6 +163,8 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
   const getOnlinePriceForPlatform = (product: Product): number | null => {
     if (!isOnline || !selectedOnlinePlatform) return null;
     switch (selectedOnlinePlatform) {
+      case 'qpon':
+        return product.harga_qpon ?? null;
       case 'gofood':
         return product.harga_gofood ?? null;
       case 'grabfood':
@@ -664,7 +675,7 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
                   <div className="col-span-3 flex items-center justify-center h-32">
                     <p className="text-gray-500">
                       {isOnline && selectedOnlinePlatform 
-                        ? `No products available for ${selectedOnlinePlatform}` 
+                        ? `No products available for ${PLATFORM_LABELS[selectedOnlinePlatform]}` 
                         : 'No products available'}
                     </p>
                   </div>

@@ -27,7 +27,7 @@ interface TransactionData {
   id: string; // UUID for transaction
   business_id: number;
   user_id: number;
-  payment_method: 'cash' | 'debit' | 'qr' | 'ewallet' | 'cl' | 'voucher' | 'gofood' | 'grabfood' | 'shopeefood' | 'tiktok';
+  payment_method: 'cash' | 'debit' | 'qr' | 'ewallet' | 'cl' | 'voucher' | 'qpon' | 'gofood' | 'grabfood' | 'shopeefood' | 'tiktok';
   pickup_method: 'dine-in' | 'take-away';
   total_amount: number;
   voucher_discount: number;
@@ -66,7 +66,7 @@ export async function POST(request: NextRequest) {
     
     try {
       // Get payment method ID
-      const paymentMethodId = await getPaymentMethodId(transactionData.payment_method);
+      const paymentMethodId = await getPaymentMethodId(transactionData.payment_method, transactionData.business_id);
       
       // Generate receipt number based on sale date (created_at if provided)
       let createdAtBasis: Date | undefined = undefined;
