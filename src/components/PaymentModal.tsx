@@ -16,7 +16,17 @@ interface BundleSelection {
       id: number;
       nama: string;
     };
-    quantity: number;
+    quantity?: number;
+    customizations?: {
+      customization_id: number;
+      customization_name: string;
+      selected_options: {
+        option_id: number;
+        option_name: string;
+        price_adjustment: number;
+      }[];
+    }[];
+    customNote?: string;
   }[];
   requiredQuantity: number;
 }
@@ -79,10 +89,10 @@ export default function PaymentModal({
   const [selectedPickupMethod, setSelectedPickupMethod] = useState<PickupMethod>('dine-in');
   const [amountReceived, setAmountReceived] = useState<string>('');
   const [customVoucherAmount, setCustomVoucherAmount] = useState<string>('');
-  const [preferenceAmount, setPreferenceAmount] = useState<string>('');
   const [customerName, setCustomerName] = useState<string>('');
+  const [customerUnit, setCustomerUnit] = useState<string>('1');
   const [promotionSelection, setPromotionSelection] = useState<PromotionSelection>('none');
-  const [activeInput, setActiveInput] = useState<'amount' | 'voucher' | 'preference' | 'customer'>('amount');
+  const [activeInput, setActiveInput] = useState<'amount' | 'voucher' | 'customer' | 'customerUnit'>('amount');
   const [bankId, setBankId] = useState<string>('');
   const [cardNumber, setCardNumber] = useState<string>('');
   const [banks, setBanks] = useState<Array<{id: number, bank_code: string, bank_name: string, is_popular: boolean}>>([]);
@@ -90,10 +100,13 @@ export default function PaymentModal({
   const [showBankDropdown, setShowBankDropdown] = useState<boolean>(false);
   const [isProcessing, setIsProcessing] = useState(false);
   const [showConfirmation, setShowConfirmation] = useState(false);
+  const [showDebitModal, setShowDebitModal] = useState(false);
+  const [bankError, setBankError] = useState<string>('');
   
   // Check if current payment method is an online platform
   const [cardNumberError, setCardNumberError] = useState<string>('');
   const cardNumberRef = useRef<HTMLInputElement>(null);
+  const previousPaymentMethod = useRef<PaymentMethod>(selectedPaymentMethod);
   const promotionOptions: Array<{ id: PromotionSelection; label: string }> = [
     { id: 'percent_30', label: 'Diskon 30%' },
     { id: 'percent_35', label: 'Diskon 35%' },
@@ -103,6 +116,9 @@ export default function PaymentModal({
   ];
 
   const trimmedCustomerName = customerName.trim();
+  const customerUnitNumber = Math.min(999, Math.max(1, parseInt(customerUnit, 10) || 1));
+  const customerUnitQuickOptions = Array.from({ length: 10 }, (_, index) => index + 1);
+  const selectedBank = bankId ? banks.find(bank => bank.id.toString() === bankId) ?? null : null;
   const isCustomerNameRequired = selectedPaymentMethod === 'cl';
   const isCustomerNameMissing = isCustomerNameRequired && trimmedCustomerName.length === 0;
   const isDebitInfoIncomplete = selectedPaymentMethod === 'debit' && (!bankId || !cardNumber);
@@ -180,8 +196,7 @@ export default function PaymentModal({
   };
 
   const originalPrice = calculateOrderTotal();
-  const preferenceAmountValue = parseFloat(preferenceAmount) || 0;
-  const orderTotal = originalPrice + preferenceAmountValue;
+  const orderTotal = originalPrice;
 
   const promotionDetails = (() => {
     switch (promotionSelection) {
@@ -294,6 +309,20 @@ export default function PaymentModal({
     return base;
   };
 
+  const adjustCustomerUnit = (delta: number) => {
+    setCustomerUnit(prev => {
+      const current = parseInt(prev || '1', 10) || 1;
+      const next = Math.min(999, Math.max(1, current + delta));
+      return next.toString();
+    });
+    setActiveInput('customerUnit');
+  };
+
+  const handleCustomerUnitQuickSelect = (value: number) => {
+    setCustomerUnit(value.toString());
+    setActiveInput('customerUnit');
+  };
+
   const handleCardNumberChange = (value: string) => {
     // Only allow numbers and limit to 16 digits
     const cleanValue = value.replace(/\D/g, '').slice(0, 16);
@@ -311,6 +340,11 @@ export default function PaymentModal({
       return;
     }
 
+    if (activeInput === 'customerUnit') {
+      setCustomerUnit(prev => updateAmountString(prev, value, 999));
+      return;
+    }
+
     if (activeInput === 'voucher') {
       if (promotionSelection !== 'custom') {
         setPromotionSelection('custom');
@@ -320,31 +354,10 @@ export default function PaymentModal({
       return;
     }
 
-    if (activeInput === 'preference') {
-      setPreferenceAmount(prev => updateAmountString(prev, value));
-      return;
-    }
-
     setAmountReceived(prev => updateAmountString(prev, value));
   };
 
   const applyQuickIncrement = (increment: number) => {
-    if (activeInput === 'voucher') {
-      if (promotionSelection !== 'custom') {
-        setPromotionSelection('custom');
-        setCustomVoucherAmount('');
-      }
-      setCustomVoucherAmount(prev => {
-        const current = parseFloat(prev || '0');
-        const next = Math.min(orderTotal, current + increment);
-        if (next <= 0) {
-          return '';
-        }
-        return next.toFixed(0);
-      });
-      return;
-    }
-
     setAmountReceived(prev => {
       const current = parseFloat(prev || '0');
       const next = current + increment;
@@ -365,12 +378,43 @@ export default function PaymentModal({
     }
 
     setPromotionSelection(selection);
+    if (amountReceived) {
+      setAmountReceived('');
+    }
     if (selection === 'custom') {
       setActiveInput('voucher');
     } else {
       setActiveInput('amount');
       setCustomVoucherAmount('');
     }
+  };
+
+  const handleDebitModalClose = () => {
+    setShowDebitModal(false);
+    setBankError('');
+    setCardNumberError('');
+    setShowBankDropdown(false);
+  };
+
+  const handleDebitModalSave = () => {
+    if (!bankId) {
+      setBankError('Pilih bank terlebih dahulu');
+      return;
+    }
+    if (!cardNumber || cardNumber.length !== 16) {
+      setCardNumberError('Masukkan nomor kartu debit yang valid (16 digit)');
+      setTimeout(() => {
+        if (cardNumberRef.current) {
+          cardNumberRef.current.focus();
+          cardNumberRef.current.select();
+        }
+      }, 100);
+      return;
+    }
+
+    setBankError('');
+    setCardNumberError('');
+    setShowDebitModal(false);
   };
 
   const handleConfirmPayment = () => {
@@ -382,21 +426,23 @@ export default function PaymentModal({
 
     // Validate debit card information
     if (selectedPaymentMethod === 'debit') {
-      if (!bankId || bankId.trim() === '') {
-        alert('Pilih bank');
+      if (!bankId) {
+        setBankError('Pilih bank terlebih dahulu');
+        setShowDebitModal(true);
         return;
       }
       if (!cardNumber || cardNumber.length !== 16) {
+        setShowDebitModal(true);
         setCardNumberError('Masukkan nomor kartu debit yang valid (16 digit)');
-        // Focus the card number input
         setTimeout(() => {
           if (cardNumberRef.current) {
             cardNumberRef.current.focus();
             cardNumberRef.current.select();
           }
-        }, 50);
+        }, 100);
         return;
       } else {
+        setBankError('');
         setCardNumberError('');
       }
     }
@@ -498,6 +544,7 @@ export default function PaymentModal({
         created_at: new Date().toISOString(),
         contact_id: null, // Will be used when contact book is integrated
         customer_name: trimmedCustomerName || null,
+        customer_unit: customerUnitNumber,
         bank_id: selectedPaymentMethod === 'debit' && bankId ? parseInt(bankId) : null,
         card_number: selectedPaymentMethod === 'debit' ? cardNumber : null,
         cl_account_id: clAccountId,
@@ -622,6 +669,7 @@ export default function PaymentModal({
             bank_name: selectedPaymentMethod === 'debit' ? (banks.find(b => b.id.toString() === bankId)?.bank_name || null) : null,
             contact_id: transactionData.contact_id,
             customer_name: transactionData.customer_name,
+            customer_unit: transactionData.customer_unit,
             bank_id: transactionData.bank_id,
             card_number: transactionData.card_number,
             cl_account_id: transactionData.cl_account_id,
@@ -911,11 +959,14 @@ export default function PaymentModal({
           // For regular products: count the item quantity
           const totalItems = cartItems.reduce((sum, item) => {
             if (item.bundleSelections && item.bundleSelections.length > 0) {
-              // For bundles, count all selected products
+              // For bundles, count all selected products (each entry represents one unit unless quantity provided)
               let bundleItemCount = 0;
               for (const bundleSel of item.bundleSelections) {
                 for (const selectedProduct of bundleSel.selectedProducts) {
-                  bundleItemCount += selectedProduct.quantity;
+                  const selectionQty = typeof selectedProduct.quantity === 'number' && !Number.isNaN(selectedProduct.quantity)
+                    ? selectedProduct.quantity
+                    : 1;
+                  bundleItemCount += selectionQty;
                 }
               }
               return sum + (bundleItemCount * item.quantity);
@@ -988,31 +1039,57 @@ export default function PaymentModal({
               for (const bundleSel of item.bundleSelections!) {
                 for (const selectedProduct of bundleSel.selectedProducts) {
                   // Calculate total quantity (bundle quantity × selected product quantity)
-                  const totalQty = item.quantity * selectedProduct.quantity;
+                  const selectionQty = typeof selectedProduct.quantity === 'number' && !Number.isNaN(selectedProduct.quantity)
+                    ? selectedProduct.quantity
+                    : 1;
+                  const totalQty = item.quantity * selectionQty;
+
+                  // Build customization text for bundle selected product
+                  let allOptions: string[] = [];
+                  if (selectedProduct.customizations && selectedProduct.customizations.length > 0) {
+                    selectedProduct.customizations.forEach(c => {
+                      c.selected_options.forEach(opt => {
+                        allOptions.push(opt.option_name);
+                      });
+                    });
+                  }
+
+                  if (selectedProduct.customNote && selectedProduct.customNote.trim() !== '') {
+                    allOptions.push(selectedProduct.customNote.trim());
+                  }
+
+                  const customizationText = allOptions.join('/');
+                  const customizationChunks = splitCustomizations(customizationText);
                   
                   // Print one label per unit of each selected product
                   for (let qty = 0; qty < totalQty; qty++) {
                     currentItemNumber++;
                     
-                    // Prepare label data for bundle selected product
-                    const labelData = {
-                      printerType: 'labelPrinter',
-                      counter: labelCounter,
-                      itemNumber: currentItemNumber,
-                      totalItems: totalItems,
-                      pickupMethod: finalPickupMethod,
-                      productName: selectedProduct.product.nama,
-                      customizations: '', // Bundle selected products don't have customizations
-                      customNote: '', 
-                      orderTime: transactionData.created_at,
-                      labelContinuation: undefined
-                    };
-                    
-                    // Print label with delay between prints
-                    await new Promise(resolve => setTimeout(resolve, 300));
-                    const labelResult = await window.electronAPI?.printLabel?.(labelData);
-                    if (!labelResult?.success) {
-                      console.error(`❌ Bundle label print failed:`, labelResult?.error);
+                    for (let chunkIndex = 0; chunkIndex < customizationChunks.length; chunkIndex++) {
+                      const isMultiLabel = customizationChunks.length > 1;
+                      const labelNumber = chunkIndex + 1;
+                      const totalLabels = customizationChunks.length;
+
+                      // Prepare label data for bundle selected product
+                      const labelData = {
+                        printerType: 'labelPrinter',
+                        counter: labelCounter,
+                        itemNumber: currentItemNumber,
+                        totalItems: totalItems,
+                        pickupMethod: finalPickupMethod,
+                        productName: selectedProduct.product.nama,
+                        customizations: customizationChunks[chunkIndex],
+                        customNote: '',
+                        orderTime: transactionData.created_at,
+                        labelContinuation: isMultiLabel ? `${labelNumber}/${totalLabels}` : undefined
+                      };
+                      
+                      // Print label with delay between prints
+                      await new Promise(resolve => setTimeout(resolve, 300));
+                      const labelResult = await window.electronAPI?.printLabel?.(labelData);
+                      if (!labelResult?.success) {
+                        console.error(`❌ Bundle label print failed:`, labelResult?.error);
+                      }
                     }
                   }
                 }
@@ -1168,13 +1245,44 @@ export default function PaymentModal({
     };
   }, [showBankDropdown]);
 
+  useEffect(() => {
+    if (showDebitModal) {
+      setBankSearchTerm(selectedBank?.bank_name ?? '');
+    } else {
+      setShowBankDropdown(false);
+      if (selectedBank) {
+        setBankSearchTerm(selectedBank.bank_name);
+      }
+    }
+  }, [showDebitModal, selectedBank]);
+
+  useEffect(() => {
+    if (selectedPaymentMethod !== 'debit' && showDebitModal) {
+      handleDebitModalClose();
+    }
+  }, [selectedPaymentMethod, showDebitModal]);
+
+  useEffect(() => {
+    const previous = previousPaymentMethod.current;
+    if (
+      selectedPaymentMethod === 'debit' &&
+      previous !== 'debit' &&
+      (!bankId || !cardNumber || cardNumber.length !== 16)
+    ) {
+      setBankError('');
+      setCardNumberError('');
+      setShowDebitModal(true);
+    }
+    previousPaymentMethod.current = selectedPaymentMethod;
+  }, [selectedPaymentMethod, bankId, cardNumber]);
+
   // Reset form when modal opens
   useEffect(() => {
     if (isOpen) {
       setAmountReceived('');
       setCustomVoucherAmount('');
-      setPreferenceAmount('');
       setCustomerName('');
+      setCustomerUnit('1');
       setPromotionSelection('none');
       setBankId('');
       setCardNumber('');
@@ -1215,7 +1323,7 @@ export default function PaymentModal({
         <div className="px-6 pb-6 h-full">
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-8 h-full">
             {/* Left Side - Bill Details and Pickup Method */}
-            <div className="space-y-8">
+            <div className="space-y-2">
               {/* Customer Name and Pickup Method */}
               <div className="bg-white rounded-xl p-4 border border-gray-200 shadow-sm">
                 <div className="flex gap-4 items-center">
@@ -1308,32 +1416,103 @@ export default function PaymentModal({
                     </div>
                   )}
                 </div>
+                <div className="mt-4">
+                  <label className="block text-xs font-medium text-gray-500 mb-2 uppercase tracking-wide">
+                    Customer Unit
+                  </label>
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => adjustCustomerUnit(-1)}
+                      disabled={customerUnitNumber <= 1}
+                      className={`w-10 h-10 rounded-lg border text-lg font-bold transition-colors ${
+                        customerUnitNumber <= 1
+                          ? 'border-gray-200 bg-gray-100 text-gray-400 cursor-not-allowed'
+                          : 'border-gray-300 bg-white text-gray-700 hover:bg-gray-100'
+                      }`}
+                    >
+                      −
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setActiveInput('customerUnit')}
+                      className={`flex-1 px-4 py-2 rounded-lg border-2 text-base font-semibold transition-all duration-300 ${
+                        activeInput === 'customerUnit'
+                          ? 'border-blue-400 bg-blue-50 text-blue-800 shadow-lg shadow-blue-100 animate-pulse'
+                          : 'border-gray-200 bg-white text-gray-800 hover:border-blue-300'
+                      }`}
+                    >
+                      {`${customerUnitNumber} Orang`}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => adjustCustomerUnit(1)}
+                      className="w-10 h-10 rounded-lg border border-gray-300 bg-white text-lg font-bold text-gray-700 hover:bg-gray-100 transition-colors"
+                    >
+                      +
+                    </button>
+                  </div>
+                  <div className="grid grid-cols-5 gap-2 mt-3">
+                    {customerUnitQuickOptions.map((value) => (
+                      <button
+                        key={value}
+                        type="button"
+                        onClick={() => handleCustomerUnitQuickSelect(value)}
+                        className={`w-full px-3 py-1 rounded-full border text-xs font-medium transition-colors ${
+                          customerUnitNumber === value
+                            ? 'bg-blue-100 border-blue-400 text-blue-800'
+                            : 'bg-white border-gray-200 text-gray-700 hover:bg-gray-100'
+                        }`}
+                      >
+                        {value}
+                      </button>
+                    ))}
+                  </div>
+                </div>
               </div>
               {/* Bill Details */}
               <div className="bg-gray-50 rounded-xl p-6">
-                <h3 className="text-lg font-semibold text-gray-800 mb-4">Rincian Tagihan</h3>
+                <div className="flex items-center justify-between mb-4">
+                  <h3 className="text-lg font-semibold text-gray-800">Rincian Tagihan</h3>
+                  {selectedPaymentMethod === 'debit' && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setBankError('');
+                        setCardNumberError('');
+                        setShowDebitModal(true);
+                      }}
+                      className="px-3 py-1.5 rounded-lg border border-blue-200 bg-blue-50 text-xs font-semibold text-blue-700 hover:bg-blue-100 transition-colors"
+                    >
+                      Isi / Ubah Debit
+                    </button>
+                  )}
+                </div>
                 <div className="space-y-3">
                   <div className="flex justify-between">
                     <span className="text-sm text-gray-600">Harga produk asli</span>
                     <span className="text-sm font-medium text-gray-600">{formatPrice(originalPrice)}</span>
                   </div>
-                  <div className="flex justify-between items-center">
-                    <span className="text-sm text-gray-600">Tips/Layanan Tambahan</span>
-                    <div className="flex items-center space-x-2">
-                      <input
-                        type="text"
-                        value={preferenceAmount ? `Rp ${parseFloat(preferenceAmount).toLocaleString('id-ID')}` : ''}
-                        readOnly
-                        onClick={() => setActiveInput('preference')}
-                        className={`px-3 py-1 text-sm font-semibold border-2 rounded-lg text-gray-800 cursor-pointer transition-all duration-300 ${
-                          activeInput === 'preference' 
-                            ? 'border-orange-400 bg-orange-50 shadow-md shadow-orange-200 animate-pulse' 
-                            : 'border-gray-200 bg-gray-50 hover:bg-gray-100'
-                        }`}
-                        placeholder="Rp 0"
-                      />
+                  {selectedPaymentMethod === 'debit' && (
+                    <div className="rounded-lg border border-blue-100 bg-blue-50 p-3 space-y-2">
+                      <div className="flex justify-between items-center">
+                        <span className="text-xs text-blue-700 font-semibold uppercase tracking-wide">
+                          Bank
+                        </span>
+                        <span className={`text-sm font-semibold ${selectedBank ? 'text-blue-900' : 'text-red-600'}`}>
+                          {selectedBank?.bank_name || 'Belum dipilih'}
+                        </span>
+                      </div>
+                      <div className="flex justify-between items-center">
+                        <span className="text-xs text-blue-700 font-semibold uppercase tracking-wide">
+                          Nomor Kartu
+                        </span>
+                        <span className={`text-sm font-semibold ${cardNumber ? 'text-blue-900' : 'text-red-600'}`}>
+                          {cardNumber || 'Belum diisi'}
+                        </span>
+                      </div>
                     </div>
-                  </div>
+                  )}
                   {voucherDiscount > 0 && (
                     <div className="flex justify-between items-start">
                       <div className="flex flex-col">
@@ -1351,7 +1530,7 @@ export default function PaymentModal({
                   </div>
                   {receivedAmount > finalTotal && (
                     <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-3">
-                    <div className="flex justify-between">
+                      <div className="flex justify-between">
                         <span className="text-yellow-800 font-medium">Kembalian</span>
                         <span className="font-bold text-yellow-900">{formatPrice(receivedAmount - finalTotal)}</span>
                       </div>
@@ -1364,170 +1543,38 @@ export default function PaymentModal({
 
 
               {/* Payment Method Specific Inputs */}
-              {(selectedPaymentMethod === 'debit' || selectedPaymentMethod === 'cl') && (
-                <div className={`rounded-xl p-4 ${
-                  isDebitInfoIncomplete || 
-                  isClInfoIncomplete
-                    ? 'bg-red-50 border-2 border-red-300 animate-pulse' 
-                    : 'bg-gray-50'
-                }`}>
-                  <h3 className={`text-lg font-semibold mb-4 ${
-                    isDebitInfoIncomplete || 
-                    isClInfoIncomplete
-                      ? 'text-red-800' 
-                      : 'text-gray-800'
-                  }`}>
-                    {selectedPaymentMethod === 'debit' ? 'Informasi Debit Card' : 'Informasi City Ledger'}
+              {selectedPaymentMethod === 'cl' && (
+                <div className={`rounded-xl p-4 ${isClInfoIncomplete ? 'bg-red-50 border-2 border-red-300 animate-pulse' : 'bg-gray-50 border border-gray-200'}`}>
+                  <h3 className={`text-lg font-semibold mb-4 ${isClInfoIncomplete ? 'text-red-800' : 'text-gray-800'}`}>
+                    Informasi City Ledger
                   </h3>
-                  
-                  {selectedPaymentMethod === 'debit' && (
-                    <div className="space-y-3">
-                      <div>
-                        <label className="block text-xs font-medium text-gray-700 mb-1">
-                          Pilih Bank
-                        </label>
-                        <div className="relative bank-dropdown">
-                          <input
-                            type="text"
-                            value={bankSearchTerm}
-                            onChange={(e) => {
-                              setBankSearchTerm(e.target.value);
-                              setShowBankDropdown(true);
-                            }}
-                            onFocus={() => {
-                              setShowBankDropdown(true);
-                              // Clear any active input when focusing on bank input
-                              setActiveInput('amount');
-                            }}
-                            onBlur={() => {
-                              // Small delay to allow clicking on dropdown items
-                              setTimeout(() => setShowBankDropdown(false), 200);
-                            }}
-                            className={`w-full p-2 text-sm font-medium border rounded-md text-gray-800 bg-white focus:border-blue-400 focus:ring-1 focus:ring-blue-100 ${
-                              !bankId ? 'border-red-300 animate-pulse' : 'border-gray-300'
-                            }`}
-                            placeholder="Cari bank... (BCA, BRI, Mandiri)"
-                          />
-                          
-                          {showBankDropdown && (
-                            <div className="absolute z-10 w-full mt-1 bg-white border border-gray-300 rounded-lg shadow-lg max-h-60 overflow-y-auto">
-                              {/* Popular banks first */}
-                              {banks.filter(bank => 
-                                bank.is_popular && 
-                                (bank.bank_name.toLowerCase().includes(bankSearchTerm.toLowerCase()) ||
-                                 bank.bank_code.toLowerCase().includes(bankSearchTerm.toLowerCase()))
-                              ).map(bank => (
-                                <div
-                                  key={bank.id}
-                                  onClick={(e) => {
-                                    e.preventDefault();
-                                    e.stopPropagation();
-                                    setBankId(bank.id.toString());
-                                    setBankSearchTerm(bank.bank_name);
-                                    setShowBankDropdown(false);
-                                  }}
-                                  onMouseDown={(e) => {
-                                    e.preventDefault(); // Prevent input blur
-                                  }}
-                                  className="px-3 py-2 hover:bg-blue-50 cursor-pointer border-b border-gray-100"
-                                >
-                                  <div className="flex items-center justify-between">
-                                    <span className="font-medium text-gray-900 text-sm">{bank.bank_name}</span>
-                                    <span className="text-xs bg-blue-100 text-blue-800 px-2 py-1 rounded">Popular</span>
-                                  </div>
-                                </div>
-                              ))}
-                              
-                              {/* Other banks */}
-                              {banks.filter(bank => 
-                                !bank.is_popular && 
-                                (bank.bank_name.toLowerCase().includes(bankSearchTerm.toLowerCase()) ||
-                                 bank.bank_code.toLowerCase().includes(bankSearchTerm.toLowerCase()))
-                              ).map(bank => (
-                                <div
-                                  key={bank.id}
-                                  onClick={(e) => {
-                                    e.preventDefault();
-                                    e.stopPropagation();
-                                    setBankId(bank.id.toString());
-                                    setBankSearchTerm(bank.bank_name);
-                                    setShowBankDropdown(false);
-                                  }}
-                                  onMouseDown={(e) => {
-                                    e.preventDefault(); // Prevent input blur
-                                  }}
-                                  className="px-3 py-2 hover:bg-blue-50 cursor-pointer border-b border-gray-100"
-                                >
-                                  <div className="flex items-center justify-between">
-                                    <span className="font-medium text-gray-900 text-sm">{bank.bank_name}</span>
-                                  </div>
-                                </div>
-                              ))}
-                            </div>
-                          )}
-                        </div>
-                      </div>
-                      <div>
-                        <label className="block text-xs font-medium text-gray-700 mb-1">
-                          Nomor Kartu (16 digit)
-                        </label>
-                        <input
-                          ref={cardNumberRef}
-                          type="text"
-                          value={cardNumber}
-                          onChange={(e) => handleCardNumberChange(e.target.value)}
-                          onFocus={() => {
-                            // Clear any active input when focusing on card number
-                            setActiveInput('amount');
-                          }}
-                          className={`w-full p-2 text-sm font-medium border rounded-md text-gray-800 bg-white focus:border-blue-400 focus:ring-1 focus:ring-blue-100 ${
-                            cardNumberError ? 'border-red-500 bg-red-50' : (!cardNumber ? 'border-red-300 animate-pulse' : 'border-gray-300')
-                          }`}
-                          placeholder="1234567890123456"
-                          maxLength={16}
-                        />
-                        {cardNumberError ? (
-                          <p className="text-xs text-red-600 mt-1 font-medium">
-                            {cardNumberError}
-                          </p>
-                        ) : (
-                          <p className="text-xs text-gray-500 mt-1">
-                            Masukkan 16 digit nomor kartu debit
-                          </p>
-                        )}
-                      </div>
-                    </div>
-                  )}
-                  
-                  {selectedPaymentMethod === 'cl' && (
-                    <div className="space-y-3">
-                      <p className="text-sm text-gray-700">
-                        Nama pelanggan yang kamu isi akan disimpan sebagai referensi City Ledger.
-                      </p>
-                      <div
-                        className={`rounded-lg border border-dashed ${
-                          trimmedCustomerName ? 'border-purple-300 bg-purple-50/60' : 'border-red-300 bg-red-50/70'
-                        } p-3 text-xs`}
+                  <div className="space-y-3">
+                    <p className="text-sm text-gray-700">
+                      Nama pelanggan yang kamu isi akan disimpan sebagai referensi City Ledger.
+                    </p>
+                    <div
+                      className={`rounded-lg border border-dashed ${
+                        trimmedCustomerName ? 'border-purple-300 bg-purple-50/60' : 'border-red-300 bg-red-50/70'
+                      } p-3 text-xs`}
+                    >
+                      <p className="font-semibold text-gray-700">Nama pelanggan saat ini:</p>
+                      <p
+                        className={`mt-1 text-base font-bold ${
+                          trimmedCustomerName ? 'text-purple-800' : 'text-red-600'
+                        }`}
                       >
-                        <p className="font-semibold text-gray-700">Nama pelanggan saat ini:</p>
-                        <p
-                          className={`mt-1 text-base font-bold ${
-                            trimmedCustomerName ? 'text-purple-800' : 'text-red-600'
-                          }`}
-                        >
-                          {trimmedCustomerName || 'Belum diisi'}
-                        </p>
-                      </div>
-                      <p className="text-xs text-gray-600">
-                        Pastikan pelanggan memahami bahwa transaksi ini dicatat sebagai hutang (City Ledger).
+                        {trimmedCustomerName || 'Belum diisi'}
                       </p>
-                      {isCustomerNameMissing && (
-                        <p className="text-xs font-semibold text-red-600">
-                          Silakan isi nama pelanggan untuk melanjutkan pembayaran City Ledger.
-                        </p>
-                      )}
                     </div>
-                  )}
+                    <p className="text-xs text-gray-600">
+                      Pastikan pelanggan memahami bahwa transaksi ini dicatat sebagai hutang (City Ledger).
+                    </p>
+                    {isCustomerNameMissing && (
+                      <p className="text-xs font-semibold text-red-600">
+                        Silakan isi nama pelanggan untuk melanjutkan pembayaran City Ledger.
+                      </p>
+                    )}
+                  </div>
                 </div>
               )}
             </div>
@@ -1714,52 +1761,76 @@ export default function PaymentModal({
                       </span>
                     )}
                   </div>
-                  <input
-                    type="text"
-                    value={amountReceived ? `Rp ${parseFloat(amountReceived).toLocaleString('id-ID')}` : ''}
-                    readOnly
-                    disabled={selectedPaymentMethod === 'cl'}
-                    onClick={() => selectedPaymentMethod !== 'cl' && setActiveInput('amount')}
-                    className={`w-full p-3 text-base font-semibold border-2 rounded-lg transition-all duration-300 ${
-                      selectedPaymentMethod === 'cl'
-                        ? 'border-gray-300 bg-gray-100 text-gray-500 cursor-not-allowed opacity-50'
-                        : activeInput === 'amount' 
-                        ? 'border-blue-400 bg-blue-50 shadow-lg shadow-blue-200 animate-pulse text-gray-800 cursor-pointer' 
-                        : 'border-gray-200 bg-gray-50 hover:bg-gray-100 text-gray-800 cursor-pointer'
-                    }`}
-                    placeholder="Rp 0"
-                  />
+                  <div className="relative">
+                    <input
+                      type="text"
+                      value={amountReceived ? `Rp ${parseFloat(amountReceived).toLocaleString('id-ID')}` : ''}
+                      readOnly
+                      disabled={selectedPaymentMethod === 'cl'}
+                      onClick={() => selectedPaymentMethod !== 'cl' && setActiveInput('amount')}
+                      className={`w-full p-3 pr-12 text-base font-semibold border-2 rounded-lg transition-all duration-300 ${
+                        selectedPaymentMethod === 'cl'
+                          ? 'border-gray-300 bg-gray-100 text-gray-500 cursor-not-allowed opacity-50'
+                          : activeInput === 'amount' 
+                          ? 'border-blue-400 bg-blue-50 shadow-lg shadow-blue-200 animate-pulse text-gray-800 cursor-pointer' 
+                          : 'border-gray-200 bg-gray-50 hover:bg-gray-100 text-gray-800 cursor-pointer'
+                      }`}
+                      placeholder="Rp 0"
+                    />
+                    {amountReceived && selectedPaymentMethod !== 'cl' && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setAmountReceived('');
+                          setActiveInput('amount');
+                        }}
+                        className="absolute inset-y-0 right-0 px-3 flex items-center text-xs font-semibold text-gray-500 hover:text-red-600 transition-colors"
+                      >
+                        Clear
+                      </button>
+                    )}
+                  </div>
                   </div>
 
                 {/* Quick Amount Buttons - Show for all except CL */}
                 {selectedPaymentMethod !== 'cl' && (
                 <div className="mb-4">
-                  <div className="grid grid-cols-2 gap-2">
-                    {/* Uang Pas button - Sets exact amount */}
+                  <div className="grid grid-cols-3 gap-2">
                     <button
-                        onClick={() => {
-                          // Uang Pas - Set exact amount needed
-                          setAmountReceived(Math.ceil(finalTotal).toString());
-                          setActiveInput('amount');
-                        }}
+                      onClick={() => {
+                        setAmountReceived(Math.ceil(finalTotal).toString());
+                        setActiveInput('amount');
+                      }}
                       className="p-2 bg-green-500 hover:bg-green-600 text-white rounded-md text-xs font-semibold transition-colors shadow-md"
                     >
                       💰 Uang Pas
                     </button>
                     <button
-                        onClick={() => applyQuickIncrement(20000)}
+                      onClick={() => applyQuickIncrement(10000)}
                       className="p-2 bg-blue-100 hover:bg-blue-200 text-blue-800 rounded-md text-xs font-medium transition-colors"
                     >
-                      +Rp 20.000
+                      +Rp 10.000
                     </button>
                     <button
-                        onClick={() => applyQuickIncrement(50000)}
+                      onClick={() => applyQuickIncrement(50000)}
                       className="p-2 bg-blue-100 hover:bg-blue-200 text-blue-800 rounded-md text-xs font-medium transition-colors"
                     >
                       +Rp 50.000
                     </button>
                     <button
-                        onClick={() => applyQuickIncrement(100000)}
+                      onClick={() => applyQuickIncrement(5000)}
+                      className="p-2 bg-blue-100 hover:bg-blue-200 text-blue-800 rounded-md text-xs font-medium transition-colors"
+                    >
+                      +Rp 5.000
+                    </button>
+                    <button
+                      onClick={() => applyQuickIncrement(20000)}
+                      className="p-2 bg-blue-100 hover:bg-blue-200 text-blue-800 rounded-md text-xs font-medium transition-colors"
+                    >
+                      +Rp 20.000
+                    </button>
+                    <button
+                      onClick={() => applyQuickIncrement(100000)}
                       className="p-2 bg-blue-100 hover:bg-blue-200 text-blue-800 rounded-md text-xs font-medium transition-colors"
                     >
                       +Rp 100.000
@@ -1889,6 +1960,166 @@ export default function PaymentModal({
       </div>
     </div>
       
+      {showDebitModal && (
+        <div
+          className="fixed inset-0 z-[60] flex items-center justify-center bg-black/50 backdrop-blur-sm px-4"
+          onClick={handleDebitModalClose}
+        >
+          <div
+            className="w-full max-w-md bg-white rounded-2xl shadow-xl p-6 relative"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <button
+              type="button"
+              onClick={handleDebitModalClose}
+              className="absolute top-3 right-3 text-gray-400 hover:text-gray-600"
+            >
+              <X size={18} />
+            </button>
+            <div className="mb-4">
+              <h3 className="text-lg font-semibold text-gray-900">Lengkapi Informasi Debit</h3>
+              <p className="text-sm text-gray-500 mt-1">
+                Pilih bank dan masukkan nomor kartu debit pelanggan.
+              </p>
+            </div>
+            <div className="space-y-4">
+              <div>
+                <label className="block text-xs font-medium text-gray-700 mb-1">
+                  Pilih Bank
+                </label>
+                <div className="relative bank-dropdown">
+                  <input
+                    type="text"
+                    value={bankSearchTerm}
+                    onChange={(e) => {
+                      setBankSearchTerm(e.target.value);
+                      setShowBankDropdown(true);
+                    }}
+                    onFocus={() => {
+                      setShowBankDropdown(true);
+                      setActiveInput('amount');
+                    }}
+                    onBlur={() => {
+                      setTimeout(() => setShowBankDropdown(false), 200);
+                    }}
+                    className={`w-full p-2 text-sm font-medium border rounded-md text-gray-800 bg-white focus:border-blue-400 focus:ring-1 focus:ring-blue-100 ${
+                      bankError ? 'border-red-400' : 'border-gray-300'
+                    }`}
+                    placeholder="Cari bank... (BCA, BRI, Mandiri)"
+                  />
+
+                  {showBankDropdown && (
+                    <div className="absolute z-10 w-full mt-1 bg-white border border-gray-300 rounded-lg shadow-lg max-h-60 overflow-y-auto">
+                      {banks.filter(bank =>
+                        bank.is_popular &&
+                        (bank.bank_name.toLowerCase().includes(bankSearchTerm.toLowerCase()) ||
+                         bank.bank_code.toLowerCase().includes(bankSearchTerm.toLowerCase()))
+                      ).map(bank => (
+                        <div
+                          key={bank.id}
+                          onClick={(e) => {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            setBankId(bank.id.toString());
+                            setBankSearchTerm(bank.bank_name);
+                            setShowBankDropdown(false);
+                            setBankError('');
+                          }}
+                          onMouseDown={(e) => {
+                            e.preventDefault();
+                          }}
+                          className="px-3 py-2 hover:bg-blue-50 cursor-pointer border-b border-gray-100"
+                        >
+                          <div className="flex items-center justify-between">
+                            <span className="font-medium text-gray-900 text-sm">{bank.bank_name}</span>
+                            <span className="text-xs bg-blue-100 text-blue-800 px-2 py-1 rounded">Popular</span>
+                          </div>
+                        </div>
+                      ))}
+
+                      {banks.filter(bank =>
+                        !bank.is_popular &&
+                        (bank.bank_name.toLowerCase().includes(bankSearchTerm.toLowerCase()) ||
+                         bank.bank_code.toLowerCase().includes(bankSearchTerm.toLowerCase()))
+                      ).map(bank => (
+                        <div
+                          key={bank.id}
+                          onClick={(e) => {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            setBankId(bank.id.toString());
+                            setBankSearchTerm(bank.bank_name);
+                            setShowBankDropdown(false);
+                            setBankError('');
+                          }}
+                          onMouseDown={(e) => {
+                            e.preventDefault();
+                          }}
+                          className="px-3 py-2 hover:bg-blue-50 cursor-pointer border-b border-gray-100"
+                        >
+                          <div className="flex items-center justify-between">
+                            <span className="font-medium text-gray-900 text-sm">{bank.bank_name}</span>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+                {bankError && (
+                  <p className="mt-2 text-xs text-red-600 font-medium">{bankError}</p>
+                )}
+              </div>
+
+              <div>
+                <label className="block text-xs font-medium text-gray-700 mb-1">
+                  Nomor Kartu (16 digit)
+                </label>
+                <input
+                  ref={cardNumberRef}
+                  type="text"
+                  value={cardNumber}
+                  onChange={(e) => handleCardNumberChange(e.target.value)}
+                  onFocus={() => {
+                    setActiveInput('amount');
+                  }}
+                  className={`w-full p-2 text-sm border rounded-md bg-white focus:border-blue-400 focus:ring-1 focus:ring-blue-100 placeholder:text-gray-400 placeholder:opacity-70 ${
+                    cardNumberError ? 'border-red-500 bg-red-50 text-red-800' : 'border-gray-300 text-gray-900'
+                  }`}
+                  placeholder="1234567890123456"
+                  maxLength={16}
+                />
+                {cardNumberError ? (
+                  <p className="text-xs text-red-600 mt-1 font-medium">
+                    {cardNumberError}
+                  </p>
+                ) : (
+                  <p className="text-xs text-gray-500 mt-1">
+                    Masukkan 16 digit nomor kartu debit.
+                  </p>
+                )}
+              </div>
+            </div>
+
+            <div className="mt-6 flex justify-end gap-3">
+              <button
+                type="button"
+                onClick={handleDebitModalClose}
+                className="px-4 py-2 rounded-lg border border-gray-200 text-sm font-medium text-gray-600 hover:bg-gray-50 transition-colors"
+              >
+                Batal
+              </button>
+              <button
+                type="button"
+                onClick={handleDebitModalSave}
+                className="px-4 py-2 rounded-lg bg-blue-600 text-white text-sm font-semibold hover:bg-blue-700 transition-colors"
+              >
+                Simpan
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Transaction Confirmation Dialog */}
       <TransactionConfirmationDialog
         isOpen={showConfirmation}

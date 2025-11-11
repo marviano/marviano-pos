@@ -9,6 +9,7 @@ type Tx = {
   pickup_method: string;
   final_amount: number;
   customer_name?: string | null;
+  customer_unit?: number | null;
   created_at: string;
 };
 
@@ -95,7 +96,8 @@ export default function PrintingLogsPage() {
       return (
         (t.id && String(t.id).toLowerCase().includes(q)) ||
         (t.uuid_id && t.uuid_id.toLowerCase().includes(q)) ||
-        (t.customer_name && t.customer_name.toLowerCase().includes(q))
+        (t.customer_name && t.customer_name.toLowerCase().includes(q)) ||
+        (typeof t.customer_unit === 'number' && t.customer_unit.toString().includes(q))
       );
     });
   }, [transactions, search, fromDate, toDate]);
@@ -180,6 +182,7 @@ export default function PrintingLogsPage() {
               <th className="px-2 py-2 text-left">Pickup</th>
               <th className="px-2 py-2 text-right">Total</th>
               <th className="px-2 py-2 text-left">Customer</th>
+              <th className="px-2 py-2 text-center">CU</th>
               <th className="px-2 py-2 text-center">Receipt</th>
               <th className="px-2 py-2 text-center">Receiptize</th>
               <th className="px-2 py-2 text-left">Printed At (last)</th>
@@ -188,9 +191,9 @@ export default function PrintingLogsPage() {
           </thead>
           <tbody>
             {isLoading ? (
-              <tr><td colSpan={9} className="px-3 py-6 text-center text-gray-600">Loading...</td></tr>
+              <tr><td colSpan={10} className="px-3 py-6 text-center text-gray-600">Loading...</td></tr>
             ) : filteredTxs.length === 0 ? (
-              <tr><td colSpan={9} className="px-3 py-6 text-center text-gray-600">No data</td></tr>
+              <tr><td colSpan={10} className="px-3 py-6 text-center text-gray-600">No data</td></tr>
             ) : (
               filteredTxs.map(tx => {
                 const receiptTick = txIdToReceiptPrinted.has(tx.id);
@@ -212,6 +215,7 @@ export default function PrintingLogsPage() {
                       <td className="px-2 py-2">{tx.pickup_method}</td>
                       <td className="px-2 py-2 text-right">{Number(tx.final_amount || 0).toLocaleString('id-ID')}</td>
                       <td className="px-2 py-2">{tx.customer_name || ''}</td>
+                      <td className="px-2 py-2 text-center text-gray-800">{typeof tx.customer_unit === 'number' ? tx.customer_unit : '-'}</td>
                       <td className="px-2 py-2 text-center">{receiptTick ? '✔' : ''}</td>
                       <td className="px-2 py-2 text-center">{receiptizeTick ? '✔' : ''}</td>
                       <td className="px-2 py-2">{lastPrintedAt}</td>
@@ -223,7 +227,7 @@ export default function PrintingLogsPage() {
                     </tr>
                     {isOpen && (
                       <tr>
-                        <td colSpan={9} className="bg-gray-50 px-3 py-3">
+                        <td colSpan={10} className="bg-gray-50 px-3 py-3">
                           <Details transactionId={tx.id} />
                         </td>
                       </tr>

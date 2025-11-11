@@ -323,6 +323,21 @@ class OfflineSyncService {
             console.log(`✅ ${data.teams.length} teams synced to local database`);
           }
           
+          if (Array.isArray(data.roles)) {
+            await (window as any).electronAPI.localDbUpsertRoles(data.roles);
+            console.log(`✅ ${data.roles.length} roles synced to local database`);
+          }
+          
+          if (Array.isArray(data.permissions)) {
+            await (window as any).electronAPI.localDbUpsertPermissions(data.permissions);
+            console.log(`✅ ${data.permissions.length} permissions synced to local database`);
+          }
+          
+          if (Array.isArray(data.rolePermissions)) {
+            await (window as any).electronAPI.localDbUpsertRolePermissions(data.rolePermissions);
+            console.log(`✅ ${data.rolePermissions.length} role-permission mappings synced to local database`);
+          }
+          
           if (data.source && data.source.length > 0) {
             await (window as any).electronAPI.localDbUpsertSource(data.source);
             console.log(`✅ ${data.source.length} source records synced to local database`);

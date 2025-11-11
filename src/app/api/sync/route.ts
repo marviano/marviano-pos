@@ -156,6 +156,53 @@ export async function GET() {
       counts.contacts = 0;
     }
 
+    // Sync Roles
+    try {
+      const roles = await query(`
+        SELECT id, name, description, organization_id, created_at, updated_at
+        FROM roles
+        ORDER BY name ASC
+      `);
+      syncResults.roles = roles;
+      counts.roles = roles.length;
+      console.log(`✅ Synced ${roles.length} roles`);
+    } catch (error) {
+      console.warn('⚠️ Failed to sync roles:', error);
+      syncResults.roles = [];
+      counts.roles = 0;
+    }
+
+    // Sync Permissions
+    try {
+      const permissions = await query(`
+        SELECT id, name, description, created_at, category_id, organization_id, status
+        FROM permissions
+        ORDER BY name ASC
+      `);
+      syncResults.permissions = permissions;
+      counts.permissions = permissions.length;
+      console.log(`✅ Synced ${permissions.length} permissions`);
+    } catch (error) {
+      console.warn('⚠️ Failed to sync permissions:', error);
+      syncResults.permissions = [];
+      counts.permissions = 0;
+    }
+
+    // Sync Role Permissions
+    try {
+      const rolePermissions = await query(`
+        SELECT role_id, permission_id
+        FROM role_permissions
+      `);
+      syncResults.rolePermissions = rolePermissions;
+      counts.rolePermissions = rolePermissions.length;
+      console.log(`✅ Synced ${rolePermissions.length} role-permission mappings`);
+    } catch (error) {
+      console.warn('⚠️ Failed to sync role permissions:', error);
+      syncResults.rolePermissions = [];
+      counts.rolePermissions = 0;
+    }
+
     // Sync Banks
 
     // Sync Payment Methods
@@ -336,7 +383,7 @@ export async function GET() {
         SELECT 
           t.uuid_id as id, t.business_id, t.user_id, pm.code as payment_method, t.pickup_method,
           t.total_amount, t.voucher_discount, t.voucher_type, t.voucher_value, t.voucher_label, t.final_amount, t.amount_received, t.change_amount,
-          t.status, t.created_at, t.contact_id, t.customer_name, t.note, t.bank_name,
+          t.status, t.created_at, t.contact_id, t.customer_name, t.customer_unit, t.note, t.bank_name,
           t.card_number, t.cl_account_id, t.cl_account_name, t.bank_id, t.receipt_number,
           t.transaction_type, t.payment_method_id
         FROM transactions t

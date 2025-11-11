@@ -84,6 +84,25 @@ declare global {
       localDbUpsertTeams?: (rows: any[]) => Promise<{ success: boolean }>;
       localDbGetTeams?: () => Promise<any[]>;
       
+      // Roles & permissions
+      localDbUpsertRoles?: (rows: any[]) => Promise<{ success: boolean }>;
+      localDbGetRoles?: () => Promise<any[]>;
+      localDbUpsertPermissions?: (rows: any[]) => Promise<{ success: boolean }>;
+      localDbGetPermissions?: () => Promise<any[]>;
+      localDbUpsertRolePermissions?: (rows: any[]) => Promise<{ success: boolean }>;
+      localDbGetRolePermissions?: (roleId: number) => Promise<any[]>;
+      localDbGetUserAuth?: (email: string) => Promise<{
+        id: number;
+        email: string;
+        password: string | null;
+        name: string | null;
+        role_id: number | null;
+        organization_id: number | null;
+        role_name: string | null;
+        permissions: string[];
+      } | null>;
+      checkOfflineDbExists?: () => Promise<{ exists: boolean; path?: string; error?: string }>;
+      
       // Supporting tables
       localDbUpsertSource?: (rows: any[]) => Promise<{ success: boolean }>;
       localDbGetSource?: () => Promise<any[]>;

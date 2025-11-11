@@ -1,12 +1,20 @@
 'use client';
 
+import bcrypt from 'bcryptjs';
+
+const KNOWN_ROLES = ['admin', 'cashier', 'manager'] as const;
+type KnownRole = (typeof KNOWN_ROLES)[number];
+
 export interface User {
   id: string;
   email: string;
   username: string;
   name: string;
-  role: 'admin' | 'cashier' | 'manager';
+  role: KnownRole;
+  role_name?: string | null;
   organization_id: number;
+  role_id?: number | null;
+  permissions: string[];
 }
 
 export interface AuthState {
@@ -50,9 +58,10 @@ class AuthManager {
           const parsedState = JSON.parse(savedState);
           // Only restore if it's recent (within 24 hours)
           if (parsedState.timestamp && Date.now() - parsedState.timestamp < 24 * 60 * 60 * 1000) {
+            const restoredUser = this.sanitizeUser(parsedState.user);
             this.authState = {
-              isAuthenticated: parsedState.isAuthenticated,
-              user: parsedState.user,
+              isAuthenticated: Boolean(parsedState.isAuthenticated && restoredUser),
+              user: restoredUser,
               isOfflineMode: parsedState.isOfflineMode,
             };
             // Notify listeners after restoring state
@@ -92,75 +101,170 @@ class AuthManager {
     this.listeners.forEach(listener => listener(this.authState));
   }
 
+  private filterAppPermissions(rawPermissions: any): string[] {
+    if (!Array.isArray(rawPermissions)) {
+      return [];
+    }
+
+    return rawPermissions
+      .filter((perm): perm is string => typeof perm === 'string' && perm.startsWith('marviano-pos_'))
+      .sort((a, b) => a.localeCompare(b));
+  }
+
+  private normalizeRole(roleName?: string | null): KnownRole {
+    const normalized = (roleName || 'cashier').toLowerCase();
+    if ((KNOWN_ROLES as readonly string[]).includes(normalized)) {
+      return normalized as KnownRole;
+    }
+    return 'cashier';
+  }
+
+  private sanitizeUser(user: any): User | null {
+    if (!user) {
+      return null;
+    }
+
+    const organizationId = Number(user.organization_id ?? 0);
+    const normalizedOrganizationId = Number.isFinite(organizationId) ? organizationId : 0;
+    const roleIdValue =
+      user.role_id !== null && user.role_id !== undefined && Number.isFinite(Number(user.role_id))
+        ? Number(user.role_id)
+        : null;
+
+    return {
+      id: String(user.id),
+      email: user.email,
+      username: user.username ?? user.email,
+      name: user.name ?? user.email,
+      role: this.normalizeRole(user.role),
+      role_name: user.role_name ?? user.role ?? null,
+      organization_id: normalizedOrganizationId,
+      role_id: roleIdValue,
+      permissions: this.filterAppPermissions(user.permissions),
+    };
+  }
+
+  private setAuthenticatedUser(user: User, isOfflineMode: boolean): void {
+    this.authState = {
+      isAuthenticated: true,
+      user,
+      isOfflineMode,
+    };
+
+    this.notifyListeners();
+  }
+
+  private async notifyElectronLoginSuccess() {
+    if (typeof window !== 'undefined' && window.electronAPI) {
+      try {
+        await window.electronAPI.notifyLoginSuccess();
+      } catch (error) {
+        console.error('🔍 [AUTH] Failed to notify Electron:', error);
+      }
+    }
+  }
+
+  private async tryOfflineLogin(email: string, password: string): Promise<User> {
+    if (typeof window === 'undefined' || !window.electronAPI?.localDbGetUserAuth) {
+      throw new Error('Offline login is not available on this platform');
+    }
+
+    console.log('🔍 [AUTH] Attempting offline login...');
+    const offlineUser = await window.electronAPI.localDbGetUserAuth(email);
+
+    if (!offlineUser) {
+      throw new Error('Offline login unavailable for this user. Please sync while online.');
+    }
+
+    if (!offlineUser.password) {
+      throw new Error('Offline login unavailable: password not cached. Please login online once.');
+    }
+
+    const passwordMatches = await bcrypt.compare(password, offlineUser.password);
+
+    if (!passwordMatches) {
+      throw new Error('Invalid email or password');
+    }
+
+    const sanitizedUser = this.sanitizeUser({
+      id: offlineUser.id,
+      email: offlineUser.email,
+      username: offlineUser.email,
+      name: offlineUser.name,
+      role: offlineUser.role_name,
+      role_name: offlineUser.role_name,
+      organization_id: offlineUser.organization_id,
+      role_id: offlineUser.role_id,
+      permissions: offlineUser.permissions,
+    });
+
+    if (!sanitizedUser) {
+      throw new Error('Offline user data is invalid. Please login online once.');
+    }
+
+    this.setAuthenticatedUser(sanitizedUser, true);
+    await this.notifyElectronLoginSuccess();
+    console.log('🔍 [AUTH] Offline login completed successfully');
+    return sanitizedUser;
+  }
+
   async login(email: string, password: string): Promise<User> {
     console.log('🔍 [AUTH] Starting login process...');
     try {
       // Call the login API
       console.log('🔍 [AUTH] Calling login API...');
-      const response = await fetch('/api/auth/login', {
+      let response: Response | null = null;
+      let data: any = null;
+
+      try {
+        response = await fetch('/api/auth/login', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({ email, password }),
       });
-
-      console.log('🔍 [AUTH] API response status:', response.status);
-      const data = await response.json();
-      console.log('🔍 [AUTH] API response data:', data);
+        console.log('🔍 [AUTH] API response status:', response.status);
+        data = await response.json();
+        console.log('🔍 [AUTH] API response data:', data);
+      } catch (networkError: any) {
+        console.warn('⚠️ [AUTH] Online login failed, attempting offline fallback...', networkError);
+        return this.tryOfflineLogin(email, password);
+      }
 
       if (!response.ok) {
-        throw new Error(data.error || 'Login failed');
-      }
+        const errorMessage = data?.error || 'Login failed';
 
-      if (data.success && data.user) {
-        console.log('🔍 [AUTH] Login successful, setting user state...');
-        const user: User = {
-          id: data.user.id,
-          email: data.user.email,
-          username: data.user.username,
-          name: data.user.name,
-          role: data.user.role,
-          organization_id: data.user.organization_id,
-        };
-        
-        this.authState = {
-          isAuthenticated: true,
-          user,
-          isOfflineMode: false,
-        };
-        
-        console.log('🔍 [AUTH] Notifying listeners...');
-        this.notifyListeners();
-        
-        // Notify Electron about successful login
-        console.log('🔍 [AUTH] Checking Electron API...');
-        console.log('🔍 [AUTH] window object:', typeof window);
-        console.log('🔍 [AUTH] window.electronAPI:', typeof window !== 'undefined' ? !!window.electronAPI : 'undefined');
-        
-        if (typeof window !== 'undefined' && window.electronAPI) {
-          console.log('🔍 [AUTH] Electron API available, calling notifyLoginSuccess...');
-          console.log('🔍 [AUTH] notifyLoginSuccess method:', typeof window.electronAPI.notifyLoginSuccess);
-          
+        if (response.status >= 500) {
+          console.warn('⚠️ [AUTH] Server error during login, attempting offline fallback...');
           try {
-            const result = await window.electronAPI.notifyLoginSuccess();
-            console.log('🔍 [AUTH] Electron login success result:', result);
-          } catch (error) {
-            console.error('🔍 [AUTH] Failed to notify Electron:', error);
-          }
-        } else {
-          console.log('🔍 [AUTH] Electron API not available');
-          console.log('🔍 [AUTH] window:', typeof window);
-          if (typeof window !== 'undefined') {
-            console.log('🔍 [AUTH] electronAPI:', window.electronAPI);
+            return await this.tryOfflineLogin(email, password);
+          } catch (offlineError) {
+            console.error('❌ [AUTH] Offline fallback failed:', offlineError);
+            throw new Error(errorMessage);
           }
         }
-        
-        console.log('🔍 [AUTH] Login process completed successfully');
-        return user;
-      } else {
-        throw new Error('Invalid response from server');
+
+        throw new Error(errorMessage);
       }
+
+      if (data?.success && data.user) {
+        console.log('🔍 [AUTH] Login successful, setting user state...');
+        const sanitizedUser = this.sanitizeUser({
+          ...data.user,
+          role_name: data.user.role_name ?? data.user.role,
+        });
+        if (!sanitizedUser) {
+          throw new Error('Invalid user payload received');
+        }
+
+        this.setAuthenticatedUser(sanitizedUser, false);
+        await this.notifyElectronLoginSuccess();
+        console.log('🔍 [AUTH] Login process completed successfully');
+        return sanitizedUser;
+      }
+
+      throw new Error('Invalid response from server');
     } catch (error) {
       console.error('🔍 [AUTH] Login error:', error);
       throw error;
@@ -169,40 +273,19 @@ class AuthManager {
 
   async loginOffline(): Promise<User> {
     console.log('🔍 [AUTH] Starting offline login...');
-    const user: User = {
-      id: 'offline',
-      email: 'offline@marviano.com',
-      username: 'offline_user',
-      name: 'Offline User',
-      role: 'cashier',
-      organization_id: 1,
-    };
+    const cachedUser = this.authState.user;
 
-    this.authState = {
-      isAuthenticated: true,
-      user,
-      isOfflineMode: true,
-    };
-
-    console.log('🔍 [AUTH] Offline login - notifying listeners...');
-    this.notifyListeners();
-    
-    // Notify Electron about successful offline login
-    console.log('🔍 [AUTH] Offline login - checking Electron API...');
-    if (typeof window !== 'undefined' && window.electronAPI) {
-      console.log('🔍 [AUTH] Offline login - Electron API available, calling notifyLoginSuccess...');
-      try {
-        const result = await window.electronAPI.notifyLoginSuccess();
-        console.log('🔍 [AUTH] Offline login - Electron result:', result);
-      } catch (error) {
-        console.error('🔍 [AUTH] Offline login - Failed to notify Electron:', error);
-      }
-    } else {
-      console.log('🔍 [AUTH] Offline login - Electron API not available');
+    if (!cachedUser) {
+      throw new Error('Offline login unavailable. Please login online at least once.');
     }
+
+    this.setAuthenticatedUser(cachedUser, true);
     
-    console.log('🔍 [AUTH] Offline login completed');
-    return user;
+    console.log('🔍 [AUTH] Offline login - checking Electron API...');
+    await this.notifyElectronLoginSuccess();
+    
+    console.log('🔍 [AUTH] Offline login completed with cached credentials');
+    return cachedUser;
   }
 
   logout(): void {

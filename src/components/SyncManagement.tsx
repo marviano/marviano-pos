@@ -48,6 +48,7 @@ interface OfflineTransaction {
   total_amount: number;
   final_amount: number;
   customer_name: string | null;
+  customer_unit?: number | null;
   receipt_number: number | null;
   transaction_type: string;
   status: string;
@@ -385,6 +386,7 @@ export default function SyncManagement() {
             change_amount: transaction.change_amount,
             contact_id: transaction.contact_id,
             customer_name: transaction.customer_name,
+            customer_unit: transaction.customer_unit ?? null,
             bank_id: transaction.bank_id || null,
             card_number: transaction.card_number || null,
             cl_account_id: transaction.cl_account_id || null,
@@ -1211,6 +1213,7 @@ WHERE ${baseWhere};`;
                         <th className="px-3 py-2 text-center font-medium text-gray-700">UUID</th>
                         <th className="px-3 py-2 text-left font-medium text-gray-700">Tanggal</th>
                         <th className="px-3 py-2 text-left font-medium text-gray-700">Customer</th>
+                        <th className="px-3 py-2 text-center font-medium text-gray-700">CU</th>
                         <th className="px-3 py-2 text-left font-medium text-gray-700">Metode</th>
                         <th className="px-3 py-2 text-left font-medium text-gray-700">Total</th>
                         <th className="px-3 py-2 text-left font-medium text-gray-700">Status</th>
@@ -1240,6 +1243,9 @@ WHERE ${baseWhere};`;
                           </td>
                           <td className="px-3 py-2 text-gray-600">
                             {transaction.customer_name || 'Guest'}
+                          </td>
+                          <td className="px-3 py-2 text-center text-gray-700">
+                            {transaction.customer_unit ?? '-'}
                           </td>
                           <td className="px-3 py-2">
                             <span className="inline-flex px-2 py-1 text-xs font-semibold rounded-full bg-blue-100 text-blue-800">
@@ -1311,6 +1317,7 @@ WHERE ${baseWhere};`;
                           <th className="px-3 py-2 text-center font-medium text-orange-900">UUID</th>
                           <th className="px-3 py-2 text-left font-medium text-orange-900">Tanggal</th>
                           <th className="px-3 py-2 text-left font-medium text-orange-900">Customer</th>
+                          <th className="px-3 py-2 text-center font-medium text-orange-900">CU</th>
                           <th className="px-3 py-2 text-left font-medium text-orange-900">Metode</th>
                           <th className="px-3 py-2 text-left font-medium text-orange-900">Total</th>
                           <th className="px-3 py-2 text-left font-medium text-orange-900">Status</th>
@@ -1338,6 +1345,9 @@ WHERE ${baseWhere};`;
                             </td>
                             <td className="px-3 py-2 text-gray-600">
                               {transaction.customer_name || 'Guest'}
+                            </td>
+                            <td className="px-3 py-2 text-center text-orange-900">
+                              {transaction.customer_unit ?? '-'}
                             </td>
                             <td className="px-3 py-2">
                               <span className="inline-flex px-2 py-1 text-xs font-semibold rounded-full bg-blue-100 text-blue-800">

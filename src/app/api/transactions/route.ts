@@ -39,6 +39,7 @@ interface TransactionData {
   change_amount: number;
   contact_id?: number | null;
   customer_name?: string | null;
+  customer_unit?: number | null;
   bank_id?: number | null;
   card_number?: string | null;
   cl_account_id?: number | null;
@@ -94,6 +95,10 @@ export async function POST(request: NextRequest) {
       }
       
       // Insert main transaction record using UUID
+      const customerUnit = transactionData.customer_unit !== undefined && transactionData.customer_unit !== null
+        ? Number(transactionData.customer_unit)
+        : null;
+
       const transactionResult = await query(`
     INSERT INTO transactions (
       uuid_id,
@@ -111,6 +116,7 @@ export async function POST(request: NextRequest) {
       change_amount,
       contact_id,
       customer_name,
+      customer_unit,
       bank_id,
       card_number,
       cl_account_id,
@@ -119,7 +125,7 @@ export async function POST(request: NextRequest) {
       transaction_type,
       status,
       created_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `, [
         transactionData.id, // Use UUID from client
         transactionData.business_id,
@@ -136,6 +142,7 @@ export async function POST(request: NextRequest) {
         transactionData.change_amount,
         transactionData.contact_id || null,
         transactionData.customer_name || null,
+        customerUnit,
         transactionData.bank_id || null,
         transactionData.card_number || null,
         transactionData.cl_account_id || null,
@@ -256,6 +263,7 @@ export async function GET(request: NextRequest) {
         t.updated_at,
         t.contact_id,
         t.customer_name,
+        t.customer_unit,
         t.note,
         t.bank_name,
         t.card_number,

@@ -141,6 +141,15 @@ export default function TransactionConfirmationDialog({
     }
   };
 
+  const percentLabel =
+    promotionType === 'percent' && promotionValue !== null
+      ? `Diskon ${promotionValue}%`
+      : '';
+  const showPercentDetails =
+    promotionType === 'percent' &&
+    promotionValue !== null &&
+    percentLabel !== promotionLabel;
+
   if (!isOpen) return null;
 
   return (
@@ -273,24 +282,34 @@ export default function TransactionConfirmationDialog({
           </div>
 
           {/* Payment Details */}
-          <div className="grid grid-cols-2 gap-4">
-            <div className="bg-blue-50 rounded-xl p-4">
-              <h4 className="font-semibold text-blue-800 mb-2">Metode Pembayaran</h4>
-              <p className="text-blue-700">{getPaymentMethodLabel(paymentMethod)}</p>
-            </div>
-            <div className="bg-green-50 rounded-xl p-4">
-              <h4 className="font-semibold text-green-800 mb-2">Metode Pengambilan</h4>
-              <p className="text-green-700">{getPickupMethodLabel(pickupMethod)}</p>
+          <div className="border border-black rounded-lg overflow-hidden">
+            <div className="grid grid-cols-3 divide-x divide-black/50">
+              <div className="p-3">
+                <div className="text-[11px] font-semibold uppercase text-gray-600 tracking-wide">
+                  Metode Pembayaran
+                </div>
+                <div className="mt-1 text-sm font-medium text-gray-900">
+                  {getPaymentMethodLabel(paymentMethod)}
+                </div>
+              </div>
+              <div className="p-3">
+                <div className="text-[11px] font-semibold uppercase text-gray-600 tracking-wide">
+                  Metode Pengambilan
+                </div>
+                <div className="mt-1 text-sm font-medium text-gray-900">
+                  {getPickupMethodLabel(pickupMethod)}
+                </div>
+              </div>
+              <div className="p-3">
+                <div className="text-[11px] font-semibold uppercase text-gray-600 tracking-wide">
+                  Nama Pelanggan
+                </div>
+                <div className="mt-1 text-sm font-medium text-gray-900">
+                  {customerName || '-'}
+                </div>
+              </div>
             </div>
           </div>
-
-          {/* Customer Name */}
-          {customerName && (
-            <div className="bg-orange-50 rounded-xl p-4">
-              <h4 className="font-semibold text-orange-800 mb-2">Nama Pelanggan</h4>
-              <p className="text-orange-700">{customerName}</p>
-            </div>
-          )}
 
           {/* Amount Summary */}
           <div className="bg-gray-50 rounded-xl p-4">
@@ -307,8 +326,8 @@ export default function TransactionConfirmationDialog({
                     {promotionLabel && (
                       <span className="text-xs text-green-500 font-medium">{promotionLabel}</span>
                     )}
-                    {promotionType === 'percent' && promotionValue && (
-                      <span className="text-[11px] text-green-500">Diskon {promotionValue}%</span>
+                    {showPercentDetails && (
+                      <span className="text-[11px] text-green-500">{percentLabel}</span>
                     )}
                     {promotionType === 'free' && (
                       <span className="text-[11px] text-green-500">Gratis 100%</span>

@@ -36,6 +36,7 @@ export async function GET(
         t.updated_at,
         t.contact_id,
         t.customer_name,
+        t.customer_unit,
         t.note,
         t.bank_name,
         t.card_number,
@@ -109,6 +110,9 @@ export async function GET(
       change_amount: parseFloat(transaction.change_amount || 0),
       contact_id: transaction.contact_id,
       customer_name: transaction.customer_name,
+      customer_unit: transaction.customer_unit !== undefined && transaction.customer_unit !== null
+        ? Number(transaction.customer_unit)
+        : null,
       bank_id: transaction.bank_id,
       bank_name: transaction.bank_name,
       card_number: transaction.card_number,

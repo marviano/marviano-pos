@@ -20,11 +20,15 @@ let printWindow: BrowserWindow | null = null;
 let localDb: Database.Database | null = null;
 let printerService: PrinterManagementService | null = null;
 
+function getLocalDbPath(): string {
+  return path.join(__dirname, '../pos-offline.db');
+}
+
 function createWindows(): void {
   // Initialize local SQLite (offline storage)
   try {
     console.log('🔍 Initializing SQLite database for offline support...');
-    const dbPath = path.join(__dirname, '../pos-offline.db');
+    const dbPath = getLocalDbPath();
     localDb = new Database(dbPath);
     
     // Enable WAL mode for better concurrency
@@ -57,6 +61,11 @@ function createWindows(): void {
       if (!hasVoucherLabel) {
         console.log('📋 Migrating database: Adding transactions.voucher_label column...');
         localDb.prepare(`ALTER TABLE transactions ADD COLUMN voucher_label TEXT`).run();
+      }
+      const hasCustomerUnit = schemaCheck.some(col => col.name === 'customer_unit');
+      if (!hasCustomerUnit) {
+        console.log('📋 Migrating database: Adding transactions.customer_unit column...');
+        localDb.prepare(`ALTER TABLE transactions ADD COLUMN customer_unit INTEGER`).run();
       }
     } catch (e) {
       console.log('⚠️ Migration check failed:', e);
@@ -351,6 +360,12 @@ function createWindows(): void {
         status TEXT DEFAULT 'active'
       );
       
+      CREATE TABLE IF NOT EXISTS role_permissions (
+        role_id INTEGER NOT NULL,
+        permission_id INTEGER NOT NULL,
+        PRIMARY KEY (role_id, permission_id)
+      );
+      
       -- Supporting Tables
       CREATE TABLE IF NOT EXISTS source (
         id INTEGER PRIMARY KEY,
@@ -403,6 +418,7 @@ function createWindows(): void {
         synced_at INTEGER,
         contact_id INTEGER,
         customer_name TEXT,
+        customer_unit INTEGER,
         note TEXT,
         bank_name TEXT,
         card_number TEXT,
@@ -1409,6 +1425,138 @@ function createWindows(): void {
     return stmt.all();
   });
 
+  // Roles
+  ipcMain.handle('localdb-upsert-roles', async (event, rows: any[]) => {
+    if (!localDb) return { success: false };
+    const tx = localDb.transaction((data: any[]) => {
+      const stmt = localDb!.prepare(`INSERT INTO roles (
+        id, name, description, organization_id, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        name=excluded.name,
+        description=excluded.description,
+        organization_id=excluded.organization_id,
+        created_at=excluded.created_at,
+        updated_at=excluded.updated_at`);
+      for (const r of data) {
+        stmt.run(r.id, r.name, r.description, r.organization_id, r.created_at, Date.now());
+      }
+    });
+    tx(rows ?? []);
+    return { success: true };
+  });
+
+  ipcMain.handle('localdb-get-roles', async () => {
+    if (!localDb) return [];
+    const stmt = localDb.prepare('SELECT * FROM roles ORDER BY name ASC');
+    return stmt.all();
+  });
+
+  // Permissions
+  ipcMain.handle('localdb-upsert-permissions', async (event, rows: any[]) => {
+    if (!localDb) return { success: false };
+    const tx = localDb.transaction((data: any[]) => {
+      const stmt = localDb!.prepare(`INSERT INTO permissions (
+        id, name, description, created_at, category_id, organization_id, status
+      ) VALUES (?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        name=excluded.name,
+        description=excluded.description,
+        created_at=excluded.created_at,
+        category_id=excluded.category_id,
+        organization_id=excluded.organization_id,
+        status=excluded.status`);
+      for (const r of data) {
+        stmt.run(
+          r.id,
+          r.name,
+          r.description,
+          r.created_at,
+          r.category_id,
+          r.organization_id,
+          r.status ?? 'active'
+        );
+      }
+    });
+    tx(rows ?? []);
+    return { success: true };
+  });
+
+  ipcMain.handle('localdb-get-permissions', async () => {
+    if (!localDb) return [];
+    const stmt = localDb.prepare('SELECT * FROM permissions ORDER BY name ASC');
+    return stmt.all();
+  });
+
+  // Role permissions
+  ipcMain.handle('localdb-upsert-role-permissions', async (event, rows: any[]) => {
+    if (!localDb) return { success: false };
+    const tx = localDb.transaction((data: any[]) => {
+      localDb!.prepare('DELETE FROM role_permissions').run();
+      const stmt = localDb!.prepare(`INSERT INTO role_permissions (
+        role_id, permission_id
+      ) VALUES (?, ?)
+      ON CONFLICT(role_id, permission_id) DO NOTHING`);
+      for (const r of data) {
+        stmt.run(r.role_id, r.permission_id);
+      }
+    });
+    tx(rows ?? []);
+    return { success: true };
+  });
+
+  ipcMain.handle('localdb-get-role-permissions', async (event, roleId: number) => {
+    if (!localDb) return [];
+    const stmt = localDb.prepare(`
+      SELECT p.id, p.name, p.status
+      FROM role_permissions rp
+      INNER JOIN permissions p ON p.id = rp.permission_id
+      WHERE rp.role_id = ?
+      ORDER BY p.name ASC
+    `);
+    return stmt.all(roleId);
+  });
+
+  // Aggregated auth helper
+  ipcMain.handle('localdb-get-user-auth', async (event, email: string) => {
+    if (!localDb) return null;
+    const userStmt = localDb.prepare(`
+      SELECT id, email, password, name, role_id, organization_id
+      FROM users
+      WHERE LOWER(email) = LOWER(?)
+      LIMIT 1
+    `);
+    const user = userStmt.get(email);
+
+    if (!user) {
+      return null;
+    }
+
+    let roleName: string | null = null;
+    if (user.role_id !== null && user.role_id !== undefined) {
+      const roleStmt = localDb.prepare('SELECT name FROM roles WHERE id = ? LIMIT 1');
+      const role = roleStmt.get(user.role_id);
+      roleName = role?.name ?? null;
+    }
+
+    const permissionsStmt = localDb.prepare(`
+      SELECT p.name
+      FROM role_permissions rp
+      INNER JOIN permissions p ON p.id = rp.permission_id
+      WHERE rp.role_id = ?
+      ORDER BY p.name ASC
+    `);
+    const permissionRows = (user.role_id !== null && user.role_id !== undefined)
+      ? permissionsStmt.all(user.role_id)
+      : [];
+
+    return {
+      ...user,
+      role_name: roleName,
+      permissions: Array.isArray(permissionRows) ? permissionRows.map((row: any) => row.name) : [],
+    };
+  });
+
   // Supporting tables
   ipcMain.handle('localdb-upsert-source', async (event, rows: any[]) => {
     if (!localDb) return { success: false };
@@ -1459,17 +1607,17 @@ function createWindows(): void {
       const stmt = localDb!.prepare(`INSERT INTO transactions (
         id, business_id, user_id, payment_method, pickup_method, total_amount,
         voucher_discount, voucher_type, voucher_value, voucher_label, final_amount, amount_received, change_amount, status,
-        created_at, updated_at, synced_at, contact_id, customer_name, note, bank_name,
+        created_at, updated_at, synced_at, contact_id, customer_name, customer_unit, note, bank_name,
         card_number, cl_account_id, cl_account_name, bank_id, receipt_number,
         transaction_type, payment_method_id
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET
         business_id=excluded.business_id, user_id=excluded.user_id, payment_method=excluded.payment_method,
         pickup_method=excluded.pickup_method, total_amount=excluded.total_amount, voucher_discount=excluded.voucher_discount,
         voucher_type=excluded.voucher_type, voucher_value=excluded.voucher_value, voucher_label=excluded.voucher_label,
         final_amount=excluded.final_amount, amount_received=excluded.amount_received, change_amount=excluded.change_amount,
         status=excluded.status, created_at=excluded.created_at, updated_at=excluded.updated_at, synced_at=excluded.synced_at,
-        contact_id=excluded.contact_id, customer_name=excluded.customer_name, note=excluded.note,
+        contact_id=excluded.contact_id, customer_name=excluded.customer_name, customer_unit=excluded.customer_unit, note=excluded.note,
         bank_name=excluded.bank_name, card_number=excluded.card_number, cl_account_id=excluded.cl_account_id,
         cl_account_name=excluded.cl_account_name, bank_id=excluded.bank_id, receipt_number=excluded.receipt_number,
         transaction_type=excluded.transaction_type, payment_method_id=excluded.payment_method_id`);
@@ -1492,6 +1640,7 @@ function createWindows(): void {
           created_at: r.created_at,
           contact_id: r.contact_id,
           customer_name: r.customer_name,
+          customer_unit: r.customer_unit,
           note: r.note,
           bank_name: r.bank_name,
           card_number: r.card_number,
@@ -1523,6 +1672,7 @@ function createWindows(): void {
           r.synced_at ?? null, // Keep existing synced_at or NULL for new unsynced transactions
           r.contact_id ?? null,
           r.customer_name ?? null,
+        typeof r.customer_unit === 'number' ? r.customer_unit : (r.customer_unit ? Number(r.customer_unit) : null),
           r.note ?? null,
           r.bank_name ?? null,
           r.card_number ?? null,
@@ -2358,6 +2508,17 @@ function createWindows(): void {
     if (!localDb) return [];
     const stmt = localDb.prepare('SELECT * FROM management_groups ORDER BY name ASC');
     return stmt.all();
+  });
+
+  ipcMain.handle('localdb-check-exists', async () => {
+    try {
+      const dbPath = getLocalDbPath();
+      const exists = fs.existsSync(dbPath);
+      return { exists, path: dbPath };
+    } catch (error) {
+      console.error('Error checking local DB existence:', error);
+      return { exists: false, error: String(error) };
+    }
   });
 
   // Category1

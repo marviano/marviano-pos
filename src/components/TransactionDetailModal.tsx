@@ -26,6 +26,7 @@ interface Transaction {
   change_amount: number;
   contact_id?: number | null;
   customer_name?: string | null;
+  customer_unit?: number | null;
   receipt_number?: number | null;
   transaction_type?: 'drinks' | 'bakery';
   bank_id?: number | null;
@@ -206,6 +207,14 @@ const TransactionDetailModal: React.FC<TransactionDetailModalProps> = ({
                 <p className="text-sm font-medium text-gray-600">Contact ID</p>
                 <p className="text-base text-gray-900">
                   {transaction.contact_id || 'Tidak ada'}
+                </p>
+              </div>
+              <div>
+                <p className="text-sm font-medium text-gray-600">Customer Unit</p>
+                <p className="text-base text-gray-900">
+                  {transaction.customer_unit !== undefined && transaction.customer_unit !== null
+                    ? transaction.customer_unit
+                    : 'Tidak dicatat'}
                 </p>
               </div>
             </div>

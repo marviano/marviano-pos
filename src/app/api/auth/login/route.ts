@@ -16,6 +16,10 @@ interface Role {
   name: string;
 }
 
+interface PermissionRow {
+  name: string;
+}
+
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
@@ -70,6 +74,19 @@ export async function POST(request: NextRequest) {
 
     const roleName = roles.length > 0 ? roles[0].name : 'cashier';
 
+    // Get permissions for the user's role
+    const permissionRows = user.role_id
+      ? await query<PermissionRow[]>(
+          `SELECT p.name
+           FROM permissions p
+           INNER JOIN role_permissions rp ON rp.permission_id = p.id
+           WHERE rp.role_id = ? AND (p.status IS NULL OR p.status = 'active')`,
+          [user.role_id]
+        )
+      : [];
+
+    const permissions = permissionRows.map(permission => permission.name);
+
     // Return user data (without password)
     return NextResponse.json({
       success: true,
@@ -79,7 +96,10 @@ export async function POST(request: NextRequest) {
         username: user.email,
         name: user.name || user.email,
         role: roleName.toLowerCase() as 'admin' | 'cashier' | 'manager',
+        role_name: roleName,
         organization_id: user.organization_id,
+        role_id: user.role_id,
+        permissions,
       },
     });
   } catch (error) {

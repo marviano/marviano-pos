@@ -55,6 +55,15 @@ electron_1.contextBridge.exposeInMainWorld('electronAPI', {
     // Teams
     localDbUpsertTeams: (rows) => electron_1.ipcRenderer.invoke('localdb-upsert-teams', rows),
     localDbGetTeams: () => electron_1.ipcRenderer.invoke('localdb-get-teams'),
+    // Roles & Permissions
+    localDbUpsertRoles: (rows) => electron_1.ipcRenderer.invoke('localdb-upsert-roles', rows),
+    localDbGetRoles: () => electron_1.ipcRenderer.invoke('localdb-get-roles'),
+    localDbUpsertPermissions: (rows) => electron_1.ipcRenderer.invoke('localdb-upsert-permissions', rows),
+    localDbGetPermissions: () => electron_1.ipcRenderer.invoke('localdb-get-permissions'),
+    localDbUpsertRolePermissions: (rows) => electron_1.ipcRenderer.invoke('localdb-upsert-role-permissions', rows),
+    localDbGetRolePermissions: (roleId) => electron_1.ipcRenderer.invoke('localdb-get-role-permissions', roleId),
+    localDbGetUserAuth: (email) => electron_1.ipcRenderer.invoke('localdb-get-user-auth', email),
+    checkOfflineDbExists: () => electron_1.ipcRenderer.invoke('localdb-check-exists'),
     // Supporting tables
     localDbUpsertSource: (rows) => electron_1.ipcRenderer.invoke('localdb-upsert-source', rows),
     localDbGetSource: () => electron_1.ipcRenderer.invoke('localdb-get-source'),

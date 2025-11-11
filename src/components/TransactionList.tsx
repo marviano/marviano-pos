@@ -30,6 +30,7 @@ interface Transaction {
   change_amount: number;
   contact_id: number | null;
   customer_name: string | null;
+  customer_unit?: number | null;
   note: string | null;
   receipt_number: number | null;
   transaction_type: 'drinks' | 'bakery';
@@ -66,6 +67,7 @@ interface TransactionDetail {
   change_amount: number;
   contact_id?: number | null;
   customer_name?: string | null;
+  customer_unit?: number | null;
   bank_id?: number | null;
   bank_name?: string | null;
   card_number?: string | null;
@@ -326,7 +328,8 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
           voucher_value: tx.voucher_value !== undefined && tx.voucher_value !== null ? parseFloat(tx.voucher_value) : null,
           voucher_discount: tx.voucher_discount !== undefined && tx.voucher_discount !== null ? parseFloat(tx.voucher_discount) : 0,
           voucher_type: tx.voucher_type || 'none',
-          voucher_label: tx.voucher_label || null
+          voucher_label: tx.voucher_label || null,
+          customer_unit: tx.customer_unit !== undefined && tx.customer_unit !== null ? Number(tx.customer_unit) : null
         }));
       } else {
         // Fetch from offline database only
@@ -387,6 +390,7 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
             change_amount: tx.change_amount || 0,
             contact_id: tx.contact_id,
             customer_name: tx.customer_name,
+            customer_unit: tx.customer_unit !== undefined && tx.customer_unit !== null ? Number(tx.customer_unit) : null,
             note: tx.note || null,
             receipt_number: tx.receipt_number,
             transaction_type: tx.transaction_type || 'drinks',
@@ -538,6 +542,7 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
       const matchesSearch = searchTerm === '' || 
         transaction.user_name?.toLowerCase().includes(searchTerm.toLowerCase()) ||
         transaction.customer_name?.toLowerCase().includes(searchTerm.toLowerCase()) ||
+        (transaction.customer_unit !== undefined && transaction.customer_unit !== null && transaction.customer_unit.toString().includes(searchTerm)) ||
         transaction.payment_method.toLowerCase().includes(searchTerm.toLowerCase()) ||
         transaction.receipt_number?.toString().includes(searchTerm) ||
         transaction.voucher_label?.toLowerCase().includes(searchTerm.toLowerCase());
@@ -554,7 +559,7 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
       if (sortField === 'receipt_number') {
         aValue = resolveReceiptSequence(a);
         bValue = resolveReceiptSequence(b);
-      } else if (sortField === 'id' || sortField === 'total_amount' || sortField === 'voucher_discount' || sortField === 'final_amount' || sortField === 'amount_received' || sortField === 'change_amount') {
+      } else if (sortField === 'id' || sortField === 'total_amount' || sortField === 'voucher_discount' || sortField === 'final_amount' || sortField === 'amount_received' || sortField === 'change_amount' || sortField === 'customer_unit') {
         aValue = typeof aValue === 'string' ? parseFloat(aValue) : aValue;
         bValue = typeof bValue === 'string' ? parseFloat(bValue) : bValue;
       } else if (sortField === 'created_at') {
@@ -580,6 +585,10 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
   const totalVoucherDiscount = filteredTransactions.reduce((sum, t) => {
     const amount = typeof t.voucher_discount === 'string' ? parseFloat(t.voucher_discount) : t.voucher_discount;
     return sum + (isNaN(amount) ? 0 : amount);
+  }, 0);
+  const totalCustomerUnit = filteredTransactions.reduce((sum, t) => {
+    const value = typeof t.customer_unit === 'number' ? t.customer_unit : 0;
+    return sum + (Number.isFinite(value) ? value : 0);
   }, 0);
 
   // Aggregations for footer
@@ -789,7 +798,7 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
           </div>
 
           {/* Grand Total Card */}
-          <GrandTotalCard totalRevenue={totalRevenue} />
+          <GrandTotalCard totalRevenue={totalRevenue} totalCustomerUnit={totalCustomerUnit} />
         </div>
 
         {/* Search and Filter */}
@@ -970,6 +979,15 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
                       </div>
                     </th>
                     <th 
+                      className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider cursor-pointer hover:bg-gray-100 select-none w-20"
+                      onClick={() => handleSort('customer_unit')}
+                    >
+                      <div className="flex items-center gap-1">
+                        CU
+                        {getSortIcon('customer_unit')}
+                      </div>
+                    </th>
+                    <th 
                       className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider cursor-pointer hover:bg-gray-100 select-none"
                       onClick={() => handleSort('customer_name')}
                     >
@@ -1084,6 +1102,13 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
                           {formatPrice(transaction.final_amount)}
                         </span>
                       </td>
+                      <td className="px-4 py-4 whitespace-nowrap">
+                        <span className="text-xs text-gray-900">
+                          {transaction.customer_unit !== undefined && transaction.customer_unit !== null
+                            ? transaction.customer_unit
+                            : '-'}
+                        </span>
+                      </td>
                       <td className="px-6 py-4 whitespace-nowrap">
                         <span className="text-xs text-gray-900">
                           {transaction.customer_name || 'Guest'}
@@ -1134,9 +1159,10 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
 
 interface GrandTotalCardProps {
   totalRevenue: number;
+  totalCustomerUnit: number;
 }
 
-function GrandTotalCard({ totalRevenue }: GrandTotalCardProps) {
+function GrandTotalCard({ totalRevenue, totalCustomerUnit }: GrandTotalCardProps) {
   return (
     <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-4 md:col-span-1">
       <div className="flex items-center gap-2 mb-3">
@@ -1145,6 +1171,9 @@ function GrandTotalCard({ totalRevenue }: GrandTotalCardProps) {
       </div>
       <div className="text-center">
         <div className="text-lg font-bold text-gray-900">{formatPrice(totalRevenue)}</div>
+        <div className="text-xs text-gray-600 mt-2">
+          Total Customer Unit: <span className="font-semibold text-gray-900">{totalCustomerUnit}</span>
+        </div>
       </div>
     </div>
   );

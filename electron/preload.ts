@@ -66,6 +66,16 @@ contextBridge.exposeInMainWorld('electronAPI', {
   localDbUpsertTeams: (rows: any[]) => ipcRenderer.invoke('localdb-upsert-teams', rows),
   localDbGetTeams: () => ipcRenderer.invoke('localdb-get-teams'),
   
+  // Roles & Permissions
+  localDbUpsertRoles: (rows: any[]) => ipcRenderer.invoke('localdb-upsert-roles', rows),
+  localDbGetRoles: () => ipcRenderer.invoke('localdb-get-roles'),
+  localDbUpsertPermissions: (rows: any[]) => ipcRenderer.invoke('localdb-upsert-permissions', rows),
+  localDbGetPermissions: () => ipcRenderer.invoke('localdb-get-permissions'),
+  localDbUpsertRolePermissions: (rows: any[]) => ipcRenderer.invoke('localdb-upsert-role-permissions', rows),
+  localDbGetRolePermissions: (roleId: number) => ipcRenderer.invoke('localdb-get-role-permissions', roleId),
+  localDbGetUserAuth: (email: string) => ipcRenderer.invoke('localdb-get-user-auth', email),
+  checkOfflineDbExists: () => ipcRenderer.invoke('localdb-check-exists'),
+  
   // Supporting tables
   localDbUpsertSource: (rows: any[]) => ipcRenderer.invoke('localdb-upsert-source', rows),
   localDbGetSource: () => ipcRenderer.invoke('localdb-get-source'),
