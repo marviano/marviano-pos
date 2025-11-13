@@ -1518,6 +1518,15 @@ function createWindows(): void {
   });
 
   // Aggregated auth helper
+  type LocalDbUser = {
+    id: number;
+    email: string;
+    password: string | null;
+    name: string | null;
+    role_id: number | null;
+    organization_id: number | null;
+  };
+
   ipcMain.handle('localdb-get-user-auth', async (event, email: string) => {
     if (!localDb) return null;
     const userStmt = localDb.prepare(`
@@ -1526,7 +1535,7 @@ function createWindows(): void {
       WHERE LOWER(email) = LOWER(?)
       LIMIT 1
     `);
-    const user = userStmt.get(email);
+    const user = userStmt.get(email) as LocalDbUser | undefined;
 
     if (!user) {
       return null;
@@ -1535,7 +1544,7 @@ function createWindows(): void {
     let roleName: string | null = null;
     if (user.role_id !== null && user.role_id !== undefined) {
       const roleStmt = localDb.prepare('SELECT name FROM roles WHERE id = ? LIMIT 1');
-      const role = roleStmt.get(user.role_id);
+      const role = roleStmt.get(user.role_id) as { name?: string } | undefined;
       roleName = role?.name ?? null;
     }
 

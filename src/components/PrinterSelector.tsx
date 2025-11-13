@@ -369,22 +369,15 @@ Please check:
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center justify-between">
-        <div>
-          <h2 className="text-2xl font-bold text-gray-800">Printer Selector</h2>
-          <p className="text-gray-600 mt-1">Select printers for each type and test printing</p>
-        </div>
-        
-        <div className="flex space-x-3">
-          <button
-            onClick={scanForPrinters}
-            disabled={isScanning}
-            className="flex items-center space-x-2 bg-blue-500 hover:bg-blue-600 disabled:bg-blue-300 text-white px-4 py-2 rounded-lg transition-colors"
-          >
-            <Printer className={`w-4 h-4 ${isScanning ? 'animate-pulse' : ''}`} />
-            <span>{isScanning ? 'Scanning...' : 'Scan Printers'}</span>
-          </button>
-        </div>
+      <div className="flex items-center gap-3">
+        <button
+          onClick={scanForPrinters}
+          disabled={isScanning}
+          className="flex-1 flex items-center justify-center space-x-2 bg-blue-500 hover:bg-blue-600 disabled:bg-blue-300 text-white px-4 py-2 rounded-lg transition-colors"
+        >
+          <Printer className={`w-4 h-4 ${isScanning ? 'animate-pulse' : ''}`} />
+          <span>{isScanning ? 'Scanning...' : 'Scan Printers'}</span>
+        </button>
       </div>
 
       {/* Printer Selection Cards */}
@@ -635,7 +628,7 @@ Please check:
         <button
           onClick={handleSave}
           disabled={isSaving}
-          className="flex items-center space-x-2 bg-blue-500 hover:bg-blue-600 disabled:bg-blue-300 text-white px-6 py-3 rounded-lg transition-colors"
+          className="flex items-center space-x-2 bg-green-500 hover:bg-green-600 disabled:bg-green-300 text-white px-6 py-3 rounded-lg transition-colors"
         >
           {isSaving ? (
             <>

@@ -152,6 +152,20 @@ class DatabaseHealthService {
             console.log(`✅ ${data.products.length} products synced to local database`);
           }
           
+          if (data.categories && data.categories.length > 0) {
+            const formattedCategories = data.categories
+              .map((cat: any) => ({
+                category2_name: cat.category2_name || cat.jenis,
+                updated_at: Date.now()
+              }))
+              .filter(cat => !!cat.category2_name);
+            
+            if (formattedCategories.length > 0) {
+              await electronAPI.localDbUpsertCategories(formattedCategories);
+              console.log(`✅ ${formattedCategories.length} categories synced to local database`);
+            }
+          }
+          
           if (data.bundleItems && data.bundleItems.length > 0) {
             await electronAPI.localDbUpsertBundleItems(data.bundleItems);
             console.log(`✅ ${data.bundleItems.length} bundle items synced to local database`);
