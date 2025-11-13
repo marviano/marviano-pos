@@ -1,6 +1,7 @@
 'use client';
 
 import bcrypt from 'bcryptjs';
+import { addSavedEmail } from '@/lib/savedLoginEmails';
 
 const KNOWN_ROLES = ['admin', 'cashier', 'manager'] as const;
 type KnownRole = (typeof KNOWN_ROLES)[number];
@@ -203,6 +204,7 @@ class AuthManager {
     }
 
     this.setAuthenticatedUser(sanitizedUser, true);
+    addSavedEmail(sanitizedUser.email);
     await this.notifyElectronLoginSuccess();
     console.log('🔍 [AUTH] Offline login completed successfully');
     return sanitizedUser;
@@ -259,6 +261,7 @@ class AuthManager {
         }
 
         this.setAuthenticatedUser(sanitizedUser, false);
+        addSavedEmail(sanitizedUser.email);
         await this.notifyElectronLoginSuccess();
         console.log('🔍 [AUTH] Login process completed successfully');
         return sanitizedUser;
@@ -280,6 +283,9 @@ class AuthManager {
     }
 
     this.setAuthenticatedUser(cachedUser, true);
+    if (cachedUser?.email) {
+      addSavedEmail(cachedUser.email);
+    }
     
     console.log('🔍 [AUTH] Offline login - checking Electron API...');
     await this.notifyElectronLoginSuccess();

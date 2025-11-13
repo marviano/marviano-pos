@@ -2100,55 +2100,52 @@ function createWindows(): void {
   ipcMain.handle('localdb-get-shift-statistics', async (event, userId: number, shiftStart: string, shiftEnd: string | null, businessId: number = 14) => {
     if (!localDb) return {
       order_count: 0,
-      total_amount: 0
+      total_amount: 0,
+      total_discount: 0,
+      voucher_count: 0
     };
     
     try {
-      // Order count query
-      let orderCountQuery = `
-        SELECT COUNT(*) as order_count
-        FROM transactions
-        WHERE user_id = ? AND business_id = ? 
-        AND datetime(created_at) >= datetime(?)
-        AND status = 'completed'
-      `;
-      const orderParams: any[] = [userId, businessId, shiftStart];
-      
-      if (shiftEnd) {
-        orderCountQuery += ' AND datetime(created_at) <= datetime(?)';
-        orderParams.push(shiftEnd);
-      }
-      
-      const orderStmt = localDb.prepare(orderCountQuery);
-      const orderResult = orderStmt.get(...orderParams) as { order_count: number };
-      
-      // Total amount query
-      let totalQuery = `
-        SELECT COALESCE(SUM(final_amount), 0) as total_amount
+      // Combined statistics query including voucher metrics
+      let statsQuery = `
+        SELECT 
+          COUNT(*) as order_count,
+          COALESCE(SUM(final_amount), 0) as total_amount,
+          COALESCE(SUM(voucher_discount), 0) as total_discount,
+          COALESCE(SUM(CASE WHEN voucher_discount IS NOT NULL AND voucher_discount > 0 THEN 1 ELSE 0 END), 0) as voucher_count
         FROM transactions
         WHERE user_id = ? AND business_id = ?
         AND datetime(created_at) >= datetime(?)
         AND status = 'completed'
       `;
-      const totalParams: any[] = [userId, businessId, shiftStart];
+      const statsParams: any[] = [userId, businessId, shiftStart];
       
       if (shiftEnd) {
-        totalQuery += ' AND datetime(created_at) <= datetime(?)';
-        totalParams.push(shiftEnd);
+        statsQuery += ' AND datetime(created_at) <= datetime(?)';
+        statsParams.push(shiftEnd);
       }
       
-      const totalStmt = localDb.prepare(totalQuery);
-      const totalResult = totalStmt.get(...totalParams) as { total_amount: number };
+      const statsStmt = localDb.prepare(statsQuery);
+      const statsResult = statsStmt.get(...statsParams) as {
+        order_count: number;
+        total_amount: number;
+        total_discount: number;
+        voucher_count: number;
+      } | undefined;
       
       return {
-        order_count: orderResult.order_count || 0,
-        total_amount: totalResult.total_amount || 0
+        order_count: statsResult?.order_count || 0,
+        total_amount: statsResult?.total_amount || 0,
+        total_discount: statsResult?.total_discount || 0,
+        voucher_count: statsResult?.voucher_count || 0
       };
     } catch (error) {
       console.error('Error getting shift statistics:', error);
       return {
         order_count: 0,
-        total_amount: 0
+        total_amount: 0,
+        total_discount: 0,
+        voucher_count: 0
       };
     }
   });
@@ -4042,7 +4039,7 @@ function generateShiftBreakdownHTML(shiftData: {
   shift_start: string;
   shift_end: string | null;
   modal_awal: number;
-  statistics: { order_count: number; total_amount: number };
+  statistics: { order_count: number; total_amount: number; total_discount: number; voucher_count: number };
   productSales: Array<{ product_name: string; total_quantity: number; total_subtotal: number }>;
   paymentBreakdown: Array<{ payment_method_name: string; transaction_count: number }>;
   cashSummary: { cash_shift: number; cash_whole_day: number; total_cash_in_cashier: number };
@@ -4085,6 +4082,9 @@ function generateShiftBreakdownHTML(shiftData: {
   `).join('');
 
   const totalPaymentCount = shiftData.paymentBreakdown.reduce((sum, p) => sum + p.transaction_count, 0);
+  const formattedTotalDiscount = shiftData.statistics.total_discount > 0
+    ? (-shiftData.statistics.total_discount).toLocaleString('id-ID')
+    : '0';
 
   return `
 <!DOCTYPE html>
@@ -4261,6 +4261,14 @@ function generateShiftBreakdownHTML(shiftData: {
       <span class="summary-value">${shiftData.statistics.total_amount.toLocaleString('id-ID')}</span>
     </div>
     <div class="summary-line">
+      <span class="summary-label">Voucher Dipakai:</span>
+      <span class="summary-value">${shiftData.statistics.voucher_count}</span>
+    </div>
+    <div class="summary-line">
+      <span class="summary-label">Total Diskon Voucher:</span>
+      <span class="summary-value">${formattedTotalDiscount}</span>
+    </div>
+    <div class="summary-line">
       <span class="summary-label">Cash (Shift):</span>
       <span class="summary-value">${shiftData.cashSummary.cash_shift.toLocaleString('id-ID')}</span>
     </div>
@@ -4291,7 +4299,7 @@ ipcMain.handle('print-shift-breakdown', async (event, data: {
   shift_start: string;
   shift_end: string | null;
   modal_awal: number;
-  statistics: { order_count: number; total_amount: number };
+  statistics: { order_count: number; total_amount: number; total_discount: number; voucher_count: number };
   productSales: Array<{ product_name: string; total_quantity: number; total_subtotal: number }>;
   paymentBreakdown: Array<{ payment_method_name: string; transaction_count: number }>;
   cashSummary: { cash_shift: number; cash_whole_day: number; total_cash_in_cashier: number };

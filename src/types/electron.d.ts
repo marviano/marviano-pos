@@ -158,6 +158,8 @@ declare global {
       localDbGetShiftStatistics?: (userId: number, shiftStart: string, shiftEnd: string | null, businessId?: number) => Promise<{
         order_count: number;
         total_amount: number;
+        total_discount: number;
+        voucher_count: number;
       }>;
       localDbGetPaymentBreakdown?: (userId: number, shiftStart: string, shiftEnd: string | null, businessId?: number) => Promise<Array<{
         payment_method_name: string;
@@ -188,7 +190,7 @@ declare global {
         shift_start: string;
         shift_end: string | null;
         modal_awal: number;
-        statistics: { order_count: number; total_amount: number };
+        statistics: { order_count: number; total_amount: number; total_discount: number; voucher_count: number };
         productSales: Array<{ product_name: string; total_quantity: number; total_subtotal: number }>;
         paymentBreakdown: Array<{ payment_method_name: string; transaction_count: number }>;
         cashSummary: { cash_shift: number; cash_whole_day: number; total_cash_in_cashier: number };

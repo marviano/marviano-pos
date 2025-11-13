@@ -1,17 +1,18 @@
 'use client';
 
-import { 
-  ShoppingCart, 
-  Clock, 
-  Mail, 
-  Heart, 
-  BarChart3, 
-  Settings, 
+import {
+  ShoppingCart,
+  Clock,
+  Mail,
+  Heart,
+  BarChart3,
+  Settings,
   Grid3X3,
   Wifi,
   Minimize2,
   Receipt
 } from 'lucide-react';
+import { useAuth } from '@/hooks/useAuth';
 
 interface MenuItem {
   id: number;
@@ -27,6 +28,8 @@ interface LeftSidebarProps {
 }
 
 export default function LeftSidebar({ menuItems, activeMenuItem, onMenuItemClick }: LeftSidebarProps) {
+  const { user } = useAuth();
+  const permissions = user?.permissions ?? [];
   const getIcon = (name: string) => {
     switch (name) {
       case 'Kasir':
@@ -61,23 +64,33 @@ export default function LeftSidebar({ menuItems, activeMenuItem, onMenuItemClick
 
       {/* Menu Items */}
       <div className="flex-1 px-4">
-        {menuItems.map((item) => (
-          <button
-            key={item.id}
-            onClick={() => !item.disabled && onMenuItemClick(item.name)}
-            disabled={item.disabled}
-            className={`w-full flex items-center space-x-3 px-4 py-3 rounded-lg mb-2 transition-colors ${
-              item.disabled
-                ? 'text-gray-400 cursor-not-allowed opacity-50'
-                : activeMenuItem === item.name
-                ? 'bg-green-500 text-white'
-                : 'text-white hover:bg-blue-800'
-            }`}
-          >
-            {getIcon(item.name)}
-            <span className={`font-medium ${item.disabled ? 'line-through' : ''}`}>{item.name}</span>
-          </button>
-        ))}
+        {menuItems.map((item) => {
+          if (item.name === 'Setelan') {
+            const canAccessSync = permissions.includes('marviano-pos_setelan_sinkronisasi');
+            const canAccessPrinter = permissions.includes('marviano-pos_setelan_printer-setup');
+            const canAccessSettings = canAccessSync || canAccessPrinter;
+            if (!canAccessSettings) {
+              return null;
+            }
+          }
+          return (
+            <button
+              key={item.id}
+              onClick={() => !item.disabled && onMenuItemClick(item.name)}
+              disabled={item.disabled}
+              className={`w-full flex items-center space-x-3 px-4 py-3 rounded-lg mb-2 transition-colors ${
+                item.disabled
+                  ? 'text-gray-400 cursor-not-allowed opacity-50'
+                  : activeMenuItem === item.name
+                  ? 'bg-green-500 text-white'
+                  : 'text-white hover:bg-blue-800'
+              }`}
+            >
+              {getIcon(item.name)}
+              <span className={`font-medium ${item.disabled ? 'line-through' : ''}`}>{item.name}</span>
+            </button>
+          );
+        })}
       </div>
 
       {/* Bottom Status */}

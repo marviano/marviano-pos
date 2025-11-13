@@ -15,6 +15,7 @@ export default function Login() {
   const [syncError, setSyncError] = useState<string | null>(null);
   const [hasOfflineDb, setHasOfflineDb] = useState<boolean | null>(null);
   const hasCheckedOfflineDb = useRef(false);
+  const [syncProgress, setSyncProgress] = useState<number | null>(null);
 
   // Ensure we're on the client side to prevent hydration mismatch
   useEffect(() => {
@@ -48,6 +49,9 @@ export default function Login() {
       setSyncError(null);
       setIsSyncing(true);
       setSyncStatus('Memeriksa koneksi internet...');
+      setSyncProgress(null);
+
+      let unsubscribe: (() => void) | undefined;
 
       try {
         await offlineSyncService.forceConnectionCheck();
@@ -58,8 +62,17 @@ export default function Login() {
         }
 
         setSyncStatus('Menjalankan Sinkronisasi Lengkap. Mohon tunggu...');
+        setSyncProgress(0);
+
+        if (typeof offlineSyncService.subscribeSyncProgress === 'function') {
+          unsubscribe = offlineSyncService.subscribeSyncProgress(progress => {
+            setSyncProgress(progress);
+          });
+        }
+
         await offlineSyncService.syncFromOnline();
         setSyncStatus('Sinkronisasi lengkap selesai.');
+        setSyncProgress(100);
         setHasOfflineDb(true);
 
         // Re-check to confirm DB now exists
@@ -80,7 +93,15 @@ export default function Login() {
         setSyncError(message);
         return false;
       } finally {
+        if (unsubscribe) {
+          try {
+            unsubscribe();
+          } catch (error) {
+            console.warn('Gagal unsubscribe dari progress sync:', error);
+          }
+        }
         setIsSyncing(false);
+        setTimeout(() => setSyncProgress(null), 1500);
       }
     },
     [isSyncing]
@@ -184,6 +205,7 @@ export default function Login() {
         syncError={syncError}
         onSyncRequest={() => handleFullSync('manual')}
         hasOfflineDb={hasOfflineDb ?? false}
+        syncProgress={syncProgress}
       />
     </div>
   );

@@ -14,6 +14,7 @@ import GantiShift from './GantiShift';
 import { mockMenuItems } from '@/data/mockData';
 import { fetchCategories, fetchProducts } from '@/lib/offlineDataFetcher';
 import { databaseHealthService } from '@/lib/databaseHealth';
+import { useAuth } from '@/hooks/useAuth';
 
 interface Category {
   jenis: string;
@@ -36,6 +37,10 @@ interface Product {
 }
 
 export default function POSLayout() {
+  const { user } = useAuth();
+  const permissions = user?.permissions ?? [];
+  const canAccessSync = permissions.includes('marviano-pos_setelan_sinkronisasi');
+  const canAccessPrinter = permissions.includes('marviano-pos_setelan_printer-setup');
   const [selectedCategory, setSelectedCategory] = useState('');
   
   // Separate carts for each category - offline
@@ -485,22 +490,36 @@ export default function POSLayout() {
         return <GantiShift />;
       
       case 'Setelan':
+        if (!canAccessSync && !canAccessPrinter) {
+          return (
+            <div className="flex-1 flex items-center justify-center">
+              <div className="text-center space-y-2">
+                <h2 className="text-lg font-semibold text-gray-700">Akses Ditolak</h2>
+                <p className="text-gray-500 text-sm">
+                  Anda tidak memiliki izin untuk membuka menu Setelan.
+                </p>
+              </div>
+            </div>
+          );
+        }
         return (
           <div className="flex-1 flex flex-col overflow-hidden">
             <div className="max-w-6xl mx-auto w-full flex flex-col h-full">
               {/* Settings Tabs */}
               <div className="border-b border-gray-200 mb-6">
                 <nav className="-mb-px flex space-x-8 mt-4">
-                  <button
-                    onClick={() => setActiveSettingsTab('sync')}
-                    className={`py-2 px-1 border-b-2 font-semibold text-lg ${
-                      activeSettingsTab === 'sync'
-                        ? 'border-blue-500 text-blue-600'
-                        : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
-                    }`}
-                  >
-                    Sinkronisasi
-                  </button>
+                  {canAccessSync && (
+                    <button
+                      onClick={() => setActiveSettingsTab('sync')}
+                      className={`py-2 px-1 border-b-2 font-semibold text-lg ${
+                        activeSettingsTab === 'sync'
+                          ? 'border-blue-500 text-blue-600'
+                          : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
+                      }`}
+                    >
+                      Sinkronisasi
+                    </button>
+                  )}
                   <button
                     onClick={() => setActiveSettingsTab('slideshow')}
                     className={`py-2 px-1 border-b-2 font-semibold text-lg ${
@@ -511,16 +530,18 @@ export default function POSLayout() {
                   >
                     Slideshow Manager
                   </button>
-                  <button
-                    onClick={() => setActiveSettingsTab('printers')}
-                    className={`py-2 px-1 border-b-2 font-semibold text-lg ${
-                      activeSettingsTab === 'printers'
-                        ? 'border-blue-500 text-blue-600'
-                        : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
-                    }`}
-                  >
-                    Printer Setup
-                  </button>
+                  {canAccessPrinter && (
+                    <button
+                      onClick={() => setActiveSettingsTab('printers')}
+                      className={`py-2 px-1 border-b-2 font-semibold text-lg ${
+                        activeSettingsTab === 'printers'
+                          ? 'border-blue-500 text-blue-600'
+                          : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
+                      }`}
+                    >
+                      Printer Setup
+                    </button>
+                  )}
                   <button
                     onClick={() => setActiveSettingsTab('debug')}
                     className={`py-2 px-1 border-b-2 font-semibold text-lg ${
@@ -536,9 +557,9 @@ export default function POSLayout() {
               
               {/* Settings Content */}
               <div className="flex-1 overflow-y-auto">
-                {activeSettingsTab === 'sync' && <SyncManagement />}
+                {activeSettingsTab === 'sync' && canAccessSync && <SyncManagement />}
                 {activeSettingsTab === 'slideshow' && <SlideshowManager />}
-                {activeSettingsTab === 'printers' && <PrinterSetup />}
+                {activeSettingsTab === 'printers' && canAccessPrinter && <PrinterSetup />}
                 {activeSettingsTab === 'debug' && <OfflineDebugPanel />}
               </div>
             </div>

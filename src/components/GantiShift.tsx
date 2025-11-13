@@ -12,7 +12,8 @@ import {
   AlertCircle,
   CheckCircle,
   Loader2,
-  Printer
+  Printer,
+  Ticket
 } from 'lucide-react';
 import { useAuth } from '@/hooks/useAuth';
 import { generateUUID } from '@/lib/uuid';
@@ -33,6 +34,8 @@ interface Shift {
 interface ShiftStatistics {
   order_count: number;
   total_amount: number;
+  total_discount: number;
+  voucher_count: number;
 }
 
 interface PaymentBreakdown {
@@ -132,7 +135,9 @@ export default function GantiShift() {
   
   const [statistics, setStatistics] = useState<ShiftStatistics>({
     order_count: 0,
-    total_amount: 0
+    total_amount: 0,
+    total_discount: 0,
+    voucher_count: 0
   });
   
   const [paymentBreakdown, setPaymentBreakdown] = useState<PaymentBreakdown[]>([]);
@@ -202,7 +207,7 @@ export default function GantiShift() {
       checkTodayTransactions();
     } else {
       // Reset stats when no active shift
-      setStatistics({ order_count: 0, total_amount: 0 });
+      setStatistics({ order_count: 0, total_amount: 0, total_discount: 0, voucher_count: 0 });
       setPaymentBreakdown([]);
       setCashSummary({ cash_shift: 0, cash_whole_day: 0 });
       setProductSales([]);
@@ -289,7 +294,7 @@ export default function GantiShift() {
           activeShift.shift_start,
           activeShift.shift_end,
           BUSINESS_ID
-        ) || Promise.resolve({ order_count: 0, total_amount: 0 }),
+        ) || Promise.resolve({ order_count: 0, total_amount: 0, total_discount: 0, voucher_count: 0 }),
         window.electronAPI.localDbGetPaymentBreakdown?.(
           user.id,
           activeShift.shift_start,
@@ -313,7 +318,7 @@ export default function GantiShift() {
       // Handle results with fallbacks
       const stats = statsResult.status === 'fulfilled' 
         ? statsResult.value 
-        : { order_count: 0, total_amount: 0 };
+        : { order_count: 0, total_amount: 0, total_discount: 0, voucher_count: 0 };
       
       const breakdown = breakdownResult.status === 'fulfilled' 
         ? breakdownResult.value 
@@ -327,7 +332,12 @@ export default function GantiShift() {
         ? productSalesResult.value
         : [];
 
-      setStatistics(stats);
+      setStatistics({
+        order_count: stats.order_count ?? 0,
+        total_amount: stats.total_amount ?? 0,
+        total_discount: stats.total_discount ?? 0,
+        voucher_count: stats.voucher_count ?? 0
+      });
       setPaymentBreakdown(breakdown);
       setCashSummary(cash);
       setProductSales(productSalesData);
@@ -447,7 +457,7 @@ export default function GantiShift() {
         setActiveShift(null);
         setModalAwal('');
         // Reset statistics
-        setStatistics({ order_count: 0, total_amount: 0 });
+        setStatistics({ order_count: 0, total_amount: 0, total_discount: 0, voucher_count: 0 });
         setPaymentBreakdown([]);
         setCashSummary({ cash_shift: 0, cash_whole_day: 0 });
         await loadActiveShift();
@@ -485,7 +495,9 @@ export default function GantiShift() {
         modal_awal: activeShift.modal_awal,
         statistics: {
           order_count: statistics.order_count,
-          total_amount: statistics.total_amount
+          total_amount: statistics.total_amount,
+          total_discount: statistics.total_discount,
+          voucher_count: statistics.voucher_count
         },
         productSales: productSales.map(p => ({
           product_name: p.product_name,
@@ -544,7 +556,7 @@ export default function GantiShift() {
           startDateTime,
           endDateTime,
           BUSINESS_ID
-        ) || Promise.resolve({ order_count: 0, total_amount: 0 }),
+        ) || Promise.resolve({ order_count: 0, total_amount: 0, total_discount: 0, voucher_count: 0 }),
         window.electronAPI.localDbGetPaymentBreakdown?.(
           user?.id || 0,
           startDateTime,
@@ -565,7 +577,7 @@ export default function GantiShift() {
         ) || Promise.resolve([])
       ]);
 
-      const customStats = statsResult.status === 'fulfilled' ? statsResult.value : { order_count: 0, total_amount: 0 };
+      const customStats = statsResult.status === 'fulfilled' ? statsResult.value : { order_count: 0, total_amount: 0, total_discount: 0, voucher_count: 0 };
       const customBreakdown = breakdownResult.status === 'fulfilled' ? breakdownResult.value : [];
       const customCash = cashResult.status === 'fulfilled' ? cashResult.value : { cash_shift: 0, cash_whole_day: 0 };
       const customProductSales = productSalesResult.status === 'fulfilled' ? productSalesResult.value : [];
@@ -580,8 +592,10 @@ export default function GantiShift() {
         shift_end: endDateTime,
         modal_awal: modalAwalForCustom,
         statistics: {
-          order_count: customStats.order_count,
-          total_amount: customStats.total_amount
+          order_count: customStats.order_count ?? 0,
+          total_amount: customStats.total_amount ?? 0,
+          total_discount: customStats.total_discount ?? 0,
+          voucher_count: customStats.voucher_count ?? 0
         },
         productSales: customProductSales.map((p: any) => ({
           product_name: p.product_name,
@@ -839,6 +853,14 @@ export default function GantiShift() {
                   <DollarSign className="w-5 h-5 text-gray-400" />
                   <span className="text-gray-600">Total Transaksi: <strong>Rp 0</strong></span>
                 </div>
+                <div className="flex items-center space-x-3">
+                  <Ticket className="w-5 h-5 text-gray-400" />
+                  <span className="text-gray-600">Voucher Dipakai: <strong>0 transaksi</strong></span>
+                </div>
+                <div className="flex items-center space-x-3">
+                  <Ticket className="w-5 h-5 text-gray-400" />
+                  <span className="text-gray-600">Total Diskon Voucher: <strong>Rp 0</strong></span>
+                </div>
               </div>
             </div>
 
@@ -934,6 +956,22 @@ export default function GantiShift() {
                   <div className="flex items-center justify-between">
                     <span className="text-sm text-gray-600">Total Transaksi:</span>
                     <span className="text-sm font-semibold">{formatRupiah(statistics.total_amount)}</span>
+                  </div>
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center space-x-2">
+                      <Ticket className="w-4 h-4 text-orange-600" />
+                      <span className="text-sm text-gray-600">Voucher Dipakai:</span>
+                    </div>
+                    <span className="text-sm font-semibold">{statistics.voucher_count} transaksi</span>
+                  </div>
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center space-x-2">
+                      <Ticket className="w-4 h-4 text-green-600" />
+                      <span className="text-sm text-gray-600">Total Diskon Voucher:</span>
+                    </div>
+                    <span className="text-sm font-semibold text-green-600">
+                      {statistics.total_discount > 0 ? formatRupiah(-statistics.total_discount) : formatRupiah(0)}
+                    </span>
                   </div>
                 </div>
               </div>
@@ -1133,6 +1171,16 @@ export default function GantiShift() {
               <div className="flex justify-between">
                 <span className="text-gray-600">Total Transaksi:</span>
                 <span className="font-semibold">{formatRupiah(statistics.total_amount)}</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-gray-600">Voucher Dipakai:</span>
+                <span className="font-semibold">{statistics.voucher_count} transaksi</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-gray-600">Total Diskon Voucher:</span>
+                <span className="font-semibold text-green-600">
+                  {statistics.total_discount > 0 ? formatRupiah(-statistics.total_discount) : formatRupiah(0)}
+                </span>
               </div>
               <div className="flex justify-between">
                 <span className="text-gray-600">Cash (Shift):</span>

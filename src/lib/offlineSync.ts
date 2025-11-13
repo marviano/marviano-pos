@@ -37,6 +37,7 @@ class OfflineSyncService {
 
   private listeners: Set<(status: SyncStatus) => void> = new Set();
   private checkInterval: NodeJS.Timeout | null = null;
+  private progressListeners: Set<(progress: number | null) => void> = new Set();
 
   constructor() {
     console.log('🚀 [OFFLINE SYNC] Service initializing...');
@@ -238,6 +239,7 @@ class OfflineSyncService {
     console.log('📥 This will download ALL POS tables for complete offline functionality');
     this.syncStatus.syncInProgress = true;
     this.notifyListeners();
+    this.notifyProgress(0);
 
     // Also trigger smart sync for pending transactions
     try {
@@ -261,17 +263,27 @@ class OfflineSyncService {
         if (syncData.success && syncData.data) {
           const { data, counts } = syncData;
           const targetBusinessId = Number(syncData.businessId ?? 14);
+
+          const totalSteps = 24;
+          let completedSteps = 0;
+          const advanceProgress = () => {
+            completedSteps = Math.min(totalSteps, completedSteps + 1);
+            const percent = Math.round((completedSteps / totalSteps) * 100);
+            this.notifyProgress(percent);
+          };
           
           // Cache all tables to local SQLite
           if (data.users && data.users.length > 0) {
             await (window as any).electronAPI.localDbUpsertUsers(data.users);
             console.log(`✅ ${data.users.length} users synced to local database`);
           }
+          advanceProgress();
           
           if (data.businesses && data.businesses.length > 0) {
             await (window as any).electronAPI.localDbUpsertBusinesses(data.businesses);
             console.log(`✅ ${data.businesses.length} businesses synced to local database`);
           }
+          advanceProgress();
           
           if (data.categories && data.categories.length > 0) {
             await (window as any).electronAPI.localDbUpsertCategories(
@@ -282,109 +294,131 @@ class OfflineSyncService {
             );
             console.log(`✅ ${data.categories.length} categories synced to local database`);
           }
+          advanceProgress();
           
           if (data.products && data.products.length > 0) {
             await (window as any).electronAPI.localDbUpsertProducts(data.products);
             console.log(`✅ ${data.products.length} products synced to local database`);
           }
+          advanceProgress();
           
           if (data.customizationTypes && data.customizationTypes.length > 0) {
             await (window as any).electronAPI.localDbUpsertCustomizationTypes(data.customizationTypes);
             console.log(`✅ ${data.customizationTypes.length} customization types synced to local database`);
           }
+          advanceProgress();
           
           if (data.customizationOptions && data.customizationOptions.length > 0) {
             await (window as any).electronAPI.localDbUpsertCustomizationOptions(data.customizationOptions);
             console.log(`✅ ${data.customizationOptions.length} customization options synced to local database`);
           }
+          advanceProgress();
           
           if (data.productCustomizations && data.productCustomizations.length > 0) {
             await (window as any).electronAPI.localDbUpsertProductCustomizations(data.productCustomizations);
             console.log(`✅ ${data.productCustomizations.length} product customizations synced to local database`);
           }
+          advanceProgress();
           
           if (data.ingredients && data.ingredients.length > 0) {
             await (window as any).electronAPI.localDbUpsertIngredients(data.ingredients);
             console.log(`✅ ${data.ingredients.length} ingredients synced to local database`);
           }
+          advanceProgress();
           
           if (data.cogs && data.cogs.length > 0) {
             await (window as any).electronAPI.localDbUpsertCogs(data.cogs);
             console.log(`✅ ${data.cogs.length} COGS records synced to local database`);
           }
+          advanceProgress();
           
           if (data.contacts && data.contacts.length > 0) {
             await (window as any).electronAPI.localDbUpsertContacts(data.contacts);
             console.log(`✅ ${data.contacts.length} contacts synced to local database`);
           }
+          advanceProgress();
           
           if (data.teams && data.teams.length > 0) {
             await (window as any).electronAPI.localDbUpsertTeams(data.teams);
             console.log(`✅ ${data.teams.length} teams synced to local database`);
           }
+          advanceProgress();
           
           if (Array.isArray(data.roles)) {
             await (window as any).electronAPI.localDbUpsertRoles(data.roles);
             console.log(`✅ ${data.roles.length} roles synced to local database`);
           }
+          advanceProgress();
           
           if (Array.isArray(data.permissions)) {
             await (window as any).electronAPI.localDbUpsertPermissions(data.permissions);
             console.log(`✅ ${data.permissions.length} permissions synced to local database`);
           }
+          advanceProgress();
           
           if (Array.isArray(data.rolePermissions)) {
             await (window as any).electronAPI.localDbUpsertRolePermissions(data.rolePermissions);
             console.log(`✅ ${data.rolePermissions.length} role-permission mappings synced to local database`);
           }
+          advanceProgress();
           
           if (data.source && data.source.length > 0) {
             await (window as any).electronAPI.localDbUpsertSource(data.source);
             console.log(`✅ ${data.source.length} source records synced to local database`);
           }
+          advanceProgress();
           
           if (data.pekerjaan && data.pekerjaan.length > 0) {
             await (window as any).electronAPI.localDbUpsertPekerjaan(data.pekerjaan);
             console.log(`✅ ${data.pekerjaan.length} pekerjaan records synced to local database`);
           }
+          advanceProgress();
           
           // Sync new tables for enhanced offline support
           if (data.paymentMethods && data.paymentMethods.length > 0) {
             await (window as any).electronAPI.localDbUpsertPaymentMethods(data.paymentMethods);
             console.log(`✅ ${data.paymentMethods.length} payment methods synced to local database`);
           }
+          advanceProgress();
           
           if (data.banks && data.banks.length > 0) {
             await (window as any).electronAPI.localDbUpsertBanks(data.banks);
             console.log(`✅ ${data.banks.length} banks synced to local database`);
           }
+          advanceProgress();
           
           if (data.organizations && data.organizations.length > 0) {
             await (window as any).electronAPI.localDbUpsertOrganizations(data.organizations);
             console.log(`✅ ${data.organizations.length} organizations synced to local database`);
           }
+          advanceProgress();
           
           if (data.managementGroups && data.managementGroups.length > 0) {
             await (window as any).electronAPI.localDbUpsertManagementGroups(data.managementGroups);
             console.log(`✅ ${data.managementGroups.length} management groups synced to local database`);
           }
+          advanceProgress();
           
           if (data.category1 && data.category1.length > 0) {
             await (window as any).electronAPI.localDbUpsertCategory1(data.category1);
             console.log(`✅ ${data.category1.length} category1 records synced to local database`);
           }
+          advanceProgress();
           
           if (data.category2 && data.category2.length > 0) {
             await (window as any).electronAPI.localDbUpsertCategory2(data.category2);
             console.log(`✅ ${data.category2.length} category2 records synced to local database`);
           }
+          advanceProgress();
           
           if (data.clAccounts && data.clAccounts.length > 0) {
             await (window as any).electronAPI.localDbUpsertClAccounts(data.clAccounts);
             console.log(`✅ ${data.clAccounts.length} CL accounts synced to local database`);
           }
+          advanceProgress();
           
           await restorePrinterStateFromCloud(data, (window as any).electronAPI, targetBusinessId);
+          advanceProgress();
           
           // Update sync status
           this.syncStatus.lastSync = Date.now();
@@ -392,6 +426,7 @@ class OfflineSyncService {
             'last_full_sync',
             'success'
           );
+          this.notifyProgress(100);
           
           console.log('✅ Comprehensive sync completed successfully');
           console.log('✅ All POS tables now available offline!');
@@ -404,6 +439,7 @@ class OfflineSyncService {
       }
     } catch (error) {
       console.error('❌ Comprehensive sync failed:', error);
+      this.notifyProgress(null);
       if (isElectron) {
         await (window as any).electronAPI.localDbUpdateSyncStatus(
           'last_full_sync',
@@ -495,6 +531,23 @@ class OfflineSyncService {
     return () => {
       this.listeners.delete(listener);
     };
+  }
+
+  subscribeSyncProgress(listener: (progress: number | null) => void) {
+    this.progressListeners.add(listener);
+    return () => {
+      this.progressListeners.delete(listener);
+    };
+  }
+
+  private notifyProgress(progress: number | null) {
+    this.progressListeners.forEach(listener => {
+      try {
+        listener(progress);
+      } catch (error) {
+        console.warn('Progress listener error:', error);
+      }
+    });
   }
 
   /**
