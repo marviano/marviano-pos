@@ -18,6 +18,22 @@ import {
 import { useAuth } from '@/hooks/useAuth';
 import { generateUUID } from '@/lib/uuid';
 
+const PLATFORM_LABELS: Record<string, string> = {
+  offline: 'Offline',
+  gofood: 'GoFood',
+  grabfood: 'GrabFood',
+  shopeefood: 'ShopeeFood',
+  qpon: 'Qpon',
+  tiktok: 'TikTok',
+};
+
+const formatPlatformLabel = (platform: string): string => {
+  const key = (platform || 'offline').toLowerCase();
+  if (PLATFORM_LABELS[key]) return PLATFORM_LABELS[key];
+  if (!key) return 'Offline';
+  return key.charAt(0).toUpperCase() + key.slice(1);
+};
+
 interface Shift {
   id: number;
   uuid_id: string;
@@ -53,8 +69,22 @@ interface ProductSale {
   product_id: number;
   product_name: string;
   product_code: string;
+  platform: string;
+  transaction_type: string;
   total_quantity: number;
   total_subtotal: number;
+  customization_subtotal: number;
+  base_subtotal: number;
+  base_unit_price: number;
+}
+
+interface CustomizationSale {
+  option_id: number;
+  option_name: string;
+  customization_id: number;
+  customization_name: string;
+  total_quantity: number;
+  total_revenue: number;
 }
 
 const BUSINESS_ID = 14;
@@ -126,6 +156,9 @@ export default function GantiShift() {
   const [error, setError] = useState<string | null>(null);
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
   const [showEndShiftConfirm, setShowEndShiftConfirm] = useState(false);
+  const [showForceCloseConfirm, setShowForceCloseConfirm] = useState(false);
+  const [isCurrentUsersShift, setIsCurrentUsersShift] = useState(false);
+  const [endShiftMode, setEndShiftMode] = useState<'normal' | 'force'>('normal');
   const [todayTransactionsInfo, setTodayTransactionsInfo] = useState<{
     hasTransactions: boolean;
     count: number;
@@ -146,6 +179,7 @@ export default function GantiShift() {
     cash_whole_day: 0
   });
   const [productSales, setProductSales] = useState<ProductSale[]>([]);
+  const [customizationSales, setCustomizationSales] = useState<CustomizationSale[]>([]);
   
   // Date-time picker states for custom date range printing
   const [showDatePicker, setShowDatePicker] = useState(false);
@@ -155,6 +189,10 @@ export default function GantiShift() {
   
   const modalInputRef = useRef<HTMLInputElement>(null);
   const autoRefreshIntervalRef = useRef<NodeJS.Timeout | null>(null);
+  const permissions = user?.permissions ?? [];
+  const canForceCloseShift = permissions.includes('marviano-pos_gantishift.closeunattendedshift');
+  const currentUserId = Number(user?.id ?? 0);
+  const canManageActiveShift = Boolean(activeShift && (isCurrentUsersShift || canForceCloseShift));
 
   // Load active shift on mount
   useEffect(() => {
@@ -166,11 +204,11 @@ export default function GantiShift() {
         setIsLoadingInitial(false);
       }
     };
-    if (user?.id) {
+    if (currentUserId) {
       load();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [user?.id]);
+  }, [currentUserId]);
 
   // Auto-focus modal awal input when no active shift
   useEffect(() => {
@@ -184,13 +222,18 @@ export default function GantiShift() {
 
   // Check for transactions before shift start
   const checkTodayTransactions = useCallback(async () => {
-    if (!activeShift || !user?.id || !window.electronAPI?.localDbCheckTodayTransactions) {
+    if (!activeShift || !window.electronAPI?.localDbCheckTodayTransactions) {
       return;
     }
 
     try {
+      const shiftOwnerId = Number(activeShift.user_id ?? 0);
+      if (!shiftOwnerId) {
+        return;
+      }
+
       const info = await window.electronAPI.localDbCheckTodayTransactions(
-        user.id,
+        shiftOwnerId,
         activeShift.shift_start,
         BUSINESS_ID
       );
@@ -198,7 +241,7 @@ export default function GantiShift() {
     } catch (error) {
       console.error('Error checking today transactions:', error);
     }
-  }, [activeShift, user]);
+  }, [activeShift]);
 
   // Load statistics when shift changes
   useEffect(() => {
@@ -211,6 +254,7 @@ export default function GantiShift() {
       setPaymentBreakdown([]);
       setCashSummary({ cash_shift: 0, cash_whole_day: 0 });
       setProductSales([]);
+      setCustomizationSales([]);
       setTodayTransactionsInfo(null);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -218,7 +262,7 @@ export default function GantiShift() {
 
   // Auto-refresh statistics when shift is active
   useEffect(() => {
-    if (activeShift && user?.id) {
+    if (activeShift) {
       // Clear any existing interval
       if (autoRefreshIntervalRef.current) {
         clearInterval(autoRefreshIntervalRef.current);
@@ -238,7 +282,7 @@ export default function GantiShift() {
       }
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeShift?.id, user?.id]);
+  }, [activeShift?.id]);
 
   // Auto-dismiss success messages
   useEffect(() => {
@@ -251,7 +295,7 @@ export default function GantiShift() {
   }, [successMessage]);
 
   const loadActiveShift = useCallback(async () => {
-    if (!user?.id) {
+    if (!currentUserId) {
       return;
     }
 
@@ -269,46 +313,53 @@ export default function GantiShift() {
     }
 
     try {
-      const shift = await window.electronAPI.localDbGetActiveShift(user.id, BUSINESS_ID);
+      const response = await window.electronAPI.localDbGetActiveShift(currentUserId, BUSINESS_ID);
+      const shift = response?.shift ?? null;
       setActiveShift(shift);
-      setModalAwal(shift ? shift.modal_awal.toString() : '');
+      setIsCurrentUsersShift(Boolean(shift && response?.isCurrentUserShift));
+      setModalAwal(shift && response?.isCurrentUserShift ? shift.modal_awal.toString() : '');
       setError(null);
     } catch (error: any) {
       console.error('Error loading active shift:', error);
       setError('Gagal memuat shift aktif. Silakan refresh halaman.');
     }
-  }, [user]);
+  }, [currentUserId]);
 
   const loadStatistics = useCallback(async () => {
-    if (!activeShift || !user?.id || !window.electronAPI) {
+    if (!activeShift || !window.electronAPI) {
       return;
     }
 
     try {
       setIsRefreshing(true);
+      const shiftOwnerId = Number(activeShift.user_id ?? 0);
+      if (!shiftOwnerId) {
+        setIsRefreshing(false);
+        return;
+      }
       
       // Load all statistics in parallel with error handling
       const [statsResult, breakdownResult, cashResult, productSalesResult] = await Promise.allSettled([
         window.electronAPI.localDbGetShiftStatistics?.(
-          user.id,
+          shiftOwnerId,
           activeShift.shift_start,
           activeShift.shift_end,
           BUSINESS_ID
         ) || Promise.resolve({ order_count: 0, total_amount: 0, total_discount: 0, voucher_count: 0 }),
         window.electronAPI.localDbGetPaymentBreakdown?.(
-          user.id,
+          shiftOwnerId,
           activeShift.shift_start,
           activeShift.shift_end,
           BUSINESS_ID
         ) || Promise.resolve([]),
         window.electronAPI.localDbGetCashSummary?.(
-          user.id,
+          shiftOwnerId,
           activeShift.shift_start,
           activeShift.shift_end,
           BUSINESS_ID
         ) || Promise.resolve({ cash_shift: 0, cash_whole_day: 0 }),
         window.electronAPI.localDbGetProductSales?.(
-          user.id,
+          shiftOwnerId,
           activeShift.shift_start,
           activeShift.shift_end,
           BUSINESS_ID
@@ -330,7 +381,7 @@ export default function GantiShift() {
 
       const productSalesData = productSalesResult.status === 'fulfilled'
         ? productSalesResult.value
-        : [];
+        : { products: [], customizations: [] };
 
       setStatistics({
         order_count: stats.order_count ?? 0,
@@ -340,7 +391,8 @@ export default function GantiShift() {
       });
       setPaymentBreakdown(breakdown);
       setCashSummary(cash);
-      setProductSales(productSalesData);
+      setProductSales(productSalesData.products || []);
+      setCustomizationSales(productSalesData.customizations || []);
       
       // Only show error if all requests failed
       if (statsResult.status === 'rejected' && breakdownResult.status === 'rejected' && cashResult.status === 'rejected') {
@@ -352,7 +404,7 @@ export default function GantiShift() {
     } finally {
       setIsRefreshing(false);
     }
-  }, [activeShift, user]);
+  }, [activeShift]);
 
   const handleStartShift = async () => {
     if (!user?.id || !user?.name) {
@@ -362,9 +414,17 @@ export default function GantiShift() {
 
     // Check if there's already an active shift (double-check)
     try {
-      const existingShift = await window.electronAPI?.localDbGetActiveShift?.(user.id, BUSINESS_ID);
+      const existingResponse = await window.electronAPI?.localDbGetActiveShift?.(currentUserId, BUSINESS_ID);
+      const existingShift = existingResponse?.shift ?? null;
       if (existingShift) {
-        setError('Anda sudah memiliki shift aktif. Silakan tutup shift yang aktif terlebih dahulu.');
+        const ownerName = existingShift.user_name || 'Kasir lain';
+        if (existingResponse?.isCurrentUserShift) {
+          setError('Anda sudah memiliki shift aktif. Silakan tutup shift yang aktif terlebih dahulu.');
+        } else if (canForceCloseShift) {
+          setError(`Shift atas nama ${ownerName} masih aktif. Force close shift tersebut sebelum memulai shift baru.`);
+        } else {
+          setError(`Shift atas nama ${ownerName} masih aktif. Minta kasir tersebut untuk mengakhiri shift sebelum memulai shift baru.`);
+        }
         await loadActiveShift(); // Reload to show the active shift
         return;
       }
@@ -403,7 +463,7 @@ export default function GantiShift() {
       const result = await window.electronAPI.localDbCreateShift({
         uuid_id,
         business_id: BUSINESS_ID,
-        user_id: user.id,
+        user_id: currentUserId,
         user_name: user.name,
         modal_awal: amount
       });
@@ -413,6 +473,13 @@ export default function GantiShift() {
         await loadActiveShift();
         setModalAwal(''); // Clear input after successful start
       } else {
+        if (result.error === 'ACTIVE_SHIFT_EXISTS' && result.activeShift) {
+          const ownerName = result.activeShift.user_name || 'Kasir lain';
+          const message = canForceCloseShift
+            ? `Shift atas nama ${ownerName} masih aktif. Force close shift tersebut sebelum memulai shift baru.`
+            : `Shift atas nama ${ownerName} masih aktif. Minta kasir tersebut untuk mengakhiri shift sebelum memulai shift baru.`;
+          throw new Error(message);
+        }
         throw new Error(result.error || 'Gagal membuat shift');
       }
     } catch (error: any) {
@@ -424,7 +491,31 @@ export default function GantiShift() {
   };
 
   const handleEndShiftClick = () => {
+    if (!activeShift) {
+      return;
+    }
+
+    if (!isCurrentUsersShift) {
+      setError(`Shift aktif saat ini dimiliki oleh ${activeShift.user_name || 'kasir lain'}. Anda tidak dapat mengakhirinya.`);
+      return;
+    }
+
+    setEndShiftMode('normal');
     setShowEndShiftConfirm(true);
+  };
+
+  const handleForceCloseClick = () => {
+    if (!activeShift) {
+      return;
+    }
+
+    if (!canForceCloseShift) {
+      setError('Anda tidak memiliki izin untuk force close shift.');
+      return;
+    }
+
+    setEndShiftMode('force');
+    setShowForceCloseConfirm(true);
   };
 
   const handleEndShiftConfirm = async () => {
@@ -434,6 +525,7 @@ export default function GantiShift() {
     setError(null);
     setSuccessMessage(null);
     setShowEndShiftConfirm(false);
+    setShowForceCloseConfirm(false);
 
     // Check Electron API availability
     if (!window.electronAPI) {
@@ -449,11 +541,26 @@ export default function GantiShift() {
     }
 
     try {
+      const isForce = endShiftMode === 'force';
+      if (!isCurrentUsersShift && !isForce) {
+        setIsEndingShift(false);
+        setError(`Shift aktif dimiliki oleh ${activeShift.user_name || 'kasir lain'}. Anda tidak dapat mengakhirinya.`);
+        return;
+      }
+
+      if (isForce && !canForceCloseShift) {
+        setIsEndingShift(false);
+        setError('Anda tidak memiliki izin untuk force close shift.');
+        return;
+      }
 
       const result = await window.electronAPI.localDbEndShift(activeShift.id);
 
       if (result.success) {
-        setSuccessMessage('Shift berhasil diakhiri!');
+        const successText = isForce
+          ? `Shift atas nama ${activeShift.user_name || 'kasir lain'} berhasil di-force close.`
+          : 'Shift berhasil diakhiri!';
+        setSuccessMessage(successText);
         setActiveShift(null);
         setModalAwal('');
         // Reset statistics
@@ -469,6 +576,7 @@ export default function GantiShift() {
       setError(error.message || 'Gagal mengakhiri shift. Silakan coba lagi.');
     } finally {
       setIsEndingShift(false);
+      setEndShiftMode('normal');
     }
   };
 
@@ -502,7 +610,20 @@ export default function GantiShift() {
         productSales: productSales.map(p => ({
           product_name: p.product_name,
           total_quantity: p.total_quantity,
-          total_subtotal: p.total_subtotal
+          total_subtotal: p.total_subtotal,
+          customization_subtotal: p.customization_subtotal,
+          base_subtotal: p.base_subtotal,
+          base_unit_price: p.base_unit_price,
+          platform: p.platform,
+          transaction_type: p.transaction_type
+        })),
+        customizationSales: customizationSales.map(item => ({
+          option_id: item.option_id,
+          option_name: item.option_name,
+          customization_id: item.customization_id,
+          customization_name: item.customization_name,
+          total_quantity: item.total_quantity,
+          total_revenue: item.total_revenue
         })),
         paymentBreakdown: paymentBreakdown.map(p => ({
           payment_method_name: p.payment_method_name || p.payment_method_code,
@@ -580,7 +701,7 @@ export default function GantiShift() {
       const customStats = statsResult.status === 'fulfilled' ? statsResult.value : { order_count: 0, total_amount: 0, total_discount: 0, voucher_count: 0 };
       const customBreakdown = breakdownResult.status === 'fulfilled' ? breakdownResult.value : [];
       const customCash = cashResult.status === 'fulfilled' ? cashResult.value : { cash_shift: 0, cash_whole_day: 0 };
-      const customProductSales = productSalesResult.status === 'fulfilled' ? productSalesResult.value : [];
+      const customProductSales = productSalesResult.status === 'fulfilled' ? productSalesResult.value : { products: [], customizations: [] };
 
       // Calculate total cash (using modal awal from active shift if available, otherwise 0)
       const modalAwalForCustom = activeShift?.modal_awal || 0;
@@ -597,11 +718,17 @@ export default function GantiShift() {
           total_discount: customStats.total_discount ?? 0,
           voucher_count: customStats.voucher_count ?? 0
         },
-        productSales: customProductSales.map((p: any) => ({
+        productSales: (customProductSales.products || []).map((p: any) => ({
           product_name: p.product_name,
           total_quantity: p.total_quantity,
-          total_subtotal: p.total_subtotal
+          total_subtotal: p.total_subtotal,
+          customization_subtotal: p.customization_subtotal,
+          base_subtotal: p.base_subtotal,
+          base_unit_price: p.base_unit_price,
+          platform: p.platform,
+          transaction_type: p.transaction_type
         })),
+        customizationSales: customProductSales.customizations || [],
         paymentBreakdown: customBreakdown.map((p: any) => ({
           payment_method_name: p.payment_method_name || p.payment_method_code,
           transaction_count: p.transaction_count
@@ -633,6 +760,11 @@ export default function GantiShift() {
 
   const handleMigrateTodayTransactions = async () => {
     if (!activeShift || !todayTransactionsInfo?.earliestTime) return;
+
+    if (!canManageActiveShift) {
+      setError('Anda tidak memiliki izin untuk memigrasikan transaksi ke shift ini.');
+      return;
+    }
 
     const confirmed = window.confirm(
       `Migrasikan ${todayTransactionsInfo.count} transaksi hari ini ke shift ini?\n\n` +
@@ -723,14 +855,29 @@ export default function GantiShift() {
               <Printer className="w-4 h-4" />
               <span>Print All</span>
             </button>
-            <button
-              onClick={handleEndShiftClick}
-              disabled={isEndingShift}
-              className="flex-1 flex items-center justify-center space-x-2 px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 disabled:opacity-50 disabled:cursor-not-allowed font-semibold transition-colors"
-            >
-              <StopCircle className="w-5 h-5" />
-              <span>{isEndingShift ? 'Mengakhiri Shift...' : 'End Shift'}</span>
-            </button>
+            {isCurrentUsersShift ? (
+              <button
+                onClick={handleEndShiftClick}
+                disabled={isEndingShift}
+                className="flex-1 flex items-center justify-center space-x-2 px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 disabled:opacity-50 disabled:cursor-not-allowed font-semibold transition-colors"
+              >
+                <StopCircle className="w-5 h-5" />
+                <span>{isEndingShift ? 'Mengakhiri Shift...' : 'End Shift'}</span>
+              </button>
+            ) : canForceCloseShift ? (
+              <button
+                onClick={handleForceCloseClick}
+                disabled={isEndingShift}
+                className="flex-1 flex items-center justify-center space-x-2 px-4 py-2 bg-orange-600 text-white rounded-lg hover:bg-orange-700 disabled:opacity-50 disabled:cursor-not-allowed font-semibold transition-colors"
+              >
+                <StopCircle className="w-5 h-5" />
+                <span>{isEndingShift ? 'Menutup Shift...' : 'Force Close Shift'}</span>
+              </button>
+            ) : (
+              <div className="flex-1 px-4 py-2 bg-yellow-100 text-yellow-900 rounded-lg text-sm font-semibold flex items-center justify-center">
+                Shift aktif oleh {activeShift.user_name}
+              </div>
+            )}
             <button
               onClick={handleRefresh}
               disabled={isRefreshing}
@@ -770,6 +917,34 @@ export default function GantiShift() {
           >
             ✕
           </button>
+        </div>
+      )}
+
+      {activeShift && !isCurrentUsersShift && !canForceCloseShift && (
+        <div className="mx-6 mt-4 p-4 bg-yellow-50 border border-yellow-200 rounded-lg flex items-start space-x-3">
+          <AlertCircle className="w-5 h-5 text-yellow-600 flex-shrink-0 mt-0.5" />
+          <div className="flex-1 text-sm text-yellow-900">
+            <p className="font-semibold">
+              Shift atas nama {activeShift.user_name} masih berlangsung.
+            </p>
+            <p className="mt-1">
+              Minta kasir tersebut login kembali dan mengakhiri shift sebelum memulai shift baru.
+            </p>
+          </div>
+        </div>
+      )}
+
+      {activeShift && !isCurrentUsersShift && canForceCloseShift && (
+        <div className="mx-6 mt-4 p-4 bg-orange-50 border border-orange-200 rounded-lg flex items-start space-x-3">
+          <AlertCircle className="w-5 h-5 text-orange-600 flex-shrink-0 mt-0.5" />
+          <div className="flex-1 text-sm text-orange-900">
+            <p className="font-semibold">
+              Shift atas nama {activeShift.user_name} masih berlangsung.
+            </p>
+            <p className="mt-1">
+              Anda memiliki izin untuk force close shift ini bila kasir sebelumnya tidak tersedia.
+            </p>
+          </div>
         </div>
       )}
 
@@ -892,8 +1067,9 @@ export default function GantiShift() {
                     </p>
                     <button
                       onClick={handleMigrateTodayTransactions}
-                      disabled={isMigrating}
+                      disabled={isMigrating || !canManageActiveShift}
                       className="px-4 py-2 bg-yellow-600 text-white text-sm font-medium rounded-lg hover:bg-yellow-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                      title={!canManageActiveShift ? 'Anda tidak memiliki izin untuk memigrasikan transaksi ke shift ini.' : undefined}
                     >
                       {isMigrating ? 'Memproses...' : 'Sertakan Transaksi Hari Ini ke Shift'}
                     </button>
@@ -1014,6 +1190,7 @@ export default function GantiShift() {
                     <tr className="border-b border-gray-200">
                       <th className="text-left py-3 px-4 font-semibold text-gray-700">Product</th>
                       <th className="text-right py-3 px-4 font-semibold text-gray-700">Quantity</th>
+                      <th className="text-right py-3 px-4 font-semibold text-gray-700">Unit Price</th>
                       <th className="text-right py-3 px-4 font-semibold text-gray-700">Subtotal</th>
                     </tr>
                   </thead>
@@ -1021,10 +1198,23 @@ export default function GantiShift() {
                     {productSales.length > 0 ? (
                       <>
                         {productSales.map((product, idx) => (
-                          <tr key={idx} className="border-b border-gray-100 hover:bg-gray-50">
-                            <td className="py-3 px-4 font-medium">{product.product_name}</td>
+                          <tr key={`${product.product_id}-${product.platform}-${product.transaction_type}-${idx}`} className="border-b border-gray-100 hover:bg-gray-50">
+                            <td className="py-3 px-4 font-medium">
+                              <div>{product.product_name}</div>
+                              <div className="text-xs text-gray-500">
+                                {product.transaction_type === 'drinks' ? 'Drinks' : 'Bakery'}
+                                {' · '}
+                                {formatPlatformLabel(product.platform)}
+                              </div>
+                            </td>
                             <td className="py-3 px-4 text-right font-medium">{product.total_quantity}</td>
-                            <td className="py-3 px-4 text-right font-semibold">{formatRupiah(product.total_subtotal)}</td>
+                            <td className="py-3 px-4 text-right font-medium">
+                              {formatRupiah(
+                                product.base_unit_price ??
+                                  (product.total_quantity > 0 ? product.base_subtotal / product.total_quantity : 0)
+                              )}
+                            </td>
+                            <td className="py-3 px-4 text-right font-semibold">{formatRupiah(product.base_subtotal)}</td>
                           </tr>
                         ))}
                         <tr className="border-t-2 border-gray-300 bg-gray-50">
@@ -1033,14 +1223,97 @@ export default function GantiShift() {
                             {productSales.reduce((sum, p) => sum + p.total_quantity, 0)}
                           </td>
                           <td className="py-3 px-4 text-right font-bold">
-                            {formatRupiah(productSales.reduce((sum, p) => sum + p.total_subtotal, 0))}
+                          {(() => {
+                            const totalsByKey = productSales.reduce((acc, product) => {
+                              const key = `${product.transaction_type}-${product.platform}`;
+                              if (!acc.has(key)) {
+                                acc.set(key, { quantity: 0, base: 0 });
+                              }
+                              const current = acc.get(key)!;
+                              current.quantity += product.total_quantity;
+                              current.base += product.base_subtotal;
+                              return acc;
+                            }, new Map<string, { quantity: number; base: number }>());
+
+                            const rows = Array.from(totalsByKey.entries()).map(([key, value]) => {
+                              const [transactionType, platform] = key.split('-');
+                              const label = `${transactionType === 'drinks' ? 'Drinks' : 'Bakery'} · ${formatPlatformLabel(platform)}`;
+                              const unitPrice = value.quantity > 0 ? value.base / value.quantity : 0;
+                              return (
+                                <div key={key} className="flex justify-between text-sm text-gray-600">
+                                  <span>{label}</span>
+                                  <span>{formatRupiah(unitPrice)}</span>
+                                </div>
+                              );
+                            });
+                            const totalQty = productSales.reduce((sum, p) => sum + p.total_quantity, 0);
+                            const totalBase = productSales.reduce((sum, p) => sum + p.base_subtotal, 0);
+                            const overallUnitPrice = totalQty > 0 ? totalBase / totalQty : 0;
+                            rows.push(
+                              <div key="overall" className="flex justify-between text-sm font-semibold text-gray-700">
+                                <span>Overall</span>
+                                <span>{formatRupiah(overallUnitPrice)}</span>
+                              </div>
+                            );
+                            return rows;
+                          })()}
+                          </td>
+                          <td className="py-3 px-4 text-right font-bold">
+                            {formatRupiah(productSales.reduce((sum, p) => sum + p.base_subtotal, 0))}
+                          </td>
+                        </tr>
+                      </>
+                    ) : (
+                      <tr>
+                        <td colSpan={4} className="py-8 text-center text-gray-500">
+                          Belum ada produk yang terjual
+                        </td>
+                      </tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+            {/* Customization Sales Breakdown */}
+            <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-6">
+              <h2 className="text-xl font-semibold text-gray-800 mb-4">Customization Sales Breakdown</h2>
+              <div className="overflow-x-auto">
+                <table className="w-full">
+                  <thead>
+                    <tr className="border-b border-gray-200">
+                      <th className="text-left py-3 px-4 font-semibold text-gray-700">Customization</th>
+                      <th className="text-right py-3 px-4 font-semibold text-gray-700">Quantity</th>
+                      <th className="text-right py-3 px-4 font-semibold text-gray-700">Revenue</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {customizationSales.length > 0 ? (
+                      <>
+                        {customizationSales.map((item, idx) => (
+                          <tr key={idx} className="border-b border-gray-100 hover:bg-gray-50">
+                            <td className="py-3 px-4">
+                              <div className="font-medium text-gray-800">{item.option_name}</div>
+                              <div className="text-xs text-gray-500">{item.customization_name}</div>
+                            </td>
+                            <td className="py-3 px-4 text-right font-medium">{item.total_quantity}</td>
+                            <td className="py-3 px-4 text-right font-semibold">{formatRupiah(item.total_revenue)}</td>
+                          </tr>
+                        ))}
+                        <tr className="border-t-2 border-gray-300 bg-gray-50">
+                          <td className="py-3 px-4 font-bold">TOTAL</td>
+                          <td className="py-3 px-4 text-right font-bold">
+                            {customizationSales.reduce((sum, item) => sum + item.total_quantity, 0)}
+                          </td>
+                          <td className="py-3 px-4 text-right font-bold">
+                            {formatRupiah(customizationSales.reduce((sum, item) => sum + item.total_revenue, 0))}
                           </td>
                         </tr>
                       </>
                     ) : (
                       <tr>
                         <td colSpan={3} className="py-8 text-center text-gray-500">
-                          Belum ada produk yang terjual
+                          Belum ada kustomisasi terjual
                         </td>
                       </tr>
                     )}
@@ -1210,6 +1483,53 @@ export default function GantiShift() {
                 className="flex-1 px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 disabled:opacity-50 disabled:cursor-not-allowed font-medium transition-colors"
               >
                 {isEndingShift ? 'Mengakhiri...' : 'Akhiri Shift'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Force Close Confirmation Modal */}
+      {showForceCloseConfirm && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-lg shadow-xl max-w-md w-full p-6 animate-in zoom-in">
+            <h3 className="text-xl font-bold text-gray-800 mb-4">Force Close Shift</h3>
+            <p className="text-sm text-gray-600 mb-4">
+              Shift ini dimiliki oleh <span className="font-semibold text-gray-800">{activeShift?.user_name}</span>. Pastikan kasir sebelumnya tidak tersedia sebelum melakukan force close.
+            </p>
+            <div className="space-y-3 mb-6">
+              <div className="flex justify-between">
+                <span className="text-gray-600">Total Pesanan:</span>
+                <span className="font-semibold">{statistics.order_count} transaksi</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-gray-600">Total Transaksi:</span>
+                <span className="font-semibold">{formatRupiah(statistics.total_amount)}</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-gray-600">Cash (Shift):</span>
+                <span className="font-semibold">{formatRupiah(cashSummary.cash_shift)}</span>
+              </div>
+            </div>
+            <div className="bg-orange-50 border border-orange-200 rounded-lg p-3 mb-6">
+              <p className="text-sm text-orange-800">
+                ⚠️ Force close akan menutup shift tanpa konfirmasi dari kasir asli dan sebaiknya digunakan hanya dalam keadaan darurat.
+              </p>
+            </div>
+            <div className="flex space-x-3">
+              <button
+                onClick={() => setShowForceCloseConfirm(false)}
+                disabled={isEndingShift}
+                className="flex-1 px-4 py-2 border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed font-medium transition-colors"
+              >
+                Batal
+              </button>
+              <button
+                onClick={handleEndShiftConfirm}
+                disabled={isEndingShift}
+                className="flex-1 px-4 py-2 bg-orange-600 text-white rounded-lg hover:bg-orange-700 disabled:opacity-50 disabled:cursor-not-allowed font-medium transition-colors"
+              >
+                {isEndingShift ? 'Menutup...' : 'Force Close Shift'}
               </button>
             </div>
           </div>

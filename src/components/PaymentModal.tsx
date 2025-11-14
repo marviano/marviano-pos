@@ -178,18 +178,46 @@ export default function PaymentModal({
     return product.harga_jual;
   };
 
+  type GenericCustomization = {
+    selected_options: {
+      price_adjustment: number;
+    }[];
+  };
+
+  const sumCustomizationPrice = (customizations?: GenericCustomization[]) => {
+    if (!customizations || customizations.length === 0) return 0;
+    return customizations.reduce((sum, customization) => {
+      const optionTotal = customization.selected_options.reduce(
+        (optionSum, option) => optionSum + option.price_adjustment,
+        0
+      );
+      return sum + optionTotal;
+    }, 0);
+  };
+
+  const calculateBundleCustomizationCharge = (bundleSelections?: BundleSelection[]) => {
+    if (!bundleSelections || bundleSelections.length === 0) return 0;
+
+    return bundleSelections.reduce((bundleSum, bundleSelection) => {
+      const selectionTotal = bundleSelection.selectedProducts.reduce((productSum, selectedProduct) => {
+        const perUnitAdjustment = sumCustomizationPrice(selectedProduct.customizations);
+        const quantity =
+          typeof selectedProduct.quantity === 'number' && !Number.isNaN(selectedProduct.quantity)
+            ? selectedProduct.quantity
+            : 1;
+        return productSum + perUnitAdjustment * quantity;
+      }, 0);
+      return bundleSum + selectionTotal;
+    }, 0);
+  };
+
   const calculateOrderTotal = () => {
     return cartItems.reduce((sum, item) => {
       let itemPrice = effectiveProductPrice(item.product as any);
       
       // Add customization prices
-      if (item.customizations) {
-        item.customizations.forEach(customization => {
-          customization.selected_options.forEach(option => {
-            itemPrice += option.price_adjustment;
-          });
-        });
-      }
+      itemPrice += sumCustomizationPrice(item.customizations);
+      itemPrice += calculateBundleCustomizationCharge(item.bundleSelections);
       
       return sum + (itemPrice * item.quantity);
     }, 0);
@@ -705,13 +733,8 @@ export default function PaymentModal({
             let itemPrice = basePrice;
 
             // Add customization prices
-            if (item.customizations) {
-              item.customizations.forEach(customization => {
-                customization.selected_options.forEach(option => {
-                  itemPrice += option.price_adjustment;
-                });
-              });
-            }
+            itemPrice += sumCustomizationPrice(item.customizations);
+            itemPrice += calculateBundleCustomizationCharge(item.bundleSelections);
             
             return {
               id: generateTransactionItemId(), // Generate UUID for transaction item
@@ -807,14 +830,8 @@ export default function PaymentModal({
           
           let itemPrice = basePrice;
           
-          // Add customization prices
-          if (item.customizations) {
-            item.customizations.forEach(customization => {
-              customization.selected_options.forEach(option => {
-                itemPrice += option.price_adjustment;
-              });
-            });
-          }
+          // Add customization prices for main item only
+          itemPrice += sumCustomizationPrice(item.customizations);
           
           // Format item name with customizations and custom note if any
           let itemName = item.product.nama;
@@ -846,12 +863,41 @@ export default function PaymentModal({
             item.bundleSelections.forEach(bundleSel => {
               bundleSel.selectedProducts.forEach(sp => {
                 // Multiply by bundle quantity and selected product quantity
-                const totalQty = item.quantity * sp.quantity;
+                const selectionQty =
+                  typeof sp.quantity === 'number' && !Number.isNaN(sp.quantity) ? sp.quantity : 1;
+                const totalQty = item.quantity * selectionQty;
+                const customizationDetails: string[] = [];
+
+                if (sp.customizations && sp.customizations.length > 0) {
+                  sp.customizations.forEach(customization => {
+                    const optionNames = customization.selected_options.map(opt => opt.option_name).join(', ');
+                    if (optionNames) {
+                      customizationDetails.push(
+                        customization.customization_name
+                          ? `${customization.customization_name}: ${optionNames}`
+                          : optionNames
+                      );
+                    }
+                  });
+                }
+
+                if (sp.customNote && sp.customNote.trim() !== '') {
+                  customizationDetails.push(sp.customNote.trim());
+                }
+
+                let subItemName = `  └ ${sp.product.nama}${selectionQty > 1 ? ` (×${selectionQty})` : ''}`;
+                if (customizationDetails.length > 0) {
+                  subItemName = `${subItemName} (${customizationDetails.join(', ')})`;
+                }
+
+                const perUnitAdjustment = sumCustomizationPrice(sp.customizations);
+                const perUnitTotal = perUnitAdjustment;
+
                 receiptItems.push({
-                  name: `  └ ${sp.product.nama}${sp.quantity > 1 ? ` (×${sp.quantity})` : ''}`,
+                  name: subItemName,
                   quantity: totalQty,
-                  price: 0,
-                  total_price: 0
+                  price: perUnitTotal,
+                  total_price: perUnitTotal * totalQty
                 });
               });
             });

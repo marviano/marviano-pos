@@ -2025,21 +2025,31 @@ function createWindows(): void {
 
   // ========== SHIFTS IPC HANDLERS ==========
   
-  // Get active shift for a user
+  // Get active shift for a business (with ownership flag)
   ipcMain.handle('localdb-get-active-shift', async (event, userId: number, businessId: number = 14) => {
-    if (!localDb) return null;
+    if (!localDb) {
+      return { shift: null, isCurrentUserShift: false };
+    }
     try {
       const stmt = localDb.prepare(`
-        SELECT * FROM shifts 
-        WHERE user_id = ? AND business_id = ? AND status = 'active' 
-        ORDER BY shift_start DESC 
+        SELECT *
+        FROM shifts 
+        WHERE business_id = ? AND status = 'active'
+        ORDER BY shift_start ASC
         LIMIT 1
       `);
-      const shift = stmt.get(userId, businessId) as any;
-      return shift || null;
+      const shift = stmt.get(businessId) as any | undefined;
+      if (!shift) {
+        return { shift: null, isCurrentUserShift: false };
+      }
+
+      return {
+        shift,
+        isCurrentUserShift: Number(shift.user_id) === Number(userId),
+      };
     } catch (error) {
       console.error('Error getting active shift:', error);
-      return null;
+      return { shift: null, isCurrentUserShift: false };
     }
   });
 
@@ -2053,6 +2063,20 @@ function createWindows(): void {
   }) => {
     if (!localDb) return { success: false, error: 'Database not available' };
     try {
+      // Ensure there is no other active shift for the business
+      const existingStmt = localDb.prepare(`
+        SELECT id, user_id, user_name, shift_start
+        FROM shifts
+        WHERE business_id = ? AND status = 'active'
+        ORDER BY shift_start ASC
+        LIMIT 1
+      `);
+      const existingShift = existingStmt.get(shiftData.business_id) as any | undefined;
+
+      if (existingShift) {
+        return { success: false, error: 'ACTIVE_SHIFT_EXISTS', activeShift: existingShift };
+      }
+
       const now = new Date().toISOString();
       const stmt = localDb.prepare(`
         INSERT INTO shifts (
@@ -2380,7 +2404,7 @@ function createWindows(): void {
 
   // Get product sales breakdown for shift
   ipcMain.handle('localdb-get-product-sales', async (event, userId: number, shiftStart: string, shiftEnd: string | null, businessId: number = 14) => {
-    if (!localDb) return [];
+    if (!localDb) return { products: [], customizations: [] };
     
     try {
       let query = `
@@ -2388,10 +2412,17 @@ function createWindows(): void {
           p.id as product_id,
           p.nama as product_name,
           p.menu_code as product_code,
-          SUM(ti.quantity) as total_quantity,
-          SUM(ti.total_price) as total_subtotal
+          ti.quantity,
+          ti.unit_price,
+          ti.total_price,
+          ti.customizations_json,
+          ti.bundle_selections_json,
+          t.transaction_type,
+          pm.code as payment_method_code,
+          t.payment_method as payment_method
         FROM transaction_items ti
         INNER JOIN transactions t ON ti.transaction_id = t.id
+        LEFT JOIN payment_methods pm ON t.payment_method_id = pm.id
         INNER JOIN products p ON ti.product_id = p.id
         WHERE t.user_id = ?
         AND t.business_id = ?
@@ -2405,13 +2436,184 @@ function createWindows(): void {
         params.push(shiftEnd);
       }
       
-      query += ' GROUP BY p.id, p.nama, p.menu_code ORDER BY total_subtotal DESC';
-      
       const stmt = localDb.prepare(query);
-      return stmt.all(...params);
+      const rows = stmt.all(...params) as any[];
+
+      type ProductAccumulator = {
+        product_id: number;
+        product_name: string;
+        product_code: string;
+        platform: string;
+        transaction_type: string;
+        total_quantity: number;
+        total_subtotal: number;
+        customization_subtotal: number;
+        base_subtotal: number;
+      };
+
+      type CustomizationAccumulator = {
+        option_id: number;
+        option_name: string;
+        customization_id: number;
+        customization_name: string;
+        total_quantity: number;
+        total_revenue: number;
+      };
+
+      const aggregate = new Map<string, ProductAccumulator>();
+      const customizationAggregate = new Map<number, CustomizationAccumulator>();
+      const OFFLINE_METHODS = new Set(['cash', 'debit', 'qr', 'ewallet', 'cl', 'voucher', 'offline']);
+
+      const sumCustomizationForRow = (row: any, unitQuantity: number): number => {
+        let customizationTotal = 0;
+
+        if (row.customizations_json) {
+          try {
+            const customizations = JSON.parse(row.customizations_json);
+            if (Array.isArray(customizations)) {
+              for (const customization of customizations) {
+                if (customization?.selected_options && Array.isArray(customization.selected_options)) {
+                  for (const option of customization.selected_options) {
+                    const adjustment = Number(option?.price_adjustment || 0);
+                    customizationTotal += adjustment;
+                    const optionId = Number(option?.option_id);
+                    if (!Number.isNaN(optionId)) {
+                      const existingOption = customizationAggregate.get(optionId);
+                      if (existingOption) {
+                        existingOption.total_quantity += unitQuantity;
+                        existingOption.total_revenue += adjustment * unitQuantity;
+                      } else {
+                        customizationAggregate.set(optionId, {
+                          option_id: optionId,
+                          option_name: option?.option_name || 'Unknown Option',
+                          customization_id: Number(customization?.customization_id) || 0,
+                          customization_name: customization?.customization_name || 'Unknown Customization',
+                          total_quantity: unitQuantity,
+                          total_revenue: adjustment * unitQuantity,
+                        });
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          } catch (err) {
+            console.warn('⚠️ Failed to parse customizations_json for product sale:', err);
+          }
+        }
+
+        if (row.bundle_selections_json) {
+          try {
+            const bundleSelections = JSON.parse(row.bundle_selections_json);
+            if (Array.isArray(bundleSelections)) {
+              for (const selection of bundleSelections) {
+                if (selection?.selectedProducts && Array.isArray(selection.selectedProducts)) {
+                  for (const selectedProduct of selection.selectedProducts) {
+                    const selectionQty =
+                      typeof selectedProduct?.quantity === 'number' && !Number.isNaN(selectedProduct.quantity)
+                        ? selectedProduct.quantity
+                        : 1;
+
+                    if (selectedProduct?.customizations && Array.isArray(selectedProduct.customizations)) {
+                      for (const customization of selectedProduct.customizations) {
+                        if (customization?.selected_options && Array.isArray(customization.selected_options)) {
+                          for (const option of customization.selected_options) {
+                            const adjustment = Number(option?.price_adjustment || 0);
+                            const qty = selectionQty * unitQuantity;
+                            customizationTotal += adjustment * selectionQty;
+
+                            const optionId = Number(option?.option_id);
+                            if (!Number.isNaN(optionId)) {
+                              const existingOption = customizationAggregate.get(optionId);
+                              if (existingOption) {
+                                existingOption.total_quantity += qty;
+                                existingOption.total_revenue += adjustment * qty;
+                              } else {
+                                customizationAggregate.set(optionId, {
+                                  option_id: optionId,
+                                  option_name: option?.option_name || 'Unknown Option',
+                                  customization_id: Number(customization?.customization_id) || 0,
+                                  customization_name: customization?.customization_name || 'Unknown Customization',
+                                  total_quantity: qty,
+                                  total_revenue: adjustment * qty,
+                                });
+                              }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          } catch (err) {
+            console.warn('⚠️ Failed to parse bundle_selections_json for product sale:', err);
+          }
+        }
+
+        return customizationTotal * unitQuantity || 0;
+      };
+
+      for (const row of rows) {
+        const quantity = Number(row.quantity || 0);
+        const totalPrice = Number(row.total_price || 0);
+        const customizationSubtotal = sumCustomizationForRow(row, quantity);
+        let baseSubtotal = totalPrice - customizationSubtotal;
+
+        if (baseSubtotal < 0) {
+          baseSubtotal = 0;
+        }
+
+        const rawPlatform = (row.payment_method_code || row.payment_method || '').toString().toLowerCase();
+        const platformCode = rawPlatform && !OFFLINE_METHODS.has(rawPlatform) ? rawPlatform : 'offline';
+        const transactionType = row.transaction_type || 'drinks';
+        const key = `${row.product_id}-${platformCode}-${transactionType}`;
+
+        const existing = aggregate.get(key);
+
+        if (existing) {
+          existing.total_quantity += quantity;
+          existing.total_subtotal += totalPrice;
+          existing.customization_subtotal += customizationSubtotal;
+          existing.base_subtotal += baseSubtotal;
+        } else {
+          aggregate.set(key, {
+            product_id: Number(row.product_id),
+            product_name: row.product_name,
+            product_code: row.product_code,
+            platform: platformCode,
+            transaction_type: transactionType,
+            total_quantity: quantity,
+            total_subtotal: totalPrice,
+            customization_subtotal: customizationSubtotal,
+            base_subtotal: baseSubtotal,
+          });
+        }
+      }
+
+      const products = Array.from(aggregate.values()).map(product => {
+        const quantity = product.total_quantity || 0;
+        const baseSubtotal = product.base_subtotal || 0;
+        const baseUnitPrice = quantity > 0 ? baseSubtotal / quantity : 0;
+        return {
+          ...product,
+          base_unit_price: baseUnitPrice,
+        };
+      }).sort((a, b) => {
+        if (a.product_name === b.product_name) {
+          return a.platform.localeCompare(b.platform);
+        }
+        return a.product_name.localeCompare(b.product_name);
+      });
+
+      return {
+        products,
+        customizations: Array.from(customizationAggregate.values()).sort((a, b) => b.total_quantity - a.total_quantity),
+      };
     } catch (error) {
       console.error('Error getting product sales:', error);
-      return [];
+      return { products: [], customizations: [] };
     }
   });
   
@@ -4049,7 +4251,8 @@ function generateShiftBreakdownHTML(shiftData: {
   shift_end: string | null;
   modal_awal: number;
   statistics: { order_count: number; total_amount: number; total_discount: number; voucher_count: number };
-  productSales: Array<{ product_name: string; total_quantity: number; total_subtotal: number }>;
+  productSales: Array<{ product_name: string; total_quantity: number; total_subtotal: number; customization_subtotal: number; base_subtotal: number; base_unit_price: number; platform: string; transaction_type: string }>;
+  customizationSales: Array<{ option_id: number; option_name: string; customization_id: number; customization_name: string; total_quantity: number; total_revenue: number }>;
   paymentBreakdown: Array<{ payment_method_name: string; transaction_count: number }>;
   cashSummary: { cash_shift: number; cash_whole_day: number; total_cash_in_cashier: number };
   businessName?: string;
@@ -4066,21 +4269,80 @@ function generateShiftBreakdownHTML(shiftData: {
     return `${year}-${month}-${day} ${hours}:${minutes}:${seconds}`;
   };
 
+  const formatCurrency = (value: number): string => {
+    return new Intl.NumberFormat('id-ID', {
+      style: 'currency',
+      currency: 'IDR',
+      minimumFractionDigits: 0,
+      maximumFractionDigits: 0,
+    }).format(value);
+  };
+
+  const formatPlatformLabel = (platform: string): string => {
+    const key = (platform || 'offline').toLowerCase();
+    switch (key) {
+      case 'offline':
+        return 'Offline';
+      case 'gofood':
+        return 'GoFood';
+      case 'grabfood':
+        return 'GrabFood';
+      case 'shopeefood':
+        return 'ShopeeFood';
+      case 'qpon':
+        return 'Qpon';
+      case 'tiktok':
+        return 'TikTok';
+      default:
+        return key.charAt(0).toUpperCase() + key.slice(1);
+    }
+  };
+
+  const formatTransactionLabel = (transactionType: string): string => {
+    return transactionType === 'bakery' ? 'Bakery' : 'Drinks';
+  };
+
   const printTime = formatDateTime(new Date().toISOString());
   const shiftStartTime = formatDateTime(shiftData.shift_start);
   const shiftEndTime = shiftData.shift_end ? formatDateTime(shiftData.shift_end) : 'Masih Berlangsung';
 
   // Generate product sales table rows
-  const productRows = shiftData.productSales.map(product => `
+  const productRows = shiftData.productSales.map(product => {
+    const quantity = product.total_quantity || 0;
+    const baseSubtotal = product.base_subtotal ?? (product.total_subtotal - product.customization_subtotal);
+    const unitPrice = product.base_unit_price ?? (quantity > 0 ? baseSubtotal / quantity : 0);
+    const platformLabel = formatPlatformLabel(product.platform);
+    const transactionLabel = formatTransactionLabel(product.transaction_type);
+    return `
     <tr>
-      <td style="text-align: left; padding: 1mm 0;">${product.product_name}</td>
-      <td style="text-align: right; padding: 1mm 0;">${product.total_quantity}</td>
-      <td style="text-align: right; padding: 1mm 0;">${product.total_subtotal.toLocaleString('id-ID')}</td>
+      <td style="text-align: left; padding: 1mm 0;">
+        <div>${product.product_name}</div>
+        <div style="font-size: 7pt; color: #555;">${transactionLabel} · ${platformLabel}</div>
+      </td>
+      <td style="text-align: right; padding: 1mm 0;">${quantity}</td>
+      <td style="text-align: right; padding: 1mm 0;">${unitPrice.toLocaleString('id-ID')}</td>
+      <td style="text-align: right; padding: 1mm 0;">${baseSubtotal.toLocaleString('id-ID')}</td>
+    </tr>
+    `;
+  }).join('');
+
+  const totalProductQty = shiftData.productSales.reduce((sum, p) => sum + p.total_quantity, 0);
+  const totalProductBaseSubtotal = shiftData.productSales.reduce((sum, p) => sum + (p.base_subtotal ?? (p.total_subtotal - p.customization_subtotal)), 0);
+  const averageBaseUnitPrice = totalProductQty > 0 ? totalProductBaseSubtotal / totalProductQty : 0;
+
+  const customizationRows = shiftData.customizationSales.map(item => `
+    <tr>
+      <td style="text-align: left; padding: 1mm 0;">
+        <div>${item.option_name}</div>
+        <div style="font-size: 7pt; color: #555;">${item.customization_name}</div>
+      </td>
+      <td style="text-align: right; padding: 1mm 0;">${item.total_quantity}</td>
+      <td style="text-align: right; padding: 1mm 0;">${item.total_revenue.toLocaleString('id-ID')}</td>
     </tr>
   `).join('');
 
-  const totalProductQty = shiftData.productSales.reduce((sum, p) => sum + p.total_quantity, 0);
-  const totalProductSubtotal = shiftData.productSales.reduce((sum, p) => sum + p.total_subtotal, 0);
+  const totalCustomizationUnits = shiftData.customizationSales.reduce((sum, item) => sum + item.total_quantity, 0);
+  const totalCustomizationRevenue = shiftData.customizationSales.reduce((sum, item) => sum + item.total_revenue, 0);
 
   // Generate payment method rows
   const paymentRows = shiftData.paymentBreakdown.map(payment => `
@@ -4092,8 +4354,8 @@ function generateShiftBreakdownHTML(shiftData: {
 
   const totalPaymentCount = shiftData.paymentBreakdown.reduce((sum, p) => sum + p.transaction_count, 0);
   const formattedTotalDiscount = shiftData.statistics.total_discount > 0
-    ? (-shiftData.statistics.total_discount).toLocaleString('id-ID')
-    : '0';
+    ? formatCurrency(-Math.abs(shiftData.statistics.total_discount))
+    : formatCurrency(0);
 
   return `
 <!DOCTYPE html>
@@ -4226,15 +4488,17 @@ function generateShiftBreakdownHTML(shiftData: {
       <tr>
         <th>Product</th>
         <th class="right">Qty</th>
+        <th class="right">Unit Price</th>
         <th class="right">Subtotal</th>
       </tr>
     </thead>
     <tbody>
-      ${productRows || '<tr><td colSpan="3" style="text-align: center;">Tidak ada produk</td></tr>'}
+      ${productRows || '<tr><td colSpan="4" style="text-align: center;">Tidak ada produk</td></tr>'}
       <tr class="total-row">
         <td>TOTAL</td>
         <td class="right">${totalProductQty}</td>
-        <td class="right">${totalProductSubtotal.toLocaleString('id-ID')}</td>
+        <td class="right">${averageBaseUnitPrice.toLocaleString('id-ID')}</td>
+        <td class="right">${totalProductBaseSubtotal.toLocaleString('id-ID')}</td>
       </tr>
     </tbody>
   </table>
@@ -4260,6 +4524,43 @@ function generateShiftBreakdownHTML(shiftData: {
 
   <div class="divider"></div>
 
+  <div class="section-title">CUSTOMIZATION SALES BREAKDOWN</div>
+  <table>
+    <thead>
+      <tr>
+        <th>Customization</th>
+        <th class="right">Qty</th>
+        <th class="right">Revenue</th>
+      </tr>
+    </thead>
+    <tbody>
+      ${customizationRows || '<tr><td colSpan="3" style="text-align: center;">Tidak ada kustomisasi</td></tr>'}
+      <tr class="total-row">
+        <td>TOTAL</td>
+        <td class="right">${totalCustomizationUnits}</td>
+        <td class="right">${totalCustomizationRevenue.toLocaleString('id-ID')}</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <div class="divider"></div>
+
+  <div class="section-title">DISKON & VOUCHER</div>
+  <table>
+    <tbody>
+      <tr>
+        <td style="text-align: left; padding: 1mm 0;">Voucher Digunakan</td>
+        <td class="right">${shiftData.statistics.voucher_count}</td>
+      </tr>
+      <tr>
+        <td style="text-align: left; padding: 1mm 0;">Total Diskon Voucher</td>
+        <td class="right">${formattedTotalDiscount}</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <div class="divider"></div>
+
   <div class="summary">
     <div class="summary-line">
       <span class="summary-label">Total Pesanan:</span>
@@ -4268,6 +4569,14 @@ function generateShiftBreakdownHTML(shiftData: {
     <div class="summary-line">
       <span class="summary-label">Total Transaksi:</span>
       <span class="summary-value">${shiftData.statistics.total_amount.toLocaleString('id-ID')}</span>
+    </div>
+    <div class="summary-line">
+      <span class="summary-label">Customization Units:</span>
+      <span class="summary-value">${totalCustomizationUnits}</span>
+    </div>
+    <div class="summary-line">
+      <span class="summary-label">Total Kustomisasi:</span>
+      <span class="summary-value">${totalCustomizationRevenue.toLocaleString('id-ID')}</span>
     </div>
     <div class="summary-line">
       <span class="summary-label">Voucher Dipakai:</span>
@@ -4309,7 +4618,8 @@ ipcMain.handle('print-shift-breakdown', async (event, data: {
   shift_end: string | null;
   modal_awal: number;
   statistics: { order_count: number; total_amount: number; total_discount: number; voucher_count: number };
-  productSales: Array<{ product_name: string; total_quantity: number; total_subtotal: number }>;
+  productSales: Array<{ product_name: string; total_quantity: number; total_subtotal: number; customization_subtotal: number; base_subtotal: number; base_unit_price: number }>;
+  customizationSales: Array<{ option_id: number; option_name: string; customization_id: number; customization_name: string; total_quantity: number; total_revenue: number }>;
   paymentBreakdown: Array<{ payment_method_name: string; transaction_count: number }>;
   cashSummary: { cash_shift: number; cash_whole_day: number; total_cash_in_cashier: number };
   business_id?: number;
@@ -4346,6 +4656,10 @@ ipcMain.handle('print-shift-breakdown', async (event, data: {
     // Generate HTML
     const htmlContent = generateShiftBreakdownHTML({
       ...data,
+      productSales: data.productSales || [],
+      customizationSales: data.customizationSales || [],
+      paymentBreakdown: data.paymentBreakdown || [],
+      cashSummary: data.cashSummary,
       businessName
     });
 

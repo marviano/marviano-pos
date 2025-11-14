@@ -39,8 +39,12 @@ interface Product {
 export default function POSLayout() {
   const { user } = useAuth();
   const permissions = user?.permissions ?? [];
-  const canAccessSync = permissions.includes('marviano-pos_setelan_sinkronisasi');
-  const canAccessPrinter = permissions.includes('marviano-pos_setelan_printer-setup');
+  const canAccessSync =
+    permissions.includes('setelan.sinkronisasi') ||
+    permissions.includes('marviano-pos_setelan_sinkronisasi');
+  const canAccessPrinter =
+    permissions.includes('setelan.printersetup') ||
+    permissions.includes('marviano-pos_setelan_printer-setup');
   const [selectedCategory, setSelectedCategory] = useState('');
   
   // Separate carts for each category - offline

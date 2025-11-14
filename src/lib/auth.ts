@@ -107,9 +107,40 @@ class AuthManager {
       return [];
     }
 
-    return rawPermissions
-      .filter((perm): perm is string => typeof perm === 'string' && perm.startsWith('marviano-pos_'))
-      .sort((a, b) => a.localeCompare(b));
+    const legacyMap: Record<string, string> = {
+      'marviano-pos_setelan_printer-setup': 'setelan.printersetup',
+      'marviano-pos_setelan_sinkronisasi': 'setelan.sinkronisasi',
+    };
+
+    const normalizedPermissions = new Set<string>();
+
+    for (const rawPermission of rawPermissions) {
+      if (typeof rawPermission !== 'string') {
+        continue;
+      }
+
+      const trimmed = rawPermission.trim();
+      if (!trimmed) {
+        continue;
+      }
+
+      const mapped = legacyMap[trimmed];
+      if (mapped) {
+        normalizedPermissions.add(mapped);
+        continue;
+      }
+
+      if (trimmed.startsWith('marviano-pos_')) {
+        normalizedPermissions.add(trimmed);
+        continue;
+      }
+
+      if (/^[a-z0-9]+(?:[._-][a-z0-9]+)+$/i.test(trimmed)) {
+        normalizedPermissions.add(trimmed);
+      }
+    }
+
+    return Array.from(normalizedPermissions).sort((a, b) => a.localeCompare(b));
   }
 
   private normalizeRole(roleName?: string | null): KnownRole {
@@ -314,7 +345,19 @@ class AuthManager {
     
     // Notify Electron about logout
     if (typeof window !== 'undefined' && window.electronAPI) {
-      window.electronAPI.notifyLogout();
+      window.electronAPI.notifyLogout?.().catch(error => {
+        console.error('Failed to notify Electron about logout:', error);
+      });
+    }
+
+    if (typeof window !== 'undefined') {
+      try {
+        if (window.location.pathname !== '/login') {
+          window.location.replace('/login');
+        }
+      } catch (error) {
+        console.error('Failed to redirect to login after logout:', error);
+      }
     }
   }
 

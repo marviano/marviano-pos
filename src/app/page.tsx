@@ -22,9 +22,17 @@ export default function Home() {
     if (!user?.permissions || user.permissions.length === 0) {
       return [];
     }
+
+    const formatPermissionLabel = (permission: string) => {
+      if (permission.startsWith('marviano-pos_')) {
+        return permission.replace(/^marviano-pos_/, '');
+      }
+      return permission;
+    };
+
     return user.permissions.map(permission => ({
       full: permission,
-      label: permission.replace(/^marviano-pos_/, ''),
+      label: formatPermissionLabel(permission),
     }));
   }, [user?.permissions]);
 
@@ -254,7 +262,7 @@ export default function Home() {
               <div className="pt-2 border-t border-gray-100">
                 <span className="text-gray-500">Permissions ({appPermissions.length}):</span>
                 {appPermissions.length === 0 ? (
-                  <p className="mt-1 text-gray-400 text-xs">Tidak ada permission dengan prefix marviano-pos_</p>
+                  <p className="mt-1 text-gray-400 text-xs">Tidak ada permission yang tersedia</p>
                 ) : (
                   <ul className="mt-1 max-h-32 overflow-y-auto space-y-1 text-xs text-gray-700">
                     {appPermissions.map(permission => (

@@ -66,8 +66,12 @@ export default function LeftSidebar({ menuItems, activeMenuItem, onMenuItemClick
       <div className="flex-1 px-4">
         {menuItems.map((item) => {
           if (item.name === 'Setelan') {
-            const canAccessSync = permissions.includes('marviano-pos_setelan_sinkronisasi');
-            const canAccessPrinter = permissions.includes('marviano-pos_setelan_printer-setup');
+            const canAccessSync =
+              permissions.includes('setelan.sinkronisasi') ||
+              permissions.includes('marviano-pos_setelan_sinkronisasi');
+            const canAccessPrinter =
+              permissions.includes('setelan.printersetup') ||
+              permissions.includes('marviano-pos_setelan_printer-setup');
             const canAccessSettings = canAccessSync || canAccessPrinter;
             if (!canAccessSettings) {
               return null;

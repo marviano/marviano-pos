@@ -146,14 +146,37 @@ declare global {
       localDbGetOmset?: (businessId?: number, startDate?: string, endDate?: string) => Promise<any[]>;
       
       // Shifts
-      localDbGetActiveShift?: (userId: number, businessId?: number) => Promise<any | null>;
+      localDbGetActiveShift?: (userId: number, businessId?: number) => Promise<{
+        shift: {
+          id: number;
+          uuid_id: string;
+          business_id: number;
+          user_id: number;
+          user_name: string;
+          shift_start: string;
+          shift_end: string | null;
+          modal_awal: number;
+          status: string;
+          created_at: string;
+        } | null;
+        isCurrentUserShift: boolean;
+      }>;
       localDbCreateShift?: (shiftData: {
         uuid_id: string;
         business_id: number;
         user_id: number;
         user_name: string;
         modal_awal: number;
-      }) => Promise<{ success: boolean; error?: string }>;
+      }) => Promise<{
+        success: boolean;
+        error?: string;
+        activeShift?: {
+          id: number;
+          user_id: number;
+          user_name: string;
+          shift_start: string;
+        };
+      }>;
       localDbEndShift?: (shiftId: number) => Promise<{ success: boolean; error?: string }>;
       localDbGetShiftStatistics?: (userId: number, shiftStart: string, shiftEnd: string | null, businessId?: number) => Promise<{
         order_count: number;
@@ -178,20 +201,36 @@ declare global {
         earliestTime: string | null;
       }>;
       localDbUpdateShiftStart?: (shiftId: number, newStartTime: string) => Promise<{ success: boolean; error?: string }>;
-      localDbGetProductSales?: (userId: number, shiftStart: string, shiftEnd: string | null, businessId?: number) => Promise<Array<{
-        product_id: number;
-        product_name: string;
-        product_code: string;
-        total_quantity: number;
-        total_subtotal: number;
-      }>>;
+      localDbGetProductSales?: (userId: number, shiftStart: string, shiftEnd: string | null, businessId?: number) => Promise<{
+        products: Array<{
+          product_id: number;
+          product_name: string;
+          product_code: string;
+          platform: string;
+          transaction_type: string;
+          total_quantity: number;
+          total_subtotal: number;
+          customization_subtotal: number;
+          base_subtotal: number;
+          base_unit_price: number;
+        }>;
+        customizations: Array<{
+          option_id: number;
+          option_name: string;
+          customization_id: number;
+          customization_name: string;
+          total_quantity: number;
+          total_revenue: number;
+        }>;
+      }>;
       printShiftBreakdown?: (data: {
         user_name: string;
         shift_start: string;
         shift_end: string | null;
         modal_awal: number;
         statistics: { order_count: number; total_amount: number; total_discount: number; voucher_count: number };
-        productSales: Array<{ product_name: string; total_quantity: number; total_subtotal: number }>;
+        productSales: Array<{ product_name: string; total_quantity: number; total_subtotal: number; customization_subtotal: number; base_subtotal: number; base_unit_price: number; platform: string; transaction_type: string }>;
+        customizationSales: Array<{ option_id: number; option_name: string; customization_id: number; customization_name: string; total_quantity: number; total_revenue: number }>;
         paymentBreakdown: Array<{ payment_method_name: string; transaction_count: number }>;
         cashSummary: { cash_shift: number; cash_whole_day: number; total_cash_in_cashier: number };
         business_id?: number;
