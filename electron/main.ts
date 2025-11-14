@@ -2461,6 +2461,7 @@ function createWindows(): void {
       };
 
       const aggregate = new Map<string, ProductAccumulator>();
+      const bundleItemsAggregate = new Map<string, ProductAccumulator>();
       const customizationAggregate = new Map<number, CustomizationAccumulator>();
       const OFFLINE_METHODS = new Set(['cash', 'debit', 'qr', 'ewallet', 'cl', 'voucher', 'offline']);
 
@@ -2506,6 +2507,10 @@ function createWindows(): void {
           try {
             const bundleSelections = JSON.parse(row.bundle_selections_json);
             if (Array.isArray(bundleSelections)) {
+              const rawPlatform = (row.payment_method_code || row.payment_method || '').toString().toLowerCase();
+              const platformCode = rawPlatform && !OFFLINE_METHODS.has(rawPlatform) ? rawPlatform : 'offline';
+              const transactionType = row.transaction_type || 'drinks';
+
               for (const selection of bundleSelections) {
                 if (selection?.selectedProducts && Array.isArray(selection.selectedProducts)) {
                   for (const selectedProduct of selection.selectedProducts) {
@@ -2513,6 +2518,28 @@ function createWindows(): void {
                       typeof selectedProduct?.quantity === 'number' && !Number.isNaN(selectedProduct.quantity)
                         ? selectedProduct.quantity
                         : 1;
+                    const totalQty = selectionQty * unitQuantity;
+
+                    if (selectedProduct?.product?.id) {
+                      const bundleItemKey = `${selectedProduct.product.id}-${platformCode}-${transactionType}`;
+                      const existingBundleItem = bundleItemsAggregate.get(bundleItemKey);
+
+                      if (existingBundleItem) {
+                        existingBundleItem.total_quantity += totalQty;
+                      } else {
+                        bundleItemsAggregate.set(bundleItemKey, {
+                          product_id: Number(selectedProduct.product.id),
+                          product_name: selectedProduct.product.nama || 'Unknown Product',
+                          product_code: '',
+                          platform: platformCode,
+                          transaction_type: transactionType,
+                          total_quantity: totalQty,
+                          total_subtotal: 0,
+                          customization_subtotal: 0,
+                          base_subtotal: 0,
+                        });
+                      }
+                    }
 
                     if (selectedProduct?.customizations && Array.isArray(selectedProduct.customizations)) {
                       for (const customization of selectedProduct.customizations) {
@@ -2592,23 +2619,37 @@ function createWindows(): void {
         }
       }
 
-      const products = Array.from(aggregate.values()).map(product => {
+      const regularProducts = Array.from(aggregate.values()).map(product => {
         const quantity = product.total_quantity || 0;
         const baseSubtotal = product.base_subtotal || 0;
         const baseUnitPrice = quantity > 0 ? baseSubtotal / quantity : 0;
         return {
           ...product,
           base_unit_price: baseUnitPrice,
+          is_bundle_item: false,
         };
-      }).sort((a, b) => {
+      });
+
+      const bundleItems = Array.from(bundleItemsAggregate.values()).map(product => {
+        return {
+          ...product,
+          base_unit_price: 0,
+          is_bundle_item: true,
+        };
+      });
+
+      const allProducts = [...regularProducts, ...bundleItems].sort((a, b) => {
         if (a.product_name === b.product_name) {
+          if (a.is_bundle_item !== b.is_bundle_item) {
+            return a.is_bundle_item ? 1 : -1;
+          }
           return a.platform.localeCompare(b.platform);
         }
         return a.product_name.localeCompare(b.product_name);
       });
 
       return {
-        products,
+        products: allProducts,
         customizations: Array.from(customizationAggregate.values()).sort((a, b) => b.total_quantity - a.total_quantity),
       };
     } catch (error) {
@@ -4313,22 +4354,26 @@ function generateShiftBreakdownHTML(shiftData: {
     const unitPrice = product.base_unit_price ?? (quantity > 0 ? baseSubtotal / quantity : 0);
     const platformLabel = formatPlatformLabel(product.platform);
     const transactionLabel = formatTransactionLabel(product.transaction_type);
+    const isBundleItem = (product as any).is_bundle_item || false;
+    const productNameDisplay = isBundleItem ? `[Bundle] ${product.product_name}` : product.product_name;
     return `
     <tr>
       <td style="text-align: left; padding: 1mm 0;">
-        <div>${product.product_name}</div>
+        <div>${productNameDisplay}</div>
         <div style="font-size: 7pt; color: #555;">${transactionLabel} · ${platformLabel}</div>
       </td>
       <td style="text-align: right; padding: 1mm 0;">${quantity}</td>
-      <td style="text-align: right; padding: 1mm 0;">${unitPrice.toLocaleString('id-ID')}</td>
-      <td style="text-align: right; padding: 1mm 0;">${baseSubtotal.toLocaleString('id-ID')}</td>
+      <td style="text-align: right; padding: 1mm 0;">${isBundleItem ? '-' : unitPrice.toLocaleString('id-ID')}</td>
+      <td style="text-align: right; padding: 1mm 0;">${isBundleItem ? '-' : baseSubtotal.toLocaleString('id-ID')}</td>
     </tr>
     `;
   }).join('');
 
+  const regularProducts = shiftData.productSales.filter((p: any) => !p.is_bundle_item);
   const totalProductQty = shiftData.productSales.reduce((sum, p) => sum + p.total_quantity, 0);
-  const totalProductBaseSubtotal = shiftData.productSales.reduce((sum, p) => sum + (p.base_subtotal ?? (p.total_subtotal - p.customization_subtotal)), 0);
-  const averageBaseUnitPrice = totalProductQty > 0 ? totalProductBaseSubtotal / totalProductQty : 0;
+  const totalProductBaseSubtotal = regularProducts.reduce((sum, p) => sum + (p.base_subtotal ?? (p.total_subtotal - p.customization_subtotal)), 0);
+  const regularProductQty = regularProducts.reduce((sum, p) => sum + p.total_quantity, 0);
+  const averageBaseUnitPrice = regularProductQty > 0 ? totalProductBaseSubtotal / regularProductQty : 0;
 
   const customizationRows = shiftData.customizationSales.map(item => `
     <tr>
@@ -4497,7 +4542,7 @@ function generateShiftBreakdownHTML(shiftData: {
       <tr class="total-row">
         <td>TOTAL</td>
         <td class="right">${totalProductQty}</td>
-        <td class="right">${averageBaseUnitPrice.toLocaleString('id-ID')}</td>
+        <td class="right">-</td>
         <td class="right">${totalProductBaseSubtotal.toLocaleString('id-ID')}</td>
       </tr>
     </tbody>

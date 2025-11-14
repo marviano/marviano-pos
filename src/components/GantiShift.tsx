@@ -76,6 +76,7 @@ interface ProductSale {
   customization_subtotal: number;
   base_subtotal: number;
   base_unit_price: number;
+  is_bundle_item?: boolean;
 }
 
 interface CustomizationSale {
@@ -1198,9 +1199,12 @@ export default function GantiShift() {
                     {productSales.length > 0 ? (
                       <>
                         {productSales.map((product, idx) => (
-                          <tr key={`${product.product_id}-${product.platform}-${product.transaction_type}-${idx}`} className="border-b border-gray-100 hover:bg-gray-50">
+                          <tr key={`${product.product_id}-${product.platform}-${product.transaction_type}-${idx}`} className="border-b border-gray-200 hover:bg-gray-50">
                             <td className="py-3 px-4 font-medium">
-                              <div>{product.product_name}</div>
+                              <div>
+                                {product.is_bundle_item && <span className="text-xs font-semibold text-purple-600">[Bundle] </span>}
+                                {product.product_name}
+                              </div>
                               <div className="text-xs text-gray-500">
                                 {product.transaction_type === 'drinks' ? 'Drinks' : 'Bakery'}
                                 {' · '}
@@ -1209,12 +1213,22 @@ export default function GantiShift() {
                             </td>
                             <td className="py-3 px-4 text-right font-medium">{product.total_quantity}</td>
                             <td className="py-3 px-4 text-right font-medium">
-                              {formatRupiah(
-                                product.base_unit_price ??
-                                  (product.total_quantity > 0 ? product.base_subtotal / product.total_quantity : 0)
+                              {product.is_bundle_item ? (
+                                <span className="text-gray-400">-</span>
+                              ) : (
+                                formatRupiah(
+                                  product.base_unit_price ??
+                                    (product.total_quantity > 0 ? product.base_subtotal / product.total_quantity : 0)
+                                )
                               )}
                             </td>
-                            <td className="py-3 px-4 text-right font-semibold">{formatRupiah(product.base_subtotal)}</td>
+                            <td className="py-3 px-4 text-right font-semibold">
+                              {product.is_bundle_item ? (
+                                <span className="text-gray-400">-</span>
+                              ) : (
+                                formatRupiah(product.base_subtotal)
+                              )}
+                            </td>
                           </tr>
                         ))}
                         <tr className="border-t-2 border-gray-300 bg-gray-50">
@@ -1224,7 +1238,8 @@ export default function GantiShift() {
                           </td>
                           <td className="py-3 px-4 text-right font-bold">
                           {(() => {
-                            const totalsByKey = productSales.reduce((acc, product) => {
+                            const regularProducts = productSales.filter(p => !p.is_bundle_item);
+                            const totalsByKey = regularProducts.reduce((acc, product) => {
                               const key = `${product.transaction_type}-${product.platform}`;
                               if (!acc.has(key)) {
                                 acc.set(key, { quantity: 0, base: 0 });
@@ -1246,8 +1261,8 @@ export default function GantiShift() {
                                 </div>
                               );
                             });
-                            const totalQty = productSales.reduce((sum, p) => sum + p.total_quantity, 0);
-                            const totalBase = productSales.reduce((sum, p) => sum + p.base_subtotal, 0);
+                            const totalQty = regularProducts.reduce((sum, p) => sum + p.total_quantity, 0);
+                            const totalBase = regularProducts.reduce((sum, p) => sum + p.base_subtotal, 0);
                             const overallUnitPrice = totalQty > 0 ? totalBase / totalQty : 0;
                             rows.push(
                               <div key="overall" className="flex justify-between text-sm font-semibold text-gray-700">
@@ -1259,7 +1274,7 @@ export default function GantiShift() {
                           })()}
                           </td>
                           <td className="py-3 px-4 text-right font-bold">
-                            {formatRupiah(productSales.reduce((sum, p) => sum + p.base_subtotal, 0))}
+                            {formatRupiah(productSales.filter(p => !p.is_bundle_item).reduce((sum, p) => sum + p.base_subtotal, 0))}
                           </td>
                         </tr>
                       </>
@@ -1291,7 +1306,7 @@ export default function GantiShift() {
                     {customizationSales.length > 0 ? (
                       <>
                         {customizationSales.map((item, idx) => (
-                          <tr key={idx} className="border-b border-gray-100 hover:bg-gray-50">
+                          <tr key={idx} className="border-b border-gray-200 hover:bg-gray-50">
                             <td className="py-3 px-4">
                               <div className="font-medium text-gray-800">{item.option_name}</div>
                               <div className="text-xs text-gray-500">{item.customization_name}</div>
