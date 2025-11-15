@@ -13,6 +13,7 @@ import {
   Receipt
 } from 'lucide-react';
 import { useAuth } from '@/hooks/useAuth';
+import { isSuperAdmin } from '@/lib/auth';
 
 interface MenuItem {
   id: number;
@@ -30,6 +31,7 @@ interface LeftSidebarProps {
 export default function LeftSidebar({ menuItems, activeMenuItem, onMenuItemClick }: LeftSidebarProps) {
   const { user } = useAuth();
   const permissions = user?.permissions ?? [];
+  const isAdmin = isSuperAdmin(user);
   const getIcon = (name: string) => {
     switch (name) {
       case 'Kasir':
@@ -66,10 +68,10 @@ export default function LeftSidebar({ menuItems, activeMenuItem, onMenuItemClick
       <div className="flex-1 px-4">
         {menuItems.map((item) => {
           if (item.name === 'Setelan') {
-            const canAccessSync =
+            const canAccessSync = isAdmin ||
               permissions.includes('setelan.sinkronisasi') ||
               permissions.includes('marviano-pos_setelan_sinkronisasi');
-            const canAccessPrinter =
+            const canAccessPrinter = isAdmin ||
               permissions.includes('setelan.printersetup') ||
               permissions.includes('marviano-pos_setelan_printer-setup');
             const canAccessSettings = canAccessSync || canAccessPrinter;

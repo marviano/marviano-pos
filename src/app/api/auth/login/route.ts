@@ -18,6 +18,13 @@ interface Role {
 
 interface PermissionRow {
   name: string;
+  business_id: number | null;
+}
+
+interface BusinessRow {
+  id: number;
+  name: string;
+  permission_name: string;
 }
 
 export async function POST(request: NextRequest) {
@@ -73,11 +80,12 @@ export async function POST(request: NextRequest) {
     );
 
     const roleName = roles.length > 0 ? roles[0].name : 'cashier';
+    const isSuperAdmin = roleName.toLowerCase() === 'super admin';
 
-    // Get permissions for the user's role
+    // Get permissions for the user's role (including business_id)
     const permissionRows = user.role_id
       ? await query<PermissionRow[]>(
-          `SELECT p.name
+          `SELECT p.name, p.business_id
            FROM permissions p
            INNER JOIN role_permissions rp ON rp.permission_id = p.id
            WHERE rp.role_id = ? AND (p.status IS NULL OR p.status = 'active')`,
@@ -86,6 +94,38 @@ export async function POST(request: NextRequest) {
       : [];
 
     const permissions = permissionRows.map(permission => permission.name);
+
+    // Get businesses for selection
+    let businesses: BusinessRow[] = [];
+    
+    if (isSuperAdmin) {
+      // Super admin: Get all active businesses
+      businesses = await query<BusinessRow[]>(
+        `SELECT id, name, permission_name
+         FROM businesses
+         WHERE status = 'active'
+         ORDER BY name ASC`
+      );
+    } else {
+      // Non-super admin: Get businesses from permissions
+      const businessIds = permissionRows
+        .filter(p => p.business_id !== null)
+        .map(p => p.business_id as number);
+      
+      if (businessIds.length > 0) {
+        // Get distinct business IDs and filter by active status
+        const uniqueBusinessIds = Array.from(new Set(businessIds));
+        const placeholders = uniqueBusinessIds.map(() => '?').join(',');
+        
+        businesses = await query<BusinessRow[]>(
+          `SELECT id, name, permission_name
+           FROM businesses
+           WHERE id IN (${placeholders}) AND status = 'active'
+           ORDER BY name ASC`,
+          uniqueBusinessIds
+        );
+      }
+    }
 
     // Return user data (without password)
     return NextResponse.json({
@@ -101,6 +141,8 @@ export async function POST(request: NextRequest) {
         role_id: user.role_id,
         permissions,
       },
+      businesses,
+      isSuperAdmin,
     });
   } catch (error) {
     console.error('Login error:', error);

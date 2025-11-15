@@ -16,6 +16,7 @@ import {
   Ticket
 } from 'lucide-react';
 import { useAuth } from '@/hooks/useAuth';
+import { isSuperAdmin } from '@/lib/auth';
 import { generateUUID } from '@/lib/uuid';
 
 const PLATFORM_LABELS: Record<string, string> = {
@@ -191,7 +192,8 @@ export default function GantiShift() {
   const modalInputRef = useRef<HTMLInputElement>(null);
   const autoRefreshIntervalRef = useRef<NodeJS.Timeout | null>(null);
   const permissions = user?.permissions ?? [];
-  const canForceCloseShift = permissions.includes('marviano-pos_gantishift.closeunattendedshift');
+  const isAdmin = isSuperAdmin(user);
+  const canForceCloseShift = isAdmin || permissions.includes('marviano-pos_gantishift.closeunattendedshift');
   const currentUserId = Number(user?.id ?? 0);
   const canManageActiveShift = Boolean(activeShift && (isCurrentUsersShift || canForceCloseShift));
 
@@ -997,7 +999,7 @@ export default function GantiShift() {
                       }
                     }}
                     placeholder="Masukkan modal awal (contoh: 500000)"
-                    className="w-full pl-12 pr-4 py-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 text-lg font-medium"
+                    className="w-full pl-12 pr-4 py-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 text-lg font-medium text-black"
                     disabled={isStartingShift}
                     inputMode="numeric"
                     autoComplete="off"
@@ -1094,11 +1096,11 @@ export default function GantiShift() {
                 <div className="space-y-2">
                   <div className="flex items-center justify-between">
                     <span className="text-sm text-gray-600">Cashier:</span>
-                    <span className="text-sm font-medium">{activeShift.user_name}</span>
+                    <span className="text-sm font-medium text-black">{activeShift.user_name}</span>
                   </div>
                   <div className="flex items-center justify-between">
                     <span className="text-sm text-gray-600">Started:</span>
-                    <span className="text-sm font-medium">{formatTime(activeShift.shift_start)}</span>
+                    <span className="text-sm font-medium text-black">{formatTime(activeShift.shift_start)}</span>
                   </div>
                   <div className="flex items-center justify-between">
                     <span className="text-sm text-gray-600">Status:</span>
@@ -1128,18 +1130,18 @@ export default function GantiShift() {
                       <Package className="w-4 h-4 text-blue-600" />
                       <span className="text-sm text-gray-600">Pesanan:</span>
                     </div>
-                    <span className="text-sm font-semibold">{statistics.order_count} transaksi</span>
+                    <span className="text-sm font-semibold text-black">{statistics.order_count} transaksi</span>
                   </div>
                   <div className="flex items-center justify-between">
                     <span className="text-sm text-gray-600">Total Transaksi:</span>
-                    <span className="text-sm font-semibold">{formatRupiah(statistics.total_amount)}</span>
+                    <span className="text-sm font-semibold text-black">{formatRupiah(statistics.total_amount)}</span>
                   </div>
                   <div className="flex items-center justify-between">
                     <div className="flex items-center space-x-2">
                       <Ticket className="w-4 h-4 text-orange-600" />
                       <span className="text-sm text-gray-600">Voucher Dipakai:</span>
                     </div>
-                    <span className="text-sm font-semibold">{statistics.voucher_count} transaksi</span>
+                    <span className="text-sm font-semibold text-black">{statistics.voucher_count} transaksi</span>
                   </div>
                   <div className="flex items-center justify-between">
                     <div className="flex items-center space-x-2">
@@ -1162,14 +1164,14 @@ export default function GantiShift() {
                       <Wallet className="w-4 h-4 text-green-600" />
                       <span className="text-sm text-gray-600">Cash (Shift):</span>
                     </div>
-                    <span className="text-sm font-semibold">{formatRupiah(cashSummary.cash_shift)}</span>
+                    <span className="text-sm font-semibold text-black">{formatRupiah(cashSummary.cash_shift)}</span>
                   </div>
                   <div className="flex items-center justify-between">
                     <div className="flex items-center space-x-2">
                       <Wallet className="w-4 h-4 text-blue-600" />
                       <span className="text-sm text-gray-600">Cash (Hari):</span>
                     </div>
-                    <span className="text-sm font-semibold">{formatRupiah(cashSummary.cash_whole_day)}</span>
+                    <span className="text-sm font-semibold text-black">{formatRupiah(cashSummary.cash_whole_day)}</span>
                   </div>
                   <div className="flex items-center justify-between pt-2 border-t border-gray-200">
                     <div className="flex items-center space-x-2">

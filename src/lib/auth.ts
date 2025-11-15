@@ -16,6 +16,7 @@ export interface User {
   organization_id: number;
   role_id?: number | null;
   permissions: string[];
+  selectedBusinessId?: number | null;
 }
 
 export interface AuthState {
@@ -173,6 +174,7 @@ class AuthManager {
       organization_id: normalizedOrganizationId,
       role_id: roleIdValue,
       permissions: this.filterAppPermissions(user.permissions),
+      selectedBusinessId: user.selectedBusinessId !== undefined ? (user.selectedBusinessId !== null ? Number(user.selectedBusinessId) : null) : undefined,
     };
   }
 
@@ -282,7 +284,7 @@ class AuthManager {
       }
 
       if (data?.success && data.user) {
-        console.log('🔍 [AUTH] Login successful, setting user state...');
+        console.log('🔍 [AUTH] Login successful, returning user data...');
         const sanitizedUser = this.sanitizeUser({
           ...data.user,
           role_name: data.user.role_name ?? data.user.role,
@@ -291,11 +293,12 @@ class AuthManager {
           throw new Error('Invalid user payload received');
         }
 
-        this.setAuthenticatedUser(sanitizedUser, false);
-        addSavedEmail(sanitizedUser.email);
-        await this.notifyElectronLoginSuccess();
-        console.log('🔍 [AUTH] Login process completed successfully');
-        return sanitizedUser;
+        // Return user data with businesses for selection (don't set authenticated yet)
+        return {
+          ...sanitizedUser,
+          _businesses: data.businesses || [],
+          _isSuperAdmin: data.isSuperAdmin || false,
+        } as any;
       }
 
       throw new Error('Invalid response from server');
@@ -303,6 +306,25 @@ class AuthManager {
       console.error('🔍 [AUTH] Login error:', error);
       throw error;
     }
+  }
+
+  async completeLogin(user: User & { _businesses?: any[]; _isSuperAdmin?: boolean }, selectedBusinessId: number | null): Promise<User> {
+    console.log('🔍 [AUTH] Completing login with business selection...');
+    
+    // Remove temporary properties
+    const { _businesses, _isSuperAdmin, ...cleanUser } = user as any;
+    
+    // Set selected business
+    const userWithBusiness: User = {
+      ...cleanUser,
+      selectedBusinessId,
+    };
+
+    this.setAuthenticatedUser(userWithBusiness, false);
+    addSavedEmail(userWithBusiness.email);
+    await this.notifyElectronLoginSuccess();
+    console.log('🔍 [AUTH] Login process completed successfully');
+    return userWithBusiness;
   }
 
   async loginOffline(): Promise<User> {
@@ -376,6 +398,22 @@ class AuthManager {
   isOfflineMode(): boolean {
     return this.authState.isOfflineMode;
   }
+
+  isSuperAdmin(): boolean {
+    const user = this.authState.user;
+    if (!user) {
+      return false;
+    }
+    return user.role_name?.toLowerCase() === 'super admin';
+  }
 }
 
 export const authManager = AuthManager.getInstance();
+
+// Utility function to check if a user is super admin
+export function isSuperAdmin(user: User | null): boolean {
+  if (!user) {
+    return false;
+  }
+  return user.role_name?.toLowerCase() === 'super admin';
+}

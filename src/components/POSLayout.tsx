@@ -15,6 +15,7 @@ import { mockMenuItems } from '@/data/mockData';
 import { fetchCategories, fetchProducts } from '@/lib/offlineDataFetcher';
 import { databaseHealthService } from '@/lib/databaseHealth';
 import { useAuth } from '@/hooks/useAuth';
+import { isSuperAdmin } from '@/lib/auth';
 
 interface Category {
   jenis: string;
@@ -39,10 +40,11 @@ interface Product {
 export default function POSLayout() {
   const { user } = useAuth();
   const permissions = user?.permissions ?? [];
-  const canAccessSync =
+  const isAdmin = isSuperAdmin(user);
+  const canAccessSync = isAdmin ||
     permissions.includes('setelan.sinkronisasi') ||
     permissions.includes('marviano-pos_setelan_sinkronisasi');
-  const canAccessPrinter =
+  const canAccessPrinter = isAdmin ||
     permissions.includes('setelan.printersetup') ||
     permissions.includes('marviano-pos_setelan_printer-setup');
   const [selectedCategory, setSelectedCategory] = useState('');

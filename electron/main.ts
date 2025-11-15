@@ -4663,7 +4663,7 @@ ipcMain.handle('print-shift-breakdown', async (event, data: {
   shift_end: string | null;
   modal_awal: number;
   statistics: { order_count: number; total_amount: number; total_discount: number; voucher_count: number };
-  productSales: Array<{ product_name: string; total_quantity: number; total_subtotal: number; customization_subtotal: number; base_subtotal: number; base_unit_price: number }>;
+  productSales: Array<{ product_name: string; total_quantity: number; total_subtotal: number; customization_subtotal: number; base_subtotal: number; base_unit_price: number; platform: string; transaction_type: string }>;
   customizationSales: Array<{ option_id: number; option_name: string; customization_id: number; customization_name: string; total_quantity: number; total_revenue: number }>;
   paymentBreakdown: Array<{ payment_method_name: string; transaction_count: number }>;
   cashSummary: { cash_shift: number; cash_whole_day: number; total_cash_in_cashier: number };

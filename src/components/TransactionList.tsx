@@ -902,11 +902,11 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
                 <thead className="bg-gray-50 sticky top-0 z-10">
                   <tr>
                     <th 
-                      className="px-2 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider cursor-pointer hover:bg-gray-100 select-none w-16"
+                      className="px-2 py-3 text-left text-[10px] font-medium text-gray-500 uppercase tracking-wider cursor-pointer hover:bg-gray-100 select-none w-16"
                       onClick={() => handleSort('receipt_number')}
                     >
-                      <div className="flex items-center gap-1 text-xs">
-                        <span className="text-xs">{showAllTransactions ? '#' : 'Receiptize #'}</span>
+                      <div className="flex items-center gap-1">
+                        <span className="text-[10px]">#</span>
                         {getSortIcon('receipt_number')}
                       </div>
                     </th>
@@ -925,7 +925,7 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
                       </div>
                     </th>
                     <th 
-                      className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider cursor-pointer hover:bg-gray-100 select-none"
+                      className="px-6 py-3 text-left text-[10px] font-medium text-gray-500 uppercase tracking-wider cursor-pointer hover:bg-gray-100 select-none"
                       onClick={() => handleSort('created_at')}
                     >
                       <div className="flex items-center gap-1">
@@ -934,20 +934,20 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
                       </div>
                     </th>
                     <th 
-                      className="px-2 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider cursor-pointer hover:bg-gray-100 select-none w-20"
+                      className="px-2 py-3 text-left text-[10px] font-medium text-gray-500 uppercase tracking-wider cursor-pointer hover:bg-gray-100 select-none w-20"
                       onClick={() => handleSort('payment_method')}
                     >
-                      <div className="flex items-center gap-1 text-xs">
-                        <span className="text-xs">Metode Pembayaran</span>
+                      <div className="flex items-center gap-1">
+                        <span className="text-[10px]">M.Pembayaran</span>
                         {getSortIcon('payment_method')}
                       </div>
                     </th>
                     <th 
-                      className="px-2 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider cursor-pointer hover:bg-gray-100 select-none w-16"
+                      className="px-2 py-3 text-left text-[10px] font-medium text-gray-500 uppercase tracking-wider cursor-pointer hover:bg-gray-100 select-none w-16"
                       onClick={() => handleSort('pickup_method')}
                     >
-                      <div className="flex items-center gap-1 text-xs">
-                        <span className="text-xs">Pengambilan</span>
+                      <div className="flex items-center gap-1">
+                        <span className="text-[10px]">DI/TA</span>
                         {getSortIcon('pickup_method')}
                       </div>
                     </th>
@@ -961,11 +961,11 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
                       </div>
                     </th>
                     <th 
-                      className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider cursor-pointer hover:bg-gray-100 select-none"
+                      className="px-6 py-3 text-left text-[10px] font-medium text-gray-500 uppercase tracking-wider cursor-pointer hover:bg-gray-100 select-none"
                       onClick={() => handleSort('voucher_discount')}
                     >
                       <div className="flex items-center gap-1">
-                        Diskon Voucher
+                        Disc/Vc
                         {getSortIcon('voucher_discount')}
                       </div>
                     </th>
@@ -979,7 +979,7 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
                       </div>
                     </th>
                     <th 
-                      className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider cursor-pointer hover:bg-gray-100 select-none w-20"
+                      className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider cursor-pointer hover:bg-gray-100 select-none w-12"
                       onClick={() => handleSort('customer_unit')}
                     >
                       <div className="flex items-center gap-1">
@@ -988,7 +988,7 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
                       </div>
                     </th>
                     <th 
-                      className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider cursor-pointer hover:bg-gray-100 select-none"
+                      className="px-6 py-3 text-left text-[10px] font-medium text-gray-500 uppercase tracking-wider cursor-pointer hover:bg-gray-100 select-none"
                       onClick={() => handleSort('customer_name')}
                     >
                       <div className="flex items-center gap-1">
@@ -1062,7 +1062,7 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
                         </span>
                       </td>
                       <td className="px-6 py-4 whitespace-nowrap">
-                        <span className="text-xs text-gray-900">
+                        <span className="text-[10px] text-gray-900">
                           {formatDate(transaction.created_at)}
                         </span>
                       </td>
@@ -1102,25 +1102,34 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
                           {formatPrice(transaction.final_amount)}
                         </span>
                       </td>
-                      <td className="px-4 py-4 whitespace-nowrap">
+                      <td className="px-2 py-4 whitespace-nowrap">
                         <span className="text-xs text-gray-900">
                           {transaction.customer_unit !== undefined && transaction.customer_unit !== null
                             ? transaction.customer_unit
                             : '-'}
                         </span>
                       </td>
-                      <td className="px-6 py-4 whitespace-nowrap">
-                        <span className="text-xs text-gray-900">
+                      <td className="px-6 py-4">
+                        <span 
+                          className="text-xs text-gray-900 truncate block max-w-[120px]" 
+                          title={transaction.customer_name || 'Guest'}
+                        >
                           {transaction.customer_name || 'Guest'}
                         </span>
                       </td>
-                      <td className="px-6 py-4 whitespace-nowrap">
-                        <span className="text-xs text-gray-900">
+                      <td className="px-6 py-4">
+                        <span 
+                          className="text-xs text-gray-900 truncate block max-w-[120px]" 
+                          title={transaction.user_name || 'Unknown'}
+                        >
                           {transaction.user_name || 'Unknown'}
                         </span>
                       </td>
-                      <td className="px-6 py-4 whitespace-nowrap">
-                        <span className="text-xs text-gray-500 italic">
+                      <td className="px-6 py-4">
+                        <span 
+                          className="text-xs text-gray-500 italic truncate block max-w-[120px]" 
+                          title={transaction.note || '-'}
+                        >
                           {transaction.note || '-'}
                         </span>
                       </td>
