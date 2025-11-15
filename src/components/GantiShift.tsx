@@ -1203,39 +1203,43 @@ export default function GantiShift() {
                         {productSales.map((product, idx) => (
                           <tr key={`${product.product_id}-${product.platform}-${product.transaction_type}-${idx}`} className="border-b border-gray-200 hover:bg-gray-50">
                             <td className="py-3 px-4 font-medium">
-                              <div>
+                              <div className="text-gray-900">
                                 {product.is_bundle_item && <span className="text-xs font-semibold text-purple-600">[Bundle] </span>}
                                 {product.product_name}
                               </div>
-                              <div className="text-xs text-gray-500">
+                              <div className="text-xs text-gray-700">
                                 {product.transaction_type === 'drinks' ? 'Drinks' : 'Bakery'}
                                 {' · '}
                                 {formatPlatformLabel(product.platform)}
                               </div>
                             </td>
-                            <td className="py-3 px-4 text-right font-medium">{product.total_quantity}</td>
+                            <td className="py-3 px-4 text-right font-medium text-gray-900">{product.total_quantity}</td>
                             <td className="py-3 px-4 text-right font-medium">
                               {product.is_bundle_item ? (
-                                <span className="text-gray-400">-</span>
+                                <span className="text-gray-700">-</span>
                               ) : (
-                                formatRupiah(
-                                  product.base_unit_price ??
-                                    (product.total_quantity > 0 ? product.base_subtotal / product.total_quantity : 0)
-                                )
+                                <span className="text-gray-900">
+                                  {formatRupiah(
+                                    product.base_unit_price ??
+                                      (product.total_quantity > 0 ? product.base_subtotal / product.total_quantity : 0)
+                                  )}
+                                </span>
                               )}
                             </td>
                             <td className="py-3 px-4 text-right font-semibold">
                               {product.is_bundle_item ? (
-                                <span className="text-gray-400">-</span>
+                                <span className="text-gray-700">-</span>
                               ) : (
-                                formatRupiah(product.base_subtotal)
+                                <span className="text-gray-900">
+                                  {formatRupiah(product.base_subtotal)}
+                                </span>
                               )}
                             </td>
                           </tr>
                         ))}
                         <tr className="border-t-2 border-gray-300 bg-gray-50">
-                          <td className="py-3 px-4 font-bold">TOTAL</td>
-                          <td className="py-3 px-4 text-right font-bold">
+                          <td className="py-3 px-4 font-bold text-gray-900">TOTAL</td>
+                          <td className="py-3 px-4 text-right font-bold text-gray-900">
                             {productSales.reduce((sum, p) => sum + p.total_quantity, 0)}
                           </td>
                           <td className="py-3 px-4 text-right font-bold">
@@ -1257,7 +1261,7 @@ export default function GantiShift() {
                               const label = `${transactionType === 'drinks' ? 'Drinks' : 'Bakery'} · ${formatPlatformLabel(platform)}`;
                               const unitPrice = value.quantity > 0 ? value.base / value.quantity : 0;
                               return (
-                                <div key={key} className="flex justify-between text-sm text-gray-600">
+                                <div key={key} className="flex justify-between text-sm text-gray-800">
                                   <span>{label}</span>
                                   <span>{formatRupiah(unitPrice)}</span>
                                 </div>
@@ -1267,7 +1271,7 @@ export default function GantiShift() {
                             const totalBase = regularProducts.reduce((sum, p) => sum + p.base_subtotal, 0);
                             const overallUnitPrice = totalQty > 0 ? totalBase / totalQty : 0;
                             rows.push(
-                              <div key="overall" className="flex justify-between text-sm font-semibold text-gray-700">
+                              <div key="overall" className="flex justify-between text-sm font-semibold text-gray-900">
                                 <span>Overall</span>
                                 <span>{formatRupiah(overallUnitPrice)}</span>
                               </div>
@@ -1275,7 +1279,7 @@ export default function GantiShift() {
                             return rows;
                           })()}
                           </td>
-                          <td className="py-3 px-4 text-right font-bold">
+                          <td className="py-3 px-4 text-right font-bold text-gray-900">
                             {formatRupiah(productSales.filter(p => !p.is_bundle_item).reduce((sum, p) => sum + p.base_subtotal, 0))}
                           </td>
                         </tr>
@@ -1310,19 +1314,19 @@ export default function GantiShift() {
                         {customizationSales.map((item, idx) => (
                           <tr key={idx} className="border-b border-gray-200 hover:bg-gray-50">
                             <td className="py-3 px-4">
-                              <div className="font-medium text-gray-800">{item.option_name}</div>
-                              <div className="text-xs text-gray-500">{item.customization_name}</div>
+                              <div className="font-medium text-gray-900">{item.option_name}</div>
+                              <div className="text-xs text-gray-700">{item.customization_name}</div>
                             </td>
-                            <td className="py-3 px-4 text-right font-medium">{item.total_quantity}</td>
-                            <td className="py-3 px-4 text-right font-semibold">{formatRupiah(item.total_revenue)}</td>
+                            <td className="py-3 px-4 text-right font-medium text-gray-900">{item.total_quantity}</td>
+                            <td className="py-3 px-4 text-right font-semibold text-gray-900">{formatRupiah(item.total_revenue)}</td>
                           </tr>
                         ))}
                         <tr className="border-t-2 border-gray-300 bg-gray-50">
-                          <td className="py-3 px-4 font-bold">TOTAL</td>
-                          <td className="py-3 px-4 text-right font-bold">
+                          <td className="py-3 px-4 font-bold text-gray-900">TOTAL</td>
+                          <td className="py-3 px-4 text-right font-bold text-gray-900">
                             {customizationSales.reduce((sum, item) => sum + item.total_quantity, 0)}
                           </td>
-                          <td className="py-3 px-4 text-right font-bold">
+                          <td className="py-3 px-4 text-right font-bold text-gray-900">
                             {formatRupiah(customizationSales.reduce((sum, item) => sum + item.total_revenue, 0))}
                           </td>
                         </tr>
@@ -1355,13 +1359,13 @@ export default function GantiShift() {
                       <>
                         {paymentBreakdown.map((item, idx) => (
                           <tr key={idx} className="border-b border-gray-100">
-                            <td className="py-3 px-4">{item.payment_method_name || item.payment_method_code}</td>
-                            <td className="py-3 px-4 text-right font-medium">{item.transaction_count}</td>
+                            <td className="py-3 px-4 text-gray-900 font-medium">{item.payment_method_name || item.payment_method_code}</td>
+                            <td className="py-3 px-4 text-right font-medium text-gray-900">{item.transaction_count}</td>
                           </tr>
                         ))}
                         <tr className="border-t-2 border-gray-300 bg-gray-50">
-                          <td className="py-3 px-4 font-bold">TOTAL</td>
-                          <td className="py-3 px-4 text-right font-bold">{totalPaymentCount}</td>
+                          <td className="py-3 px-4 font-bold text-gray-900">TOTAL</td>
+                          <td className="py-3 px-4 text-right font-bold text-gray-900">{totalPaymentCount}</td>
                         </tr>
                       </>
                     ) : (
@@ -1455,30 +1459,30 @@ export default function GantiShift() {
             <h3 className="text-xl font-bold text-gray-800 mb-4">Konfirmasi Akhiri Shift</h3>
             <div className="space-y-3 mb-6">
               <div className="flex justify-between">
-                <span className="text-gray-600">Total Pesanan:</span>
-                <span className="font-semibold">{statistics.order_count} transaksi</span>
+                <span className="text-gray-800 font-medium">Total Pesanan:</span>
+                <span className="font-semibold text-gray-900">{statistics.order_count} transaksi</span>
               </div>
               <div className="flex justify-between">
-                <span className="text-gray-600">Total Transaksi:</span>
-                <span className="font-semibold">{formatRupiah(statistics.total_amount)}</span>
+                <span className="text-gray-800 font-medium">Total Transaksi:</span>
+                <span className="font-semibold text-gray-900">{formatRupiah(statistics.total_amount)}</span>
               </div>
               <div className="flex justify-between">
-                <span className="text-gray-600">Voucher Dipakai:</span>
-                <span className="font-semibold">{statistics.voucher_count} transaksi</span>
+                <span className="text-gray-800 font-medium">Voucher Dipakai:</span>
+                <span className="font-semibold text-gray-900">{statistics.voucher_count} transaksi</span>
               </div>
               <div className="flex justify-between">
-                <span className="text-gray-600">Total Diskon Voucher:</span>
-                <span className="font-semibold text-green-600">
+                <span className="text-gray-800 font-medium">Total Diskon Voucher:</span>
+                <span className="font-semibold text-green-700">
                   {statistics.total_discount > 0 ? formatRupiah(-statistics.total_discount) : formatRupiah(0)}
                 </span>
               </div>
               <div className="flex justify-between">
-                <span className="text-gray-600">Cash (Shift):</span>
-                <span className="font-semibold">{formatRupiah(cashSummary.cash_shift)}</span>
+                <span className="text-gray-800 font-medium">Cash (Shift):</span>
+                <span className="font-semibold text-gray-900">{formatRupiah(cashSummary.cash_shift)}</span>
               </div>
               <div className="flex justify-between pt-3 border-t border-gray-200">
-                <span className="text-gray-800 font-medium">Cash in Cashier:</span>
-                <span className="font-bold text-lg text-purple-600">{formatRupiah(totalCashInCashier)}</span>
+                <span className="text-gray-900 font-semibold">Cash in Cashier:</span>
+                <span className="font-bold text-lg text-purple-700">{formatRupiah(totalCashInCashier)}</span>
               </div>
             </div>
             <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-3 mb-6">
@@ -1511,21 +1515,21 @@ export default function GantiShift() {
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
           <div className="bg-white rounded-lg shadow-xl max-w-md w-full p-6 animate-in zoom-in">
             <h3 className="text-xl font-bold text-gray-800 mb-4">Force Close Shift</h3>
-            <p className="text-sm text-gray-600 mb-4">
-              Shift ini dimiliki oleh <span className="font-semibold text-gray-800">{activeShift?.user_name}</span>. Pastikan kasir sebelumnya tidak tersedia sebelum melakukan force close.
+            <p className="text-sm text-gray-800 mb-4">
+              Shift ini dimiliki oleh <span className="font-semibold text-gray-900">{activeShift?.user_name}</span>. Pastikan kasir sebelumnya tidak tersedia sebelum melakukan force close.
             </p>
             <div className="space-y-3 mb-6">
               <div className="flex justify-between">
-                <span className="text-gray-600">Total Pesanan:</span>
-                <span className="font-semibold">{statistics.order_count} transaksi</span>
+                <span className="text-gray-800 font-medium">Total Pesanan:</span>
+                <span className="font-semibold text-gray-900">{statistics.order_count} transaksi</span>
               </div>
               <div className="flex justify-between">
-                <span className="text-gray-600">Total Transaksi:</span>
-                <span className="font-semibold">{formatRupiah(statistics.total_amount)}</span>
+                <span className="text-gray-800 font-medium">Total Transaksi:</span>
+                <span className="font-semibold text-gray-900">{formatRupiah(statistics.total_amount)}</span>
               </div>
               <div className="flex justify-between">
-                <span className="text-gray-600">Cash (Shift):</span>
-                <span className="font-semibold">{formatRupiah(cashSummary.cash_shift)}</span>
+                <span className="text-gray-800 font-medium">Cash (Shift):</span>
+                <span className="font-semibold text-gray-900">{formatRupiah(cashSummary.cash_shift)}</span>
               </div>
             </div>
             <div className="bg-orange-50 border border-orange-200 rounded-lg p-3 mb-6">
