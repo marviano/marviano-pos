@@ -944,7 +944,7 @@ export default function PaymentModal({
           cashier: cashierName,
           transactionType: transactionType,
           pickupMethod: finalPickupMethod,
-          printer1Counter: printer1Counter, // Store counter separately for reference
+          printer1Counter: printer1Counter, // Receipt printer daily counter (only for receiptPrinter)
           globalCounter
         };
         
@@ -977,7 +977,14 @@ export default function PaymentModal({
               }
             }
             await window.electronAPI?.logPrinter2Print?.(transactionData.id, printer2Counter, 'manual', undefined, globalCounter);
-            const printer2Data = { ...printData, printerType: 'receiptizePrinter', receiptNumber: transactionData.id, printer2Counter } as any;
+            // Create printer2Data with receiptizePrinter counter, remove printer1Counter to avoid confusion
+            const { printer1Counter: _, ...printDataWithoutPrinter1 } = printData;
+            const printer2Data = { 
+              ...printDataWithoutPrinter1, 
+              printerType: 'receiptizePrinter', 
+              receiptNumber: transactionData.id, 
+              printer2Counter // Receiptize printer daily counter (only for receiptizePrinter)
+            } as any;
             await new Promise(r => setTimeout(r, 500));
             const print2Result = await window.electronAPI?.printReceipt?.(printer2Data);
             if (print2Result?.success) {

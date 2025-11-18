@@ -938,7 +938,7 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
                       onClick={() => handleSort('payment_method')}
                     >
                       <div className="flex items-center gap-1">
-                        <span className="text-[10px]">M.Pembayaran</span>
+                        <span className="text-[10px]">Metode</span>
                         {getSortIcon('payment_method')}
                       </div>
                     </th>

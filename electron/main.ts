@@ -4192,12 +4192,15 @@ function generateReceiptHTML(data: any, businessName: string, options?: ReceiptF
   <div class="address">Jl. Kalimantan no. 21, Kartoharjo<br>Kec. Kartoharjo, Kota Madiun</div>
   
   ${(() => {
-    // Choose per-printer display number: Printer 1 uses printer1Counter, Printer 2 uses printer2Counter
-    // Fall back to tableNumber, then '01'
+    // Choose per-printer display number: Each printer type uses its own daily counter
+    // Printer 1 (receiptPrinter) uses printer1Counter from receiptPrinter counter
+    // Printer 2 (receiptizePrinter) uses printer2Counter from receiptizePrinter counter
+    // Fall back to globalCounter, then tableNumber, then '01'
     const isReceiptize = data.printerType === 'receiptizePrinter';
-    const displayCounter = data.globalCounter ?? (isReceiptize ? data.printer2Counter : data.printer1Counter);
-    const number = displayCounter ?? data.tableNumber ?? '01';
-    const numStr = String(number).padStart(2, '0');
+    // Prioritize per-printer counter over globalCounter to ensure each printer has its own counter
+    const perPrinterCounter = isReceiptize ? data.printer2Counter : data.printer1Counter;
+    const displayCounter = perPrinterCounter ?? data.globalCounter ?? data.tableNumber ?? '01';
+    const numStr = String(displayCounter).padStart(2, '0');
     return `<div class="transaction-type">${transactionDisplay} ${numStr}</div>`;
   })()}
   
