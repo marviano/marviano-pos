@@ -1,12 +1,14 @@
-type ElectronAPI = any;
+type UnknownRecord = Record<string, unknown>;
 
-const parseEpoch = (entry: any): number | null => {
+type ElectronAPI = UnknownRecord;
+
+const parseEpoch = (entry: UnknownRecord | null | undefined): number | null => {
   if (!entry) return null;
   const epoch = Number(entry.printed_at_epoch);
   if (Number.isFinite(epoch) && epoch > 0) {
     return epoch;
   }
-  if (entry.printed_at) {
+  if (entry.printed_at && typeof entry.printed_at === 'string') {
     const parsed = Date.parse(entry.printed_at);
     if (!Number.isNaN(parsed)) {
       return parsed;
@@ -16,7 +18,7 @@ const parseEpoch = (entry: any): number | null => {
 };
 
 const buildDailyCounters = (
-  audits: any[],
+  audits: UnknownRecord[],
   counterField: string,
   printerType: string,
   businessId: number
@@ -50,18 +52,18 @@ const buildDailyCounters = (
  * Restore local printer audit logs and daily counters from cloud sync payload.
  */
 export const restorePrinterStateFromCloud = async (
-  data: any,
+  data: UnknownRecord,
   electronAPI: ElectronAPI,
   businessId: number
 ) => {
   if (!electronAPI) return;
 
-  const printer1Audits: any[] = Array.isArray(data?.printer1Audits) ? data.printer1Audits : [];
-  const printer2Audits: any[] = Array.isArray(data?.printer2Audits) ? data.printer2Audits : [];
+  const printer1Audits: UnknownRecord[] = Array.isArray(data?.printer1Audits) ? data.printer1Audits as UnknownRecord[] : [];
+  const printer2Audits: UnknownRecord[] = Array.isArray(data?.printer2Audits) ? data.printer2Audits as UnknownRecord[] : [];
 
   try {
     if (printer1Audits.length && electronAPI?.localDbUpsertPrinterAudits) {
-      await electronAPI.localDbUpsertPrinterAudits('receipt', printer1Audits);
+      await (electronAPI.localDbUpsertPrinterAudits as (printerType: string, audits: unknown[]) => Promise<{ success: boolean }>)('receipt', printer1Audits);
     }
   } catch (error) {
     console.error('[SYNC] Failed to upsert printer1 audits:', error);
@@ -69,7 +71,7 @@ export const restorePrinterStateFromCloud = async (
 
   try {
     if (printer2Audits.length && electronAPI?.localDbUpsertPrinterAudits) {
-      await electronAPI.localDbUpsertPrinterAudits('receiptize', printer2Audits);
+      await (electronAPI.localDbUpsertPrinterAudits as (printerType: string, audits: unknown[]) => Promise<{ success: boolean }>)('receiptize', printer2Audits);
     }
   } catch (error) {
     console.error('[SYNC] Failed to upsert printer2 audits:', error);
@@ -93,7 +95,7 @@ export const restorePrinterStateFromCloud = async (
 
   if (counters.length && electronAPI?.localDbUpsertPrinterDailyCounters) {
     try {
-      await electronAPI.localDbUpsertPrinterDailyCounters(counters);
+      await (electronAPI.localDbUpsertPrinterDailyCounters as (counters: unknown[]) => Promise<{ success: boolean }>)(counters);
     } catch (error) {
       console.error('[SYNC] Failed to upsert printer daily counters:', error);
     }

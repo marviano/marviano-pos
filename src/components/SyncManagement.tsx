@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useEffect, useRef, useMemo } from 'react';
+import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import { 
   RefreshCw, 
   Cloud, 
@@ -14,21 +14,25 @@ import {
   Eye,
   EyeOff,
   Archive,
-  ChevronDown,
-  ChevronUp,
   AlertTriangle,
   X
 } from 'lucide-react';
 import { offlineSyncService } from '@/lib/offlineSync';
 import { smartSyncService } from '@/lib/smartSync';
 import { restorePrinterStateFromCloud } from '@/lib/printerSyncUtils';
+import { getApiUrl } from '@/lib/api';
+
+type UnknownRecord = Record<string, unknown>;
+type SmartSyncStatus = ReturnType<typeof smartSyncService.getStatus>;
+
+const getElectronAPI = () => (typeof window !== 'undefined' ? window.electronAPI : undefined);
 
 interface SyncLog {
   id: string;
   timestamp: Date;
   type: 'info' | 'success' | 'warning' | 'error';
   message: string;
-  details?: any;
+  details?: unknown;
 }
 
 interface SyncStatus {
@@ -40,9 +44,10 @@ interface SyncStatus {
 }
 
 interface OfflineTransaction {
-  id: number;
+  id: string | number;
   business_id: number;
   user_id: number;
+  shift_uuid?: string; // Added shift_uuid
   payment_method: string;
   pickup_method: string;
   total_amount: number;
@@ -55,6 +60,129 @@ interface OfflineTransaction {
   created_at: string;
 }
 
+interface OfflineTransactionItemRow {
+  product_id: number;
+  quantity: number;
+  unit_price: number;
+  total_price: number;
+  customizations?: Array<{
+    customization_id: number;
+    customization_name: string;
+    selected_options: Array<{
+      option_id: number;
+      option_name: string;
+      price_adjustment: number;
+    }>;
+  }> | null;
+  custom_note?: string | null;
+}
+
+interface OfflineShift {
+  id: number;
+  uuid_id: string;
+  business_id: number;
+  user_id: number;
+  user_name: string;
+  shift_start: string;
+  shift_end: string | null;
+  modal_awal: number;
+  status: string;
+  created_at: string;
+}
+
+const isOfflineShift = (value: unknown): value is OfflineShift => {
+  if (typeof value !== 'object' || value === null) return false;
+  const record = value as Partial<OfflineShift>;
+  return (
+    typeof record.id === 'number' &&
+    typeof record.uuid_id === 'string' &&
+    typeof record.business_id === 'number' &&
+    typeof record.user_id === 'number' &&
+    typeof record.shift_start === 'string'
+  );
+};
+
+const normalizeOfflineShifts = (rows: unknown): OfflineShift[] =>
+  Array.isArray(rows) ? rows.filter(isOfflineShift) : [];
+
+const isOfflineTransaction = (value: unknown): value is OfflineTransaction => {
+  if (typeof value !== 'object' || value === null) return false;
+  const record = value as Partial<OfflineTransaction>;
+  return (
+    (typeof record.id === 'number' || typeof record.id === 'string') &&
+    typeof record.business_id === 'number' &&
+    typeof record.user_id === 'number' &&
+    typeof record.payment_method === 'string' &&
+    typeof record.pickup_method === 'string' &&
+    typeof record.final_amount === 'number' &&
+    typeof record.created_at === 'string'
+  );
+};
+
+const normalizeOfflineTransactions = (rows: unknown): OfflineTransaction[] =>
+  Array.isArray(rows) ? rows.filter(isOfflineTransaction) : [];
+
+const isOfflineTransactionItemRow = (value: unknown): value is OfflineTransactionItemRow => {
+  if (typeof value !== 'object' || value === null) return false;
+  const record = value as Partial<OfflineTransactionItemRow>;
+  return (
+    typeof record.product_id === 'number' &&
+    typeof record.quantity === 'number' &&
+    typeof record.unit_price === 'number' &&
+    typeof record.total_price === 'number'
+  );
+};
+
+const normalizeTransactionItems = (rows: unknown): OfflineTransactionItemRow[] =>
+  Array.isArray(rows) ? rows.filter(isOfflineTransactionItemRow) : [];
+
+const toRecordArray = (value: unknown): UnknownRecord[] =>
+  Array.isArray(value)
+    ? value.filter((item): item is UnknownRecord => typeof item === 'object' && item !== null)
+    : [];
+
+const convertUtc7ToUtcDate = (
+  year: number,
+  month: number,
+  day: number,
+  hour: number,
+  minute: number,
+  isEnd: boolean
+): Date => {
+  const seconds = isEnd ? 59 : 0;
+  const milliseconds = isEnd ? 999 : 0;
+  const utcMillis = Date.UTC(year, month - 1, day, hour - 7, minute, seconds, milliseconds);
+  return new Date(utcMillis);
+};
+
+const normalizeDateInput = (value: string | null | undefined, isEnd: boolean): string | null => {
+  if (!value) return null;
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+
+  const dateOnlyMatch = trimmed.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (dateOnlyMatch) {
+    const [, y, m, d] = dateOnlyMatch.map(Number);
+    const date = convertUtc7ToUtcDate(y, m, d, isEnd ? 23 : 0, isEnd ? 59 : 0, isEnd);
+    return date.toISOString();
+  }
+
+  const dateTimeMatch = trimmed.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})$/);
+  if (dateTimeMatch) {
+    const [, y, m, d, h, min] = dateTimeMatch.map(Number);
+    const date = convertUtc7ToUtcDate(y, m, d, h, min, isEnd);
+    return date.toISOString();
+  }
+
+  const parsed = new Date(trimmed);
+  if (Number.isNaN(parsed.getTime())) return null;
+  if (isEnd) {
+    parsed.setUTCMilliseconds(999);
+    parsed.setUTCSeconds(59);
+  }
+  return parsed.toISOString();
+};
+
 export default function SyncManagement() {
   const [syncStatus, setSyncStatus] = useState<SyncStatus>({
     isOnline: true,
@@ -66,6 +194,7 @@ export default function SyncManagement() {
 
   const [syncLogs, setSyncLogs] = useState<SyncLog[]>([]);
   const [offlineTransactions, setOfflineTransactions] = useState<OfflineTransaction[]>([]);
+  const [offlineShifts, setOfflineShifts] = useState<OfflineShift[]>([]);
   const [showLogs, setShowLogs] = useState(true);
   const [showOfflineData, setShowOfflineData] = useState(true);
   const [isLoadingOfflineData, setIsLoadingOfflineData] = useState(false);
@@ -90,11 +219,42 @@ export default function SyncManagement() {
   const [dangerTo, setDangerTo] = useState<string>('');
   const logsEndRef = useRef<HTMLDivElement>(null);
 
+  const [smartSyncStatus, setSmartSyncStatus] = useState<SmartSyncStatus | null>(null);
+
   // Check if we're in Electron environment
-  const isElectron = typeof window !== 'undefined' && (window as any).electronAPI;
+  const isElectron = Boolean(getElectronAPI());
+
+  useEffect(() => {
+    const updateStatus = () => {
+      setSmartSyncStatus(smartSyncService.getStatus());
+    };
+    updateStatus();
+    const interval = setInterval(updateStatus, 5000);
+    return () => clearInterval(interval);
+  }, []);
+
+  useEffect(() => {
+    const checkPendingTransactions = async () => {
+      const electronAPI = getElectronAPI();
+      if (!electronAPI?.localDbGetPendingTransactions) {
+        return;
+      }
+      try {
+        const pending = await electronAPI.localDbGetPendingTransactions();
+        // Pending count is now managed by syncStatus state
+        console.log('Pending transactions:', Array.isArray(pending) ? pending.length : 0);
+      } catch (error) {
+        console.warn('Failed to get pending transactions:', error);
+      }
+    };
+
+    checkPendingTransactions();
+    const interval = setInterval(checkPendingTransactions, 10000);
+    return () => clearInterval(interval);
+  }, []);
 
   // Add log entry
-  const addLog = (type: SyncLog['type'], message: string, details?: any) => {
+  const addLog = useCallback((type: SyncLog['type'], message: string, details?: unknown) => {
     const log: SyncLog = {
       id: `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
       timestamp: new Date(),
@@ -108,17 +268,17 @@ export default function SyncManagement() {
     setTimeout(() => {
       logsEndRef.current?.scrollIntoView({ behavior: 'smooth' });
     }, 100);
-  };
+  }, []);
 
   // Get current sync status
-  const getSyncStatus = async (): Promise<SyncStatus> => {
+  const getSyncStatus = useCallback(async (): Promise<SyncStatus> => {
     try {
       const connectionStatus = offlineSyncService.getDetailedStatus();
       const pendingCount = await smartSyncService.getPendingTransactionCount();
       
       return {
         isOnline: connectionStatus.isOnline,
-        lastSync: connectionStatus.lastSyncTime || null,
+        lastSync: connectionStatus.lastSyncTime ? (typeof connectionStatus.lastSyncTime === 'number' ? new Date(connectionStatus.lastSyncTime).toISOString() : String(connectionStatus.lastSyncTime)) : null,
         pendingTransactions: pendingCount,
         syncInProgress: false,
         error: null
@@ -132,22 +292,25 @@ export default function SyncManagement() {
         error: error instanceof Error ? error.message : 'Unknown error'
       };
     }
-  };
+  }, []);
 
   // Update sync status
-  const updateSyncStatus = async (logChanges: boolean = false) => {
+  const updateSyncStatus = useCallback(async (logChanges: boolean = false) => {
     const status = await getSyncStatus();
-    const previousStatus = syncStatus;
-    
-    setSyncStatus(status);
-    
-    // Only log if there's a change or if explicitly requested
-    if (logChanges || 
-        previousStatus.isOnline !== status.isOnline || 
-        previousStatus.pendingTransactions !== status.pendingTransactions) {
-      addLog('info', `Status updated: ${status.isOnline ? 'Online' : 'Offline'}, Pending: ${status.pendingTransactions}`);
-    }
-  };
+    setSyncStatus(prev => {
+      if (
+        logChanges ||
+        prev.isOnline !== status.isOnline ||
+        prev.pendingTransactions !== status.pendingTransactions
+      ) {
+        addLog(
+          'info',
+          `Status updated: ${status.isOnline ? 'Online' : 'Offline'}, Pending: ${status.pendingTransactions}`
+        );
+      }
+      return status;
+    });
+  }, [addLog, getSyncStatus]);
 
   // Handle UUID copy with notification
   const handleCopyUuid = async (uuid: string) => {
@@ -176,28 +339,80 @@ export default function SyncManagement() {
     }
   };
 
+  // Load offline shifts
+  const loadOfflineShifts = useCallback(async () => {
+    const electronAPI = getElectronAPI();
+    if (!electronAPI?.localDbGetUnsyncedShifts) {
+      return;
+    }
+
+    try {
+      const shifts = await electronAPI.localDbGetUnsyncedShifts(14);
+      const normalized = normalizeOfflineShifts(shifts);
+      setOfflineShifts(normalized);
+      if (normalized.length > 0) {
+        addLog('info', `Found ${normalized.length} offline shifts pending upload`);
+      }
+    } catch (error) {
+      addLog(
+        'error',
+        `Failed to load offline shifts: ${error instanceof Error ? error.message : 'Unknown error'}`
+      );
+    }
+  }, [addLog]);
+
   // Load offline transactions
-  const loadOfflineTransactions = async () => {
-    if (!isElectron) {
+  const loadOfflineTransactions = useCallback(async () => {
+    const electronAPI = getElectronAPI();
+    if (!electronAPI?.localDbGetUnsyncedTransactions) {
       addLog('error', 'Offline database not available');
       return;
     }
 
     setIsLoadingOfflineData(true);
     try {
-      const transactions = await (window as any).electronAPI.localDbGetUnsyncedTransactions(14);
-      setOfflineTransactions(transactions);
-      addLog('success', `Loaded ${transactions.length} offline transactions pending upload`);
+      const transactions = await electronAPI.localDbGetUnsyncedTransactions(14);
+      const normalized = normalizeOfflineTransactions(transactions);
+      setOfflineTransactions(normalized);
+      addLog('success', `Loaded ${normalized.length} offline transactions pending upload`);
     } catch (error) {
-      addLog('error', `Failed to load offline transactions: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      addLog(
+        'error',
+        `Failed to load offline transactions: ${error instanceof Error ? error.message : 'Unknown error'}`
+      );
     } finally {
       setIsLoadingOfflineData(false);
     }
-  };
+  }, [addLog]);
+
+  const fetchTransactionCounts = useCallback(async () => {
+    try {
+      const electronAPI = getElectronAPI();
+      if (electronAPI?.localDbGetTransactions) {
+        const offlineTx = await electronAPI.localDbGetTransactions(14, 10000);
+        setOfflineTransactionCount(Array.isArray(offlineTx) ? offlineTx.length : 0);
+      }
+
+      try {
+        const response = await fetch(getApiUrl('/api/transactions?business_id=14&limit=10000'));
+        if (response.ok) {
+          const data = await response.json();
+          setOnlineTransactionCount(Array.isArray(data.transactions) ? data.transactions.length : 0);
+        } else {
+          setOnlineTransactionCount(0);
+        }
+      } catch {
+        setOnlineTransactionCount(0);
+      }
+    } catch (error) {
+      console.error('Failed to fetch transaction counts:', error);
+    }
+  }, []);
 
   // Full database sync (Download from cloud)
-  const syncFromCloud = async () => {
-    if (!isElectron) {
+  const syncFromCloud = useCallback(async () => {
+    const electronAPI = getElectronAPI();
+    if (!electronAPI) {
       addLog('error', 'Offline database not available');
       return;
     }
@@ -207,110 +422,134 @@ export default function SyncManagement() {
     setSyncProgress(50); // Start download at 50%
 
     try {
-      const response = await fetch('/api/sync');
+      const response = await fetch(getApiUrl('/api/sync'));
       if (!response.ok) {
         throw new Error(`HTTP ${response.status}: ${response.statusText}`);
       }
       
-      const jsonData = await response.json();
-      addLog('info', `Received data from cloud: ${JSON.stringify(jsonData.counts)}`);
+      const jsonData: UnknownRecord = await response.json();
+      addLog('info', `Received data from cloud: ${JSON.stringify(jsonData.counts ?? {})}`);
 
-      // Save to local database - use jsonData.data (syncResults)
-      const electronAPI = (window as any).electronAPI;
-      const data = jsonData.data; // Access the actual sync results
+      const data = (jsonData.data ?? {}) as UnknownRecord;
       const targetBusinessId = Number(jsonData.businessId ?? 14);
-      
-      if (data.products && data.products.length > 0) {
-        await electronAPI.localDbUpsertProducts(data.products);
-        addLog('success', `✅ ${data.products.length} products synced to local database`);
+
+      // 1. SYNC DEPENDENCIES FIRST (Categories, Types, Options)
+      const category1 = toRecordArray(data.category1);
+      if (category1.length > 0 && electronAPI.localDbUpsertCategory1) {
+        await electronAPI.localDbUpsertCategory1(category1);
+        addLog('success', `✅ ${category1.length} category1 synced to local database`);
       }
       
-      if (data.transactions && data.transactions.length > 0) {
-        addLog('info', `🔄 Syncing ${data.transactions.length} transactions to local database...`);
-        console.log('📥 [SYNC] Transaction sample:', data.transactions[0]);
-        console.log('📥 [SYNC] Total transactions to sync:', data.transactions.length);
-        
-        // Show dates being synced with timestamp info
-        const syncedDates = [...new Set(data.transactions.map((tx: any) => 
-          new Date(tx.created_at).toISOString().split('T')[0]
-        ))].sort();
+      const category2 = toRecordArray(data.category2);
+      if (category2.length > 0 && electronAPI.localDbUpsertCategory2) {
+        await electronAPI.localDbUpsertCategory2(category2);
+        addLog('success', `✅ ${category2.length} category2 synced to local database`);
+      }
+
+      const customizationTypes = toRecordArray(data.customizationTypes);
+      if (customizationTypes.length > 0 && electronAPI.localDbUpsertCustomizationTypes) {
+        await electronAPI.localDbUpsertCustomizationTypes(customizationTypes);
+        addLog('success', `✅ ${customizationTypes.length} customization types synced to local database`);
+      }
+
+      const customizationOptions = toRecordArray(data.customizationOptions);
+      if (customizationOptions.length > 0 && electronAPI.localDbUpsertCustomizationOptions) {
+        await electronAPI.localDbUpsertCustomizationOptions(customizationOptions);
+        addLog('success', `✅ ${customizationOptions.length} customization options synced to local database`);
+      }
+
+      // 2. SYNC PRODUCTS
+      const products = Array.isArray(data.products) ? (data.products as UnknownRecord[]) : [];
+      if (products.length > 0 && electronAPI.localDbUpsertProducts) {
+        await electronAPI.localDbUpsertProducts(products);
+        addLog('success', `✅ ${products.length} products synced to local database`);
+      } else {
+        addLog('warning', `⚠️ No products found in sync data (received: ${products.length})`);
+      }
+
+      // 3. SYNC DEPENDENTS (Product Customizations, Bundle Items)
+      const productCustomizations = toRecordArray(data.productCustomizations);
+      if (productCustomizations.length > 0 && electronAPI.localDbUpsertProductCustomizations) {
+        await electronAPI.localDbUpsertProductCustomizations(productCustomizations);
+        addLog('success', `✅ ${productCustomizations.length} product customizations synced`);
+      }
+
+      const bundleItems = toRecordArray(data.bundleItems);
+      if (bundleItems.length > 0 && electronAPI.localDbUpsertBundleItems) {
+        await electronAPI.localDbUpsertBundleItems(bundleItems);
+        addLog('success', `✅ ${bundleItems.length} bundle items synced`);
+      }
+      
+      // 4. Sync Transactions and other tables
+      const cloudTransactions = toRecordArray(data.transactions);
+      if (cloudTransactions.length > 0 && electronAPI.localDbUpsertTransactions) {
+        addLog('info', `🔄 Syncing ${cloudTransactions.length} transactions to local database...`);
+        const syncedDates = [
+          ...new Set(
+            cloudTransactions
+              .map(tx => (typeof tx.created_at === 'string' ? tx.created_at : null))
+              .filter(Boolean)
+              .map(date => new Date(String(date)).toISOString().split('T')[0])
+          ),
+        ].sort();
         console.log('📅 [SYNC] Dates being synced:', syncedDates);
-        console.log('📅 [SYNC] Sample timestamps:', JSON.stringify(data.transactions.slice(0, 3).map((tx: any) => ({id: tx.id, created_at: tx.created_at, parsed: new Date(tx.created_at).toISOString().split('T')[0]})), null, 2));
-        
-        // Mark downloaded transactions as already synced (they came from cloud)
-        const transactionsWithSyncStatus = data.transactions.map((tx: any) => ({
+
+        const transactionsWithSyncStatus = cloudTransactions.map(tx => ({
           ...tx,
-          synced_at: Date.now() // Already in cloud, so mark as synced
+          synced_at: Date.now(),
         }));
-        
-        const result = await electronAPI.localDbUpsertTransactions(transactionsWithSyncStatus);
-        console.log('📥 [SYNC] Insert result:', result);
-        addLog('success', `✅ Downloaded ${data.transactions.length} transactions from cloud`);
-        
-        // Verify they were saved by checking local database
-        const verifyCount = await electronAPI.localDbGetTransactions(14, 10000);
-        console.log('📥 [SYNC] Verification - Total transactions in offline DB now:', verifyCount.length);
+
+        await electronAPI.localDbUpsertTransactions(transactionsWithSyncStatus);
+        addLog('success', `✅ Downloaded ${cloudTransactions.length} transactions from cloud`);
       } else {
         addLog('info', 'ℹ️ No transactions to download from cloud');
-        console.log('📥 [SYNC] No transactions in response - data.transactions is:', data.transactions);
       }
       
-      if (data.transactionItems && data.transactionItems.length > 0) {
-        addLog('info', `🔄 Syncing ${data.transactionItems.length} transaction items to local database...`);
-        await electronAPI.localDbUpsertTransactionItems(data.transactionItems);
-        addLog('success', `✅ Downloaded ${data.transactionItems.length} transaction items from cloud`);
+      const transactionItems = toRecordArray(data.transactionItems);
+      if (transactionItems.length > 0 && electronAPI.localDbUpsertTransactionItems) {
+        addLog('info', `🔄 Syncing ${transactionItems.length} transaction items to local database...`);
+        await electronAPI.localDbUpsertTransactionItems(transactionItems);
+        addLog('success', `✅ Downloaded ${transactionItems.length} transaction items from cloud`);
       } else {
         addLog('info', 'ℹ️ No transaction items to download from cloud');
       }
 
       await restorePrinterStateFromCloud(data, electronAPI, targetBusinessId);
       
-      if (data.paymentMethods && data.paymentMethods.length > 0) {
-        await electronAPI.localDbUpsertPaymentMethods(data.paymentMethods);
-        addLog('success', `✅ ${data.paymentMethods.length} payment methods synced to local database`);
+      const paymentMethods = toRecordArray(data.paymentMethods);
+      if (paymentMethods.length > 0 && electronAPI.localDbUpsertPaymentMethods) {
+        await electronAPI.localDbUpsertPaymentMethods(paymentMethods);
+        addLog('success', `✅ ${paymentMethods.length} payment methods synced to local database`);
       }
       
-      if (data.banks && data.banks.length > 0) {
-        await electronAPI.localDbUpsertBanks(data.banks);
-        addLog('success', `✅ ${data.banks.length} banks synced to local database`);
+      const banks = toRecordArray(data.banks);
+      if (banks.length > 0 && electronAPI.localDbUpsertBanks) {
+        await electronAPI.localDbUpsertBanks(banks);
+        addLog('success', `✅ ${banks.length} banks synced to local database`);
       }
       
-      if (data.organizations && data.organizations.length > 0) {
-        await electronAPI.localDbUpsertOrganizations(data.organizations);
-        addLog('success', `✅ ${data.organizations.length} organizations synced to local database`);
+      const organizations = toRecordArray(data.organizations);
+      if (organizations.length > 0 && electronAPI.localDbUpsertOrganizations) {
+        await electronAPI.localDbUpsertOrganizations(organizations);
+        addLog('success', `✅ ${organizations.length} organizations synced to local database`);
       }
       
-      if (data.managementGroups && data.managementGroups.length > 0) {
-        await electronAPI.localDbUpsertManagementGroups(data.managementGroups);
-        addLog('success', `✅ ${data.managementGroups.length} management groups synced to local database`);
+      const managementGroups = toRecordArray(data.managementGroups);
+      if (managementGroups.length > 0 && electronAPI.localDbUpsertManagementGroups) {
+        await electronAPI.localDbUpsertManagementGroups(managementGroups);
+        addLog('success', `✅ ${managementGroups.length} management groups synced to local database`);
       }
       
-      if (data.category1 && data.category1.length > 0) {
-        await electronAPI.localDbUpsertCategory1(data.category1);
-        addLog('success', `✅ ${data.category1.length} category1 synced to local database`);
-      }
-      
-      if (data.category2 && data.category2.length > 0) {
-        await electronAPI.localDbUpsertCategory2(data.category2);
-        addLog('success', `✅ ${data.category2.length} category2 synced to local database`);
-      }
-      
-      if (data.clAccounts && data.clAccounts.length > 0) {
-        await electronAPI.localDbUpsertClAccounts(data.clAccounts);
-        addLog('success', `✅ ${data.clAccounts.length} CL accounts synced to local database`);
-      }
-      
-      if (data.bundleItems && data.bundleItems.length > 0) {
-        await electronAPI.localDbUpsertBundleItems(data.bundleItems);
-        addLog('success', `✅ ${data.bundleItems.length} bundle items synced to local database`);
+      const clAccounts = toRecordArray(data.clAccounts);
+      if (clAccounts.length > 0 && electronAPI.localDbUpsertClAccounts) {
+        await electronAPI.localDbUpsertClAccounts(clAccounts);
+        addLog('success', `✅ ${clAccounts.length} CL accounts synced to local database`);
       }
       
       addLog('success', '🎉 Full database sync completed successfully!');
       
-      // Update status and refresh counts
       await updateSyncStatus(true);
       await fetchTransactionCounts();
-      
     } catch (error) {
       addLog('error', `❌ Full database sync failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
       setSyncStatus(prev => ({ 
@@ -319,91 +558,117 @@ export default function SyncManagement() {
         error: error instanceof Error ? error.message : 'Sync failed' 
       }));
     }
-  };
+  }, [addLog, fetchTransactionCounts, updateSyncStatus]);
 
   // Upload offline transactions to cloud
-  const syncToCloud = async () => {
-    if (!isElectron) {
+  const syncToCloud = useCallback(async () => {
+    const electronAPI = getElectronAPI();
+    if (!electronAPI?.localDbGetUnsyncedTransactions || !electronAPI?.localDbGetUnsyncedShifts) {
       addLog('error', 'Offline database not available');
       return;
     }
 
     setSyncStatus(prev => ({ ...prev, syncInProgress: true, error: null }));
-    addLog('info', 'Starting upload of offline transactions to cloud...');
+    addLog('info', 'Starting upload of offline data to cloud...');
 
     try {
-      const electronAPI = (window as any).electronAPI;
-      const localTransactions = await electronAPI.localDbGetUnsyncedTransactions(14);
+      // 1. Upload Shifts First
+      const localShifts = await electronAPI.localDbGetUnsyncedShifts(14);
+      const shifts = normalizeOfflineShifts(localShifts);
       
-      if (localTransactions.length === 0) {
-        addLog('info', 'ℹ️ No transactions to upload - proceeding to download step');
-        setSyncProgress(50); // Skip to download step
-        await updateSyncStatus();
-        return; // Return early but don't fail - allows download step to proceed
+      if (shifts.length > 0) {
+        addLog('info', `📤 Uploading ${shifts.length} shifts to cloud...`);
+        
+        const syncedShiftIds: number[] = [];
+
+        for (const shift of shifts) {
+          try {
+            const response = await fetch(getApiUrl('/api/shifts/sync'), {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(shift),
+            });
+
+            if (response.ok) {
+              syncedShiftIds.push(shift.id);
+              addLog('success', `✅ Shift ${shift.id} uploaded successfully`);
+            } else {
+              addLog('warning', `⚠️ Failed to upload shift ${shift.id}: ${response.status}`);
+            }
+          } catch (error) {
+            addLog('error', `❌ Error uploading shift ${shift.id}: ${error instanceof Error ? error.message : 'Unknown error'}`);
+          }
+        }
+
+        if (syncedShiftIds.length > 0 && electronAPI.localDbMarkShiftsSynced) {
+          await electronAPI.localDbMarkShiftsSynced(syncedShiftIds);
+          addLog('info', `Marked ${syncedShiftIds.length} shifts as synced`);
+        }
       }
 
-      addLog('info', `📤 Uploading ${localTransactions.length} transactions to cloud...`);
+      // 2. Upload Transactions
+      const localTransactions = await electronAPI.localDbGetUnsyncedTransactions(14);
+      const transactions = normalizeOfflineTransactions(localTransactions);
+      
+      if (transactions.length === 0 && shifts.length === 0) {
+        addLog('info', 'ℹ️ No data to upload - proceeding to download step');
+        setSyncProgress(50); // Skip to download step
+        await updateSyncStatus();
+        return;
+      }
+
+      if (transactions.length > 0) {
+        addLog('info', `📤 Uploading ${transactions.length} transactions to cloud...`);
       setSyncProgress(0);
 
       let successCount = 0;
       let errorCount = 0;
-      const syncedIds: string[] = [];
+      const syncedIds: Array<number | string> = [];
 
-      // Upload transactions to cloud
-      for (let i = 0; i < localTransactions.length; i++) {
-        const transaction = localTransactions[i];
+      for (let i = 0; i < transactions.length; i++) {
+        const transaction = transactions[i];
         try {
-          // Update progress
-          const progress = Math.round((i / localTransactions.length) * 50); // Upload takes 50% of total
+          const progress = Math.round((i / transactions.length) * 50); // Upload takes 50%
           setSyncProgress(progress);
-          // Get transaction items for this transaction
-          const items = await electronAPI.localDbGetTransactionItems(transaction.id);
-          
-          // Map items to API format
-          const mappedItems = items.map((item: any) => ({
+
+          const rawItems = electronAPI.localDbGetTransactionItems ? await electronAPI.localDbGetTransactionItems(transaction.id) : [];
+          const items = normalizeTransactionItems(rawItems).map(item => ({
             product_id: item.product_id,
             quantity: item.quantity,
             unit_price: item.unit_price,
             total_price: item.total_price,
-            customizations: item.customizations_json ? JSON.parse(item.customizations_json) : undefined,
-            customNote: item.custom_note
+            customizations: item.customizations || undefined,
+            customNote: item.custom_note ?? undefined,
           }));
-          
-          // Prepare data matching API expectations (remove extra fields)
-          const uploadData = {
+
+          const uploadData: UnknownRecord = {
             id: transaction.id,
             business_id: transaction.business_id,
             user_id: transaction.user_id,
+            shift_uuid: transaction.shift_uuid ?? null, // Include shift_uuid
             payment_method: transaction.payment_method,
             pickup_method: transaction.pickup_method,
             total_amount: transaction.total_amount,
-            voucher_discount: transaction.voucher_discount,
-            voucher_type: transaction.voucher_type || 'none',
-            voucher_value: transaction.voucher_value ?? null,
-            voucher_label: transaction.voucher_label || null,
+            voucher_discount: (transaction as unknown as UnknownRecord).voucher_discount ?? 0,
+            voucher_type: (transaction as unknown as UnknownRecord).voucher_type ?? 'none',
+            voucher_value: (transaction as unknown as UnknownRecord).voucher_value ?? null,
+            voucher_label: (transaction as unknown as UnknownRecord).voucher_label ?? null,
             final_amount: transaction.final_amount,
-            amount_received: transaction.amount_received,
-            change_amount: transaction.change_amount,
-            contact_id: transaction.contact_id,
+            amount_received: (transaction as unknown as UnknownRecord).amount_received ?? transaction.final_amount,
+            change_amount: (transaction as unknown as UnknownRecord).change_amount ?? 0,
+            contact_id: (transaction as unknown as UnknownRecord).contact_id ?? null,
             customer_name: transaction.customer_name,
             customer_unit: transaction.customer_unit ?? null,
-            bank_id: transaction.bank_id || null,
-            card_number: transaction.card_number || null,
-            cl_account_id: transaction.cl_account_id || null,
-            cl_account_name: transaction.cl_account_name || null,
+            bank_id: (transaction as unknown as UnknownRecord).bank_id ?? null,
+            card_number: (transaction as unknown as UnknownRecord).card_number ?? null,
+            cl_account_id: (transaction as unknown as UnknownRecord).cl_account_id ?? null,
+            cl_account_name: (transaction as unknown as UnknownRecord).cl_account_name ?? null,
             transaction_type: transaction.transaction_type,
-            created_at: transaction.created_at, // Preserve original timestamp
-            items: mappedItems
+            created_at: transaction.created_at,
+            items,
           };
-          
-          console.log('📤 Uploading transaction:', {
-            id: uploadData.id,
-            payment_method: uploadData.payment_method,
-            created_at: uploadData.created_at,
-            items_count: uploadData.items.length
-          });
-          
-          const response = await fetch('/api/transactions', {
+
+          const response = await fetch(getApiUrl('/api/transactions'), {
             method: 'POST',
             headers: {
               'Content-Type': 'application/json',
@@ -417,7 +682,6 @@ export default function SyncManagement() {
             addLog('success', `✅ Transaction ${transaction.id} uploaded successfully`);
           } else {
             const errorText = await response.text();
-            console.error('Upload error response:', errorText);
             errorCount++;
             addLog('warning', `⚠️ Failed to upload transaction ${transaction.id}: ${response.status} - ${errorText}`);
           }
@@ -427,19 +691,18 @@ export default function SyncManagement() {
         }
       }
 
-      // Mark successfully uploaded transactions as synced
-      if (syncedIds.length > 0) {
-        await electronAPI.localDbMarkTransactionsSynced(syncedIds);
+      if (syncedIds.length > 0 && electronAPI.localDbMarkTransactionsSynced) {
+        await electronAPI.localDbMarkTransactionsSynced(syncedIds.map(String));
         addLog('info', `Marked ${syncedIds.length} transactions as synced`);
       }
 
       addLog('success', `🎉 Upload completed! Success: ${successCount}, Errors: ${errorCount}`);
       setSyncProgress(50);
       
-      // Update status and refresh offline transactions list
       await updateSyncStatus(true);
       await loadOfflineTransactions();
-      
+      await loadOfflineShifts();
+    }
     } catch (error) {
       addLog('error', `❌ Upload to cloud failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
       setSyncProgress(0);
@@ -449,10 +712,10 @@ export default function SyncManagement() {
         error: error instanceof Error ? error.message : 'Upload failed' 
       }));
     }
-  };
+  }, [addLog, loadOfflineTransactions, loadOfflineShifts, updateSyncStatus]);
 
   // Full bidirectional sync
-  const fullSync = async () => {
+  const fullSync = useCallback(async () => {
     if (!isElectron) {
       addLog('error', 'Offline database not available');
       return;
@@ -462,25 +725,18 @@ export default function SyncManagement() {
     addLog('info', '🔄 Starting full bidirectional sync...');
 
     try {
-      // Step 1: Upload offline transactions to cloud
       await syncToCloud();
-      
-      // Step 2: Download latest data from cloud
       await syncFromCloud();
       
       addLog('success', '🎉 Full bidirectional sync completed!');
       setSyncProgress(100);
       
-      // Update status and refresh counts
       await updateSyncStatus(true);
       await fetchTransactionCounts();
-      
-      // Refresh offline transactions list to reflect uploaded data
       await loadOfflineTransactions();
+      await loadOfflineShifts();
       
-      // Reset progress after completion
       setTimeout(() => setSyncProgress(0), 1500);
-      
     } catch (error) {
       addLog('error', `❌ Full sync failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
       setSyncProgress(0);
@@ -490,7 +746,7 @@ export default function SyncManagement() {
         error: error instanceof Error ? error.message : 'Sync failed' 
       }));
     }
-  };
+  }, [addLog, fetchTransactionCounts, isElectron, loadOfflineTransactions, loadOfflineShifts, syncFromCloud, syncToCloud, updateSyncStatus]);
 
   // Clear logs
   const clearLogs = () => {
@@ -510,7 +766,13 @@ export default function SyncManagement() {
     addLog('info', `🚀 Starting archive process${rangeSuffix}...`);
     
     try {
-      const archiveCount = await (window as any).electronAPI.localDbArchiveTransactions({
+      const electronAPI = getElectronAPI();
+      if (!electronAPI?.localDbArchiveTransactions || !electronAPI.localDbResetPrinterDailyCounters) {
+        addLog('error', 'Offline database not available');
+        setIsArchiving(false);
+        return;
+      }
+      const archiveCount = await electronAPI.localDbArchiveTransactions({
         businessId: 14,
         from: dangerRange.fromIso,
         to: dangerRange.toIso
@@ -519,7 +781,7 @@ export default function SyncManagement() {
       
       // Also archive online transactions
       try {
-        const response = await fetch('/api/transactions/archive', {
+        const response = await fetch(getApiUrl('/api/transactions/archive'), {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
@@ -534,10 +796,15 @@ export default function SyncManagement() {
           addLog('warning', '⚠️ Could not archive online transactions (may be offline)');
         }
       } catch (error) {
-        addLog('warning', '⚠️ Could not archive online transactions');
+        addLog(
+          'warning',
+          `⚠️ Could not archive online transactions${rangeSuffix ? ` ${rangeSuffix}` : ''}: ${
+            error instanceof Error ? error.message : 'Unknown error'
+          }`
+        );
       }
       
-      const resetCounters = await (window as any).electronAPI.localDbResetPrinterDailyCounters(14);
+      const resetCounters = await electronAPI.localDbResetPrinterDailyCounters(14);
       if (resetCounters?.success) {
         addLog('info', '🧹 Reset offline printer daily counters');
       }
@@ -593,8 +860,18 @@ export default function SyncManagement() {
     addLog('info', `🗑️ Starting permanent deletion process${rangeSuffix}...`);
     
     try {
+      const electronAPI = getElectronAPI();
+      if (
+        !electronAPI?.localDbDeleteTransactions ||
+        !electronAPI.localDbDeleteTransactionItems ||
+        !electronAPI.localDbResetPrinterDailyCounters
+      ) {
+        addLog('error', 'Offline database not available');
+        setIsDeleting(false);
+        return;
+      }
       // Delete from offline database
-      const deleteCount = await (window as any).electronAPI.localDbDeleteTransactions({
+      const deleteCount = await electronAPI.localDbDeleteTransactions({
         businessId: 14,
         from: dangerRange.fromIso,
         to: dangerRange.toIso
@@ -602,7 +879,7 @@ export default function SyncManagement() {
       addLog('success', `✅ Deleted ${deleteCount} offline transactions permanently${rangeSuffix}`);
       
       // Delete transaction items
-      const itemsResult = await (window as any).electronAPI.localDbDeleteTransactionItems({
+      const itemsResult = await electronAPI.localDbDeleteTransactionItems({
         businessId: 14,
         from: dangerRange.fromIso,
         to: dangerRange.toIso
@@ -612,7 +889,7 @@ export default function SyncManagement() {
       
       // Delete from online database
       try {
-        const response = await fetch('/api/transactions/delete', {
+        const response = await fetch(getApiUrl('/api/transactions/delete'), {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
@@ -627,10 +904,15 @@ export default function SyncManagement() {
           addLog('warning', '⚠️ Could not delete online transactions (may be offline)');
         }
       } catch (error) {
-        addLog('warning', '⚠️ Could not delete online transactions');
+        addLog(
+          'warning',
+          `⚠️ Could not delete online transactions${rangeSuffix ? ` ${rangeSuffix}` : ''}: ${
+            error instanceof Error ? error.message : 'Unknown error'
+          }`
+        );
       }
       
-      const resetCounters = await (window as any).electronAPI.localDbResetPrinterDailyCounters(14);
+      const resetCounters = await electronAPI.localDbResetPrinterDailyCounters(14);
       if (resetCounters?.success) {
         addLog('info', '🧹 Reset offline printer daily counters');
       }
@@ -652,33 +934,10 @@ export default function SyncManagement() {
   };
 
   // Fetch transaction counts
-  const fetchTransactionCounts = async () => {
-    try {
-      // Fetch offline count
-      if (isElectron) {
-        const offlineTx = await (window as any).electronAPI.localDbGetTransactions(14, 10000);
-        setOfflineTransactionCount(offlineTx.length);
-      }
-
-      // Fetch online count
-      try {
-        const response = await fetch('/api/transactions?business_id=14&limit=10000');
-        if (response.ok) {
-          const data = await response.json();
-          setOnlineTransactionCount(data.transactions?.length || 0);
-        }
-      } catch (error) {
-        // Online not available
-        setOnlineTransactionCount(0);
-      }
-    } catch (error) {
-      console.error('Failed to fetch transaction counts:', error);
-    }
-  };
-
   // Find orphaned transactions (exist offline but not online, even if marked as synced)
-  const findOrphanedTransactions = async () => {
-    if (!isElectron) {
+  const findOrphanedTransactions = useCallback(async () => {
+    const electronAPI = getElectronAPI();
+    if (!electronAPI?.localDbGetTransactions) {
       addLog('error', 'Offline database not available');
       return;
     }
@@ -686,23 +945,23 @@ export default function SyncManagement() {
     addLog('info', '🔍 Searching for orphaned transactions...');
     
     try {
-      // Get all offline transactions (including synced ones)
-      const allOfflineTransactions = await (window as any).electronAPI.localDbGetTransactions(14, 10000);
+      const allOfflineTransactionsRaw = await electronAPI.localDbGetTransactions(14, 10000);
+      const allOfflineTransactions = normalizeOfflineTransactions(allOfflineTransactionsRaw);
       
-      // Get all online transaction IDs
       let onlineTransactionIds: string[] = [];
       try {
-        const response = await fetch('/api/transactions?business_id=14&limit=10000');
+        const response = await fetch(getApiUrl('/api/transactions?business_id=14&limit=10000'));
         if (response.ok) {
           const data = await response.json();
-          onlineTransactionIds = data.transactions?.map((t: any) => t.id) || [];
+          onlineTransactionIds = Array.isArray(data.transactions)
+            ? data.transactions.map((t: UnknownRecord) => String(t.id ?? ''))
+            : [];
         }
-      } catch (error) {
+      } catch {
         addLog('warning', '⚠️ Cannot connect to online database - showing all offline transactions');
       }
 
-      // Find transactions that exist offline but not online
-      const orphaned = allOfflineTransactions.filter((offlineTx: OfflineTransaction) => 
+      const orphaned = allOfflineTransactions.filter(offlineTx =>
         !onlineTransactionIds.includes(String(offlineTx.id))
       );
 
@@ -717,26 +976,27 @@ export default function SyncManagement() {
     } catch (error) {
       addLog('error', `❌ Failed to find orphaned transactions: ${error instanceof Error ? error.message : 'Unknown error'}`);
     }
-  };
+  }, [addLog]);
 
   // Reset synced_at for orphaned transactions so they can be re-uploaded
-  const resetOrphanedTransactions = async () => {
-    if (!isElectron || orphanedTransactions.length === 0) return;
+  const resetOrphanedTransactions = useCallback(async () => {
+    if (orphanedTransactions.length === 0) return;
+    const electronAPI = getElectronAPI();
+    if (!electronAPI?.localDbResetTransactionSync) {
+      addLog('error', 'Offline database not available');
+      return;
+    }
 
     addLog('info', '🔄 Resetting synced_at for orphaned transactions...');
     
     try {
-      const electronAPI = (window as any).electronAPI;
       const orphanedIds = orphanedTransactions.map(t => t.id);
-      
-      // Reset synced_at to NULL for these transactions
       for (const id of orphanedIds) {
         await electronAPI.localDbResetTransactionSync(id);
       }
       
       addLog('success', `✅ Reset ${orphanedIds.length} transaction(s) - they will now appear in upload list`);
       
-      // Refresh data
       await loadOfflineTransactions();
       await fetchTransactionCounts();
       await updateSyncStatus(true);
@@ -744,18 +1004,18 @@ export default function SyncManagement() {
     } catch (error) {
       addLog('error', `❌ Failed to reset transactions: ${error instanceof Error ? error.message : 'Unknown error'}`);
     }
-  };
+  }, [addLog, fetchTransactionCounts, loadOfflineTransactions, orphanedTransactions, updateSyncStatus]);
 
   // Initialize on component mount
   useEffect(() => {
-    if (!isInitialized) {
-      updateSyncStatus(false); // Don't log initial status
-      loadOfflineTransactions();
-      fetchTransactionCounts();
-      addLog('info', 'Sync management initialized');
-      setIsInitialized(true);
-    }
-  }, [isInitialized]);
+    if (isInitialized) return;
+    updateSyncStatus(false);
+    loadOfflineTransactions();
+    loadOfflineShifts();
+    fetchTransactionCounts();
+    addLog('info', 'Sync management initialized');
+    setIsInitialized(true);
+  }, [addLog, fetchTransactionCounts, isInitialized, loadOfflineTransactions, loadOfflineShifts, updateSyncStatus]);
 
   const formatLastSync = (lastSync: string | null) => {
     if (!lastSync) return 'Belum pernah';
@@ -796,50 +1056,6 @@ export default function SyncManagement() {
     }
   };
 
-  const convertUtc7ToUtcDate = (
-    year: number,
-    month: number,
-    day: number,
-    hour: number,
-    minute: number,
-    isEnd: boolean
-  ): Date => {
-    const seconds = isEnd ? 59 : 0;
-    const milliseconds = isEnd ? 999 : 0;
-    // Interpret provided components as UTC+7, convert to UTC by subtracting 7 hours
-    const utcMillis = Date.UTC(year, month - 1, day, hour - 7, minute, seconds, milliseconds);
-    return new Date(utcMillis);
-  };
-
-  const normalizeDateInput = (value: string | null | undefined, isEnd: boolean): string | null => {
-    if (!value) return null;
-    const trimmed = value.trim();
-    if (!trimmed) return null;
-
-    const dateOnlyMatch = trimmed.match(/^(\d{4})-(\d{2})-(\d{2})$/);
-    if (dateOnlyMatch) {
-      const [, y, m, d] = dateOnlyMatch.map(Number);
-      const date = convertUtc7ToUtcDate(y, m, d, isEnd ? 23 : 0, isEnd ? 59 : 0, isEnd);
-      return date.toISOString();
-    }
-
-    const dateTimeMatch = trimmed.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})$/);
-    if (dateTimeMatch) {
-      const [, y, m, d, h, min] = dateTimeMatch.map(Number);
-      const date = convertUtc7ToUtcDate(y, m, d, h, min, isEnd);
-      return date.toISOString();
-    }
-
-    // Fall back to native parsing (allows explicit timezone strings)
-    const parsed = new Date(trimmed);
-    if (Number.isNaN(parsed.getTime())) return null;
-    if (isEnd) {
-      parsed.setUTCMilliseconds(999);
-      parsed.setUTCSeconds(59);
-    }
-    return parsed.toISOString();
-  };
-
   const dangerRange = useMemo(() => {
     const fromIso = normalizeDateInput(dangerFrom, false);
     const toIso = normalizeDateInput(dangerTo, true);
@@ -875,7 +1091,7 @@ export default function SyncManagement() {
     return `${iso} /* UTC+7: ${jakartaString} */`;
   };
 
-  const buildSqlWherePreview = (alias?: string, statusCondition?: string) => {
+  const buildSqlWherePreview = useCallback((alias?: string, statusCondition?: string) => {
     const prefix = alias ? `${alias}.` : '';
     const clauses: string[] = [`${prefix}business_id = 14`];
     if (dangerRange.fromIso) {
@@ -888,7 +1104,7 @@ export default function SyncManagement() {
       clauses.push(statusCondition);
     }
     return clauses.join('\n  AND ');
-  };
+  }, [dangerRange.fromIso, dangerRange.toIso]);
 
   const UPDATED_AT_PLACEHOLDER = '<current_epoch_ms>';
 
@@ -911,7 +1127,7 @@ WHERE transaction_id IN (
   SELECT id FROM transactions
   WHERE ${archivedWhere}
 );`;
-  }, [dangerRange.fromIso, dangerRange.toIso]);
+  }, [buildSqlWherePreview]);
 
   const onlineArchivePreview = useMemo(() => {
     const baseWhere = buildSqlWherePreview('t', "t.status != 'archived'");
@@ -923,7 +1139,7 @@ WHERE ${baseWhere};
 DELETE pa FROM printer_audits pa
 INNER JOIN transactions t ON pa.transaction_uuid = t.uuid_id
 WHERE ${archivedWhere};`;
-  }, [dangerRange.fromIso, dangerRange.toIso]);
+  }, [buildSqlWherePreview]);
 
   const offlineDeletePreview = useMemo(() => {
     const baseWhere = buildSqlWherePreview();
@@ -949,7 +1165,7 @@ WHERE transaction_id IN (
 
 DELETE FROM transactions
 WHERE ${baseWhere};`;
-  }, [dangerRange.fromIso, dangerRange.toIso]);
+  }, [buildSqlWherePreview]);
 
   const onlineDeletePreview = useMemo(() => {
     const aliasWhere = buildSqlWherePreview('t');
@@ -967,7 +1183,7 @@ WHERE ${aliasWhere};
 -- Then delete transactions
 DELETE FROM transactions
 WHERE ${baseWhere};`;
-  }, [dangerRange.fromIso, dangerRange.toIso]);
+  }, [buildSqlWherePreview]);
 
   return (
     <div className="flex-1 flex flex-col bg-white h-full relative">
@@ -1072,7 +1288,7 @@ WHERE ${baseWhere};`;
         )}
 
         {/* Connection Status */}
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
+        <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-6">
           <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-4">
             <div className="flex items-center gap-2 mb-2">
               {syncStatus.isOnline ? (
@@ -1107,6 +1323,46 @@ WHERE ${baseWhere};`;
             <div className="text-sm text-gray-600">
               <div>Log entries: <span className="font-medium">{syncLogs.length}</span></div>
               <div>Offline transactions: <span className="font-medium">{offlineTransactions.length}</span></div>
+              <div>Offline shifts: <span className="font-medium">{offlineShifts.length}</span></div>
+            </div>
+          </div>
+
+          <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-4">
+            <div className="flex items-center gap-2 mb-2">
+              <Activity className="w-5 h-5 text-indigo-600" />
+              <h3 className="font-semibold text-gray-900">Smart Sync</h3>
+            </div>
+            <div className="text-sm text-gray-600">
+              {smartSyncStatus ? (
+                <>
+                  <div>
+                    Status:{' '}
+                    <span className={smartSyncStatus.isSyncing ? 'text-blue-600' : 'text-green-600'}>
+                      {smartSyncStatus.isSyncing
+                        ? 'Syncing'
+                        : smartSyncStatus.consecutiveFailures > 0
+                          ? `${smartSyncStatus.consecutiveFailures} fails`
+                          : 'Ready'}
+                    </span>
+                  </div>
+                  <div>
+                    Avg load:{' '}
+                    <span
+                      className={
+                        smartSyncStatus.averageServerLoad > 1000
+                          ? 'text-red-600'
+                          : smartSyncStatus.averageServerLoad > 500
+                            ? 'text-yellow-600'
+                            : 'text-green-600'
+                      }
+                    >
+                      {Math.round(smartSyncStatus.averageServerLoad)} ms
+                    </span>
+                  </div>
+                </>
+              ) : (
+                <div className="text-gray-500">Belum ada data</div>
+              )}
             </div>
           </div>
         </div>
@@ -1163,7 +1419,7 @@ WHERE ${baseWhere};`;
                         </span>
                         <span>{log.message}</span>
                       </div>
-                      {log.details && (
+                      {log.details != null && (
                         <div className="mt-1 ml-6 text-xs opacity-75">
                           {JSON.stringify(log.details)}
                         </div>
@@ -1304,7 +1560,7 @@ WHERE ${baseWhere};`;
                     <strong>Ditemukan {orphanedTransactions.length} transaksi</strong> yang ada di offline database tapi tidak ada di online database.
                   </p>
                   <p className="text-sm text-orange-800">
-                    Transaksi ini mungkin sudah ditandai sebagai "synced" tapi gagal diupload. Klik tombol di bawah untuk reset status mereka sehingga bisa diupload ulang.
+                    Transaksi ini mungkin sudah ditandai sebagai &quot;synced&quot; tapi gagal diupload. Klik tombol di bawah untuk reset status mereka sehingga bisa diupload ulang.
                   </p>
                 </div>
 

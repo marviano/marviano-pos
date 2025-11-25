@@ -3,10 +3,11 @@
 import { useState, useEffect, useRef } from 'react';
 import { X, Delete } from 'lucide-react';
 import TransactionConfirmationDialog from './TransactionConfirmationDialog';
-import { smartSyncService } from '@/lib/smartSync';
 import { offlineSyncService } from '@/lib/offlineSync';
+import { smartSyncService } from '@/lib/smartSync';
 import { generateTransactionId, generateTransactionItemId } from '@/lib/uuid';
 import { useAuth } from '@/hooks/useAuth';
+import { getApiUrl } from '@/lib/api';
 
 interface BundleSelection {
   category2_id: number;
@@ -60,6 +61,37 @@ interface CartItem {
   customNote?: string;
   bundleSelections?: BundleSelection[];
 }
+
+type ProductInfo = CartItem['product'];
+
+type PaymentMethodRow = {
+  id: number;
+  code: string;
+};
+
+type ReceiptItem = {
+  name: string;
+  quantity: number;
+  price: number;
+  total_price: number;
+};
+
+const getElectronAPI = () => (typeof window !== 'undefined' ? window.electronAPI : undefined);
+
+type SuccessResponse = {
+  success?: boolean;
+  error?: string;
+};
+
+type CounterResponse = SuccessResponse & {
+  counter?: number;
+};
+
+const isSuccessResponse = (value: unknown): value is SuccessResponse =>
+  typeof value === 'object' && value !== null && ('success' in (value as Record<string, unknown>) || 'error' in (value as Record<string, unknown>));
+
+const isCounterResponse = (value: unknown): value is CounterResponse =>
+  typeof value === 'object' && value !== null && ('counter' in (value as Record<string, unknown>) || 'success' in (value as Record<string, unknown>));
 
 interface PaymentModalProps {
   isOpen: boolean;
@@ -121,7 +153,6 @@ export default function PaymentModal({
   const selectedBank = bankId ? banks.find(bank => bank.id.toString() === bankId) ?? null : null;
   const isCustomerNameRequired = selectedPaymentMethod === 'cl';
   const isCustomerNameMissing = isCustomerNameRequired && trimmedCustomerName.length === 0;
-  const isDebitInfoIncomplete = selectedPaymentMethod === 'debit' && (!bankId || !cardNumber);
   const isClInfoIncomplete = selectedPaymentMethod === 'cl' && isCustomerNameMissing;
 
   // Auto-set pickup method for online orders
@@ -151,7 +182,7 @@ export default function PaymentModal({
   }, [isOpen, isOnline, selectedOnlinePlatform]);
 
   // Calculate order totals
-  const getOnlinePriceForPlatform = (product: any): number | null => {
+  const getOnlinePriceForPlatform = (product: ProductInfo): number | null => {
     if (!isOnline || !selectedOnlinePlatform) return null;
     switch (selectedOnlinePlatform) {
       case 'qpon':
@@ -169,7 +200,7 @@ export default function PaymentModal({
     }
   };
 
-  const effectiveProductPrice = (product: any): number => {
+  const effectiveProductPrice = (product: ProductInfo): number => {
     if (isOnline && selectedOnlinePlatform) {
       const p = getOnlinePriceForPlatform(product);
       if (p && p > 0) return p;
@@ -213,7 +244,7 @@ export default function PaymentModal({
 
   const calculateOrderTotal = () => {
     return cartItems.reduce((sum, item) => {
-      let itemPrice = effectiveProductPrice(item.product as any);
+      let itemPrice = effectiveProductPrice(item.product);
       
       // Add customization prices
       itemPrice += sumCustomizationPrice(item.customizations);
@@ -630,7 +661,6 @@ export default function PaymentModal({
         const isOnline = offlineSyncService.getStatus().isOnline;
         
         let onlineResult = null;
-        let offlineResult = null;
         
         // Step 1: Save to online database if connected
         if (isOnline) {
@@ -638,7 +668,7 @@ export default function PaymentModal({
             const controller = new AbortController();
             const timeoutId = setTimeout(() => controller.abort(), 5000); // 5 second timeout
             
-            const response = await fetch('/api/transactions', {
+            const response = await fetch(getApiUrl('/api/transactions'), {
               method: 'POST',
               headers: {
                 'Content-Type': 'application/json',
@@ -661,16 +691,19 @@ export default function PaymentModal({
         }
         
         // Step 2: Save to offline database (always, for redundancy and offline capability)
-        if (typeof window !== 'undefined' && (window as any).electronAPI) {
+        const electronAPI = getElectronAPI();
+        if (electronAPI) {
           // Get payment method ID from local database
           let paymentMethodId = 1; // Default to cash
           try {
-            const paymentMethods = await (window as any).electronAPI.localDbGetPaymentMethods();
-            const paymentMethod = paymentMethods.find((pm: any) => pm.code === selectedPaymentMethod);
+            const paymentMethods = await electronAPI.localDbGetPaymentMethods?.();
+            if (Array.isArray(paymentMethods)) {
+              const paymentMethod = (paymentMethods as PaymentMethodRow[]).find((pm) => pm.code === selectedPaymentMethod);
             if (paymentMethod) {
               paymentMethodId = paymentMethod.id;
             } else {
               console.warn('⚠️ Payment method not found in local DB, defaulting to cash (ID: 1)');
+              }
             }
           } catch (error) {
             console.error('❌ Failed to get payment methods from local DB:', error);
@@ -743,7 +776,7 @@ export default function PaymentModal({
               quantity: item.quantity,
               unit_price: itemPrice,
               total_price: itemPrice * item.quantity,
-              customizations_json: item.customizations || null,
+              customizations: item.customizations || null,
               custom_note: item.customNote || null,
               bundle_selections_json: item.bundleSelections ? JSON.stringify(item.bundleSelections) : null,
               created_at: transactionData.created_at
@@ -751,16 +784,18 @@ export default function PaymentModal({
           });
           
           // Save transaction and items to local database
-          await (window as any).electronAPI.localDbUpsertTransactions([sqliteTransactionData]);
-          await (window as any).electronAPI.localDbUpsertTransactionItems(transactionItems);
+          await electronAPI.localDbUpsertTransactions?.([sqliteTransactionData]);
+          await electronAPI.localDbUpsertTransactionItems?.(transactionItems);
+
+          // If online save failed or was skipped (offline), queue for background sync
+          if (!onlineResult) {
+            console.log('🔄 Queuing transaction for background sync...');
+            await smartSyncService.queueTransaction(transactionData);
+          }
           
-          offlineResult = { success: true, transaction: sqliteTransactionData };
         } else {
           throw new Error('Offline database not available');
         }
-        
-        // Use online result if available, otherwise use offline result
-        const result = onlineResult || offlineResult;
         
         // Close confirmation dialog first
         setShowConfirmation(false);
@@ -774,7 +809,7 @@ export default function PaymentModal({
         if (window.electronAPI?.getPrinterCounter) {
           try {
             const globalCounterResult = await window.electronAPI.getPrinterCounter('globalPrinter', 14, true);
-            if (globalCounterResult?.success && typeof globalCounterResult.counter === 'number') {
+            if (isCounterResponse(globalCounterResult) && typeof globalCounterResult.counter === 'number') {
               globalCounter = globalCounterResult.counter;
             }
           } catch (counterError) {
@@ -782,15 +817,6 @@ export default function PaymentModal({
           }
         }
 
-        // Get Printer 1 counter and increment only if printing to receipt printer
-        let printer1Counter = 1;
-        if (shouldPrintReceipt && window.electronAPI?.getPrinterCounter) {
-          const counterResult = await window.electronAPI.getPrinterCounter('receiptPrinter', 14, true); // true = increment
-          if (counterResult?.success) {
-            printer1Counter = counterResult.counter;
-          }
-        }
-        
         // Prepare receipt data for printing
         const receiptNumber = onlineResult?.receipt_number || 'N/A';
         const getTableNumber = () => {
@@ -802,7 +828,7 @@ export default function PaymentModal({
         };
         
         // Transform cart items to receipt format - use platform price for online orders
-        let receiptItems: any[] = [];
+        const receiptItems: ReceiptItem[] = [];
         
         cartItems.forEach(item => {
           // For online orders, use platform-specific price, otherwise use harga_jual
@@ -944,21 +970,51 @@ export default function PaymentModal({
           cashier: cashierName,
           transactionType: transactionType,
           pickupMethod: finalPickupMethod,
-          printer1Counter: printer1Counter, // Receipt printer daily counter (only for receiptPrinter)
           globalCounter
         };
+        
+        // Variables to store printer counters for label printing
+        let printer1Counter: number | undefined = undefined;
+        let printer2Counter: number | undefined = undefined;
         
         // Print to Printer 1 if selected
         if (shouldPrintReceipt) {
           try {
-            const printResult = await window.electronAPI?.printReceipt?.(printData);
-            if (printResult?.success) {
-              try {
-                await window.electronAPI?.logPrinter1Print?.(transactionData.id, printer1Counter, globalCounter);
-              } catch (e) {
-                console.warn('⚠️ Failed to log Printer 1 audit:', e);
+            // Get Printer 1 counter and increment
+            printer1Counter = 1;
+            if (window.electronAPI?.getPrinterCounter) {
+              const counterResult = await window.electronAPI.getPrinterCounter('receiptPrinter', 14, true); // true = increment
+              if (isCounterResponse(counterResult) && typeof counterResult.counter === 'number') {
+                printer1Counter = counterResult.counter;
               }
-            } else {
+            }
+            
+            // Create printer1Data with receiptPrinter counter
+            const printer1Data = { 
+              ...printData, 
+              printerType: 'receiptPrinter', 
+              receiptNumber: transactionData.id, 
+              printer1Counter // Receipt printer daily counter (only for receiptPrinter)
+            };
+            
+            // Log to audit BEFORE printing (so reprint is possible even if print fails)
+              try {
+              const logResult = await window.electronAPI?.logPrinter1Print?.(transactionData.id, printer1Counter, globalCounter);
+              if (isSuccessResponse(logResult) && !logResult.success) {
+                console.error('❌ Failed to log Printer 1 audit:', logResult?.error);
+                console.warn('⚠️ Transaction saved but audit log failed - receipt badge may not appear correctly');
+              } else if (!isSuccessResponse(logResult)) {
+                console.warn('⚠️ Failed to log Printer 1 audit: Invalid response', logResult);
+              }
+            } catch (logError) {
+              console.error('❌ Error logging Printer 1 audit:', logError);
+              console.warn('⚠️ Transaction saved but audit log failed - receipt badge may not appear correctly');
+            }
+            
+            // Print after logging
+            await new Promise(r => setTimeout(r, 500));
+            const printResult = await window.electronAPI?.printReceipt?.(printer1Data);
+            if (isSuccessResponse(printResult) && !printResult.success) {
               console.error('❌ Printer 1 failed:', printResult?.error);
             }
           } catch (printError) {
@@ -969,40 +1025,59 @@ export default function PaymentModal({
         // Printer 2 manual print if selected via confirmation dialog
         if (shouldPrintReceiptize) {
           try {
-            let printer2Counter = 1;
+            // Get Printer 2 counter and increment
+            printer2Counter = 1;
             if (window.electronAPI?.getPrinterCounter) {
-              const counterResult = await window.electronAPI.getPrinterCounter('receiptizePrinter', 14, true);
-              if (counterResult?.success) {
+              const counterResult = await window.electronAPI.getPrinterCounter('receiptizePrinter', 14, true); // true = increment
+              if (isCounterResponse(counterResult) && typeof counterResult.counter === 'number') {
                 printer2Counter = counterResult.counter;
               }
             }
-            await window.electronAPI?.logPrinter2Print?.(transactionData.id, printer2Counter, 'manual', undefined, globalCounter);
-            // Create printer2Data with receiptizePrinter counter, remove printer1Counter to avoid confusion
-            const { printer1Counter: _, ...printDataWithoutPrinter1 } = printData;
+            
+            // Create printer2Data with receiptizePrinter counter
             const printer2Data = { 
-              ...printDataWithoutPrinter1, 
+              ...printData, 
               printerType: 'receiptizePrinter', 
               receiptNumber: transactionData.id, 
               printer2Counter // Receiptize printer daily counter (only for receiptizePrinter)
-            } as any;
-            await new Promise(r => setTimeout(r, 500));
-            const print2Result = await window.electronAPI?.printReceipt?.(printer2Data);
-            if (print2Result?.success) {
-            } else {
-              console.error('❌ Printer 2 failed:', print2Result?.error);
+            };
+            
+            // Log to audit BEFORE printing (so reprint is possible even if print fails)
+            try {
+              const logResult = await window.electronAPI?.logPrinter2Print?.(transactionData.id, printer2Counter, 'manual', undefined, globalCounter);
+              if (isSuccessResponse(logResult) && !logResult.success) {
+                console.error('❌ Failed to log Printer 2 audit:', logResult?.error);
+                console.warn('⚠️ Transaction saved but audit log failed - receiptize badge may not appear correctly');
+              } else if (!isSuccessResponse(logResult)) {
+                console.warn('⚠️ Failed to log Printer 2 audit: Invalid response', logResult);
+              }
+            } catch (logError) {
+              console.error('❌ Error logging Printer 2 audit:', logError);
+              console.warn('⚠️ Transaction saved but audit log failed - receiptize badge may not appear correctly');
             }
-          } catch (print2Error) {
-            console.error('❌ Error printing to Printer 2:', print2Error);
+            
+            // Print after logging
+            await new Promise(r => setTimeout(r, 500));
+            const printResult = await window.electronAPI?.printReceipt?.(printer2Data);
+            if (isSuccessResponse(printResult) && !printResult.success) {
+              console.error('❌ Printer 2 failed:', printResult?.error);
+            }
+          } catch (printError) {
+            console.error('❌ Error printing to Printer 2:', printError);
           }
         }
         
         // Print labels for each order item
         try {
           // Get the counter to use (from the selected printer)
-          let labelCounter = printer1Counter;
-          if (!shouldPrintReceipt && shouldPrintReceiptize && window.electronAPI?.getPrinterCounter) {
+          let labelCounter: number = 1;
+          if (shouldPrintReceipt && typeof printer1Counter === 'number') {
+            labelCounter = printer1Counter;
+          } else if (shouldPrintReceiptize && typeof printer2Counter === 'number') {
+            labelCounter = printer2Counter;
+          } else if (!shouldPrintReceipt && shouldPrintReceiptize && window.electronAPI?.getPrinterCounter) {
             const counterResult = await window.electronAPI.getPrinterCounter('receiptizePrinter', 14, false); // Don't increment
-            if (counterResult?.success) {
+            if (isCounterResponse(counterResult) && typeof counterResult.counter === 'number') {
               labelCounter = counterResult.counter;
             }
           }
@@ -1098,7 +1173,7 @@ export default function PaymentModal({
                   const totalQty = item.quantity * selectionQty;
 
                   // Build customization text for bundle selected product
-                  let allOptions: string[] = [];
+                  const allOptions: string[] = [];
                   if (selectedProduct.customizations && selectedProduct.customizations.length > 0) {
                     selectedProduct.customizations.forEach(c => {
                       c.selected_options.forEach(opt => {
@@ -1140,8 +1215,9 @@ export default function PaymentModal({
                       // Print label with delay between prints
                       await new Promise(resolve => setTimeout(resolve, 300));
                       const labelResult = await window.electronAPI?.printLabel?.(labelData);
-                      if (!labelResult?.success) {
-                        console.error(`❌ Bundle label print failed:`, labelResult?.error);
+                      if (!isSuccessResponse(labelResult) || !labelResult.success) {
+                        const errorMessage = isSuccessResponse(labelResult) ? labelResult.error : undefined;
+                        console.error(`❌ Bundle label print failed:`, errorMessage);
                       }
                     }
                   }
@@ -1150,7 +1226,7 @@ export default function PaymentModal({
             } else {
               // For regular products (non-bundle), use existing logic
               // Build customization text - format as xxx/xxx/xxx
-              let allOptions: string[] = [];
+              const allOptions: string[] = [];
               if (item.customizations && item.customizations.length > 0) {
                 item.customizations.forEach(c => {
                   c.selected_options.forEach(opt => {
@@ -1196,8 +1272,9 @@ export default function PaymentModal({
                   // Print label with delay between prints
                   await new Promise(resolve => setTimeout(resolve, 300));
                   const labelResult = await window.electronAPI?.printLabel?.(labelData);
-                  if (!labelResult?.success) {
-                    console.error(`❌ Label print failed:`, labelResult?.error);
+                  if (!isSuccessResponse(labelResult) || !labelResult.success) {
+                    const errorMessage = isSuccessResponse(labelResult) ? labelResult.error : undefined;
+                    console.error(`❌ Label print failed:`, errorMessage);
                   }
                 }
               }
@@ -1241,7 +1318,7 @@ export default function PaymentModal({
             const timeoutId = setTimeout(() => controller.abort(), 5000); // 5 second timeout
             
             try {
-              const response = await fetch('/api/banks', {
+              const response = await fetch(getApiUrl('/api/banks'), {
                 signal: controller.signal
               });
               clearTimeout(timeoutId);
@@ -1258,16 +1335,16 @@ export default function PaymentModal({
           },
           // Offline fetch
           async () => {
-            if (typeof window !== 'undefined' && (window as any).electronAPI) {
-              const banks = await (window as any).electronAPI.localDbGetBanks();
-              return banks;
-            } else {
+            const electronAPI = getElectronAPI();
+            if (!electronAPI?.localDbGetBanks) {
               throw new Error('Offline database not available');
         }
+            const banks = await electronAPI.localDbGetBanks();
+            return Array.isArray(banks) ? banks : [];
           }
         );
         
-        setBanks(banksData);
+        setBanks(Array.isArray(banksData) ? banksData : []);
       } catch (error) {
         console.error('Failed to fetch banks:', error);
         setBanks([]); // Set empty array as fallback
@@ -2191,6 +2268,8 @@ export default function PaymentModal({
         finalTotal={finalTotal}
         isProcessing={isProcessing}
         customerName={customerName}
+        isOnline={isOnline}
+        selectedOnlinePlatform={selectedOnlinePlatform}
       />
     </>
   );

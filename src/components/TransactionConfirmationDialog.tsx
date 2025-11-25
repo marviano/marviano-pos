@@ -33,6 +33,11 @@ interface CartItem {
     nama: string;
     kategori: string;
     harga_jual: number;
+    harga_qpon?: number | null;
+    harga_gofood?: number | null;
+    harga_grabfood?: number | null;
+    harga_shopeefood?: number | null;
+    harga_tiktok?: number | null;
     status: string;
   };
   quantity: number;
@@ -181,31 +186,54 @@ export default function TransactionConfirmationDialog({
             <h3 className="text-lg font-semibold text-gray-800 mb-4">Rincian Pesanan</h3>
             <div className="space-y-3">
               {cartItems.map((item, index) => {
-                let basePrice = item.product.harga_jual;
+                // Use the same pricing logic as PaymentModal
+                const getEffectiveProductPrice = (product: typeof item.product): number => {
                 if (isOnline && selectedOnlinePlatform) {
                   switch (selectedOnlinePlatform) {
                     case 'qpon':
-                      basePrice = (item.product as any).harga_qpon || item.product.harga_jual;
-                      break;
+                        const qponPrice = product.harga_qpon;
+                        if (qponPrice && qponPrice > 0) return qponPrice;
+                        return 0; // No fallback in online mode when platform is selected
                     case 'gofood':
-                      basePrice = (item.product as any).harga_gofood || item.product.harga_jual;
-                      break;
+                        const gofoodPrice = product.harga_gofood;
+                        if (gofoodPrice && gofoodPrice > 0) return gofoodPrice;
+                        return 0;
                     case 'grabfood':
-                      basePrice = (item.product as any).harga_grabfood || item.product.harga_jual;
-                      break;
+                        const grabfoodPrice = product.harga_grabfood;
+                        if (grabfoodPrice && grabfoodPrice > 0) return grabfoodPrice;
+                        return 0;
                     case 'shopeefood':
-                      basePrice = (item.product as any).harga_shopeefood || item.product.harga_jual;
-                      break;
+                        const shopeefoodPrice = product.harga_shopeefood;
+                        if (shopeefoodPrice && shopeefoodPrice > 0) return shopeefoodPrice;
+                        return 0;
                     case 'tiktok':
-                      basePrice = (item.product as any).harga_tiktok || item.product.harga_jual;
-                      break;
+                        const tiktokPrice = product.harga_tiktok;
+                        if (tiktokPrice && tiktokPrice > 0) return tiktokPrice;
+                        return 0;
+                      default:
+                        return 0;
+                    }
                   }
-                }
-                let itemPrice = basePrice;
+                  return product.harga_jual;
+                };
+                
+                let itemPrice = getEffectiveProductPrice(item.product);
                 itemPrice += sumCustomizationPrice(item.customizations);
                 itemPrice += calculateBundleCustomizationCharge(item.bundleSelections);
                 
                 const totalItemPrice = itemPrice * item.quantity;
+                
+                // Debug logging
+                console.log('🔍 [TransactionConfirmationDialog] Pricing Debug:', {
+                  productName: item.product.nama,
+                  isOnline,
+                  selectedOnlinePlatform,
+                  harga_jual: item.product.harga_jual,
+                  harga_qpon: item.product.harga_qpon,
+                  effectivePrice: getEffectiveProductPrice(item.product),
+                  finalItemPrice: itemPrice,
+                  totalItemPrice
+                });
                 
                 return (
                   <div key={index} className="flex justify-between items-start">

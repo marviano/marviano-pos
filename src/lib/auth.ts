@@ -2,8 +2,9 @@
 
 import bcrypt from 'bcryptjs';
 import { addSavedEmail } from '@/lib/savedLoginEmails';
+import { getApiUrl } from '@/lib/api';
 
-const KNOWN_ROLES = ['admin', 'cashier', 'manager'] as const;
+const KNOWN_ROLES = ['admin', 'cashier', 'manager', 'super admin'] as const;
 type KnownRole = (typeof KNOWN_ROLES)[number];
 
 export interface User {
@@ -103,7 +104,7 @@ class AuthManager {
     this.listeners.forEach(listener => listener(this.authState));
   }
 
-  private filterAppPermissions(rawPermissions: any): string[] {
+  private filterAppPermissions(rawPermissions: unknown): string[] {
     if (!Array.isArray(rawPermissions)) {
       return [];
     }
@@ -146,13 +147,18 @@ class AuthManager {
 
   private normalizeRole(roleName?: string | null): KnownRole {
     const normalized = (roleName || 'cashier').toLowerCase();
+    
+    // Map super admin to admin for basic role checks if needed, 
+    // or keep it as its own role if the app supports it.
+    // For now, let's allow 'super admin' to pass through since we added it to KNOWN_ROLES
+    
     if ((KNOWN_ROLES as readonly string[]).includes(normalized)) {
       return normalized as KnownRole;
     }
     return 'cashier';
   }
 
-  private sanitizeUser(user: any): User | null {
+  private sanitizeUser(user: Record<string, unknown> | null | undefined): User | null {
     if (!user) {
       return null;
     }
@@ -166,11 +172,11 @@ class AuthManager {
 
     return {
       id: String(user.id),
-      email: user.email,
-      username: user.username ?? user.email,
-      name: user.name ?? user.email,
-      role: this.normalizeRole(user.role),
-      role_name: user.role_name ?? user.role ?? null,
+      email: String(user.email ?? ''),
+      username: String(user.username ?? user.email ?? ''),
+      name: String(user.name ?? user.email ?? ''),
+      role: this.normalizeRole(typeof user.role === 'string' ? user.role : undefined),
+      role_name: (typeof user.role_name === 'string' ? user.role_name : null) ?? (typeof user.role === 'string' ? user.role : null) ?? null,
       organization_id: normalizedOrganizationId,
       role_id: roleIdValue,
       permissions: this.filterAppPermissions(user.permissions),
@@ -246,29 +252,32 @@ class AuthManager {
   async login(email: string, password: string): Promise<User> {
     console.log('🔍 [AUTH] Starting login process...');
     try {
-      // Call the login API
-      console.log('🔍 [AUTH] Calling login API...');
+      // Determine API URL and ensure no trailing spaces
+      const loginUrl = getApiUrl('/api/auth/login');
+
+      console.log('🔍 [AUTH] Login URL:', loginUrl);
+
       let response: Response | null = null;
-      let data: any = null;
+      let data: Record<string, unknown> | null = null;
 
       try {
-        response = await fetch('/api/auth/login', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({ email, password }),
-      });
+        response = await fetch(loginUrl, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({ email, password }),
+        });
         console.log('🔍 [AUTH] API response status:', response.status);
-        data = await response.json();
+        data = await response.json() as Record<string, unknown>;
         console.log('🔍 [AUTH] API response data:', data);
-      } catch (networkError: any) {
+      } catch (networkError: unknown) {
         console.warn('⚠️ [AUTH] Online login failed, attempting offline fallback...', networkError);
         return this.tryOfflineLogin(email, password);
       }
 
       if (!response.ok) {
-        const errorMessage = data?.error || 'Login failed';
+        const errorMessage = typeof data?.error === 'string' ? data.error : 'Login failed';
 
         if (response.status >= 500) {
           console.warn('⚠️ [AUTH] Server error during login, attempting offline fallback...');
@@ -285,20 +294,25 @@ class AuthManager {
 
       if (data?.success && data.user) {
         console.log('🔍 [AUTH] Login successful, returning user data...');
+        const userData = data.user as Record<string, unknown>;
         const sanitizedUser = this.sanitizeUser({
-          ...data.user,
-          role_name: data.user.role_name ?? data.user.role,
+          ...userData,
+          role_name: (typeof userData.role_name === 'string' ? userData.role_name : null) ?? (typeof userData.role === 'string' ? userData.role : null),
         });
         if (!sanitizedUser) {
           throw new Error('Invalid user payload received');
         }
 
         // Return user data with businesses for selection (don't set authenticated yet)
+        interface UserWithBusinesses extends User {
+          _businesses?: unknown[];
+          _isSuperAdmin?: boolean;
+        }
         return {
           ...sanitizedUser,
-          _businesses: data.businesses || [],
-          _isSuperAdmin: data.isSuperAdmin || false,
-        } as any;
+          _businesses: (data.businesses as unknown[]) || [],
+          _isSuperAdmin: (data.isSuperAdmin as boolean) || false,
+        } as UserWithBusinesses;
       }
 
       throw new Error('Invalid response from server');
@@ -308,11 +322,18 @@ class AuthManager {
     }
   }
 
-  async completeLogin(user: User & { _businesses?: any[]; _isSuperAdmin?: boolean }, selectedBusinessId: number | null): Promise<User> {
+  async completeLogin(user: User & { _businesses?: unknown[]; _isSuperAdmin?: boolean }, selectedBusinessId: number | null): Promise<User> {
     console.log('🔍 [AUTH] Completing login with business selection...');
     
     // Remove temporary properties
-    const { _businesses, _isSuperAdmin, ...cleanUser } = user as any;
+    interface UserWithTempProps extends User {
+      _businesses?: unknown[];
+      _isSuperAdmin?: boolean;
+    }
+    const { _businesses, _isSuperAdmin, ...cleanUser } = user as UserWithTempProps;
+    // These variables are intentionally unused - they're being destructured out
+    void _businesses;
+    void _isSuperAdmin;
     
     // Set selected business
     const userWithBusiness: User = {
@@ -374,8 +395,10 @@ class AuthManager {
 
     if (typeof window !== 'undefined') {
       try {
-        if (window.location.pathname !== '/login') {
-          window.location.replace('/login');
+        // Use root relative path which works for both dev (localhost:3000/login)
+        // and production if configured correctly with simple routing
+        if (window.location.pathname !== '/login' && !window.location.pathname.endsWith('/login')) {
+          window.location.href = '/login';
         }
       } catch (error) {
         console.error('Failed to redirect to login after logout:', error);

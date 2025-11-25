@@ -14,11 +14,11 @@ async function ensurePaymentMethodExists(paymentMethodCode: string, businessId?:
   }
 
   const columns = await query<Array<{ Field: string; Null: 'YES' | 'NO'; Extra: string }>>('SHOW COLUMNS FROM payment_methods');
-  const referenceRows = await query<any[]>('SELECT * FROM payment_methods LIMIT 1');
-  const referenceRow = referenceRows.length > 0 ? referenceRows[0] : {};
+  const referenceRows = await query<Array<Record<string, unknown>>>('SELECT * FROM payment_methods LIMIT 1');
+  const referenceRow = referenceRows.length > 0 ? referenceRows[0] : {} as Record<string, unknown>;
 
   const insertColumns: string[] = [];
-  const insertValues: any[] = [];
+  const insertValues: (string | number | null | Date)[] = [];
 
   const now = new Date();
 
@@ -29,7 +29,7 @@ async function ensurePaymentMethodExists(paymentMethodCode: string, businessId?:
       continue;
     }
 
-    let value: any;
+    let value: string | number | null | Date;
     switch (name) {
       case 'code':
         value = paymentMethodCode;
@@ -38,7 +38,7 @@ async function ensurePaymentMethodExists(paymentMethodCode: string, businessId?:
         value = fallback.name;
         break;
       case 'description':
-        value = fallback.description ?? referenceRow[name] ?? null;
+        value = fallback.description ?? (referenceRow[name] as string | undefined) ?? null;
         break;
       case 'is_active':
         value = 1;
@@ -51,13 +51,13 @@ async function ensurePaymentMethodExists(paymentMethodCode: string, businessId?:
         value = now;
         break;
       case 'business_id':
-        value = businessId ?? referenceRow[name] ?? 14;
+        value = businessId ?? (referenceRow[name] as number | undefined) ?? 14;
         break;
       case 'organization_id':
-        value = referenceRow[name] ?? businessId ?? null;
+        value = (referenceRow[name] as number | undefined) ?? businessId ?? null;
         break;
       default:
-        value = referenceRow[name] ?? (column.Null === 'YES' ? null : 0);
+        value = (referenceRow[name] as string | number | null | undefined) ?? (column.Null === 'YES' ? null : 0);
         break;
     }
 
@@ -74,10 +74,11 @@ async function ensurePaymentMethodExists(paymentMethodCode: string, businessId?:
   try {
     await query(
       `INSERT INTO payment_methods (${insertColumns.join(', ')}) VALUES (${placeholders})`,
-      insertValues
+      insertValues as (string | number | null)[]
     );
-  } catch (error: any) {
-    const message = typeof error?.message === 'string' ? error.message.toLowerCase() : '';
+  } catch (error: unknown) {
+    const err = error as { message?: string };
+    const message = typeof err?.message === 'string' ? err.message.toLowerCase() : '';
     if (!message.includes('duplicate')) {
       throw error;
     }
@@ -88,14 +89,14 @@ async function ensurePaymentMethodExists(paymentMethodCode: string, businessId?:
 export async function getPaymentMethodId(paymentMethodCode: string, businessId?: number): Promise<number> {
   let result = await query<{ id: number }[]>(
     'SELECT id FROM payment_methods WHERE code = ? AND is_active = 1',
-    [paymentMethodCode]
+    [paymentMethodCode] as (string | number)[]
   );
 
   if (result.length === 0) {
     await ensurePaymentMethodExists(paymentMethodCode, businessId);
     result = await query<{ id: number }[]>(
       'SELECT id FROM payment_methods WHERE code = ? AND is_active = 1',
-      [paymentMethodCode]
+      [paymentMethodCode] as (string | number)[]
     );
   }
 
@@ -110,7 +111,7 @@ export async function getPaymentMethodId(paymentMethodCode: string, businessId?:
 export async function getPaymentMethodCode(paymentMethodId: number): Promise<string> {
   const result = await query<{ code: string }[]>(
     'SELECT code FROM payment_methods WHERE id = ? AND is_active = 1',
-    [paymentMethodId]
+    [paymentMethodId] as (string | number)[]
   );
 
   if (result.length === 0) {

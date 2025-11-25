@@ -41,6 +41,145 @@ const better_sqlite3_1 = __importDefault(require("better-sqlite3"));
 const path = __importStar(require("path"));
 const fs = __importStar(require("fs"));
 const printerManagement_1 = require("./printerManagement");
+const parseJsonArray = (value, context) => {
+    if (!value) {
+        return [];
+    }
+    if (typeof value === 'string') {
+        try {
+            const parsed = JSON.parse(value);
+            return Array.isArray(parsed) ? parsed : [];
+        }
+        catch (error) {
+            console.warn(`⚠️ Failed to parse JSON array${context ? ` for ${context}` : ''}:`, error);
+            return [];
+        }
+    }
+    if (Array.isArray(value)) {
+        return value;
+    }
+    return [];
+};
+/**
+ * Reads customizations from normalized tables (NO JSON)
+ * bundleProductId: NULL/undefined = main product, number = specific bundle product
+ */
+const readCustomizationsFromNormalizedTables = (db, transactionItemId, bundleProductId) => {
+    try {
+        // Read from normalized tables - filter by bundle_product_id
+        const customizations = db.prepare(`
+      SELECT 
+        tic.customization_type_id as customization_id,
+        pct.name as customization_name,
+        tico.customization_option_id as option_id,
+        tico.option_name,
+        tico.price_adjustment,
+        tic.bundle_product_id
+      FROM transaction_item_customizations tic
+      JOIN product_customization_types pct ON tic.customization_type_id = pct.id
+      LEFT JOIN transaction_item_customization_options tico ON tic.id = tico.transaction_item_customization_id
+      WHERE tic.transaction_item_id = ?
+        AND (tic.bundle_product_id IS NULL AND ? IS NULL OR tic.bundle_product_id = ?)
+      ORDER BY tic.id, tico.id
+    `).all(transactionItemId, bundleProductId || null, bundleProductId || null);
+        if (customizations.length === 0) {
+            return null;
+        }
+        // Group by customization type
+        const grouped = new Map();
+        for (const row of customizations) {
+            if (!grouped.has(row.customization_id)) {
+                grouped.set(row.customization_id, {
+                    customization_id: row.customization_id,
+                    customization_name: row.customization_name,
+                    selected_options: []
+                });
+            }
+            const customization = grouped.get(row.customization_id);
+            if (row.option_id && row.option_name !== null) {
+                customization.selected_options = customization.selected_options || [];
+                customization.selected_options.push({
+                    option_id: row.option_id,
+                    option_name: row.option_name,
+                    price_adjustment: row.price_adjustment || 0
+                });
+            }
+        }
+        return Array.from(grouped.values());
+    }
+    catch (error) {
+        console.warn('⚠️ Error reading from normalized tables:', error);
+        return null;
+    }
+};
+/**
+ * Saves customizations to normalized tables for analytics
+ * NO JSON - only normalized tables
+ */
+const saveCustomizationsToNormalizedTables = (db, transactionItemId, customizations, createdAt, bundleProductId // NULL or undefined = main product, number = bundle product ID
+) => {
+    if (!customizations || !Array.isArray(customizations) || customizations.length === 0) {
+        return;
+    }
+    try {
+        // Delete existing normalized data for this transaction item and bundle product (in case of update)
+        // If bundleProductId is provided, only delete customizations for that specific bundle product
+        // If bundleProductId is null/undefined, delete main product customizations (bundle_product_id IS NULL)
+        const deleteStmt = db.prepare(`
+      DELETE FROM transaction_item_customization_options 
+      WHERE transaction_item_customization_id IN (
+        SELECT id FROM transaction_item_customizations 
+        WHERE transaction_item_id = ? 
+          AND (bundle_product_id IS NULL AND ? IS NULL OR bundle_product_id = ?)
+      )
+    `);
+        const deleteTicStmt = db.prepare(`
+      DELETE FROM transaction_item_customizations 
+      WHERE transaction_item_id = ? 
+        AND (bundle_product_id IS NULL AND ? IS NULL OR bundle_product_id = ?)
+    `);
+        deleteStmt.run(transactionItemId, bundleProductId || null, bundleProductId || null);
+        deleteTicStmt.run(transactionItemId, bundleProductId || null, bundleProductId || null);
+        // Insert into normalized tables
+        const insertTicStmt = db.prepare(`
+      INSERT INTO transaction_item_customizations (transaction_item_id, customization_type_id, bundle_product_id, created_at)
+      VALUES (?, ?, ?, ?)
+    `);
+        const insertTicoStmt = db.prepare(`
+      INSERT INTO transaction_item_customization_options (
+        transaction_item_customization_id, customization_option_id, option_name, price_adjustment, created_at
+      ) VALUES (?, ?, ?, ?, ?)
+    `);
+        for (const customization of customizations) {
+            const customizationId = Number(customization.customization_id);
+            if (!customizationId || Number.isNaN(customizationId)) {
+                console.warn('⚠️ Invalid customization_id:', customization.customization_id);
+                continue;
+            }
+            // Insert customization type link
+            const ticResult = insertTicStmt.run(transactionItemId, customizationId, bundleProductId || null, createdAt);
+            const ticId = ticResult.lastInsertRowid;
+            // Insert selected options
+            if (Array.isArray(customization.selected_options)) {
+                for (const option of customization.selected_options) {
+                    const optionId = Number(option.option_id);
+                    if (!optionId || Number.isNaN(optionId)) {
+                        console.warn('⚠️ Invalid option_id:', option.option_id);
+                        continue;
+                    }
+                    const optionName = option.option_name || 'Unknown Option';
+                    const priceAdjustment = Number(option.price_adjustment) || 0;
+                    insertTicoStmt.run(ticId, optionId, optionName, priceAdjustment, createdAt);
+                }
+            }
+        }
+    }
+    catch (error) {
+        console.error('❌ Error saving customizations to normalized tables:', error);
+        // Don't throw - we want to continue even if normalized save fails
+        // The JSON format is still saved, so data is not lost
+    }
+};
 const isDev = process.env.NODE_ENV === 'development' || !electron_1.app.isPackaged;
 const shouldLog = process.env.POS_DEBUG_LOGS === 'true';
 if (!shouldLog) {
@@ -55,7 +194,9 @@ let printWindow = null;
 let localDb = null;
 let printerService = null;
 function getLocalDbPath() {
-    return path.join(__dirname, '../pos-offline.db');
+    // Use userData directory for consistent database location across dev/prod
+    const userDataPath = electron_1.app.getPath('userData');
+    return path.join(userDataPath, 'pos-offline.db');
 }
 function createWindows() {
     // Initialize local SQLite (offline storage)
@@ -97,9 +238,61 @@ function createWindows() {
                 console.log('📋 Migrating database: Adding transactions.customer_unit column...');
                 localDb.prepare(`ALTER TABLE transactions ADD COLUMN customer_unit INTEGER`).run();
             }
+            const hasRefundStatus = schemaCheck.some(col => col.name === 'refund_status');
+            if (!hasRefundStatus) {
+                console.log('📋 Migrating database: Adding transactions.refund_status column...');
+                localDb.prepare(`ALTER TABLE transactions ADD COLUMN refund_status TEXT DEFAULT 'none'`).run();
+            }
+            const hasRefundTotal = schemaCheck.some(col => col.name === 'refund_total');
+            if (!hasRefundTotal) {
+                console.log('📋 Migrating database: Adding transactions.refund_total column...');
+                localDb.prepare(`ALTER TABLE transactions ADD COLUMN refund_total REAL DEFAULT 0.0`).run();
+            }
+            const hasLastRefundedAt = schemaCheck.some(col => col.name === 'last_refunded_at');
+            if (!hasLastRefundedAt) {
+                console.log('📋 Migrating database: Adding transactions.last_refunded_at column...');
+                localDb.prepare(`ALTER TABLE transactions ADD COLUMN last_refunded_at TEXT`).run();
+            }
         }
         catch (e) {
             console.log('⚠️ Migration check failed:', e);
+        }
+        // Schema migration: ensure new cash tracking columns exist on shifts
+        try {
+            const shiftSchema = localDb.prepare(`PRAGMA table_info(shifts)`).all();
+            const hasKasAkhir = shiftSchema.some(col => col.name === 'kas_akhir');
+            if (!hasKasAkhir) {
+                console.log('📋 Migrating database: Adding shifts.kas_akhir column...');
+                localDb.prepare(`ALTER TABLE shifts ADD COLUMN kas_akhir REAL`).run();
+            }
+            const hasKasExpected = shiftSchema.some(col => col.name === 'kas_expected');
+            if (!hasKasExpected) {
+                console.log('📋 Migrating database: Adding shifts.kas_expected column...');
+                localDb.prepare(`ALTER TABLE shifts ADD COLUMN kas_expected REAL`).run();
+            }
+            const hasKasSelisih = shiftSchema.some(col => col.name === 'kas_selisih');
+            if (!hasKasSelisih) {
+                console.log('📋 Migrating database: Adding shifts.kas_selisih column...');
+                localDb.prepare(`ALTER TABLE shifts ADD COLUMN kas_selisih REAL`).run();
+            }
+            const hasKasSelisihLabel = shiftSchema.some(col => col.name === 'kas_selisih_label');
+            if (!hasKasSelisihLabel) {
+                console.log('📋 Migrating database: Adding shifts.kas_selisih_label column...');
+                localDb.prepare(`ALTER TABLE shifts ADD COLUMN kas_selisih_label TEXT DEFAULT 'balanced'`).run();
+            }
+            const hasCashSalesTotal = shiftSchema.some(col => col.name === 'cash_sales_total');
+            if (!hasCashSalesTotal) {
+                console.log('📋 Migrating database: Adding shifts.cash_sales_total column...');
+                localDb.prepare(`ALTER TABLE shifts ADD COLUMN cash_sales_total REAL`).run();
+            }
+            const hasCashRefundTotal = shiftSchema.some(col => col.name === 'cash_refund_total');
+            if (!hasCashRefundTotal) {
+                console.log('📋 Migrating database: Adding shifts.cash_refund_total column...');
+                localDb.prepare(`ALTER TABLE shifts ADD COLUMN cash_refund_total REAL`).run();
+            }
+        }
+        catch (shiftError) {
+            console.log('⚠️ Shift migration check failed:', shiftError);
         }
         // Schema migration: Ensure platform price columns exist on products
         try {
@@ -174,6 +367,22 @@ function createWindows() {
           `).run();
                 console.log('✅ Created bundle_items table');
             }
+            // Check if transaction_item_customizations has bundle_product_id column
+            try {
+                const ticSchema = localDb.prepare(`PRAGMA table_info(transaction_item_customizations)`).all();
+                const hasBundleProductId = ticSchema.some(col => col.name === 'bundle_product_id');
+                if (!hasBundleProductId) {
+                    console.log('📋 Migrating database: Adding bundle_product_id to transaction_item_customizations...');
+                    localDb.prepare('ALTER TABLE transaction_item_customizations ADD COLUMN bundle_product_id INTEGER DEFAULT NULL').run();
+                    // Add index for the new column
+                    localDb.prepare('CREATE INDEX IF NOT EXISTS idx_tic_bundle_product ON transaction_item_customizations(bundle_product_id)').run();
+                    localDb.prepare('CREATE INDEX IF NOT EXISTS idx_tic_item_bundle ON transaction_item_customizations(transaction_item_id, bundle_product_id)').run();
+                    console.log('✅ Added bundle_product_id column');
+                }
+            }
+            catch (error) {
+                console.warn('⚠️ Error checking/adding bundle_product_id column:', error);
+            }
             // Check if transaction_items has bundle_selections_json column
             const transactionItemsSchema = localDb.prepare(`PRAGMA table_info(transaction_items)`).all();
             const hasBundleSelections = transactionItemsSchema.some(col => col.name === 'bundle_selections_json');
@@ -185,19 +394,22 @@ function createWindows() {
         catch (e) {
             console.log('⚠️ Bundle feature migration check failed:', e);
         }
-        localDb.exec(`
-      -- Core POS Tables
-      CREATE TABLE IF NOT EXISTS users (
-        id INTEGER PRIMARY KEY,
-        email TEXT UNIQUE NOT NULL,
-        password TEXT,
-        name TEXT,
-        googleId TEXT UNIQUE,
-        createdAt TEXT,
-        role_id INTEGER,
-        organization_id INTEGER,
-        updated_at INTEGER
-      );
+        try {
+            // First block of SQL execution
+            localDb.exec(`
+        -- Core POS Tables
+        CREATE TABLE IF NOT EXISTS users (
+          id INTEGER PRIMARY KEY,
+          email TEXT UNIQUE NOT NULL,
+          password TEXT,
+          name TEXT,
+          googleId TEXT UNIQUE,
+          createdAt TEXT,
+          role_id INTEGER,
+          organization_id INTEGER,
+          updated_at INTEGER
+        );
+
       
       CREATE TABLE IF NOT EXISTS businesses (
         id INTEGER PRIMARY KEY,
@@ -429,6 +641,7 @@ function createWindows() {
         id TEXT PRIMARY KEY,  -- UUID instead of INTEGER
         business_id INTEGER NOT NULL,
         user_id INTEGER NOT NULL,
+        shift_uuid TEXT, -- Link to specific shift (UUID)
         payment_method TEXT NOT NULL,
         pickup_method TEXT NOT NULL,
         total_amount REAL NOT NULL,
@@ -440,6 +653,9 @@ function createWindows() {
         amount_received REAL NOT NULL,
         change_amount REAL DEFAULT 0.0,
         status TEXT DEFAULT 'completed',
+        refund_status TEXT DEFAULT 'none',
+        refund_total REAL DEFAULT 0.0,
+        last_refunded_at TEXT,
         created_at TEXT NOT NULL,
         updated_at INTEGER,
         synced_at INTEGER,
@@ -464,11 +680,51 @@ function createWindows() {
         quantity INTEGER NOT NULL DEFAULT 1,
         unit_price REAL NOT NULL,
         total_price REAL NOT NULL,
-        customizations_json TEXT,
         custom_note TEXT,
         bundle_selections_json TEXT,
         created_at TEXT NOT NULL,
         FOREIGN KEY (transaction_id) REFERENCES transactions(id) ON DELETE CASCADE
+      );
+      
+      -- Normalized customization tables for analytics
+      CREATE TABLE IF NOT EXISTS transaction_item_customizations (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        transaction_item_id TEXT NOT NULL,  -- UUID reference to transaction_items.id
+        customization_type_id INTEGER NOT NULL,
+        bundle_product_id INTEGER DEFAULT NULL,  -- NULL = main product, otherwise ID of bundle product
+        created_at TEXT NOT NULL,
+        FOREIGN KEY (customization_type_id) REFERENCES product_customization_types(id) ON DELETE CASCADE
+      );
+      
+      CREATE TABLE IF NOT EXISTS transaction_item_customization_options (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        transaction_item_customization_id INTEGER NOT NULL,
+        customization_option_id INTEGER NOT NULL,
+        option_name TEXT NOT NULL,  -- Snapshot of option name at time of sale
+        price_adjustment REAL NOT NULL DEFAULT 0.0,  -- Snapshot of price adjustment at time of sale
+        created_at TEXT NOT NULL,
+        FOREIGN KEY (transaction_item_customization_id) REFERENCES transaction_item_customizations(id) ON DELETE CASCADE,
+        FOREIGN KEY (customization_option_id) REFERENCES product_customization_options(id) ON DELETE CASCADE
+      );
+      
+      CREATE TABLE IF NOT EXISTS transaction_refunds (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        uuid_id TEXT UNIQUE NOT NULL,
+        transaction_uuid TEXT NOT NULL,
+        business_id INTEGER NOT NULL,
+        shift_uuid TEXT,
+        refunded_by INTEGER NOT NULL,
+        refund_amount REAL NOT NULL,
+        cash_delta REAL NOT NULL DEFAULT 0.0,
+        payment_method_id INTEGER NOT NULL,
+        reason TEXT,
+        note TEXT,
+        refund_type TEXT DEFAULT 'full',
+        status TEXT DEFAULT 'completed',
+        refunded_at TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at INTEGER,
+        synced_at INTEGER
       );
       
       CREATE TABLE IF NOT EXISTS payment_methods (
@@ -548,24 +804,6 @@ function createWindows() {
         updated_at INTEGER
       );
       
-      CREATE TABLE IF NOT EXISTS omset (
-        id INTEGER PRIMARY KEY,
-        business_id INTEGER NOT NULL,
-        date TEXT NOT NULL,
-        regular INTEGER,
-        ojol INTEGER,
-        event INTEGER,
-        delivery INTEGER,
-        fitness INTEGER,
-        pool INTEGER,
-        user_id INTEGER NOT NULL,
-        created_at TEXT,
-        updated_at INTEGER,
-        UNIQUE(business_id, date),
-        FOREIGN KEY (business_id) REFERENCES businesses(id),
-        FOREIGN KEY (user_id) REFERENCES users(id)
-      );
-      
       -- Shifts table for cashier shift tracking
       CREATE TABLE IF NOT EXISTS shifts (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -576,6 +814,12 @@ function createWindows() {
         shift_start TEXT NOT NULL,
         shift_end TEXT,
         modal_awal REAL NOT NULL DEFAULT 0.0,
+        kas_akhir REAL,
+        kas_expected REAL,
+        kas_selisih REAL,
+        kas_selisih_label TEXT DEFAULT 'balanced',
+        cash_sales_total REAL,
+        cash_refund_total REAL,
         status TEXT DEFAULT 'active' CHECK (status IN ('active', 'completed', 'cancelled')),
         created_at TEXT NOT NULL,
         updated_at INTEGER,
@@ -650,7 +894,22 @@ function createWindows() {
         synced_at INTEGER,
         FOREIGN KEY (transaction_id) REFERENCES transactions(id)
       );
-      
+      `);
+            // Add shift_uuid column to transactions table if it doesn't exist
+            try {
+                const tableInfo = localDb.prepare("PRAGMA table_info(transactions)").all();
+                const hasShiftUuid = tableInfo.some(col => col.name === 'shift_uuid');
+                if (!hasShiftUuid) {
+                    console.log('Adding shift_uuid column to transactions table...');
+                    localDb.prepare("ALTER TABLE transactions ADD COLUMN shift_uuid TEXT").run();
+                    // Add index for shift_uuid
+                    localDb.prepare("CREATE INDEX IF NOT EXISTS idx_transactions_shift ON transactions(shift_uuid)").run();
+                }
+            }
+            catch (error) {
+                console.error('Error checking/adding shift_uuid column:', error);
+            }
+            localDb.exec(`
       -- Printer 1 audit log (local)
       CREATE TABLE IF NOT EXISTS printer1_audit_log (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -702,6 +961,17 @@ function createWindows() {
       CREATE INDEX IF NOT EXISTS idx_transaction_items_product ON transaction_items(product_id);
       CREATE INDEX IF NOT EXISTS idx_transaction_items_created ON transaction_items(created_at);
       
+      -- Indexes for normalized customization tables
+      CREATE INDEX IF NOT EXISTS idx_tic_transaction_item ON transaction_item_customizations(transaction_item_id);
+      CREATE INDEX IF NOT EXISTS idx_tic_customization_type ON transaction_item_customizations(customization_type_id);
+      CREATE INDEX IF NOT EXISTS idx_tic_bundle_product ON transaction_item_customizations(bundle_product_id);
+      CREATE INDEX IF NOT EXISTS idx_tic_item_type ON transaction_item_customizations(transaction_item_id, customization_type_id);
+      CREATE INDEX IF NOT EXISTS idx_tic_item_bundle ON transaction_item_customizations(transaction_item_id, bundle_product_id);
+      
+      CREATE INDEX IF NOT EXISTS idx_tico_transaction_item_customization ON transaction_item_customization_options(transaction_item_customization_id);
+      CREATE INDEX IF NOT EXISTS idx_tico_customization_option ON transaction_item_customization_options(customization_option_id);
+      CREATE INDEX IF NOT EXISTS idx_tico_customization_option_composite ON transaction_item_customization_options(transaction_item_customization_id, customization_option_id);
+      
       CREATE INDEX IF NOT EXISTS idx_printer_mode_settings_type ON printer_mode_settings(printer_type);
       CREATE INDEX IF NOT EXISTS idx_printer_daily_counters_lookup ON printer_daily_counters(printer_type, business_id, date);
       CREATE INDEX IF NOT EXISTS idx_printer2_automation_lookup ON printer2_automation(business_id, cycle_number);
@@ -735,8 +1005,6 @@ function createWindows() {
       CREATE INDEX IF NOT EXISTS idx_cl_accounts_code ON cl_accounts(account_code);
       CREATE INDEX IF NOT EXISTS idx_cl_accounts_active ON cl_accounts(is_active);
       
-      CREATE INDEX IF NOT EXISTS idx_omset_business_date ON omset(business_id, date);
-      CREATE INDEX IF NOT EXISTS idx_omset_date ON omset(date);
       
       -- Offline transaction queue for sync when online
       CREATE TABLE IF NOT EXISTS offline_transactions (
@@ -756,60 +1024,74 @@ function createWindows() {
         FOREIGN KEY (offline_transaction_id) REFERENCES offline_transactions(id) ON DELETE CASCADE
       );
       
+      CREATE TABLE IF NOT EXISTS offline_refunds (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        refund_data TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        sync_status TEXT DEFAULT 'pending',
+        sync_attempts INTEGER DEFAULT 0,
+        last_sync_attempt INTEGER
+      );
+      
       -- Indexes for offline sync performance
       CREATE INDEX IF NOT EXISTS idx_offline_transactions_sync ON offline_transactions(sync_status);
       CREATE INDEX IF NOT EXISTS idx_offline_transactions_created ON offline_transactions(created_at);
     `);
-        console.log('✅ SQLite database initialized successfully');
-        console.log('📊 Database file location:', dbPath);
-        // Initialize printer management service
-        if (localDb) {
-            printerService = new printerManagement_1.PrinterManagementService(localDb);
-            console.log('✅ Printer Management Service initialized');
-        }
-        console.log('🔍 Testing database connection...');
-        // Test the database connection
-        try {
-            const testResult = localDb.prepare('SELECT 1 as test').get();
-            console.log('✅ Database test query successful:', testResult);
-        }
-        catch (testError) {
-            console.error('❌ Database test query failed:', testError);
-        }
-        // Schema migration: Add missing columns to existing tables
-        try {
-            console.log('🔍 Running schema migrations...');
-            // Ensure printer_configs.extra_settings column exists for per-printer settings
-            const printerConfigSchema = localDb.prepare(`PRAGMA table_info(printer_configs)`).all();
-            const hasExtraSettingsColumn = printerConfigSchema.some(col => col.name === 'extra_settings');
-            if (!hasExtraSettingsColumn) {
-                console.log('📝 Adding extra_settings column to printer_configs...');
-                localDb.prepare('ALTER TABLE printer_configs ADD COLUMN extra_settings TEXT').run();
+            console.log('✅ SQLite database initialized successfully');
+            console.log('📊 Database file location:', dbPath);
+            // Initialize printer management service
+            if (localDb) {
+                printerService = new printerManagement_1.PrinterManagementService(localDb);
+                console.log('✅ Printer Management Service initialized');
             }
-            // Check if display_order column exists in product_customization_types
-            const columnsResult = localDb.prepare(`
+            console.log('🔍 Testing database connection...');
+            // Test the database connection
+            try {
+                const testResult = localDb.prepare('SELECT 1 as test').get();
+                console.log('✅ Database test query successful:', testResult);
+            }
+            catch (testError) {
+                console.error('❌ Database test query failed:', testError);
+            }
+            // Schema migration: Add missing columns to existing tables
+            try {
+                console.log('🔍 Running schema migrations...');
+                // Ensure printer_configs.extra_settings column exists for per-printer settings
+                const printerConfigSchema = localDb.prepare(`PRAGMA table_info(printer_configs)`).all();
+                const hasExtraSettingsColumn = printerConfigSchema.some(col => col.name === 'extra_settings');
+                if (!hasExtraSettingsColumn) {
+                    console.log('📝 Adding extra_settings column to printer_configs...');
+                    localDb.prepare('ALTER TABLE printer_configs ADD COLUMN extra_settings TEXT').run();
+                }
+                // Check if display_order column exists in product_customization_types
+                const columnsResult = localDb.prepare(`
         SELECT sql FROM sqlite_master WHERE type='table' AND name='product_customization_types'
       `).get();
-            if (columnsResult && columnsResult.sql && !columnsResult.sql.includes('display_order')) {
-                console.log('📝 Adding display_order to product_customization_types...');
-                localDb.prepare('ALTER TABLE product_customization_types ADD COLUMN display_order INTEGER DEFAULT 0').run();
-            }
-            // Check if display_order and status columns exist in product_customization_options
-            const optionsColumnsResult = localDb.prepare(`
+                if (columnsResult && columnsResult.sql && !columnsResult.sql.includes('display_order')) {
+                    console.log('📝 Adding display_order to product_customization_types...');
+                    localDb.prepare('ALTER TABLE product_customization_types ADD COLUMN display_order INTEGER DEFAULT 0').run();
+                }
+                // Check if display_order and status columns exist in product_customization_options
+                const optionsColumnsResult = localDb.prepare(`
         SELECT sql FROM sqlite_master WHERE type='table' AND name='product_customization_options'
       `).get();
-            if (optionsColumnsResult && optionsColumnsResult.sql && !optionsColumnsResult.sql.includes('display_order')) {
-                console.log('📝 Adding display_order to product_customization_options...');
-                localDb.prepare('ALTER TABLE product_customization_options ADD COLUMN display_order INTEGER DEFAULT 0').run();
+                if (optionsColumnsResult && optionsColumnsResult.sql && !optionsColumnsResult.sql.includes('display_order')) {
+                    console.log('📝 Adding display_order to product_customization_options...');
+                    localDb.prepare('ALTER TABLE product_customization_options ADD COLUMN display_order INTEGER DEFAULT 0').run();
+                }
+                if (optionsColumnsResult && optionsColumnsResult.sql && !optionsColumnsResult.sql.includes('status')) {
+                    console.log('📝 Adding status to product_customization_options...');
+                    localDb.prepare('ALTER TABLE product_customization_options ADD COLUMN status TEXT DEFAULT \'active\' CHECK (status IN (\'active\', \'inactive\'))').run();
+                }
+                console.log('✅ Schema migrations completed');
             }
-            if (optionsColumnsResult && optionsColumnsResult.sql && !optionsColumnsResult.sql.includes('status')) {
-                console.log('📝 Adding status to product_customization_options...');
-                localDb.prepare('ALTER TABLE product_customization_options ADD COLUMN status TEXT DEFAULT \'active\' CHECK (status IN (\'active\', \'inactive\'))').run();
+            catch (migrationError) {
+                console.error('⚠️ Schema migration error (this is OK for first run):', migrationError);
             }
-            console.log('✅ Schema migrations completed');
         }
-        catch (migrationError) {
-            console.error('⚠️ Schema migration error (this is OK for first run):', migrationError);
+        catch (dbExecError) {
+            console.error('❌ Database execution error:', dbExecError);
+            throw dbExecError;
         }
     }
     catch (error) {
@@ -853,20 +1135,24 @@ function createWindows() {
     // Create customer display window if secondary monitor is available
     if (secondaryDisplay) {
         console.log('🔍 Creating customer display window...');
-        const customerWindowWidth = Math.floor(secondaryDisplay.workAreaSize.width * 0.9);
-        const customerWindowHeight = Math.floor(secondaryDisplay.workAreaSize.height * 0.9);
+        const { bounds } = secondaryDisplay;
+        const customerWindowWidth = bounds.width;
+        const customerWindowHeight = bounds.height;
+        const customerWindowX = bounds.x;
+        const customerWindowY = bounds.y;
         console.log('🔍 Customer window dimensions:', { width: customerWindowWidth, height: customerWindowHeight });
-        console.log('🔍 Customer window position:', { x: secondaryDisplay.workArea.x, y: secondaryDisplay.workArea.y });
+        console.log('🔍 Customer window position:', { x: customerWindowX, y: customerWindowY });
         customerWindow = new electron_1.BrowserWindow({
             width: customerWindowWidth,
             height: customerWindowHeight,
-            x: secondaryDisplay.workArea.x,
-            y: secondaryDisplay.workArea.y,
+            x: customerWindowX,
+            y: customerWindowY,
             title: 'Marviano POS - Customer Display',
             frame: false,
             backgroundColor: '#000000',
             alwaysOnTop: true,
             kiosk: false, // Temporarily disable kiosk mode for debugging
+            fullscreenable: true,
             webPreferences: {
                 nodeIntegration: false,
                 contextIsolation: true,
@@ -879,7 +1165,6 @@ function createWindows() {
         if (isDev) {
             setTimeout(async () => {
                 console.log('🔍 Loading customer display page...');
-                // Try ports in order: 3000, 3001, 3002 (3000 is default Next.js port)
                 const tryLoadCustomerURL = async (port) => {
                     try {
                         await customerWindow.loadURL(`http://localhost:${port}/customer-display`);
@@ -891,7 +1176,12 @@ function createWindows() {
                         return false;
                     }
                 };
-                const ports = [3000, 3001, 3002];
+                const preferredPort = Number(process.env.PORT ?? '');
+                const fallbackPorts = [3000, 3001, 3002];
+                const ports = [
+                    ...(Number.isFinite(preferredPort) ? [preferredPort] : []),
+                    ...fallbackPorts
+                ].filter((port, index, arr) => arr.indexOf(port) === index);
                 let loaded = false;
                 for (const port of ports) {
                     if (await tryLoadCustomerURL(port)) {
@@ -905,7 +1195,7 @@ function createWindows() {
             }, 6000); // Load after main window
         }
         else {
-            customerWindow.loadFile(path.join(__dirname, '../out/customer-display.html'));
+            customerWindow.loadFile(path.join(__dirname, '../../out/customer-display.html'));
         }
     }
     else {
@@ -915,7 +1205,8 @@ function createWindows() {
     mainWindow.webContents.on('did-navigate', (event, url) => {
         const currentURL = new URL(url);
         console.log('🔍 Navigation detected:', currentURL.pathname);
-        if (currentURL.pathname === '/login') {
+        const isLogin = currentURL.pathname === '/login' || currentURL.pathname.endsWith('login.html');
+        if (isLogin) {
             // Keep login page at 800x432
             console.log('🔍 Login page detected - setting login window size');
             mainWindow.setFullScreen(false);
@@ -923,7 +1214,7 @@ function createWindows() {
             mainWindow.setSize(800, 432);
             mainWindow.center();
         }
-        else if (currentURL.pathname === '/' || !currentURL.pathname.includes('/login')) {
+        else {
             // Main POS page - set to fullscreen
             console.log('🔍 Main POS page detected - setting fullscreen');
             mainWindow.setResizable(true);
@@ -934,7 +1225,8 @@ function createWindows() {
     mainWindow.webContents.on('did-navigate-in-page', (event, url) => {
         const currentURL = new URL(url);
         console.log('🔍 In-page navigation detected:', currentURL.pathname);
-        if (currentURL.pathname === '/login') {
+        const isLogin = currentURL.pathname === '/login' || currentURL.pathname.endsWith('login.html');
+        if (isLogin) {
             // Keep login page at 800x432
             console.log('🔍 Login page detected - setting login window size');
             mainWindow.setFullScreen(false);
@@ -942,7 +1234,7 @@ function createWindows() {
             mainWindow.setSize(800, 432);
             mainWindow.center();
         }
-        else if (currentURL.pathname === '/' || !currentURL.pathname.includes('/login')) {
+        else {
             // Main POS page - set to fullscreen
             console.log('🔍 Main POS page detected - setting fullscreen');
             mainWindow.setResizable(true);
@@ -1010,6 +1302,7 @@ function createWindows() {
     electron_1.ipcMain.handle('localdb-upsert-products', async (event, rows) => {
         if (!localDb)
             return { success: false };
+        console.log(`🔄 [PRODUCTS UPSERT] Received ${rows.length} products to upsert`);
         const tx = localDb.transaction((data) => {
             const stmt = localDb.prepare(`INSERT INTO products (
         id, business_id, menu_code, nama, satuan, kategori, jenis, category2_name, keterangan,
@@ -1038,16 +1331,32 @@ function createWindows() {
         status=excluded.status,
         is_bundle=excluded.is_bundle,
         updated_at=excluded.updated_at`);
+            let successCount = 0;
+            let errorCount = 0;
             for (const r of data) {
-                // Map MySQL columns to SQLite columns
-                const kategori = r.kategori || r.category1_name || '';
-                const category2Name = r.category2_name || r.jenis || '';
-                const isBundle = r.is_bundle === 1 || r.is_bundle === true ? 1 : 0;
-                stmt.run(r.id, r.business_id, r.menu_code, r.nama, r.satuan || '', kategori, null, category2Name, r.keterangan || null, r.harga_beli || null, r.ppn || null, r.harga_jual, r.harga_khusus || null, r.harga_online || null, r.harga_qpon || null, r.harga_gofood || null, r.harga_grabfood || null, r.harga_shopeefood || null, r.harga_tiktok || null, r.fee_kerja || null, r.status, isBundle, Date.now());
+                try {
+                    // Map MySQL columns to SQLite columns
+                    const kategori = r.kategori || r.category1_name || '';
+                    const category2Name = r.category2_name || r.jenis || '';
+                    const isBundle = r.is_bundle === 1 || r.is_bundle === true ? 1 : 0;
+                    stmt.run(r.id, r.business_id, r.menu_code, r.nama, r.satuan || '', kategori, null, category2Name, r.keterangan || null, r.harga_beli || null, r.ppn || null, r.harga_jual, r.harga_khusus || null, r.harga_online || null, r.harga_qpon || null, r.harga_gofood || null, r.harga_grabfood || null, r.harga_shopeefood || null, r.harga_tiktok || null, r.fee_kerja || null, r.status, isBundle, Date.now());
+                    successCount++;
+                }
+                catch (error) {
+                    errorCount++;
+                    console.warn(`⚠️ [PRODUCTS UPSERT] Skipping product ${r.id} (${r.nama}) due to error:`, error);
+                }
             }
+            console.log(`✅ [PRODUCTS UPSERT] Completed: ${successCount} success, ${errorCount} errors`);
         });
-        tx(rows);
-        return { success: true };
+        try {
+            tx(rows);
+            return { success: true };
+        }
+        catch (error) {
+            console.error('❌ [PRODUCTS UPSERT] Transaction failed:', error);
+            return { success: false };
+        }
     });
     electron_1.ipcMain.handle('localdb-get-products-by-jenis', async (event, jenis) => {
         if (!localDb)
@@ -1129,7 +1438,12 @@ function createWindows() {
         product_id=excluded.product_id, customization_type_id=excluded.customization_type_id,
         updated_at=excluded.updated_at`);
             for (const r of data) {
-                stmt.run(r.id, r.product_id, r.customization_type_id, Date.now());
+                try {
+                    stmt.run(r.id, r.product_id, r.customization_type_id, Date.now());
+                }
+                catch (error) {
+                    console.warn(`⚠️ [PRODUCT CUSTOMIZATION UPSERT] Skipping row ${r.id} due to error:`, error);
+                }
             }
         });
         tx(rows);
@@ -1137,9 +1451,21 @@ function createWindows() {
     });
     // Bundle items handlers
     electron_1.ipcMain.handle('localdb-get-bundle-items', async (event, productId) => {
-        if (!localDb)
+        if (!localDb) {
+            console.warn('⚠️ [BUNDLE ITEMS] Local DB not available');
             return [];
+        }
         try {
+            // Ensure productId is a number
+            const productIdNum = typeof productId === 'string' ? parseInt(productId, 10) : productId;
+            if (isNaN(productIdNum)) {
+                console.error(`❌ [BUNDLE ITEMS] Invalid product ID: ${productId}`);
+                return [];
+            }
+            console.log(`🔍 [BUNDLE ITEMS] Fetching bundle items for product ID: ${productIdNum} (type: ${typeof productId}, converted from: ${productId})`);
+            // First, check if any bundle items exist at all
+            const allBundleItems = localDb.prepare('SELECT bundle_product_id, COUNT(*) as count FROM bundle_items GROUP BY bundle_product_id').all();
+            console.log(`📊 [BUNDLE ITEMS] Bundle items by product:`, allBundleItems);
             const bundleItems = localDb.prepare(`
         SELECT 
           bi.id,
@@ -1152,7 +1478,16 @@ function createWindows() {
         LEFT JOIN category2 c2 ON bi.category2_id = c2.id
         WHERE bi.bundle_product_id = ?
         ORDER BY bi.display_order ASC
-      `).all(productId);
+      `).all(productIdNum);
+            console.log(`✅ [BUNDLE ITEMS] Found ${bundleItems.length} bundle items for product ${productIdNum}`);
+            if (bundleItems.length > 0) {
+                console.log(`📦 [BUNDLE ITEMS] First item:`, JSON.stringify(bundleItems[0], null, 2));
+            }
+            else {
+                console.warn(`⚠️ [BUNDLE ITEMS] No bundle items found for product ${productIdNum}. Checking if product exists in products table...`);
+                const productCheck = localDb.prepare('SELECT id, nama, is_bundle FROM products WHERE id = ?').get(productIdNum);
+                console.log(`🔍 [BUNDLE ITEMS] Product check result:`, productCheck);
+            }
             return bundleItems.map(item => ({
                 id: item.id,
                 bundle_product_id: item.bundle_product_id,
@@ -1163,33 +1498,104 @@ function createWindows() {
             }));
         }
         catch (error) {
-            console.error('Error fetching bundle items:', error);
+            const errorMessage = (error && typeof error === 'object' && 'message' in error)
+                ? String(error.message)
+                : String(error);
+            console.error(`❌ [BUNDLE ITEMS] Error fetching bundle items for product ${productId}:`, errorMessage);
             return [];
         }
     });
     electron_1.ipcMain.handle('localdb-upsert-bundle-items', async (event, rows) => {
-        if (!localDb)
+        if (!localDb) {
+            console.warn('⚠️ [BUNDLE ITEMS UPSERT] Local DB not available');
             return { success: false };
-        const tx = localDb.transaction((data) => {
-            const stmt = localDb.prepare(`
-        INSERT INTO bundle_items (
-          id, bundle_product_id, category2_id, required_quantity, display_order, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(id) DO UPDATE SET
-          bundle_product_id = excluded.bundle_product_id,
-          category2_id = excluded.category2_id,
-          required_quantity = excluded.required_quantity,
-          display_order = excluded.display_order,
-          updated_at = excluded.updated_at
-      `);
-            for (const r of data) {
-                const createdAt = r.created_at || new Date().toISOString();
-                const updatedAt = Date.now();
-                stmt.run(r.id, r.bundle_product_id, r.category2_id, r.required_quantity, r.display_order, createdAt, updatedAt);
+        }
+        try {
+            if (!Array.isArray(rows)) {
+                console.error(`❌ [BUNDLE ITEMS UPSERT] Invalid data: rows is not an array, got ${typeof rows}`);
+                return { success: false };
             }
-        });
-        tx(rows);
-        return { success: true };
+            console.log(`🔄 [BUNDLE ITEMS UPSERT] Upserting ${rows.length} bundle items`);
+            if (rows.length > 0) {
+                console.log(`📦 [BUNDLE ITEMS UPSERT] First item sample:`, JSON.stringify(rows[0], null, 2));
+            }
+            const tx = localDb.transaction((data) => {
+                const stmt = localDb.prepare(`
+          INSERT INTO bundle_items (
+            id, bundle_product_id, category2_id, required_quantity, display_order, created_at, updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?)
+          ON CONFLICT(id) DO UPDATE SET
+            bundle_product_id = excluded.bundle_product_id,
+            category2_id = excluded.category2_id,
+            required_quantity = excluded.required_quantity,
+            display_order = excluded.display_order,
+            updated_at = excluded.updated_at
+        `);
+                let successCount = 0;
+                let errorCount = 0;
+                for (const r of data) {
+                    try {
+                        const createdAt = r.created_at || new Date().toISOString();
+                        const updatedAt = Date.now();
+                        stmt.run(r.id, r.bundle_product_id, r.category2_id, r.required_quantity, r.display_order, createdAt, updatedAt);
+                        successCount++;
+                    }
+                    catch (rowError) {
+                        errorCount++;
+                        // Simply log warning and continue, instead of error which scares users
+                        const rowErrorMessage = (rowError && typeof rowError === 'object' && 'message' in rowError)
+                            ? String(rowError.message)
+                            : String(rowError);
+                        console.warn(`⚠️ [BUNDLE ITEMS UPSERT] Skipping row ${r.id}: ${rowErrorMessage}`);
+                    }
+                }
+                console.log(`📊 [BUNDLE ITEMS UPSERT] Upserted ${successCount} items, ${errorCount} errors`);
+            });
+            tx(rows);
+            console.log(`✅ [BUNDLE ITEMS UPSERT] Successfully upserted bundle items`);
+            // Verify the data was saved
+            const verifyCount = localDb.prepare('SELECT COUNT(*) as count FROM bundle_items').get();
+            console.log(`✅ [BUNDLE ITEMS UPSERT] Total bundle items in database: ${verifyCount.count}`);
+            return { success: true };
+        }
+        catch (error) {
+            const errorMessage = (error && typeof error === 'object' && 'message' in error)
+                ? String(error.message)
+                : String(error);
+            console.error(`❌ [BUNDLE ITEMS UPSERT] Error:`, errorMessage);
+            return { success: false };
+        }
+    });
+    // Debug handler to list all bundle items
+    electron_1.ipcMain.handle('localdb-debug-bundle-items', async () => {
+        if (!localDb)
+            return { success: false, items: [] };
+        try {
+            const allItems = localDb.prepare(`
+        SELECT 
+          bi.id,
+          bi.bundle_product_id,
+          bi.category2_id,
+          bi.required_quantity,
+          bi.display_order,
+          c2.name AS category2_name
+        FROM bundle_items bi
+        LEFT JOIN category2 c2 ON bi.category2_id = c2.id
+        ORDER BY bi.bundle_product_id, bi.display_order ASC
+      `).all();
+            console.log(`🔍 [DEBUG] Total bundle items in database: ${allItems.length}`);
+            if (allItems.length > 0) {
+                console.log(`📦 [DEBUG] All bundle items:`, JSON.stringify(allItems, null, 2));
+            }
+            return { success: true, items: allItems };
+        }
+        catch (error) {
+            const errorMessage = (error && typeof error === 'object' && 'message' in error)
+                ? String(error.message)
+                : String(error);
+            console.error(`❌ [DEBUG] Error listing bundle items:`, errorMessage);
+            return { success: false, items: [], error: errorMessage };
+        }
     });
     electron_1.ipcMain.handle('localdb-get-product-customizations', async (event, productId) => {
         if (!localDb)
@@ -1586,14 +1992,14 @@ function createWindows() {
             return { success: false };
         const tx = localDb.transaction((data) => {
             const stmt = localDb.prepare(`INSERT INTO transactions (
-        id, business_id, user_id, payment_method, pickup_method, total_amount,
+        id, business_id, user_id, shift_uuid, payment_method, pickup_method, total_amount,
         voucher_discount, voucher_type, voucher_value, voucher_label, final_amount, amount_received, change_amount, status,
         created_at, updated_at, synced_at, contact_id, customer_name, customer_unit, note, bank_name,
         card_number, cl_account_id, cl_account_name, bank_id, receipt_number,
         transaction_type, payment_method_id
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET
-        business_id=excluded.business_id, user_id=excluded.user_id, payment_method=excluded.payment_method,
+        business_id=excluded.business_id, user_id=excluded.user_id, shift_uuid=excluded.shift_uuid, payment_method=excluded.payment_method,
         pickup_method=excluded.pickup_method, total_amount=excluded.total_amount, voucher_discount=excluded.voucher_discount,
         voucher_type=excluded.voucher_type, voucher_value=excluded.voucher_value, voucher_label=excluded.voucher_label,
         final_amount=excluded.final_amount, amount_received=excluded.amount_received, change_amount=excluded.change_amount,
@@ -1603,10 +2009,32 @@ function createWindows() {
         cl_account_name=excluded.cl_account_name, bank_id=excluded.bank_id, receipt_number=excluded.receipt_number,
         transaction_type=excluded.transaction_type, payment_method_id=excluded.payment_method_id`);
             for (const r of data) {
+                // Auto-link to active shift if shift_uuid is missing
+                let finalShiftUuid = r.shift_uuid;
+                if (!finalShiftUuid && r.user_id) {
+                    try {
+                        const shiftStmt = localDb.prepare(`
+              SELECT uuid_id 
+              FROM shifts 
+              WHERE user_id = ? AND status = 'active' AND business_id = ?
+              ORDER BY shift_start DESC 
+              LIMIT 1
+            `);
+                        const activeShift = shiftStmt.get(r.user_id, r.business_id ?? 14);
+                        if (activeShift) {
+                            finalShiftUuid = activeShift.uuid_id;
+                            console.log(`🔗 [UPSERT] Linked transaction ${r.id} to active shift ${finalShiftUuid}`);
+                        }
+                    }
+                    catch (e) {
+                        console.warn('Failed to link transaction to active shift during upsert:', e);
+                    }
+                }
                 console.log('🔍 [SQLITE] Inserting transaction data:', {
                     id: r.id,
                     business_id: r.business_id,
                     user_id: r.user_id,
+                    shift_uuid: finalShiftUuid,
                     payment_method: r.payment_method,
                     pickup_method: r.pickup_method,
                     total_amount: r.total_amount,
@@ -1636,6 +2064,7 @@ function createWindows() {
                     r.id,
                     r.business_id,
                     r.user_id,
+                    finalShiftUuid || null,
                     r.payment_method,
                     r.pickup_method,
                     Number(r.total_amount),
@@ -1672,8 +2101,12 @@ function createWindows() {
                 }
                 catch (err) {
                     console.error('❌ [SQLITE] Insert error:', err);
-                    console.error('📝 [SQLITE] Error code:', err.code);
-                    console.error('📝 [SQLITE] Error message:', err.message);
+                    if (err && typeof err === 'object' && 'code' in err) {
+                        console.error('📝 [SQLITE] Error code:', err.code);
+                    }
+                    if (err && typeof err === 'object' && 'message' in err) {
+                        console.error('📝 [SQLITE] Error message:', err.message);
+                    }
                     throw err;
                 }
             }
@@ -1887,11 +2320,11 @@ function createWindows() {
         const tx = localDb.transaction((data) => {
             const stmt = localDb.prepare(`INSERT INTO transaction_items (
         id, transaction_id, product_id, quantity, unit_price, total_price,
-        customizations_json, bundle_selections_json, custom_note, created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        bundle_selections_json, custom_note, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET
         transaction_id=excluded.transaction_id, product_id=excluded.product_id, quantity=excluded.quantity,
-        unit_price=excluded.unit_price, total_price=excluded.total_price, customizations_json=excluded.customizations_json,
+        unit_price=excluded.unit_price, total_price=excluded.total_price,
         bundle_selections_json=excluded.bundle_selections_json,
         custom_note=excluded.custom_note, created_at=excluded.created_at`);
             for (const r of data) {
@@ -1899,26 +2332,61 @@ function createWindows() {
                     id: r.id,
                     transaction_id: r.transaction_id,
                     product_id: r.product_id,
-                    customizations_json: r.customizations_json,
-                    customizations_type: typeof r.customizations_json,
                     custom_note: r.custom_note
                 });
-                // Parse customizations_json if it's already a string, otherwise stringify if it's an object
-                let customizationsJson = null;
-                if (r.customizations_json) {
-                    customizationsJson = typeof r.customizations_json === 'string'
-                        ? r.customizations_json
-                        : JSON.stringify(r.customizations_json);
-                }
+                // Handle bundle selections (still JSON for structure, but extract customizations to normalized tables)
                 let bundleSelectionsJson = null;
+                let bundleSelectionsData = null;
                 if (r.bundle_selections_json) {
                     bundleSelectionsJson = typeof r.bundle_selections_json === 'string'
                         ? r.bundle_selections_json
                         : JSON.stringify(r.bundle_selections_json);
+                    // Parse to extract bundle product customizations
+                    try {
+                        bundleSelectionsData = parseJsonArray(bundleSelectionsJson, 'bundle_selections_json');
+                    }
+                    catch (error) {
+                        console.warn('⚠️ Failed to parse bundle_selections_json:', error);
+                    }
                 }
-                console.log('📦 [SQLITE] Final customizations JSON:', customizationsJson);
                 console.log('📝 [SQLITE] Custom note:', r.custom_note);
-                stmt.run(r.id, r.transaction_id, r.product_id, r.quantity || 1, r.unit_price, r.total_price, customizationsJson, bundleSelectionsJson, r.custom_note, r.created_at);
+                stmt.run(r.id, r.transaction_id, r.product_id, r.quantity || 1, r.unit_price, r.total_price, bundleSelectionsJson, r.custom_note, r.created_at);
+                // Save main product customizations directly to normalized tables (NO JSON)
+                if (r.customizations && Array.isArray(r.customizations)) {
+                    try {
+                        const customizations = r.customizations;
+                        if (customizations.length > 0) {
+                            saveCustomizationsToNormalizedTables(localDb, r.id, customizations, r.created_at || new Date().toISOString());
+                        }
+                    }
+                    catch (error) {
+                        console.error('❌ Error saving main product customizations to normalized tables:', error);
+                    }
+                }
+                // Extract and save bundle product customizations to normalized tables (NO JSON)
+                if (bundleSelectionsData && bundleSelectionsData.length > 0) {
+                    try {
+                        const transactionItemId = r.id;
+                        const createdAt = r.created_at || new Date().toISOString();
+                        for (const bundleSelection of bundleSelectionsData) {
+                            if (!Array.isArray(bundleSelection.selectedProducts))
+                                continue;
+                            for (const selectedProduct of bundleSelection.selectedProducts) {
+                                // Each bundle product can have customizations
+                                if (selectedProduct.customizations && Array.isArray(selectedProduct.customizations) && selectedProduct.customizations.length > 0) {
+                                    const bundleProductCustomizations = selectedProduct.customizations;
+                                    // Save bundle product customizations to normalized tables
+                                    // Link them to the bundle product ID so we can reconstruct them later
+                                    const bundleProductId = selectedProduct.product?.id || null;
+                                    saveCustomizationsToNormalizedTables(localDb, transactionItemId, bundleProductCustomizations, createdAt, bundleProductId);
+                                }
+                            }
+                        }
+                    }
+                    catch (error) {
+                        console.error('❌ Error saving bundle product customizations to normalized tables:', error);
+                    }
+                }
             }
         });
         tx(rows);
@@ -1928,13 +2396,198 @@ function createWindows() {
     electron_1.ipcMain.handle('localdb-get-transaction-items', async (event, transactionId) => {
         if (!localDb)
             return [];
+        // Get transaction items
+        let items = [];
         if (transactionId) {
             const stmt = localDb.prepare('SELECT * FROM transaction_items WHERE transaction_id = ? ORDER BY id ASC');
-            return stmt.all(transactionId);
+            items = stmt.all(transactionId);
         }
         else {
             const stmt = localDb.prepare('SELECT * FROM transaction_items ORDER BY created_at DESC');
-            return stmt.all();
+            items = stmt.all();
+        }
+        // For each item, load customizations from normalized tables
+        const itemsWithCustomizations = items.map(item => {
+            const itemId = item.id;
+            // Read main product customizations from normalized tables (bundle_product_id IS NULL)
+            const customizations = readCustomizationsFromNormalizedTables(localDb, itemId, null);
+            // If item has bundle_selections_json, reconstruct it with customizations from normalized tables
+            let bundleSelections = null;
+            if (item.bundle_selections_json) {
+                try {
+                    const bundleSelectionsJson = typeof item.bundle_selections_json === 'string'
+                        ? item.bundle_selections_json
+                        : JSON.stringify(item.bundle_selections_json);
+                    bundleSelections = parseJsonArray(bundleSelectionsJson, 'bundle_selections_json');
+                    // For each bundle selection, load customizations for each product from normalized tables
+                    if (bundleSelections && bundleSelections.length > 0) {
+                        bundleSelections = bundleSelections.map(bundleSel => {
+                            if (!Array.isArray(bundleSel.selectedProducts))
+                                return bundleSel;
+                            return {
+                                ...bundleSel,
+                                selectedProducts: bundleSel.selectedProducts.map(selectedProduct => {
+                                    const bundleProductId = selectedProduct.product?.id;
+                                    if (!bundleProductId)
+                                        return selectedProduct;
+                                    // Read customizations for this specific bundle product from normalized tables
+                                    const productCustomizations = readCustomizationsFromNormalizedTables(localDb, itemId, bundleProductId);
+                                    return {
+                                        ...selectedProduct,
+                                        customizations: productCustomizations || undefined
+                                    };
+                                })
+                            };
+                        });
+                    }
+                }
+                catch (error) {
+                    console.warn('⚠️ Error reconstructing bundle selections:', error);
+                }
+            }
+            return {
+                ...item,
+                customizations: customizations || [], // Main product customizations
+                bundleSelections: bundleSelections || null // Bundle selections with customizations from normalized tables
+            };
+        });
+        return itemsWithCustomizations;
+    });
+    electron_1.ipcMain.handle('localdb-get-transaction-refunds', async (event, transactionUuid) => {
+        if (!localDb)
+            return [];
+        try {
+            const stmt = localDb.prepare(`
+        SELECT *
+        FROM transaction_refunds
+        WHERE transaction_uuid = ?
+        ORDER BY datetime(refunded_at) DESC, id DESC
+      `);
+            return stmt.all(transactionUuid);
+        }
+        catch (error) {
+            console.error('Error getting transaction refunds:', error);
+            return [];
+        }
+    });
+    electron_1.ipcMain.handle('localdb-upsert-transaction-refunds', async (event, rows) => {
+        if (!localDb)
+            return { success: false, error: 'Database not available' };
+        try {
+            const tx = localDb.transaction((data) => {
+                const stmt = localDb.prepare(`
+          INSERT INTO transaction_refunds (
+            uuid_id,
+            transaction_uuid,
+            business_id,
+            shift_uuid,
+            refunded_by,
+            refund_amount,
+            cash_delta,
+            payment_method_id,
+            reason,
+            note,
+            refund_type,
+            status,
+            refunded_at,
+            created_at,
+            updated_at,
+            synced_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          ON CONFLICT(uuid_id) DO UPDATE SET
+            transaction_uuid = excluded.transaction_uuid,
+            business_id = excluded.business_id,
+            shift_uuid = excluded.shift_uuid,
+            refunded_by = excluded.refunded_by,
+            refund_amount = excluded.refund_amount,
+            cash_delta = excluded.cash_delta,
+            payment_method_id = excluded.payment_method_id,
+            reason = excluded.reason,
+            note = excluded.note,
+            refund_type = excluded.refund_type,
+            status = excluded.status,
+            refunded_at = excluded.refunded_at,
+            created_at = excluded.created_at,
+            updated_at = excluded.updated_at,
+            synced_at = excluded.synced_at
+        `);
+                for (const r of data) {
+                    stmt.run(r.uuid_id, r.transaction_uuid, Number(r.business_id ?? 14), r.shift_uuid ?? null, Number(r.refunded_by ?? 0), Number(r.refund_amount ?? 0), Number(r.cash_delta ?? 0), Number(r.payment_method_id ?? 1), r.reason ?? null, r.note ?? null, r.refund_type ?? 'full', r.status ?? 'completed', r.refunded_at ?? new Date().toISOString(), r.created_at ?? new Date().toISOString(), typeof r.updated_at === 'number' ? r.updated_at : Date.now(), typeof r.synced_at === 'number' ? r.synced_at : Date.now());
+                }
+            });
+            tx(rows);
+            return { success: true };
+        }
+        catch (error) {
+            console.error('Error upserting transaction refunds:', error);
+            return { success: false, error: String(error) };
+        }
+    });
+    electron_1.ipcMain.handle('localdb-apply-transaction-refund', async (event, payload) => {
+        if (!localDb)
+            return { success: false, error: 'Database not available' };
+        try {
+            const { refund, transactionUpdate } = payload || {};
+            if (!refund || !refund.uuid_id) {
+                return { success: false, error: 'Invalid refund payload' };
+            }
+            const refundedAt = refund.refunded_at ?? new Date().toISOString();
+            const createdAt = refund.created_at ?? refundedAt;
+            const updatedAt = refund.updated_at ?? Date.now();
+            const syncedAt = refund.synced_at ?? null;
+            const stmt = localDb.prepare(`
+        INSERT INTO transaction_refunds (
+          uuid_id,
+          transaction_uuid,
+          business_id,
+          shift_uuid,
+          refunded_by,
+          refund_amount,
+          cash_delta,
+          payment_method_id,
+          reason,
+          note,
+          refund_type,
+          status,
+          refunded_at,
+          created_at,
+          updated_at,
+          synced_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(uuid_id) DO UPDATE SET
+          transaction_uuid = excluded.transaction_uuid,
+          business_id = excluded.business_id,
+          shift_uuid = excluded.shift_uuid,
+          refunded_by = excluded.refunded_by,
+          refund_amount = excluded.refund_amount,
+          cash_delta = excluded.cash_delta,
+          payment_method_id = excluded.payment_method_id,
+          reason = excluded.reason,
+          note = excluded.note,
+          refund_type = excluded.refund_type,
+          status = excluded.status,
+          refunded_at = excluded.refunded_at,
+          created_at = excluded.created_at,
+          updated_at = excluded.updated_at,
+          synced_at = excluded.synced_at
+      `);
+            stmt.run(refund.uuid_id, refund.transaction_uuid, Number(refund.business_id ?? 14), refund.shift_uuid ?? null, Number(refund.refunded_by ?? 0), Number(refund.refund_amount ?? 0), Number(refund.cash_delta ?? 0), Number(refund.payment_method_id ?? 1), refund.reason ?? null, refund.note ?? null, refund.refund_type ?? 'full', refund.status ?? 'completed', refundedAt, createdAt, updatedAt, syncedAt);
+            if (transactionUpdate?.id) {
+                const txUpdateStmt = localDb.prepare(`
+          UPDATE transactions
+          SET refund_status = COALESCE(?, refund_status),
+              refund_total = COALESCE(?, refund_total),
+              last_refunded_at = COALESCE(?, last_refunded_at),
+              status = COALESCE(?, status)
+          WHERE id = ?
+        `);
+                txUpdateStmt.run(transactionUpdate.refund_status ?? null, typeof transactionUpdate.refund_total === 'number' ? transactionUpdate.refund_total : null, transactionUpdate.last_refunded_at ?? refundedAt, transactionUpdate.status ?? null, transactionUpdate.id);
+            }
+            return { success: true };
+        }
+        catch (error) {
+            console.error('Error applying transaction refund:', error);
+            return { success: false, error: String(error) };
         }
     });
     // Mark transactions as synced
@@ -1994,11 +2647,87 @@ function createWindows() {
             return { shift: null, isCurrentUserShift: false };
         }
     });
+    // Get shifts history
+    electron_1.ipcMain.handle('localdb-get-shifts', async (event, params) => {
+        if (!localDb)
+            return { shifts: [], total: 0 };
+        try {
+            const { userId, startDate, endDate, businessId = 14, limit = 20, offset = 0 } = params;
+            const conditions = ['business_id = ?'];
+            const queryParams = [businessId];
+            if (userId) {
+                conditions.push('user_id = ?');
+                queryParams.push(userId);
+            }
+            if (startDate) {
+                conditions.push('datetime(shift_start) >= datetime(?)');
+                queryParams.push(startDate);
+            }
+            if (endDate) {
+                conditions.push('datetime(shift_start) <= datetime(?)');
+                queryParams.push(endDate);
+            }
+            const whereClause = conditions.join(' AND ');
+            const countStmt = localDb.prepare(`SELECT COUNT(*) as count FROM shifts WHERE ${whereClause}`);
+            const total = countStmt.get(...queryParams).count;
+            const query = `
+        SELECT * FROM shifts 
+        WHERE ${whereClause}
+        ORDER BY shift_start DESC
+        LIMIT ? OFFSET ?
+      `;
+            const stmt = localDb.prepare(query);
+            const shifts = stmt.all(...queryParams, limit, offset);
+            return { shifts, total };
+        }
+        catch (error) {
+            console.error('Error getting shifts history:', error);
+            return { shifts: [], total: 0 };
+        }
+    });
+    // Get all users who have shifts
+    electron_1.ipcMain.handle('localdb-get-shift-users', async (event, businessId = 14) => {
+        if (!localDb)
+            return [];
+        try {
+            const stmt = localDb.prepare(`
+            SELECT DISTINCT user_id, user_name 
+            FROM shifts 
+            WHERE business_id = ? 
+            ORDER BY user_name
+        `);
+            return stmt.all(businessId);
+        }
+        catch (error) {
+            console.error('Error getting shift users:', error);
+            return [];
+        }
+    });
     // Create a new shift
     electron_1.ipcMain.handle('localdb-create-shift', async (event, shiftData) => {
         if (!localDb)
             return { success: false, error: 'Database not available' };
         try {
+            // Validate that business exists (required for foreign key constraint)
+            const businessStmt = localDb.prepare('SELECT id FROM businesses WHERE id = ? LIMIT 1');
+            const business = businessStmt.get(shiftData.business_id);
+            if (!business) {
+                console.error(`❌ [SHIFTS] Business ID ${shiftData.business_id} not found in local database`);
+                return {
+                    success: false,
+                    error: `Business ID ${shiftData.business_id} tidak ditemukan di database lokal. Silakan sinkronkan data dari server terlebih dahulu.`
+                };
+            }
+            // Validate that user exists (required for foreign key constraint)
+            const userStmt = localDb.prepare('SELECT id FROM users WHERE id = ? LIMIT 1');
+            const user = userStmt.get(shiftData.user_id);
+            if (!user) {
+                console.error(`❌ [SHIFTS] User ID ${shiftData.user_id} not found in local database`);
+                return {
+                    success: false,
+                    error: `User ID ${shiftData.user_id} tidak ditemukan di database lokal. Silakan sinkronkan data dari server terlebih dahulu.`
+                };
+            }
             // Ensure there is no other active shift for the business
             const existingStmt = localDb.prepare(`
         SELECT id, user_id, user_name, shift_start
@@ -2024,26 +2753,107 @@ function createWindows() {
         }
         catch (error) {
             console.error('Error creating shift:', error);
-            return { success: false, error: String(error) };
+            const errorMessage = String(error);
+            // Provide more helpful error message for foreign key constraint failures
+            if (errorMessage.includes('FOREIGN KEY constraint failed')) {
+                return {
+                    success: false,
+                    error: 'Data business atau user tidak ditemukan di database lokal. Silakan sinkronkan data dari server terlebih dahulu sebelum memulai shift.'
+                };
+            }
+            return { success: false, error: errorMessage };
         }
     });
     // End a shift
-    electron_1.ipcMain.handle('localdb-end-shift', async (event, shiftId) => {
+    electron_1.ipcMain.handle('localdb-end-shift', async (event, payload) => {
         if (!localDb)
             return { success: false, error: 'Database not available' };
         try {
+            const { shiftId, kasAkhir } = payload || {};
+            if (!shiftId) {
+                return { success: false, error: 'Shift ID is required' };
+            }
+            const shiftRow = localDb.prepare(`SELECT * FROM shifts WHERE id = ?`).get(shiftId);
+            if (!shiftRow) {
+                return { success: false, error: 'Shift not found' };
+            }
+            if (shiftRow.status !== 'active') {
+                return { success: false, error: 'Shift already ended' };
+            }
             const now = new Date().toISOString();
+            const cashMethodStmt = localDb.prepare('SELECT id FROM payment_methods WHERE code = ? LIMIT 1');
+            const cashMethod = cashMethodStmt.get('cash');
+            const cashMethodId = cashMethod?.id || 1;
+            const shiftSalesStmt = localDb.prepare(`
+        SELECT COALESCE(SUM(final_amount), 0) as cash_total
+        FROM transactions
+        WHERE business_id = ?
+          AND user_id = ?
+          AND datetime(created_at) >= datetime(?)
+          AND datetime(created_at) <= datetime(?)
+          AND payment_method_id = ?
+          AND status = 'completed'
+      `);
+            const shiftSalesResult = shiftSalesStmt.get(shiftRow.business_id, shiftRow.user_id, shiftRow.shift_start, now, cashMethodId);
+            const shiftRefundStmt = localDb.prepare(`
+        SELECT COALESCE(SUM(cash_delta), 0) as refund_total
+        FROM transaction_refunds
+        WHERE business_id = ?
+          AND refunded_by = ?
+          AND datetime(refunded_at) >= datetime(?)
+          AND datetime(refunded_at) <= datetime(?)
+          AND status != 'failed'
+      `);
+            const shiftRefundResult = shiftRefundStmt.get(shiftRow.business_id, shiftRow.user_id, shiftRow.shift_start, now);
+            const cashSalesTotal = shiftSalesResult?.cash_total || 0;
+            const cashRefundTotal = shiftRefundResult?.refund_total || 0;
+            const kasExpected = Number((Number(shiftRow.modal_awal || 0) + cashSalesTotal - cashRefundTotal).toFixed(2));
+            let kasAkhirValue = kasAkhir !== undefined && kasAkhir !== null ? Number(kasAkhir) : null;
+            if (kasAkhirValue !== null && Number.isNaN(kasAkhirValue)) {
+                kasAkhirValue = null;
+            }
+            let kasSelisih = null;
+            let kasSelisihLabel = 'balanced';
+            if (kasAkhirValue !== null) {
+                kasSelisih = Number((kasAkhirValue - kasExpected).toFixed(2));
+                if (Math.abs(kasSelisih) < 0.01) {
+                    kasSelisih = 0;
+                    kasSelisihLabel = 'balanced';
+                }
+                else {
+                    kasSelisihLabel = kasSelisih > 0 ? 'plus' : 'minus';
+                }
+            }
             const stmt = localDb.prepare(`
         UPDATE shifts 
-        SET shift_end = ?, status = 'completed', updated_at = ?
+        SET shift_end = ?, 
+            status = 'completed', 
+            updated_at = ?,
+            kas_akhir = ?,
+            kas_expected = ?,
+            kas_selisih = ?,
+            kas_selisih_label = ?,
+            cash_sales_total = ?,
+            cash_refund_total = ?
         WHERE id = ? AND status = 'active'
       `);
-            const result = stmt.run(now, Date.now(), shiftId);
+            const result = stmt.run(now, Date.now(), kasAkhirValue, kasExpected, kasSelisih, kasSelisihLabel, cashSalesTotal, cashRefundTotal, shiftId);
             if (result.changes === 0) {
                 return { success: false, error: 'Shift not found or already ended' };
             }
             console.log(`✅ [SHIFTS] Ended shift ${shiftId}`);
-            return { success: true };
+            return {
+                success: true,
+                cashSummary: {
+                    kas_mulai: shiftRow.modal_awal || 0,
+                    kas_expected: kasExpected,
+                    kas_akhir: kasAkhirValue,
+                    cash_sales: cashSalesTotal,
+                    cash_refunds: cashRefundTotal,
+                    variance: kasSelisih,
+                    variance_label: kasSelisihLabel
+                }
+            };
         }
         catch (error) {
             console.error('Error ending shift:', error);
@@ -2182,9 +2992,40 @@ function createWindows() {
         AND t.status = 'completed'
       `);
             const wholeDayResult = wholeDayStmt.get(businessId, dayStart.toISOString(), dayEnd.toISOString(), cashMethod.id);
+            let refundShiftQuery = `
+        SELECT COALESCE(SUM(cash_delta), 0) as refund_total
+        FROM transaction_refunds
+        WHERE refunded_by = ? AND business_id = ?
+        AND datetime(refunded_at) >= datetime(?)
+        AND status != 'failed'
+      `;
+            const refundShiftParams = [userId, businessId, shiftStart];
+            if (shiftEnd) {
+                refundShiftQuery += ' AND datetime(refunded_at) <= datetime(?)';
+                refundShiftParams.push(shiftEnd);
+            }
+            const refundShiftStmt = localDb.prepare(refundShiftQuery);
+            const refundShiftResult = refundShiftStmt.get(...refundShiftParams);
+            const dayRefundStmt = localDb.prepare(`
+        SELECT COALESCE(SUM(cash_delta), 0) as refund_total
+        FROM transaction_refunds
+        WHERE business_id = ?
+        AND datetime(refunded_at) >= datetime(?)
+        AND datetime(refunded_at) <= datetime(?)
+        AND status != 'failed'
+      `);
+            const dayRefundResult = dayRefundStmt.get(businessId, dayStart.toISOString(), dayEnd.toISOString());
+            const shiftSales = shiftResult.cash_total || 0;
+            const shiftRefunds = refundShiftResult?.refund_total || 0;
+            const daySales = wholeDayResult.cash_total || 0;
+            const dayRefunds = dayRefundResult?.refund_total || 0;
             return {
-                cash_shift: shiftResult.cash_total || 0,
-                cash_whole_day: wholeDayResult.cash_total || 0
+                cash_shift: shiftSales - shiftRefunds,
+                cash_shift_sales: shiftSales,
+                cash_shift_refunds: shiftRefunds,
+                cash_whole_day: daySales - dayRefunds,
+                cash_whole_day_sales: daySales,
+                cash_whole_day_refunds: dayRefunds
             };
         }
         catch (error) {
@@ -2195,6 +3036,13 @@ function createWindows() {
             };
         }
     });
+    // Get shifts with filtering - REMOVED DUPLICATE HANDLER
+    // The new handler is defined above with pagination support
+    /*
+    ipcMain.handle('localdb-get-shifts', async (event, filters: { businessId?: number; startDate?: string; endDate?: string; userId?: number; limit?: number } = {}) => {
+      // ... implementation ...
+    });
+    */
     // Get unsynced shifts
     electron_1.ipcMain.handle('localdb-get-unsynced-shifts', async (event, businessId) => {
         if (!localDb)
@@ -2245,6 +3093,7 @@ function createWindows() {
             const dayStartUTC = new Date(Date.UTC(year, month, day, 0, 0, 0, 0));
             const dayStart = new Date(dayStartUTC.getTime() - gmt7Offset);
             // Check for transactions before shift_start but on the same day
+            // AND ensure they are not already linked to another shift
             const checkStmt = localDb.prepare(`
         SELECT COUNT(*) as count, MIN(created_at) as earliest_time
         FROM transactions
@@ -2253,6 +3102,7 @@ function createWindows() {
         AND datetime(created_at) >= datetime(?)
         AND datetime(created_at) < datetime(?)
         AND status = 'completed'
+        AND (shift_uuid IS NULL OR shift_uuid = '')
       `);
             const result = checkStmt.get(userId, businessId, dayStart.toISOString(), shiftStart);
             return {
@@ -2271,6 +3121,13 @@ function createWindows() {
         if (!localDb)
             return { success: false, error: 'Database not available' };
         try {
+            // 1. Get shift details first to have the UUID and User ID
+            const getShiftStmt = localDb.prepare('SELECT uuid_id, user_id FROM shifts WHERE id = ?');
+            const shift = getShiftStmt.get(shiftId);
+            if (!shift) {
+                return { success: false, error: 'Shift not found' };
+            }
+            // 2. Update the shift start time
             const stmt = localDb.prepare(`
         UPDATE shifts 
         SET shift_start = ?, updated_at = ?
@@ -2280,7 +3137,17 @@ function createWindows() {
             if (result.changes === 0) {
                 return { success: false, error: 'Shift not found or not active' };
             }
+            // 3. Link the transactions in the new time range to this shift
+            const linkStmt = localDb.prepare(`
+        UPDATE transactions
+        SET shift_uuid = ?
+        WHERE user_id = ? 
+        AND datetime(created_at) >= datetime(?)
+        AND (shift_uuid IS NULL OR shift_uuid = '')
+      `);
+            const linkResult = linkStmt.run(shift.uuid_id, shift.user_id, newStartTime);
             console.log(`✅ [SHIFTS] Updated shift ${shiftId} start time to ${newStartTime}`);
+            console.log(`🔗 [SHIFTS] Linked ${linkResult.changes} transactions to shift ${shift.uuid_id}`);
             return { success: true };
         }
         catch (error) {
@@ -2295,13 +3162,13 @@ function createWindows() {
         try {
             let query = `
         SELECT 
+          ti.id,
           p.id as product_id,
           p.nama as product_name,
           p.menu_code as product_code,
           ti.quantity,
           ti.unit_price,
           ti.total_price,
-          ti.customizations_json,
           ti.bundle_selections_json,
           t.transaction_type,
           pm.code as payment_method_code,
@@ -2328,112 +3195,101 @@ function createWindows() {
             const OFFLINE_METHODS = new Set(['cash', 'debit', 'qr', 'ewallet', 'cl', 'voucher', 'offline']);
             const sumCustomizationForRow = (row, unitQuantity) => {
                 let customizationTotal = 0;
-                if (row.customizations_json) {
-                    try {
-                        const customizations = JSON.parse(row.customizations_json);
-                        if (Array.isArray(customizations)) {
-                            for (const customization of customizations) {
-                                if (customization?.selected_options && Array.isArray(customization.selected_options)) {
-                                    for (const option of customization.selected_options) {
-                                        const adjustment = Number(option?.price_adjustment || 0);
-                                        customizationTotal += adjustment;
-                                        const optionId = Number(option?.option_id);
-                                        if (!Number.isNaN(optionId)) {
-                                            const existingOption = customizationAggregate.get(optionId);
-                                            if (existingOption) {
-                                                existingOption.total_quantity += unitQuantity;
-                                                existingOption.total_revenue += adjustment * unitQuantity;
-                                            }
-                                            else {
-                                                customizationAggregate.set(optionId, {
-                                                    option_id: optionId,
-                                                    option_name: option?.option_name || 'Unknown Option',
-                                                    customization_id: Number(customization?.customization_id) || 0,
-                                                    customization_name: customization?.customization_name || 'Unknown Customization',
-                                                    total_quantity: unitQuantity,
-                                                    total_revenue: adjustment * unitQuantity,
-                                                });
-                                            }
-                                        }
-                                    }
-                                }
-                            }
+                // Read from normalized tables instead of JSON
+                const customizations = readCustomizationsFromNormalizedTables(localDb, row.id, null);
+                if (!customizations || customizations.length === 0)
+                    return 0;
+                for (const customization of customizations) {
+                    if (!Array.isArray(customization?.selected_options))
+                        continue;
+                    for (const option of customization.selected_options) {
+                        const adjustment = Number(option?.price_adjustment || 0);
+                        customizationTotal += adjustment;
+                        const optionId = Number(option?.option_id);
+                        if (Number.isNaN(optionId)) {
+                            continue;
                         }
-                    }
-                    catch (err) {
-                        console.warn('⚠️ Failed to parse customizations_json for product sale:', err);
+                        const existingOption = customizationAggregate.get(optionId);
+                        if (existingOption) {
+                            existingOption.total_quantity += unitQuantity;
+                            existingOption.total_revenue += adjustment * unitQuantity;
+                        }
+                        else {
+                            customizationAggregate.set(optionId, {
+                                option_id: optionId,
+                                option_name: option?.option_name || 'Unknown Option',
+                                customization_id: Number(customization?.customization_id) || 0,
+                                customization_name: customization?.customization_name || 'Unknown Customization',
+                                total_quantity: unitQuantity,
+                                total_revenue: adjustment * unitQuantity,
+                            });
+                        }
                     }
                 }
-                if (row.bundle_selections_json) {
-                    try {
-                        const bundleSelections = JSON.parse(row.bundle_selections_json);
-                        if (Array.isArray(bundleSelections)) {
-                            const rawPlatform = (row.payment_method_code || row.payment_method || '').toString().toLowerCase();
-                            const platformCode = rawPlatform && !OFFLINE_METHODS.has(rawPlatform) ? rawPlatform : 'offline';
-                            const transactionType = row.transaction_type || 'drinks';
-                            for (const selection of bundleSelections) {
-                                if (selection?.selectedProducts && Array.isArray(selection.selectedProducts)) {
-                                    for (const selectedProduct of selection.selectedProducts) {
-                                        const selectionQty = typeof selectedProduct?.quantity === 'number' && !Number.isNaN(selectedProduct.quantity)
-                                            ? selectedProduct.quantity
-                                            : 1;
-                                        const totalQty = selectionQty * unitQuantity;
-                                        if (selectedProduct?.product?.id) {
-                                            const bundleItemKey = `${selectedProduct.product.id}-${platformCode}-${transactionType}`;
-                                            const existingBundleItem = bundleItemsAggregate.get(bundleItemKey);
-                                            if (existingBundleItem) {
-                                                existingBundleItem.total_quantity += totalQty;
-                                            }
-                                            else {
-                                                bundleItemsAggregate.set(bundleItemKey, {
-                                                    product_id: Number(selectedProduct.product.id),
-                                                    product_name: selectedProduct.product.nama || 'Unknown Product',
-                                                    product_code: '',
-                                                    platform: platformCode,
-                                                    transaction_type: transactionType,
-                                                    total_quantity: totalQty,
-                                                    total_subtotal: 0,
-                                                    customization_subtotal: 0,
-                                                    base_subtotal: 0,
-                                                });
-                                            }
-                                        }
-                                        if (selectedProduct?.customizations && Array.isArray(selectedProduct.customizations)) {
-                                            for (const customization of selectedProduct.customizations) {
-                                                if (customization?.selected_options && Array.isArray(customization.selected_options)) {
-                                                    for (const option of customization.selected_options) {
-                                                        const adjustment = Number(option?.price_adjustment || 0);
-                                                        const qty = selectionQty * unitQuantity;
-                                                        customizationTotal += adjustment * selectionQty;
-                                                        const optionId = Number(option?.option_id);
-                                                        if (!Number.isNaN(optionId)) {
-                                                            const existingOption = customizationAggregate.get(optionId);
-                                                            if (existingOption) {
-                                                                existingOption.total_quantity += qty;
-                                                                existingOption.total_revenue += adjustment * qty;
-                                                            }
-                                                            else {
-                                                                customizationAggregate.set(optionId, {
-                                                                    option_id: optionId,
-                                                                    option_name: option?.option_name || 'Unknown Option',
-                                                                    customization_id: Number(customization?.customization_id) || 0,
-                                                                    customization_name: customization?.customization_name || 'Unknown Customization',
-                                                                    total_quantity: qty,
-                                                                    total_revenue: adjustment * qty,
-                                                                });
-                                                            }
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                        }
+                const bundleSelections = parseJsonArray(row.bundle_selections_json, 'bundle_selections_json');
+                if (bundleSelections.length > 0) {
+                    const rawPlatform = (row.payment_method_code || row.payment_method || '').toString().toLowerCase();
+                    const platformCode = rawPlatform && !OFFLINE_METHODS.has(rawPlatform) ? rawPlatform : 'offline';
+                    const transactionType = row.transaction_type || 'drinks';
+                    for (const selection of bundleSelections) {
+                        if (!Array.isArray(selection?.selectedProducts))
+                            continue;
+                        for (const selectedProduct of selection.selectedProducts) {
+                            const selectionQty = typeof selectedProduct?.quantity === 'number' && !Number.isNaN(selectedProduct.quantity)
+                                ? selectedProduct.quantity
+                                : 1;
+                            const totalQty = selectionQty * unitQuantity;
+                            if (selectedProduct?.product?.id) {
+                                const bundleItemKey = `${selectedProduct.product.id}-${platformCode}-${transactionType}`;
+                                const existingBundleItem = bundleItemsAggregate.get(bundleItemKey);
+                                if (existingBundleItem) {
+                                    existingBundleItem.total_quantity += totalQty;
+                                }
+                                else {
+                                    bundleItemsAggregate.set(bundleItemKey, {
+                                        product_id: Number(selectedProduct.product.id),
+                                        product_name: selectedProduct.product.nama || 'Unknown Product',
+                                        product_code: '',
+                                        platform: platformCode,
+                                        transaction_type: transactionType,
+                                        total_quantity: totalQty,
+                                        total_subtotal: 0,
+                                        customization_subtotal: 0,
+                                        base_subtotal: 0,
+                                    });
+                                }
+                            }
+                            if (!Array.isArray(selectedProduct?.customizations))
+                                continue;
+                            for (const customization of selectedProduct.customizations) {
+                                if (!Array.isArray(customization?.selected_options))
+                                    continue;
+                                for (const option of customization.selected_options) {
+                                    const adjustment = Number(option?.price_adjustment || 0);
+                                    const qty = selectionQty * unitQuantity;
+                                    customizationTotal += adjustment * selectionQty;
+                                    const optionId = Number(option?.option_id);
+                                    if (Number.isNaN(optionId)) {
+                                        continue;
+                                    }
+                                    const existingOption = customizationAggregate.get(optionId);
+                                    if (existingOption) {
+                                        existingOption.total_quantity += qty;
+                                        existingOption.total_revenue += adjustment * qty;
+                                    }
+                                    else {
+                                        customizationAggregate.set(optionId, {
+                                            option_id: optionId,
+                                            option_name: option?.option_name || 'Unknown Option',
+                                            customization_id: Number(customization?.customization_id) || 0,
+                                            customization_name: customization?.customization_name || 'Unknown Customization',
+                                            total_quantity: qty,
+                                            total_revenue: adjustment * qty,
+                                        });
                                     }
                                 }
                             }
                         }
-                    }
-                    catch (err) {
-                        console.warn('⚠️ Failed to parse bundle_selections_json for product sale:', err);
                     }
                 }
                 return customizationTotal * unitQuantity || 0;
@@ -2482,13 +3338,22 @@ function createWindows() {
                 };
             });
             const bundleItems = Array.from(bundleItemsAggregate.values()).map(product => {
-                return {
+                const bundleItem = {
                     ...product,
                     base_unit_price: 0,
                     is_bundle_item: true,
                 };
+                console.log(`[SHIFT REPORT] Bundle item: ${bundleItem.product_name}, is_bundle_item: ${bundleItem.is_bundle_item}`);
+                return bundleItem;
             });
-            const allProducts = [...regularProducts, ...bundleItems].sort((a, b) => {
+            // Create a map to track bundle item keys to avoid duplicates
+            const bundleItemKeys = new Set(bundleItems.map(item => `${item.product_id}-${item.platform}-${item.transaction_type}`));
+            // Filter out any regular products that are actually bundle items
+            const filteredRegularProducts = regularProducts.filter(product => {
+                const key = `${product.product_id}-${product.platform}-${product.transaction_type}`;
+                return !bundleItemKeys.has(key);
+            });
+            const allProducts = [...filteredRegularProducts, ...bundleItems].sort((a, b) => {
                 if (a.product_name === b.product_name) {
                     if (a.is_bundle_item !== b.is_bundle_item) {
                         return a.is_bundle_item ? 1 : -1;
@@ -2699,47 +3564,6 @@ function createWindows() {
         const stmt = localDb.prepare('SELECT * FROM cl_accounts WHERE is_active = 1 ORDER BY account_name ASC');
         return stmt.all();
     });
-    // Omset
-    electron_1.ipcMain.handle('localdb-upsert-omset', async (event, rows) => {
-        if (!localDb)
-            return { success: false };
-        const tx = localDb.transaction((data) => {
-            const stmt = localDb.prepare(`INSERT INTO omset (
-        id, business_id, date, regular, ojol, event, delivery, fitness, pool,
-        user_id, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT(business_id, date) DO UPDATE SET
-        regular=excluded.regular, ojol=excluded.ojol, event=excluded.event, delivery=excluded.delivery,
-        fitness=excluded.fitness, pool=excluded.pool, user_id=excluded.user_id,
-        created_at=excluded.created_at, updated_at=excluded.updated_at`);
-            for (const r of data) {
-                stmt.run(r.id, r.business_id, r.date, r.regular, r.ojol, r.event, r.delivery, r.fitness, r.pool, r.user_id, r.created_at, Date.now());
-            }
-        });
-        tx(rows);
-        return { success: true };
-    });
-    electron_1.ipcMain.handle('localdb-get-omset', async (event, businessId, startDate, endDate) => {
-        if (!localDb)
-            return [];
-        let query = 'SELECT * FROM omset';
-        const params = [];
-        if (businessId) {
-            query += ' WHERE business_id = ?';
-            params.push(businessId);
-            if (startDate) {
-                query += ' AND date >= ?';
-                params.push(startDate);
-            }
-            if (endDate) {
-                query += ' AND date <= ?';
-                params.push(endDate);
-            }
-        }
-        query += ' ORDER BY date DESC';
-        const stmt = localDb.prepare(query);
-        return stmt.all(...params);
-    });
     // Printer configuration handlers
     electron_1.ipcMain.handle('localdb-save-printer-config', async (event, printerType, systemPrinterName, extraSettings) => {
         if (!localDb)
@@ -2814,7 +3638,7 @@ function createWindows() {
     // Get Printer 2 mode
     electron_1.ipcMain.handle('get-printer2-mode', async () => {
         if (!printerService)
-            return { success: true, mode: 'auto' };
+            return { success: true, mode: 'manual' };
         const mode = printerService.getPrinter2Mode();
         return { success: true, mode };
     });
@@ -2847,10 +3671,10 @@ function createWindows() {
         return { success: true, selections };
     });
     // Log Printer 2 print
-    electron_1.ipcMain.handle('log-printer2-print', async (event, transactionId, printer2ReceiptNumber, mode, cycleNumber, globalCounter) => {
+    electron_1.ipcMain.handle('log-printer2-print', async (event, transactionId, printer2ReceiptNumber, mode, cycleNumber, globalCounter, isReprint, reprintCount) => {
         if (!printerService)
             return { success: false };
-        const result = printerService.logPrinter2Print(transactionId, printer2ReceiptNumber, mode, cycleNumber, globalCounter);
+        const result = printerService.logPrinter2Print(transactionId, printer2ReceiptNumber, mode, cycleNumber, globalCounter, isReprint, reprintCount);
         return { success: result };
     });
     // Get Printer 2 audit log
@@ -2861,10 +3685,10 @@ function createWindows() {
         return { success: true, entries };
     });
     // Log Printer 1 print
-    electron_1.ipcMain.handle('log-printer1-print', async (event, transactionId, printer1ReceiptNumber, globalCounter) => {
+    electron_1.ipcMain.handle('log-printer1-print', async (event, transactionId, printer1ReceiptNumber, globalCounter, isReprint, reprintCount) => {
         if (!printerService)
             return { success: false };
-        const result = printerService.logPrinter1Print(transactionId, printer1ReceiptNumber, globalCounter);
+        const result = printerService.logPrinter1Print(transactionId, printer1ReceiptNumber, globalCounter, isReprint, reprintCount);
         return { success: result };
     });
     // Get Printer 1 audit log
@@ -2928,7 +3752,16 @@ function createWindows() {
                     for (const row of data) {
                         const transactionId = String(row.transaction_id);
                         const receiptNumber = Number(row.printer1_receipt_number);
-                        const printedAtEpoch = Number(row.printed_at_epoch ?? (row.printed_at ? new Date(row.printed_at).getTime() : 0));
+                        const parsePrintedAt = (value) => {
+                            if (typeof value === 'string' || typeof value === 'number') {
+                                const date = new Date(value);
+                                if (!Number.isNaN(date.getTime())) {
+                                    return date.getTime();
+                                }
+                            }
+                            return 0;
+                        };
+                        const printedAtEpoch = Number(row.printed_at_epoch ?? parsePrintedAt(row.printed_at));
                         if (!transactionId || Number.isNaN(receiptNumber) || Number.isNaN(printedAtEpoch)) {
                             continue;
                         }
@@ -2945,7 +3778,16 @@ function createWindows() {
                     for (const row of data) {
                         const transactionId = String(row.transaction_id);
                         const receiptNumber = Number(row.printer2_receipt_number);
-                        const printedAtEpoch = Number(row.printed_at_epoch ?? (row.printed_at ? new Date(row.printed_at).getTime() : 0));
+                        const parsePrintedAt = (value) => {
+                            if (typeof value === 'string' || typeof value === 'number') {
+                                const date = new Date(value);
+                                if (!Number.isNaN(date.getTime())) {
+                                    return date.getTime();
+                                }
+                            }
+                            return 0;
+                        };
+                        const printedAtEpoch = Number(row.printed_at_epoch ?? parsePrintedAt(row.printed_at));
                         if (!transactionId || Number.isNaN(receiptNumber) || Number.isNaN(printedAtEpoch)) {
                             continue;
                         }
@@ -3015,18 +3857,42 @@ function createWindows() {
         if (!localDb)
             return { success: false, error: 'Database not available' };
         try {
+            // Try to link to an active shift if not already provided
+            if (!transactionData.shift_uuid && transactionData.user_id) {
+                try {
+                    const shiftStmt = localDb.prepare(`
+            SELECT uuid_id 
+            FROM shifts 
+            WHERE user_id = ? AND status = 'active' AND business_id = ?
+            ORDER BY shift_start DESC 
+            LIMIT 1
+          `);
+                    const activeShift = shiftStmt.get(transactionData.user_id, transactionData.business_id ?? 14);
+                    if (activeShift) {
+                        transactionData.shift_uuid = activeShift.uuid_id;
+                        console.log(`🔗 Linking offline transaction to shift ${activeShift.uuid_id}`);
+                    }
+                    else {
+                        console.warn(`⚠️ No active shift found for user ${transactionData.user_id} when queuing transaction`);
+                    }
+                }
+                catch (shiftError) {
+                    console.error('Error finding active shift for offline transaction:', shiftError);
+                }
+            }
             const stmt = localDb.prepare(`
         INSERT INTO offline_transactions (transaction_data, created_at, sync_status)
         VALUES (?, ?, 'pending')
       `);
             const result = stmt.run(JSON.stringify(transactionData), Date.now());
             // Queue transaction items
-            if (transactionData.items && transactionData.items.length > 0) {
+            const items = Array.isArray(transactionData.items) ? transactionData.items : [];
+            if (items.length > 0) {
                 const itemStmt = localDb.prepare(`
           INSERT INTO offline_transaction_items (offline_transaction_id, item_data)
           VALUES (?, ?)
         `);
-                for (const item of transactionData.items) {
+                for (const item of items) {
                     itemStmt.run(result.lastInsertRowid, JSON.stringify(item));
                 }
             }
@@ -3049,7 +3915,37 @@ function createWindows() {
         ORDER BY created_at ASC
         LIMIT 50
       `);
-            return stmt.all();
+            const transactions = stmt.all();
+            // Fetch items for each transaction and include them
+            const transactionsWithItems = transactions.map(transaction => {
+                try {
+                    const transactionData = JSON.parse(transaction.transaction_data);
+                    // Fetch items for this transaction
+                    if (!localDb) {
+                        // If localDb becomes null, return transaction without items
+                        return transaction;
+                    }
+                    const itemsStmt = localDb.prepare(`
+            SELECT item_data
+            FROM offline_transaction_items
+            WHERE offline_transaction_id = ?
+            ORDER BY id ASC
+          `);
+                    const items = itemsStmt.all(transaction.id);
+                    // Parse and include items in transaction data
+                    transactionData.items = items.map(item => JSON.parse(item.item_data));
+                    return {
+                        ...transaction,
+                        transaction_data: JSON.stringify(transactionData)
+                    };
+                }
+                catch (error) {
+                    console.error(`Error processing transaction ${transaction.id}:`, error);
+                    // Return transaction without items if parsing fails
+                    return transaction;
+                }
+            });
+            return transactionsWithItems;
         }
         catch (error) {
             console.error('Error getting pending transactions:', error);
@@ -3090,6 +3986,74 @@ function createWindows() {
             return { success: false, error: String(error) };
         }
     });
+    electron_1.ipcMain.handle('localdb-queue-offline-refund', async (event, refundData) => {
+        if (!localDb)
+            return { success: false, error: 'Database not available' };
+        try {
+            const stmt = localDb.prepare(`
+        INSERT INTO offline_refunds (refund_data, created_at, sync_status, sync_attempts)
+        VALUES (?, ?, 'pending', 0)
+      `);
+            const result = stmt.run(JSON.stringify(refundData), Date.now());
+            return { success: true, offlineRefundId: Number(result.lastInsertRowid) };
+        }
+        catch (error) {
+            console.error('Error queueing offline refund:', error);
+            return { success: false, error: String(error) };
+        }
+    });
+    electron_1.ipcMain.handle('localdb-get-pending-refunds', async () => {
+        if (!localDb)
+            return [];
+        try {
+            const stmt = localDb.prepare(`
+        SELECT id, refund_data, created_at, sync_attempts, last_sync_attempt
+        FROM offline_refunds
+        WHERE sync_status = 'pending'
+        ORDER BY created_at ASC
+        LIMIT 50
+      `);
+            return stmt.all();
+        }
+        catch (error) {
+            console.error('Error getting pending refunds:', error);
+            return [];
+        }
+    });
+    electron_1.ipcMain.handle('localdb-mark-refund-synced', async (event, offlineRefundId) => {
+        if (!localDb)
+            return { success: false };
+        try {
+            const stmt = localDb.prepare(`
+        UPDATE offline_refunds
+        SET sync_status = 'synced', last_sync_attempt = ?
+        WHERE id = ?
+      `);
+            stmt.run(Date.now(), offlineRefundId);
+            return { success: true };
+        }
+        catch (error) {
+            console.error('Error marking refund as synced:', error);
+            return { success: false, error: String(error) };
+        }
+    });
+    electron_1.ipcMain.handle('localdb-mark-refund-failed', async (event, offlineRefundId) => {
+        if (!localDb)
+            return { success: false };
+        try {
+            const stmt = localDb.prepare(`
+        UPDATE offline_refunds
+        SET sync_attempts = sync_attempts + 1, last_sync_attempt = ?
+        WHERE id = ?
+      `);
+            stmt.run(Date.now(), offlineRefundId);
+            return { success: true };
+        }
+        catch (error) {
+            console.error('Error marking refund as failed:', error);
+            return { success: false, error: String(error) };
+        }
+    });
     // Load the app - start with login page
     console.log('🔍 isDev:', isDev);
     if (isDev) {
@@ -3097,7 +4061,7 @@ function createWindows() {
         // Wait a bit for Next.js to start, then load the login page
         setTimeout(async () => {
             console.log('🔍 Loading login page...');
-            // Try port 3001 first (common alternative), then fallback to 3000
+            // Try to use the port specified in env (PORT from npm script), fall back to defaults
             const tryLoadURL = async (port) => {
                 try {
                     await mainWindow.loadURL(`http://localhost:${port}/login`);
@@ -3109,8 +4073,12 @@ function createWindows() {
                     return false;
                 }
             };
-            // Try ports in order: 3000, 3001, 3002 (3000 is default Next.js port)
-            const ports = [3000, 3001, 3002];
+            const preferredPort = Number(process.env.PORT ?? '');
+            const fallbackPorts = [3000, 3001, 3002];
+            const ports = [
+                ...(Number.isFinite(preferredPort) ? [preferredPort] : []),
+                ...fallbackPorts
+            ].filter((port, index, arr) => arr.indexOf(port) === index);
             let loaded = false;
             for (const port of ports) {
                 if (await tryLoadURL(port)) {
@@ -3125,7 +4093,9 @@ function createWindows() {
     }
     else {
         // In production, load the built Next.js app
-        mainWindow.loadFile(path.join(__dirname, '../out/index.html'));
+        const indexPath = path.join(__dirname, '../../out/index.html');
+        console.log('🔍 Loading production index file from:', indexPath);
+        mainWindow.loadFile(indexPath);
     }
     // Show windows when ready
     mainWindow.once('ready-to-show', () => {
@@ -3137,6 +4107,7 @@ function createWindows() {
     });
     if (customerWindow) {
         customerWindow.once('ready-to-show', () => {
+            customerWindow.setFullScreen(true);
             customerWindow.show();
         });
     }
@@ -3235,7 +4206,7 @@ electron_1.ipcMain.handle('print-receipt', async (event, data) => {
                 const allConfigs = localDb.prepare('SELECT * FROM printer_configs').all();
                 console.log('📋 All printer configs in database:', allConfigs);
                 printerConfig = localDb.prepare('SELECT * FROM printer_configs WHERE printer_type = ?')
-                    .get(data.printerType);
+                    .get(data.printerType) ?? null;
                 console.log('📋 Printer config query result for type', data.printerType, ':', printerConfig);
                 if (!printerName && printerConfig && printerConfig.system_printer_name) {
                     printerName = printerConfig.system_printer_name;
@@ -3694,6 +4665,7 @@ function generateTestReceiptHTML(printerName, businessName, options) {
 }
 // Generate test label HTML for 40x30mm label printer
 function generateTestLabelHTML(printerName) {
+    const labelPrinterName = printerName || 'Label Printer';
     return `
 <!DOCTYPE html>
 <html>
@@ -3738,6 +4710,7 @@ function generateTestLabelHTML(printerName) {
   <div class="label-content">
     <div class="customer-name">Austin</div>
     <div class="item-name">Matcha Latte Hot</div>
+    <div style="font-size: 7pt; margin-top: 2mm;">Testing printer: ${labelPrinterName}</div>
   </div>
 </body>
 </html>
@@ -3963,6 +4936,7 @@ function generateReceiptHTML(data, businessName, options) {
   
   ${logoDataUri ? `<div class="logo-container"><img src="${logoDataUri}" class="logo" alt="Momoyo Logo"></div>` : '<div class="store-name">MOMOYO</div>'}
   <div class="branch">${businessName}</div>
+  ${data.isReprint && data.reprintCount ? `<div class="reprint-notice" style="text-align: center; font-size: 10pt; font-weight: bold; margin: 2mm 0; color: #000;">REPRINT KE-${data.reprintCount}</div>` : ''}
   <div class="address">Jl. Kalimantan no. 21, Kartoharjo<br>Kec. Kartoharjo, Kota Madiun</div>
   
   ${(() => {
@@ -4107,15 +5081,33 @@ function generateShiftBreakdownHTML(shiftData) {
     const printTime = formatDateTime(new Date().toISOString());
     const shiftStartTime = formatDateTime(shiftData.shift_start);
     const shiftEndTime = shiftData.shift_end ? formatDateTime(shiftData.shift_end) : 'Masih Berlangsung';
+    // Sort products: regular products first, bundle items at the bottom
+    const sortedProducts = [...shiftData.productSales].sort((a, b) => {
+        const aIsBundle = Boolean(a.is_bundle_item);
+        const bIsBundle = Boolean(b.is_bundle_item);
+        // If one is bundle and one isn't, bundle goes to bottom
+        if (aIsBundle && !bIsBundle)
+            return 1;
+        if (!aIsBundle && bIsBundle)
+            return -1;
+        // If both are same type, keep original order
+        return 0;
+    });
     // Generate product sales table rows
-    const productRows = shiftData.productSales.map(product => {
+    const productRows = sortedProducts.map(product => {
         const quantity = product.total_quantity || 0;
         const baseSubtotal = product.base_subtotal ?? (product.total_subtotal - product.customization_subtotal);
         const unitPrice = product.base_unit_price ?? (quantity > 0 ? baseSubtotal / quantity : 0);
         const platformLabel = formatPlatformLabel(product.platform);
         const transactionLabel = formatTransactionLabel(product.transaction_type);
-        const isBundleItem = product.is_bundle_item || false;
-        const productNameDisplay = isBundleItem ? `[Bundle] ${product.product_name}` : product.product_name;
+        const isBundleItem = Boolean(product.is_bundle_item);
+        // Debug log for bundle items
+        if (isBundleItem) {
+            console.log(`[SHIFT PRINT] Displaying bundle item: ${product.product_name}, is_bundle_item: ${product.is_bundle_item}`);
+        }
+        const productNameDisplay = isBundleItem
+            ? `<span style="font-size: 4.8pt;">(Bundle)</span> ${product.product_name}`
+            : product.product_name;
         return `
     <tr>
       <td style="text-align: left; padding: 1mm 0;">
@@ -4131,8 +5123,6 @@ function generateShiftBreakdownHTML(shiftData) {
     const regularProducts = shiftData.productSales.filter((p) => !p.is_bundle_item);
     const totalProductQty = shiftData.productSales.reduce((sum, p) => sum + p.total_quantity, 0);
     const totalProductBaseSubtotal = regularProducts.reduce((sum, p) => sum + (p.base_subtotal ?? (p.total_subtotal - p.customization_subtotal)), 0);
-    const regularProductQty = regularProducts.reduce((sum, p) => sum + p.total_quantity, 0);
-    const averageBaseUnitPrice = regularProductQty > 0 ? totalProductBaseSubtotal / regularProductQty : 0;
     const customizationRows = shiftData.customizationSales.map(item => `
     <tr>
       <td style="text-align: left; padding: 1mm 0;">
@@ -4156,6 +5146,47 @@ function generateShiftBreakdownHTML(shiftData) {
     const formattedTotalDiscount = shiftData.statistics.total_discount > 0
         ? formatCurrency(-Math.abs(shiftData.statistics.total_discount))
         : formatCurrency(0);
+    const cashSummaryData = shiftData.cashSummary || {
+        cash_shift: 0,
+        cash_whole_day: 0,
+        total_cash_in_cashier: 0
+    };
+    const cashShiftSales = cashSummaryData.cash_shift_sales ?? cashSummaryData.cash_shift ?? 0;
+    const cashShiftRefunds = cashSummaryData.cash_shift_refunds ?? 0;
+    const cashWholeDaySales = cashSummaryData.cash_whole_day_sales ?? cashSummaryData.cash_whole_day ?? 0;
+    const cashWholeDayRefunds = cashSummaryData.cash_whole_day_refunds ?? 0;
+    const cashNetShift = cashSummaryData.cash_shift ?? (cashShiftSales - cashShiftRefunds);
+    const cashNetWholeDay = cashSummaryData.cash_whole_day ?? (cashWholeDaySales - cashWholeDayRefunds);
+    const kasMulaiSummary = cashSummaryData.kas_mulai ?? shiftData.modal_awal ?? 0;
+    const kasExpectedSummary = cashSummaryData.kas_expected ?? (kasMulaiSummary + cashShiftSales - cashShiftRefunds);
+    const kasAkhirSummary = typeof cashSummaryData.kas_akhir === 'number' ? cashSummaryData.kas_akhir : null;
+    let kasSelisihSummary = typeof cashSummaryData.kas_selisih === 'number'
+        ? cashSummaryData.kas_selisih
+        : kasAkhirSummary !== null
+            ? Number((kasAkhirSummary - kasExpectedSummary).toFixed(2))
+            : null;
+    let kasSelisihLabelSummary = cashSummaryData.kas_selisih_label ?? null;
+    if (kasSelisihSummary !== null) {
+        if (Math.abs(kasSelisihSummary) < 0.01) {
+            kasSelisihSummary = 0;
+            kasSelisihLabelSummary = 'balanced';
+        }
+        else if (!kasSelisihLabelSummary) {
+            kasSelisihLabelSummary = kasSelisihSummary > 0 ? 'plus' : 'minus';
+        }
+    }
+    const varianceLabelDisplay = kasSelisihLabelSummary === 'plus'
+        ? 'Plus'
+        : kasSelisihLabelSummary === 'minus'
+            ? 'Minus'
+            : kasSelisihLabelSummary === 'balanced'
+                ? 'Balanced'
+                : 'Pending';
+    const varianceValueDisplay = kasSelisihSummary === null
+        ? '-'
+        : `${kasSelisihSummary > 0 ? '+' : ''}${kasSelisihSummary.toLocaleString('id-ID')}`;
+    const kasAkhirDisplay = kasAkhirSummary !== null ? kasAkhirSummary.toLocaleString('id-ID') : '-';
+    const totalCashInCashierDisplay = (cashSummaryData.total_cash_in_cashier ?? kasExpectedSummary).toLocaleString('id-ID');
     return `
 <!DOCTYPE html>
 <html>
@@ -4281,7 +5312,7 @@ function generateShiftBreakdownHTML(shiftData) {
 
   <div class="divider"></div>
 
-  <div class="section-title">PRODUCT SALES BREAKDOWN</div>
+  <div class="section-title">BARANG TERJUAL</div>
   <table>
     <thead>
       <tr>
@@ -4304,7 +5335,7 @@ function generateShiftBreakdownHTML(shiftData) {
 
   <div class="divider"></div>
 
-  <div class="section-title">PAYMENT METHOD BREAKDOWN</div>
+  <div class="section-title">PAYMENT METHOD</div>
   <table>
     <thead>
       <tr>
@@ -4323,7 +5354,7 @@ function generateShiftBreakdownHTML(shiftData) {
 
   <div class="divider"></div>
 
-  <div class="section-title">CUSTOMIZATION SALES BREAKDOWN</div>
+  <div class="section-title">TOPPING SALES BREAKDOWN</div>
   <table>
     <thead>
       <tr>
@@ -4370,11 +5401,11 @@ function generateShiftBreakdownHTML(shiftData) {
       <span class="summary-value">${shiftData.statistics.total_amount.toLocaleString('id-ID')}</span>
     </div>
     <div class="summary-line">
-      <span class="summary-label">Customization Units:</span>
+      <span class="summary-label">Topping Units:</span>
       <span class="summary-value">${totalCustomizationUnits}</span>
     </div>
     <div class="summary-line">
-      <span class="summary-label">Total Kustomisasi:</span>
+      <span class="summary-label">Total Topping:</span>
       <span class="summary-value">${totalCustomizationRevenue.toLocaleString('id-ID')}</span>
     </div>
     <div class="summary-line">
@@ -4386,16 +5417,48 @@ function generateShiftBreakdownHTML(shiftData) {
       <span class="summary-value">${formattedTotalDiscount}</span>
     </div>
     <div class="summary-line">
-      <span class="summary-label">Cash (Shift):</span>
-      <span class="summary-value">${shiftData.cashSummary.cash_shift.toLocaleString('id-ID')}</span>
+      <span class="summary-label">Kas Mulai:</span>
+      <span class="summary-value">${kasMulaiSummary.toLocaleString('id-ID')}</span>
     </div>
     <div class="summary-line">
-      <span class="summary-label">Cash (Hari):</span>
-      <span class="summary-value">${shiftData.cashSummary.cash_whole_day.toLocaleString('id-ID')}</span>
+      <span class="summary-label">Cash Sales (Shift):</span>
+      <span class="summary-value">${cashShiftSales.toLocaleString('id-ID')}</span>
+    </div>
+    <div class="summary-line">
+      <span class="summary-label">Cash Refunds (Shift):</span>
+      <span class="summary-value">-${cashShiftRefunds.toLocaleString('id-ID')}</span>
+    </div>
+    <div class="summary-line">
+      <span class="summary-label">Net Cash (Shift):</span>
+      <span class="summary-value">${cashNetShift.toLocaleString('id-ID')}</span>
+    </div>
+    <div class="summary-line">
+      <span class="summary-label">Kas Diharapkan:</span>
+      <span class="summary-value">${kasExpectedSummary.toLocaleString('id-ID')}</span>
+    </div>
+    <div class="summary-line">
+      <span class="summary-label">Kas Akhir:</span>
+      <span class="summary-value">${kasAkhirDisplay}</span>
+    </div>
+    <div class="summary-line">
+      <span class="summary-label">Selisih (${varianceLabelDisplay}):</span>
+      <span class="summary-value">${varianceValueDisplay}</span>
+    </div>
+    <div class="summary-line">
+      <span class="summary-label">Cash Sales (Hari):</span>
+      <span class="summary-value">${cashWholeDaySales.toLocaleString('id-ID')}</span>
+    </div>
+    <div class="summary-line">
+      <span class="summary-label">Cash Refunds (Hari):</span>
+      <span class="summary-value">-${cashWholeDayRefunds.toLocaleString('id-ID')}</span>
+    </div>
+    <div class="summary-line">
+      <span class="summary-label">Net Cash (Hari):</span>
+      <span class="summary-value">${cashNetWholeDay.toLocaleString('id-ID')}</span>
     </div>
     <div class="summary-line">
       <span class="summary-label">Cash in Cashier:</span>
-      <span class="summary-value">${shiftData.cashSummary.total_cash_in_cashier.toLocaleString('id-ID')}</span>
+      <span class="summary-value">${totalCashInCashierDisplay}</span>
     </div>
   </div>
 
@@ -4492,7 +5555,10 @@ electron_1.ipcMain.handle('list-printers', async (event) => {
     }
     catch (error) {
         console.error('Failed to list printers:', error);
-        return { success: false, error: error?.message || String(error), printers: [] };
+        const errorMessage = (error && typeof error === 'object' && 'message' in error)
+            ? String(error.message)
+            : String(error);
+        return { success: false, error: errorMessage, printers: [] };
     }
 });
 electron_1.ipcMain.handle('open-cash-drawer', async () => {
@@ -4620,7 +5686,7 @@ electron_1.ipcMain.handle('create-customer-display', async () => {
         }
     }
     else {
-        customerWindow.loadFile(path.join(__dirname, '../out/customer-display.html'));
+        customerWindow.loadFile(path.join(__dirname, '../../out/customer-display.html'));
         customerWindow.show();
     }
     return { success: true, message: 'Customer display created successfully' };

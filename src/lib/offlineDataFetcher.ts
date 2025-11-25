@@ -3,9 +3,13 @@
  * Automatically falls back to local SQLite database when offline
  */
 
-const isElectron = typeof window !== 'undefined' && (window as any).electronAPI;
+import { getApiUrl } from '@/lib/api';
 
-interface Product {
+type UnknownRecord = Record<string, unknown>;
+
+const isElectron = typeof window !== 'undefined' && (window as { electronAPI?: UnknownRecord }).electronAPI;
+
+export interface Product {
   id: number;
   menu_code: string;
   nama: string;
@@ -29,7 +33,7 @@ interface Product {
   status: 'active' | 'inactive';
 }
 
-interface Category {
+export interface Category {
   jenis: string;
   active?: boolean;
 }
@@ -42,22 +46,59 @@ export async function fetchProducts(
   transactionType?: 'drinks' | 'bakery',
   options?: { isOnline?: boolean, forceOnline?: boolean, platform?: 'qpon' | 'gofood' | 'grabfood' | 'shopeefood' | 'tiktok' }
 ): Promise<Product[]> {
-  console.log('🔍 [FETCH PRODUCTS] Starting fetch with params:', {
-    category2Name,
-    transactionType,
-    options,
-    isElectron: isElectron
-  });
 
   // If we're in offline mode (isOnline is false), skip API call entirely
   if (options?.isOnline === false) {
-    console.log('📱 [OFFLINE MODE] Skipping API call, using local database directly');
     return await fetchFromLocalDatabase(category2Name, transactionType, options);
+  }
+
+  // For online tabs (qpon, gofood, etc), prioritize fetching from offline database first
+  // to ensure instant loading, then optionally refresh from online in background
+  if (options?.platform) {
+    // Attempt to fetch locally first
+    const localProducts = await fetchFromLocalDatabase(category2Name, transactionType, options);
+    
+    // If we have local data, return it immediately
+    if (localProducts.length > 0) {
+      
+      // Trigger background refresh if online
+      // We use a non-blocking promise here
+      if (options.isOnline) {
+        // Define a separate function for the background fetch to avoid recursive loops if we called fetchProducts
+        const backgroundRefresh = async () => {
+          try {
+            let url = category2Name ? getApiUrl(`/api/products?category2_name=${encodeURIComponent(category2Name)}`) : getApiUrl('/api/products');
+            if (transactionType) url += (url.includes('?') ? '&' : '?') + `transaction_type=${transactionType}`;
+            if (options?.isOnline) url += (url.includes('?') ? '&' : '?') + `online=true`;
+            if (options?.platform) url += (url.includes('?') ? '&' : '?') + `platform=${options.platform}`;
+            
+            const response = await fetch(url, { cache: 'no-store' });
+            if (response.ok) {
+              const data = await response.json();
+              if (data.success && data.products && isElectron) {
+                const electronAPI = typeof window !== 'undefined' ? (window as { electronAPI?: UnknownRecord }).electronAPI : undefined;
+                if (electronAPI?.localDbUpsertProducts) {
+                  await (electronAPI.localDbUpsertProducts as (rows: unknown[]) => Promise<{ success: boolean }>)(data.products);
+                  // Dispatch event to update UI if needed
+                  window.dispatchEvent(new CustomEvent('dataSynced'));
+                }
+              }
+            }
+          } catch (e) {
+            console.warn('Background refresh failed:', e);
+          }
+        };
+        backgroundRefresh();
+      }
+      
+      return localProducts;
+    }
+    // If local is empty, fall through to online fetch below
   }
 
   try {
     // Try online fetch first
-    let url = category2Name ? `/api/products?category2_name=${encodeURIComponent(category2Name)}` : '/api/products';
+    let url = category2Name ? getApiUrl(`/api/products?category2_name=${encodeURIComponent(category2Name)}`) : getApiUrl('/api/products');
     if (transactionType) {
       url += (url.includes('?') ? '&' : '?') + `transaction_type=${transactionType}`;
     }
@@ -68,26 +109,23 @@ export async function fetchProducts(
       url += (url.includes('?') ? '&' : '?') + `platform=${options.platform}`;
     }
     
-    console.log('🌐 [ONLINE FETCH] Making API request to:', url);
     const response = await fetch(url, { cache: 'no-store' });
-    
-    console.log('🌐 [ONLINE FETCH] Response status:', response.status, response.statusText);
     
     if (!response.ok) {
       throw new Error(`Network request failed: ${response.status} ${response.statusText}`);
     }
     
     const data = await response.json();
-    console.log('🌐 [ONLINE FETCH] Response data:', data);
     
     if (data.success && data.products) {
-      console.log('✅ [ONLINE FETCH] Successfully fetched', data.products.length, 'products');
       
       // If we got online data successfully, cache it locally
       if (isElectron) {
         try {
-          await (window as any).electronAPI.localDbUpsertProducts(data.products);
-          console.log('✅ Products cached locally');
+          const electronAPI = typeof window !== 'undefined' ? (window as { electronAPI?: UnknownRecord }).electronAPI : undefined;
+          if (electronAPI?.localDbUpsertProducts) {
+            await (electronAPI.localDbUpsertProducts as (rows: unknown[]) => Promise<{ success: boolean }>)(data.products);
+          }
         } catch (error) {
           console.warn('⚠️ Failed to cache products locally:', error);
         }
@@ -102,7 +140,6 @@ export async function fetchProducts(
     
     // If forceOnline is true, don't fall back to offline data
     if (options?.forceOnline) {
-      console.warn('⚠️ Force online mode enabled, but online fetch failed:', error);
       return [];
     }
     
@@ -122,81 +159,63 @@ async function fetchFromLocalDatabase(
     // Fall back to local SQLite database
     if (isElectron) {
       try {
-        console.log('🔄 [OFFLINE FETCHER] Falling back to local SQLite database');
-        let products;
-        if (category2Name) {
-          console.log('🔄 [OFFLINE FETCHER] Fetching products by category2:', category2Name);
-          products = await (window as any).electronAPI.localDbGetProductsByCategory2(category2Name);
-        } else {
-          console.log('🔄 [OFFLINE FETCHER] Fetching all products');
-          products = await (window as any).electronAPI.localDbGetAllProducts();
+        const electronAPI = typeof window !== 'undefined' ? (window as { electronAPI?: UnknownRecord }).electronAPI : undefined;
+        let products: UnknownRecord[] = [];
+        if (category2Name && electronAPI?.localDbGetProductsByCategory2) {
+          const result = await (electronAPI.localDbGetProductsByCategory2 as (category2Name: string) => Promise<unknown[]>)(category2Name);
+          products = Array.isArray(result) ? result as UnknownRecord[] : [];
+        } else if (electronAPI?.localDbGetAllProducts) {
+          const result = await (electronAPI.localDbGetAllProducts as () => Promise<unknown[]>)();
+          products = Array.isArray(result) ? result as UnknownRecord[] : [];
         }
         
-        console.log('📦 [OFFLINE FETCHER] Retrieved products from SQLite:', products ? products.length : 0);
-
         // Normalize local rows to API shape: ensure category1_name and category2_name exist
-        products = (products || []).map((p: any) => ({
+        products = products.map((p: UnknownRecord) => ({
           ...p,
           category1_name: p.category1_name ?? p.kategori ?? null, // SQLite uses 'kategori' for category1
           category2_name: p.category2_name ?? p.jenis ?? null,
         }));
         
-        // Log first product to see its structure
-        if (products.length > 0) {
-          console.log('🔍 [DEBUG] First product structure:', products[0]);
-          console.log('🔍 [DEBUG] First product keys:', Object.keys(products[0]));
-        }
-
         // When no specific category is selected, only show products with valid category2_name
         // This ensures consistency with categories API (which only shows categories with non-null names)
         if (!category2Name) {
-          products = products.filter((p: Product) => p.category2_name && p.category2_name.trim() !== '');
+          products = products.filter((p: unknown) => {
+            const product = p as Product;
+            return product.category2_name && product.category2_name.trim() !== '';
+          });
         }
 
         // Filter by transaction type if specified - using category1_name to match API logic
         if (transactionType) {
-          console.log('🔄 [OFFLINE FETCHER] Filtering by transaction type:', transactionType);
-          console.log('🔄 [OFFLINE FETCHER] Products before filtering:', products.map(p => ({ 
-            id: p.id, 
-            name: p.nama, 
-            category1_name: p.category1_name,
-            category2_name: p.category2_name
-          })));
-          
           // Filter by transaction type: bakery vs drinks - match API logic using category1_name
           if (transactionType === 'drinks') {
-            products = products.filter((p: Product) => 
-              p.category1_name && (p.category1_name === 'Minuman' || p.category1_name === 'Dessert')
-            );
+            products = products.filter((p: unknown) => {
+              const product = p as Product;
+              return product.category1_name && (product.category1_name === 'Minuman' || product.category1_name === 'Dessert');
+            });
           } else if (transactionType === 'bakery') {
-            products = products.filter((p: Product) => p.category1_name === 'Bakery');
+            products = products.filter((p: unknown) => {
+              const product = p as Product;
+              return product.category1_name === 'Bakery';
+            });
           }
-          console.log('📦 [OFFLINE FETCHER] After filtering:', products.length, 'products');
-          console.log('📦 [OFFLINE FETCHER] Filtered products:', products.map(p => ({ 
-            id: p.id, 
-            name: p.nama, 
-            category1_name: p.category1_name,
-            category2_name: p.category2_name
-          })));
         }
 
         // Apply online/platform filter when in online mode (offline DB)
         if (options?.isOnline && options?.platform) {
-          console.log('🔄 [OFFLINE FETCHER] Applying platform filter for', options.platform);
-          products = products.filter((p: Product) => {
-            if (options.platform === 'qpon') return !!p.harga_qpon && p.harga_qpon > 0;
-            if (options.platform === 'gofood') return !!p.harga_gofood && p.harga_gofood > 0;
-            if (options.platform === 'grabfood') return !!p.harga_grabfood && p.harga_grabfood > 0;
-            if (options.platform === 'shopeefood') return !!p.harga_shopeefood && p.harga_shopeefood > 0;
-            if (options.platform === 'tiktok') return !!p.harga_tiktok && p.harga_tiktok > 0;
+          products = products.filter((p: unknown) => {
+            const product = p as Product;
+            if (options.platform === 'qpon') return !!product.harga_qpon && product.harga_qpon > 0;
+            if (options.platform === 'gofood') return !!product.harga_gofood && product.harga_gofood > 0;
+            if (options.platform === 'grabfood') return !!product.harga_grabfood && product.harga_grabfood > 0;
+            if (options.platform === 'shopeefood') return !!product.harga_shopeefood && product.harga_shopeefood > 0;
+            if (options.platform === 'tiktok') return !!product.harga_tiktok && product.harga_tiktok > 0;
             return false;
           });
-          console.log('📦 [OFFLINE FETCHER] After platform filter:', products.length, 'products');
         }
         // Note: If online=true but no platform specified, show all products (no harga_online filter)
         
-        console.log('✅ [OFFLINE FETCHER] Returning', products.length, 'products from offline database');
-        return products;
+        return products as unknown as Product[];
       } catch (localError) {
         console.error('❌ Failed to load from local database:', localError);
       }
@@ -227,7 +246,7 @@ export async function fetchCategories(
 
   try {
     // Try online fetch first
-    let url = '/api/categories';
+    let url = getApiUrl('/api/categories');
     if (transactionType) {
       url += `?transaction_type=${transactionType}`;
     }
@@ -256,13 +275,16 @@ export async function fetchCategories(
       // If we got online data successfully, cache it locally
       if (isElectron) {
         try {
-          await (window as any).electronAPI.localDbUpsertCategories(
-            data.categories.map((cat: Category) => ({
-              jenis: cat.jenis,
-              updated_at: Date.now(),
-            }))
-          );
-          console.log('✅ Categories cached locally');
+          const electronAPI = typeof window !== 'undefined' ? (window as { electronAPI?: UnknownRecord }).electronAPI : undefined;
+          if (electronAPI?.localDbUpsertCategories) {
+            await (electronAPI.localDbUpsertCategories as (rows: unknown[]) => Promise<{ success: boolean }>)(
+              data.categories.map((cat: Category) => ({
+                jenis: cat.jenis,
+                updated_at: Date.now(),
+              }))
+            );
+            console.log('✅ Categories cached locally');
+          }
         } catch (error) {
           console.warn('⚠️ Failed to cache categories locally:', error);
         }
@@ -290,10 +312,15 @@ async function fetchCategoriesFromLocalDatabase(
     if (isElectron) {
       try {
         // Get all products first - we need to filter by category1_name to match API logic
-        let allProducts = await (window as any).electronAPI.localDbGetAllProducts();
+        const electronAPI = typeof window !== 'undefined' ? (window as { electronAPI?: UnknownRecord }).electronAPI : undefined;
+        if (!electronAPI?.localDbGetAllProducts) {
+          return [];
+        }
+        const allProductsResult = await (electronAPI.localDbGetAllProducts as () => Promise<unknown[]>)();
+        let allProducts: UnknownRecord[] = Array.isArray(allProductsResult) ? allProductsResult as UnknownRecord[] : [];
         
         // Normalize local rows to API shape: ensure category1_name and category2_name exist
-        allProducts = (allProducts || []).map((p: any) => ({
+        allProducts = allProducts.map((p: UnknownRecord) => ({
           ...p,
           category1_name: p.category1_name ?? p.kategori ?? null, // SQLite uses 'kategori' for category1
           category2_name: p.category2_name ?? p.jenis ?? null,
@@ -303,10 +330,10 @@ async function fetchCategoriesFromLocalDatabase(
         let filteredProducts = allProducts;
         if (transactionType) {
           if (transactionType === 'bakery') {
-            filteredProducts = allProducts.filter((p: any) => p.category1_name === 'Bakery');
+            filteredProducts = allProducts.filter((p: UnknownRecord) => p.category1_name === 'Bakery');
           } else if (transactionType === 'drinks') {
             // For drinks, include products where category1_name is 'Minuman' or 'Dessert'
-            filteredProducts = allProducts.filter((p: any) => 
+            filteredProducts = allProducts.filter((p: UnknownRecord) => 
               p.category1_name && (p.category1_name === 'Minuman' || p.category1_name === 'Dessert')
             );
           }
@@ -314,9 +341,10 @@ async function fetchCategoriesFromLocalDatabase(
         
         // Get distinct category2 names from filtered products (matching API logic)
         const category2Set = new Set<string>();
-        filteredProducts.forEach((p: any) => {
-          if (p.category2_name && p.category2_name.trim() !== '') {
-            category2Set.add(p.category2_name);
+        filteredProducts.forEach((p: UnknownRecord) => {
+          const category2Name = typeof p.category2_name === 'string' ? p.category2_name : null;
+          if (category2Name && category2Name.trim() !== '') {
+            category2Set.add(category2Name);
           }
         });
         
@@ -328,30 +356,30 @@ async function fetchCategoriesFromLocalDatabase(
         // Apply online/platform filter if needed - use filteredProducts (already filtered by transaction type)
         if (options?.isOnline && options?.platform) {
           // Only show categories that have products with the platform price (within filtered products)
-          const productsWithPlatformPrice = filteredProducts.filter((p: any) => {
-            if (options.platform === 'qpon') return p.harga_qpon && p.harga_qpon > 0;
-            if (options.platform === 'gofood') return p.harga_gofood && p.harga_gofood > 0;
-            if (options.platform === 'grabfood') return p.harga_grabfood && p.harga_grabfood > 0;
-            if (options.platform === 'shopeefood') return p.harga_shopeefood && p.harga_shopeefood > 0;
-            if (options.platform === 'tiktok') return p.harga_tiktok && p.harga_tiktok > 0;
+          const productsWithPlatformPrice = filteredProducts.filter((p: UnknownRecord) => {
+            if (options.platform === 'qpon') return p.harga_qpon && Number(p.harga_qpon) > 0;
+            if (options.platform === 'gofood') return p.harga_gofood && Number(p.harga_gofood) > 0;
+            if (options.platform === 'grabfood') return p.harga_grabfood && Number(p.harga_grabfood) > 0;
+            if (options.platform === 'shopeefood') return p.harga_shopeefood && Number(p.harga_shopeefood) > 0;
+            if (options.platform === 'tiktok') return p.harga_tiktok && Number(p.harga_tiktok) > 0;
             return false;
           });
           
           const category2SetWithPrice = new Set<string>();
-          productsWithPlatformPrice.forEach((p: any) => {
-            if (p.category2_name && p.category2_name.trim() !== '') {
-              category2SetWithPrice.add(p.category2_name);
+          productsWithPlatformPrice.forEach((p: UnknownRecord) => {
+            if (p.category2_name && String(p.category2_name).trim() !== '') {
+              category2SetWithPrice.add(String(p.category2_name));
             }
           });
           
-          filteredCategories = filteredCategories.filter((cat: any) => 
+          filteredCategories = filteredCategories.filter((cat: { category2_name: string }) => 
             category2SetWithPrice.has(cat.category2_name)
           );
         }
         // Note: If online=true but no platform specified, show all categories (no harga_online filter)
         
         // Transform to match expected format
-        const formattedCategories = filteredCategories.map((cat: any, index: number) => ({
+        const formattedCategories = filteredCategories.map((cat: { category2_name: string }, index: number) => ({
           jenis: cat.category2_name,
           active: index === 0,
         }));
@@ -371,7 +399,7 @@ async function fetchCategoriesFromLocalDatabase(
  * Check if running in Electron with offline support
  */
 export function hasOfflineSupport(): boolean {
-  return isElectron;
+  return Boolean(isElectron);
 }
 
 

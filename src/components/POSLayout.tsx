@@ -1,26 +1,26 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, type ComponentProps } from 'react';
 import LeftSidebar from './LeftSidebar';
 import RightSidebar from './RightSidebar';
 import CenterContent from './CenterContent';
-import BottomBar from './BottomBar';
 import SlideshowManager from './SlideshowManager';
 import TransactionList from './TransactionList';
 import PrinterSetup from './PrinterSetup';
 import OfflineDebugPanel from './OfflineDebugPanel';
 import SyncManagement from './SyncManagement';
 import GantiShift from './GantiShift';
+import Laporan from './Laporan';
 import { mockMenuItems } from '@/data/mockData';
 import { fetchCategories, fetchProducts } from '@/lib/offlineDataFetcher';
 import { databaseHealthService } from '@/lib/databaseHealth';
 import { useAuth } from '@/hooks/useAuth';
 import { isSuperAdmin } from '@/lib/auth';
 
-interface Category {
+type LocalCategory = {
   jenis: string;
   active: boolean;
-}
+};
 
 interface Product {
   id: number;
@@ -37,6 +37,12 @@ interface Product {
   status: string;
 }
 
+type CenterContentProps = ComponentProps<typeof CenterContent>;
+type CartItem = CenterContentProps['cartItems'][number];
+type OnlinePlatform = NonNullable<CenterContentProps['selectedOnlinePlatform']>;
+
+const getElectronAPI = () => (typeof window !== 'undefined' ? window.electronAPI : undefined);
+
 export default function POSLayout() {
   const { user } = useAuth();
   const permissions = user?.permissions ?? [];
@@ -50,34 +56,33 @@ export default function POSLayout() {
   const [selectedCategory, setSelectedCategory] = useState('');
   
   // Separate carts for each category - offline
-  const [drinksCart, setDrinksCart] = useState<any[]>([]);
-  const [bakeryCart, setBakeryCart] = useState<any[]>([]);
+  const [drinksCart, setDrinksCart] = useState<CartItem[]>([]);
+  const [bakeryCart, setBakeryCart] = useState<CartItem[]>([]);
   
   // Separate carts for each platform - online
-  const [drinksGofoodCart, setDrinksGofoodCart] = useState<any[]>([]);
-  const [drinksGrabfoodCart, setDrinksGrabfoodCart] = useState<any[]>([]);
-  const [drinksShopeefoodCart, setDrinksShopeefoodCart] = useState<any[]>([]);
-  const [drinksTiktokCart, setDrinksTiktokCart] = useState<any[]>([]);
-  const [drinksQponCart, setDrinksQponCart] = useState<any[]>([]);
-  const [bakeryGofoodCart, setBakeryGofoodCart] = useState<any[]>([]);
-  const [bakeryGrabfoodCart, setBakeryGrabfoodCart] = useState<any[]>([]);
-  const [bakeryShopeefoodCart, setBakeryShopeefoodCart] = useState<any[]>([]);
-  const [bakeryTiktokCart, setBakeryTiktokCart] = useState<any[]>([]);
-  const [bakeryQponCart, setBakeryQponCart] = useState<any[]>([]);
+  const [drinksGofoodCart, setDrinksGofoodCart] = useState<CartItem[]>([]);
+  const [drinksGrabfoodCart, setDrinksGrabfoodCart] = useState<CartItem[]>([]);
+  const [drinksShopeefoodCart, setDrinksShopeefoodCart] = useState<CartItem[]>([]);
+  const [drinksTiktokCart, setDrinksTiktokCart] = useState<CartItem[]>([]);
+  const [drinksQponCart, setDrinksQponCart] = useState<CartItem[]>([]);
+  const [bakeryGofoodCart, setBakeryGofoodCart] = useState<CartItem[]>([]);
+  const [bakeryGrabfoodCart, setBakeryGrabfoodCart] = useState<CartItem[]>([]);
+  const [bakeryShopeefoodCart, setBakeryShopeefoodCart] = useState<CartItem[]>([]);
+  const [bakeryTiktokCart, setBakeryTiktokCart] = useState<CartItem[]>([]);
+  const [bakeryQponCart, setBakeryQponCart] = useState<CartItem[]>([]);
   
   const [activeMenuItem, setActiveMenuItem] = useState('Kasir');
   const [activeKasirTab, setActiveKasirTab] = useState<'drinks' | 'bakery'>('drinks');
   const [isOnlineTab, setIsOnlineTab] = useState<boolean>(false);
-  const [selectedOnlinePlatform, setSelectedOnlinePlatform] = useState<'qpon' | 'gofood' | 'grabfood' | 'shopeefood' | 'tiktok' | null>(null);
+  const [selectedOnlinePlatform, setSelectedOnlinePlatform] = useState<OnlinePlatform | null>(null);
   const [activeSettingsTab, setActiveSettingsTab] = useState('sync');
-  const [categories, setCategories] = useState<Category[]>([]); // Start with empty array
+  const [categories, setCategories] = useState<LocalCategory[]>([]); // Start with empty array
   const [isLoadingCategories, setIsLoadingCategories] = useState(true);
   const [products, setProducts] = useState<Product[]>([]); // Start with empty array
   const [isLoadingProducts, setIsLoadingProducts] = useState(true);
-  const [isSwitchingCategory, setIsSwitchingCategory] = useState(false);
 
   // Helper functions to get current cart based on active tab and platform
-  const getCurrentCart = () => {
+  const getCurrentCart = (): CartItem[] => {
     // Offline carts
     if (activeKasirTab === 'drinks' && !isOnlineTab) return drinksCart;
     if (activeKasirTab === 'bakery' && !isOnlineTab) return bakeryCart;
@@ -99,7 +104,7 @@ export default function POSLayout() {
     return drinksCart; // fallback
   };
 
-  const setCurrentCart = (newCart: any[]) => {
+  const setCurrentCart = (newCart: CartItem[]) => {
     // Offline carts
     if (activeKasirTab === 'drinks' && !isOnlineTab) {
       setDrinksCart(newCart);
@@ -132,85 +137,102 @@ export default function POSLayout() {
     }
   };
 
-  // Function to clear current cart after payment
-  const clearCurrentCart = () => {
-    setCurrentCart([]);
-  };
-
   // Send tab updates to customer display
-  const sendTabUpdate = (tabInfo: { activeTab: string; isOnline: boolean; selectedPlatform?: 'qpon' | 'gofood' | 'grabfood' | 'shopeefood' | 'tiktok' | null }) => {
-    if (window.electronAPI && window.electronAPI.updateCustomerDisplay) {
-      window.electronAPI.updateCustomerDisplay({ tabInfo });
-    }
+  const sendTabUpdate = (tabInfo: { activeTab: string; isOnline: boolean; selectedPlatform?: OnlinePlatform | null }) => {
+    const electronAPI = getElectronAPI();
+    electronAPI?.updateCustomerDisplay?.({ tabInfo });
   };
 
   // Fetch categories from database (business_id = 14) with offline fallback
   useEffect(() => {
+    let isCancelled = false;
+    setIsLoadingCategories(true);
+
     const loadCategories = async () => {
       try {
-        console.log('📦 Fetching categories from database for tab:', activeKasirTab, 'online:', isOnlineTab, 'platform:', selectedOnlinePlatform);
         const categoriesData = await fetchCategories(activeKasirTab, { 
           isOnline: isOnlineTab,
           platform: isOnlineTab ? (selectedOnlinePlatform ?? undefined) : undefined
-        });
+        }) as Array<{ jenis: string; active?: boolean }>;
         
-        // Filter out empty/invalid categories
-        const validCategories = categoriesData.filter(cat => cat.jenis && cat.jenis.trim() !== '');
+        if (isCancelled) {
+          return;
+        }
+
+        // Filter out empty/invalid categories and map to expected type
+        const validCategories: LocalCategory[] = categoriesData
+          .filter(cat => cat.jenis && cat.jenis.trim() !== '')
+          .map(cat => ({ jenis: cat.jenis, active: cat.active ?? true }));
         
         if (validCategories.length > 0) {
-          console.log('✅ Categories loaded:', validCategories);
-          setCategories(validCategories);
+          setCategories(validCategories as unknown as LocalCategory[]);
           // Always set the first valid category as selected - this will trigger product loading
           setSelectedCategory(validCategories[0].jenis);
         } else {
-          console.log('⚠️ No categories available');
-          setCategories([]);
+          setCategories([] as LocalCategory[]);
           setSelectedCategory(''); // Clear selection if no categories
         }
       } catch (error) {
-        console.error('❌ Error loading categories:', error);
-        setCategories([]);
-        setSelectedCategory('');
+        if (!isCancelled) {
+          console.error('❌ Error loading categories:', error);
+          setCategories([]);
+          setSelectedCategory('');
+        }
       } finally {
-        setIsLoadingCategories(false);
+        if (!isCancelled) {
+          setIsLoadingCategories(false);
+        }
       }
     };
 
     loadCategories();
+
+    return () => {
+      isCancelled = true;
+    };
   }, [activeKasirTab, isOnlineTab, selectedOnlinePlatform]);
 
   // Fetch products when category or tab changes (business_id = 14) with offline fallback
   useEffect(() => {
+    let isCancelled = false;
+
     const loadProducts = async () => {
       if (!selectedCategory) {
-        console.log('⚠️ No category selected, skipping product load');
-        setIsLoadingProducts(false); // Ensure loading state is cleared
-        setProducts([]);
+        if (!isCancelled) {
+          setIsLoadingProducts(false); // Ensure loading state is cleared
+          setProducts([]);
+        }
         return;
       }
 
       setIsLoadingProducts(true);
-      setIsSwitchingCategory(true);
       try {
-        console.log('📦 Fetching products for category:', selectedCategory, 'tab:', activeKasirTab, 'online:', isOnlineTab, 'platform:', selectedOnlinePlatform);
         // Use smart offline/online mode - only force online for online tab
         const productsData = await fetchProducts(selectedCategory, activeKasirTab, { 
           isOnline: isOnlineTab,
           platform: isOnlineTab ? (selectedOnlinePlatform ?? undefined) : undefined
         });
         
-        console.log('✅ Products loaded:', productsData.length, 'items');
-        setProducts(productsData);
+        if (!isCancelled) {
+          setProducts(productsData);
+        }
       } catch (error) {
-        console.error('❌ Error loading products:', error);
-        setProducts([]);
+        if (!isCancelled) {
+          console.error('❌ Error loading products:', error);
+          setProducts([]);
+        }
       } finally {
-        setIsLoadingProducts(false);
-        setIsSwitchingCategory(false);
+        if (!isCancelled) {
+          setIsLoadingProducts(false);
+        }
       }
     };
 
     loadProducts();
+
+    return () => {
+      isCancelled = true;
+    };
   }, [selectedCategory, activeKasirTab, isOnlineTab, selectedOnlinePlatform]); // Re-fetch when category or tab changes
 
   // Reset platform selection when switching away from online tab
@@ -223,15 +245,12 @@ export default function POSLayout() {
   // Send tab updates to customer display when tab changes
   useEffect(() => {
     const tabName = `${activeKasirTab}${isOnlineTab ? ' (Online)' : ''}`;
-    console.log('📤 Sending tab update to customer display:', { activeTab: tabName, isOnline: isOnlineTab, selectedPlatform: selectedOnlinePlatform });
     
-    // Check if electronAPI is available
-    if (window.electronAPI) {
-      console.log('📤 ElectronAPI is available, sending tab update...');
-      sendTabUpdate({ activeTab: tabName, isOnline: isOnlineTab, selectedPlatform: selectedOnlinePlatform });
-    } else {
-      console.log('❌ ElectronAPI is not available');
+    const electronAPI = getElectronAPI();
+    if (!electronAPI) {
+      return;
     }
+    sendTabUpdate({ activeTab: tabName, isOnline: isOnlineTab, selectedPlatform: selectedOnlinePlatform });
   }, [activeKasirTab, isOnlineTab, selectedOnlinePlatform]);
 
   // Check database health on mount and ensure it's populated
@@ -269,7 +288,9 @@ export default function POSLayout() {
           isOnline: isOnlineTab,
           platform: isOnlineTab ? (selectedOnlinePlatform ?? undefined) : undefined
         });
-        const validCategories = refreshedCategories.filter(cat => cat.jenis && cat.jenis.trim() !== '');
+        const validCategories: LocalCategory[] = (refreshedCategories as Array<{ jenis: string; active?: boolean }>)
+          .filter(cat => cat.jenis && cat.jenis.trim() !== '')
+          .map(cat => ({ jenis: cat.jenis, active: cat.active ?? true }));
         setCategories(validCategories);
         
         if (validCategories.length > 0 && validCategories[0].jenis) {
@@ -292,7 +313,7 @@ export default function POSLayout() {
     return () => {
       window.removeEventListener('dataSynced', handleDataSynced);
     };
-  }, [activeKasirTab, isOnlineTab]);
+  }, [activeKasirTab, isOnlineTab, selectedOnlinePlatform]);
 
   const renderMainContent = () => {
     switch (activeMenuItem) {
@@ -473,7 +494,7 @@ export default function POSLayout() {
                 cartItems={getCurrentCart()}
                 setCartItems={setCurrentCart}
                 transactionType={activeKasirTab}
-                isLoadingProducts={isSwitchingCategory}
+                isLoadingProducts={isLoadingProducts}
                 isOnline={isOnlineTab}
                 selectedOnlinePlatform={selectedOnlinePlatform}
               />
@@ -483,7 +504,7 @@ export default function POSLayout() {
                 categories={categories}
                 selectedCategory={selectedCategory}
                 onCategorySelect={setSelectedCategory}
-                isLoadingCategories={isSwitchingCategory || isLoadingCategories}
+                isLoadingCategories={isLoadingCategories || isLoadingProducts}
               />
             </div>
           </div>
@@ -494,6 +515,9 @@ export default function POSLayout() {
       
       case 'Ganti Shift':
         return <GantiShift />;
+
+      case 'Laporan':
+        return <Laporan />;
       
       case 'Setelan':
         if (!canAccessSync && !canAccessPrinter) {

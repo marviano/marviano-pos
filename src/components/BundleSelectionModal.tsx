@@ -1,10 +1,12 @@
 'use client';
 
 import { useState, useEffect } from 'react';
+import Image from 'next/image';
 import { X, Check, Plus, Minus, SlidersHorizontal, MessageCircle } from 'lucide-react';
 import { offlineSyncService } from '@/lib/offlineSync';
 import BundleProductCustomizationModal, { SelectedCustomization } from './BundleProductCustomizationModal';
 import CustomNoteModal from './CustomNoteModal';
+import { getApiUrl } from '@/lib/api';
 
 interface Product {
   id: number;
@@ -14,6 +16,18 @@ interface Product {
   category2_name: string | null;
   has_customization?: number | boolean;
 }
+
+type RawProduct = Product & {
+  is_bundle?: number | boolean;
+};
+
+const isRawProduct = (value: unknown): value is RawProduct => {
+  if (!value || typeof value !== 'object') {
+    return false;
+  }
+  const candidate = value as Partial<RawProduct>;
+  return typeof candidate.id === 'number' && typeof candidate.nama === 'string';
+};
 
 interface BundleItem {
   id: number;
@@ -50,6 +64,53 @@ interface BundleSelectionModalProps {
   bundleItems: BundleItem[];
 }
 
+const getCategoryEmoji = (categoryName?: string | null) => {
+  switch (categoryName) {
+    case 'Bakery':
+      return '🥖';
+    case 'Ice Cream Cone':
+      return '🍦';
+    case 'Sundae':
+      return '🍨';
+    case 'Milk Tea':
+      return '🧋';
+    default:
+      return '🍦';
+  }
+};
+
+function BundleProductImage({
+  imageUrl,
+  productName,
+  categoryName,
+}: {
+  imageUrl: string | null;
+  productName: string;
+  categoryName?: string | null;
+}) {
+  const [hasError, setHasError] = useState(false);
+
+  if (!imageUrl || hasError) {
+    return (
+      <span className="text-gray-400 text-2xl">
+        {getCategoryEmoji(categoryName)}
+      </span>
+    );
+  }
+
+  return (
+    <Image
+      src={imageUrl}
+      alt={productName}
+      fill
+      sizes="(max-width: 768px) 33vw, 120px"
+      className="object-contain"
+      unoptimized
+      onError={() => setHasError(true)}
+    />
+  );
+}
+
 export default function BundleSelectionModal({
   isOpen,
   onClose,
@@ -75,26 +136,49 @@ export default function BundleSelectionModal({
   // Initialize selections from bundleItems
   useEffect(() => {
     if (isOpen && bundleItems.length > 0) {
-      const initialSelections: BundleSelection[] = bundleItems.map(item => ({
-        category2_id: item.category2_id,
-        category2_name: item.category2_name || '',
-        selectedProducts: [], // Array of { product, quantity }
-        requiredQuantity: item.required_quantity
-      }));
+      console.log(`🔍 [BUNDLE MODAL] Initializing with ${bundleItems.length} bundle items:`, bundleItems);
+      const initialSelections: BundleSelection[] = bundleItems.map(item => {
+        console.log(`📦 [BUNDLE MODAL] Processing bundle item:`, {
+          category2_id: item.category2_id,
+          category2_name: item.category2_name,
+          required_quantity: item.required_quantity
+        });
+        return {
+          category2_id: item.category2_id,
+          category2_name: item.category2_name || '',
+          selectedProducts: [], // Array of { product, quantity }
+          requiredQuantity: item.required_quantity
+        };
+      });
+      console.log(`✅ [BUNDLE MODAL] Created ${initialSelections.length} initial selections:`, initialSelections);
       setSelections(initialSelections);
+    } else if (isOpen && bundleItems.length === 0) {
+      console.warn(`⚠️ [BUNDLE MODAL] Modal opened but bundleItems is empty!`);
     }
-  }, [isOpen, bundleItems]);
+  }, [isOpen, bundleItems, bundleProduct.id]);
 
   // Fetch products for each category
   useEffect(() => {
     if (isOpen && bundleItems.length > 0) {
       const fetchProducts = async () => {
         setLoading(true);
+        console.log(`🔄 [BUNDLE MODAL] Starting to fetch products for ${bundleItems.length} categories`);
         try {
           const productsByCategory: { [key: number]: Product[] } = {};
           
           for (const item of bundleItems) {
             try {
+              console.log(`🔍 [BUNDLE MODAL] Fetching products for category:`, {
+                category2_id: item.category2_id,
+                category2_name: item.category2_name
+              });
+              
+              if (!item.category2_name) {
+                console.warn(`⚠️ [BUNDLE MODAL] Bundle item has no category2_name, skipping:`, item);
+                productsByCategory[item.category2_id] = [];
+                continue;
+              }
+              
               const products = await offlineSyncService.fetchWithFallback(
                 // Online fetch
                 async () => {
@@ -105,34 +189,63 @@ export default function BundleSelectionModal({
                     throw new Error('Category name not found');
                   }
                   
-                  const response = await fetch(`/api/products?category2_name=${encodeURIComponent(categoryName)}`, {
+                  console.log(`🌐 [BUNDLE MODAL] Fetching online products for category: ${categoryName}`);
+                  const response = await fetch(getApiUrl(`/api/products?category2_name=${encodeURIComponent(categoryName)}`), {
                     signal: AbortSignal.timeout(5000)
                   });
                   if (!response.ok) throw new Error('Failed to fetch');
                   const data = await response.json();
+                  console.log(`✅ [BUNDLE MODAL] Got ${data.products?.length || 0} products online for ${categoryName}`);
                   return data.products || [];
                 },
                 // Offline fetch
                 async () => {
-                  if (typeof window !== 'undefined' && (window as any).electronAPI) {
-                    // Get all products and filter by category2_id
-                    const allProducts = await (window as any).electronAPI.localDbGetAllProducts();
-                    return allProducts.filter((p: any) => p.category2_id === item.category2_id);
+                  console.log(`📱 [BUNDLE MODAL] Fetching offline products for category: ${item.category2_name}`);
+                  const electronAPI = typeof window !== 'undefined' ? window.electronAPI : undefined;
+                  
+                  // Try using category2_name first (more efficient)
+                  if (electronAPI?.localDbGetProductsByCategory2 && item.category2_name) {
+                    console.log(`📱 [BUNDLE MODAL] Using localDbGetProductsByCategory2 for: ${item.category2_name}`);
+                    const categoryProducts = await electronAPI.localDbGetProductsByCategory2(item.category2_name);
+                    console.log(`✅ [BUNDLE MODAL] Got ${Array.isArray(categoryProducts) ? categoryProducts.length : 0} products from category name`);
+                    return Array.isArray(categoryProducts) ? categoryProducts.filter(isRawProduct) : [];
                   }
+                  
+                  // Fallback: get all products and filter by category2_id
+                  if (electronAPI?.localDbGetAllProducts) {
+                    console.log(`📱 [BUNDLE MODAL] Fallback: Using localDbGetAllProducts and filtering by category2_id: ${item.category2_id}`);
+                    const allProducts = await electronAPI.localDbGetAllProducts();
+                    if (!Array.isArray(allProducts)) {
+                      console.warn(`⚠️ [BUNDLE MODAL] localDbGetAllProducts returned non-array`);
+                      return [];
+                    }
+                    const filtered = allProducts.filter(isRawProduct).filter((p) => p.category2_id === item.category2_id);
+                    console.log(`✅ [BUNDLE MODAL] Got ${filtered.length} products after filtering by category2_id`);
+                    return filtered;
+                  }
+                  
+                  console.warn(`⚠️ [BUNDLE MODAL] No offline product fetch method available`);
                   return [];
                 }
               );
               
+              console.log(`📦 [BUNDLE MODAL] Raw products fetched: ${Array.isArray(products) ? products.length : 0}`);
+              
               // Filter out bundle products and the bundle product itself
-              const filteredProducts = products
-                .filter((p: any) => {
+              const filteredProducts = (Array.isArray(products) ? products : [])
+                .filter(isRawProduct)
+                .filter((p) => {
                   // Exclude bundle products
                   const isBundle = p.is_bundle === 1 || p.is_bundle === true;
                   // Exclude the bundle product itself
                   const isBundleProduct = p.id === bundleProduct.id;
-                  return !isBundle && !isBundleProduct;
+                  const shouldInclude = !isBundle && !isBundleProduct;
+                  if (!shouldInclude) {
+                    console.log(`🚫 [BUNDLE MODAL] Excluding product ${p.id} (${p.nama}): isBundle=${isBundle}, isBundleProduct=${isBundleProduct}`);
+                  }
+                  return shouldInclude;
                 })
-                .map((p: any) => ({
+                .map((p) => ({
                   id: p.id,
                   nama: p.nama,
                   image_url: p.image_url,
@@ -142,15 +255,26 @@ export default function BundleSelectionModal({
                 }));
               
               productsByCategory[item.category2_id] = filteredProducts;
+              console.log(`✅ [BUNDLE MODAL] Fetched ${filteredProducts.length} products for category ${item.category2_name} (category2_id: ${item.category2_id})`);
+              if (filteredProducts.length > 0) {
+                console.log(`📦 [BUNDLE MODAL] First product in category:`, filteredProducts[0]);
+              } else {
+                console.warn(`⚠️ [BUNDLE MODAL] No products found for category ${item.category2_name} (category2_id: ${item.category2_id})`);
+              }
             } catch (error) {
-              console.error(`Error fetching products for category ${item.category2_id}:`, error);
+              console.error(`❌ [BUNDLE MODAL] Error fetching products for category ${item.category2_id}:`, error);
               productsByCategory[item.category2_id] = [];
             }
           }
           
+          console.log(`✅ [BUNDLE MODAL] Finished fetching products. Total categories with products:`, Object.keys(productsByCategory).length);
+          console.log(`📊 [BUNDLE MODAL] Products by category:`, Object.entries(productsByCategory).map(([catId, prods]) => ({
+            category2_id: catId,
+            productCount: Array.isArray(prods) ? prods.length : 0
+          })));
           setCategoryProducts(productsByCategory);
         } catch (error) {
-          console.error('Error fetching category products:', error);
+          console.error('❌ [BUNDLE MODAL] Error fetching category products:', error);
         } finally {
           setLoading(false);
         }
@@ -158,7 +282,7 @@ export default function BundleSelectionModal({
       
       fetchProducts();
     }
-  }, [isOpen, bundleItems]);
+  }, [isOpen, bundleItems, bundleProduct.id]);
 
   const getTotalQuantity = (category2Id: number): number => {
     const categorySelection = selections.find(s => s.category2_id === category2Id);
@@ -326,7 +450,6 @@ export default function BundleSelectionModal({
             </div>
           ) : (
             sortedBundleItems.map((item, index) => {
-              const categorySelection = selections.find(s => s.category2_id === item.category2_id);
               const products = categoryProducts[item.category2_id] || [];
               const totalQuantity = getTotalQuantity(item.category2_id);
               const isComplete = totalQuantity === item.required_quantity;
@@ -390,20 +513,12 @@ export default function BundleSelectionModal({
                               </div>
                             )}
                             
-                            <div className="w-full h-24 bg-gray-50 rounded-lg mb-2 flex items-center justify-center overflow-hidden">
-                              {product.image_url ? (
-                                <img
-                                  src={product.image_url}
-                                  alt={product.nama}
-                                  className="h-full w-auto object-contain"
-                                  onError={(e) => {
-                                    const target = e.target as HTMLImageElement;
-                                    target.style.display = 'none';
-                                  }}
-                                />
-                              ) : (
-                                <span className="text-gray-400 text-xl">📦</span>
-                              )}
+                            <div className="relative w-full h-24 bg-gray-50 rounded-lg mb-2 flex items-center justify-center overflow-hidden">
+                              <BundleProductImage
+                                imageUrl={product.image_url}
+                                productName={product.nama}
+                                categoryName={product.category2_name}
+                              />
                             </div>
                             
                             <h4 className="font-medium text-gray-800 text-sm leading-tight mb-2">
@@ -568,9 +683,8 @@ export default function BundleSelectionModal({
       <CustomNoteModal
         isOpen={!!noteTarget}
         onClose={() => setNoteTarget(null)}
-        initialNote={noteTarget?.note || ''}
         onConfirm={handleNoteSave}
-        product={noteTarget ? selections.flatMap(sel => sel.selectedProducts).find(sp => sp.key === noteTarget.instanceKey)?.product || null : null}
+        product={noteTarget ? (selections.flatMap(sel => sel.selectedProducts).find(sp => sp.key === noteTarget.instanceKey)?.product as unknown as { id: number; business_id: number; menu_code: string; nama: string; kategori: string; harga_jual: number; status: string } | null) || null : null}
       />
     </div>
   );

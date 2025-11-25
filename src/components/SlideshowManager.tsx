@@ -1,7 +1,8 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import { Plus, Trash2, Edit, Play, Pause, Image, RefreshCw } from 'lucide-react';
+import { Plus, Trash2, Edit, Play, Pause, Image as ImageIcon, RefreshCw } from 'lucide-react';
+import { getApiUrl } from '@/lib/api';
 
 interface SlideshowItem {
   id: string;
@@ -60,7 +61,7 @@ export default function SlideshowManager() {
   // Load slideshow images from API
   const loadSlideshowImages = async () => {
     try {
-      const response = await fetch('/api/slideshow/images');
+      const response = await fetch(getApiUrl('/api/slideshow/images'));
       const data = await response.json();
       
       if (data.success) {
@@ -227,7 +228,7 @@ export default function SlideshowManager() {
       <div className="mb-4 p-3 bg-gray-50 rounded-lg">
         <div className="flex items-center justify-between">
           <div className="flex items-center space-x-2">
-            <Image className="w-5 h-5 text-blue-600" />
+            <ImageIcon className="w-5 h-5 text-blue-600" />
             <span className="text-sm font-medium">Images Folder</span>
           </div>
           <div className="text-sm text-gray-600">
@@ -280,7 +281,7 @@ export default function SlideshowManager() {
         
         {slideshowItems.length === 0 && (
           <div className="text-center py-8 text-gray-500">
-            <p>No slideshow items. Click "Add Slide" to create one.</p>
+            <p>No slideshow items. Click &quot;Add Slide&quot; to create one.</p>
           </div>
         )}
       </div>

@@ -2,8 +2,21 @@ const Database = require('better-sqlite3');
 const path = require('path');
 const fs = require('fs');
 
-// SQLite database path
-const dbPath = path.join(__dirname, '../dist/pos-offline.db');
+// SQLite database path - Use userData directory for consistency with main app
+const { app } = require('electron');
+const os = require('os');
+
+// Get the same userData path that the main app uses
+let userDataPath;
+if (process.platform === 'win32') {
+  userDataPath = path.join(os.homedir(), 'AppData', 'Roaming', 'marviano-pos');
+} else if (process.platform === 'darwin') {
+  userDataPath = path.join(os.homedir(), 'Library', 'Application Support', 'marviano-pos');
+} else {
+  userDataPath = path.join(os.homedir(), '.config', 'marviano-pos');
+}
+
+const dbPath = path.join(userDataPath, 'pos-offline.db');
 
 if (!fs.existsSync(dbPath)) {
   console.error(`❌ SQLite database not found at: ${dbPath}`);

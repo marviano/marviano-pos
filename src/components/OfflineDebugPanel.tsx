@@ -1,17 +1,17 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import { databaseHealthService } from '@/lib/databaseHealth';
-import { fetchProducts, fetchCategories } from '@/lib/offlineDataFetcher';
-import { checkElectronAPI, getRestartInstructions } from '@/lib/electronRestartHelper';
+import { databaseHealthService, type DatabaseHealth } from '@/lib/databaseHealth';
+import { fetchProducts, fetchCategories, type Product, type Category } from '@/lib/offlineDataFetcher';
+import { checkElectronAPI, getRestartInstructions, type RestartInstructions } from '@/lib/electronRestartHelper';
 
 export default function OfflineDebugPanel() {
-  const [health, setHealth] = useState<any>(null);
-  const [products, setProducts] = useState<any[]>([]);
-  const [categories, setCategories] = useState<any[]>([]);
+  const [health, setHealth] = useState<DatabaseHealth | null>(null);
+  const [products, setProducts] = useState<Product[]>([]);
+  const [categories, setCategories] = useState<Category[]>([]);
   const [isLoading, setIsLoading] = useState(false);
-  const [apiStatus, setApiStatus] = useState<any>(null);
-  const [restartInstructions, setRestartInstructions] = useState<any>(null);
+  const [apiStatus, setApiStatus] = useState<boolean | null>(null);
+  const [restartInstructions, setRestartInstructions] = useState<RestartInstructions | null>(null);
 
   const checkHealth = async () => {
     setIsLoading(true);
@@ -121,9 +121,9 @@ export default function OfflineDebugPanel() {
         <div className="bg-white p-3 rounded border">
           <h4 className="font-medium mb-2 text-gray-900">Electron API Status</h4>
           <div className="text-sm">
-            <div className="text-gray-900">Available: {typeof window !== 'undefined' && (window as any).electronAPI ? '✅ Yes' : '❌ No'}</div>
+            <div className="text-gray-900">Available: {typeof window !== 'undefined' && window.electronAPI ? '✅ Yes' : '❌ No'}</div>
             <div className="text-gray-900">API Complete: {apiStatus ? '✅ Yes' : '❌ No'}</div>
-            <div className="text-gray-900">Local DB Methods: {typeof window !== 'undefined' && (window as any).electronAPI?.localDbGetAllProducts ? '✅ Yes' : '❌ No'}</div>
+            <div className="text-gray-900">Local DB Methods: {typeof window !== 'undefined' && window.electronAPI?.localDbGetAllProducts ? '✅ Yes' : '❌ No'}</div>
           </div>
         </div>
 
@@ -133,7 +133,7 @@ export default function OfflineDebugPanel() {
             <h4 className="font-medium text-yellow-800 mb-2">{restartInstructions.title}</h4>
             <p className="text-sm text-yellow-700 mb-2">{restartInstructions.message}</p>
             <ul className="text-sm text-yellow-700 space-y-1">
-              {restartInstructions.steps.map((step: string, index: number) => (
+              {restartInstructions.steps.map((step, index) => (
                 <li key={index}>{step}</li>
               ))}
             </ul>

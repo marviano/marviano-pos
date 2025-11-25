@@ -23,24 +23,19 @@ export function getPool(): mysql.Pool {
     pool = mysql.createPool(dbConfig);
     
     // Handle connection errors
-    pool.on('connection', (connection) => {
+    pool.on('connection', () => {
       console.log('✅ Database connection established');
     });
     
-    pool.on('error', (err) => {
-      console.error('❌ Database pool error:', err);
-      if (err.code === 'PROTOCOL_CONNECTION_LOST') {
-        console.log('🔄 Recreating database pool due to connection loss');
-        pool = null;
-      }
-    });
+    // Note: mysql2 Pool doesn't have an 'error' event, errors are handled per-connection
+    // Connection errors are handled in the query function
   }
   return pool;
 }
 
-export async function query<T = any>(sql: string, params?: any[]): Promise<T> {
+export async function query<T = unknown>(sql: string, params?: (string | number | null)[]): Promise<T> {
   const maxRetries = 3;
-  let lastError: any;
+  let lastError: unknown;
   
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     try {
@@ -60,14 +55,14 @@ export async function query<T = any>(sql: string, params?: any[]): Promise<T> {
         try {
           const [results] = await pool.execute(sql, params);
           return results as T;
-        } catch (error: any) {
+        } catch {
           // Silently retry with direct query
           // If prepared statement fails, try direct query (less secure but works)
           if (params && params.length > 0) {
             let directSql = sql;
-            params.forEach((param, index) => {
-              const value = typeof param === 'string' ? `'${param}'` : param;
-              directSql = directSql.replace('?', value);
+            params.forEach((param) => {
+              const value = typeof param === 'string' ? `'${param.replace(/'/g, "''")}'` : param;
+              directSql = directSql.replace('?', String(value));
             });
             const [results] = await pool.query(directSql);
             return results as T;
@@ -77,12 +72,13 @@ export async function query<T = any>(sql: string, params?: any[]): Promise<T> {
           }
         }
       }
-    } catch (error: any) {
+    } catch (error: unknown) {
       lastError = error;
-      console.error(`❌ Database query failed (attempt ${attempt}/${maxRetries}):`, error.message);
+      const err = error as { message?: string; code?: string };
+      console.error(`❌ Database query failed (attempt ${attempt}/${maxRetries}):`, err.message || 'Unknown error');
       
       // If it's a connection error, recreate the pool
-      if (error.code === 'PROTOCOL_CONNECTION_LOST' || error.code === 'ECONNRESET' || error.code === 'ETIMEDOUT') {
+      if (err.code === 'PROTOCOL_CONNECTION_LOST' || err.code === 'ECONNRESET' || err.code === 'ETIMEDOUT') {
         console.log('🔄 Connection lost, recreating pool...');
         pool = null;
         
@@ -100,4 +96,5 @@ export async function query<T = any>(sql: string, params?: any[]): Promise<T> {
   throw lastError;
 }
 
-export default { getPool, query };
+const dbExports = { getPool, query };
+export default dbExports;

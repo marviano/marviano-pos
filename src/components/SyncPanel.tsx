@@ -1,37 +1,92 @@
 'use client';
 
-import React, { useState } from 'react';
-import { RefreshCw, Cloud, CloudOff, CheckCircle, AlertCircle, Upload, Download, Settings, X } from 'lucide-react';
+import React, { useState, useCallback } from 'react';
+import { RefreshCw, Cloud, CloudOff, AlertCircle, Upload, Download, Settings, X } from 'lucide-react';
 import { offlineSyncService } from '@/lib/offlineSync';
 import { smartSyncService } from '@/lib/smartSync';
 import { restorePrinterStateFromCloud } from '@/lib/printerSyncUtils';
+import { getApiUrl } from '@/lib/api';
+
+type UnknownRecord = Record<string, unknown>;
+type TransactionRow = UnknownRecord & { id?: number | string; synced_at?: number | null };
+type PrinterAuditRow = UnknownRecord & { id?: number };
+interface PrinterAuditSet {
+  p1: PrinterAuditRow[];
+  p2: PrinterAuditRow[];
+}
+
+const isUnknownRecord = (value: unknown): value is UnknownRecord =>
+  typeof value === 'object' && value !== null;
+
+const toUnknownRecordArray = (value: unknown): UnknownRecord[] =>
+  Array.isArray(value) ? value.filter(isUnknownRecord) : [];
+
+const toTransactionRows = (value: unknown): TransactionRow[] =>
+  toUnknownRecordArray(value).map((row) => row as TransactionRow);
+
+const toPrinterAuditSet = (value: unknown): PrinterAuditSet => {
+  if (value && typeof value === 'object') {
+    const record = value as Partial<PrinterAuditSet>;
+    return {
+      p1: toUnknownRecordArray(record.p1).map((row) => row as PrinterAuditRow),
+      p2: toUnknownRecordArray(record.p2).map((row) => row as PrinterAuditRow),
+    };
+  }
+  return { p1: [], p2: [] };
+};
+
+const extractNumericIds = (rows: PrinterAuditRow[]): number[] =>
+  rows
+    .map((row) => row.id)
+    .filter((id): id is number => typeof id === 'number');
+
+const getElectronAPI = () => (typeof window !== 'undefined' ? window.electronAPI : undefined);
+
+const getNumericTransactionId = (transaction: TransactionRow): number | undefined => {
+  if (typeof transaction.id === 'number' && Number.isFinite(transaction.id)) {
+    return transaction.id;
+  }
+  if (typeof transaction.id === 'string') {
+    const parsed = Number(transaction.id);
+    return Number.isFinite(parsed) ? parsed : undefined;
+  }
+  return undefined;
+};
 
 interface SyncPanelProps {
   isOpen: boolean;
   onClose: () => void;
 }
 
+interface SyncStatusState {
+  isOnline: boolean;
+  lastSync: number | null;
+  pendingTransactions: number;
+  syncInProgress: boolean;
+  error: string | null;
+}
+
 export default function SyncPanel({ isOpen, onClose }: SyncPanelProps) {
-  const [syncStatus, setSyncStatus] = useState({
+  const [syncStatus, setSyncStatus] = useState<SyncStatusState>({
     isOnline: true,
-    lastSync: null as string | null,
+    lastSync: null,
     pendingTransactions: 0,
     syncInProgress: false,
-    error: null as string | null
+    error: null,
   });
 
   // Check if we're in Electron environment
-  const isElectron = typeof window !== 'undefined' && (window as any).electronAPI;
+  const isElectron = typeof window !== 'undefined' && Boolean(window.electronAPI);
 
   // Get current sync status
-  const getSyncStatus = async () => {
+  const getSyncStatus = useCallback(async (): Promise<SyncStatusState> => {
     try {
       const connectionStatus = offlineSyncService.getDetailedStatus();
       const pendingCount = await smartSyncService.getPendingTransactionCount();
       
       return {
         isOnline: connectionStatus.isOnline,
-        lastSync: connectionStatus.lastSyncTime || null,
+        lastSync: connectionStatus.lastSyncTime ?? null,
         pendingTransactions: pendingCount,
         syncInProgress: false,
         error: null
@@ -45,13 +100,13 @@ export default function SyncPanel({ isOpen, onClose }: SyncPanelProps) {
         error: error instanceof Error ? error.message : 'Unknown error'
       };
     }
-  };
+  }, []);
 
   // Update sync status
-  const updateSyncStatus = async () => {
+  const updateSyncStatus = useCallback(async () => {
     const status = await getSyncStatus();
     setSyncStatus(status);
-  };
+  }, [getSyncStatus]);
 
   // Full database sync (Download from cloud)
   const syncFromCloud = async () => {
@@ -66,84 +121,97 @@ export default function SyncPanel({ isOpen, onClose }: SyncPanelProps) {
       console.log('🔄 [SYNC] Starting full database sync from cloud...');
       
       // Get all data from cloud
-      const response = await fetch('/api/sync');
+      const response = await fetch(getApiUrl('/api/sync'));
       if (!response.ok) {
         throw new Error(`HTTP ${response.status}: ${response.statusText}`);
       }
       
       const jsonData = await response.json();
-      const data = jsonData.data || jsonData; // Support both response structures
+      const data = (jsonData.data || jsonData) as Record<string, unknown>;
       const targetBusinessId = Number(jsonData.businessId ?? 14);
+      const describeLength = (value: unknown) => (Array.isArray(value) ? value.length : 0);
       console.log('📥 [SYNC] Received data from cloud:', {
-        products: data.products?.length || 0,
-        transactions: data.transactions?.length || 0,
-        paymentMethods: data.paymentMethods?.length || 0,
-        banks: data.banks?.length || 0,
-        organizations: data.organizations?.length || 0,
-        managementGroups: data.managementGroups?.length || 0,
-        category1: data.category1?.length || 0,
-        category2: data.category2?.length || 0,
-        clAccounts: data.clAccounts?.length || 0,
-        bundleItems: data.bundleItems?.length || 0,
-        omset: data.omset?.length || 0
+        products: describeLength(data.products),
+        transactions: describeLength(data.transactions),
+        paymentMethods: describeLength(data.paymentMethods),
+        banks: describeLength(data.banks),
+        organizations: describeLength(data.organizations),
+        managementGroups: describeLength(data.managementGroups),
+        category1: describeLength(data.category1),
+        category2: describeLength(data.category2),
+        clAccounts: describeLength(data.clAccounts),
+        bundleItems: describeLength(data.bundleItems)
       });
 
       // Save to local database
-      const electronAPI = (window as any).electronAPI;
-      
-      if (data.products && data.products.length > 0) {
-        await electronAPI.localDbUpsertProducts(data.products);
-        console.log(`✅ ${data.products.length} products synced to local database`);
+      const electronAPI = getElectronAPI();
+      if (!electronAPI) {
+        throw new Error('Electron API not available');
+      }
+
+      const products = toUnknownRecordArray(data.products);
+      if (products.length > 0 && electronAPI.localDbUpsertProducts) {
+        await electronAPI.localDbUpsertProducts(products);
+        console.log(`✅ ${products.length} products synced to local database`);
       }
       
-      if (data.bundleItems && data.bundleItems.length > 0) {
-        await electronAPI.localDbUpsertBundleItems(data.bundleItems);
-        console.log(`✅ ${data.bundleItems.length} bundle items synced to local database`);
+      const bundleItems = toUnknownRecordArray(data.bundleItems);
+      if (bundleItems.length > 0 && electronAPI.localDbUpsertBundleItems) {
+        await electronAPI.localDbUpsertBundleItems(bundleItems);
+        console.log(`✅ ${bundleItems.length} bundle items synced to local database`);
       }
       
-      if (data.transactions && data.transactions.length > 0) {
+      const transactions = toTransactionRows(data.transactions);
+      if (transactions.length > 0 && electronAPI.localDbUpsertTransactions) {
         // Mark downloaded transactions as already synced (they came from cloud)
-        const transactionsWithSyncStatus = data.transactions.map((tx: any) => ({
+        const transactionsWithSyncStatus = transactions.map((tx) => ({
           ...tx,
-          synced_at: Date.now() // Already in cloud, so mark as synced
+          synced_at: Date.now(),
         }));
         await electronAPI.localDbUpsertTransactions(transactionsWithSyncStatus);
-        console.log(`✅ ${data.transactions.length} transactions synced to local database`);
+        console.log(`✅ ${transactions.length} transactions synced to local database`);
       }
       
-      if (data.paymentMethods && data.paymentMethods.length > 0) {
-        await electronAPI.localDbUpsertPaymentMethods(data.paymentMethods);
-        console.log(`✅ ${data.paymentMethods.length} payment methods synced to local database`);
+      const paymentMethods = toUnknownRecordArray(data.paymentMethods);
+      if (paymentMethods.length > 0 && electronAPI.localDbUpsertPaymentMethods) {
+        await electronAPI.localDbUpsertPaymentMethods(paymentMethods);
+        console.log(`✅ ${paymentMethods.length} payment methods synced to local database`);
       }
       
-      if (data.banks && data.banks.length > 0) {
-        await electronAPI.localDbUpsertBanks(data.banks);
-        console.log(`✅ ${data.banks.length} banks synced to local database`);
+      const banks = toUnknownRecordArray(data.banks);
+      if (banks.length > 0 && electronAPI.localDbUpsertBanks) {
+        await electronAPI.localDbUpsertBanks(banks);
+        console.log(`✅ ${banks.length} banks synced to local database`);
       }
       
-      if (data.organizations && data.organizations.length > 0) {
-        await electronAPI.localDbUpsertOrganizations(data.organizations);
-        console.log(`✅ ${data.organizations.length} organizations synced to local database`);
+      const organizations = toUnknownRecordArray(data.organizations);
+      if (organizations.length > 0 && electronAPI.localDbUpsertOrganizations) {
+        await electronAPI.localDbUpsertOrganizations(organizations);
+        console.log(`✅ ${organizations.length} organizations synced to local database`);
       }
       
-      if (data.managementGroups && data.managementGroups.length > 0) {
-        await electronAPI.localDbUpsertManagementGroups(data.managementGroups);
-        console.log(`✅ ${data.managementGroups.length} management groups synced to local database`);
+      const managementGroups = toUnknownRecordArray(data.managementGroups);
+      if (managementGroups.length > 0 && electronAPI.localDbUpsertManagementGroups) {
+        await electronAPI.localDbUpsertManagementGroups(managementGroups);
+        console.log(`✅ ${managementGroups.length} management groups synced to local database`);
       }
       
-      if (data.category1 && data.category1.length > 0) {
-        await electronAPI.localDbUpsertCategory1(data.category1);
-        console.log(`✅ ${data.category1.length} category1 synced to local database`);
+      const category1 = toUnknownRecordArray(data.category1);
+      if (category1.length > 0 && electronAPI.localDbUpsertCategory1) {
+        await electronAPI.localDbUpsertCategory1(category1);
+        console.log(`✅ ${category1.length} category1 synced to local database`);
       }
       
-      if (data.category2 && data.category2.length > 0) {
-        await electronAPI.localDbUpsertCategory2(data.category2);
-        console.log(`✅ ${data.category2.length} category2 synced to local database`);
+      const category2 = toUnknownRecordArray(data.category2);
+      if (category2.length > 0 && electronAPI.localDbUpsertCategory2) {
+        await electronAPI.localDbUpsertCategory2(category2);
+        console.log(`✅ ${category2.length} category2 synced to local database`);
       }
       
-      if (data.clAccounts && data.clAccounts.length > 0) {
-        await electronAPI.localDbUpsertClAccounts(data.clAccounts);
-        console.log(`✅ ${data.clAccounts.length} CL accounts synced to local database`);
+      const clAccounts = toUnknownRecordArray(data.clAccounts);
+      if (clAccounts.length > 0 && electronAPI.localDbUpsertClAccounts) {
+        await electronAPI.localDbUpsertClAccounts(clAccounts);
+        console.log(`✅ ${clAccounts.length} CL accounts synced to local database`);
       }
 
       await restorePrinterStateFromCloud(data, electronAPI, targetBusinessId);
@@ -180,14 +248,20 @@ export default function SyncPanel({ isOpen, onClose }: SyncPanelProps) {
       console.log('🔄 [SYNC] Starting upload of offline transactions to cloud...');
       
       // Get only UNSYNCED transactions from local database
-      const electronAPI = (window as any).electronAPI;
+      const electronAPI = getElectronAPI();
+      if (!electronAPI) {
+        throw new Error('Electron API not available');
+      }
+
       // Prefer dedicated helper if available; otherwise fallback to filter by synced_at
-      let transactionsToUpload: any[] = [];
+      let transactionsToUpload: TransactionRow[] = [];
       if (electronAPI.localDbGetUnsyncedTransactions) {
-        transactionsToUpload = await electronAPI.localDbGetUnsyncedTransactions(14);
-      } else {
+        const unsynced = await electronAPI.localDbGetUnsyncedTransactions(14);
+        transactionsToUpload = toTransactionRows(unsynced);
+      } else if (electronAPI.localDbGetTransactions) {
         const localTransactions = await electronAPI.localDbGetTransactions(14, 1000);
-        transactionsToUpload = localTransactions.filter((tx: any) => !tx.synced_at);
+        const parsedTransactions = toTransactionRows(localTransactions);
+        transactionsToUpload = parsedTransactions.filter(tx => !tx.synced_at);
       }
 
       if (transactionsToUpload.length === 0) {
@@ -201,7 +275,7 @@ export default function SyncPanel({ isOpen, onClose }: SyncPanelProps) {
       // Upload transactions to cloud (idempotent on server)
       for (const transaction of transactionsToUpload) {
         try {
-          const response = await fetch('/api/transactions', {
+          const response = await fetch(getApiUrl('/api/transactions'), {
             method: 'POST',
             headers: {
               'Content-Type': 'application/json',
@@ -210,10 +284,11 @@ export default function SyncPanel({ isOpen, onClose }: SyncPanelProps) {
           });
 
           if (response.ok) {
-            console.log(`✅ Transaction ${transaction.id} uploaded successfully`);
+            console.log(`✅ Transaction ${transaction.id ?? 'unknown'} uploaded successfully`);
             // Mark as synced locally if helper exists
-            if (electronAPI.localDbMarkTransactionsSyncedByIds) {
-              await electronAPI.localDbMarkTransactionsSyncedByIds([transaction.id]);
+            const transactionId = getNumericTransactionId(transaction);
+            if (transactionId !== undefined && electronAPI.localDbMarkTransactionsSyncedByIds) {
+              await electronAPI.localDbMarkTransactionsSyncedByIds([transactionId]);
             }
           } else {
             console.warn(`⚠️ Failed to upload transaction ${transaction.id}: ${response.status}`);
@@ -264,20 +339,20 @@ export default function SyncPanel({ isOpen, onClose }: SyncPanelProps) {
       
       // Step 1: Upload printer audits first
       try {
-        const electronAPI = (window as any).electronAPI;
+        const electronAPI = getElectronAPI();
         if (electronAPI?.localDbGetUnsyncedPrinterAudits) {
-          const audits = await electronAPI.localDbGetUnsyncedPrinterAudits();
-          const hasAudits = (audits?.p1?.length || 0) + (audits?.p2?.length || 0) > 0;
+          const audits = toPrinterAuditSet(await electronAPI.localDbGetUnsyncedPrinterAudits());
+          const hasAudits = audits.p1.length + audits.p2.length > 0;
           if (hasAudits) {
-            const res = await fetch('/api/printer-audits', {
+            const res = await fetch(getApiUrl('/api/printer-audits'), {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({ printer1: audits.p1, printer2: audits.p2 })
             });
             if (res.ok && electronAPI?.localDbMarkPrinterAuditsSynced) {
               await electronAPI.localDbMarkPrinterAuditsSynced({
-                p1Ids: audits.p1.map((r: any) => r.id),
-                p2Ids: audits.p2.map((r: any) => r.id)
+                p1Ids: extractNumericIds(audits.p1),
+                p2Ids: extractNumericIds(audits.p2)
               });
             }
           }
@@ -316,9 +391,9 @@ export default function SyncPanel({ isOpen, onClose }: SyncPanelProps) {
     if (isOpen) {
       updateSyncStatus();
     }
-  }, [isOpen]);
+  }, [isOpen, updateSyncStatus]);
 
-  const formatLastSync = (lastSync: string | null) => {
+  const formatLastSync = (lastSync: number | null) => {
     if (!lastSync) return 'Belum pernah';
     const date = new Date(lastSync);
     return date.toLocaleString('id-ID', {

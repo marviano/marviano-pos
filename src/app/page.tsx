@@ -3,10 +3,13 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { useAuth } from '@/hooks/useAuth';
+import { isSuperAdmin } from '@/lib/auth';
 import POSLayout from '@/components/POSLayout';
 import OfflineStatus from '@/components/OfflineStatus';
+import StartShiftModal from '@/components/StartShiftModal';
 import { LogOut, Minimize2, X } from 'lucide-react';
 import { databaseHealthService } from '@/lib/databaseHealth';
+import { smartSyncService } from '@/lib/smartSync';
 
 export default function Home() {
   const router = useRouter();
@@ -15,8 +18,13 @@ export default function Home() {
   const [databaseStatus, setDatabaseStatus] = useState<string>('Checking...');
   const [isSyncing, setIsSyncing] = useState(false);
   const [showUserDebug, setShowUserDebug] = useState(false);
+  const [showStartShiftModal, setShowStartShiftModal] = useState(false);
+  const [hasCheckedShift, setHasCheckedShift] = useState(false);
   const userDebugButtonRef = useRef<HTMLButtonElement | null>(null);
   const userDebugPanelRef = useRef<HTMLDivElement | null>(null);
+
+  const BUSINESS_ID = 14;
+  const getElectronAPI = () => (typeof window !== 'undefined' ? window.electronAPI : undefined);
 
   const appPermissions = useMemo(() => {
     if (!user?.permissions || user.permissions.length === 0) {
@@ -67,11 +75,42 @@ export default function Home() {
     }
   }, [isClient, isAuthenticated]);
 
+  // Check for active shift on first login
+  useEffect(() => {
+    if (isClient && isAuthenticated && user?.id && !hasCheckedShift) {
+      const checkActiveShift = async () => {
+        try {
+          const electronAPI = getElectronAPI();
+          if (electronAPI?.localDbGetActiveShift) {
+            const userId = typeof user.id === 'string' ? parseInt(user.id, 10) : user.id;
+            const response = await electronAPI.localDbGetActiveShift(userId, BUSINESS_ID);
+            if (!response.shift) {
+              // No active shift, show modal
+              setShowStartShiftModal(true);
+            }
+          }
+        } catch (error) {
+          console.error('❌ Error checking active shift:', error);
+        } finally {
+          setHasCheckedShift(true);
+        }
+      };
+      checkActiveShift();
+    }
+  }, [isClient, isAuthenticated, user?.id, hasCheckedShift]);
+
   // Redirect to login if not authenticated
   useEffect(() => {
     if (isClient && !isAuthenticated) {
       console.log('🔍 Not authenticated, redirecting to login');
+      
+      if (process.env.NODE_ENV === 'development') {
+        // In development, use Next.js router for reliable navigation
       router.replace('/login');
+      } else {
+        // In production (Electron file://), use window.location
+        window.location.href = 'login.html';
+      }
     }
   }, [isClient, isAuthenticated, router]);
 
@@ -117,36 +156,45 @@ export default function Home() {
   return (
     <div className="h-screen flex flex-col overflow-hidden">
       {/* Top Bar with User Info and Logout */}
-      <div className="h-10 bg-white border-b border-gray-200 flex items-center justify-between px-4 relative">
-        <div className="flex items-center space-x-4">
-          <h1 className="text-base font-semibold text-gray-800">MOMOYO MADIUN 1</h1>
-          <div className="w-px h-6 bg-gray-300"></div>
+      <div className="h-[25.6px] bg-white border-b border-gray-200 flex items-center justify-between px-[9.6px] relative">
+        <div className="flex items-center space-x-[9.6px]">
+          <h1 className="text-[11.2px] font-semibold text-gray-800">MOMOYO MADIUN 1</h1>
+          <div className="w-px h-[16px] bg-gray-300"></div>
           <button
             ref={userDebugButtonRef}
             type="button"
             onClick={() => setShowUserDebug(prev => !prev)}
-            className="text-sm font-medium text-gray-600 hover:text-gray-900 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-offset-2 focus-visible:ring-offset-white rounded px-1 transition-colors"
+            className="text-[9.6px] font-medium text-gray-600 hover:text-gray-900 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-offset-2 focus-visible:ring-offset-white px-[3.2px] transition-colors"
             title="Klik untuk melihat detail pengguna"
           >
             {user?.name || 'Pengguna'}
           </button>
-          <div className="w-px h-6 bg-gray-300"></div>
+          <div className="w-px h-[16px] bg-gray-300"></div>
           <OfflineStatus />
         </div>
-        <div className="flex items-center space-x-2">
-          <div className="w-px h-6 bg-gray-300"></div>
-          <div className="flex items-center gap-2 px-2 py-0.5 bg-blue-50 border border-blue-200 rounded">
-            <span className="text-xs text-blue-700 font-medium">Database:</span>
+        <div className="flex items-center space-x-[4.8px]">
+          <div className="w-px h-[16px] bg-gray-300"></div>
+          <div className="flex items-center gap-[4.8px] px-[4.8px] py-[1.6px] bg-blue-100 border border-blue-200">
+            <span className="text-[9.6px] text-blue-700 font-medium">Database:</span>
             {isSyncing && (
-              <span className="inline-block w-1.5 h-1.5 bg-blue-600 rounded-full animate-pulse"></span>
+              <span className="inline-block w-[3.2px] h-[3.2px] bg-blue-600 animate-pulse"></span>
             )}
-            <span className="text-xs text-blue-700">{databaseStatus}</span>
+            <span className="text-[9.6px] text-blue-700">{databaseStatus}</span>
             <button
               onClick={async () => {
                 setIsSyncing(true);
                 setDatabaseStatus('Syncing...');
                 try {
-                  const success = await databaseHealthService.forceSync();
+                  // First: Upload any pending local transactions to cloud
+                  console.log('🔄 [SYNC] Starting upload sync...');
+                  await smartSyncService.forceSync();
+                  console.log('✅ [SYNC] Upload sync completed');
+                  
+                  // Then: Download fresh data from cloud
+                  console.log('🔄 [SYNC] Starting download sync...');
+                  await databaseHealthService.forceSync();
+                  console.log('✅ [SYNC] Download sync completed');
+                  
                   const newStatus = await databaseHealthService.getStatusMessage();
                   setDatabaseStatus(newStatus);
                   
@@ -160,118 +208,136 @@ export default function Home() {
                 }
               }}
               disabled={isSyncing}
-              className="px-1.5 py-0.5 text-xs bg-blue-600 text-white rounded hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
+              className="px-[3.2px] py-[1.6px] text-[9.6px] bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
               title="Sync database"
             >
               Sync Now
             </button>
           </div>
-          <div className="w-px h-6 bg-gray-300"></div>
+          <div className="w-px h-[16px] bg-gray-300"></div>
           <button
             onClick={async () => {
               if (window.electronAPI) {
-                const result = await window.electronAPI.createCustomerDisplay();
+                const result = await window.electronAPI.createCustomerDisplay() as { message?: string };
                 console.log('Customer display result:', result);
-                alert(result.message);
+                alert(result.message || 'Customer display created');
               }
             }}
-            className="flex items-center space-x-1 bg-blue-500 hover:bg-blue-600 text-white px-2 py-1.5 rounded-lg transition-colors"
+            className="flex items-center space-x-[3.2px] bg-blue-500 hover:bg-blue-600 text-white px-[4.8px] py-[3.2px] transition-colors"
             title="Create Customer Display"
           >
-            <span className="text-xs">Customer Display</span>
+            <span className="text-[9.6px]">Customer Display</span>
           </button>
-          <div className="w-px h-6 bg-gray-300"></div>
+          <div className="w-px h-[16px] bg-gray-300"></div>
           <button
             onClick={logout}
-            className="flex items-center space-x-1 bg-red-500 hover:bg-red-600 text-white px-2 py-1.5 rounded-lg transition-colors"
+            className="flex items-center space-x-[3.2px] bg-red-500 hover:bg-red-600 text-white px-[4.8px] py-[3.2px] transition-colors"
             title="Logout"
           >
-            <LogOut className="w-4 h-4" />
-            <span className="text-xs">Logout</span>
+            <LogOut className="w-[9.6px] h-[9.6px]" />
+            <span className="text-[9.6px]">Logout</span>
           </button>
-          <div className="w-px h-6 bg-gray-300"></div>
+          <div className="w-px h-[16px] bg-gray-300"></div>
           <button
             onClick={() => {
               if (window.electronAPI) {
                 window.electronAPI.minimizeWindow();
               }
             }}
-            className="p-2 hover:bg-gray-100 rounded-lg transition-colors"
+            onTouchEnd={(e) => {
+              e.preventDefault();
+              if (window.electronAPI) {
+                window.electronAPI.minimizeWindow();
+              }
+            }}
+            className="p-[4.8px] hover:bg-gray-100 transition-colors"
+            style={{ touchAction: 'manipulation' }}
             title="Minimize"
           >
-            <Minimize2 className="w-4 h-4 text-gray-600" />
+            <Minimize2 className="w-[9.6px] h-[9.6px] text-gray-600" />
           </button>
-          <div className="w-px h-6 bg-gray-300"></div>
+          <div className="w-px h-[16px] bg-gray-300"></div>
           <button
             onClick={() => {
               if (window.electronAPI) {
                 window.electronAPI.closeWindow();
               }
             }}
-            className="p-2 hover:bg-red-100 rounded-lg transition-colors"
+            onTouchEnd={(e) => {
+              e.preventDefault();
+              if (window.electronAPI) {
+                window.electronAPI.closeWindow();
+              }
+            }}
+            className="p-[4.8px] hover:bg-red-100 transition-colors"
+            style={{ touchAction: 'manipulation' }}
             title="Close"
           >
-            <X className="w-4 h-4 text-red-600" />
+            <X className="w-[9.6px] h-[9.6px] text-red-600" />
           </button>
         </div>
 
         {showUserDebug && (
           <div
             ref={userDebugPanelRef}
-            className="absolute top-full left-4 mt-2 w-72 rounded-lg border border-gray-200 bg-white shadow-xl p-4 z-50"
+            className="absolute top-full left-[12.8px] mt-[6.4px] w-[230.4px] border border-gray-200 bg-white shadow-xl p-[12.8px] z-50"
           >
-            <div className="flex items-center justify-between mb-2">
-              <span className="text-sm font-semibold text-gray-800">User Debug Info</span>
+            <div className="flex items-center justify-between mb-[6.4px]">
+              <span className="text-[11.2px] font-semibold text-gray-800">User Debug Info</span>
               <button
                 type="button"
                 onClick={() => setShowUserDebug(false)}
-                className="p-1 rounded hover:bg-gray-100 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+                className="p-[3.2px] hover:bg-gray-100 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
                 aria-label="Close user debug panel"
               >
-                <X className="w-4 h-4 text-gray-500" />
+                <X className="w-[12.8px] h-[12.8px] text-gray-500" />
               </button>
             </div>
-            <div className="space-y-2 text-sm">
+            <div className="space-y-[6.4px] text-[11.2px]">
               <div>
                 <span className="text-gray-500">Nama:</span>
-                <span className="ml-2 font-medium text-gray-800">{user?.name || 'Tidak diketahui'}</span>
+                <span className="ml-[6.4px] font-medium text-gray-800">{user?.name || 'Tidak diketahui'}</span>
               </div>
               <div>
                 <span className="text-gray-500">Email:</span>
-                <span className="ml-2 text-gray-800">{user?.email || 'Tidak diketahui'}</span>
+                <span className="ml-[6.4px] text-gray-800">{user?.email || 'Tidak diketahui'}</span>
               </div>
               <div>
                 <span className="text-gray-500">Role:</span>
-                <span className="ml-2 text-gray-800 font-medium">
+                <span className="ml-[6.4px] text-gray-800 font-medium">
                   {roleDisplayName}
                   {user?.role_id !== null && user?.role_id !== undefined ? ` (${user.role_id})` : ''}
                 </span>
               </div>
               <div>
                 <span className="text-gray-500">Normalized Role:</span>
-                <span className="ml-2 uppercase tracking-wide text-xs font-semibold text-blue-600">
+                <span className="ml-[6.4px] uppercase tracking-wide text-[9.6px] font-semibold text-blue-600">
                   {user?.role || 'N/A'}
                 </span>
               </div>
               <div>
                 <span className="text-gray-500">Role ID:</span>
-                <span className="ml-2 text-gray-800">
+                <span className="ml-[6.4px] text-gray-800">
                   {user?.role_id !== null && user?.role_id !== undefined ? user.role_id : 'N/A'}
                 </span>
               </div>
-              <div className="pt-2 border-t border-gray-100">
-                <span className="text-gray-500">Permissions ({appPermissions.length}):</span>
-                {appPermissions.length === 0 ? (
-                  <p className="mt-1 text-gray-400 text-xs">Tidak ada permission yang tersedia</p>
+              <div className="pt-[6.4px] border-t border-gray-100">
+                <span className="text-gray-500">Permissions ({isSuperAdmin(user) ? 'ALL' : appPermissions.length}):</span>
+                {isSuperAdmin(user) ? (
+                  <p className="mt-[3.2px] text-green-600 text-[9.6px] font-medium">
+                    ✨ Super Admin Access (All Permissions)
+                  </p>
+                ) : appPermissions.length === 0 ? (
+                  <p className="mt-[3.2px] text-gray-400 text-[9.6px]">Tidak ada permission yang tersedia</p>
                 ) : (
-                  <ul className="mt-1 max-h-32 overflow-y-auto space-y-1 text-xs text-gray-700">
+                  <ul className="mt-[3.2px] max-h-[102.4px] overflow-y-auto space-y-[3.2px] text-[9.6px] text-gray-700">
                     {appPermissions.map(permission => (
                       <li
                         key={permission.full}
-                        className="px-2 py-1 bg-gray-50 border border-gray-200 rounded flex flex-col"
+                        className="px-[6.4px] py-[3.2px] bg-gray-100 border border-gray-200 flex flex-col"
                       >
                         <span className="font-medium text-gray-800">{permission.label}</span>
-                        <span className="text-[11px] text-gray-500">{permission.full}</span>
+                        <span className="text-[8.8px] text-gray-500">{permission.full}</span>
                       </li>
                     ))}
                   </ul>
@@ -284,6 +350,18 @@ export default function Home() {
       
       {/* POS Interface */}
       <POSLayout />
+
+      {/* Start Shift Modal */}
+      {user && (
+        <StartShiftModal
+          isOpen={showStartShiftModal}
+          userId={typeof user.id === 'string' ? parseInt(user.id, 10) : user.id}
+          userName={user.name || 'Cashier'}
+          onShiftStarted={() => {
+            setShowStartShiftModal(false);
+          }}
+        />
+      )}
     </div>
   );
 }

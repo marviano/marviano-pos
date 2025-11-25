@@ -10,9 +10,11 @@ interface ConflictResolution {
   maxAge: number; // Maximum age in milliseconds for conflict resolution
 }
 
+type UnknownRecord = Record<string, unknown>;
+
 interface ConflictData {
-  localData: any;
-  serverData: any;
+  localData: UnknownRecord;
+  serverData: UnknownRecord;
   timestamp: number;
   conflictType: 'update' | 'delete' | 'create';
 }
@@ -29,8 +31,8 @@ class ConflictResolutionService {
    */
   resolveConflict<T>(localData: T, serverData: T, conflictType: 'update' | 'delete' | 'create' = 'update'): T {
     const conflictData: ConflictData = {
-      localData,
-      serverData,
+      localData: localData as UnknownRecord,
+      serverData: serverData as UnknownRecord,
       timestamp: Date.now(),
       conflictType,
     };
@@ -39,15 +41,15 @@ class ConflictResolutionService {
 
     switch (this.config.strategy) {
       case 'last-write-wins':
-        return this.lastWriteWins(conflictData);
+        return this.lastWriteWins<T>(conflictData);
       case 'server-wins':
-        return this.serverWins(conflictData);
+        return this.serverWins<T>(conflictData);
       case 'client-wins':
-        return this.clientWins(conflictData);
+        return this.clientWins<T>(conflictData);
       case 'merge':
-        return this.mergeData(conflictData);
+        return this.mergeData<T>(conflictData);
       default:
-        return this.lastWriteWins(conflictData);
+        return this.lastWriteWins<T>(conflictData);
     }
   }
 
@@ -61,7 +63,7 @@ class ConflictResolutionService {
     // If timestamps are equal or very close, prefer server data
     if (Math.abs(localTimestamp - serverTimestamp) < 1000) {
       console.log('🔄 [CONFLICT RESOLUTION] Timestamps too close, preferring server data');
-      return conflictData.serverData;
+      return conflictData.serverData as T;
     }
 
     // Choose the most recent data
@@ -69,7 +71,7 @@ class ConflictResolutionService {
     const winnerType = localTimestamp > serverTimestamp ? 'local' : 'server';
     
     console.log(`🔄 [CONFLICT RESOLUTION] Last-write-wins: ${winnerType} data chosen`);
-    return winner;
+    return winner as T;
   }
 
   /**
@@ -77,7 +79,7 @@ class ConflictResolutionService {
    */
   private serverWins<T>(conflictData: ConflictData): T {
     console.log('🔄 [CONFLICT RESOLUTION] Server-wins: server data chosen');
-    return conflictData.serverData;
+    return conflictData.serverData as T;
   }
 
   /**
@@ -85,7 +87,7 @@ class ConflictResolutionService {
    */
   private clientWins<T>(conflictData: ConflictData): T {
     console.log('🔄 [CONFLICT RESOLUTION] Client-wins: local data chosen');
-    return conflictData.localData;
+      return conflictData.localData as T;
   }
 
   /**
@@ -96,13 +98,13 @@ class ConflictResolutionService {
     
     // For now, use last-write-wins as fallback
     // In the future, this could implement sophisticated merging logic
-    return this.lastWriteWins(conflictData);
+    return this.lastWriteWins<T>(conflictData);
   }
 
   /**
    * Get timestamp from data object
    */
-  private getTimestamp(data: any): number {
+  private getTimestamp(data: UnknownRecord | null | undefined): number {
     if (!data) return 0;
     
     // Try different timestamp fields
@@ -110,7 +112,12 @@ class ConflictResolutionService {
     
     for (const field of timestampFields) {
       if (data[field]) {
-        const timestamp = typeof data[field] === 'number' ? data[field] : new Date(data[field]).getTime();
+        const fieldValue = data[field];
+        const timestamp = typeof fieldValue === 'number' 
+          ? fieldValue 
+          : (typeof fieldValue === 'string' || fieldValue instanceof Date 
+              ? new Date(fieldValue as string | Date).getTime() 
+              : 0);
         if (!isNaN(timestamp)) {
           return timestamp;
         }
@@ -124,7 +131,7 @@ class ConflictResolutionService {
   /**
    * Check if data is too old for conflict resolution
    */
-  isDataTooOld(data: any): boolean {
+  isDataTooOld(data: UnknownRecord | null | undefined): boolean {
     const timestamp = this.getTimestamp(data);
     const age = Date.now() - timestamp;
     return age > this.config.maxAge;
@@ -133,7 +140,7 @@ class ConflictResolutionService {
   /**
    * Validate data integrity before sync
    */
-  validateData(data: any): { isValid: boolean; errors: string[] } {
+  validateData(data: UnknownRecord | null | undefined): { isValid: boolean; errors: string[] } {
     const errors: string[] = [];
     
     if (!data) {
@@ -161,7 +168,7 @@ class ConflictResolutionService {
   /**
    * Handle transaction conflicts specifically
    */
-  resolveTransactionConflict(localTransaction: any, serverTransaction: any): any {
+  resolveTransactionConflict(localTransaction: UnknownRecord, serverTransaction: UnknownRecord): UnknownRecord {
     // For transactions, we typically want to preserve the original transaction
     // and only update metadata like sync status
     
@@ -176,7 +183,7 @@ class ConflictResolutionService {
     }
     
     // Both exist, use last-write-wins but preserve transaction integrity
-    const resolved = this.lastWriteWins({
+    const resolved = this.lastWriteWins<UnknownRecord>({
       localData: localTransaction,
       serverData: serverTransaction,
       timestamp: Date.now(),

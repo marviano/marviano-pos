@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useRef } from 'react';
+import { useState, useRef } from 'react';
 import { X } from 'lucide-react';
 
 interface Product {
@@ -24,20 +24,6 @@ interface CustomNoteModalProps {
 export default function CustomNoteModal({ isOpen, onClose, product, effectivePrice, onConfirm }: CustomNoteModalProps) {
   const [customNote, setCustomNote] = useState('');
   const textareaRef = useRef<HTMLTextAreaElement>(null);
-
-  // Force focus on the textarea when modal opens - aggressive approach for Electron
-  useEffect(() => {
-    if (isOpen && textareaRef.current) {
-      // Simple focus attempt
-      const timer = setTimeout(() => {
-        if (textareaRef.current) {
-          textareaRef.current.focus();
-        }
-      }, 100);
-      
-      return () => clearTimeout(timer);
-    }
-  }, [isOpen]);
 
   const handleConfirm = () => {
     onConfirm(customNote);
@@ -98,10 +84,6 @@ export default function CustomNoteModal({ isOpen, onClose, product, effectivePri
               ref={textareaRef}
               value={customNote}
               onChange={(e) => setCustomNote(e.target.value)}
-              onClick={(e) => {
-                e.stopPropagation();
-                e.currentTarget.focus();
-              }}
               className="w-full p-3 border-2 border-gray-300 rounded-lg text-gray-800 bg-white focus:border-blue-500 focus:ring-4 focus:ring-blue-200 resize-none cursor-text"
               placeholder="Add any special instructions or notes for this item..."
               rows={3}

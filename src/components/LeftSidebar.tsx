@@ -14,6 +14,7 @@ import {
 } from 'lucide-react';
 import { useAuth } from '@/hooks/useAuth';
 import { isSuperAdmin } from '@/lib/auth';
+import { useEffect, useMemo } from 'react';
 
 interface MenuItem {
   id: number;
@@ -30,8 +31,22 @@ interface LeftSidebarProps {
 
 export default function LeftSidebar({ menuItems, activeMenuItem, onMenuItemClick }: LeftSidebarProps) {
   const { user } = useAuth();
-  const permissions = user?.permissions ?? [];
+  const permissions = useMemo(() => user?.permissions ?? [], [user?.permissions]);
   const isAdmin = isSuperAdmin(user);
+
+  useEffect(() => {
+    if (user) {
+      // Reduced log noise
+      /* console.log('👤 [SIDEBAR DEBUG] User:', {
+        name: user.name,
+        role: user.role,
+        role_name: user.role_name,
+        isAdmin,
+        permissions
+      }); */
+    }
+  }, [user, isAdmin, permissions]);
+
   const getIcon = (name: string) => {
     switch (name) {
       case 'Kasir':
@@ -75,6 +90,14 @@ export default function LeftSidebar({ menuItems, activeMenuItem, onMenuItemClick
               permissions.includes('setelan.printersetup') ||
               permissions.includes('marviano-pos_setelan_printer-setup');
             const canAccessSettings = canAccessSync || canAccessPrinter;
+            
+            /* console.log(`🔧 [SIDEBAR DEBUG] 'Setelan' access:`, {
+              isAdmin,
+              hasSyncPerm: permissions.includes('setelan.sinkronisasi'),
+              hasPrinterPerm: permissions.includes('setelan.printersetup'),
+              access: canAccessSettings
+            }); */
+
             if (!canAccessSettings) {
               return null;
             }
@@ -106,7 +129,21 @@ export default function LeftSidebar({ menuItems, activeMenuItem, onMenuItemClick
             <Wifi className="w-5 h-5 text-white" />
             <span className="text-white text-sm">Online</span>
           </div>
-          <button className="p-2 text-white hover:bg-blue-800 rounded">
+          <button
+            onClick={() => {
+              if (window.electronAPI) {
+                window.electronAPI.minimizeWindow();
+              }
+            }}
+            onTouchEnd={(e) => {
+              e.preventDefault();
+              if (window.electronAPI) {
+                window.electronAPI.minimizeWindow();
+              }
+            }}
+            className="p-2 text-white hover:bg-blue-800 rounded"
+            title="Minimize"
+          >
             <Minimize2 className="w-4 h-4" />
           </button>
         </div>

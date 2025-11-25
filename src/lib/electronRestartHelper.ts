@@ -3,8 +3,10 @@
  * Provides instructions for restarting Electron after preload changes
  */
 
+type UnknownRecord = Record<string, unknown>;
+
 export function checkElectronAPI() {
-  const api = (window as any).electronAPI;
+  const api = typeof window !== 'undefined' ? (window as { electronAPI?: UnknownRecord }).electronAPI : undefined;
   
   if (!api) {
     console.error('❌ Electron API not available - not running in Electron');
@@ -33,7 +35,13 @@ export function checkElectronAPI() {
   return true;
 }
 
-export function getRestartInstructions() {
+export interface RestartInstructions {
+  title: string;
+  message: string;
+  steps: string[];
+}
+
+export function getRestartInstructions(): RestartInstructions {
   return {
     title: 'Electron Restart Required',
     message: 'The preload script has been updated. Please restart the Electron app to load the new methods.',
@@ -43,5 +51,5 @@ export function getRestartInstructions() {
       '3. Start the Electron app again',
       '4. The offline functionality should now work properly'
     ]
-  };
+  } as const;
 }

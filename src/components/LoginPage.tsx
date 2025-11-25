@@ -41,9 +41,12 @@ export default function LoginPage({
   useEffect(() => {
     const emails = getSavedEmails();
     setSavedEmails(emails);
-    if (!email && emails.length > 0) {
-      setEmail(emails[0]);
-    }
+    setEmail((prev) => {
+      if (prev && prev.trim().length > 0) {
+        return prev;
+      }
+      return emails[0] ?? '';
+    });
   }, []);
 
   useEffect(() => {
@@ -91,8 +94,8 @@ export default function LoginPage({
   };
 
   return (
-    <div className="w-full h-screen flex items-center justify-center bg-gray-900 overflow-hidden" style={{ WebkitAppRegion: 'drag' }}>
-      <div className="bg-white rounded-2xl shadow-2xl overflow-hidden w-full h-[432px] flex" style={{ WebkitAppRegion: 'drag' }}>
+    <div className="w-full h-screen flex items-center justify-center bg-gray-900 overflow-hidden" style={{ WebkitAppRegion: 'drag' } as React.CSSProperties}>
+      <div className="bg-white rounded-2xl shadow-2xl overflow-hidden w-full h-[432px] flex" style={{ WebkitAppRegion: 'drag' } as React.CSSProperties}>
         {/* Left Panel - Branding */}
         <div className="w-1/2 bg-gray-900 relative overflow-hidden">
           {/* Background Pattern */}
@@ -104,12 +107,12 @@ export default function LoginPage({
           
           {/* Content */}
           <div className="relative z-10 h-full flex flex-col items-center justify-center text-white p-8">
-             {/* Logo */}
-             <div className="mb-8">
-               <Image
-                 src="/images/momoyo-logo.png"
-                 alt="Momoyo Logo"
-                 width={120}
+            {/* Logo */}
+            <div className="mb-8">
+              <Image
+                src="images/momoyo-logo.png"
+                alt="Momoyo Logo"
+                width={120}
                  height={120}
                  className="w-30 h-30 object-contain"
                />
@@ -133,7 +136,7 @@ export default function LoginPage({
                 type="button"
                 onClick={() => setIsSettingsView(false)}
                 className="w-8 h-8 bg-gray-100 hover:bg-gray-200 rounded-lg flex items-center justify-center transition-colors"
-                style={{ WebkitAppRegion: 'no-drag' }}
+                style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
                 title="Kembali ke Login"
                 disabled={isSyncing}
               >
@@ -144,7 +147,7 @@ export default function LoginPage({
                 type="button"
                 onClick={() => setIsSettingsView(true)}
                 className="w-8 h-8 bg-gray-100 hover:bg-gray-200 rounded-lg flex items-center justify-center transition-colors"
-                style={{ WebkitAppRegion: 'no-drag' }}
+                style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
                 title="Pengaturan"
                 disabled={isSyncing}
               >
@@ -158,14 +161,14 @@ export default function LoginPage({
             <button
               onClick={onClose}
               className="absolute top-4 right-4 w-8 h-8 bg-gray-100 hover:bg-gray-200 rounded-lg flex items-center justify-center transition-colors"
-              style={{ WebkitAppRegion: 'no-drag' }}
+              style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
             >
               <X className="w-4 h-4 text-gray-600" />
             </button>
           )}
 
           {isSettingsView ? (
-            <div className="flex flex-col justify-between h-full space-y-6" style={{ WebkitAppRegion: 'no-drag' }}>
+            <div className="flex flex-col justify-between h-full space-y-6" style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}>
               <div className="space-y-6">
                 <div>
                   <h2 className="text-xl font-semibold text-gray-800">Pengaturan</h2>
@@ -203,7 +206,7 @@ export default function LoginPage({
                     }
                   }}
                   className="w-full flex items-center justify-center gap-2 bg-blue-600 hover:bg-blue-700 text-white text-sm font-semibold px-4 py-3 rounded-lg transition-colors disabled:bg-blue-300"
-                  style={{ WebkitAppRegion: 'no-drag', cursor: isSyncing ? 'not-allowed' : 'pointer' }}
+                  style={{ WebkitAppRegion: 'no-drag', cursor: isSyncing ? 'not-allowed' : 'pointer' } as React.CSSProperties}
                   disabled={isSyncing}
                 >
                   {isSyncing ? (
@@ -223,7 +226,7 @@ export default function LoginPage({
                 type="button"
                 onClick={() => setIsSettingsView(false)}
                 className="text-sm text-gray-500 hover:text-gray-700 transition-colors"
-                style={{ WebkitAppRegion: 'no-drag' }}
+                style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
                 disabled={isSyncing}
               >
                 Kembali ke Login
@@ -244,7 +247,7 @@ export default function LoginPage({
                       onChange={(e) => setEmail(e.target.value)}
                       placeholder="Silakan masukkan nama pengguna"
                       className="w-full px-4 py-3 border-2 border-cyan-300 rounded-lg focus:outline-none focus:border-cyan-500 text-gray-700 placeholder-gray-400"
-                      style={{ WebkitAppRegion: 'no-drag' }}
+                      style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
                       required
                       onFocus={() => {
                         if (savedEmails.length > 0) {
@@ -255,7 +258,7 @@ export default function LoginPage({
                     <button
                       type="button"
                       className="absolute right-3 top-1/2 transform -translate-y-1/2 text-gray-400 hover:text-gray-600"
-                      style={{ WebkitAppRegion: 'no-drag' }}
+                      style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
                       onClick={() => {
                         if (savedEmails.length > 0) {
                           setIsDropdownOpen(prev => !prev);
@@ -270,7 +273,7 @@ export default function LoginPage({
                     {isDropdownOpen && savedEmails.length > 0 && (
                       <div
                         className="absolute left-0 right-0 mt-1 bg-white border border-gray-200 rounded-lg shadow-lg max-h-48 overflow-y-auto z-10"
-                        style={{ WebkitAppRegion: 'no-drag' }}
+                        style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
                       >
                         {savedEmails.map(savedEmail => (
                           <button
@@ -303,14 +306,14 @@ export default function LoginPage({
                       onChange={(e) => setPassword(e.target.value)}
                       placeholder="Silakan masukkan kata sandi"
                       className="w-full px-4 py-3 border-2 border-cyan-300 rounded-lg focus:outline-none focus:border-cyan-500 text-gray-700 placeholder-gray-400 pr-12"
-                      style={{ WebkitAppRegion: 'no-drag' }}
+                      style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
                       required
                     />
                     <button
                       type="button"
                       onClick={() => setShowPassword(!showPassword)}
                       className="absolute right-3 top-1/2 transform -translate-y-1/2 text-gray-400 hover:text-gray-600"
-                      style={{ WebkitAppRegion: 'no-drag' }}
+                      style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
                     >
                       {showPassword ? <EyeOff className="w-5 h-5" /> : <Eye className="w-5 h-5" />}
                     </button>
@@ -335,7 +338,7 @@ export default function LoginPage({
                 type="submit"
                 disabled={isLoading || isSyncing}
                 className="w-full bg-cyan-500 hover:bg-cyan-600 disabled:bg-cyan-300 text-white font-semibold py-3 px-4 rounded-lg flex items-center justify-center transition-colors"
-                style={{ WebkitAppRegion: 'no-drag' }}
+                style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
               >
                 {isLoading ? (
                   <div className="w-5 h-5 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
@@ -343,6 +346,18 @@ export default function LoginPage({
                   'Masuk'
                 )}
               </button>
+
+              {hasOfflineDb && onOfflineLogin && (
+                <button
+                  type="button"
+                  onClick={handleOfflineLogin}
+                  disabled={isLoading || isSyncing}
+                  className="w-full border border-gray-300 text-gray-700 hover:bg-gray-50 font-semibold py-3 px-4 rounded-lg transition-colors"
+                  style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
+                >
+                  Masuk Offline
+                </button>
+              )}
 
             </form>
           )}

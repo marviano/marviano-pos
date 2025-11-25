@@ -3,6 +3,7 @@
 import { useEffect, useState } from 'react';
 import { X, RotateCcw } from 'lucide-react';
 import { offlineSyncService } from '@/lib/offlineSync';
+import { getApiUrl } from '@/lib/api';
 
 interface Product {
   id: number;
@@ -72,7 +73,7 @@ export default function BundleProductCustomizationModal({
             const timeoutId = setTimeout(() => controller.abort(), 3000);
 
             try {
-              const response = await fetch(`/api/products/${product.id}/customizations`, {
+              const response = await fetch(getApiUrl(`/api/products/${product.id}/customizations`), {
                 signal: controller.signal
               });
               clearTimeout(timeoutId);
@@ -89,16 +90,18 @@ export default function BundleProductCustomizationModal({
             }
           },
           async () => {
-            if (typeof window !== 'undefined' && (window as any).electronAPI) {
-              return await (window as any).electronAPI.localDbGetProductCustomizations(product.id);
+            const electronAPI = typeof window !== 'undefined' ? window.electronAPI : undefined;
+            if (!electronAPI?.localDbGetProductCustomizations) {
+              throw new Error('Offline database not available');
             }
-            throw new Error('Offline database not available');
+            const offlineData = await electronAPI.localDbGetProductCustomizations(product.id);
+            return offlineData || [];
           }
         );
 
-        setCustomizations(result);
+        setCustomizations(Array.isArray(result) ? (result as Customization[]) : []);
 
-        const nextSelections: SelectedCustomization[] = result.map((customization: Customization) => {
+        const nextSelections: SelectedCustomization[] = (Array.isArray(result) ? (result as Customization[]) : []).map((customization) => {
           const existing = initialCustomizations.find(
             (sel) => sel.customization_id === customization.id
           );

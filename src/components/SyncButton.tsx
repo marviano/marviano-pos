@@ -1,14 +1,39 @@
 'use client';
 
-import React, { useState } from 'react';
-import { RefreshCw, Cloud, CloudOff, CheckCircle, AlertCircle, Upload, Download } from 'lucide-react';
+import React, { useState, useCallback } from 'react';
+import { RefreshCw, Cloud, CloudOff, AlertCircle, Upload, Download } from 'lucide-react';
 import { offlineSyncService } from '@/lib/offlineSync';
 import { smartSyncService } from '@/lib/smartSync';
 import { restorePrinterStateFromCloud } from '@/lib/printerSyncUtils';
+import { getApiUrl } from '@/lib/api';
+
+type UnknownRecord = Record<string, unknown>;
+type TransactionRow = UnknownRecord & { id?: number | string; synced_at?: number | null };
+const isUnknownRecord = (value: unknown): value is UnknownRecord =>
+  typeof value === 'object' && value !== null;
+
+const toUnknownRecordArray = (value: unknown): UnknownRecord[] =>
+  Array.isArray(value) ? value.filter(isUnknownRecord) : [];
+
+const toTransactionRows = (value: unknown): TransactionRow[] =>
+  toUnknownRecordArray(value).map((row) => row as TransactionRow);
+
+const getElectronAPI = () => (typeof window !== 'undefined' ? window.electronAPI : undefined);
+
+const getNumericTransactionId = (transaction: TransactionRow): number | undefined => {
+  if (typeof transaction.id === 'number' && Number.isFinite(transaction.id)) {
+    return transaction.id;
+  }
+  if (typeof transaction.id === 'string') {
+    const parsed = Number(transaction.id);
+    return Number.isFinite(parsed) ? parsed : undefined;
+  }
+  return undefined;
+};
 
 interface SyncStatus {
   isOnline: boolean;
-  lastSync: string | null;
+  lastSync: number | null;
   pendingTransactions: number;
   syncInProgress: boolean;
   error: string | null;
@@ -29,17 +54,17 @@ export default function SyncButton({ className = '', showDetails = true }: SyncB
   });
 
   // Check if we're in Electron environment
-  const isElectron = typeof window !== 'undefined' && (window as any).electronAPI;
+  const isElectron = typeof window !== 'undefined' && Boolean(window.electronAPI);
 
   // Get current sync status
-  const getSyncStatus = async (): Promise<SyncStatus> => {
+  const getSyncStatus = useCallback(async (): Promise<SyncStatus> => {
     try {
       const connectionStatus = offlineSyncService.getDetailedStatus();
       const pendingCount = await smartSyncService.getPendingTransactionCount();
       
       return {
         isOnline: connectionStatus.isOnline,
-        lastSync: connectionStatus.lastSyncTime || null,
+        lastSync: connectionStatus.lastSyncTime ?? null,
         pendingTransactions: pendingCount,
         syncInProgress: false,
         error: null
@@ -53,13 +78,13 @@ export default function SyncButton({ className = '', showDetails = true }: SyncB
         error: error instanceof Error ? error.message : 'Unknown error'
       };
     }
-  };
+  }, []);
 
   // Update sync status
-  const updateSyncStatus = async () => {
+  const updateSyncStatus = useCallback(async () => {
     const status = await getSyncStatus();
     setSyncStatus(status);
-  };
+  }, [getSyncStatus]);
 
   // Full database sync (Download from cloud)
   const syncFromCloud = async () => {
@@ -74,84 +99,97 @@ export default function SyncButton({ className = '', showDetails = true }: SyncB
       console.log('🔄 [SYNC] Starting full database sync from cloud...');
       
       // Get all data from cloud
-      const response = await fetch('/api/sync');
+      const response = await fetch(getApiUrl('/api/sync'));
       if (!response.ok) {
         throw new Error(`HTTP ${response.status}: ${response.statusText}`);
       }
       
       const jsonData = await response.json();
-      const data = jsonData.data || jsonData; // Support both response structures
+      const data = (jsonData.data || jsonData) as Record<string, unknown>;
       const targetBusinessId = Number(jsonData.businessId ?? 14);
+      const describeLength = (value: unknown) => (Array.isArray(value) ? value.length : 0);
       console.log('📥 [SYNC] Received data from cloud:', {
-        products: data.products?.length || 0,
-        transactions: data.transactions?.length || 0,
-        paymentMethods: data.paymentMethods?.length || 0,
-        banks: data.banks?.length || 0,
-        organizations: data.organizations?.length || 0,
-        managementGroups: data.managementGroups?.length || 0,
-        category1: data.category1?.length || 0,
-        category2: data.category2?.length || 0,
-        clAccounts: data.clAccounts?.length || 0,
-        bundleItems: data.bundleItems?.length || 0,
-        omset: data.omset?.length || 0
+        products: describeLength(data.products),
+        transactions: describeLength(data.transactions),
+        paymentMethods: describeLength(data.paymentMethods),
+        banks: describeLength(data.banks),
+        organizations: describeLength(data.organizations),
+        managementGroups: describeLength(data.managementGroups),
+        category1: describeLength(data.category1),
+        category2: describeLength(data.category2),
+        clAccounts: describeLength(data.clAccounts),
+        bundleItems: describeLength(data.bundleItems)
       });
 
       // Save to local database
-      const electronAPI = (window as any).electronAPI;
-      
-      if (data.products && data.products.length > 0) {
-        await electronAPI.localDbUpsertProducts(data.products);
-        console.log(`✅ ${data.products.length} products synced to local database`);
+      const electronAPI = getElectronAPI();
+      if (!electronAPI) {
+        throw new Error('Electron API not available');
       }
       
-      if (data.bundleItems && data.bundleItems.length > 0) {
-        await electronAPI.localDbUpsertBundleItems(data.bundleItems);
-        console.log(`✅ ${data.bundleItems.length} bundle items synced to local database`);
+      const products = toUnknownRecordArray(data.products);
+      if (products.length > 0 && electronAPI.localDbUpsertProducts) {
+        await electronAPI.localDbUpsertProducts(products);
+        console.log(`✅ ${products.length} products synced to local database`);
       }
       
-      if (data.transactions && data.transactions.length > 0) {
+      const bundleItems = toUnknownRecordArray(data.bundleItems);
+      if (bundleItems.length > 0 && electronAPI.localDbUpsertBundleItems) {
+        await electronAPI.localDbUpsertBundleItems(bundleItems);
+        console.log(`✅ ${bundleItems.length} bundle items synced to local database`);
+      }
+      
+      const transactions = toTransactionRows(data.transactions);
+      if (transactions.length > 0 && electronAPI.localDbUpsertTransactions) {
         // Mark downloaded transactions as already synced (they came from cloud)
-        const transactionsWithSyncStatus = data.transactions.map((tx: any) => ({
+        const transactionsWithSyncStatus = transactions.map((tx) => ({
           ...tx,
-          synced_at: Date.now() // Already in cloud, so mark as synced
+          synced_at: Date.now()
         }));
         await electronAPI.localDbUpsertTransactions(transactionsWithSyncStatus);
-        console.log(`✅ ${data.transactions.length} transactions synced to local database`);
+        console.log(`✅ ${transactions.length} transactions synced to local database`);
       }
       
-      if (data.paymentMethods && data.paymentMethods.length > 0) {
-        await electronAPI.localDbUpsertPaymentMethods(data.paymentMethods);
-        console.log(`✅ ${data.paymentMethods.length} payment methods synced to local database`);
+      const paymentMethods = toUnknownRecordArray(data.paymentMethods);
+      if (paymentMethods.length > 0 && electronAPI.localDbUpsertPaymentMethods) {
+        await electronAPI.localDbUpsertPaymentMethods(paymentMethods);
+        console.log(`✅ ${paymentMethods.length} payment methods synced to local database`);
       }
       
-      if (data.banks && data.banks.length > 0) {
-        await electronAPI.localDbUpsertBanks(data.banks);
-        console.log(`✅ ${data.banks.length} banks synced to local database`);
+      const banks = toUnknownRecordArray(data.banks);
+      if (banks.length > 0 && electronAPI.localDbUpsertBanks) {
+        await electronAPI.localDbUpsertBanks(banks);
+        console.log(`✅ ${banks.length} banks synced to local database`);
       }
       
-      if (data.organizations && data.organizations.length > 0) {
-        await electronAPI.localDbUpsertOrganizations(data.organizations);
-        console.log(`✅ ${data.organizations.length} organizations synced to local database`);
+      const organizations = toUnknownRecordArray(data.organizations);
+      if (organizations.length > 0 && electronAPI.localDbUpsertOrganizations) {
+        await electronAPI.localDbUpsertOrganizations(organizations);
+        console.log(`✅ ${organizations.length} organizations synced to local database`);
       }
       
-      if (data.managementGroups && data.managementGroups.length > 0) {
-        await electronAPI.localDbUpsertManagementGroups(data.managementGroups);
-        console.log(`✅ ${data.managementGroups.length} management groups synced to local database`);
+      const managementGroups = toUnknownRecordArray(data.managementGroups);
+      if (managementGroups.length > 0 && electronAPI.localDbUpsertManagementGroups) {
+        await electronAPI.localDbUpsertManagementGroups(managementGroups);
+        console.log(`✅ ${managementGroups.length} management groups synced to local database`);
       }
       
-      if (data.category1 && data.category1.length > 0) {
-        await electronAPI.localDbUpsertCategory1(data.category1);
-        console.log(`✅ ${data.category1.length} category1 synced to local database`);
+      const category1 = toUnknownRecordArray(data.category1);
+      if (category1.length > 0 && electronAPI.localDbUpsertCategory1) {
+        await electronAPI.localDbUpsertCategory1(category1);
+        console.log(`✅ ${category1.length} category1 synced to local database`);
       }
       
-      if (data.category2 && data.category2.length > 0) {
-        await electronAPI.localDbUpsertCategory2(data.category2);
-        console.log(`✅ ${data.category2.length} category2 synced to local database`);
+      const category2 = toUnknownRecordArray(data.category2);
+      if (category2.length > 0 && electronAPI.localDbUpsertCategory2) {
+        await electronAPI.localDbUpsertCategory2(category2);
+        console.log(`✅ ${category2.length} category2 synced to local database`);
       }
       
-      if (data.clAccounts && data.clAccounts.length > 0) {
-        await electronAPI.localDbUpsertClAccounts(data.clAccounts);
-        console.log(`✅ ${data.clAccounts.length} CL accounts synced to local database`);
+      const clAccounts = toUnknownRecordArray(data.clAccounts);
+      if (clAccounts.length > 0 && electronAPI.localDbUpsertClAccounts) {
+        await electronAPI.localDbUpsertClAccounts(clAccounts);
+        console.log(`✅ ${clAccounts.length} CL accounts synced to local database`);
       }
 
       await restorePrinterStateFromCloud(data, electronAPI, targetBusinessId);
@@ -188,15 +226,19 @@ export default function SyncButton({ className = '', showDetails = true }: SyncB
       console.log('🔄 [SYNC] Starting upload of offline transactions to cloud...');
       
       // Get pending transactions from local database
-      const electronAPI = (window as any).electronAPI;
-      const localTransactions = await electronAPI.localDbGetTransactions(1, 1000); // Get all transactions
-      
-      // Filter transactions that might not be on cloud (you can add more sophisticated logic here)
-      const transactionsToUpload = localTransactions.filter((tx: any) => {
-        // For now, upload all transactions. In production, you might want to check timestamps
-        // or add a sync_status field to track what's been uploaded
-        return true;
-      });
+      const electronAPI = getElectronAPI();
+      if (!electronAPI) {
+        throw new Error('Electron API not available');
+      }
+
+      let transactionsToUpload: TransactionRow[] = [];
+      if (electronAPI.localDbGetUnsyncedTransactions) {
+        const rows = await electronAPI.localDbGetUnsyncedTransactions(14);
+        transactionsToUpload = toTransactionRows(rows);
+      } else if (electronAPI.localDbGetTransactions) {
+        const localTransactions = await electronAPI.localDbGetTransactions(14, 1000);
+        transactionsToUpload = toTransactionRows(localTransactions);
+      }
 
       if (transactionsToUpload.length === 0) {
         console.log('ℹ️ [SYNC] No transactions to upload - proceeding to download step');
@@ -209,7 +251,7 @@ export default function SyncButton({ className = '', showDetails = true }: SyncB
       // Upload transactions to cloud
       for (const transaction of transactionsToUpload) {
         try {
-          const response = await fetch('/api/transactions', {
+          const response = await fetch(getApiUrl('/api/transactions'), {
             method: 'POST',
             headers: {
               'Content-Type': 'application/json',
@@ -218,7 +260,11 @@ export default function SyncButton({ className = '', showDetails = true }: SyncB
           });
 
           if (response.ok) {
-            console.log(`✅ Transaction ${transaction.id} uploaded successfully`);
+            console.log(`✅ Transaction ${transaction.id ?? 'unknown'} uploaded successfully`);
+            const transactionId = getNumericTransactionId(transaction);
+            if (transactionId !== undefined && electronAPI.localDbMarkTransactionsSyncedByIds) {
+              await electronAPI.localDbMarkTransactionsSyncedByIds([transactionId]);
+            }
           } else {
             console.warn(`⚠️ Failed to upload transaction ${transaction.id}: ${response.status}`);
           }
@@ -294,9 +340,9 @@ export default function SyncButton({ className = '', showDetails = true }: SyncB
   // Initialize sync status on component mount
   React.useEffect(() => {
     updateSyncStatus();
-  }, []);
+  }, [updateSyncStatus]);
 
-  const formatLastSync = (lastSync: string | null) => {
+  const formatLastSync = (lastSync: number | null) => {
     if (!lastSync) return 'Belum pernah';
     const date = new Date(lastSync);
     return date.toLocaleString('id-ID', {

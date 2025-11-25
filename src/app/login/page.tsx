@@ -6,7 +6,7 @@ import { X } from 'lucide-react';
 import LoginPage from '@/components/LoginPage';
 import { useAuth } from '@/hooks/useAuth';
 import { offlineSyncService } from '@/lib/offlineSync';
-import { authManager } from '@/lib/auth';
+import { authManager, type User } from '@/lib/auth';
 
 interface Business {
   id: number;
@@ -24,8 +24,13 @@ export default function Login() {
   const [hasOfflineDb, setHasOfflineDb] = useState<boolean | null>(null);
   const hasCheckedOfflineDb = useRef(false);
   const [syncProgress, setSyncProgress] = useState<number | null>(null);
+  interface LoginResult {
+    _businesses?: Business[];
+    _isSuperAdmin?: boolean;
+    [key: string]: unknown;
+  }
   const [pendingLogin, setPendingLogin] = useState<{
-    user: any;
+    user: User | LoginResult;
     businesses: Business[];
     isSuperAdmin: boolean;
   } | null>(null);
@@ -39,7 +44,14 @@ export default function Login() {
   useEffect(() => {
     if (isClient && isAuthenticated) {
       console.log('🔍 Already authenticated, redirecting to POS');
+      
+      if (process.env.NODE_ENV === 'development') {
+        // In development, use Next.js router
       router.replace('/');
+      } else {
+        // In production (Electron file://), use window.location
+        window.location.href = 'index.html';
+      }
     }
   }, [isClient, isAuthenticated, router]);
 
@@ -171,8 +183,9 @@ export default function Login() {
       const loginResult = await login(email, password);
       
       // Check if we need business selection
-      const businesses = (loginResult as any)?._businesses || [];
-      const isSuperAdmin = (loginResult as any)?._isSuperAdmin || false;
+      const loginResultTyped = loginResult as unknown as LoginResult;
+      const businesses = loginResultTyped?._businesses || [];
+      const isSuperAdmin = loginResultTyped?._isSuperAdmin || false;
       
       if (businesses.length > 1) {
         // Show business selection UI
@@ -184,7 +197,7 @@ export default function Login() {
       } else {
         // Auto-select business if only one, or proceed with null if none
         const selectedBusinessId = businesses.length === 1 ? businesses[0].id : null;
-        await authManager.completeLogin(loginResult as any, selectedBusinessId);
+        await authManager.completeLogin(loginResult as User & { _businesses?: unknown[]; _isSuperAdmin?: boolean }, selectedBusinessId);
         // Router will handle redirect via useEffect
       }
     } catch (error) {
@@ -199,7 +212,7 @@ export default function Login() {
     }
 
     try {
-      await authManager.completeLogin(pendingLogin.user, businessId);
+      await authManager.completeLogin(pendingLogin.user as User & { _businesses?: unknown[]; _isSuperAdmin?: boolean }, businessId);
       setPendingLogin(null);
       // Router will handle redirect via useEffect
     } catch (error) {
@@ -243,8 +256,8 @@ export default function Login() {
   // Show business selection if needed
   if (pendingLogin) {
     return (
-      <div className="w-full h-screen flex items-center justify-center bg-gray-900 overflow-hidden" style={{ WebkitAppRegion: 'drag' }}>
-        <div className="bg-white rounded-2xl shadow-2xl overflow-hidden w-full h-[432px] flex" style={{ WebkitAppRegion: 'drag' }}>
+      <div className="w-full h-screen flex items-center justify-center bg-gray-900 overflow-hidden" style={{ WebkitAppRegion: 'drag' } as React.CSSProperties}>
+        <div className="bg-white rounded-2xl shadow-2xl overflow-hidden w-full h-[432px] flex" style={{ WebkitAppRegion: 'drag' } as React.CSSProperties}>
           {/* Left Panel - Branding (20% width) */}
           <div className="w-[20%] bg-gray-900 relative overflow-hidden">
             <div className="absolute inset-0 opacity-5">
@@ -263,13 +276,13 @@ export default function Login() {
             <button
               onClick={() => setPendingLogin(null)}
               className="absolute top-4 right-4 w-8 h-8 bg-gray-100 hover:bg-gray-200 rounded-lg flex items-center justify-center transition-colors"
-              style={{ WebkitAppRegion: 'no-drag' }}
+              style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
               title="Kembali ke Login"
             >
               <X className="w-4 h-4 text-gray-600" />
             </button>
 
-            <div className="flex-1 flex flex-col justify-center" style={{ WebkitAppRegion: 'no-drag' }}>
+            <div className="flex-1 flex flex-col justify-center" style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}>
               <div className="grid grid-cols-2 gap-3 max-h-[280px] overflow-y-auto pr-2">
                 {pendingLogin.businesses.map((business) => (
                   <button
@@ -299,7 +312,7 @@ export default function Login() {
         isSyncing={isSyncing || hasOfflineDb === null}
         syncStatus={effectiveSyncStatus}
         syncError={syncError}
-        onSyncRequest={() => handleFullSync('manual')}
+        onSyncRequest={async () => { await handleFullSync('manual'); }}
         hasOfflineDb={hasOfflineDb ?? false}
         syncProgress={syncProgress}
       />

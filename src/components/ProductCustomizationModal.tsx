@@ -1,8 +1,9 @@
 'use client';
 
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import { X, Plus, Minus } from 'lucide-react';
 import { offlineSyncService } from '@/lib/offlineSync';
+import { getApiUrl } from '@/lib/api';
 
 interface Product {
   id: number;
@@ -60,100 +61,75 @@ export default function ProductCustomizationModal({
   const [loading, setLoading] = useState(false);
   const customNoteRef = useRef<HTMLTextAreaElement>(null);
 
-  useEffect(() => {
-    if (isOpen && product) {
-      fetchCustomizations();
-      // Reset quantity and customNote when modal opens
-      setQuantity(1);
-      setCustomNote('');
-    }
-  }, [isOpen, product]);
-
-  // Aggressive focus handling for custom note textarea
-  useEffect(() => {
-    if (isOpen && customNoteRef.current) {
-      // Multiple attempts to focus with different timeouts
-      const timers = [
-        setTimeout(() => {
-          if (customNoteRef.current) {
-            customNoteRef.current.focus();
-          }
-        }, 50),
-        setTimeout(() => {
-          if (customNoteRef.current) {
-            customNoteRef.current.focus();
-          }
-        }, 200),
-      ];
-      
-      return () => {
-        timers.forEach(timer => clearTimeout(timer));
-      };
-    }
-  }, [isOpen]);
-
-  const fetchCustomizations = async () => {
+  const fetchCustomizations = useCallback(async () => {
     if (!product) return;
     
     try {
       setLoading(true);
       
-      // Use offline sync service for fallback
-      const customizations = await offlineSyncService.fetchWithFallback(
-        // Online fetch
-        async () => {
+      // Always try offline first for UI responsiveness
+      let fetchedCustomizations: Customization[] = [];
+      let foundLocally = false;
+      
+      const electronAPI = typeof window !== 'undefined' ? window.electronAPI : undefined;
+      if (electronAPI?.localDbGetProductCustomizations) {
+        try {
+          console.log('💾 Attempting offline fetch first...');
+          const localCustomizations = await electronAPI.localDbGetProductCustomizations(product.id);
+          console.log('💾 Retrieved customizations:', Array.isArray(localCustomizations) ? localCustomizations.length : 0);
+          if (Array.isArray(localCustomizations) && localCustomizations.length > 0) {
+            fetchedCustomizations = localCustomizations as Customization[];
+            foundLocally = true;
+          }
+        } catch (e) {
+          console.warn('Local fetch failed:', e);
+        }
+      }
+
+      // If not found locally and we are online, try fetching
+      if (!foundLocally && offlineSyncService.getStatus().isOnline) {
+        try {
+          console.log('🌐 Local empty, attempting online fetch...');
           const controller = new AbortController();
           const timeoutId = setTimeout(() => controller.abort(), 2000);
           
-          try {
-            const response = await fetch(`/api/products/${product.id}/customizations`, {
-              signal: controller.signal
-            });
-            clearTimeout(timeoutId);
-            
-            if (!response.ok) {
-              console.log('🌐 API returned non-OK status:', response.status);
-              throw new Error(`HTTP ${response.status}`);
-            }
-            
+          const response = await fetch(getApiUrl(`/api/products/${product.id}/customizations`), {
+            signal: controller.signal
+          });
+          clearTimeout(timeoutId);
+          
+          if (response.ok) {
             const data = await response.json();
-            return data.customizations || [];
-          } catch (error) {
-            console.log('🌐 Online fetch error:', error);
-            clearTimeout(timeoutId);
-            throw error;
+            fetchedCustomizations = data.customizations || [];
           }
-        },
-        // Offline fetch
-        async () => {
-          console.log('💾 Attempting offline fallback...');
-          if (typeof window !== 'undefined' && (window as any).electronAPI) {
-            console.log('💾 Calling Electron IPC...');
-            const customizations = await (window as any).electronAPI.localDbGetProductCustomizations(product.id);
-            console.log('💾 Retrieved customizations:', customizations.length);
-            return customizations;
-          } else {
-            throw new Error('Offline database not available');
-          }
+        } catch (error) {
+          console.log('🌐 Online fetch error:', error);
         }
-      );
+      }
       
-      setCustomizations(customizations);
+      setCustomizations(fetchedCustomizations);
         
-        // Initialize selected customizations
-      const initialSelections = customizations.map((customization: Customization) => ({
-          customization_id: customization.id,
-          customization_name: customization.name,
-          selected_options: []
-        }));
-        setSelectedCustomizations(initialSelections);
+      const initialSelections = fetchedCustomizations.map((customization: Customization) => ({
+        customization_id: customization.id,
+        customization_name: customization.name,
+        selected_options: []
+      }));
+      setSelectedCustomizations(initialSelections);
       
     } catch (error) {
       console.error('Error fetching customizations:', error);
     } finally {
       setLoading(false);
     }
-  };
+  }, [product]);
+
+  useEffect(() => {
+    if (isOpen && product) {
+      fetchCustomizations();
+      setQuantity(1);
+      setCustomNote('');
+    }
+  }, [fetchCustomizations, isOpen, product]);
 
   const handleOptionToggle = (customizationId: number, option: CustomizationOption) => {
     setSelectedCustomizations(prev => {
@@ -210,8 +186,7 @@ export default function ProductCustomizationModal({
   const calculateTotalPrice = () => {
     if (!product) return 0;
     
-    // Use effectivePrice if provided (platform-specific), otherwise fall back to harga_jual
-    let basePrice = effectivePrice !== undefined ? Number(effectivePrice) : Number(product.harga_jual);
+    const basePrice = effectivePrice !== undefined ? Number(effectivePrice) : Number(product.harga_jual);
     let customizationPrice = 0;
     
     selectedCustomizations.forEach(selection => {
@@ -370,25 +345,6 @@ export default function ProductCustomizationModal({
             id="custom-note-textarea"
             value={customNote}
             onChange={(e) => setCustomNote(e.target.value)}
-            onClick={(e) => {
-              e.stopPropagation();
-              // Force focus on click
-              e.currentTarget.focus();
-            }}
-            onMouseDown={(e) => {
-              e.stopPropagation();
-              // Prevent any default behavior that might steal focus
-              e.preventDefault();
-              // Then focus after preventing default
-              setTimeout(() => {
-                if (customNoteRef.current) {
-                  customNoteRef.current.focus();
-                }
-              }, 0);
-            }}
-            onFocus={() => {
-              console.log('✅ Custom note (customization modal) focused');
-            }}
             className="w-full p-2 border-2 border-gray-300 rounded-lg text-sm text-gray-800 bg-white focus:border-blue-500 focus:ring-4 focus:ring-blue-200 resize-none cursor-text focus:outline-none"
             placeholder="Add any special instructions or notes for this item..."
             rows={2}

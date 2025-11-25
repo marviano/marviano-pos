@@ -34,9 +34,9 @@ export async function generateReceiptNumber(
       WHERE business_id = ? 
         AND created_at >= ? 
         AND created_at < ?
-    `, [businessId, startOfDay, endOfDay]);
+    `, [businessId, startOfDay.toISOString(), endOfDay.toISOString()]);
     
-    const maxReceiptNumber = result && result.length > 0 ? result[0].max_receipt_number : 0;
+    const maxReceiptNumber = Array.isArray(result) && result.length > 0 ? (result[0] as { max_receipt_number?: number })?.max_receipt_number : 0;
     
     // Return the next receipt number
     return (maxReceiptNumber || 0) + 1;
@@ -75,9 +75,9 @@ export async function getReceiptStats(businessId: number, date?: Date): Promise<
       WHERE business_id = ? 
         AND created_at >= ? 
         AND created_at < ?
-    `, [businessId, startOfDay, endOfDay]);
+    `, [businessId, startOfDay.toISOString(), endOfDay.toISOString()]);
     
-    const stats = result && result.length > 0 ? result[0] : {
+    const stats = Array.isArray(result) && result.length > 0 ? (result[0] as { total_receipts?: number; drinks_receipts?: number; bakery_receipts?: number; last_receipt_number?: number }) : {
       total_receipts: 0,
       drinks_receipts: 0,
       bakery_receipts: 0,
@@ -85,10 +85,10 @@ export async function getReceiptStats(businessId: number, date?: Date): Promise<
     };
     
     return {
-      totalReceipts: parseInt(stats.total_receipts) || 0,
-      drinksReceipts: parseInt(stats.drinks_receipts) || 0,
-      bakeryReceipts: parseInt(stats.bakery_receipts) || 0,
-      lastReceiptNumber: parseInt(stats.last_receipt_number) || 0
+      totalReceipts: Number(stats.total_receipts) || 0,
+      drinksReceipts: Number(stats.drinks_receipts) || 0,
+      bakeryReceipts: Number(stats.bakery_receipts) || 0,
+      lastReceiptNumber: Number(stats.last_receipt_number) || 0
     };
     
   } catch (error) {

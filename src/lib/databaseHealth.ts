@@ -3,9 +3,13 @@
  * Ensures SQLite database has data before going offline
  */
 
-const isElectron = typeof window !== 'undefined' && (window as any).electronAPI;
+import { getApiUrl } from '@/lib/api';
 
-interface DatabaseHealth {
+type UnknownRecord = Record<string, unknown>;
+
+const isElectron = typeof window !== 'undefined' && (window as { electronAPI?: UnknownRecord }).electronAPI;
+
+export interface DatabaseHealth {
   hasProducts: boolean;
   hasCategories: boolean;
   productCount: number;
@@ -32,8 +36,9 @@ class DatabaseHealthService {
 
     try {
       // Check if methods are available
-      if (!(window as any).electronAPI?.localDbGetAllProducts || 
-          !(window as any).electronAPI?.localDbGetCategories) {
+      const electronAPI = typeof window !== 'undefined' ? (window as { electronAPI?: UnknownRecord }).electronAPI : undefined;
+      if (!electronAPI?.localDbGetAllProducts || 
+          !electronAPI?.localDbGetCategories) {
         console.warn('⚠️ [DB HEALTH] Required Electron API methods not available - Electron may need restart');
         return {
           hasProducts: false,
@@ -46,21 +51,21 @@ class DatabaseHealthService {
       }
 
       // Check products
-      const products = await (window as any).electronAPI.localDbGetAllProducts();
-      const productCount = products ? products.length : 0;
+      const products = await (electronAPI.localDbGetAllProducts as () => Promise<unknown[]>)();
+      const productCount = Array.isArray(products) ? products.length : 0;
       
       // Check categories
-      const categories = await (window as any).electronAPI.localDbGetCategories();
-      const categoryCount = categories ? categories.length : 0;
+      const categories = await (electronAPI.localDbGetCategories as () => Promise<unknown[]>)();
+      const categoryCount = Array.isArray(categories) ? categories.length : 0;
       
       // Check last sync status
-      const syncStatus = (window as any).electronAPI?.localDbGetSyncStatus ? 
-        await (window as any).electronAPI.localDbGetSyncStatus('last_sync') : null;
+      const syncStatus = electronAPI.localDbGetSyncStatus ? 
+        await (electronAPI.localDbGetSyncStatus as (key: string) => Promise<{ key: string; last_sync: number; status: string } | null>)('last_sync') : null;
       const lastSync = syncStatus ? syncStatus.last_sync : null;
       
       // Determine if sync is needed
-      const needsSync = productCount === 0 || categoryCount === 0 || 
-                       (lastSync && Date.now() - lastSync > 3600000); // 1 hour
+      const needsSync: boolean = productCount === 0 || categoryCount === 0 || 
+                       (lastSync !== null && Date.now() - lastSync > 3600000); // 1 hour
       
       return {
         hasProducts: productCount > 0,
@@ -98,9 +103,9 @@ class DatabaseHealthService {
     
     try {
       // Trigger comprehensive sync
-      const response = await fetch('/api/sync');
+      const response = await fetch(getApiUrl('/api/sync'));
       if (response.ok) {
-        const data = await response.json();
+        await response.json();
         console.log('✅ [DB HEALTH] Initial sync completed');
         
         // Verify sync was successful
@@ -137,75 +142,73 @@ class DatabaseHealthService {
     console.log('🔄 [DB HEALTH] Force syncing all data...');
     
     try {
-      const response = await fetch('/api/sync');
+      const response = await fetch(getApiUrl('/api/sync'));
       if (response.ok) {
         const jsonData = await response.json();
         const data = jsonData.data || jsonData;
         
         // Save to local database
-        const isElectron = typeof window !== 'undefined' && (window as any).electronAPI;
-        if (isElectron) {
-          const electronAPI = (window as any).electronAPI;
-          
-          if (data.products && data.products.length > 0) {
-            await electronAPI.localDbUpsertProducts(data.products);
+        const electronAPI = typeof window !== 'undefined' ? (window as { electronAPI?: UnknownRecord }).electronAPI : undefined;
+        if (electronAPI) {
+          if (Array.isArray(data.products) && data.products.length > 0) {
+            await (electronAPI.localDbUpsertProducts as (rows: unknown[]) => Promise<{ success: boolean }>)(data.products);
             console.log(`✅ ${data.products.length} products synced to local database`);
           }
           
-          if (data.categories && data.categories.length > 0) {
+          if (Array.isArray(data.categories) && data.categories.length > 0) {
             const formattedCategories = data.categories
-              .map((cat: any) => ({
-                category2_name: cat.category2_name || cat.jenis,
+              .map((cat: UnknownRecord) => ({
+                category2_name: (cat.category2_name || cat.jenis) as string,
                 updated_at: Date.now()
               }))
-              .filter(cat => !!cat.category2_name);
+              .filter((cat: { category2_name?: string }) => !!cat.category2_name);
             
             if (formattedCategories.length > 0) {
-              await electronAPI.localDbUpsertCategories(formattedCategories);
+              await (electronAPI.localDbUpsertCategories as (rows: unknown[]) => Promise<{ success: boolean }>)(formattedCategories);
               console.log(`✅ ${formattedCategories.length} categories synced to local database`);
             }
           }
           
-          if (data.bundleItems && data.bundleItems.length > 0) {
-            await electronAPI.localDbUpsertBundleItems(data.bundleItems);
+          if (Array.isArray(data.bundleItems) && data.bundleItems.length > 0) {
+            await (electronAPI.localDbUpsertBundleItems as (rows: unknown[]) => Promise<{ success: boolean }>)(data.bundleItems);
             console.log(`✅ ${data.bundleItems.length} bundle items synced to local database`);
           }
           
-          if (data.transactions && data.transactions.length > 0) {
-            const transactionsWithSyncStatus = data.transactions.map((tx: any) => ({
+          if (Array.isArray(data.transactions) && data.transactions.length > 0) {
+            const transactionsWithSyncStatus = data.transactions.map((tx: UnknownRecord) => ({
               ...tx,
               synced_at: Date.now()
             }));
-            await electronAPI.localDbUpsertTransactions(transactionsWithSyncStatus);
+            await (electronAPI.localDbUpsertTransactions as (rows: unknown[]) => Promise<{ success: boolean }>)(transactionsWithSyncStatus);
             console.log(`✅ ${data.transactions.length} transactions synced to local database`);
           }
           
           if (data.paymentMethods && data.paymentMethods.length > 0) {
-            await electronAPI.localDbUpsertPaymentMethods(data.paymentMethods);
+            await (electronAPI.localDbUpsertPaymentMethods as (rows: unknown[]) => Promise<{ success: boolean }>)(data.paymentMethods);
           }
           
           if (data.banks && data.banks.length > 0) {
-            await electronAPI.localDbUpsertBanks(data.banks);
+            await (electronAPI.localDbUpsertBanks as (rows: unknown[]) => Promise<{ success: boolean }>)(data.banks);
           }
           
           if (data.organizations && data.organizations.length > 0) {
-            await electronAPI.localDbUpsertOrganizations(data.organizations);
+            await (electronAPI.localDbUpsertOrganizations as (rows: unknown[]) => Promise<{ success: boolean }>)(data.organizations);
           }
           
           if (data.managementGroups && data.managementGroups.length > 0) {
-            await electronAPI.localDbUpsertManagementGroups(data.managementGroups);
+            await (electronAPI.localDbUpsertManagementGroups as (rows: unknown[]) => Promise<{ success: boolean }>)(data.managementGroups);
           }
           
           if (data.category1 && data.category1.length > 0) {
-            await electronAPI.localDbUpsertCategory1(data.category1);
+            await (electronAPI.localDbUpsertCategory1 as (rows: unknown[]) => Promise<{ success: boolean }>)(data.category1);
           }
           
           if (data.category2 && data.category2.length > 0) {
-            await electronAPI.localDbUpsertCategory2(data.category2);
+            await (electronAPI.localDbUpsertCategory2 as (rows: unknown[]) => Promise<{ success: boolean }>)(data.category2);
           }
           
           if (data.clAccounts && data.clAccounts.length > 0) {
-            await electronAPI.localDbUpsertClAccounts(data.clAccounts);
+            await (electronAPI.localDbUpsertClAccounts as (rows: unknown[]) => Promise<{ success: boolean }>)(data.clAccounts);
           }
           
         }

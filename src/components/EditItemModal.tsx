@@ -44,20 +44,11 @@ export default function EditItemModal({ isOpen, onClose, cartItem, effectivePric
   const [customNote, setCustomNote] = useState('');
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
-  // Initialize form when modal opens - aggressive focus for Electron
+  // Initialize form when modal opens
   useEffect(() => {
     if (cartItem) {
       setQuantity(cartItem.quantity);
       setCustomNote(cartItem.customNote || '');
-      
-      // Simple focus attempt
-      const timer = setTimeout(() => {
-        if (textareaRef.current) {
-          textareaRef.current.focus();
-        }
-      }, 100);
-      
-      return () => clearTimeout(timer);
     }
   }, [cartItem]);
 
@@ -148,10 +139,6 @@ export default function EditItemModal({ isOpen, onClose, cartItem, effectivePric
               ref={textareaRef}
               value={customNote}
               onChange={(e) => setCustomNote(e.target.value)}
-              onClick={(e) => {
-                e.stopPropagation();
-                e.currentTarget.focus();
-              }}
               className="w-full p-3 border-2 border-gray-300 rounded-lg text-gray-800 bg-white focus:border-blue-500 focus:ring-4 focus:ring-blue-200 resize-none cursor-text"
               placeholder="Add any special instructions or notes for this item..."
               rows={3}

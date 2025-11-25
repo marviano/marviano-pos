@@ -17,7 +17,8 @@
     "electron-pack": "npm run build && electron-builder",
     "build-electron": "tsc -p electron/tsconfig.json",
     "rebuild-native": "@electron/rebuild -f -w better-sqlite3",
-    "dist": "npm run build-electron && npm run build && electron-builder --publish=never"
+    "dist": "npm run build-electron && npm run build && node scripts/fix-nested-html-paths.js && electron-builder --publish=never",
+    "dist-clean": "if exist dist-electron rmdir /s /q dist-electron 2>nul & npm run build-electron && npm run build && node scripts/fix-nested-html-paths.js && electron-builder --publish=never"
   },
   "dependencies": {
     "bcryptjs": "^3.0.2",
@@ -59,13 +60,15 @@
     "files": [
       "dist/**/*",
       "out/**/*",
+      "out/_next/**/*",
       "public/**/*",
       "node_modules/**/*",
       "scripts/**/*"
     ],
     "win": {
       "target": "nsis",
-      "icon": "public/app.ico"
+      "icon": "public/app.ico",
+      "forceCodeSigning": false
     },
     "nsis": {
       "oneClick": false,

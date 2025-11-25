@@ -1,13 +1,24 @@
 'use client';
 
-import { ShoppingCart, Plus } from 'lucide-react';
-import { useEffect, useState } from 'react';
+import { ShoppingCart } from 'lucide-react';
+import { useState } from 'react';
+import Image from 'next/image';
 import ProductCustomizationModal from './ProductCustomizationModal';
 import CustomNoteModal from './CustomNoteModal';
 import EditItemModal from './EditItemModal';
 import PaymentModal from './PaymentModal';
 import BundleSelectionModal from './BundleSelectionModal';
 import { offlineSyncService } from '@/lib/offlineSync';
+import { getApiUrl } from '@/lib/api';
+
+interface BundleItem {
+  id: number;
+  bundle_product_id: number;
+  category2_id: number;
+  category2_name?: string;
+  required_quantity: number;
+  display_order: number;
+}
 
 interface Product {
   id: number;
@@ -66,6 +77,53 @@ interface CartItem {
   bundleSelections?: BundleSelection[];
 }
 
+const categoryEmoji = (categoryName?: string | null) => {
+  switch (categoryName) {
+    case 'Bakery':
+      return '🥖';
+    case 'Ice Cream Cone':
+      return '🍦';
+    case 'Sundae':
+      return '🍨';
+    case 'Milk Tea':
+      return '🧋';
+    default:
+      return '🍦';
+  }
+};
+
+function ProductCardImage({
+  imageUrl,
+  productName,
+  categoryName,
+}: {
+  imageUrl: string | null;
+  productName: string;
+  categoryName?: string | null;
+}) {
+  const [hasError, setHasError] = useState(false);
+
+  if (!imageUrl || hasError) {
+    return (
+      <span className="text-gray-400 text-2xl">
+        {categoryEmoji(categoryName)}
+      </span>
+    );
+  }
+
+  return (
+    <Image
+      src={imageUrl}
+      alt={productName}
+      fill
+      sizes="(max-width: 768px) 45vw, 200px"
+      className="object-contain rounded-lg"
+      unoptimized
+      onError={() => setHasError(true)}
+    />
+  );
+}
+
 interface CenterContentProps {
   products: Product[];
   cartItems: CartItem[];
@@ -85,10 +143,26 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
   const [selectedCartItem, setSelectedCartItem] = useState<CartItem | null>(null);
   const [loadingProductId, setLoadingProductId] = useState<number | null>(null);
   const [showPaymentModal, setShowPaymentModal] = useState(false);
-  const [bundleItems, setBundleItems] = useState<any[]>([]);
+  const [bundleItems, setBundleItems] = useState<BundleItem[]>([]);
   // Send order updates to customer display
-  const sendOrderUpdate = (orderData: any) => {
-    if (window.electronAPI && window.electronAPI.updateCustomerDisplay) {
+  interface CustomerDisplayOrderItem {
+    id: string;
+    name: string;
+    quantity: number;
+    price: number;
+    status: string;
+  }
+
+  interface CustomerDisplayOrder {
+    id: string;
+    items: CustomerDisplayOrderItem[];
+    total: number;
+    status: string;
+    timestamp: Date;
+  }
+
+  const sendOrderUpdate = (orderData: CustomerDisplayOrder) => {
+    if (typeof window !== 'undefined' && window.electronAPI?.updateCustomerDisplay) {
       window.electronAPI.updateCustomerDisplay({ order: orderData });
     }
   };
@@ -135,25 +209,33 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
     }, 0);
   };
 
-  const checkProductCustomizations = async (product: Product) => {
+    const checkProductCustomizations = async (product: Product) => {
     try {
-      const customizations = await offlineSyncService.fetchWithFallback(
-        async () => {
-          const response = await fetch(`/api/products/${product.id}/customizations`, {
+      // Always try offline first for UI responsiveness
+      const electronAPI = typeof window !== 'undefined' ? window.electronAPI : undefined;
+      if (electronAPI?.localDbGetProductCustomizations) {
+        const localData = await electronAPI.localDbGetProductCustomizations(product.id);
+        if (Array.isArray(localData) && localData.length > 0) {
+          return true;
+        }
+      }
+
+      // Only try online if explicitly online mode and offline failed/empty
+      if (isOnline && offlineSyncService.getStatus().isOnline) {
+        try {
+          const response = await fetch(getApiUrl(`/api/products/${product.id}/customizations`), {
             signal: AbortSignal.timeout(2000)
           });
-          if (!response.ok) throw new Error(`HTTP ${response.status}`);
-          const data = await response.json();
-          return data.customizations || [];
-        },
-        async () => {
-          if (typeof window !== 'undefined' && (window as any).electronAPI) {
-            return await (window as any).electronAPI.localDbGetProductCustomizations(product.id);
+          if (response.ok) {
+            const data = await response.json();
+            return data.customizations && data.customizations.length > 0;
           }
-          return [];
+        } catch (e) {
+          console.warn('Online check failed, ignoring:', e);
         }
-      );
-      return customizations && customizations.length > 0;
+      }
+      
+      return false;
     } catch (error) {
       console.error('Error checking customizations:', error);
     }
@@ -203,28 +285,55 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
       if (isBundle) {
         // Fetch bundle items
         try {
-          const bundleItemsData = await offlineSyncService.fetchWithFallback(
-            async () => {
-              const response = await fetch(`/api/products/${product.id}/bundle-items`, {
+          console.log(`🔍 [BUNDLE] Fetching bundle items for product ${product.id} (${product.nama})`);
+          
+          // Always try offline first
+          let finalItems: BundleItem[] = [];
+          let foundLocally = false;
+          
+          const electronAPI = typeof window !== 'undefined' ? window.electronAPI : undefined;
+          if (electronAPI?.localDbGetBundleItems) {
+            try {
+              console.log(`🔄 [BUNDLE] Calling localDbGetBundleItems(${product.id})`);
+              const localBundleItems = await electronAPI.localDbGetBundleItems(product.id);
+              console.log(`📦 [BUNDLE] Offline fetch returned:`, localBundleItems);
+              if (Array.isArray(localBundleItems) && localBundleItems.length > 0) {
+                finalItems = localBundleItems as BundleItem[];
+                foundLocally = true;
+              }
+            } catch (e) {
+              console.warn('Local bundle fetch failed:', e);
+            }
+          }
+
+          // Only try online if local failed/empty and we are online
+          if (!foundLocally && offlineSyncService.getStatus().isOnline) {
+             try {
+              console.log(`🌐 [BUNDLE] Attempting online fetch for product ${product.id}`);
+              const response = await fetch(getApiUrl(`/api/products/${product.id}/bundle-items`), {
                 signal: AbortSignal.timeout(5000)
               });
-              if (!response.ok) throw new Error('Failed to fetch bundle items');
-              const data = await response.json();
-              return data.bundleItems || [];
-            },
-            async () => {
-              if (typeof window !== 'undefined' && (window as any).electronAPI) {
-                return await (window as any).electronAPI.localDbGetBundleItems(product.id);
+              if (response.ok) {
+                const data = await response.json();
+                finalItems = data.bundleItems || [];
               }
-              return [];
-            }
-          );
+             } catch (e) {
+                console.warn('Online bundle fetch failed:', e);
+             }
+          }
           
-          setBundleItems(bundleItemsData);
+          console.log(`📋 [BUNDLE] Final bundle items data:`, finalItems);
+          console.log(`✅ [BUNDLE] Setting ${finalItems.length} bundle items and opening modal`);
+          if (finalItems.length > 0) {
+            console.log(`📦 [BUNDLE] First bundle item details:`, JSON.stringify(finalItems[0], null, 2));
+            console.log(`📦 [BUNDLE] Bundle item has category2_name:`, finalItems[0].category2_name);
+            console.log(`📦 [BUNDLE] Bundle item has category2_id:`, finalItems[0].category2_id);
+          }
+          setBundleItems(finalItems);
           setSelectedProduct(product);
           setShowBundleModal(true);
         } catch (error) {
-          console.error('Error fetching bundle items:', error);
+          console.error('❌ [BUNDLE] Error fetching bundle items:', error);
           alert('Gagal memuat detail bundle. Silakan coba lagi.');
         }
       } else {
@@ -491,7 +600,7 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
                         <div className="mt-1">
                           <div className="text-xs">
                             <span className="text-gray-500">Note:</span>
-                            <span className="text-gray-700 ml-1 italic">"{item.customNote}"</span>
+                            <span className="text-gray-700 ml-1 italic">&ldquo;{item.customNote}&rdquo;</span>
                           </div>
                         </div>
                       )}
@@ -534,7 +643,7 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
                                       )}
                                       {sp.customNote && (
                                         <div className="text-[11px] text-gray-500 italic">
-                                          Note: "{sp.customNote}"
+                                          Note: &ldquo;{sp.customNote}&rdquo;
                                         </div>
                                       )}
                                     </div>
@@ -709,41 +818,12 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
                 )}
                 
                 {/* Product Image */}
-                <div className="w-full aspect-square bg-gray-50 rounded-lg mb-3 flex items-center justify-center overflow-hidden">
-                  {product.image_url ? (
-                    <img 
-                      src={product.image_url} 
-                      alt={product.nama}
-                      className="w-full h-full object-contain rounded-lg"
-                      onError={(e) => {
-                        // Fallback to emoji if image fails to load
-                        const target = e.target as HTMLImageElement;
-                        target.style.display = 'none';
-                        const parent = target.parentElement;
-                        if (parent) {
-                          // Choose emoji based on category
-                          let emoji = '🍦'; // default
-                          if (product.category2_name === 'Bakery') {
-                            emoji = '🥖';
-                          } else if (product.category2_name === 'Ice Cream Cone') {
-                            emoji = '🍦';
-                          } else if (product.category2_name === 'Sundae') {
-                            emoji = '🍨';
-                          } else if (product.category2_name === 'Milk Tea') {
-                            emoji = '🧋';
-                          }
-                          parent.innerHTML = `<span class="text-gray-400 text-2xl">${emoji}</span>`;
-                        }
-                      }}
-                    />
-                  ) : (
-                    <span className="text-gray-400 text-2xl">
-                      {product.category2_name === 'Bakery' ? '🥖' : 
-                       product.category2_name === 'Ice Cream Cone' ? '🍦' :
-                       product.category2_name === 'Sundae' ? '🍨' :
-                       product.category2_name === 'Milk Tea' ? '🧋' : '🍦'}
-                    </span>
-                  )}
+                <div className="relative w-full aspect-square bg-gray-50 rounded-lg mb-3 flex items-center justify-center overflow-hidden">
+                  <ProductCardImage
+                    imageUrl={product.image_url}
+                    productName={product.nama}
+                    categoryName={product.category2_name}
+                  />
                 </div>
                 
                 {/* Product Info */}
@@ -804,16 +884,47 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
           setShowCustomizationModal(false);
           setSelectedProduct(null);
         }}
-        product={selectedProduct}
+        product={selectedProduct as unknown as { id: number; business_id: number; menu_code: string; nama: string; kategori: string; harga_jual: number; status: string } | null}
         effectivePrice={selectedProduct ? effectiveProductPrice(selectedProduct) : undefined}
-        onAddToCart={addToCart}
+        onAddToCart={(product, customizations, quantity, customNote) => {
+          const centerProduct = product as unknown as Product;
+          addToCart(centerProduct, customizations, quantity, customNote);
+        }}
       />
 
       {/* Payment Modal */}
       <PaymentModal
         isOpen={showPaymentModal}
         onClose={() => setShowPaymentModal(false)}
-        cartItems={cartItems}
+        cartItems={cartItems as unknown as Array<{
+          id: number;
+          product: {
+            id: number;
+            business_id: number;
+            menu_code: string;
+            nama: string;
+            kategori: string;
+            harga_jual: number;
+            status: string;
+            harga_gofood?: number;
+            harga_grabfood?: number;
+            harga_shopeefood?: number;
+            harga_tiktok?: number;
+            harga_qpon?: number;
+          };
+          quantity: number;
+          customizations?: Array<{
+            customization_id: number;
+            customization_name: string;
+            selected_options: Array<{
+              option_id: number;
+              option_name: string;
+              price_adjustment: number;
+            }>;
+          }>;
+          customNote?: string;
+          bundleSelections?: BundleSelection[];
+        }>}
         onPaymentComplete={handlePaymentComplete}
         transactionType={transactionType}
         isOnline={isOnline}
@@ -827,7 +938,7 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
           setShowCustomNoteModal(false);
           setSelectedProduct(null);
         }}
-        product={selectedProduct}
+        product={selectedProduct as unknown as { id: number; business_id: number; menu_code: string; nama: string; kategori: string; harga_jual: number; status: string } | null}
         effectivePrice={selectedProduct ? effectiveProductPrice(selectedProduct) : undefined}
         onConfirm={handleCustomNoteConfirm}
       />
@@ -839,9 +950,34 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
           setShowEditModal(false);
           setSelectedCartItem(null);
         }}
-        cartItem={selectedCartItem}
+        cartItem={selectedCartItem as unknown as {
+          id: number;
+          product: {
+            id: number;
+            business_id: number;
+            menu_code: string;
+            nama: string;
+            kategori: string;
+            harga_jual: number;
+            status: string;
+          };
+          quantity: number;
+          customizations?: Array<{
+            customization_id: number;
+            customization_name: string;
+            selected_options: Array<{
+              option_id: number;
+              option_name: string;
+              price_adjustment: number;
+            }>;
+          }>;
+          customNote?: string;
+        } | null}
         effectivePrice={selectedCartItem ? effectiveProductPrice(selectedCartItem.product) : undefined}
-        onUpdate={handleUpdateItem}
+        onUpdate={(updatedItem) => {
+          const centerCartItem = updatedItem as unknown as CartItem;
+          handleUpdateItem(centerCartItem);
+        }}
       />
 
       {/* Bundle Selection Modal */}

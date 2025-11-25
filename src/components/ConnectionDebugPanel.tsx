@@ -2,11 +2,27 @@
 
 import { useState } from 'react';
 import { offlineSyncService } from '@/lib/offlineSync';
+import type { DetailedSyncStatus, EndpointTestResults } from '@/lib/offlineSync';
 import { Wifi, WifiOff, Database, RefreshCw, Bug } from 'lucide-react';
+
+interface DebugInfoSuccess {
+  currentStatus: DetailedSyncStatus;
+  endpointResults: EndpointTestResults;
+  updatedStatus: DetailedSyncStatus;
+  timestamp: string;
+  error?: undefined;
+}
+
+interface DebugInfoError {
+  timestamp: string;
+  error: string;
+}
+
+type DebugInfo = DebugInfoSuccess | DebugInfoError;
 
 export default function ConnectionDebugPanel() {
   const [isOpen, setIsOpen] = useState(false);
-  const [debugInfo, setDebugInfo] = useState<any>(null);
+  const [debugInfo, setDebugInfo] = useState<DebugInfo | null>(null);
   const [testing, setTesting] = useState(false);
 
   const runDebugTest = async () => {
@@ -103,11 +119,7 @@ export default function ConnectionDebugPanel() {
               Last Test: {new Date(debugInfo.timestamp).toLocaleTimeString()}
             </div>
 
-            {debugInfo.error ? (
-              <div className="text-xs text-red-600 bg-red-50 p-2 rounded border border-red-200">
-                Error: {debugInfo.error}
-              </div>
-            ) : (
+            {'endpointResults' in debugInfo ? (
               <>
                 {/* Current Status */}
                 <div className="bg-gray-50 dark:bg-gray-700 p-2 rounded text-xs">
@@ -135,7 +147,7 @@ export default function ConnectionDebugPanel() {
                 {/* Internet Endpoints */}
                 <div className="bg-gray-50 dark:bg-gray-700 p-2 rounded text-xs">
                   <div className="font-medium mb-1">Internet Endpoints:</div>
-                  {debugInfo.endpointResults.internet.map((result: any, index: number) => (
+                  {debugInfo.endpointResults.internet.map((result, index) => (
                     <div key={index} className="flex items-center gap-2">
                       {result.success ? (
                         <Wifi className="w-3 h-3 text-green-500" />
@@ -184,6 +196,10 @@ export default function ConnectionDebugPanel() {
                   </div>
                 )}
               </>
+            ) : (
+              <div className="text-xs text-red-600 bg-red-50 p-2 rounded border border-red-200">
+                Error: {debugInfo.error}
+              </div>
             )}
           </div>
         )}

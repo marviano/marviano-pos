@@ -1,5 +1,42 @@
 import Database from 'better-sqlite3';
 
+type TableColumnInfo = {
+  name: string;
+};
+
+type CounterRow = {
+  counter: number;
+};
+
+type ModeRow = {
+  mode?: 'auto' | 'manual';
+};
+
+type AutomationRow = {
+  cycle_number: number;
+  selected_transactions: string;
+};
+
+type Printer1AuditRow = {
+  transaction_id: string;
+  printer1_receipt_number: number;
+  global_counter: number | null;
+  printed_at: string;
+  printed_at_epoch: number;
+};
+
+type Printer2AuditRow = {
+  transaction_id: string;
+  printer2_receipt_number: number;
+  print_mode: 'auto' | 'manual';
+  cycle_number: number | null;
+  global_counter: number | null;
+  printed_at: string;
+  printed_at_epoch: number;
+};
+
+type QueryParam = string | number | null;
+
 /**
  * Printer Management Service
  * Handles multi-printer system with separate counters and automation
@@ -15,25 +52,53 @@ export class PrinterManagementService {
 
   private ensureGlobalCounterColumns() {
     try {
-      const printer1Cols = this.db.prepare(`PRAGMA table_info(printer1_audit_log)`).all() as any[];
+      const printer1Cols = this.db.prepare(`PRAGMA table_info(printer1_audit_log)`).all() as TableColumnInfo[];
       const hasPrinter1Global = printer1Cols.some(col => col.name === 'global_counter');
       if (!hasPrinter1Global) {
         this.db.prepare(`ALTER TABLE printer1_audit_log ADD COLUMN global_counter INTEGER`).run();
         console.log('📋 Added printer1_audit_log.global_counter column');
       }
+      
+      // Add is_reprint column
+      const hasPrinter1Reprint = printer1Cols.some(col => col.name === 'is_reprint');
+      if (!hasPrinter1Reprint) {
+        this.db.prepare(`ALTER TABLE printer1_audit_log ADD COLUMN is_reprint INTEGER DEFAULT 0`).run();
+        console.log('📋 Added printer1_audit_log.is_reprint column');
+      }
+      
+      // Add reprint_count column
+      const hasPrinter1ReprintCount = printer1Cols.some(col => col.name === 'reprint_count');
+      if (!hasPrinter1ReprintCount) {
+        this.db.prepare(`ALTER TABLE printer1_audit_log ADD COLUMN reprint_count INTEGER DEFAULT 0`).run();
+        console.log('📋 Added printer1_audit_log.reprint_count column');
+      }
     } catch (error) {
-      console.error('Error ensuring printer1_audit_log.global_counter column:', error);
+      console.error('Error ensuring printer1_audit_log columns:', error);
     }
 
     try {
-      const printer2Cols = this.db.prepare(`PRAGMA table_info(printer2_audit_log)`).all() as any[];
+      const printer2Cols = this.db.prepare(`PRAGMA table_info(printer2_audit_log)`).all() as TableColumnInfo[];
       const hasPrinter2Global = printer2Cols.some(col => col.name === 'global_counter');
       if (!hasPrinter2Global) {
         this.db.prepare(`ALTER TABLE printer2_audit_log ADD COLUMN global_counter INTEGER`).run();
         console.log('📋 Added printer2_audit_log.global_counter column');
       }
+      
+      // Add is_reprint column
+      const hasPrinter2Reprint = printer2Cols.some(col => col.name === 'is_reprint');
+      if (!hasPrinter2Reprint) {
+        this.db.prepare(`ALTER TABLE printer2_audit_log ADD COLUMN is_reprint INTEGER DEFAULT 0`).run();
+        console.log('📋 Added printer2_audit_log.is_reprint column');
+      }
+      
+      // Add reprint_count column
+      const hasPrinter2ReprintCount = printer2Cols.some(col => col.name === 'reprint_count');
+      if (!hasPrinter2ReprintCount) {
+        this.db.prepare(`ALTER TABLE printer2_audit_log ADD COLUMN reprint_count INTEGER DEFAULT 0`).run();
+        console.log('📋 Added printer2_audit_log.reprint_count column');
+      }
     } catch (error) {
-      console.error('Error ensuring printer2_audit_log.global_counter column:', error);
+      console.error('Error ensuring printer2_audit_log columns:', error);
     }
   }
 
@@ -58,8 +123,8 @@ export class PrinterManagementService {
     
     let sequence = 1;
     try {
-      const existing = this.db.prepare('SELECT counter FROM uuid_sequence_tracker WHERE key = ?').get(counterKey) as any;
-      if (existing) {
+      const existing = this.db.prepare('SELECT counter FROM uuid_sequence_tracker WHERE key = ?').get(counterKey) as CounterRow | undefined;
+      if (existing && typeof existing.counter === 'number') {
         sequence = existing.counter + 1;
         this.db.prepare('UPDATE uuid_sequence_tracker SET counter = ?, updated_at = ? WHERE key = ?').run(sequence, Date.now(), counterKey);
       } else {
@@ -94,9 +159,9 @@ export class PrinterManagementService {
     
     try {
       const existing = this.db.prepare('SELECT counter FROM printer_daily_counters WHERE printer_type = ? AND business_id = ? AND date = ?')
-        .get(printerType, businessId, today) as any;
+        .get(printerType, businessId, today) as CounterRow | undefined;
       
-      if (existing) {
+      if (existing && typeof existing.counter === 'number') {
         if (increment) {
           const newCounter = existing.counter + 1;
           this.db.prepare('UPDATE printer_daily_counters SET counter = ?, last_reset_at = ? WHERE printer_type = ? AND business_id = ? AND date = ?')
@@ -125,11 +190,14 @@ export class PrinterManagementService {
   getPrinter2Mode(): 'auto' | 'manual' {
     try {
       const result = this.db.prepare('SELECT mode FROM printer_mode_settings WHERE printer_type = ?')
-        .get('receiptizePrinter') as any;
-      return result?.mode || 'auto';
+        .get('receiptizePrinter') as ModeRow | undefined;
+      if (result?.mode === 'auto' || result?.mode === 'manual') {
+        return result.mode;
+      }
+      return 'manual';
     } catch (error) {
       console.error('Error getting printer mode:', error);
-      return 'auto';
+      return 'manual';
     }
   }
 
@@ -157,10 +225,11 @@ export class PrinterManagementService {
   getPrinter2AutomationSelections(businessId: number): { cycleNumber: number; selections: number[] } {
     try {
       const result = this.db.prepare('SELECT cycle_number, selected_transactions FROM printer2_automation WHERE business_id = ? ORDER BY created_at DESC LIMIT 1')
-        .get(businessId) as any;
+        .get(businessId) as AutomationRow | undefined;
       
       if (result) {
-        const selections = JSON.parse(result.selected_transactions);
+        const parsed = JSON.parse(result.selected_transactions);
+        const selections = Array.isArray(parsed) ? parsed.filter((value): value is number => Number.isFinite(value)) : [];
         return { cycleNumber: result.cycle_number, selections };
       }
       return { cycleNumber: 0, selections: [] };
@@ -209,11 +278,11 @@ export class PrinterManagementService {
   /**
    * Log Printer 2 print to audit
    */
-  logPrinter2Print(transactionId: string, printer2ReceiptNumber: number, mode: 'auto' | 'manual', cycleNumber?: number, globalCounter?: number): boolean {
+  logPrinter2Print(transactionId: string, printer2ReceiptNumber: number, mode: 'auto' | 'manual', cycleNumber?: number, globalCounter?: number, isReprint: boolean = false, reprintCount: number = 0): boolean {
     try {
       const now = new Date().toISOString();
-      this.db.prepare('INSERT INTO printer2_audit_log (transaction_id, printer2_receipt_number, print_mode, cycle_number, global_counter, printed_at, printed_at_epoch) ' +
-        'VALUES (?, ?, ?, ?, ?, ?, ?)')
+      this.db.prepare('INSERT INTO printer2_audit_log (transaction_id, printer2_receipt_number, print_mode, cycle_number, global_counter, printed_at, printed_at_epoch, is_reprint, reprint_count) ' +
+        'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)')
         .run(
           transactionId,
           printer2ReceiptNumber,
@@ -221,10 +290,12 @@ export class PrinterManagementService {
           cycleNumber || null,
           typeof globalCounter === 'number' ? globalCounter : null,
           now,
-          Date.now()
+          Date.now(),
+          isReprint ? 1 : 0,
+          reprintCount
         );
       
-      console.log(`✅ Logged Printer 2 print: Transaction ${transactionId}, Receipt #${printer2ReceiptNumber}, Mode: ${mode}`);
+      console.log(`✅ Logged Printer 2 print: Transaction ${transactionId}, Receipt #${printer2ReceiptNumber}, Mode: ${mode}${isReprint ? ` (REPRINT ke-${reprintCount})` : ''}`);
       return true;
     } catch (error) {
       console.error('Error logging printer2 print:', error);
@@ -235,19 +306,21 @@ export class PrinterManagementService {
   /**
    * Log Printer 1 print to audit
    */
-  logPrinter1Print(transactionId: string, printer1ReceiptNumber: number, globalCounter?: number): boolean {
+  logPrinter1Print(transactionId: string, printer1ReceiptNumber: number, globalCounter?: number, isReprint: boolean = false, reprintCount: number = 0): boolean {
     try {
       const now = new Date().toISOString();
-      this.db.prepare('INSERT INTO printer1_audit_log (transaction_id, printer1_receipt_number, global_counter, printed_at, printed_at_epoch) ' +
-        'VALUES (?, ?, ?, ?, ?)')
+      this.db.prepare('INSERT INTO printer1_audit_log (transaction_id, printer1_receipt_number, global_counter, printed_at, printed_at_epoch, is_reprint, reprint_count) ' +
+        'VALUES (?, ?, ?, ?, ?, ?, ?)')
         .run(
           transactionId,
           printer1ReceiptNumber,
           typeof globalCounter === 'number' ? globalCounter : null,
           now,
-          Date.now()
+          Date.now(),
+          isReprint ? 1 : 0,
+          reprintCount
         );
-      console.log(`✅ Logged Printer 1 print: Transaction ${transactionId}, Receipt #${printer1ReceiptNumber}`);
+      console.log(`✅ Logged Printer 1 print: Transaction ${transactionId}, Receipt #${printer1ReceiptNumber}${isReprint ? ` (REPRINT ke-${reprintCount})` : ''}`);
       return true;
     } catch (error) {
       console.error('Error logging printer1 print:', error);
@@ -258,10 +331,10 @@ export class PrinterManagementService {
   /**
    * Get Printer 1 audit log entries
    */
-  getPrinter1AuditLog(fromDate?: string, toDate?: string, limit: number = 100): any[] {
+  getPrinter1AuditLog(fromDate?: string, toDate?: string, limit: number = 100): Printer1AuditRow[] {
     try {
       let query = 'SELECT * FROM printer1_audit_log';
-      const params: any[] = [];
+      const params: QueryParam[] = [];
       if (fromDate || toDate) {
         const conditions: string[] = [];
         if (fromDate) {
@@ -280,7 +353,7 @@ export class PrinterManagementService {
       }
       query += ' ORDER BY printed_at_epoch DESC LIMIT ?';
       params.push(limit);
-      const results = this.db.prepare(query).all(...params) as any[];
+      const results = this.db.prepare(query).all(...params) as Printer1AuditRow[];
       console.log(`✅ Retrieved ${results.length} printer1 audit log entries`);
       return results;
     } catch (error) {
@@ -292,10 +365,10 @@ export class PrinterManagementService {
   /**
    * Get Printer 2 audit log entries
    */
-  getPrinter2AuditLog(fromDate?: string, toDate?: string, limit: number = 100): any[] {
+  getPrinter2AuditLog(fromDate?: string, toDate?: string, limit: number = 100): Printer2AuditRow[] {
     try {
       let query = 'SELECT * FROM printer2_audit_log';
-      const params: any[] = [];
+      const params: QueryParam[] = [];
       
       if (fromDate || toDate) {
         const conditions: string[] = [];
@@ -317,7 +390,7 @@ export class PrinterManagementService {
       query += ' ORDER BY printed_at_epoch DESC LIMIT ?';
       params.push(limit);
       
-      const results = this.db.prepare(query).all(...params) as any[];
+      const results = this.db.prepare(query).all(...params) as Printer2AuditRow[];
       console.log(`✅ Retrieved ${results.length} audit log entries`);
       return results;
     } catch (error) {

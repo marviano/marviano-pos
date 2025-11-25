@@ -1,9 +1,15 @@
 'use client';
 
 import { useState, useEffect, useCallback } from 'react';
-import { Calendar, Clock, CreditCard, RefreshCw, Search, Filter, ChevronUp, ChevronDown, Wifi, WifiOff } from 'lucide-react';
-import TransactionDetailModal from './TransactionDetailModal';
+import { useRouter } from 'next/navigation';
+import { Clock, CreditCard, RefreshCw, Search, Filter, ChevronUp, ChevronDown, Wifi, WifiOff } from 'lucide-react';
+import TransactionDetailModal, { TransactionDetail, TransactionRefund } from './TransactionDetailModal';
 import { offlineSyncService } from '@/lib/offlineSync';
+import { useAuth } from '@/hooks/useAuth';
+import { hasPermission } from '@/lib/permissions';
+import { isSuperAdmin } from '@/lib/auth';
+
+import { getApiUrl } from '@/lib/api';
 
 // Format price for display (hoisted to module scope so it can be reused)
 const formatPrice = (price: number | string) => {
@@ -21,7 +27,9 @@ interface Transaction {
   id: string; // Changed to string for UUID
   business_id: number;
   user_id: number;
+  shift_uuid?: string | null; // Added shift_uuid
   payment_method: 'cash' | 'debit' | 'qr' | 'ewallet' | 'cl' | 'voucher' | 'qpon' | 'gofood' | 'grabfood' | 'shopeefood' | 'tiktok';
+  payment_method_id?: number; // Source of truth - foreign key to payment_methods table
   pickup_method: 'dine-in' | 'take-away';
   total_amount: number;
   voucher_discount: number;
@@ -41,50 +49,110 @@ interface Transaction {
   voucher_type?: 'none' | 'percent' | 'nominal' | 'free';
   voucher_value?: number | null;
   voucher_label?: string | null;
-}
-
-interface TransactionItem {
-  id: string; // Changed to string for UUID
-  product_name: string;
-  quantity: number;
-  unit_price: number;
-  total_price: number;
-  notes?: string;
-}
-
-interface TransactionDetail {
-  id: string; // Changed to string for UUID
-  business_id: number;
-  user_id: number;
-  user_name: string;
-  business_name: string;
-  payment_method: 'cash' | 'debit' | 'qr' | 'ewallet' | 'cl' | 'voucher' | 'qpon' | 'gofood' | 'grabfood' | 'shopeefood' | 'tiktok';
-  pickup_method: 'dine-in' | 'take-away';
-  total_amount: number;
-  voucher_discount: number;
-  final_amount: number;
-  amount_received: number;
-  change_amount: number;
-  contact_id?: number | null;
-  customer_name?: string | null;
-  customer_unit?: number | null;
-  bank_id?: number | null;
-  bank_name?: string | null;
-  card_number?: string | null;
-  cl_account_id?: number | null;
-  cl_account_name?: string | null;
-  created_at: string;
-  items: TransactionItem[];
-  voucher_type?: 'none' | 'percent' | 'nominal' | 'free';
-  voucher_value?: number | null;
-  voucher_label?: string | null;
+  refund_status?: string | null;
+  refund_total?: number | null;
 }
 
 interface TransactionListProps {
   businessId?: number;
 }
 
+// Types for electron API responses
+interface ElectronTransaction {
+  id: string;
+  business_id: number;
+  user_id: number;
+  payment_method: string;
+  pickup_method: string;
+  total_amount: number;
+  voucher_discount: number;
+  voucher_type: string;
+  voucher_value: number | null;
+  voucher_label: string | null;
+  final_amount: number;
+  amount_received: number;
+  change_amount: number;
+  contact_id: number | null;
+  customer_name: string | null;
+  customer_unit: number | null;
+  note: string | null;
+  receipt_number: number | null;
+  transaction_type: string;
+  status: string;
+  created_at: string;
+  shift_uuid?: string;
+  refund_total?: number | null;
+  refund_status?: string | null;
+}
+
+interface ElectronUser {
+  id: number;
+  name: string;
+}
+
+interface ElectronBusiness {
+  id: number;
+  name: string;
+}
+
+interface ElectronProduct {
+  id: number;
+  nama: string;
+}
+
+interface ElectronTransactionItem {
+  id: string;
+  product_id: number;
+  quantity: number;
+  unit_price: number;
+  total_price: number;
+  custom_note?: string;
+  customizations?: Array<{
+    customization_id: number;
+    customization_name: string;
+    selected_options: Array<{
+      option_id: number;
+      option_name: string;
+      price_adjustment: number;
+    }>;
+  }>;
+  bundleSelections?: Array<{
+    category2_id: number;
+    category2_name: string;
+    selectedProducts: Array<{
+      product: { id: number; nama: string };
+      quantity?: number;
+      customizations?: Array<{
+        customization_id: number;
+        customization_name: string;
+        selected_options: Array<{
+          option_id: number;
+          option_name: string;
+          price_adjustment: number;
+        }>;
+      }>;
+      customNote?: string;
+    }>;
+    requiredQuantity: number;
+  }>;
+}
+
+// Type for window.electronAPI
+interface ElectronAPI {
+  localDbGetTransactions: (businessId: number, limit: number) => Promise<ElectronTransaction[]>;
+  localDbGetTransactionItems: (transactionId: string) => Promise<ElectronTransactionItem[]>;
+  localDbGetTransactionRefunds: (transactionId: string) => Promise<TransactionRefund[]>;
+  localDbGetAllProducts: () => Promise<ElectronProduct[]>;
+  localDbGetUsers: () => Promise<ElectronUser[]>;
+  localDbGetBusinesses: () => Promise<ElectronBusiness[]>;
+  getPrinter1AuditLog?: (fromDate?: string, toDate?: string, limit?: number) => Promise<{ entries: Array<{ transaction_id?: string; printer1_receipt_number?: number; printed_at_epoch?: number; is_reprint?: number }> }>;
+  getPrinter2AuditLog: (fromDate?: string, toDate?: string, limit?: number) => Promise<{ entries: Array<{ transaction_id?: string; printer2_receipt_number?: number; printed_at_epoch?: number; is_reprint?: number }> }>;
+  navigateTo?: (path: string) => void;
+}
+
 export default function TransactionList({ businessId = 14 }: TransactionListProps) {
+  const router = useRouter();
+  const { user } = useAuth();
   const [transactions, setTransactions] = useState<Transaction[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -94,8 +162,11 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
   const [sortDirection, setSortDirection] = useState<'asc' | 'desc'>('desc');
   const [receiptizePrintedIds, setReceiptizePrintedIds] = useState<Set<string>>(() => new Set());
   const [receiptizeCounters, setReceiptizeCounters] = useState<Record<string, number>>({});
-  const [refreshSuccessCount, setRefreshSuccessCount] = useState(0);
+  const [receiptCounters, setReceiptCounters] = useState<Record<string, number>>({});
   const [showAllTransactions, setShowAllTransactions] = useState(false);
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  const [voucherClickCount, setVoucherClickCount] = useState(0);
+  const [showPrintingLogs, setShowPrintingLogs] = useState(false);
   
   // Get today's date in UTC+7 timezone
   const getTodayUTC7 = () => {
@@ -113,14 +184,25 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
   const [copiedUuid, setCopiedUuid] = useState<string | null>(null);
   const [isOnlineMode, setIsOnlineMode] = useState(false); // Default to offline mode
 
+  // Permission checks
+  const canViewPastData = hasPermission(user, 'daftartransaksi.viewpastdata');
+  const canViewUserDataOnly = hasPermission(user, 'daftartransaksi.viewuserdataonly');
+  const canViewAllData = hasPermission(user, 'daftartransaksi.viewalldata');
+  const canViewPrintingLogs = hasPermission(user, 'daftartransaksi.viewprintinglogs');
+  const canViewOfflineOnlineSwitch = isSuperAdmin(user) || hasPermission(user, 'daftartransaksi.offlineonlineswitch');
+  const canRefund = isSuperAdmin(user) || hasPermission(user, 'daftartransaksi.refund');
+
+  // Check for conflicting permissions (Super Admin bypasses this check)
+  const hasConflictingPermissions = !isSuperAdmin(user) && canViewUserDataOnly && canViewAllData;
+
   // Fetch transaction details with offline fallback
   const fetchTransactionDetail = async (transactionId: string) => {
     setIsLoadingDetail(true);
     try {
-      const response = await offlineSyncService.fetchWithFallback(
+      const response = await offlineSyncService.fetchWithFallback<TransactionDetail>(
         // Online fetch
         async () => {
-      const response = await fetch(`/api/transactions/${transactionId}`);
+      const response = await fetch(getApiUrl(`/api/transactions/${transactionId}`));
       if (!response.ok) {
         throw new Error('Failed to fetch transaction details');
       }
@@ -133,35 +215,49 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
         },
         // Offline fetch
         async () => {
-          if (typeof window === 'undefined' || !(window as any).electronAPI) {
+          if (typeof window === 'undefined' || !(window as { electronAPI?: ElectronAPI }).electronAPI) {
             throw new Error('Offline database not available');
           }
           
           // Get transaction from local database
-          const transactions = await (window as any).electronAPI.localDbGetTransactions(businessId, 1000);
-          const transaction = transactions.find((tx: any) => tx.id === transactionId);
+          const transactions: ElectronTransaction[] = await (window as { electronAPI: ElectronAPI }).electronAPI.localDbGetTransactions(businessId, 1000);
+          const transaction = transactions.find((tx) => tx.id === transactionId);
           
           if (!transaction) {
             throw new Error('Transaction not found in offline database');
           }
           
           // Get transaction items
-          const items = await (window as any).electronAPI.localDbGetTransactionItems(transactionId);
+          const items: ElectronTransactionItem[] = await (window as { electronAPI: ElectronAPI }).electronAPI.localDbGetTransactionItems(transactionId);
           
           // Get all products to map product_id to product_name
-          const products = await (window as any).electronAPI.localDbGetAllProducts();
+          const products: ElectronProduct[] = await (window as { electronAPI: ElectronAPI }).electronAPI.localDbGetAllProducts();
           
           // Get users and businesses to show actual names
-          const users = await (window as any).electronAPI.localDbGetUsers();
-          const businesses = await (window as any).electronAPI.localDbGetBusinesses();
+          const users: ElectronUser[] = await (window as { electronAPI: ElectronAPI }).electronAPI.localDbGetUsers();
+          const businesses: ElectronBusiness[] = await (window as { electronAPI: ElectronAPI }).electronAPI.localDbGetBusinesses();
+          const refunds: TransactionRefund[] = await (window as { electronAPI: ElectronAPI }).electronAPI.localDbGetTransactionRefunds(transactionId);
           
-          const user = users.find((u: any) => u.id === transaction.user_id);
-          const business = businesses.find((b: any) => b.id === transaction.business_id);
+          const user = users.find((u) => u.id === transaction.user_id);
+          const business = businesses.find((b) => b.id === transaction.business_id);
           
+          // Removed normalizeJsonField - no longer using JSON for customizations
+
+          const refundTotalValue = transaction.refund_total ?? refunds.reduce((sum, refund) => sum + (refund.refund_amount ?? 0), 0);
+          const finalAmount = Number(transaction.final_amount ?? 0);
+          const refundStatusValue =
+            transaction.refund_status ??
+            (refundTotalValue > 0
+              ? refundTotalValue >= finalAmount - 0.01
+                ? 'full'
+                : 'partial'
+              : 'none');
+
           return {
             ...transaction,
-            items: items.map((item: any) => {
-              const product = products.find((p: any) => p.id === item.product_id);
+            payment_method: (transaction.payment_method || 'cash') as TransactionDetail['payment_method'],
+            items: items.map((item) => {
+              const product = products.find((p) => p.id === item.product_id);
               return {
                 id: item.id,
                 product_name: product?.nama || 'Unknown Product',
@@ -169,21 +265,24 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
                 unit_price: item.unit_price,
                 total_price: item.total_price,
                 custom_note: item.custom_note,
-                customizations_json: item.customizations_json || null,
-                bundle_selections_json: item.bundle_selections_json || null
+                customizations: item.customizations || [],
+                bundleSelections: item.bundleSelections || undefined
               };
             }),
             user_name: user?.name || 'Unknown User',
-            business_name: business?.name || 'Unknown Business'
-          };
+            business_name: business?.name || 'Unknown Business',
+            refunds,
+            refund_total: refundTotalValue,
+            refund_status: refundStatusValue
+          } as TransactionDetail;
         }
       );
       
       setSelectedTransaction(response);
       setIsDetailModalOpen(true);
-    } catch (error: any) {
+    } catch (error: unknown) {
       console.error('Error fetching transaction details:', error);
-      setError(error.message);
+      setError(error instanceof Error ? error.message : 'Unknown error');
     } finally {
       setIsLoadingDetail(false);
       setLoadingTransactionId(null);
@@ -196,6 +295,21 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
     setIsLoadingDetail(true);
     setIsDetailModalOpen(true);
     fetchTransactionDetail(transactionId);
+  };
+
+  const handleTransactionUpdated = (updatedTransaction: TransactionDetail) => {
+    setSelectedTransaction(updatedTransaction);
+    setTransactions((prev) =>
+      prev.map((tx) =>
+        tx.id === updatedTransaction.id
+          ? {
+              ...tx,
+              refund_status: updatedTransaction.refund_status ?? tx.refund_status,
+              refund_total: updatedTransaction.refund_total ?? tx.refund_total
+            }
+          : tx
+      )
+    );
   };
 
   // Close detail modal
@@ -240,7 +354,7 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
             throw new Error('execCommand copy failed');
           }
         }
-      } catch (clipboardError) {
+      } catch {
         // Final fallback: use execCommand
         const successful = document.execCommand('copy');
         if (!successful) {
@@ -269,47 +383,116 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
     counters: Record<string, number>;
   }
 
+  interface ReceiptFetchResult {
+    success: boolean;
+    counters: Record<string, number>;
+  }
+
+  // Fetch original Receiptize counters from Printer2 audit log (same logic as reprint)
   const fetchReceiptizePrintedIds = useCallback(async (): Promise<ReceiptizeFetchResult> => {
-    if (typeof window === 'undefined' || !(window as any).electronAPI?.getPrinter2AuditLog) {
+    const electronAPI = typeof window !== 'undefined' ? (window as { electronAPI?: ElectronAPI }).electronAPI : undefined;
+    if (!electronAPI?.getPrinter2AuditLog) {
       console.warn('Receiptize audit log API unavailable');
       return { success: false, ids: new Set<string>(), counters: {} };
     }
 
     try {
-      const response = await (window as any).electronAPI.getPrinter2AuditLog(fromDate, toDate, 2000);
-      const entries = Array.isArray(response?.entries) ? response.entries : [];
+      // Try with date range first
+      let response = await electronAPI.getPrinter2AuditLog(fromDate, toDate, 2000);
+      let entries = Array.isArray(response?.entries) ? response.entries : [];
+      
+      // If no results with date filter, try without date filter (fallback)
+      if (entries.length === 0) {
+        console.log('⚠️ [TransactionList] No receiptize entries with date filter, trying without date filter');
+        response = await electronAPI.getPrinter2AuditLog(undefined, undefined, 2000);
+        entries = Array.isArray(response?.entries) ? response.entries : [];
+      }
+      
       const ids = new Set<string>();
-      const latestCounters: Record<string, { counter: number; epoch: number }> = {};
+      const originalCounters: Record<string, number> = {};
 
       for (const entry of entries) {
         if (entry?.transaction_id == null) continue;
         const txId = String(entry.transaction_id);
         ids.add(txId);
 
+        // Find ORIGINAL print (is_reprint = 0 or undefined/null) - same logic as reprint
+        const isReprint = entry.is_reprint;
+        if (isReprint === 1) {
+          // Skip reprints, only use original prints
+          continue;
+        }
+
         const counterValue = Number(entry.printer2_receipt_number);
-        const epochValue = Number(entry.printed_at_epoch ?? 0);
         if (Number.isNaN(counterValue)) continue;
 
-        const existing = latestCounters[txId];
-        if (!existing || epochValue >= existing.epoch) {
-          latestCounters[txId] = { counter: counterValue, epoch: epochValue };
+        // Only set if we haven't found an original print for this transaction yet
+        if (!(txId in originalCounters)) {
+          originalCounters[txId] = counterValue;
         }
       }
 
-      const counters: Record<string, number> = {};
-      Object.entries(latestCounters).forEach(([txId, info]) => {
-        counters[txId] = info.counter;
-      });
-
-      return { success: true, ids, counters };
+      console.log(`📊 [TransactionList] Receiptize audit log: ${entries.length} total entries, ${ids.size} unique transactions, ${Object.keys(originalCounters).length} with counters`);
+      return { success: true, ids, counters: originalCounters };
     } catch (err) {
       console.error('Failed to fetch Receiptize audit log:', err);
       return { success: false, ids: new Set<string>(), counters: {} };
     }
   }, [fromDate, toDate]);
 
+  // Fetch original Receipt counters from Printer1 audit log (same logic as reprint)
+  const fetchReceiptPrintedIds = useCallback(async (): Promise<ReceiptFetchResult> => {
+    const electronAPI = typeof window !== 'undefined' ? (window as { electronAPI?: ElectronAPI }).electronAPI : undefined;
+    if (!electronAPI?.getPrinter1AuditLog) {
+      console.warn('Receipt audit log API unavailable');
+      return { success: false, counters: {} };
+    }
+
+    try {
+      // Try with date range first
+      let response = await electronAPI.getPrinter1AuditLog(fromDate, toDate, 2000);
+      let entries = Array.isArray(response?.entries) ? response.entries : [];
+      
+      // If no results with date filter, try without date filter (fallback)
+      if (entries.length === 0) {
+        console.log('⚠️ [TransactionList] No receipt entries with date filter, trying without date filter');
+        response = await electronAPI.getPrinter1AuditLog(undefined, undefined, 2000);
+        entries = Array.isArray(response?.entries) ? response.entries : [];
+      }
+      
+      const originalCounters: Record<string, number> = {};
+
+      for (const entry of entries) {
+        if (entry?.transaction_id == null) continue;
+        const txId = String(entry.transaction_id);
+
+        // Find ORIGINAL print (is_reprint = 0 or undefined/null) - same logic as reprint
+        const isReprint = entry.is_reprint;
+        if (isReprint === 1) {
+          // Skip reprints, only use original prints
+          continue;
+        }
+
+        const counterValue = Number(entry.printer1_receipt_number);
+        if (Number.isNaN(counterValue)) continue;
+
+        // Only set if we haven't found an original print for this transaction yet
+        if (!(txId in originalCounters)) {
+          originalCounters[txId] = counterValue;
+        }
+      }
+
+      console.log(`📊 [TransactionList] Receipt audit log: ${entries.length} total entries, ${Object.keys(originalCounters).length} with counters`);
+      return { success: true, counters: originalCounters };
+    } catch (err) {
+      console.error('Failed to fetch Receipt audit log:', err);
+      return { success: false, counters: {} };
+    }
+  }, [fromDate, toDate]);
+
   // Fetch transactions function
   const fetchTransactions = useCallback(async (): Promise<boolean> => {
+    console.log('🔄 [TransactionList] fetchTransactions called - isOnlineMode:', isOnlineMode);
     setIsLoading(true);
     setError(null);
     
@@ -317,72 +500,62 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
       let transactionsData: Transaction[];
       
       if (isOnlineMode) {
+        console.log('🌐 [TransactionList] Fetching from online API');
         // Fetch from online API only
-        const response = await fetch(`/api/transactions?business_id=${businessId}&from_date=${fromDate}&to_date=${toDate}&limit=1000`);
+        const response = await fetch(getApiUrl(`/api/transactions?business_id=${businessId}&from_date=${fromDate}&to_date=${toDate}&limit=1000`));
         if (!response.ok) {
           throw new Error('Failed to fetch transactions');
         }
         const data = await response.json();
-        transactionsData = (data.transactions || []).map((tx: any) => ({
+        transactionsData = (data.transactions || []).map((tx: Record<string, unknown>) => ({
           ...tx,
-          voucher_value: tx.voucher_value !== undefined && tx.voucher_value !== null ? parseFloat(tx.voucher_value) : null,
-          voucher_discount: tx.voucher_discount !== undefined && tx.voucher_discount !== null ? parseFloat(tx.voucher_discount) : 0,
+          voucher_value: tx.voucher_value !== undefined && tx.voucher_value !== null ? parseFloat(String(tx.voucher_value)) : null,
+          voucher_discount: tx.voucher_discount !== undefined && tx.voucher_discount !== null ? parseFloat(String(tx.voucher_discount)) : 0,
           voucher_type: tx.voucher_type || 'none',
           voucher_label: tx.voucher_label || null,
           customer_unit: tx.customer_unit !== undefined && tx.customer_unit !== null ? Number(tx.customer_unit) : null
         }));
       } else {
+        console.log('💾 [TransactionList] Fetching from offline database');
         // Fetch from offline database only
-        if (typeof window === 'undefined' || !(window as any).electronAPI) {
-          throw new Error('Offline database not available');
+        if (typeof window === 'undefined' || !(window as { electronAPI?: ElectronAPI }).electronAPI) {
+          console.warn('⚠️ [TransactionList] Offline database not available, showing empty list');
+          setTransactions([]);
+          return true;
         }
         
-        const offlineTransactions = await (window as any).electronAPI.localDbGetTransactions(businessId, 100);
+        const offlineTransactions: ElectronTransaction[] = await (window as { electronAPI: ElectronAPI }).electronAPI.localDbGetTransactions(businessId, 100);
+        console.log('💾 [TransactionList] Raw offline transactions count:', offlineTransactions.length);
         
         // Get users and businesses to show actual names (fetch once for all transactions)
-        const users = await (window as any).electronAPI.localDbGetUsers();
-        const businesses = await (window as any).electronAPI.localDbGetBusinesses();
+        const users: ElectronUser[] = await (window as { electronAPI: ElectronAPI }).electronAPI.localDbGetUsers();
+        const businesses: ElectronBusiness[] = await (window as { electronAPI: ElectronAPI }).electronAPI.localDbGetBusinesses();
         
-        // Show ALL unique LOCAL dates in the database for debugging
-        const allDates = [...new Set(offlineTransactions.map((tx: any) => {
-          const localDate = new Date(tx.created_at);
-          const dateString = localDate.getFullYear() + '-' + 
-            String(localDate.getMonth() + 1).padStart(2, '0') + '-' + 
-            String(localDate.getDate()).padStart(2, '0');
-          console.log(`📅 [OFFLINE] Transaction ${tx.id}: raw=${tx.created_at}, parsed=${localDate.toISOString()}, dateString=${dateString}`);
-          return dateString;
-        }))].sort();
-        console.log('📱 [OFFLINE] Total:', offlineTransactions.length, '| Date range:', fromDate, 'to', toDate, '| Available dates:', allDates);
         
         // Filter by date range - need to convert to local date for comparison
-        const filteredTransactions = offlineTransactions.filter((tx: any) => {
+        const filteredTransactions = offlineTransactions.filter((tx) => {
           // Convert UTC to local date for accurate filtering
           const localDate = new Date(tx.created_at);
           const localDateString = localDate.getFullYear() + '-' + 
             String(localDate.getMonth() + 1).padStart(2, '0') + '-' + 
             String(localDate.getDate()).padStart(2, '0');
           const isInRange = localDateString >= fromDate && localDateString <= toDate;
-          if (!isInRange && localDateString === '2025-10-27') {
-            console.log(`❌ [OFFLINE] Transaction ${tx.id} excluded: date=${localDateString}, range=${fromDate} to ${toDate}`);
-          }
           return isInRange;
         });
         
-        console.log('📱 [OFFLINE] Found:', filteredTransactions.length, 'transactions from', fromDate, 'to', toDate);
-        
-        transactionsData = filteredTransactions.map((tx: any) => {
-          const user = users.find((u: any) => u.id === tx.user_id);
-          const business = businesses.find((b: any) => b.id === tx.business_id);
+        transactionsData = filteredTransactions.map((tx) => {
+          const user = users.find((u) => u.id === tx.user_id);
+          const business = businesses.find((b) => b.id === tx.business_id);
           
           return {
             id: tx.id,
             business_id: tx.business_id,
             user_id: tx.user_id,
-            payment_method: tx.payment_method,
-            pickup_method: tx.pickup_method,
+            payment_method: tx.payment_method as Transaction['payment_method'],
+            pickup_method: tx.pickup_method as Transaction['pickup_method'],
             total_amount: tx.total_amount,
             voucher_discount: tx.voucher_discount || 0,
-            voucher_type: tx.voucher_type || 'none',
+            voucher_type: (tx.voucher_type || 'none') as Transaction['voucher_type'],
             voucher_value: tx.voucher_value !== undefined && tx.voucher_value !== null ? Number(tx.voucher_value) : null,
             voucher_label: tx.voucher_label || null,
             final_amount: tx.final_amount,
@@ -393,9 +566,10 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
             customer_unit: tx.customer_unit !== undefined && tx.customer_unit !== null ? Number(tx.customer_unit) : null,
             note: tx.note || null,
             receipt_number: tx.receipt_number,
-            transaction_type: tx.transaction_type || 'drinks',
+            transaction_type: (tx.transaction_type || 'drinks') as Transaction['transaction_type'],
             status: tx.status || 'completed',
             created_at: tx.created_at,
+            shift_uuid: tx.shift_uuid, // Include shift_uuid
             user_name: user?.name || 'Unknown User',
             business_name: business?.name || 'Unknown Business'
           };
@@ -403,16 +577,66 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
         
       }
       
-      setTransactions(transactionsData);
+      // Apply permission-based filtering
+      let filteredTransactions = transactionsData;
+      
+      // Filter by user permissions (Super Admin sees all data)
+      if (!isSuperAdmin(user) && canViewUserDataOnly && !canViewAllData && user) {
+        filteredTransactions = filteredTransactions.filter(tx => tx.user_id === parseInt(user.id));
+      }
+      
+      // Filter by date permissions (if user doesn't have viewpastdata permission, only show today's data)
+      // Super Admin bypasses date restrictions
+      if (!isSuperAdmin(user) && !canViewPastData) {
+        const today = getTodayUTC7();
+        filteredTransactions = filteredTransactions.filter(tx => {
+          const txDate = new Date(tx.created_at);
+          const txDateString = txDate.getFullYear() + '-' + 
+            String(txDate.getMonth() + 1).padStart(2, '0') + '-' + 
+            String(txDate.getDate()).padStart(2, '0');
+          return txDateString === today;
+        });
+      }
+      
+      setTransactions(filteredTransactions);
 
+      // Fetch original Receiptize counters (from Printer2 audit log)
       const receiptizeResult = await fetchReceiptizePrintedIds();
       setReceiptizePrintedIds(receiptizeResult.ids);
       setReceiptizeCounters(receiptizeResult.counters);
+
+      console.log('🔍 [TransactionList] Receiptize Result:', {
+        success: receiptizeResult.success,
+        idsCount: receiptizeResult.ids.size,
+        countersCount: Object.keys(receiptizeResult.counters).length,
+        sampleIds: Array.from(receiptizeResult.ids).slice(0, 5),
+        dateRange: { fromDate, toDate },
+        fromEpoch: fromDate ? new Date(fromDate).getTime() : null,
+        toEpoch: toDate ? new Date(toDate + 'T23:59:59').getTime() : null
+      });
 
       if (!receiptizeResult.success) {
         setError(prev => prev ?? 'Failed to fetch Receiptize print history');
         return false;
       }
+
+      // Fetch original Receipt counters (from Printer1 audit log)
+      const receiptResult = await fetchReceiptPrintedIds();
+      setReceiptCounters(receiptResult.counters);
+
+      console.log('🔍 [TransactionList] Receipt Result:', {
+        success: receiptResult.success,
+        countersCount: Object.keys(receiptResult.counters).length,
+        sampleCounters: Object.entries(receiptResult.counters).slice(0, 5),
+        dateRange: { fromDate, toDate },
+        fromEpoch: fromDate ? new Date(fromDate).getTime() : null,
+        toEpoch: toDate ? new Date(toDate + 'T23:59:59').getTime() : null,
+        sampleTransactionDates: filteredTransactions.slice(0, 3).map(tx => ({
+          id: tx.id,
+          created_at: tx.created_at,
+          createdEpoch: new Date(tx.created_at).getTime()
+        }))
+      });
 
       return true;
     } catch (err) {
@@ -423,19 +647,32 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
     } finally {
       setIsLoading(false);
     }
-  }, [isOnlineMode, fromDate, toDate, businessId, fetchReceiptizePrintedIds]);
+  }, [isOnlineMode, fromDate, toDate, businessId, fetchReceiptizePrintedIds, fetchReceiptPrintedIds, canViewUserDataOnly, canViewAllData, canViewPastData, user]);
 
   // Fetch transactions on mount and when dependencies change
   useEffect(() => {
-    fetchTransactions();
+    console.log('🔍 [TransactionList] useEffect triggered - starting fetch immediately');
+    const initialLoad = async () => {
+      await fetchTransactions();
+      // Do NOT set showAllTransactions to true on initial load
+      // Only show receiptize transactions by default
+    };
+    initialLoad();
   }, [fetchTransactions]);
 
   useEffect(() => {
     setShowAllTransactions(false);
-    setRefreshSuccessCount(0);
     setReceiptizeCounters({});
     setReceiptizePrintedIds(new Set<string>());
+    setReceiptCounters({});
   }, [businessId, fromDate, toDate, isOnlineMode]);
+
+  // State for refresh click counter
+  const [refreshClickCount, setRefreshClickCount] = useState(0);
+  const [lastRefreshClick, setLastRefreshClick] = useState(0);
+  
+  // Debug log for refresh clicks
+  console.log('🔄 [TransactionList] Refresh click count:', refreshClickCount);
 
   const handleRefresh = useCallback(async () => {
     const success = await fetchTransactions();
@@ -443,14 +680,25 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
       return;
     }
 
-    setRefreshSuccessCount(prev => {
-      const next = Math.min(prev + 1, 5);
-      if (next >= 5) {
-        setShowAllTransactions(true);
-      }
-      return next;
-    });
-  }, [fetchTransactions]);
+    // Handle 5x refresh click logic
+    const now = Date.now();
+    if (now - lastRefreshClick > 3000) {
+      // Reset counter if more than 3 seconds passed
+      setRefreshClickCount(1);
+    } else {
+      setRefreshClickCount(prev => {
+        const newCount = prev + 1;
+        if (newCount >= 5) {
+          // Show all transactions after 5 clicks
+    setShowAllTransactions(true);
+          console.log('🔓 [TransactionList] 5x refresh clicked - showing all transactions');
+          return 0; // Reset counter
+        }
+        return newCount;
+      });
+    }
+    setLastRefreshClick(now);
+  }, [fetchTransactions, lastRefreshClick]);
 
   // Format date for display
   const formatDate = (dateString: string) => {
@@ -464,8 +712,40 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
     });
   };
 
+  // Payment method ID to code mapping (matches database payment_methods table)
+  // 1=cash, 2=debit, 3=qr, 4=ewallet, 5=cl, 6=voucher,
+  // 14=gofood, 15=grabfood, 16=shopeefood, 17=tiktok, 18=qpon
+  const paymentMethodIdToCode: Record<number, string> = {
+    1: 'cash',
+    2: 'debit',
+    3: 'qr',
+    4: 'ewallet',
+    5: 'cl',
+    6: 'voucher',
+    14: 'gofood',
+    15: 'grabfood',
+    16: 'shopeefood',
+    17: 'tiktok',
+    18: 'qpon'
+  };
+
+  // Get payment method code from ID or string
+  const getPaymentMethodCode = (transaction: Transaction): string => {
+    // Use payment_method_id as source of truth if available
+    if (transaction.payment_method_id && paymentMethodIdToCode[transaction.payment_method_id]) {
+      return paymentMethodIdToCode[transaction.payment_method_id];
+    }
+    // Fallback to payment_method string
+    return transaction.payment_method?.toLowerCase() || 'cash';
+  };
+
   // Get payment method label
-  const getPaymentMethodLabel = (method: string) => {
+  const getPaymentMethodLabel = (transaction: Transaction | string) => {
+    // Handle both transaction object and string for backward compatibility
+    const method = typeof transaction === 'string' 
+      ? transaction.toLowerCase()
+      : getPaymentMethodCode(transaction as Transaction);
+    
     const labels: { [key: string]: string } = {
       'cash': 'Cash',
       'debit': 'Debit',
@@ -483,7 +763,12 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
   };
 
   // Get payment method color
-  const getPaymentMethodColor = (method: string) => {
+  const getPaymentMethodColor = (transaction: Transaction | string) => {
+    // Handle both transaction object and string for backward compatibility
+    const method = typeof transaction === 'string'
+      ? transaction.toLowerCase()
+      : getPaymentMethodCode(transaction as Transaction);
+    
     const colors: { [key: string]: string } = {
       'cash': 'bg-green-100 text-green-800',
       'debit': 'bg-blue-100 text-blue-800',
@@ -523,16 +808,59 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
   };
 
   // Apply Receiptize filter unless full list unlocked
+  // In default mode, only show transactions that are in receiptizePrintedIds (printed to Printer2/receiptize)
+  // If no receiptize data is available, show all transactions (fallback)
   const baseTransactions = showAllTransactions
     ? transactions
-    : transactions.filter(transaction => receiptizePrintedIds.has(String(transaction.id)));
+    : (receiptizePrintedIds.size > 0
+        ? transactions.filter(transaction => {
+            const txId = String(transaction.id);
+            // Show if transaction is in receiptizePrintedIds (meaning it was printed to Printer2/receiptize)
+            // This is more reliable than checking counters since IDs are set even for reprints
+            return receiptizePrintedIds.has(txId);
+          })
+        : transactions); // Fallback: show all if no receiptize data available
+
+  // Debug logging
+  console.log('🔍 [TransactionList] Filter Debug:', {
+    showAllTransactions,
+    totalTransactions: transactions.length,
+    receiptizePrintedIds: receiptizePrintedIds.size,
+    receiptizeCountersCount: Object.keys(receiptizeCounters).length,
+    receiptCountersCount: Object.keys(receiptCounters).length,
+    filteredTransactions: baseTransactions.length,
+    sampleReceiptizeCounters: Object.entries(receiptizeCounters).slice(0, 3),
+    sampleReceiptCounters: Object.entries(receiptCounters).slice(0, 3),
+    sampleTransactionIds: baseTransactions.slice(0, 3).map(tx => String(tx.id)),
+    sampleTransactionAnalysis: baseTransactions.slice(0, 3).map(tx => {
+      const txId = String(tx.id);
+      return {
+        id: txId,
+        hasReceiptizeCounter: typeof receiptizeCounters[txId] === 'number' && receiptizeCounters[txId] > 0,
+        hasReceiptCounter: typeof receiptCounters[txId] === 'number' && receiptCounters[txId] > 0,
+        isInReceiptizeIds: receiptizePrintedIds.has(txId),
+        receiptizeCounter: receiptizeCounters[txId],
+        receiptCounter: receiptCounters[txId]
+      };
+    })
+  });
 
   const resolveReceiptSequence = (tx: Transaction) => {
     const txId = String(tx.id);
+    
+    // First check for Receiptize counter (from Printer2 audit log - original print)
     const receiptizeCounter = receiptizeCounters[txId];
     if (typeof receiptizeCounter === 'number' && receiptizeCounter > 0) {
       return receiptizeCounter;
     }
+    
+    // Then check for Receipt counter (from Printer1 audit log - original print)
+    const receiptCounter = receiptCounters[txId];
+    if (typeof receiptCounter === 'number' && receiptCounter > 0) {
+      return receiptCounter;
+    }
+    
+    // Fallback to transaction table value (may not match original print)
     return typeof tx.receipt_number === 'number' ? tx.receipt_number : 0;
   };
 
@@ -552,23 +880,23 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
       return matchesSearch && matchesFilter;
     })
     .sort((a, b) => {
-      let aValue: any = a[sortField as keyof Transaction];
-      let bValue: any = b[sortField as keyof Transaction];
+      let aValue: string | number = a[sortField as keyof Transaction] as string | number;
+      let bValue: string | number = b[sortField as keyof Transaction] as string | number;
 
       // Handle different data types
       if (sortField === 'receipt_number') {
         aValue = resolveReceiptSequence(a);
         bValue = resolveReceiptSequence(b);
       } else if (sortField === 'id' || sortField === 'total_amount' || sortField === 'voucher_discount' || sortField === 'final_amount' || sortField === 'amount_received' || sortField === 'change_amount' || sortField === 'customer_unit') {
-        aValue = typeof aValue === 'string' ? parseFloat(aValue) : aValue;
-        bValue = typeof bValue === 'string' ? parseFloat(bValue) : bValue;
+        aValue = typeof aValue === 'string' ? parseFloat(aValue) : (aValue as number);
+        bValue = typeof bValue === 'string' ? parseFloat(bValue) : (bValue as number);
       } else if (sortField === 'created_at') {
-        aValue = new Date(aValue).getTime();
-        bValue = new Date(bValue).getTime();
+        aValue = new Date(aValue as string).getTime();
+        bValue = new Date(bValue as string).getTime();
       } else {
         // String fields
-        aValue = aValue?.toString().toLowerCase() || '';
-        bValue = bValue?.toString().toLowerCase() || '';
+        aValue = (aValue?.toString().toLowerCase() || '') as string;
+        bValue = (bValue?.toString().toLowerCase() || '') as string;
       }
 
       if (aValue < bValue) return sortDirection === 'asc' ? -1 : 1;
@@ -577,7 +905,6 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
     });
 
   // Calculate totals
-  const totalTransactions = filteredTransactions.length;
   const totalRevenue = filteredTransactions.reduce((sum, t) => {
     const amount = typeof t.final_amount === 'string' ? parseFloat(t.final_amount) : t.final_amount;
     return sum + (isNaN(amount) ? 0 : amount);
@@ -629,6 +956,19 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
     );
   }
 
+  // Permission error handling
+  if (hasConflictingPermissions) {
+    return (
+      <div className="flex items-center justify-center min-h-[400px]">
+        <div className="text-center p-8 bg-red-50 rounded-lg border border-red-200">
+          <div className="text-red-600 text-lg font-semibold mb-2">Permission Error</div>
+          <div className="text-red-700">User have both permissions, contact admin</div>
+        </div>
+      </div>
+    );
+  }
+
+
   return (
     <div className="flex-1 flex flex-col bg-white h-full">
       <div className="flex-1 flex flex-col max-w-7xl mx-auto w-full px-3 py-6">
@@ -646,7 +986,8 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
             })}
           </h1>
           
-          {/* Online/Offline Toggle */}
+          {/* Online/Offline Toggle - Only show for authorized users */}
+          {canViewOfflineOnlineSwitch && (
           <div className="flex items-center gap-3">
             <span className={`text-sm font-medium ${!isOnlineMode ? 'text-gray-900' : 'text-gray-500'}`}>
               <WifiOff className="inline w-4 h-4 mr-1" />
@@ -666,6 +1007,7 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
               Online
             </span>
           </div>
+          )}
         </div>
 
         {/* Summary Cards */}
@@ -773,7 +1115,13 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
                 if (clicks >= 5) {
                   clicks = 0;
                   last = 0;
-                  (window as any).electronAPI?.navigateTo?.('/logs/printing');
+                  if (process.env.NODE_ENV === 'development') {
+                    // In development, use Next.js router for reliable navigation
+                    router.push('/logs/printing');
+                  } else {
+                    // In production (Electron file://), use window.location
+                    window.location.href = 'logs/printing.html';
+                  }
                 }
               };
             })()}
@@ -1024,19 +1372,91 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
                       onClick={() => handleRowClick(transaction.id)}
                     >
                       <td className="px-2 py-4 whitespace-nowrap">
-                        <span className="text-xs font-medium text-blue-600">
+                        <div className="flex items-center gap-1">
                           {(() => {
                             const txId = String(transaction.id);
                             const receiptizeCounter = receiptizeCounters[txId];
-                            if (typeof receiptizeCounter === 'number' && receiptizeCounter > 0) {
-                              return `#${receiptizeCounter}`;
+                            const receiptCounter = receiptCounters[txId];
+                            const hasReceiptizeCounter = typeof receiptizeCounter === 'number' && receiptizeCounter > 0;
+                            const hasReceiptCounter = typeof receiptCounter === 'number' && receiptCounter > 0;
+                            const isInReceiptizeIds = receiptizePrintedIds.has(txId);
+                            
+                            // Determine if this is a receiptize transaction (printed to Printer2)
+                            // A transaction is receiptize if it's in receiptizePrintedIds OR has a receiptize counter
+                            const isReceiptize = isInReceiptizeIds || hasReceiptizeCounter;
+                            
+                            // Determine the number to display using resolveReceiptSequence logic
+                            let displayNumber: number;
+                            if (hasReceiptizeCounter) {
+                              displayNumber = receiptizeCounter;
+                            } else if (hasReceiptCounter) {
+                              displayNumber = receiptCounter;
+                            } else {
+                              // Fallback to transaction receipt_number
+                              displayNumber = typeof transaction.receipt_number === 'number' && transaction.receipt_number > 0
+                                ? transaction.receipt_number
+                                : 0;
                             }
-                            if (showAllTransactions) {
-                              return transaction.receipt_number ? `#${transaction.receipt_number}` : '#N/A';
+                            
+                            // Receiptize transaction (printed to Printer2/receiptize)
+                            if (isReceiptize) {
+                              if (showAllTransactions) {
+                                // Show all mode: Show RR badge to distinguish from R transactions
+                                return (
+                                  <>
+                                    <span className="inline-flex items-center px-1 py-0.5 rounded text-xs font-medium bg-green-100 text-green-800">
+                                      RR
+                                    </span>
+                                    <span className="text-xs font-medium text-blue-600">
+                                      {displayNumber}
+                                    </span>
+                                  </>
+                                );
+                              } else {
+                                // Default mode: Show just the number without badge (to avoid suspicion)
+                                return (
+                                  <span className="text-xs font-medium text-blue-600">
+                                    {displayNumber}
+                                  </span>
+                                );
+                              }
                             }
-                            return '#N/A';
+                            
+                            // Receipt transaction (printed to Printer1/receipt, but NOT to Printer2)
+                            // Only show in "show all" mode (after 5x refresh clicks)
+                            if (showAllTransactions && hasReceiptCounter && !isReceiptize) {
+                              return (
+                                <>
+                                  <span className="inline-flex items-center px-1 py-0.5 rounded text-xs font-medium bg-blue-100 text-blue-800">
+                                    R
+                                  </span>
+                                  <span className="text-xs font-medium text-blue-600">
+                                    {displayNumber}
+                                  </span>
+                                </>
+                              );
+                            }
+                            
+                            // Fallback: Show number if available (for transactions without audit log entries)
+                            // This handles cases where audit logs are empty or not yet synced
+                            if (displayNumber > 0) {
+                              // In default mode, if we can't determine receiptize vs receipt, show without badge
+                              // In show all mode, if neither counter exists, also show without badge
+                              return (
+                                <span className="text-xs font-medium text-blue-600">
+                                  {displayNumber}
+                                </span>
+                              );
+                            }
+                            
+                            // Last resort: Show N/A
+                            return (
+                              <span className="inline-flex items-center px-1 py-0.5 rounded text-xs font-medium bg-gray-100 text-gray-600">
+                                N/A
+                              </span>
+                            );
                           })()}
-                        </span>
+                        </div>
                       </td>
                       <td className="px-2 py-4 whitespace-nowrap">
                         <button
@@ -1053,7 +1473,7 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
                         </button>
                       </td>
                       <td className="px-3 py-4 whitespace-nowrap">
-                        <span className={`inline-flex px-2 py-1 text-xs font-semibold rounded-full ${
+                        <span className={`inline-flex px-1.5 py-0.5 text-xs font-semibold rounded-full ${
                           transaction.transaction_type === 'drinks' 
                             ? 'bg-blue-100 text-blue-800' 
                             : 'bg-orange-100 text-orange-800'
@@ -1067,8 +1487,8 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
                         </span>
                       </td>
                       <td className="px-2 py-4 whitespace-nowrap">
-                        <span className={`inline-flex px-2 py-1 text-xs font-semibold rounded-full ${getPaymentMethodColor(transaction.payment_method)}`}>
-                          {getPaymentMethodLabel(transaction.payment_method)}
+                        <span className={`inline-flex px-1.5 py-0.5 text-xs font-semibold rounded-full ${getPaymentMethodColor(transaction)}`}>
+                          {getPaymentMethodLabel(transaction)}
                         </span>
                       </td>
                       <td className="px-2 py-4 whitespace-nowrap">
@@ -1081,7 +1501,19 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
                           {formatPrice(transaction.total_amount)}
                         </span>
                       </td>
-                      <td className="px-6 py-4 whitespace-nowrap">
+                      <td 
+                        className="px-6 py-4 whitespace-nowrap cursor-pointer"
+                        onClick={() => {
+                          setVoucherClickCount(prev => {
+                            const newCount = prev + 1;
+                            if (newCount >= 5 && canViewPrintingLogs) {
+                              setShowPrintingLogs(true);
+                              return 0; // Reset counter
+                            }
+                            return newCount;
+                          });
+                        }}
+                      >
                         {transaction.voucher_discount > 0 ? (
                           <div className="flex flex-col">
                             <span className="text-xs text-green-600 font-medium">
@@ -1149,7 +1581,49 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
         onClose={handleCloseDetailModal}
         transaction={selectedTransaction}
         isLoading={isLoadingDetail}
+        canRefund={canRefund}
+        onTransactionUpdated={handleTransactionUpdated}
       />
+
+      {/* Printing Logs Modal */}
+      {showPrintingLogs && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+          <div className="bg-white rounded-lg shadow-xl max-w-4xl w-full mx-4 max-h-[80vh] overflow-hidden">
+            <div className="flex items-center justify-between p-6 border-b border-gray-200">
+              <h2 className="text-xl font-semibold text-gray-900">Printing Logs</h2>
+              <button
+                onClick={() => setShowPrintingLogs(false)}
+                className="text-gray-400 hover:text-gray-600 transition-colors"
+              >
+                <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                </svg>
+              </button>
+            </div>
+            <div className="p-6 overflow-y-auto max-h-[60vh]">
+              <div className="text-center py-8">
+                <div className="text-gray-500 mb-4">
+                  <svg className="w-16 h-16 mx-auto mb-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                  </svg>
+                </div>
+                <h3 className="text-lg font-medium text-gray-900 mb-2">Printing Logs</h3>
+                <p className="text-gray-600 mb-4">
+                  This feature shows receipt printing history, reprint logs, and voucher printing activities.
+                </p>
+                <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">
+                  <p className="text-sm text-blue-800">
+                    <strong>Access granted:</strong> You have permission to view printing logs.
+                  </p>
+                  <p className="text-xs text-blue-600 mt-1">
+                    Feature implementation pending - this is a placeholder for the printing logs functionality.
+                  </p>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Copy Notification */}
       {copiedUuid && (

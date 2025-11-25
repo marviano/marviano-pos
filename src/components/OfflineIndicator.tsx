@@ -6,13 +6,11 @@ import { useEffect, useState } from 'react';
 
 export default function OfflineIndicator() {
   const { 
-    isOnline, 
     internetConnected, 
     databaseConnected, 
     lastSync, 
     syncInProgress, 
-    triggerSync,
-    connectionDetails 
+    triggerSync
   } = useOfflineSync();
   const [lastSyncText, setLastSyncText] = useState('Never');
 
