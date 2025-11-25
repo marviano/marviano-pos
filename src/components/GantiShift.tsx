@@ -2,7 +2,6 @@
 
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { 
-  Clock, 
   Wallet, 
   Package, 
   DollarSign, 
@@ -46,6 +45,12 @@ interface Shift {
   modal_awal: number;
   status: string;
   created_at: string;
+  kas_akhir?: number | null;
+  kas_expected?: number | null;
+  kas_selisih?: number | null;
+  kas_selisih_label?: 'balanced' | 'plus' | 'minus' | null;
+  cash_sales_total?: number | null;
+  cash_refund_total?: number | null;
 }
 
 interface ShiftStatistics {
@@ -63,7 +68,11 @@ interface PaymentBreakdown {
 
 interface CashSummary {
   cash_shift: number;
+  cash_shift_sales?: number;
+  cash_shift_refunds?: number;
   cash_whole_day: number;
+  cash_whole_day_sales?: number;
+  cash_whole_day_refunds?: number;
 }
 
 interface ProductSale {
@@ -89,8 +98,51 @@ interface CustomizationSale {
   total_revenue: number;
 }
 
+interface ProductSalesPayload {
+  products?: ProductSale[];
+  customizations?: CustomizationSale[];
+}
+
+interface ShiftSequenceInfo {
+  index: number;
+  total: number;
+  dayStartUtc: string;
+  dayEndUtc: string;
+}
+
+interface ReportDataPayload {
+  statistics: ShiftStatistics;
+  paymentBreakdown: PaymentBreakdown[];
+  cashSummary: CashSummary;
+  productSales: ProductSale[];
+  customizationSales: CustomizationSale[];
+}
+
+const getGmt7DayBounds = (dateString?: string | null): { dayStartUtc: string; dayEndUtc: string } | null => {
+  if (!dateString) {
+    return null;
+  }
+  const date = new Date(dateString);
+  if (Number.isNaN(date.getTime())) {
+    return null;
+  }
+  const gmt7Offset = 7 * 60 * 60 * 1000;
+  const gmt7Date = new Date(date.getTime() + gmt7Offset);
+  const year = gmt7Date.getUTCFullYear();
+  const month = gmt7Date.getUTCMonth();
+  const day = gmt7Date.getUTCDate();
+  const dayStartGmt7 = new Date(Date.UTC(year, month, day, 0, 0, 0, 0));
+  const dayEndGmt7 = new Date(Date.UTC(year, month, day, 23, 59, 59, 999));
+  return {
+    dayStartUtc: new Date(dayStartGmt7.getTime() - gmt7Offset).toISOString(),
+    dayEndUtc: new Date(dayEndGmt7.getTime() - gmt7Offset).toISOString()
+  };
+};
+
 const BUSINESS_ID = 14;
 const AUTO_REFRESH_INTERVAL = 30000; // 30 seconds
+
+const getElectronAPI = () => (typeof window !== 'undefined' ? window.electronAPI : undefined);
 
 // Format Rupiah with Indonesian locale (dot separator)
 const formatRupiah = (amount: number): string => {
@@ -136,17 +188,6 @@ const formatTime = (dateString: string): string => {
   });
 };
 
-// Format date for display
-const formatDate = (dateString: string): string => {
-  const date = new Date(dateString);
-  const gmt7Date = new Date(date.getTime() + (7 * 60 * 60 * 1000));
-  return gmt7Date.toLocaleDateString('id-ID', {
-    day: '2-digit',
-    month: 'long',
-    year: 'numeric'
-  });
-};
-
 export default function GantiShift() {
   const { user } = useAuth();
   const [activeShift, setActiveShift] = useState<Shift | null>(null);
@@ -161,12 +202,15 @@ export default function GantiShift() {
   const [showForceCloseConfirm, setShowForceCloseConfirm] = useState(false);
   const [isCurrentUsersShift, setIsCurrentUsersShift] = useState(false);
   const [endShiftMode, setEndShiftMode] = useState<'normal' | 'force'>('normal');
+  const [kasAkhirInput, setKasAkhirInput] = useState<string>('');
+  const [kasAkhirError, setKasAkhirError] = useState<string | null>(null);
   const [todayTransactionsInfo, setTodayTransactionsInfo] = useState<{
     hasTransactions: boolean;
     count: number;
     earliestTime: string | null;
   } | null>(null);
   const [isMigrating, setIsMigrating] = useState(false);
+  const [shiftSequenceInfo, setShiftSequenceInfo] = useState<ShiftSequenceInfo | null>(null);
   
   const [statistics, setStatistics] = useState<ShiftStatistics>({
     order_count: 0,
@@ -178,7 +222,11 @@ export default function GantiShift() {
   const [paymentBreakdown, setPaymentBreakdown] = useState<PaymentBreakdown[]>([]);
   const [cashSummary, setCashSummary] = useState<CashSummary>({
     cash_shift: 0,
-    cash_whole_day: 0
+    cash_shift_sales: 0,
+    cash_shift_refunds: 0,
+    cash_whole_day: 0,
+    cash_whole_day_sales: 0,
+    cash_whole_day_refunds: 0
   });
   const [productSales, setProductSales] = useState<ProductSale[]>([]);
   const [customizationSales, setCustomizationSales] = useState<CustomizationSale[]>([]);
@@ -225,7 +273,8 @@ export default function GantiShift() {
 
   // Check for transactions before shift start
   const checkTodayTransactions = useCallback(async () => {
-    if (!activeShift || !window.electronAPI?.localDbCheckTodayTransactions) {
+    const electronAPI = getElectronAPI();
+    if (!activeShift || !electronAPI?.localDbCheckTodayTransactions) {
       return;
     }
 
@@ -235,7 +284,7 @@ export default function GantiShift() {
         return;
       }
 
-      const info = await window.electronAPI.localDbCheckTodayTransactions(
+      const info = await electronAPI.localDbCheckTodayTransactions(
         shiftOwnerId,
         activeShift.shift_start,
         BUSINESS_ID
@@ -255,7 +304,14 @@ export default function GantiShift() {
       // Reset stats when no active shift
       setStatistics({ order_count: 0, total_amount: 0, total_discount: 0, voucher_count: 0 });
       setPaymentBreakdown([]);
-      setCashSummary({ cash_shift: 0, cash_whole_day: 0 });
+      setCashSummary({
+        cash_shift: 0,
+        cash_shift_sales: 0,
+        cash_shift_refunds: 0,
+        cash_whole_day: 0,
+        cash_whole_day_sales: 0,
+        cash_whole_day_refunds: 0
+      });
       setProductSales([]);
       setCustomizationSales([]);
       setTodayTransactionsInfo(null);
@@ -297,39 +353,107 @@ export default function GantiShift() {
     }
   }, [successMessage]);
 
+  useEffect(() => {
+    if (!activeShift) {
+      setShiftSequenceInfo(null);
+      return;
+    }
+
+    const bounds = getGmt7DayBounds(activeShift.shift_start);
+    if (!bounds) {
+      setShiftSequenceInfo(null);
+      return;
+    }
+
+    const electronAPI = getElectronAPI();
+    if (!electronAPI?.localDbGetShifts) {
+      setShiftSequenceInfo({
+        index: 1,
+        total: 1,
+        dayStartUtc: bounds.dayStartUtc,
+        dayEndUtc: bounds.dayEndUtc
+      });
+      return;
+    }
+
+    let isCancelled = false;
+
+    const loadSequence = async () => {
+      try {
+        const response = await electronAPI.localDbGetShifts({
+          businessId: BUSINESS_ID,
+          startDate: bounds.dayStartUtc,
+          endDate: bounds.dayEndUtc,
+          limit: 50
+        });
+        const rawShifts = Array.isArray(response?.shifts) ? (response?.shifts as Shift[]) : [];
+        const sortedShifts = [...rawShifts].sort(
+          (a, b) => new Date(a.shift_start).getTime() - new Date(b.shift_start).getTime()
+        );
+        const index = Math.max(0, sortedShifts.findIndex(shift => shift.id === activeShift.id)) + 1;
+        if (!isCancelled) {
+          setShiftSequenceInfo({
+            index: index || 1,
+            total: sortedShifts.length || 1,
+            dayStartUtc: bounds.dayStartUtc,
+            dayEndUtc: bounds.dayEndUtc
+          });
+        }
+      } catch (error) {
+        console.error('Error determining shift sequence:', error);
+        if (!isCancelled) {
+          setShiftSequenceInfo({
+            index: 1,
+            total: 1,
+            dayStartUtc: bounds.dayStartUtc,
+            dayEndUtc: bounds.dayEndUtc
+          });
+        }
+      }
+    };
+
+    loadSequence();
+
+    return () => {
+      isCancelled = true;
+    };
+  }, [activeShift?.id]);
+
   const loadActiveShift = useCallback(async () => {
     if (!currentUserId) {
       return;
     }
 
     // Check if Electron API is available
-    if (!window.electronAPI) {
+    const electronAPI = getElectronAPI();
+    if (!electronAPI) {
       setError('Aplikasi Electron tidak terdeteksi. Silakan restart aplikasi.');
       setIsLoadingInitial(false);
       return;
     }
 
-    if (!window.electronAPI.localDbGetActiveShift) {
+    if (!electronAPI.localDbGetActiveShift) {
       setError('Fitur shift belum tersedia. Silakan restart aplikasi untuk memperbarui.');
       setIsLoadingInitial(false);
       return;
     }
 
     try {
-      const response = await window.electronAPI.localDbGetActiveShift(currentUserId, BUSINESS_ID);
+      const response = await electronAPI.localDbGetActiveShift(currentUserId, BUSINESS_ID);
       const shift = response?.shift ?? null;
       setActiveShift(shift);
       setIsCurrentUsersShift(Boolean(shift && response?.isCurrentUserShift));
       setModalAwal(shift && response?.isCurrentUserShift ? shift.modal_awal.toString() : '');
       setError(null);
-    } catch (error: any) {
+    } catch (error) {
       console.error('Error loading active shift:', error);
       setError('Gagal memuat shift aktif. Silakan refresh halaman.');
     }
   }, [currentUserId]);
 
   const loadStatistics = useCallback(async () => {
-    if (!activeShift || !window.electronAPI) {
+    const electronAPI = getElectronAPI();
+    if (!activeShift || !electronAPI) {
       return;
     }
 
@@ -341,50 +465,37 @@ export default function GantiShift() {
         return;
       }
       
+      const defaultStats: ShiftStatistics = { order_count: 0, total_amount: 0, total_discount: 0, voucher_count: 0 };
+      const defaultCash: CashSummary = { cash_shift: 0, cash_whole_day: 0 };
+
       // Load all statistics in parallel with error handling
       const [statsResult, breakdownResult, cashResult, productSalesResult] = await Promise.allSettled([
-        window.electronAPI.localDbGetShiftStatistics?.(
-          shiftOwnerId,
-          activeShift.shift_start,
-          activeShift.shift_end,
-          BUSINESS_ID
-        ) || Promise.resolve({ order_count: 0, total_amount: 0, total_discount: 0, voucher_count: 0 }),
-        window.electronAPI.localDbGetPaymentBreakdown?.(
-          shiftOwnerId,
-          activeShift.shift_start,
-          activeShift.shift_end,
-          BUSINESS_ID
-        ) || Promise.resolve([]),
-        window.electronAPI.localDbGetCashSummary?.(
-          shiftOwnerId,
-          activeShift.shift_start,
-          activeShift.shift_end,
-          BUSINESS_ID
-        ) || Promise.resolve({ cash_shift: 0, cash_whole_day: 0 }),
-        window.electronAPI.localDbGetProductSales?.(
-          shiftOwnerId,
-          activeShift.shift_start,
-          activeShift.shift_end,
-          BUSINESS_ID
-        ) || Promise.resolve([])
+        electronAPI.localDbGetShiftStatistics
+          ? electronAPI.localDbGetShiftStatistics(shiftOwnerId, activeShift.shift_start, activeShift.shift_end, BUSINESS_ID)
+          : Promise.resolve(defaultStats),
+        electronAPI.localDbGetPaymentBreakdown
+          ? electronAPI.localDbGetPaymentBreakdown(shiftOwnerId, activeShift.shift_start, activeShift.shift_end, BUSINESS_ID)
+          : Promise.resolve<PaymentBreakdown[]>([]),
+        electronAPI.localDbGetCashSummary
+          ? electronAPI.localDbGetCashSummary(shiftOwnerId, activeShift.shift_start, activeShift.shift_end, BUSINESS_ID)
+          : Promise.resolve(defaultCash),
+        electronAPI.localDbGetProductSales
+          ? electronAPI.localDbGetProductSales(shiftOwnerId, activeShift.shift_start, activeShift.shift_end, BUSINESS_ID)
+          : Promise.resolve<ProductSalesPayload>({ products: [], customizations: [] })
       ]);
 
-      // Handle results with fallbacks
-      const stats = statsResult.status === 'fulfilled' 
-        ? statsResult.value 
-        : { order_count: 0, total_amount: 0, total_discount: 0, voucher_count: 0 };
-      
-      const breakdown = breakdownResult.status === 'fulfilled' 
-        ? breakdownResult.value 
-        : [];
-      
-      const cash = cashResult.status === 'fulfilled' 
-        ? cashResult.value 
-        : { cash_shift: 0, cash_whole_day: 0 };
-
-      const productSalesData = productSalesResult.status === 'fulfilled'
-        ? productSalesResult.value
-        : { products: [], customizations: [] };
+      const stats =
+        statsResult.status === 'fulfilled' ? (statsResult.value as ShiftStatistics) : defaultStats;
+      const breakdown =
+        breakdownResult.status === 'fulfilled'
+          ? (breakdownResult.value as PaymentBreakdown[])
+          : [];
+      const cash =
+        cashResult.status === 'fulfilled' ? (cashResult.value as CashSummary) : defaultCash;
+      const productSalesData =
+        productSalesResult.status === 'fulfilled'
+          ? (productSalesResult.value as ProductSalesPayload)
+          : { products: [], customizations: [] };
 
       setStatistics({
         order_count: stats.order_count ?? 0,
@@ -398,10 +509,14 @@ export default function GantiShift() {
       setCustomizationSales(productSalesData.customizations || []);
       
       // Only show error if all requests failed
-      if (statsResult.status === 'rejected' && breakdownResult.status === 'rejected' && cashResult.status === 'rejected') {
+      if (
+        statsResult.status === 'rejected' &&
+        breakdownResult.status === 'rejected' &&
+        cashResult.status === 'rejected'
+      ) {
         setError('Gagal memuat statistik');
       }
-    } catch (error: any) {
+    } catch (error) {
       console.error('Error loading statistics:', error);
       setError('Gagal memuat statistik');
     } finally {
@@ -409,15 +524,91 @@ export default function GantiShift() {
     }
   }, [activeShift]);
 
+  const fetchReportPayload = useCallback(
+    async ({ start, end, userId, businessId = BUSINESS_ID }: { start: string; end: string | null; userId: number; businessId?: number; }): Promise<ReportDataPayload> => {
+      const electronAPI = getElectronAPI();
+      if (!electronAPI) {
+        throw new Error('Aplikasi Electron tidak terdeteksi.');
+      }
+      if (!userId) {
+        throw new Error('User ID tidak valid untuk laporan.');
+      }
+
+      const defaultStats: ShiftStatistics = { order_count: 0, total_amount: 0, total_discount: 0, voucher_count: 0 };
+      const defaultCash: CashSummary = {
+        cash_shift: 0,
+        cash_shift_sales: 0,
+        cash_shift_refunds: 0,
+        cash_whole_day: 0,
+        cash_whole_day_sales: 0,
+        cash_whole_day_refunds: 0
+      };
+
+      try {
+        const [statsResult, breakdownResult, cashResult, productSalesResult] = await Promise.allSettled([
+          electronAPI.localDbGetShiftStatistics
+            ? electronAPI.localDbGetShiftStatistics(userId, start, end, businessId)
+            : Promise.resolve(defaultStats),
+          electronAPI.localDbGetPaymentBreakdown
+            ? electronAPI.localDbGetPaymentBreakdown(userId, start, end, businessId)
+            : Promise.resolve<PaymentBreakdown[]>([]),
+          electronAPI.localDbGetCashSummary
+            ? electronAPI.localDbGetCashSummary(userId, start, end, businessId)
+            : Promise.resolve(defaultCash),
+          electronAPI.localDbGetProductSales
+            ? electronAPI.localDbGetProductSales(userId, start, end, businessId)
+            : Promise.resolve<ProductSalesPayload>({ products: [], customizations: [] })
+        ]);
+
+        const statsPayload = statsResult.status === 'fulfilled' ? (statsResult.value as ShiftStatistics) : defaultStats;
+        const breakdownPayload =
+          breakdownResult.status === 'fulfilled' ? (breakdownResult.value as PaymentBreakdown[]) : [];
+        const rawCash = cashResult.status === 'fulfilled' ? (cashResult.value as CashSummary) : defaultCash;
+        const productSalesPayload =
+          productSalesResult.status === 'fulfilled'
+            ? (productSalesResult.value as ProductSalesPayload)
+            : { products: [], customizations: [] };
+
+        const resolvedCash: CashSummary = {
+          cash_shift: rawCash.cash_shift ?? 0,
+          cash_shift_sales: rawCash.cash_shift_sales ?? rawCash.cash_shift ?? 0,
+          cash_shift_refunds: rawCash.cash_shift_refunds ?? 0,
+          cash_whole_day: rawCash.cash_whole_day ?? 0,
+          cash_whole_day_sales: rawCash.cash_whole_day_sales ?? rawCash.cash_whole_day ?? 0,
+          cash_whole_day_refunds: rawCash.cash_whole_day_refunds ?? 0
+        };
+
+        return {
+          statistics: {
+            order_count: statsPayload.order_count ?? 0,
+            total_amount: statsPayload.total_amount ?? 0,
+            total_discount: statsPayload.total_discount ?? 0,
+            voucher_count: statsPayload.voucher_count ?? 0
+          },
+          paymentBreakdown: breakdownPayload,
+          cashSummary: resolvedCash,
+          productSales: productSalesPayload.products || [],
+          customizationSales: productSalesPayload.customizations || []
+        };
+      } catch (error) {
+        console.error('Error fetching report payload:', error);
+        throw error;
+      }
+    },
+    []
+  );
+
   const handleStartShift = async () => {
     if (!user?.id || !user?.name) {
       setError('User tidak ditemukan. Silakan login ulang.');
       return;
     }
 
+    const electronAPI = getElectronAPI();
+
     // Check if there's already an active shift (double-check)
     try {
-      const existingResponse = await window.electronAPI?.localDbGetActiveShift?.(currentUserId, BUSINESS_ID);
+      const existingResponse = await electronAPI?.localDbGetActiveShift?.(currentUserId, BUSINESS_ID);
       const existingShift = existingResponse?.shift ?? null;
       if (existingShift) {
         const ownerName = existingShift.user_name || 'Kasir lain';
@@ -448,13 +639,13 @@ export default function GantiShift() {
     setSuccessMessage(null);
 
     // Check Electron API availability
-    if (!window.electronAPI) {
+    if (!electronAPI) {
       setError('Aplikasi Electron tidak terdeteksi. Silakan restart aplikasi.');
       setIsStartingShift(false);
       return;
     }
 
-    if (!window.electronAPI.localDbCreateShift) {
+    if (!electronAPI.localDbCreateShift) {
       setError('Fitur shift belum tersedia. Silakan restart aplikasi untuk memperbarui.');
       setIsStartingShift(false);
       return;
@@ -463,7 +654,7 @@ export default function GantiShift() {
     try {
 
       const uuid_id = generateUUID();
-      const result = await window.electronAPI.localDbCreateShift({
+      const result = await electronAPI.localDbCreateShift({
         uuid_id,
         business_id: BUSINESS_ID,
         user_id: currentUserId,
@@ -485,9 +676,10 @@ export default function GantiShift() {
         }
         throw new Error(result.error || 'Gagal membuat shift');
       }
-    } catch (error: any) {
+    } catch (error) {
       console.error('Error starting shift:', error);
-      setError(error.message || 'Gagal memulai shift. Silakan coba lagi.');
+      const message = error instanceof Error ? error.message : 'Gagal memulai shift. Silakan coba lagi.';
+      setError(message);
     } finally {
       setIsStartingShift(false);
     }
@@ -504,6 +696,8 @@ export default function GantiShift() {
     }
 
     setEndShiftMode('normal');
+    setKasAkhirInput('');
+    setKasAkhirError(null);
     setShowEndShiftConfirm(true);
   };
 
@@ -531,13 +725,14 @@ export default function GantiShift() {
     setShowForceCloseConfirm(false);
 
     // Check Electron API availability
-    if (!window.electronAPI) {
+    const electronAPI = getElectronAPI();
+    if (!electronAPI) {
       setError('Aplikasi Electron tidak terdeteksi. Silakan restart aplikasi.');
       setIsEndingShift(false);
       return;
     }
 
-    if (!window.electronAPI.localDbEndShift) {
+    if (!electronAPI.localDbEndShift) {
       setError('Fitur shift belum tersedia. Silakan restart aplikasi untuk memperbarui.');
       setIsEndingShift(false);
       return;
@@ -557,26 +752,62 @@ export default function GantiShift() {
         return;
       }
 
-      const result = await window.electronAPI.localDbEndShift(activeShift.id);
+      let parsedKasAkhir: number | null = null;
+      if (!isForce) {
+        const numericValue = Number(kasAkhirInput.replace(/\./g, '').replace(',', '.'));
+        if (!Number.isFinite(numericValue) || numericValue < 0) {
+          setKasAkhirError('Masukkan nominal kas akhir yang valid');
+          setIsEndingShift(false);
+          return;
+        }
+        parsedKasAkhir = numericValue;
+      }
+
+      const result = await electronAPI.localDbEndShift({
+        shiftId: activeShift.id,
+        kasAkhir: parsedKasAkhir
+      });
 
       if (result.success) {
-        const successText = isForce
+        const baseText = isForce
           ? `Shift atas nama ${activeShift.user_name || 'kasir lain'} berhasil di-force close.`
           : 'Shift berhasil diakhiri!';
-        setSuccessMessage(successText);
+
+        let detailedMessage = baseText;
+        if (result.cashSummary) {
+          const variance = Number(result.cashSummary.variance ?? 0);
+          const varianceLabel = result.cashSummary.variance_label ?? (variance > 0 ? 'plus' : variance < 0 ? 'minus' : 'balanced');
+          const varianceText =
+            varianceLabel === 'balanced'
+              ? 'Seimbang'
+              : `${varianceLabel === 'plus' ? 'Plus' : 'Minus'} ${formatRupiah(Math.abs(variance))}`;
+
+          detailedMessage = `${baseText} Kas akhir ${formatRupiah(result.cashSummary.kas_akhir ?? 0)} (${varianceText}).`;
+        }
+
+        setSuccessMessage(detailedMessage);
+        setKasAkhirInput('');
+        setKasAkhirError(null);
         setActiveShift(null);
         setModalAwal('');
-        // Reset statistics
         setStatistics({ order_count: 0, total_amount: 0, total_discount: 0, voucher_count: 0 });
         setPaymentBreakdown([]);
-        setCashSummary({ cash_shift: 0, cash_whole_day: 0 });
+        setCashSummary({
+          cash_shift: 0,
+          cash_shift_sales: 0,
+          cash_shift_refunds: 0,
+          cash_whole_day: 0,
+          cash_whole_day_sales: 0,
+          cash_whole_day_refunds: 0
+        });
         await loadActiveShift();
       } else {
         throw new Error(result.error || 'Gagal mengakhiri shift');
       }
-    } catch (error: any) {
+    } catch (error) {
       console.error('Error ending shift:', error);
-      setError(error.message || 'Gagal mengakhiri shift. Silakan coba lagi.');
+      const message = error instanceof Error ? error.message : 'Gagal mengakhiri shift. Silakan coba lagi.';
+      setError(message);
     } finally {
       setIsEndingShift(false);
       setEndShiftMode('normal');
@@ -593,13 +824,64 @@ export default function GantiShift() {
   };
 
   const handlePrintAll = async () => {
-    if (!activeShift || !window.electronAPI?.printShiftBreakdown) {
+    const electronAPI = getElectronAPI();
+    if (!activeShift || !electronAPI?.printShiftBreakdown) {
       setError('Fitur print belum tersedia. Silakan restart aplikasi.');
       return;
     }
 
     try {
-      const result = await window.electronAPI.printShiftBreakdown({
+      let wholeDayReportSection: ShiftPrintBreakdownSection | undefined;
+      const shiftOwnerId = Number(activeShift.user_id ?? 0);
+      const shouldIncludeWholeDay =
+        Boolean(shiftSequenceInfo && shiftSequenceInfo.index >= 2) && Boolean(shiftOwnerId);
+
+      if (shouldIncludeWholeDay && shiftSequenceInfo && shiftOwnerId) {
+        try {
+          const dayReportData = await fetchReportPayload({
+            start: shiftSequenceInfo.dayStartUtc,
+            end: shiftSequenceInfo.dayEndUtc,
+            userId: shiftOwnerId
+          });
+          const dayCash = dayReportData.cashSummary;
+          const dayCashSales = dayCash.cash_shift_sales ?? dayCash.cash_shift ?? 0;
+          const dayCashRefunds = dayCash.cash_shift_refunds ?? 0;
+          const dailyKasExpected = (dayCash.cash_whole_day ?? dayCash.cash_shift ?? 0) || dayCashSales - dayCashRefunds;
+
+          wholeDayReportSection = {
+            title: 'Ringkasan Harian',
+            user_name: 'Semua Shift',
+            shift_start: shiftSequenceInfo.dayStartUtc,
+            shift_end: shiftSequenceInfo.dayEndUtc,
+            modal_awal: 0,
+            statistics: dayReportData.statistics,
+            productSales: dayReportData.productSales,
+            customizationSales: dayReportData.customizationSales,
+            paymentBreakdown: dayReportData.paymentBreakdown.map(p => ({
+              payment_method_name: p.payment_method_name || p.payment_method_code,
+              transaction_count: p.transaction_count
+            })),
+            cashSummary: {
+              cash_shift: dayCash.cash_shift ?? 0,
+              cash_shift_sales: dayCashSales,
+              cash_shift_refunds: dayCashRefunds,
+              cash_whole_day: dayCash.cash_whole_day ?? 0,
+              cash_whole_day_sales: dayCash.cash_whole_day_sales ?? dayCash.cash_whole_day ?? 0,
+              cash_whole_day_refunds: dayCash.cash_whole_day_refunds ?? 0,
+              total_cash_in_cashier: dailyKasExpected,
+              kas_mulai: 0,
+              kas_expected: dailyKasExpected,
+              kas_akhir: null,
+              kas_selisih: null,
+              kas_selisih_label: null
+            }
+          };
+        } catch (error) {
+          console.error('Error preparing whole-day report:', error);
+        }
+      }
+
+      const result = await electronAPI.printShiftBreakdown({
         user_name: activeShift.user_name,
         shift_start: activeShift.shift_start,
         shift_end: activeShift.shift_end,
@@ -618,7 +900,8 @@ export default function GantiShift() {
           base_subtotal: p.base_subtotal,
           base_unit_price: p.base_unit_price,
           platform: p.platform,
-          transaction_type: p.transaction_type
+          transaction_type: p.transaction_type,
+          is_bundle_item: p.is_bundle_item
         })),
         customizationSales: customizationSales.map(item => ({
           option_id: item.option_id,
@@ -634,11 +917,21 @@ export default function GantiShift() {
         })),
         cashSummary: {
           cash_shift: cashSummary.cash_shift,
+          cash_shift_sales: cashShiftSales,
+          cash_shift_refunds: cashShiftRefunds,
           cash_whole_day: cashSummary.cash_whole_day,
-          total_cash_in_cashier: totalCashInCashier
+          cash_whole_day_sales: cashWholeDaySales,
+          cash_whole_day_refunds: cashWholeDayRefunds,
+          total_cash_in_cashier: totalCashInCashier,
+          kas_mulai: kasMulaiActive,
+          kas_expected: kasExpectedActive,
+          kas_akhir: kasAkhirActive,
+          kas_selisih: kasSelisihValue,
+          kas_selisih_label: kasSelisihLabelValue
         },
         business_id: BUSINESS_ID,
-        printerType: 'receiptPrinter'
+        printerType: 'receiptPrinter',
+        wholeDayReport: wholeDayReportSection
       });
 
       if (result.success) {
@@ -646,9 +939,10 @@ export default function GantiShift() {
       } else {
         throw new Error(result.error || 'Gagal mencetak laporan');
       }
-    } catch (error: any) {
+    } catch (error) {
       console.error('Error printing shift breakdown:', error);
-      setError(error.message || 'Gagal mencetak laporan. Silakan coba lagi.');
+      const message = error instanceof Error ? error.message : 'Gagal mencetak laporan. Silakan coba lagi.';
+      setError(message);
     }
   };
 
@@ -663,7 +957,8 @@ export default function GantiShift() {
       return;
     }
 
-    if (!window.electronAPI?.printShiftBreakdown) {
+    const electronAPI = getElectronAPI();
+    if (!electronAPI?.printShiftBreakdown) {
       setError('Fitur print belum tersedia. Silakan restart aplikasi.');
       return;
     }
@@ -673,55 +968,35 @@ export default function GantiShift() {
     setSuccessMessage(null);
 
     try {
-      // Fetch statistics for custom date range
-      const [statsResult, breakdownResult, cashResult, productSalesResult] = await Promise.allSettled([
-        window.electronAPI.localDbGetShiftStatistics?.(
-          user?.id || 0,
-          startDateTime,
-          endDateTime,
-          BUSINESS_ID
-        ) || Promise.resolve({ order_count: 0, total_amount: 0, total_discount: 0, voucher_count: 0 }),
-        window.electronAPI.localDbGetPaymentBreakdown?.(
-          user?.id || 0,
-          startDateTime,
-          endDateTime,
-          BUSINESS_ID
-        ) || Promise.resolve([]),
-        window.electronAPI.localDbGetCashSummary?.(
-          user?.id || 0,
-          startDateTime,
-          endDateTime,
-          BUSINESS_ID
-        ) || Promise.resolve({ cash_shift: 0, cash_whole_day: 0 }),
-        window.electronAPI.localDbGetProductSales?.(
-          user?.id || 0,
-          startDateTime,
-          endDateTime,
-          BUSINESS_ID
-        ) || Promise.resolve([])
-      ]);
+      const resolvedUserId =
+        typeof user?.id === 'string'
+          ? parseInt(user.id, 10)
+          : typeof user?.id === 'number'
+            ? user.id
+            : 0;
+      if (!resolvedUserId || Number.isNaN(resolvedUserId)) {
+        throw new Error('User ID tidak valid. Silakan login ulang.');
+      }
 
-      const customStats = statsResult.status === 'fulfilled' ? statsResult.value : { order_count: 0, total_amount: 0, total_discount: 0, voucher_count: 0 };
-      const customBreakdown = breakdownResult.status === 'fulfilled' ? breakdownResult.value : [];
-      const customCash = cashResult.status === 'fulfilled' ? cashResult.value : { cash_shift: 0, cash_whole_day: 0 };
-      const customProductSales = productSalesResult.status === 'fulfilled' ? productSalesResult.value : { products: [], customizations: [] };
+      const reportData = await fetchReportPayload({
+        start: startDateTime,
+        end: endDateTime,
+        userId: resolvedUserId
+      });
 
-      // Calculate total cash (using modal awal from active shift if available, otherwise 0)
       const modalAwalForCustom = activeShift?.modal_awal || 0;
-      const totalCashInCashierCustom = modalAwalForCustom + customCash.cash_shift;
+      const customCashSales = reportData.cashSummary.cash_shift_sales ?? reportData.cashSummary.cash_shift ?? 0;
+      const customCashRefunds = reportData.cashSummary.cash_shift_refunds ?? 0;
+      const customKasExpected = modalAwalForCustom + customCashSales - customCashRefunds;
+      const totalCashInCashierCustom = customKasExpected;
 
-      const result = await window.electronAPI.printShiftBreakdown({
+      const result = await electronAPI.printShiftBreakdown({
         user_name: user?.name || activeShift?.user_name || 'Cashier',
         shift_start: startDateTime,
         shift_end: endDateTime,
         modal_awal: modalAwalForCustom,
-        statistics: {
-          order_count: customStats.order_count ?? 0,
-          total_amount: customStats.total_amount ?? 0,
-          total_discount: customStats.total_discount ?? 0,
-          voucher_count: customStats.voucher_count ?? 0
-        },
-        productSales: (customProductSales.products || []).map((p: any) => ({
+        statistics: reportData.statistics,
+        productSales: reportData.productSales.map((p) => ({
           product_name: p.product_name,
           total_quantity: p.total_quantity,
           total_subtotal: p.total_subtotal,
@@ -729,17 +1004,27 @@ export default function GantiShift() {
           base_subtotal: p.base_subtotal,
           base_unit_price: p.base_unit_price,
           platform: p.platform,
-          transaction_type: p.transaction_type
+          transaction_type: p.transaction_type,
+          is_bundle_item: p.is_bundle_item
         })),
-        customizationSales: customProductSales.customizations || [],
-        paymentBreakdown: customBreakdown.map((p: any) => ({
+        customizationSales: reportData.customizationSales,
+        paymentBreakdown: reportData.paymentBreakdown.map((p) => ({
           payment_method_name: p.payment_method_name || p.payment_method_code,
           transaction_count: p.transaction_count
         })),
         cashSummary: {
-          cash_shift: customCash.cash_shift,
-          cash_whole_day: customCash.cash_whole_day,
-          total_cash_in_cashier: totalCashInCashierCustom
+          cash_shift: reportData.cashSummary.cash_shift,
+          cash_shift_sales: customCashSales,
+          cash_shift_refunds: customCashRefunds,
+          cash_whole_day: reportData.cashSummary.cash_whole_day,
+          cash_whole_day_sales: reportData.cashSummary.cash_whole_day_sales ?? reportData.cashSummary.cash_whole_day,
+          cash_whole_day_refunds: reportData.cashSummary.cash_whole_day_refunds ?? 0,
+          total_cash_in_cashier: totalCashInCashierCustom,
+          kas_mulai: modalAwalForCustom,
+          kas_expected: customKasExpected,
+          kas_akhir: null,
+          kas_selisih: null,
+          kas_selisih_label: null
         },
         business_id: BUSINESS_ID,
         printerType: 'receiptPrinter'
@@ -753,9 +1038,10 @@ export default function GantiShift() {
       } else {
         throw new Error(result.error || 'Gagal mencetak laporan');
       }
-    } catch (error: any) {
+    } catch (error) {
       console.error('Error printing custom range:', error);
-      setError(error.message || 'Gagal mencetak laporan. Silakan coba lagi.');
+      const message = error instanceof Error ? error.message : 'Gagal mencetak laporan. Silakan coba lagi.';
+      setError(message);
     } finally {
       setIsPrintingCustomRange(false);
     }
@@ -781,12 +1067,13 @@ export default function GantiShift() {
     setError(null);
 
     try {
-      if (!window.electronAPI?.localDbUpdateShiftStart) {
+      const electronAPI = getElectronAPI();
+      if (!electronAPI?.localDbUpdateShiftStart) {
         throw new Error('Fitur migrasi belum tersedia. Silakan restart aplikasi.');
       }
 
       // Use earliest transaction time as new shift start
-      const result = await window.electronAPI.localDbUpdateShiftStart(
+      const result = await electronAPI.localDbUpdateShiftStart(
         activeShift.id,
         todayTransactionsInfo.earliestTime
       );
@@ -799,18 +1086,40 @@ export default function GantiShift() {
       } else {
         throw new Error(result.error || 'Gagal memigrasikan transaksi');
       }
-    } catch (error: any) {
+    } catch (error) {
       console.error('Error migrating transactions:', error);
-      setError(error.message || 'Gagal memigrasikan transaksi. Silakan coba lagi.');
+      const message = error instanceof Error ? error.message : 'Gagal memigrasikan transaksi. Silakan coba lagi.';
+      setError(message);
     } finally {
       setIsMigrating(false);
     }
   };
 
-  // Calculate total cash in cashier
-  const totalCashInCashier = activeShift 
-    ? activeShift.modal_awal + cashSummary.cash_shift 
-    : 0;
+  // Cash reconciliation helpers
+  const cashShiftSales = cashSummary.cash_shift_sales ?? cashSummary.cash_shift ?? 0;
+  const cashShiftRefunds = cashSummary.cash_shift_refunds ?? 0;
+  const cashWholeDaySales = cashSummary.cash_whole_day_sales ?? cashSummary.cash_whole_day ?? 0;
+  const cashWholeDayRefunds = cashSummary.cash_whole_day_refunds ?? 0;
+  const kasMulaiActive = activeShift?.modal_awal ?? 0;
+  const kasExpectedActive = activeShift ? kasMulaiActive + cashShiftSales - cashShiftRefunds : 0;
+  const kasAkhirActive = activeShift?.kas_akhir ?? null;
+  let kasSelisihValue: number | null = null;
+  let kasSelisihLabelValue: 'balanced' | 'plus' | 'minus' | null = null;
+  if (kasAkhirActive !== null) {
+    const delta = Number((kasAkhirActive - kasExpectedActive).toFixed(2));
+    if (Math.abs(delta) < 0.01) {
+      kasSelisihValue = 0;
+      kasSelisihLabelValue = 'balanced';
+    } else {
+      kasSelisihValue = delta;
+      kasSelisihLabelValue = delta > 0 ? 'plus' : 'minus';
+    }
+  } else if (typeof activeShift?.kas_selisih === 'number') {
+    kasSelisihValue = activeShift.kas_selisih;
+    kasSelisihLabelValue = activeShift.kas_selisih_label ?? null;
+  }
+  const kasExpectedDisplay = activeShift ? kasExpectedActive : 0;
+  const totalCashInCashier = activeShift ? kasExpectedActive : 0;
 
   // Calculate total payment method count
   const totalPaymentCount = paymentBreakdown.reduce(
@@ -999,7 +1308,7 @@ export default function GantiShift() {
                       }
                     }}
                     placeholder="Masukkan modal awal (contoh: 500000)"
-                    className="w-full pl-12 pr-4 py-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 text-lg font-medium text-black"
+                    className="w-full pl-12 pr-4 py-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 text-lg font-medium text-black placeholder-gray-400"
                     disabled={isStartingShift}
                     inputMode="numeric"
                     autoComplete="off"
@@ -1159,6 +1468,12 @@ export default function GantiShift() {
               <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-4">
                 <h2 className="text-base font-semibold text-gray-800 mb-3">Cash Summary</h2>
                 <div className="space-y-2">
+                <div className="flex items-center justify-between">
+                  <span className="text-sm text-gray-600">Kas Mulai:</span>
+                  <span className="text-sm font-semibold text-black">
+                    {formatRupiah(activeShift?.modal_awal || 0)}
+                  </span>
+                </div>
                   <div className="flex items-center justify-between">
                     <div className="flex items-center space-x-2">
                       <Wallet className="w-4 h-4 text-green-600" />
@@ -1166,6 +1481,12 @@ export default function GantiShift() {
                     </div>
                     <span className="text-sm font-semibold text-black">{formatRupiah(cashSummary.cash_shift)}</span>
                   </div>
+                <div className="flex items-center justify-between">
+                  <span className="text-sm text-gray-600">Cash Refund:</span>
+                  <span className="text-sm font-semibold text-black">
+                    {formatRupiah(cashSummary.cash_shift_refunds || 0)}
+                  </span>
+                </div>
                   <div className="flex items-center justify-between">
                     <div className="flex items-center space-x-2">
                       <Wallet className="w-4 h-4 text-blue-600" />
@@ -1173,7 +1494,13 @@ export default function GantiShift() {
                     </div>
                     <span className="text-sm font-semibold text-black">{formatRupiah(cashSummary.cash_whole_day)}</span>
                   </div>
-                  <div className="flex items-center justify-between pt-2 border-t border-gray-200">
+                <div className="flex items-center justify-between">
+                  <span className="text-sm text-gray-600">Kas Diharapkan:</span>
+                  <span className="text-sm font-semibold text-black">
+                    {formatRupiah(kasExpectedDisplay)}
+                  </span>
+                </div>
+                <div className="flex items-center justify-between pt-2 border-t border-gray-200">
                     <div className="flex items-center space-x-2">
                       <CreditCard className="w-4 h-4 text-purple-600" />
                       <span className="text-sm font-medium text-gray-800">Cash in Cashier:</span>
@@ -1399,7 +1726,7 @@ export default function GantiShift() {
                   type="datetime-local"
                   value={startDateTime}
                   onChange={(e) => setStartDateTime(e.target.value)}
-                  className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-purple-500"
+                  className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-purple-500 text-gray-900"
                   required
                 />
               </div>
@@ -1412,7 +1739,7 @@ export default function GantiShift() {
                   type="datetime-local"
                   value={endDateTime}
                   onChange={(e) => setEndDateTime(e.target.value)}
-                  className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-purple-500"
+                  className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-purple-500 text-gray-900"
                   required
                 />
               </div>
@@ -1453,7 +1780,7 @@ export default function GantiShift() {
       )}
 
       {/* End Shift Confirmation Modal */}
-      {showEndShiftConfirm && (
+      {showEndShiftConfirm && activeShift && (
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
           <div className="bg-white rounded-lg shadow-xl max-w-md w-full p-6 animate-in zoom-in">
             <h3 className="text-xl font-bold text-gray-800 mb-4">Konfirmasi Akhiri Shift</h3>
@@ -1477,17 +1804,47 @@ export default function GantiShift() {
                 </span>
               </div>
               <div className="flex justify-between">
-                <span className="text-gray-800 font-medium">Cash (Shift):</span>
-                <span className="font-semibold text-gray-900">{formatRupiah(cashSummary.cash_shift)}</span>
+                <span className="text-gray-800 font-medium">Kas Mulai:</span>
+                <span className="font-semibold text-gray-900">{formatRupiah(activeShift.modal_awal)}</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-gray-800 font-medium">Cash Masuk:</span>
+                <span className="font-semibold text-gray-900">{formatRupiah(cashShiftSales)}</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-gray-800 font-medium">Cash Refund:</span>
+                <span className="font-semibold text-gray-900">{formatRupiah(cashSummary.cash_shift_refunds ?? 0)}</span>
               </div>
               <div className="flex justify-between pt-3 border-t border-gray-200">
-                <span className="text-gray-900 font-semibold">Cash in Cashier:</span>
-                <span className="font-bold text-lg text-purple-700">{formatRupiah(totalCashInCashier)}</span>
+                <span className="text-gray-900 font-semibold">Kas Diharapkan:</span>
+                <span className="font-bold text-lg text-purple-700">
+                  {formatRupiah(kasExpectedDisplay)}
+                </span>
               </div>
             </div>
+            {endShiftMode !== 'force' && (
+              <div className="mb-4">
+                <label className="block text-sm font-medium text-gray-700 mb-1">Kas akhir di laci</label>
+                <input
+                  type="number"
+                  min="0"
+                  value={kasAkhirInput}
+                  onChange={(e) => {
+                    setKasAkhirInput(e.target.value);
+                    setKasAkhirError(null);
+                  }}
+                  className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-red-500 text-gray-900"
+                  placeholder="Masukkan nominal kas akhir"
+                  required
+                />
+                {kasAkhirError && (
+                  <p className="text-xs text-red-600 mt-1">{kasAkhirError}</p>
+                )}
+              </div>
+            )}
             <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-3 mb-6">
               <p className="text-sm text-yellow-800">
-                ⚠️ Shift akan ditutup dan tidak dapat dibuka kembali.
+                ⚠️ Shift akan ditutup dan tidak dapat dibuka kembali. Pastikan nominal kas akhir sudah dihitung dengan benar sebelum melanjutkan.
               </p>
             </div>
             <div className="flex space-x-3">
@@ -1530,6 +1887,20 @@ export default function GantiShift() {
               <div className="flex justify-between">
                 <span className="text-gray-800 font-medium">Cash (Shift):</span>
                 <span className="font-semibold text-gray-900">{formatRupiah(cashSummary.cash_shift)}</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-gray-800 font-medium">Kas Mulai:</span>
+                <span className="font-semibold text-gray-900">{formatRupiah(activeShift?.modal_awal || 0)}</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-gray-800 font-medium">Cash Refund:</span>
+                <span className="font-semibold text-gray-900">{formatRupiah(cashSummary.cash_shift_refunds || 0)}</span>
+              </div>
+              <div className="flex justify-between border-t border-gray-200 pt-2">
+                <span className="text-gray-900 font-semibold">Kas Diharapkan:</span>
+                <span className="font-bold text-lg text-purple-700">
+                  {formatRupiah(kasExpectedDisplay)}
+                </span>
               </div>
             </div>
             <div className="bg-orange-50 border border-orange-200 rounded-lg p-3 mb-6">
