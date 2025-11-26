@@ -4572,13 +4572,13 @@ function generateTestReceiptHTML(printerName, businessName, options) {
   <div class="branch">${businessName}</div>
   <div class="address">Jl. Kalimantan no. 21, Kartoharjo<br>Kec. Kartoharjo, Kota Madiun</div>
   
-  <div class="transaction-type">DINE IN 23</div>
+  <div class="transaction-type">DINE IN TEST PRINT</div>
   
   <div class="dashed-line"></div>
   
   <div class="info-line">
     <span class="info-label">Nomor Pesanan:</span>
-    <span class="info-value order-number-value mono-value">1970326207362797570</span>
+    <span class="info-value order-number-value mono-value">0000000000000000000</span>
   </div>
   <div class="info-line">
     <span class="info-label">Waktu Pesanan:</span>
@@ -4590,7 +4590,7 @@ function generateTestReceiptHTML(printerName, businessName, options) {
   </div>
   <div class="info-line">
     <span class="info-label">Operator Kasir:</span>
-    <span class="info-value">Erika Farah</span>
+    <span class="info-value">test print</span>
   </div>
   <div class="info-line">
     <span class="info-label">Saluran:</span>
@@ -4607,7 +4607,7 @@ function generateTestReceiptHTML(printerName, businessName, options) {
       <th style="width: 25%; text-align: right;">Subtotal</th>
     </tr>
     <tr>
-      <td colspan="4" style="text-align: left; padding-bottom: 0.5mm;">Croissant</td>
+      <td colspan="4" style="text-align: left; padding-bottom: 0.5mm;">testprint</td>
     </tr>
     <tr>
       <td style="width: 30%;"></td>
@@ -5079,114 +5079,298 @@ function generateShiftBreakdownHTML(shiftData) {
         return transactionType === 'bakery' ? 'Bakery' : 'Drinks';
     };
     const printTime = formatDateTime(new Date().toISOString());
-    const shiftStartTime = formatDateTime(shiftData.shift_start);
-    const shiftEndTime = shiftData.shift_end ? formatDateTime(shiftData.shift_end) : 'Masih Berlangsung';
-    // Sort products: regular products first, bundle items at the bottom
-    const sortedProducts = [...shiftData.productSales].sort((a, b) => {
-        const aIsBundle = Boolean(a.is_bundle_item);
-        const bIsBundle = Boolean(b.is_bundle_item);
-        // If one is bundle and one isn't, bundle goes to bottom
-        if (aIsBundle && !bIsBundle)
-            return 1;
-        if (!aIsBundle && bIsBundle)
-            return -1;
-        // If both are same type, keep original order
-        return 0;
-    });
-    // Generate product sales table rows
-    const productRows = sortedProducts.map(product => {
-        const quantity = product.total_quantity || 0;
-        const baseSubtotal = product.base_subtotal ?? (product.total_subtotal - product.customization_subtotal);
-        const unitPrice = product.base_unit_price ?? (quantity > 0 ? baseSubtotal / quantity : 0);
-        const platformLabel = formatPlatformLabel(product.platform);
-        const transactionLabel = formatTransactionLabel(product.transaction_type);
-        const isBundleItem = Boolean(product.is_bundle_item);
-        // Debug log for bundle items
-        if (isBundleItem) {
-            console.log(`[SHIFT PRINT] Displaying bundle item: ${product.product_name}, is_bundle_item: ${product.is_bundle_item}`);
+    const renderReportSection = (report, options = {}) => {
+        const sectionTitle = options.titleOverride || report.title || 'LAPORAN SHIFT';
+        const businessName = options.businessName || shiftData.businessName || 'Momoyo Bakery Kalimantan';
+        const shiftStartTime = formatDateTime(report.shift_start);
+        const shiftEndTime = report.shift_end ? formatDateTime(report.shift_end) : 'Masih Berlangsung';
+        const sortedProducts = [...report.productSales].sort((a, b) => {
+            const aIsBundle = Boolean(a.is_bundle_item);
+            const bIsBundle = Boolean(b.is_bundle_item);
+            if (aIsBundle && !bIsBundle)
+                return 1;
+            if (!aIsBundle && bIsBundle)
+                return -1;
+            return 0;
+        });
+        const productRows = sortedProducts.map(product => {
+            const quantity = product.total_quantity || 0;
+            const baseSubtotal = product.base_subtotal ?? (product.total_subtotal - product.customization_subtotal);
+            const unitPrice = product.base_unit_price ?? (quantity > 0 ? baseSubtotal / quantity : 0);
+            const platformLabel = formatPlatformLabel(product.platform);
+            const transactionLabel = formatTransactionLabel(product.transaction_type);
+            const isBundleItem = Boolean(product.is_bundle_item);
+            if (isBundleItem) {
+                console.log(`[SHIFT PRINT] Displaying bundle item: ${product.product_name}, is_bundle_item: ${product.is_bundle_item}`);
+            }
+            const productNameDisplay = isBundleItem
+                ? `<span style="font-size: 4.8pt;">(Bundle)</span> ${product.product_name}`
+                : product.product_name;
+            return `
+      <tr>
+        <td style="text-align: left; padding: 1mm 0;">
+          <div>${productNameDisplay}</div>
+          <div style="font-size: 7pt; color: #555;">${transactionLabel} · ${platformLabel}</div>
+        </td>
+        <td style="text-align: right; padding: 1mm 0;">${quantity}</td>
+        <td style="text-align: right; padding: 1mm 0;">${isBundleItem ? '-' : unitPrice.toLocaleString('id-ID')}</td>
+        <td style="text-align: right; padding: 1mm 0;">${isBundleItem ? '-' : baseSubtotal.toLocaleString('id-ID')}</td>
+      </tr>
+      `;
+        }).join('');
+        const regularProducts = report.productSales.filter((p) => !p.is_bundle_item);
+        const totalProductQty = report.productSales.reduce((sum, p) => sum + p.total_quantity, 0);
+        const totalProductBaseSubtotal = regularProducts.reduce((sum, p) => sum + (p.base_subtotal ?? (p.total_subtotal - p.customization_subtotal)), 0);
+        const customizationRows = report.customizationSales.map(item => `
+      <tr>
+        <td style="text-align: left; padding: 1mm 0;">
+          <div>${item.option_name}</div>
+          <div style="font-size: 7pt; color: #555;">${item.customization_name}</div>
+        </td>
+        <td style="text-align: right; padding: 1mm 0;">${item.total_quantity}</td>
+        <td style="text-align: right; padding: 1mm 0;">${item.total_revenue.toLocaleString('id-ID')}</td>
+      </tr>
+    `).join('');
+        const totalCustomizationUnits = report.customizationSales.reduce((sum, item) => sum + item.total_quantity, 0);
+        const totalCustomizationRevenue = report.customizationSales.reduce((sum, item) => sum + item.total_revenue, 0);
+        const paymentRows = report.paymentBreakdown.map(payment => `
+      <tr>
+        <td style="text-align: left; padding: 1mm 0;">${payment.payment_method_name || 'N/A'}</td>
+        <td style="text-align: right; padding: 1mm 0;">${payment.transaction_count}</td>
+      </tr>
+    `).join('');
+        const totalPaymentCount = report.paymentBreakdown.reduce((sum, p) => sum + p.transaction_count, 0);
+        const formattedTotalDiscount = report.statistics.total_discount > 0
+            ? formatCurrency(-Math.abs(report.statistics.total_discount))
+            : formatCurrency(0);
+        const cashSummaryData = report.cashSummary;
+        const cashShiftSales = cashSummaryData.cash_shift_sales ?? cashSummaryData.cash_shift ?? 0;
+        const cashShiftRefunds = cashSummaryData.cash_shift_refunds ?? 0;
+        const cashWholeDaySales = cashSummaryData.cash_whole_day_sales ?? cashSummaryData.cash_whole_day ?? 0;
+        const cashWholeDayRefunds = cashSummaryData.cash_whole_day_refunds ?? 0;
+        const cashNetShift = cashSummaryData.cash_shift ?? (cashShiftSales - cashShiftRefunds);
+        const cashNetWholeDay = cashSummaryData.cash_whole_day ?? (cashWholeDaySales - cashWholeDayRefunds);
+        const kasMulaiSummary = cashSummaryData.kas_mulai ?? report.modal_awal ?? 0;
+        const kasExpectedSummary = cashSummaryData.kas_expected ?? (kasMulaiSummary + cashShiftSales - cashShiftRefunds);
+        const kasAkhirSummary = typeof cashSummaryData.kas_akhir === 'number' ? cashSummaryData.kas_akhir : null;
+        let kasSelisihSummary = typeof cashSummaryData.kas_selisih === 'number'
+            ? cashSummaryData.kas_selisih
+            : kasAkhirSummary !== null
+                ? Number((kasAkhirSummary - kasExpectedSummary).toFixed(2))
+                : null;
+        let kasSelisihLabelSummary = cashSummaryData.kas_selisih_label ?? null;
+        if (kasSelisihSummary !== null) {
+            if (Math.abs(kasSelisihSummary) < 0.01) {
+                kasSelisihSummary = 0;
+                kasSelisihLabelSummary = 'balanced';
+            }
+            else if (!kasSelisihLabelSummary) {
+                kasSelisihLabelSummary = kasSelisihSummary > 0 ? 'plus' : 'minus';
+            }
         }
-        const productNameDisplay = isBundleItem
-            ? `<span style="font-size: 4.8pt;">(Bundle)</span> ${product.product_name}`
-            : product.product_name;
+        const varianceLabelDisplay = kasSelisihLabelSummary === 'plus'
+            ? 'Plus'
+            : kasSelisihLabelSummary === 'minus'
+                ? 'Minus'
+                : kasSelisihLabelSummary === 'balanced'
+                    ? 'Balanced'
+                    : 'Pending';
+        const varianceValueDisplay = kasSelisihSummary === null
+            ? '-'
+            : `${kasSelisihSummary > 0 ? '+' : ''}${kasSelisihSummary.toLocaleString('id-ID')}`;
+        const kasAkhirDisplay = kasAkhirSummary !== null ? kasAkhirSummary.toLocaleString('id-ID') : '-';
+        const totalCashInCashierDisplay = (cashSummaryData.total_cash_in_cashier ?? kasExpectedSummary).toLocaleString('id-ID');
         return `
-    <tr>
-      <td style="text-align: left; padding: 1mm 0;">
-        <div>${productNameDisplay}</div>
-        <div style="font-size: 7pt; color: #555;">${transactionLabel} · ${platformLabel}</div>
-      </td>
-      <td style="text-align: right; padding: 1mm 0;">${quantity}</td>
-      <td style="text-align: right; padding: 1mm 0;">${isBundleItem ? '-' : unitPrice.toLocaleString('id-ID')}</td>
-      <td style="text-align: right; padding: 1mm 0;">${isBundleItem ? '-' : baseSubtotal.toLocaleString('id-ID')}</td>
-    </tr>
+    <div class="report-block">
+      <div class="header">
+        <div class="title">${sectionTitle}</div>
+        <div class="business-name">${businessName}</div>
+      </div>
+
+      <div class="divider"></div>
+
+      <div class="info-line">
+        <span class="info-label">Cashier:</span>
+        <span class="info-value">${report.user_name}</span>
+      </div>
+      <div class="info-line">
+        <span class="info-label">Shift Start:</span>
+        <span class="info-value">${shiftStartTime}</span>
+      </div>
+      <div class="info-line">
+        <span class="info-label">Shift End:</span>
+        <span class="info-value">${shiftEndTime}</span>
+      </div>
+      <div class="info-line">
+        <span class="info-label">Modal Awal:</span>
+        <span class="info-value">${report.modal_awal.toLocaleString('id-ID')}</span>
+      </div>
+
+      <div class="divider"></div>
+
+      <div class="section-title">BARANG TERJUAL</div>
+      <table>
+        <thead>
+          <tr>
+            <th>Product</th>
+            <th class="right">Qty</th>
+            <th class="right">Unit Price</th>
+            <th class="right">Subtotal</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${productRows || '<tr><td colSpan="4" style="text-align: center;">Tidak ada produk</td></tr>'}
+          <tr class="total-row">
+            <td>TOTAL</td>
+            <td class="right">${totalProductQty}</td>
+            <td class="right">-</td>
+            <td class="right">${totalProductBaseSubtotal.toLocaleString('id-ID')}</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <div class="divider"></div>
+
+      <div class="section-title">PAYMENT METHOD</div>
+      <table>
+        <thead>
+          <tr>
+            <th>Payment Method</th>
+            <th class="right">Count</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${paymentRows || '<tr><td colSpan="2" style="text-align: center;">Tidak ada transaksi</td></tr>'}
+          <tr class="total-row">
+            <td>TOTAL</td>
+            <td class="right">${totalPaymentCount}</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <div class="divider"></div>
+
+      <div class="section-title">TOPPING SALES BREAKDOWN</div>
+      <table>
+        <thead>
+          <tr>
+            <th>Customization</th>
+            <th class="right">Qty</th>
+            <th class="right">Revenue</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${customizationRows || '<tr><td colSpan="3" style="text-align: center;">Tidak ada kustomisasi</td></tr>'}
+          <tr class="total-row">
+            <td>TOTAL</td>
+            <td class="right">${totalCustomizationUnits}</td>
+            <td class="right">${totalCustomizationRevenue.toLocaleString('id-ID')}</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <div class="divider"></div>
+
+      <div class="section-title">DISKON & VOUCHER</div>
+      <table>
+        <tbody>
+          <tr>
+            <td style="text-align: left; padding: 1mm 0;">Voucher Digunakan</td>
+            <td class="right">${report.statistics.voucher_count}</td>
+          </tr>
+          <tr>
+            <td style="text-align: left; padding: 1mm 0;">Total Diskon Voucher</td>
+            <td class="right">${formattedTotalDiscount}</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <div class="divider"></div>
+
+      <div class="summary">
+        <div class="summary-line">
+          <span class="summary-label">Total Pesanan:</span>
+          <span class="summary-value">${report.statistics.order_count}</span>
+        </div>
+        <div class="summary-line">
+          <span class="summary-label">Total Transaksi:</span>
+          <span class="summary-value">${report.statistics.total_amount.toLocaleString('id-ID')}</span>
+        </div>
+        <div class="summary-line">
+          <span class="summary-label">Topping Units:</span>
+          <span class="summary-value">${totalCustomizationUnits}</span>
+        </div>
+        <div class="summary-line">
+          <span class="summary-label">Total Topping:</span>
+          <span class="summary-value">${totalCustomizationRevenue.toLocaleString('id-ID')}</span>
+        </div>
+        <div class="summary-line">
+          <span class="summary-label">Voucher Dipakai:</span>
+          <span class="summary-value">${report.statistics.voucher_count}</span>
+        </div>
+        <div class="summary-line">
+          <span class="summary-label">Total Diskon Voucher:</span>
+          <span class="summary-value">${formattedTotalDiscount}</span>
+        </div>
+        <div class="summary-line">
+          <span class="summary-label">Kas Mulai:</span>
+          <span class="summary-value">${kasMulaiSummary.toLocaleString('id-ID')}</span>
+        </div>
+        <div class="summary-line">
+          <span class="summary-label">Cash Sales (Shift):</span>
+          <span class="summary-value">${cashShiftSales.toLocaleString('id-ID')}</span>
+        </div>
+        <div class="summary-line">
+          <span class="summary-label">Cash Refunds (Shift):</span>
+          <span class="summary-value">-${cashShiftRefunds.toLocaleString('id-ID')}</span>
+        </div>
+        <div class="summary-line">
+          <span class="summary-label">Net Cash (Shift):</span>
+          <span class="summary-value">${cashNetShift.toLocaleString('id-ID')}</span>
+        </div>
+        <div class="summary-line">
+          <span class="summary-label">Kas Diharapkan:</span>
+          <span class="summary-value">${kasExpectedSummary.toLocaleString('id-ID')}</span>
+        </div>
+        <div class="summary-line">
+          <span class="summary-label">Kas Akhir:</span>
+          <span class="summary-value">${kasAkhirDisplay}</span>
+        </div>
+        <div class="summary-line">
+          <span class="summary-label">Selisih (${varianceLabelDisplay}):</span>
+          <span class="summary-value">${varianceValueDisplay}</span>
+        </div>
+        <div class="summary-line">
+          <span class="summary-label">Cash Sales (Hari):</span>
+          <span class="summary-value">${cashWholeDaySales.toLocaleString('id-ID')}</span>
+        </div>
+        <div class="summary-line">
+          <span class="summary-label">Cash Refunds (Hari):</span>
+          <span class="summary-value">-${cashWholeDayRefunds.toLocaleString('id-ID')}</span>
+        </div>
+        <div class="summary-line">
+          <span class="summary-label">Net Cash (Hari):</span>
+          <span class="summary-value">${cashNetWholeDay.toLocaleString('id-ID')}</span>
+        </div>
+        <div class="summary-line">
+          <span class="summary-label">Cash in Cashier:</span>
+          <span class="summary-value">${totalCashInCashierDisplay}</span>
+        </div>
+      </div>
+    </div>
     `;
-    }).join('');
-    const regularProducts = shiftData.productSales.filter((p) => !p.is_bundle_item);
-    const totalProductQty = shiftData.productSales.reduce((sum, p) => sum + p.total_quantity, 0);
-    const totalProductBaseSubtotal = regularProducts.reduce((sum, p) => sum + (p.base_subtotal ?? (p.total_subtotal - p.customization_subtotal)), 0);
-    const customizationRows = shiftData.customizationSales.map(item => `
-    <tr>
-      <td style="text-align: left; padding: 1mm 0;">
-        <div>${item.option_name}</div>
-        <div style="font-size: 7pt; color: #555;">${item.customization_name}</div>
-      </td>
-      <td style="text-align: right; padding: 1mm 0;">${item.total_quantity}</td>
-      <td style="text-align: right; padding: 1mm 0;">${item.total_revenue.toLocaleString('id-ID')}</td>
-    </tr>
-  `).join('');
-    const totalCustomizationUnits = shiftData.customizationSales.reduce((sum, item) => sum + item.total_quantity, 0);
-    const totalCustomizationRevenue = shiftData.customizationSales.reduce((sum, item) => sum + item.total_revenue, 0);
-    // Generate payment method rows
-    const paymentRows = shiftData.paymentBreakdown.map(payment => `
-    <tr>
-      <td style="text-align: left; padding: 1mm 0;">${payment.payment_method_name || 'N/A'}</td>
-      <td style="text-align: right; padding: 1mm 0;">${payment.transaction_count}</td>
-    </tr>
-  `).join('');
-    const totalPaymentCount = shiftData.paymentBreakdown.reduce((sum, p) => sum + p.transaction_count, 0);
-    const formattedTotalDiscount = shiftData.statistics.total_discount > 0
-        ? formatCurrency(-Math.abs(shiftData.statistics.total_discount))
-        : formatCurrency(0);
-    const cashSummaryData = shiftData.cashSummary || {
-        cash_shift: 0,
-        cash_whole_day: 0,
-        total_cash_in_cashier: 0
     };
-    const cashShiftSales = cashSummaryData.cash_shift_sales ?? cashSummaryData.cash_shift ?? 0;
-    const cashShiftRefunds = cashSummaryData.cash_shift_refunds ?? 0;
-    const cashWholeDaySales = cashSummaryData.cash_whole_day_sales ?? cashSummaryData.cash_whole_day ?? 0;
-    const cashWholeDayRefunds = cashSummaryData.cash_whole_day_refunds ?? 0;
-    const cashNetShift = cashSummaryData.cash_shift ?? (cashShiftSales - cashShiftRefunds);
-    const cashNetWholeDay = cashSummaryData.cash_whole_day ?? (cashWholeDaySales - cashWholeDayRefunds);
-    const kasMulaiSummary = cashSummaryData.kas_mulai ?? shiftData.modal_awal ?? 0;
-    const kasExpectedSummary = cashSummaryData.kas_expected ?? (kasMulaiSummary + cashShiftSales - cashShiftRefunds);
-    const kasAkhirSummary = typeof cashSummaryData.kas_akhir === 'number' ? cashSummaryData.kas_akhir : null;
-    let kasSelisihSummary = typeof cashSummaryData.kas_selisih === 'number'
-        ? cashSummaryData.kas_selisih
-        : kasAkhirSummary !== null
-            ? Number((kasAkhirSummary - kasExpectedSummary).toFixed(2))
-            : null;
-    let kasSelisihLabelSummary = cashSummaryData.kas_selisih_label ?? null;
-    if (kasSelisihSummary !== null) {
-        if (Math.abs(kasSelisihSummary) < 0.01) {
-            kasSelisihSummary = 0;
-            kasSelisihLabelSummary = 'balanced';
-        }
-        else if (!kasSelisihLabelSummary) {
-            kasSelisihLabelSummary = kasSelisihSummary > 0 ? 'plus' : 'minus';
-        }
+    const sections = [];
+    sections.push(renderReportSection(shiftData, {
+        titleOverride: shiftData.title || 'LAPORAN SHIFT',
+        businessName: shiftData.businessName
+    }));
+    if (shiftData.wholeDayReport) {
+        sections.push(renderReportSection(shiftData.wholeDayReport, {
+            titleOverride: shiftData.wholeDayReport.title || 'RINGKASAN HARIAN',
+            businessName: shiftData.businessName
+        }));
     }
-    const varianceLabelDisplay = kasSelisihLabelSummary === 'plus'
-        ? 'Plus'
-        : kasSelisihLabelSummary === 'minus'
-            ? 'Minus'
-            : kasSelisihLabelSummary === 'balanced'
-                ? 'Balanced'
-                : 'Pending';
-    const varianceValueDisplay = kasSelisihSummary === null
-        ? '-'
-        : `${kasSelisihSummary > 0 ? '+' : ''}${kasSelisihSummary.toLocaleString('id-ID')}`;
-    const kasAkhirDisplay = kasAkhirSummary !== null ? kasAkhirSummary.toLocaleString('id-ID') : '-';
-    const totalCashInCashierDisplay = (cashSummaryData.total_cash_in_cashier ?? kasExpectedSummary).toLocaleString('id-ID');
     return `
 <!DOCTYPE html>
 <html>
@@ -5205,6 +5389,11 @@ function generateShiftBreakdownHTML(shiftData) {
       padding: 5mm 7mm;
       word-wrap: break-word;
       overflow-wrap: break-word;
+    }
+    .report-block + .report-block {
+      margin-top: 6mm;
+      padding-top: 6mm;
+      border-top: 1px dashed #000;
     }
     .header {
       text-align: center;
@@ -5286,181 +5475,7 @@ function generateShiftBreakdownHTML(shiftData) {
   </style>
 </head>
 <body>
-  <div class="header">
-    <div class="title">LAPORAN SHIFT</div>
-    <div class="business-name">${shiftData.businessName || 'Momoyo Bakery Kalimantan'}</div>
-  </div>
-
-  <div class="divider"></div>
-
-  <div class="info-line">
-    <span class="info-label">Cashier:</span>
-    <span class="info-value">${shiftData.user_name}</span>
-  </div>
-  <div class="info-line">
-    <span class="info-label">Shift Start:</span>
-    <span class="info-value">${shiftStartTime}</span>
-  </div>
-  <div class="info-line">
-    <span class="info-label">Shift End:</span>
-    <span class="info-value">${shiftEndTime}</span>
-  </div>
-  <div class="info-line">
-    <span class="info-label">Modal Awal:</span>
-    <span class="info-value">${shiftData.modal_awal.toLocaleString('id-ID')}</span>
-  </div>
-
-  <div class="divider"></div>
-
-  <div class="section-title">BARANG TERJUAL</div>
-  <table>
-    <thead>
-      <tr>
-        <th>Product</th>
-        <th class="right">Qty</th>
-        <th class="right">Unit Price</th>
-        <th class="right">Subtotal</th>
-      </tr>
-    </thead>
-    <tbody>
-      ${productRows || '<tr><td colSpan="4" style="text-align: center;">Tidak ada produk</td></tr>'}
-      <tr class="total-row">
-        <td>TOTAL</td>
-        <td class="right">${totalProductQty}</td>
-        <td class="right">-</td>
-        <td class="right">${totalProductBaseSubtotal.toLocaleString('id-ID')}</td>
-      </tr>
-    </tbody>
-  </table>
-
-  <div class="divider"></div>
-
-  <div class="section-title">PAYMENT METHOD</div>
-  <table>
-    <thead>
-      <tr>
-        <th>Payment Method</th>
-        <th class="right">Count</th>
-      </tr>
-    </thead>
-    <tbody>
-      ${paymentRows || '<tr><td colSpan="2" style="text-align: center;">Tidak ada transaksi</td></tr>'}
-      <tr class="total-row">
-        <td>TOTAL</td>
-        <td class="right">${totalPaymentCount}</td>
-      </tr>
-    </tbody>
-  </table>
-
-  <div class="divider"></div>
-
-  <div class="section-title">TOPPING SALES BREAKDOWN</div>
-  <table>
-    <thead>
-      <tr>
-        <th>Customization</th>
-        <th class="right">Qty</th>
-        <th class="right">Revenue</th>
-      </tr>
-    </thead>
-    <tbody>
-      ${customizationRows || '<tr><td colSpan="3" style="text-align: center;">Tidak ada kustomisasi</td></tr>'}
-      <tr class="total-row">
-        <td>TOTAL</td>
-        <td class="right">${totalCustomizationUnits}</td>
-        <td class="right">${totalCustomizationRevenue.toLocaleString('id-ID')}</td>
-      </tr>
-    </tbody>
-  </table>
-
-  <div class="divider"></div>
-
-  <div class="section-title">DISKON & VOUCHER</div>
-  <table>
-    <tbody>
-      <tr>
-        <td style="text-align: left; padding: 1mm 0;">Voucher Digunakan</td>
-        <td class="right">${shiftData.statistics.voucher_count}</td>
-      </tr>
-      <tr>
-        <td style="text-align: left; padding: 1mm 0;">Total Diskon Voucher</td>
-        <td class="right">${formattedTotalDiscount}</td>
-      </tr>
-    </tbody>
-  </table>
-
-  <div class="divider"></div>
-
-  <div class="summary">
-    <div class="summary-line">
-      <span class="summary-label">Total Pesanan:</span>
-      <span class="summary-value">${shiftData.statistics.order_count}</span>
-    </div>
-    <div class="summary-line">
-      <span class="summary-label">Total Transaksi:</span>
-      <span class="summary-value">${shiftData.statistics.total_amount.toLocaleString('id-ID')}</span>
-    </div>
-    <div class="summary-line">
-      <span class="summary-label">Topping Units:</span>
-      <span class="summary-value">${totalCustomizationUnits}</span>
-    </div>
-    <div class="summary-line">
-      <span class="summary-label">Total Topping:</span>
-      <span class="summary-value">${totalCustomizationRevenue.toLocaleString('id-ID')}</span>
-    </div>
-    <div class="summary-line">
-      <span class="summary-label">Voucher Dipakai:</span>
-      <span class="summary-value">${shiftData.statistics.voucher_count}</span>
-    </div>
-    <div class="summary-line">
-      <span class="summary-label">Total Diskon Voucher:</span>
-      <span class="summary-value">${formattedTotalDiscount}</span>
-    </div>
-    <div class="summary-line">
-      <span class="summary-label">Kas Mulai:</span>
-      <span class="summary-value">${kasMulaiSummary.toLocaleString('id-ID')}</span>
-    </div>
-    <div class="summary-line">
-      <span class="summary-label">Cash Sales (Shift):</span>
-      <span class="summary-value">${cashShiftSales.toLocaleString('id-ID')}</span>
-    </div>
-    <div class="summary-line">
-      <span class="summary-label">Cash Refunds (Shift):</span>
-      <span class="summary-value">-${cashShiftRefunds.toLocaleString('id-ID')}</span>
-    </div>
-    <div class="summary-line">
-      <span class="summary-label">Net Cash (Shift):</span>
-      <span class="summary-value">${cashNetShift.toLocaleString('id-ID')}</span>
-    </div>
-    <div class="summary-line">
-      <span class="summary-label">Kas Diharapkan:</span>
-      <span class="summary-value">${kasExpectedSummary.toLocaleString('id-ID')}</span>
-    </div>
-    <div class="summary-line">
-      <span class="summary-label">Kas Akhir:</span>
-      <span class="summary-value">${kasAkhirDisplay}</span>
-    </div>
-    <div class="summary-line">
-      <span class="summary-label">Selisih (${varianceLabelDisplay}):</span>
-      <span class="summary-value">${varianceValueDisplay}</span>
-    </div>
-    <div class="summary-line">
-      <span class="summary-label">Cash Sales (Hari):</span>
-      <span class="summary-value">${cashWholeDaySales.toLocaleString('id-ID')}</span>
-    </div>
-    <div class="summary-line">
-      <span class="summary-label">Cash Refunds (Hari):</span>
-      <span class="summary-value">-${cashWholeDayRefunds.toLocaleString('id-ID')}</span>
-    </div>
-    <div class="summary-line">
-      <span class="summary-label">Net Cash (Hari):</span>
-      <span class="summary-value">${cashNetWholeDay.toLocaleString('id-ID')}</span>
-    </div>
-    <div class="summary-line">
-      <span class="summary-label">Cash in Cashier:</span>
-      <span class="summary-value">${totalCashInCashierDisplay}</span>
-    </div>
-  </div>
+  ${sections.join('')}
 
   <div class="divider"></div>
 
@@ -5508,6 +5523,7 @@ electron_1.ipcMain.handle('print-shift-breakdown', async (event, data) => {
             customizationSales: data.customizationSales || [],
             paymentBreakdown: data.paymentBreakdown || [],
             cashSummary: data.cashSummary,
+            wholeDayReport: data.wholeDayReport || null,
             businessName
         });
         // Close existing print window if any

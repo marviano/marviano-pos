@@ -5144,13 +5144,13 @@ function generateTestReceiptHTML(printerName: string, businessName: string, opti
   <div class="branch">${businessName}</div>
   <div class="address">Jl. Kalimantan no. 21, Kartoharjo<br>Kec. Kartoharjo, Kota Madiun</div>
   
-  <div class="transaction-type">DINE IN 23</div>
+  <div class="transaction-type">DINE IN TEST PRINT</div>
   
   <div class="dashed-line"></div>
   
   <div class="info-line">
     <span class="info-label">Nomor Pesanan:</span>
-    <span class="info-value order-number-value mono-value">1970326207362797570</span>
+    <span class="info-value order-number-value mono-value">0000000000000000000</span>
   </div>
   <div class="info-line">
     <span class="info-label">Waktu Pesanan:</span>
@@ -5162,7 +5162,7 @@ function generateTestReceiptHTML(printerName: string, businessName: string, opti
   </div>
   <div class="info-line">
     <span class="info-label">Operator Kasir:</span>
-    <span class="info-value">Erika Farah</span>
+    <span class="info-value">test print</span>
   </div>
   <div class="info-line">
     <span class="info-label">Saluran:</span>
@@ -5179,7 +5179,7 @@ function generateTestReceiptHTML(printerName: string, businessName: string, opti
       <th style="width: 25%; text-align: right;">Subtotal</th>
     </tr>
     <tr>
-      <td colspan="4" style="text-align: left; padding-bottom: 0.5mm;">Croissant</td>
+      <td colspan="4" style="text-align: left; padding-bottom: 0.5mm;">testprint</td>
     </tr>
     <tr>
       <td style="width: 30%;"></td>

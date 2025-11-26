@@ -16,6 +16,37 @@ interface PrinterSelection {
   receiptizePrinter: string;
 }
 
+type PrinterConfigRow = {
+  printer_type?: keyof PrinterSelection | string;
+  system_printer_name?: string;
+  extra_settings?: unknown;
+};
+
+type ElectronPrinter = {
+  name: string;
+  displayName?: string;
+  status?: string;
+  isDefault?: boolean;
+};
+
+const normalizePrinterStatus = (status?: string): SystemPrinter['status'] => {
+  if (status === 'printing' || status === 'stopped' || status === 'offline' || status === 'idle') {
+    return status;
+  }
+  return 'idle';
+};
+
+const isPrinterConfigRow = (value: unknown): value is PrinterConfigRow => {
+  if (!value || typeof value !== 'object') {
+    return false;
+  }
+  const record = value as Record<string, unknown>;
+  if (record.system_printer_name && typeof record.system_printer_name !== 'string') {
+    return false;
+  }
+  return true;
+};
+
 export default function PrinterSelector() {
   const [systemPrinters, setSystemPrinters] = useState<SystemPrinter[]>([]);
   const [selectedPrinters, setSelectedPrinters] = useState<PrinterSelection>({
@@ -28,69 +59,30 @@ export default function PrinterSelector() {
     labelPrinter: 0,
     receiptizePrinter: 0
   });
+  const [copies, setCopies] = useState<Record<'receiptPrinter' | 'receiptizePrinter', number>>({
+    receiptPrinter: 1,
+    receiptizePrinter: 1
+  });
   const [isScanning, setIsScanning] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [isTesting, setIsTesting] = useState<string | null>(null);
   const [saveStatus, setSaveStatus] = useState<'idle' | 'success' | 'error'>('idle');
 
-  // Add state for Printer 2 mode
-  const [printer2Mode, setPrinter2Mode] = useState<'auto' | 'manual'>('auto');
-  const [isSavingMode, setIsSavingMode] = useState(false);
-  const [modeSaveStatus, setModeSaveStatus] = useState<'idle' | 'success' | 'error'>('idle');
-
   // Load saved printer selections and auto-scan printers on component mount
   useEffect(() => {
     loadSavedSelections();
-    loadPrinter2Mode();
     // Auto-scan printers when component mounts
     scanForPrinters();
   }, []);
 
-  const loadPrinter2Mode = async () => {
-    try {
-      if (window.electronAPI?.getPrinter2Mode) {
-        const result = await window.electronAPI.getPrinter2Mode();
-        if (result?.success && result?.mode) {
-          setPrinter2Mode(result.mode);
-          console.log('✅ Loaded Printer 2 mode:', result.mode);
-        }
-      }
-    } catch (error) {
-      console.error('Error loading Printer 2 mode:', error);
-    }
-  };
-
-  const handleModeChange = async (newMode: 'auto' | 'manual') => {
-    setPrinter2Mode(newMode);
-    
-    // Auto-save
-    if (window.electronAPI?.setPrinter2Mode) {
-      setIsSavingMode(true);
-      setModeSaveStatus('idle');
-      
-      try {
-        const result = await window.electronAPI.setPrinter2Mode(newMode);
-        if (result?.success) {
-          setModeSaveStatus('success');
-          console.log('✅ Saved Printer 2 mode:', newMode);
-        } else {
-          setModeSaveStatus('error');
-        }
-      } catch (error) {
-        console.error('Error saving Printer 2 mode:', error);
-        setModeSaveStatus('error');
-      } finally {
-        setIsSavingMode(false);
-        setTimeout(() => setModeSaveStatus('idle'), 3000);
-      }
-    }
-  };
-
   const loadSavedSelections = async () => {
     try {
       // First try to load from database
-      const configs = await window.electronAPI?.localDbGetPrinterConfigs?.();
-      if (configs && configs.length > 0) {
+      const configsRaw = await window.electronAPI?.localDbGetPrinterConfigs?.();
+      const configs = Array.isArray(configsRaw)
+        ? configsRaw.filter(isPrinterConfigRow)
+        : [];
+      if (configs.length > 0) {
         const selections: PrinterSelection = {
           receiptPrinter: '',
           labelPrinter: '',
@@ -101,16 +93,41 @@ export default function PrinterSelector() {
           labelPrinter: 0,
           receiptizePrinter: 0
         };
+        const copiesSettings: Record<'receiptPrinter' | 'receiptizePrinter', number> = {
+          receiptPrinter: 1,
+          receiptizePrinter: 1
+        };
         
-        configs.forEach((config: any) => {
+        configs.forEach((config: PrinterConfigRow) => {
+          if (!config || typeof config.system_printer_name !== 'string') {
+            return;
+          }
           let marginAdjustMm = 0;
+          let copiesValue = 1;
           if (config.extra_settings) {
             try {
-              const extra = typeof config.extra_settings === 'string'
-                ? JSON.parse(config.extra_settings)
-                : config.extra_settings;
-              if (extra && typeof extra.marginAdjustMm === 'number' && !Number.isNaN(extra.marginAdjustMm)) {
-                marginAdjustMm = extra.marginAdjustMm;
+              const extra =
+                typeof config.extra_settings === 'string'
+                  ? JSON.parse(config.extra_settings)
+                  : config.extra_settings;
+              if (
+                extra &&
+                typeof extra === 'object' &&
+                'marginAdjustMm' in extra &&
+                typeof (extra as { marginAdjustMm?: number }).marginAdjustMm === 'number' &&
+                !Number.isNaN((extra as { marginAdjustMm?: number }).marginAdjustMm)
+              ) {
+                marginAdjustMm = (extra as { marginAdjustMm: number }).marginAdjustMm;
+              }
+              if (
+                extra &&
+                typeof extra === 'object' &&
+                'copies' in extra &&
+                typeof (extra as { copies?: number }).copies === 'number' &&
+                !Number.isNaN((extra as { copies?: number }).copies) &&
+                (extra as { copies?: number }).copies! > 0
+              ) {
+                copiesValue = (extra as { copies: number }).copies!;
               }
             } catch (parseError) {
               console.error('Failed to parse extra_settings for printer config:', parseError);
@@ -121,6 +138,7 @@ export default function PrinterSelector() {
             case 'receiptPrinter':
               selections.receiptPrinter = config.system_printer_name;
               margins.receiptPrinter = marginAdjustMm;
+              copiesSettings.receiptPrinter = copiesValue;
               break;
             case 'labelPrinter':
               selections.labelPrinter = config.system_printer_name;
@@ -129,12 +147,14 @@ export default function PrinterSelector() {
             case 'receiptizePrinter':
               selections.receiptizePrinter = config.system_printer_name;
               margins.receiptizePrinter = marginAdjustMm;
+              copiesSettings.receiptizePrinter = copiesValue;
               break;
           }
         });
         
         setSelectedPrinters(selections);
         setMarginOffsets(margins);
+        setCopies(copiesSettings);
         return;
       }
       
@@ -171,9 +191,16 @@ export default function PrinterSelector() {
       const savePromises = [];
       const buildExtraSettings = (printerType: keyof PrinterSelection) => {
         const marginAdjust = marginOffsets[printerType];
-        return {
+        const copiesValue = (printerType === 'receiptPrinter' || printerType === 'receiptizePrinter')
+          ? (copies[printerType] || 1)
+          : undefined;
+        const settings: { marginAdjustMm: number; copies?: number } = {
           marginAdjustMm: typeof marginAdjust === 'number' && !Number.isNaN(marginAdjust) ? marginAdjust : 0,
         };
+        if (copiesValue !== undefined) {
+          settings.copies = typeof copiesValue === 'number' && !Number.isNaN(copiesValue) && copiesValue > 0 ? copiesValue : 1;
+        }
+        return settings;
       };
       
       if (selections.receiptPrinter) {
@@ -229,14 +256,22 @@ export default function PrinterSelector() {
         return;
       }
 
-      const result = await window.electronAPI.listPrinters();
-      if (result && result.success) {
-        const mapped: SystemPrinter[] = (result.printers || []).map((p: any) => ({
-          name: p.name,
-          displayName: p.displayName || p.name,
-          status: (p.status as any) || 'idle',
-          isDefault: !!p.isDefault,
-        }));
+    const result = await window.electronAPI.listPrinters();
+    if (result && result.success) {
+        const mapped: SystemPrinter[] = (result.printers || [])
+          .map((printer: ElectronPrinter) => {
+            if (!printer || typeof printer.name !== 'string') {
+              return null;
+            }
+            const safeName = printer.name;
+            return {
+              name: safeName,
+              displayName: printer.displayName || safeName,
+              status: normalizePrinterStatus(printer.status),
+              isDefault: Boolean(printer.isDefault),
+            };
+          })
+          .filter((printer): printer is SystemPrinter => Boolean(printer));
         setSystemPrinters(mapped);
         
         if (mapped.length === 0) {
@@ -251,9 +286,9 @@ Troubleshooting steps:
         } else {
           console.log(`✅ Found ${mapped.length} printer(s):`, mapped.map(p => p.displayName));
         }
-      } else {
-        console.error('Failed to list printers:', result?.error);
-        alert(`Unable to list printers. Error: ${result?.error || 'Unknown error'}
+    } else {
+      console.error('Failed to list printers:', result);
+      alert(`Unable to list printers. Error: ${result instanceof Error ? result.message : 'Unknown error'}
 
 Please try:
 1. Restart the app completely
@@ -294,11 +329,38 @@ Please try:
     }));
   };
 
+  const handleCopiesChange = (printerType: 'receiptPrinter' | 'receiptizePrinter', value: number) => {
+    const numValue = Math.max(1, Math.floor(value));
+    setCopies(prev => ({
+      ...prev,
+      [printerType]: numValue
+    }));
+  };
+
   const handleSave = () => {
     saveSelections(selectedPrinters);
   };
 
-  const testPrinter = async (printerType: keyof PrinterSelection) => {
+interface PrintReceiptResult {
+  success?: boolean;
+  error?: string;
+}
+
+const isPrintReceiptResult = (value: unknown): value is PrintReceiptResult => {
+  if (!value || typeof value !== 'object') {
+    return false;
+  }
+  const record = value as Record<string, unknown>;
+  if ('success' in record && typeof record.success !== 'boolean') {
+    return false;
+  }
+  if ('error' in record && typeof record.error !== 'string') {
+    return false;
+  }
+  return true;
+};
+
+const testPrinter = async (printerType: keyof PrinterSelection) => {
     const printerName = selectedPrinters[printerType];
     if (!printerName) {
       alert('Please select a printer first.');
@@ -308,6 +370,12 @@ Please try:
     setIsTesting(printerType);
     
     try {
+      // Get copies setting for this printer
+      let copiesCount = 1;
+      if (printerType === 'receiptPrinter' || printerType === 'receiptizePrinter') {
+        copiesCount = copies[printerType] || 1;
+      }
+
       // Use the existing print-receipt IPC handler for testing
       const testData = {
         type: 'test',
@@ -317,12 +385,24 @@ Please try:
         content: `TEST PRINT - ${printerType.toUpperCase()}\n\nThis is a test print to verify your printer is working correctly.\n\nPrinter: ${printerName}\nTime: ${new Date().toLocaleString()}\n\nIf you can see this, your printer is configured correctly!`
       };
       
-      const result = await window.electronAPI?.printReceipt?.(testData);
-      
-      if (result?.success) {
-        console.log(`✅ Test print sent successfully to ${printerName}`);
-      } else {
-        alert(`❌ Test print failed to ${printerName}
+      // Print multiple copies if configured
+      let hasError = false;
+      for (let copy = 1; copy <= copiesCount; copy++) {
+        if (copy > 1) {
+          // Small delay between copies
+          await new Promise(r => setTimeout(r, 300));
+        }
+        
+        const rawResult = await window.electronAPI?.printReceipt?.(testData);
+        const result: PrintReceiptResult | undefined = isPrintReceiptResult(rawResult) ? rawResult : undefined;
+        
+        if (result?.success) {
+          if (copy === 1) {
+            console.log(`✅ Test print sent successfully to ${printerName} (${copiesCount} copy/copies)`);
+          }
+        } else {
+          hasError = true;
+          alert(`❌ Test print failed to ${printerName} (copy ${copy}/${copiesCount})
 
 Error: ${result?.error || 'Unknown error'}
 
@@ -331,6 +411,12 @@ Troubleshooting:
 2. Check Windows printer settings
 3. Try printing from another app first
 4. Restart the app and try again`);
+          break;
+        }
+      }
+      
+      if (!hasError && copiesCount > 1) {
+        console.log(`✅ All ${copiesCount} test print copies sent successfully`);
       }
       
     } catch (error) {
@@ -397,21 +483,40 @@ Please check:
 
           <div className="space-y-3">
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-2">
-                Select Printer
-              </label>
-              <select
-                value={selectedPrinters.receiptPrinter}
-                onChange={(e) => handlePrinterSelection('receiptPrinter', e.target.value)}
-                className="w-full border border-gray-300 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500 text-gray-900 bg-white"
-              >
-                <option value="">Choose a printer...</option>
-                {systemPrinters.map((printer) => (
-                  <option key={printer.name} value={printer.name}>
-                    {printer.displayName}
-                  </option>
-                ))}
-              </select>
+              <div className="flex items-center gap-2">
+                <div className="flex-1">
+                  <label className="block text-sm font-medium text-gray-700">
+                    Select Printer
+                  </label>
+                </div>
+                <div className="w-16">
+                  <label className="block text-sm font-medium text-gray-700">
+                    Copies
+                  </label>
+                </div>
+              </div>
+              <div className="flex items-center gap-2 -mt-1">
+                <select
+                  value={selectedPrinters.receiptPrinter}
+                  onChange={(e) => handlePrinterSelection('receiptPrinter', e.target.value)}
+                  className="flex-1 border border-gray-300 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500 text-gray-900 bg-white"
+                >
+                  <option value="">Choose a printer...</option>
+                  {systemPrinters.map((printer) => (
+                    <option key={printer.name} value={printer.name}>
+                      {printer.displayName}
+                    </option>
+                  ))}
+                </select>
+                <input
+                  type="number"
+                  min={1}
+                  max={10}
+                  value={copies.receiptPrinter}
+                  onChange={(e) => handleCopiesChange('receiptPrinter', Number(e.target.value))}
+                  className="w-16 border border-gray-300 rounded-lg px-2 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500 text-gray-900 bg-white text-center"
+                />
+              </div>
             </div>
 
             <div>
@@ -477,21 +582,40 @@ Please check:
 
           <div className="space-y-3">
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-2">
-                Select Printer
-              </label>
-              <select
-                value={selectedPrinters.receiptizePrinter}
-                onChange={(e) => handlePrinterSelection('receiptizePrinter', e.target.value)}
-                className="w-full border border-gray-300 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-purple-500 text-gray-900 bg-white"
-              >
-                <option value="">Choose a printer...</option>
-                {systemPrinters.map((printer) => (
-                  <option key={printer.name} value={printer.name}>
-                    {printer.displayName}
-                  </option>
-                ))}
-              </select>
+              <div className="flex items-center gap-2">
+                <div className="flex-1">
+                  <label className="block text-sm font-medium text-gray-700">
+                    Select Printer
+                  </label>
+                </div>
+                <div className="w-16">
+                  <label className="block text-sm font-medium text-gray-700">
+                    Copies
+                  </label>
+                </div>
+              </div>
+              <div className="flex items-center gap-2 -mt-1">
+                <select
+                  value={selectedPrinters.receiptizePrinter}
+                  onChange={(e) => handlePrinterSelection('receiptizePrinter', e.target.value)}
+                  className="flex-1 border border-gray-300 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-purple-500 text-gray-900 bg-white"
+                >
+                  <option value="">Choose a printer...</option>
+                  {systemPrinters.map((printer) => (
+                    <option key={printer.name} value={printer.name}>
+                      {printer.displayName}
+                    </option>
+                  ))}
+                </select>
+                <input
+                  type="number"
+                  min={1}
+                  max={10}
+                  value={copies.receiptizePrinter}
+                  onChange={(e) => handleCopiesChange('receiptizePrinter', Number(e.target.value))}
+                  className="w-16 border border-gray-300 rounded-lg px-2 py-2 focus:outline-none focus:ring-2 focus:ring-purple-500 text-gray-900 bg-white text-center"
+                />
+              </div>
             </div>
 
             <div>
@@ -659,7 +783,8 @@ Please check:
         </div>
       )}
 
-      {/* Printer 2 Mode Settings */}
+      {/* Printer 2 Mode Settings - DISABLED: Feature not implemented/used */}
+      {/* 
       <div className="bg-purple-50 border border-purple-200 rounded-lg p-6">
         <h3 className="text-lg font-semibold text-purple-800 mb-3">Mode Printer Receiptize</h3>
         <p className="text-sm text-purple-700 mb-4">
@@ -716,6 +841,7 @@ Please check:
           </div>
         )}
       </div>
+      */}
 
     </div>
   );

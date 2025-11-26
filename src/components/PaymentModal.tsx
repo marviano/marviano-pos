@@ -977,6 +977,43 @@ export default function PaymentModal({
         let printer1Counter: number | undefined = undefined;
         let printer2Counter: number | undefined = undefined;
         
+        // Get printer configs to read copies setting
+        let printer1Copies = 1;
+        let printer2Copies = 1;
+        try {
+          const configsRaw = await window.electronAPI?.localDbGetPrinterConfigs?.();
+          if (Array.isArray(configsRaw)) {
+            configsRaw.forEach((config: any) => {
+              if (config?.printer_type === 'receiptPrinter' && config?.extra_settings) {
+                try {
+                  const extra = typeof config.extra_settings === 'string'
+                    ? JSON.parse(config.extra_settings)
+                    : config.extra_settings;
+                  if (extra && typeof extra === 'object' && typeof extra.copies === 'number' && extra.copies > 0) {
+                    printer1Copies = extra.copies;
+                  }
+                } catch (parseError) {
+                  console.warn('⚠️ Failed to parse Printer 1 extra_settings:', parseError);
+                }
+              }
+              if (config?.printer_type === 'receiptizePrinter' && config?.extra_settings) {
+                try {
+                  const extra = typeof config.extra_settings === 'string'
+                    ? JSON.parse(config.extra_settings)
+                    : config.extra_settings;
+                  if (extra && typeof extra === 'object' && typeof extra.copies === 'number' && extra.copies > 0) {
+                    printer2Copies = extra.copies;
+                  }
+                } catch (parseError) {
+                  console.warn('⚠️ Failed to parse Printer 2 extra_settings:', parseError);
+                }
+              }
+            });
+          }
+        } catch (configError) {
+          console.warn('⚠️ Failed to load printer configs for copies setting:', configError);
+        }
+        
         // Print to Printer 1 if selected
         if (shouldPrintReceipt) {
           try {
@@ -998,7 +1035,7 @@ export default function PaymentModal({
             };
             
             // Log to audit BEFORE printing (so reprint is possible even if print fails)
-              try {
+            try {
               const logResult = await window.electronAPI?.logPrinter1Print?.(transactionData.id, printer1Counter, globalCounter);
               if (isSuccessResponse(logResult) && !logResult.success) {
                 console.error('❌ Failed to log Printer 1 audit:', logResult?.error);
@@ -1011,11 +1048,19 @@ export default function PaymentModal({
               console.warn('⚠️ Transaction saved but audit log failed - receipt badge may not appear correctly');
             }
             
-            // Print after logging
+            // Print after logging - loop for copies
             await new Promise(r => setTimeout(r, 500));
-            const printResult = await window.electronAPI?.printReceipt?.(printer1Data);
-            if (isSuccessResponse(printResult) && !printResult.success) {
-              console.error('❌ Printer 1 failed:', printResult?.error);
+            for (let copy = 1; copy <= printer1Copies; copy++) {
+              if (copy > 1) {
+                // Small delay between copies
+                await new Promise(r => setTimeout(r, 300));
+              }
+              const printResult = await window.electronAPI?.printReceipt?.(printer1Data);
+              if (isSuccessResponse(printResult) && !printResult.success) {
+                console.error(`❌ Printer 1 failed (copy ${copy}/${printer1Copies}):`, printResult?.error);
+              } else if (copy === 1) {
+                console.log(`✅ Printer 1 print successful (${printer1Copies} copy/copies)`);
+              }
             }
           } catch (printError) {
             console.error('❌ Error printing to Printer 1:', printError);
@@ -1056,11 +1101,19 @@ export default function PaymentModal({
               console.warn('⚠️ Transaction saved but audit log failed - receiptize badge may not appear correctly');
             }
             
-            // Print after logging
+            // Print after logging - loop for copies
             await new Promise(r => setTimeout(r, 500));
-            const printResult = await window.electronAPI?.printReceipt?.(printer2Data);
-            if (isSuccessResponse(printResult) && !printResult.success) {
-              console.error('❌ Printer 2 failed:', printResult?.error);
+            for (let copy = 1; copy <= printer2Copies; copy++) {
+              if (copy > 1) {
+                // Small delay between copies
+                await new Promise(r => setTimeout(r, 300));
+              }
+              const printResult = await window.electronAPI?.printReceipt?.(printer2Data);
+              if (isSuccessResponse(printResult) && !printResult.success) {
+                console.error(`❌ Printer 2 failed (copy ${copy}/${printer2Copies}):`, printResult?.error);
+              } else if (copy === 1) {
+                console.log(`✅ Printer 2 print successful (${printer2Copies} copy/copies)`);
+              }
             }
           } catch (printError) {
             console.error('❌ Error printing to Printer 2:', printError);

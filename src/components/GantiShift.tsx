@@ -366,7 +366,8 @@ export default function GantiShift() {
     }
 
     const electronAPI = getElectronAPI();
-    if (!electronAPI?.localDbGetShifts) {
+    const localDbGetShifts = electronAPI?.localDbGetShifts;
+    if (!localDbGetShifts) {
       setShiftSequenceInfo({
         index: 1,
         total: 1,
@@ -380,7 +381,7 @@ export default function GantiShift() {
 
     const loadSequence = async () => {
       try {
-        const response = await electronAPI.localDbGetShifts({
+        const response = await localDbGetShifts({
           businessId: BUSINESS_ID,
           startDate: bounds.dayStartUtc,
           endDate: bounds.dayEndUtc,
@@ -417,7 +418,7 @@ export default function GantiShift() {
     return () => {
       isCancelled = true;
     };
-  }, [activeShift?.id]);
+  }, [activeShift]);
 
   const loadActiveShift = useCallback(async () => {
     if (!currentUserId) {
