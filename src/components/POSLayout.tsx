@@ -20,6 +20,7 @@ import { isSuperAdmin } from '@/lib/auth';
 type LocalCategory = {
   jenis: string;
   active: boolean;
+  productType?: 'drinks' | 'bakery'; // NEW: Track whether this is a drinks or bakery category
 };
 
 interface Product {
@@ -55,24 +56,16 @@ export default function POSLayout() {
     permissions.includes('marviano-pos_setelan_printer-setup');
   const [selectedCategory, setSelectedCategory] = useState('');
   
-  // Separate carts for each category - offline
-  const [drinksCart, setDrinksCart] = useState<CartItem[]>([]);
-  const [bakeryCart, setBakeryCart] = useState<CartItem[]>([]);
-  
-  // Separate carts for each platform - online
-  const [drinksGofoodCart, setDrinksGofoodCart] = useState<CartItem[]>([]);
-  const [drinksGrabfoodCart, setDrinksGrabfoodCart] = useState<CartItem[]>([]);
-  const [drinksShopeefoodCart, setDrinksShopeefoodCart] = useState<CartItem[]>([]);
-  const [drinksTiktokCart, setDrinksTiktokCart] = useState<CartItem[]>([]);
-  const [drinksQponCart, setDrinksQponCart] = useState<CartItem[]>([]);
-  const [bakeryGofoodCart, setBakeryGofoodCart] = useState<CartItem[]>([]);
-  const [bakeryGrabfoodCart, setBakeryGrabfoodCart] = useState<CartItem[]>([]);
-  const [bakeryShopeefoodCart, setBakeryShopeefoodCart] = useState<CartItem[]>([]);
-  const [bakeryTiktokCart, setBakeryTiktokCart] = useState<CartItem[]>([]);
-  const [bakeryQponCart, setBakeryQponCart] = useState<CartItem[]>([]);
+  // NEW STRUCTURE: 6 carts total - 1 offline + 5 online platforms
+  // Each cart can contain both drinks AND bakery items
+  const [offlineCart, setOfflineCart] = useState<CartItem[]>([]);
+  const [gofoodCart, setGofoodCart] = useState<CartItem[]>([]);
+  const [grabfoodCart, setGrabfoodCart] = useState<CartItem[]>([]);
+  const [shopeefoodCart, setShopeefoodCart] = useState<CartItem[]>([]);
+  const [tiktokCart, setTiktokCart] = useState<CartItem[]>([]);
+  const [qponCart, setQponCart] = useState<CartItem[]>([]);
   
   const [activeMenuItem, setActiveMenuItem] = useState('Kasir');
-  const [activeKasirTab, setActiveKasirTab] = useState<'drinks' | 'bakery'>('drinks');
   const [isOnlineTab, setIsOnlineTab] = useState<boolean>(false);
   const [selectedOnlinePlatform, setSelectedOnlinePlatform] = useState<OnlinePlatform | null>(null);
   const [activeSettingsTab, setActiveSettingsTab] = useState('sync');
@@ -81,59 +74,41 @@ export default function POSLayout() {
   const [products, setProducts] = useState<Product[]>([]); // Start with empty array
   const [isLoadingProducts, setIsLoadingProducts] = useState(true);
 
-  // Helper functions to get current cart based on active tab and platform
+  // Helper functions to get current cart based on online status and platform
   const getCurrentCart = (): CartItem[] => {
-    // Offline carts
-    if (activeKasirTab === 'drinks' && !isOnlineTab) return drinksCart;
-    if (activeKasirTab === 'bakery' && !isOnlineTab) return bakeryCart;
+    // Offline mode - one cart for all (drinks + bakery)
+    if (!isOnlineTab) {
+      return offlineCart;
+    }
     
-    // Online carts - Drinks platforms
-    if (activeKasirTab === 'drinks' && isOnlineTab && selectedOnlinePlatform === 'qpon') return drinksQponCart;
-    if (activeKasirTab === 'drinks' && isOnlineTab && selectedOnlinePlatform === 'gofood') return drinksGofoodCart;
-    if (activeKasirTab === 'drinks' && isOnlineTab && selectedOnlinePlatform === 'grabfood') return drinksGrabfoodCart;
-    if (activeKasirTab === 'drinks' && isOnlineTab && selectedOnlinePlatform === 'shopeefood') return drinksShopeefoodCart;
-    if (activeKasirTab === 'drinks' && isOnlineTab && selectedOnlinePlatform === 'tiktok') return drinksTiktokCart;
+    // Online mode - one cart per platform (drinks + bakery)
+    if (selectedOnlinePlatform === 'gofood') return gofoodCart;
+    if (selectedOnlinePlatform === 'grabfood') return grabfoodCart;
+    if (selectedOnlinePlatform === 'shopeefood') return shopeefoodCart;
+    if (selectedOnlinePlatform === 'tiktok') return tiktokCart;
+    if (selectedOnlinePlatform === 'qpon') return qponCart;
     
-    // Online carts - Bakery platforms
-    if (activeKasirTab === 'bakery' && isOnlineTab && selectedOnlinePlatform === 'qpon') return bakeryQponCart;
-    if (activeKasirTab === 'bakery' && isOnlineTab && selectedOnlinePlatform === 'gofood') return bakeryGofoodCart;
-    if (activeKasirTab === 'bakery' && isOnlineTab && selectedOnlinePlatform === 'grabfood') return bakeryGrabfoodCart;
-    if (activeKasirTab === 'bakery' && isOnlineTab && selectedOnlinePlatform === 'shopeefood') return bakeryShopeefoodCart;
-    if (activeKasirTab === 'bakery' && isOnlineTab && selectedOnlinePlatform === 'tiktok') return bakeryTiktokCart;
-    
-    return drinksCart; // fallback
+    return offlineCart; // fallback
   };
 
   const setCurrentCart = (newCart: CartItem[]) => {
-    // Offline carts
-    if (activeKasirTab === 'drinks' && !isOnlineTab) {
-      setDrinksCart(newCart);
-    } else if (activeKasirTab === 'bakery' && !isOnlineTab) {
-      setBakeryCart(newCart);
-    } 
-    // Online carts - Drinks platforms
-    else if (activeKasirTab === 'drinks' && isOnlineTab && selectedOnlinePlatform === 'qpon') {
-      setDrinksQponCart(newCart);
-    } else if (activeKasirTab === 'drinks' && isOnlineTab && selectedOnlinePlatform === 'gofood') {
-      setDrinksGofoodCart(newCart);
-    } else if (activeKasirTab === 'drinks' && isOnlineTab && selectedOnlinePlatform === 'grabfood') {
-      setDrinksGrabfoodCart(newCart);
-    } else if (activeKasirTab === 'drinks' && isOnlineTab && selectedOnlinePlatform === 'shopeefood') {
-      setDrinksShopeefoodCart(newCart);
-    } else if (activeKasirTab === 'drinks' && isOnlineTab && selectedOnlinePlatform === 'tiktok') {
-      setDrinksTiktokCart(newCart);
+    // Offline mode - one cart for all
+    if (!isOnlineTab) {
+      setOfflineCart(newCart);
+      return;
     }
-    // Online carts - Bakery platforms
-    else if (activeKasirTab === 'bakery' && isOnlineTab && selectedOnlinePlatform === 'qpon') {
-      setBakeryQponCart(newCart);
-    } else if (activeKasirTab === 'bakery' && isOnlineTab && selectedOnlinePlatform === 'gofood') {
-      setBakeryGofoodCart(newCart);
-    } else if (activeKasirTab === 'bakery' && isOnlineTab && selectedOnlinePlatform === 'grabfood') {
-      setBakeryGrabfoodCart(newCart);
-    } else if (activeKasirTab === 'bakery' && isOnlineTab && selectedOnlinePlatform === 'shopeefood') {
-      setBakeryShopeefoodCart(newCart);
-    } else if (activeKasirTab === 'bakery' && isOnlineTab && selectedOnlinePlatform === 'tiktok') {
-      setBakeryTiktokCart(newCart);
+    
+    // Online mode - set cart based on platform
+    if (selectedOnlinePlatform === 'gofood') {
+      setGofoodCart(newCart);
+    } else if (selectedOnlinePlatform === 'grabfood') {
+      setGrabfoodCart(newCart);
+    } else if (selectedOnlinePlatform === 'shopeefood') {
+      setShopeefoodCart(newCart);
+    } else if (selectedOnlinePlatform === 'tiktok') {
+      setTiktokCart(newCart);
+    } else if (selectedOnlinePlatform === 'qpon') {
+      setQponCart(newCart);
     }
   };
 
@@ -144,32 +119,56 @@ export default function POSLayout() {
   };
 
   // Fetch categories from database (business_id = 14) with offline fallback
+  // NEW: Fetch both drinks AND bakery categories together
   useEffect(() => {
     let isCancelled = false;
     setIsLoadingCategories(true);
 
     const loadCategories = async () => {
       try {
-        const categoriesData = await fetchCategories(activeKasirTab, { 
-          isOnline: isOnlineTab,
-          platform: isOnlineTab ? (selectedOnlinePlatform ?? undefined) : undefined
-        }) as Array<{ jenis: string; active?: boolean }>;
+        // Fetch both drinks and bakery categories
+        const [drinksCategories, bakeryCategories] = await Promise.all([
+          fetchCategories('drinks', { 
+            isOnline: isOnlineTab,
+            platform: isOnlineTab ? (selectedOnlinePlatform ?? undefined) : undefined
+          }) as Promise<Array<{ jenis: string; active?: boolean }>>,
+          fetchCategories('bakery', { 
+            isOnline: isOnlineTab,
+            platform: isOnlineTab ? (selectedOnlinePlatform ?? undefined) : undefined
+          }) as Promise<Array<{ jenis: string; active?: boolean }>>
+        ]);
         
         if (isCancelled) {
           return;
         }
 
-        // Filter out empty/invalid categories and map to expected type
-        const validCategories: LocalCategory[] = categoriesData
+        // Tag drinks categories
+        const taggedDrinks = drinksCategories
           .filter(cat => cat.jenis && cat.jenis.trim() !== '')
-          .map(cat => ({ jenis: cat.jenis, active: cat.active ?? true }));
+          .map(cat => ({ 
+            jenis: cat.jenis, 
+            active: cat.active ?? true,
+            productType: 'drinks' as const
+          }));
+        
+        // Tag bakery categories
+        const taggedBakery = bakeryCategories
+          .filter(cat => cat.jenis && cat.jenis.trim() !== '')
+          .map(cat => ({ 
+            jenis: cat.jenis, 
+            active: cat.active ?? true,
+            productType: 'bakery' as const
+          }));
+        
+        // Combine: drinks first, then bakery
+        const validCategories: LocalCategory[] = [...taggedDrinks, ...taggedBakery];
         
         if (validCategories.length > 0) {
-          setCategories(validCategories as unknown as LocalCategory[]);
+          setCategories(validCategories);
           // Always set the first valid category as selected - this will trigger product loading
           setSelectedCategory(validCategories[0].jenis);
         } else {
-          setCategories([] as LocalCategory[]);
+          setCategories([]);
           setSelectedCategory(''); // Clear selection if no categories
         }
       } catch (error) {
@@ -190,9 +189,10 @@ export default function POSLayout() {
     return () => {
       isCancelled = true;
     };
-  }, [activeKasirTab, isOnlineTab, selectedOnlinePlatform]);
+  }, [isOnlineTab, selectedOnlinePlatform]);
 
   // Fetch products when category or tab changes (business_id = 14) with offline fallback
+  // NEW: We need to determine transactionType from the selected category's products
   useEffect(() => {
     let isCancelled = false;
 
@@ -207,11 +207,21 @@ export default function POSLayout() {
 
       setIsLoadingProducts(true);
       try {
-        // Use smart offline/online mode - only force online for online tab
-        const productsData = await fetchProducts(selectedCategory, activeKasirTab, { 
-          isOnline: isOnlineTab,
-          platform: isOnlineTab ? (selectedOnlinePlatform ?? undefined) : undefined
-        });
+        // Try both drinks and bakery - the category will naturally filter to the right products
+        // We fetch both types and let the API/database filter by category2_name
+        const [drinksData, bakeryData] = await Promise.all([
+          fetchProducts(selectedCategory, 'drinks', { 
+            isOnline: isOnlineTab,
+            platform: isOnlineTab ? (selectedOnlinePlatform ?? undefined) : undefined
+          }),
+          fetchProducts(selectedCategory, 'bakery', { 
+            isOnline: isOnlineTab,
+            platform: isOnlineTab ? (selectedOnlinePlatform ?? undefined) : undefined
+          })
+        ]);
+        
+        // Combine results - only one will have data for this category
+        const productsData = [...drinksData, ...bakeryData];
         
         if (!isCancelled) {
           setProducts(productsData);
@@ -233,7 +243,7 @@ export default function POSLayout() {
     return () => {
       isCancelled = true;
     };
-  }, [selectedCategory, activeKasirTab, isOnlineTab, selectedOnlinePlatform]); // Re-fetch when category or tab changes
+  }, [selectedCategory, isOnlineTab, selectedOnlinePlatform]); // Re-fetch when category or tab changes
 
   // Reset platform selection when switching away from online tab
   useEffect(() => {
@@ -244,14 +254,18 @@ export default function POSLayout() {
 
   // Send tab updates to customer display when tab changes
   useEffect(() => {
-    const tabName = `${activeKasirTab}${isOnlineTab ? ' (Online)' : ''}`;
+    let tabName = 'Offline';
+    if (isOnlineTab && selectedOnlinePlatform) {
+      // Capitalize first letter of platform name
+      tabName = selectedOnlinePlatform.charAt(0).toUpperCase() + selectedOnlinePlatform.slice(1);
+    }
     
     const electronAPI = getElectronAPI();
     if (!electronAPI) {
       return;
     }
     sendTabUpdate({ activeTab: tabName, isOnline: isOnlineTab, selectedPlatform: selectedOnlinePlatform });
-  }, [activeKasirTab, isOnlineTab, selectedOnlinePlatform]);
+  }, [isOnlineTab, selectedOnlinePlatform]);
 
   // Check database health on mount and ensure it's populated
   useEffect(() => {
@@ -284,22 +298,53 @@ export default function POSLayout() {
       setIsLoadingProducts(true);
       
       try {
-        const refreshedCategories = await fetchCategories(activeKasirTab, { 
-          isOnline: isOnlineTab,
-          platform: isOnlineTab ? (selectedOnlinePlatform ?? undefined) : undefined
-        });
-        const validCategories: LocalCategory[] = (refreshedCategories as Array<{ jenis: string; active?: boolean }>)
+        // Fetch both drinks and bakery categories
+        const [drinksCategories, bakeryCategories] = await Promise.all([
+          fetchCategories('drinks', { 
+            isOnline: isOnlineTab,
+            platform: isOnlineTab ? (selectedOnlinePlatform ?? undefined) : undefined
+          }),
+          fetchCategories('bakery', { 
+            isOnline: isOnlineTab,
+            platform: isOnlineTab ? (selectedOnlinePlatform ?? undefined) : undefined
+          })
+        ]);
+        
+        // Tag drinks categories
+        const taggedDrinks = (drinksCategories as Array<{ jenis: string; active?: boolean }>)
           .filter(cat => cat.jenis && cat.jenis.trim() !== '')
-          .map(cat => ({ jenis: cat.jenis, active: cat.active ?? true }));
+          .map(cat => ({ 
+            jenis: cat.jenis, 
+            active: cat.active ?? true,
+            productType: 'drinks' as const
+          }));
+        
+        // Tag bakery categories
+        const taggedBakery = (bakeryCategories as Array<{ jenis: string; active?: boolean }>)
+          .filter(cat => cat.jenis && cat.jenis.trim() !== '')
+          .map(cat => ({ 
+            jenis: cat.jenis, 
+            active: cat.active ?? true,
+            productType: 'bakery' as const
+          }));
+        
+        const validCategories: LocalCategory[] = [...taggedDrinks, ...taggedBakery];
         setCategories(validCategories);
         
         if (validCategories.length > 0 && validCategories[0].jenis) {
           setSelectedCategory(validCategories[0].jenis);
-          const refreshedProducts = await fetchProducts(validCategories[0].jenis, activeKasirTab, { 
-            isOnline: isOnlineTab,
-            platform: isOnlineTab ? (selectedOnlinePlatform ?? undefined) : undefined
-          });
-          setProducts(refreshedProducts);
+          // Fetch products from both drinks and bakery
+          const [drinksProducts, bakeryProducts] = await Promise.all([
+            fetchProducts(validCategories[0].jenis, 'drinks', { 
+              isOnline: isOnlineTab,
+              platform: isOnlineTab ? (selectedOnlinePlatform ?? undefined) : undefined
+            }),
+            fetchProducts(validCategories[0].jenis, 'bakery', { 
+              isOnline: isOnlineTab,
+              platform: isOnlineTab ? (selectedOnlinePlatform ?? undefined) : undefined
+            })
+          ]);
+          setProducts([...drinksProducts, ...bakeryProducts]);
         }
       } catch (error) {
         console.error('❌ Error refreshing after sync:', error);
@@ -313,174 +358,91 @@ export default function POSLayout() {
     return () => {
       window.removeEventListener('dataSynced', handleDataSynced);
     };
-  }, [activeKasirTab, isOnlineTab, selectedOnlinePlatform]);
+  }, [isOnlineTab, selectedOnlinePlatform]);
 
   const renderMainContent = () => {
     switch (activeMenuItem) {
       case 'Kasir':
         return (
           <div className="flex-1 flex flex-col h-full min-h-0">
-            {/* Kasir Tabs */}
+            {/* Kasir Tabs - NEW STRUCTURE */}
             <div className="bg-white border-b border-gray-200 px-4 py-2">
-              <div className="flex space-x-1 flex-wrap">
+              <div className="flex space-x-2 flex-wrap items-center">
+                {/* Offline Tab */}
                 <button
-                  onClick={() => { setActiveKasirTab('drinks'); setIsOnlineTab(false); }}
-                  className={`px-4 py-2 rounded-lg font-medium transition-colors ${
-                    activeKasirTab === 'drinks'
-                      && !isOnlineTab ? 'bg-blue-600 text-white'
+                  onClick={() => { setIsOnlineTab(false); setSelectedOnlinePlatform(null); }}
+                  className={`px-6 py-2 rounded-lg font-medium transition-colors ${
+                    !isOnlineTab
+                      ? 'bg-blue-600 text-white'
                       : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
                   }`}
                 >
-                  🥤 Drinks
-                </button>
-                <button
-                  onClick={() => { setActiveKasirTab('bakery'); setIsOnlineTab(false); }}
-                  className={`px-4 py-2 rounded-lg font-medium transition-colors ${
-                    activeKasirTab === 'bakery'
-                      && !isOnlineTab ? 'bg-blue-600 text-white'
-                      : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
-                  }`}
-                >
-                  🥖 Bakery
+                  🏪 Offline
                 </button>
 
-                {/* Drinks Online with integrated platform buttons */}
+                {/* Online Section with Platform Buttons */}
                 <div className={`flex items-center rounded-lg overflow-hidden ${
-                  activeKasirTab === 'drinks' && isOnlineTab
-                    ? 'bg-blue-600'
-                    : 'bg-gray-100'
+                  isOnlineTab ? 'bg-blue-600' : 'bg-gray-100'
                 }`}>
                   <div
                     className={`px-4 py-2 font-medium cursor-default ${
-                      activeKasirTab === 'drinks' && isOnlineTab
-                        ? 'text-white'
-                        : 'text-gray-700'
+                      isOnlineTab ? 'text-white' : 'text-gray-700'
                     }`}
                   >
-                    🥤 Drinks (Online)
+                    🌐 Online
                   </div>
                   
                   <div className="flex h-full">
                     <button
-                      onClick={() => { setSelectedOnlinePlatform('gofood'); setActiveKasirTab('drinks'); setIsOnlineTab(true); }}
-                      className={`px-2 py-1 text-xs font-medium transition-colors h-full ${
-                        selectedOnlinePlatform === 'gofood' && activeKasirTab === 'drinks' && isOnlineTab
+                      onClick={() => { setSelectedOnlinePlatform('gofood'); setIsOnlineTab(true); }}
+                      className={`px-3 py-1 text-sm font-medium transition-colors h-full ${
+                        selectedOnlinePlatform === 'gofood' && isOnlineTab
                           ? 'bg-green-600 text-white'
-                          : activeKasirTab === 'drinks' && isOnlineTab ? 'text-white hover:bg-blue-700' : 'text-gray-700 hover:bg-gray-200'
+                          : isOnlineTab ? 'text-white hover:bg-blue-700' : 'text-gray-700 hover:bg-gray-200'
                       }`}
                     >
                       GoFood
                     </button>
                     <button
-                      onClick={() => { setSelectedOnlinePlatform('grabfood'); setActiveKasirTab('drinks'); setIsOnlineTab(true); }}
-                      className={`px-2 py-1 text-xs font-medium transition-colors h-full ${
-                        selectedOnlinePlatform === 'grabfood' && activeKasirTab === 'drinks' && isOnlineTab
+                      onClick={() => { setSelectedOnlinePlatform('grabfood'); setIsOnlineTab(true); }}
+                      className={`px-3 py-1 text-sm font-medium transition-colors h-full ${
+                        selectedOnlinePlatform === 'grabfood' && isOnlineTab
                           ? 'bg-green-600 text-white'
-                          : activeKasirTab === 'drinks' && isOnlineTab ? 'text-white hover:bg-blue-700' : 'text-gray-700 hover:bg-gray-200'
+                          : isOnlineTab ? 'text-white hover:bg-blue-700' : 'text-gray-700 hover:bg-gray-200'
                       }`}
                     >
                       Grab
                     </button>
                     <button
-                      onClick={() => { setSelectedOnlinePlatform('shopeefood'); setActiveKasirTab('drinks'); setIsOnlineTab(true); }}
-                      className={`px-2 py-1 text-xs font-medium transition-colors h-full ${
-                        selectedOnlinePlatform === 'shopeefood' && activeKasirTab === 'drinks' && isOnlineTab
+                      onClick={() => { setSelectedOnlinePlatform('shopeefood'); setIsOnlineTab(true); }}
+                      className={`px-3 py-1 text-sm font-medium transition-colors h-full ${
+                        selectedOnlinePlatform === 'shopeefood' && isOnlineTab
                           ? 'bg-green-600 text-white'
-                          : activeKasirTab === 'drinks' && isOnlineTab ? 'text-white hover:bg-blue-700' : 'text-gray-700 hover:bg-gray-200'
+                          : isOnlineTab ? 'text-white hover:bg-blue-700' : 'text-gray-700 hover:bg-gray-200'
                       }`}
                     >
                       Shopee
                     </button>
                     <button
-                      onClick={() => { setSelectedOnlinePlatform('qpon'); setActiveKasirTab('drinks'); setIsOnlineTab(true); }}
-                      className={`px-2 py-1 text-xs font-medium transition-colors h-full ${
-                        selectedOnlinePlatform === 'qpon' && activeKasirTab === 'drinks' && isOnlineTab
+                      onClick={() => { setSelectedOnlinePlatform('qpon'); setIsOnlineTab(true); }}
+                      className={`px-3 py-1 text-sm font-medium transition-colors h-full ${
+                        selectedOnlinePlatform === 'qpon' && isOnlineTab
                           ? 'bg-green-600 text-white'
-                          : activeKasirTab === 'drinks' && isOnlineTab ? 'text-white hover:bg-blue-700' : 'text-gray-700 hover:bg-gray-200'
+                          : isOnlineTab ? 'text-white hover:bg-blue-700' : 'text-gray-700 hover:bg-gray-200'
                       }`}
                     >
                       Qpon
                     </button>
                     <button
-                      onClick={() => { setSelectedOnlinePlatform('tiktok'); setActiveKasirTab('drinks'); setIsOnlineTab(true); }}
-                      className={`px-2 py-1 text-xs font-medium transition-colors h-full rounded-r-lg ${
-                        selectedOnlinePlatform === 'tiktok' && activeKasirTab === 'drinks' && isOnlineTab
+                      onClick={() => { setSelectedOnlinePlatform('tiktok'); setIsOnlineTab(true); }}
+                      className={`px-3 py-1 text-sm font-medium transition-colors h-full rounded-r-lg ${
+                        selectedOnlinePlatform === 'tiktok' && isOnlineTab
                           ? 'bg-green-600 text-white'
-                          : activeKasirTab === 'drinks' && isOnlineTab ? 'text-white hover:bg-blue-700' : 'text-gray-700 hover:bg-gray-200'
+                          : isOnlineTab ? 'text-white hover:bg-blue-700' : 'text-gray-700 hover:bg-gray-200'
                       }`}
                     >
                       TikTok
                     </button>
-                  </div>
-                </div>
-
-                {/* Bakery Online with integrated platform buttons */}
-                <div className={`flex items-center rounded-lg overflow-hidden ${
-                  activeKasirTab === 'bakery' && isOnlineTab
-                    ? 'bg-blue-600'
-                    : 'bg-gray-100'
-                }`}>
-                  <div
-                    className={`px-4 py-2 font-medium cursor-default ${
-                      activeKasirTab === 'bakery' && isOnlineTab
-                        ? 'text-white'
-                        : 'text-gray-700'
-                    }`}
-                  >
-                    🥖 Bakery (Online)
-                  </div>
-                  
-                  <div className="flex h-full">
-                  <button
-                    onClick={() => { setSelectedOnlinePlatform('gofood'); setActiveKasirTab('bakery'); setIsOnlineTab(true); }}
-                    className={`px-2 py-1 text-xs font-medium transition-colors h-full ${
-                      selectedOnlinePlatform === 'gofood' && activeKasirTab === 'bakery' && isOnlineTab
-                        ? 'bg-green-600 text-white'
-                        : activeKasirTab === 'bakery' && isOnlineTab ? 'text-white hover:bg-blue-700' : 'text-gray-700 hover:bg-gray-200'
-                    }`}
-                  >
-                    GoFood
-                  </button>
-                  <button
-                    onClick={() => { setSelectedOnlinePlatform('grabfood'); setActiveKasirTab('bakery'); setIsOnlineTab(true); }}
-                    className={`px-2 py-1 text-xs font-medium transition-colors h-full ${
-                      selectedOnlinePlatform === 'grabfood' && activeKasirTab === 'bakery' && isOnlineTab
-                        ? 'bg-green-600 text-white'
-                        : activeKasirTab === 'bakery' && isOnlineTab ? 'text-white hover:bg-blue-700' : 'text-gray-700 hover:bg-gray-200'
-                    }`}
-                  >
-                    Grab
-                  </button>
-                  <button
-                    onClick={() => { setSelectedOnlinePlatform('shopeefood'); setActiveKasirTab('bakery'); setIsOnlineTab(true); }}
-                    className={`px-2 py-1 text-xs font-medium transition-colors h-full ${
-                      selectedOnlinePlatform === 'shopeefood' && activeKasirTab === 'bakery' && isOnlineTab
-                        ? 'bg-green-600 text-white'
-                        : activeKasirTab === 'bakery' && isOnlineTab ? 'text-white hover:bg-blue-700' : 'text-gray-700 hover:bg-gray-200'
-                    }`}
-                  >
-                    Shopee
-                  </button>
-                  <button
-                    onClick={() => { setSelectedOnlinePlatform('qpon'); setActiveKasirTab('bakery'); setIsOnlineTab(true); }}
-                    className={`px-2 py-1 text-xs font-medium transition-colors h-full ${
-                      selectedOnlinePlatform === 'qpon' && activeKasirTab === 'bakery' && isOnlineTab
-                        ? 'bg-green-600 text-white'
-                        : activeKasirTab === 'bakery' && isOnlineTab ? 'text-white hover:bg-blue-700' : 'text-gray-700 hover:bg-gray-200'
-                    }`}
-                  >
-                    Qpon
-                  </button>
-                  <button
-                    onClick={() => { setSelectedOnlinePlatform('tiktok'); setActiveKasirTab('bakery'); setIsOnlineTab(true); }}
-                    className={`px-2 py-1 text-xs font-medium transition-colors h-full rounded-r-lg ${
-                      selectedOnlinePlatform === 'tiktok' && activeKasirTab === 'bakery' && isOnlineTab
-                        ? 'bg-green-600 text-white'
-                        : activeKasirTab === 'bakery' && isOnlineTab ? 'text-white hover:bg-blue-700' : 'text-gray-700 hover:bg-gray-200'
-                    }`}
-                  >
-                    TikTok
-                  </button>
                   </div>
                 </div>
               </div>
@@ -493,7 +455,7 @@ export default function POSLayout() {
                 products={products}
                 cartItems={getCurrentCart()}
                 setCartItems={setCurrentCart}
-                transactionType={activeKasirTab}
+                transactionType={undefined}
                 isLoadingProducts={isLoadingProducts}
                 isOnline={isOnlineTab}
                 selectedOnlinePlatform={selectedOnlinePlatform}

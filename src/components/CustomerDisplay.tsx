@@ -59,7 +59,7 @@ interface SlideshowImage {
 }
 
 type OnlinePlatform = 'qpon' | 'gofood' | 'grabfood' | 'shopeefood' | 'tiktok';
-type TabName = 'drinks' | 'bakery' | 'drinks (Online)' | 'bakery (Online)';
+type TabName = 'Offline' | 'Gofood' | 'Grabfood' | 'Shopeefood' | 'Tiktok' | 'Qpon' | 'drinks' | 'bakery' | 'drinks (Online)' | 'bakery (Online)';
 
 interface CustomerDisplayOrderPayload extends Omit<CurrentOrder, 'timestamp'> {
   timestamp: string | Date;
@@ -115,125 +115,79 @@ const normalizePlatform = (platform?: string | null): OnlinePlatform | null => {
 export default function CustomerDisplay() {
   const [currentOrder, setCurrentOrder] = useState<CurrentOrder | null>(null);
   
-  // Separate carts for each tab, just like the main POS - offline
-  const [drinksCart, setDrinksCart] = useState<CartItem[]>([]);
-  const [bakeryCart, setBakeryCart] = useState<CartItem[]>([]);
-  
-  // Separate carts for each platform - online
-  const [drinksGofoodCart, setDrinksGofoodCart] = useState<CartItem[]>([]);
-  const [drinksGrabfoodCart, setDrinksGrabfoodCart] = useState<CartItem[]>([]);
-  const [drinksShopeefoodCart, setDrinksShopeefoodCart] = useState<CartItem[]>([]);
-  const [drinksTiktokCart, setDrinksTiktokCart] = useState<CartItem[]>([]);
-  const [drinksQponCart, setDrinksQponCart] = useState<CartItem[]>([]);
-  const [bakeryGofoodCart, setBakeryGofoodCart] = useState<CartItem[]>([]);
-  const [bakeryGrabfoodCart, setBakeryGrabfoodCart] = useState<CartItem[]>([]);
-  const [bakeryShopeefoodCart, setBakeryShopeefoodCart] = useState<CartItem[]>([]);
-  const [bakeryTiktokCart, setBakeryTiktokCart] = useState<CartItem[]>([]);
-  const [bakeryQponCart, setBakeryQponCart] = useState<CartItem[]>([]);
+  // NEW STRUCTURE: 6 carts total - 1 offline + 5 online platforms
+  // Each cart can contain both drinks AND bakery items
+  const [offlineCart, setOfflineCart] = useState<CartItem[]>([]);
+  const [gofoodCart, setGofoodCart] = useState<CartItem[]>([]);
+  const [grabfoodCart, setGrabfoodCart] = useState<CartItem[]>([]);
+  const [shopeefoodCart, setShopeefoodCart] = useState<CartItem[]>([]);
+  const [tiktokCart, setTiktokCart] = useState<CartItem[]>([]);
+  const [qponCart, setQponCart] = useState<CartItem[]>([]);
   
   const [slideshowItems, setSlideshowItems] = useState<SlideshowItem[]>(defaultSlideshowItems);
   const [slideshowImages, setSlideshowImages] = useState<SlideshowImage[]>([]);
   const [currentSlideIndex, setCurrentSlideIndex] = useState(0);
   const [isClient, setIsClient] = useState(false);
-  const [activeTab, setActiveTab] = useState<TabName>('drinks');
+  const [activeTab, setActiveTab] = useState<TabName>('Offline');
   const [isOnlineTab, setIsOnlineTab] = useState<boolean>(false);
   const [selectedOnlinePlatform, setSelectedOnlinePlatform] = useState<OnlinePlatform | null>(null);
 
   const tabSpecificSlideshowItems = useMemo<SlideshowItem[]>(() => {
+    // For new tab structure: Offline = general items, Online platforms = online items
     switch (activeTab) {
+      case 'Offline':
       case 'drinks':
+      case 'bakery':
         return [
           {
-            id: 'drinks-1',
-            title: 'MOMOYO Drinks',
-            description: 'Fresh Lemon Drinks with Real Fruit',
+            id: 'momoyo-1',
+            title: 'MOMOYO',
+            description: 'Fresh Drinks & Bakery Daily',
             image: '/images/drinks-1.jpg',
             duration: 5,
           },
           {
-            id: 'drinks-2',
-            title: 'Premium Tea',
-            description: 'Authentic Milk Tea & Bubble Tea',
+            id: 'momoyo-2',
+            title: 'Premium Quality',
+            description: 'Authentic Drinks & Fresh Baked Goods',
             image: '/images/drinks-2.jpg',
             duration: 5,
           },
           {
-            id: 'drinks-3',
-            title: 'Fresh Juices',
-            description: '100% Natural Fruit Juices',
+            id: 'momoyo-3',
+            title: 'Fresh Daily',
+            description: '100% Natural Ingredients',
             image: '/images/drinks-3.jpg',
             duration: 5,
           },
         ];
-      case 'bakery':
-        return [
-          {
-            id: 'bakery-1',
-            title: 'MOMOYO Bakery',
-            description: 'Fresh Baked Goods Daily',
-            image: '/images/bakery-1.jpg',
-            duration: 5,
-          },
-          {
-            id: 'bakery-2',
-            title: 'Premium Cakes',
-            description: 'Handcrafted Cakes & Pastries',
-            image: '/images/bakery-2.jpg',
-            duration: 5,
-          },
-          {
-            id: 'bakery-3',
-            title: 'Fresh Bread',
-            description: 'Artisan Bread & Croissants',
-            image: '/images/bakery-3.jpg',
-            duration: 5,
-          },
-        ];
+      case 'Gofood':
+      case 'Grabfood':
+      case 'Shopeefood':
+      case 'Tiktok':
+      case 'Qpon':
       case 'drinks (Online)':
+      case 'bakery (Online)':
         return [
           {
-            id: 'online-drinks-1',
-            title: 'Online Drinks',
-            description: 'Order Drinks Online - GoFood, GrabFood, ShopeeFood, TikTok, Qpon',
+            id: 'online-1',
+            title: 'Order Online',
+            description: `Order on ${activeTab === 'Gofood' ? 'GoFood' : activeTab === 'Grabfood' ? 'GrabFood' : activeTab === 'Shopeefood' ? 'ShopeeFood' : activeTab === 'Tiktok' ? 'TikTok' : activeTab === 'Qpon' ? 'Qpon' : 'Food Delivery Apps'}`,
             image: '/images/online-drinks-1.jpg',
             duration: 5,
           },
           {
-            id: 'online-drinks-2',
+            id: 'online-2',
             title: 'Delivery Special',
-            description: 'Free Delivery on Orders Above Rp 50.000',
+            description: 'Fast & Fresh Delivery',
             image: '/images/online-drinks-2.jpg',
             duration: 5,
           },
           {
-            id: 'online-drinks-3',
+            id: 'online-3',
             title: 'Online Exclusive',
             description: 'Special Online Menu Items',
             image: '/images/online-drinks-3.jpg',
-            duration: 5,
-          },
-        ];
-      case 'bakery (Online)':
-        return [
-          {
-            id: 'online-bakery-1',
-            title: 'Online Bakery',
-            description: 'Order Bakery Items Online - ShopeeFood, TikTok, Qpon',
-            image: '/images/online-bakery-1.jpg',
-            duration: 5,
-          },
-          {
-            id: 'online-bakery-2',
-            title: 'Fresh Delivery',
-            description: 'Fresh Bakery Items Delivered to Your Door',
-            image: '/images/online-bakery-2.jpg',
-            duration: 5,
-          },
-          {
-            id: 'online-bakery-3',
-            title: 'Online Special',
-            description: 'Exclusive Online Bakery Menu',
-            image: '/images/online-bakery-3.jpg',
             duration: 5,
           },
         ];
@@ -270,59 +224,39 @@ export default function CustomerDisplay() {
 
   const applyCartUpdate = useCallback(
     (items: CartItem[], tabInfo?: CustomerDisplayTabInfo) => {
-      const targetTab = tabInfo?.activeTab ?? activeTab;
       const targetOnline = tabInfo?.isOnline ?? isOnlineTab;
       const targetPlatform = tabInfo
         ? normalizePlatform(tabInfo.selectedPlatform ?? null)
         : selectedOnlinePlatform;
 
-      if (targetTab === 'drinks' && !targetOnline) {
-        setDrinksCart(items);
-      } else if (targetTab === 'bakery' && !targetOnline) {
-        setBakeryCart(items);
-      } else if (targetTab === 'drinks (Online)' && targetOnline) {
-        switch (targetPlatform) {
-          case 'qpon':
-            setDrinksQponCart(items);
-            break;
-          case 'gofood':
-            setDrinksGofoodCart(items);
-            break;
-          case 'grabfood':
-            setDrinksGrabfoodCart(items);
-            break;
-          case 'shopeefood':
-            setDrinksShopeefoodCart(items);
-            break;
-          case 'tiktok':
-            setDrinksTiktokCart(items);
-            break;
-          default:
-            break;
-        }
-      } else if (targetTab === 'bakery (Online)' && targetOnline) {
-        switch (targetPlatform) {
-          case 'qpon':
-            setBakeryQponCart(items);
-            break;
-          case 'gofood':
-            setBakeryGofoodCart(items);
-            break;
-          case 'grabfood':
-            setBakeryGrabfoodCart(items);
-            break;
-          case 'shopeefood':
-            setBakeryShopeefoodCart(items);
-            break;
-          case 'tiktok':
-            setBakeryTiktokCart(items);
-            break;
-          default:
-            break;
-        }
+      // Offline mode - one cart for all
+      if (!targetOnline) {
+        setOfflineCart(items);
+        return;
+      }
+
+      // Online mode - set cart based on platform
+      switch (targetPlatform) {
+        case 'gofood':
+          setGofoodCart(items);
+          break;
+        case 'grabfood':
+          setGrabfoodCart(items);
+          break;
+        case 'shopeefood':
+          setShopeefoodCart(items);
+          break;
+        case 'tiktok':
+          setTiktokCart(items);
+          break;
+        case 'qpon':
+          setQponCart(items);
+          break;
+        default:
+          break;
       }
     },
-    [activeTab, isOnlineTab, selectedOnlinePlatform]
+    [isOnlineTab, selectedOnlinePlatform]
   );
 
   // Listen for order updates from cashier display
@@ -350,7 +284,7 @@ export default function CustomerDisplay() {
         applyCartUpdate(payload.cartItems, payload.tabInfo);
       }
       if (payload.tabInfo) {
-        const newTab = ['drinks', 'bakery', 'drinks (Online)', 'bakery (Online)'].includes(
+        const newTab = ['Offline', 'Gofood', 'Grabfood', 'Shopeefood', 'Tiktok', 'Qpon', 'drinks', 'bakery', 'drinks (Online)', 'bakery (Online)'].includes(
           payload.tabInfo.activeTab
         )
           ? (payload.tabInfo.activeTab as TabName)
@@ -389,57 +323,35 @@ export default function CustomerDisplay() {
   );
 
   const currentCartItems = useMemo(() => {
-    if (activeTab === 'drinks' && !isOnlineTab) return drinksCart;
-    if (activeTab === 'bakery' && !isOnlineTab) return bakeryCart;
-    if (activeTab === 'drinks (Online)' && isOnlineTab) {
-      switch (selectedOnlinePlatform) {
-        case 'qpon':
-          return drinksQponCart;
-        case 'gofood':
-          return drinksGofoodCart;
-        case 'grabfood':
-          return drinksGrabfoodCart;
-        case 'shopeefood':
-          return drinksShopeefoodCart;
-        case 'tiktok':
-          return drinksTiktokCart;
-        default:
-          return drinksCart;
-      }
+    // Offline mode - one cart for all (drinks + bakery)
+    if (!isOnlineTab) {
+      return offlineCart;
     }
-    if (activeTab === 'bakery (Online)' && isOnlineTab) {
-      switch (selectedOnlinePlatform) {
-        case 'qpon':
-          return bakeryQponCart;
-        case 'gofood':
-          return bakeryGofoodCart;
-        case 'grabfood':
-          return bakeryGrabfoodCart;
-        case 'shopeefood':
-          return bakeryShopeefoodCart;
-        case 'tiktok':
-          return bakeryTiktokCart;
-        default:
-          return bakeryCart;
-      }
+    
+    // Online mode - one cart per platform (drinks + bakery)
+    switch (selectedOnlinePlatform) {
+      case 'gofood':
+        return gofoodCart;
+      case 'grabfood':
+        return grabfoodCart;
+      case 'shopeefood':
+        return shopeefoodCart;
+      case 'tiktok':
+        return tiktokCart;
+      case 'qpon':
+        return qponCart;
+      default:
+        return offlineCart;
     }
-    return drinksCart;
   }, [
-    activeTab,
-    bakeryCart,
-    bakeryGofoodCart,
-    bakeryGrabfoodCart,
-    bakeryQponCart,
-    bakeryShopeefoodCart,
-    bakeryTiktokCart,
-    drinksCart,
-    drinksGofoodCart,
-    drinksGrabfoodCart,
-    drinksQponCart,
-    drinksShopeefoodCart,
-    drinksTiktokCart,
     isOnlineTab,
     selectedOnlinePlatform,
+    offlineCart,
+    gofoodCart,
+    grabfoodCart,
+    shopeefoodCart,
+    tiktokCart,
+    qponCart,
   ]);
 
   // Auto-advance slideshow
@@ -510,6 +422,12 @@ export default function CustomerDisplay() {
           {/* Active Tab Indicator */}
           <div className="flex items-center space-x-2">
             <div className={`px-2 py-1 rounded text-xs font-medium ${
+              activeTab === 'Offline' ? 'bg-blue-100 text-blue-800' :
+              activeTab === 'Gofood' ? 'bg-green-100 text-green-800' :
+              activeTab === 'Grabfood' ? 'bg-emerald-100 text-emerald-800' :
+              activeTab === 'Shopeefood' ? 'bg-orange-100 text-orange-800' :
+              activeTab === 'Tiktok' ? 'bg-pink-100 text-pink-800' :
+              activeTab === 'Qpon' ? 'bg-purple-100 text-purple-800' :
               activeTab === 'drinks' ? 'bg-blue-100 text-blue-800' :
               activeTab === 'bakery' ? 'bg-orange-100 text-orange-800' :
               activeTab === 'drinks (Online)' ? 'bg-green-100 text-green-800' :
@@ -708,7 +626,7 @@ export default function CustomerDisplay() {
                   
                   {/* Product Images - Tab-specific Layout */}
                   <div className="flex justify-center space-x-8 mb-6">
-                    {activeTab === 'drinks' && (
+                    {(activeTab === 'Offline' || activeTab === 'drinks') && (
                       <>
                         {/* Left Product - Lemon Drinks */}
                         <div className="w-48 h-64 bg-gradient-to-br from-yellow-400 to-orange-500 rounded-lg flex items-center justify-center relative overflow-hidden">
@@ -764,7 +682,7 @@ export default function CustomerDisplay() {
                       </>
                     )}
                     
-                    {(activeTab === 'drinks (Online)' || activeTab === 'bakery (Online)') && (
+                    {(activeTab === 'Gofood' || activeTab === 'Grabfood' || activeTab === 'Shopeefood' || activeTab === 'Tiktok' || activeTab === 'Qpon' || activeTab === 'drinks (Online)' || activeTab === 'bakery (Online)') && (
                       <>
                         {/* Left Product - Online Ordering */}
                         <div className="w-48 h-64 bg-gradient-to-br from-blue-400 to-purple-500 rounded-lg flex items-center justify-center relative overflow-hidden">

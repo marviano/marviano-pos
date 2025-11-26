@@ -1,10 +1,11 @@
 'use client';
 
-import { ChevronLeft, ChevronRight } from 'lucide-react';
+import { ChevronRight } from 'lucide-react';
 
 interface Category {
   jenis: string;
   active: boolean;
+  productType?: 'drinks' | 'bakery';
 }
 
 interface RightSidebarProps {
@@ -18,18 +19,12 @@ export default function RightSidebar({ categories, selectedCategory, onCategoryS
   // Filter out blank/null categories
   const validCategories = categories.filter(cat => cat.jenis && cat.jenis.trim() !== '');
   
+  // Group categories by product type
+  const drinksCategories = validCategories.filter(cat => cat.productType === 'drinks');
+  const bakeryCategories = validCategories.filter(cat => cat.productType === 'bakery');
+  
   return (
     <div className="w-48 bg-blue-100 flex flex-col h-full">
-      {/* Header */}
-      <div className="p-4 border-b border-blue-200">
-        <div className="flex items-center justify-between">
-          <h3 className="font-semibold text-gray-800">Kategori</h3>
-          <button className="p-1 text-gray-600 hover:text-gray-800">
-            <ChevronLeft className="w-4 h-4" />
-          </button>
-        </div>
-      </div>
-
       {/* Category List */}
       <div className="flex-1 overflow-y-auto relative">
         {/* Loading Overlay - Only show when switching categories, not initial load */}
@@ -55,23 +50,59 @@ export default function RightSidebar({ categories, selectedCategory, onCategoryS
             <p className="text-gray-600 text-sm">No categories available</p>
           </div>
         ) : (
-          validCategories.map((category, index) => (
-          <button
-            key={index}
-            onClick={() => onCategorySelect(category.jenis)}
-            disabled={isLoadingCategories}
-            className={`w-full flex items-center justify-between px-4 py-2.5 text-left transition-colors ${
-              selectedCategory === category.jenis
-                ? 'bg-blue-200 text-blue-800'
-                : 'text-gray-700 hover:bg-blue-50'
-            } ${isLoadingCategories ? 'opacity-50 cursor-not-allowed' : ''}`}
-          >
-            <span className="text-xs">{category.jenis}</span>
-            {selectedCategory === category.jenis && (
-              <ChevronRight className="w-4 h-4 text-blue-600" />
+          <>
+            {/* Drinks Section */}
+            {drinksCategories.length > 0 && (
+              <>
+                <div className="px-4 py-2 bg-blue-200 border-b border-blue-300">
+                  <h4 className="text-xs font-semibold text-blue-900">🥤 DRINKS</h4>
+                </div>
+                {drinksCategories.map((category, index) => (
+                  <button
+                    key={`drinks-${index}`}
+                    onClick={() => onCategorySelect(category.jenis)}
+                    disabled={isLoadingCategories}
+                    className={`w-full flex items-center justify-between px-4 py-2.5 text-left transition-colors ${
+                      selectedCategory === category.jenis
+                        ? 'bg-green-200 text-green-900 font-medium'
+                        : 'text-gray-700 hover:bg-blue-50'
+                    } ${isLoadingCategories ? 'opacity-50 cursor-not-allowed' : ''}`}
+                  >
+                    <span className="text-xs">{category.jenis}</span>
+                    {selectedCategory === category.jenis && (
+                      <ChevronRight className="w-4 h-4 text-green-700" />
+                    )}
+                  </button>
+                ))}
+              </>
             )}
-          </button>
-          ))
+            
+            {/* Bakery Section */}
+            {bakeryCategories.length > 0 && (
+              <>
+                <div className="px-4 py-2 bg-blue-200 border-b border-blue-300 mt-2">
+                  <h4 className="text-xs font-semibold text-blue-900">🥖 BAKERY</h4>
+                </div>
+                {bakeryCategories.map((category, index) => (
+                  <button
+                    key={`bakery-${index}`}
+                    onClick={() => onCategorySelect(category.jenis)}
+                    disabled={isLoadingCategories}
+                    className={`w-full flex items-center justify-between px-4 py-2.5 text-left transition-colors ${
+                      selectedCategory === category.jenis
+                        ? 'bg-green-200 text-green-900 font-medium'
+                        : 'text-gray-700 hover:bg-blue-50'
+                    } ${isLoadingCategories ? 'opacity-50 cursor-not-allowed' : ''}`}
+                  >
+                    <span className="text-xs">{category.jenis}</span>
+                    {selectedCategory === category.jenis && (
+                      <ChevronRight className="w-4 h-4 text-green-700" />
+                    )}
+                  </button>
+                ))}
+              </>
+            )}
+          </>
         )}
       </div>
 
