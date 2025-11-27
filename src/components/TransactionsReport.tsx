@@ -1,5 +1,12 @@
 'use client';
 
+/**
+ * Transactions Report Component
+ * 
+ * All date/time handling in this component uses GMT+7 (Asia/Jakarta) timezone.
+ * This ensures consistent reporting regardless of the user's local timezone.
+ */
+
 import { useState, useEffect, useCallback } from 'react';
 import { 
   Calendar, 
@@ -76,22 +83,67 @@ const formatRupiah = (amount: number): string => {
   }).format(amount);
 };
 
+// Convert UTC date to GMT+7 and format for display
 const formatDateTime = (dateString: string): string => {
-  return new Date(dateString).toLocaleString('id-ID', {
+  const date = new Date(dateString);
+  // Adjust for GMT+7 (7 hours * 60 minutes * 60 seconds * 1000 milliseconds)
+  const gmt7Date = new Date(date.getTime() + (7 * 60 * 60 * 1000));
+  
+  return gmt7Date.toLocaleString('id-ID', {
     day: '2-digit',
     month: '2-digit',
     year: 'numeric',
     hour: '2-digit',
     minute: '2-digit',
+    timeZone: 'UTC', // Use UTC since we already adjusted the time
   });
 };
 
 const formatDate = (dateString: string): string => {
-  return new Date(dateString).toLocaleDateString('id-ID', {
+  const date = new Date(dateString);
+  // Adjust for GMT+7
+  const gmt7Date = new Date(date.getTime() + (7 * 60 * 60 * 1000));
+  
+  return gmt7Date.toLocaleDateString('id-ID', {
     day: '2-digit',
     month: 'short',
     year: 'numeric',
+    timeZone: 'UTC', // Use UTC since we already adjusted the time
   });
+};
+
+const formatTime = (dateString: string): string => {
+  const date = new Date(dateString);
+  // Adjust for GMT+7
+  const gmt7Date = new Date(date.getTime() + (7 * 60 * 60 * 1000));
+  
+  return gmt7Date.toLocaleTimeString('id-ID', {
+    hour: '2-digit',
+    minute: '2-digit',
+    timeZone: 'UTC', // Use UTC since we already adjusted the time
+  });
+};
+
+// Get GMT+7 day boundaries for date filtering
+const getGmt7DayBounds = (dateString: string): { dayStartUtc: Date; dayEndUtc: Date } => {
+  const date = new Date(dateString + 'T00:00:00Z'); // Treat input as UTC
+  
+  // Calculate the start and end of the day in GMT+7
+  const gmt7Offset = 7 * 60 * 60 * 1000; // 7 hours in milliseconds
+  
+  // Start of day in GMT+7 (00:00:00 GMT+7)
+  const dayStartGmt7 = new Date(date.getTime());
+  dayStartGmt7.setUTCHours(0, 0, 0, 0);
+  
+  // End of day in GMT+7 (23:59:59.999 GMT+7)
+  const dayEndGmt7 = new Date(date.getTime());
+  dayEndGmt7.setUTCHours(23, 59, 59, 999);
+  
+  // Convert to UTC by subtracting the GMT+7 offset
+  const dayStartUtc = new Date(dayStartGmt7.getTime() - gmt7Offset);
+  const dayEndUtc = new Date(dayEndGmt7.getTime() - gmt7Offset);
+  
+  return { dayStartUtc, dayEndUtc };
 };
 
 const PAYMENT_METHOD_LABELS: Record<string, string> = {
@@ -172,13 +224,25 @@ export default function TransactionsReport() {
     };
     loadUsers();
     
-    // Set default date range (Last 30 days)
-    const end = new Date();
-    const start = new Date();
-    start.setDate(start.getDate() - 30);
+    // Set default date range (Last 30 days) in GMT+7
+    const gmt7Offset = 7 * 60 * 60 * 1000;
+    const now = new Date();
+    const nowGmt7 = new Date(now.getTime() + gmt7Offset);
     
-    setEndDate(end.toISOString().split('T')[0]);
-    setStartDate(start.toISOString().split('T')[0]);
+    const end = new Date(nowGmt7);
+    const start = new Date(nowGmt7);
+    start.setUTCDate(start.getUTCDate() - 30);
+    
+    // Format as YYYY-MM-DD for date inputs
+    const formatDateInput = (date: Date) => {
+      const year = date.getUTCFullYear();
+      const month = String(date.getUTCMonth() + 1).padStart(2, '0');
+      const day = String(date.getUTCDate()).padStart(2, '0');
+      return `${year}-${month}-${day}`;
+    };
+    
+    setEndDate(formatDateInput(end));
+    setStartDate(formatDateInput(start));
   }, []);
 
   // Fetch transactions
@@ -216,14 +280,14 @@ export default function TransactionsReport() {
   useEffect(() => {
     let filtered = [...transactions];
 
-    // Date range filter
+    // Date range filter using GMT+7
     if (startDate) {
-      const startDateTime = new Date(startDate + 'T00:00:00').getTime();
-      filtered = filtered.filter(tx => new Date(tx.created_at).getTime() >= startDateTime);
+      const { dayStartUtc } = getGmt7DayBounds(startDate);
+      filtered = filtered.filter(tx => new Date(tx.created_at).getTime() >= dayStartUtc.getTime());
     }
     if (endDate) {
-      const endDateTime = new Date(endDate + 'T23:59:59').getTime();
-      filtered = filtered.filter(tx => new Date(tx.created_at).getTime() <= endDateTime);
+      const { dayEndUtc } = getGmt7DayBounds(endDate);
+      filtered = filtered.filter(tx => new Date(tx.created_at).getTime() <= dayEndUtc.getTime());
     }
 
     // User filter
@@ -720,11 +784,25 @@ export default function TransactionsReport() {
                   setSelectedPaymentMethod('all');
                   setSelectedStatus('all');
                   setSelectedSyncStatus('all');
-                  const end = new Date();
-                  const start = new Date();
-                  start.setDate(start.getDate() - 30);
-                  setEndDate(end.toISOString().split('T')[0]);
-                  setStartDate(start.toISOString().split('T')[0]);
+                  
+                  // Reset to last 30 days in GMT+7
+                  const gmt7Offset = 7 * 60 * 60 * 1000;
+                  const now = new Date();
+                  const nowGmt7 = new Date(now.getTime() + gmt7Offset);
+                  
+                  const end = new Date(nowGmt7);
+                  const start = new Date(nowGmt7);
+                  start.setUTCDate(start.getUTCDate() - 30);
+                  
+                  const formatDateInput = (date: Date) => {
+                    const year = date.getUTCFullYear();
+                    const month = String(date.getUTCMonth() + 1).padStart(2, '0');
+                    const day = String(date.getUTCDate()).padStart(2, '0');
+                    return `${year}-${month}-${day}`;
+                  };
+                  
+                  setEndDate(formatDateInput(end));
+                  setStartDate(formatDateInput(start));
                 }}
                 className="flex items-center gap-2 px-3 py-1 text-sm bg-gray-200 hover:bg-gray-300 text-gray-700 rounded-lg transition-colors"
               >
@@ -773,7 +851,7 @@ export default function TransactionsReport() {
                     </td>
                     <td className="px-4 py-3">
                       <div className="font-medium text-gray-900">{formatDate(transaction.created_at)}</div>
-                      <div className="text-xs text-gray-500">{new Date(transaction.created_at).toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' })}</div>
+                      <div className="text-xs text-gray-500">{formatTime(transaction.created_at)}</div>
                     </td>
                     <td className="px-4 py-3">
                       <div className="font-medium text-gray-900">{transaction.customer_name || 'Guest'}</div>

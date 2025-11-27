@@ -4802,20 +4802,20 @@ function generateTestReceiptHTML(printerName, businessName, options) {
       max-width: 42ch;
       font-size: 10pt;
       font-weight: 500;
-      line-height: 1.4;
-      padding: 5mm ${rightPadding.toFixed(2)}mm 5mm ${leftPadding.toFixed(2)}mm;
+      line-height: 1.2;
+      padding: 2mm ${rightPadding.toFixed(2)}mm 2mm ${leftPadding.toFixed(2)}mm;
       word-wrap: break-word;
       overflow-wrap: break-word;
     }
-    .contact { text-align: center; font-size: 8pt; font-weight: 600; margin-bottom: 3mm; }
-    .logo-container { text-align: center; margin-bottom: 2mm; }
-    .logo { max-width: 100%; height: auto; max-height: 20mm; }
-    .store-name { text-align: center; font-size: 13pt; font-weight: bold; margin-bottom: 2mm; }
-    .branch { text-align: center; font-size: 11pt; font-weight: 600; margin-bottom: 2mm; }
-    .address { text-align: center; font-size: 8pt; font-weight: 500; margin-bottom: 3mm; max-width: 100%; line-height: 1.5; }
-    .transaction-type { text-align: center; font-size: 10pt; font-weight: 700; margin-bottom: 3mm; }
-    .dashed-line { border-top: 1px dashed #000; margin: 3mm 0; }
-    .info-line { display: flex; justify-content: space-between; margin-bottom: 1mm; }
+    .contact { text-align: center; font-size: 8pt; font-weight: 600; margin-bottom: 1mm; }
+    .logo-container { text-align: center; margin-bottom: 1mm; }
+    .logo { max-width: 100%; height: auto; max-height: 18mm; }
+    .store-name { text-align: center; font-size: 13pt; font-weight: bold; margin-bottom: 1mm; }
+    .branch { text-align: center; font-size: 11pt; font-weight: 600; margin-bottom: 1mm; }
+    .address { text-align: center; font-size: 8pt; font-weight: 500; margin-bottom: 1.5mm; max-width: 100%; line-height: 1.3; }
+    .transaction-type { text-align: center; font-size: 10pt; font-weight: 700; margin-bottom: 1.5mm; }
+    .dashed-line { border-top: 1px dashed #000; margin: 1.5mm 0; }
+    .info-line { display: flex; justify-content: space-between; margin-bottom: 0.5mm; }
     .info-label { font-size: 9pt; font-weight: 500; }
     .info-value { font-size: 9pt; font-weight: 700; }
     .mono-value {
@@ -4826,13 +4826,13 @@ function generateTestReceiptHTML(printerName, businessName, options) {
       font-feature-settings: 'tnum' 1, 'lnum' 1;
     }
     .order-number-value { font-size: 9pt; font-weight: 700; }
-    table { width: 100%; border-collapse: collapse; margin: 2mm 0; font-size: 9pt; }
-    th { text-align: left; font-weight: 700; border-bottom: 1px solid #000; padding: 1mm 0; font-size: 8pt; }
-    td { padding: 1mm 0; font-weight: 500; }
-    .summary-line { display: flex; justify-content: space-between; margin-bottom: 1mm; font-size: 9pt; font-weight: 500; }
+    table { width: 100%; border-collapse: collapse; margin: 1mm 0; font-size: 9pt; }
+    th { text-align: left; font-weight: 700; border-bottom: 1px solid #000; padding: 0.5mm 0; font-size: 8pt; }
+    td { padding: 0.5mm 0; font-weight: 500; }
+    .summary-line { display: flex; justify-content: space-between; margin-bottom: 0.5mm; font-size: 9pt; font-weight: 500; }
     .summary-label { font-weight: 500; }
     .summary-value { font-weight: 700; }
-    .footer { margin-top: 5mm; font-size: 8pt; text-align: left; line-height: 1.4; font-weight: 500; }
+    .footer { margin-top: 2mm; font-size: 8pt; text-align: left; line-height: 1.3; font-weight: 500; }
   </style>
 </head>
 <body>
@@ -4927,7 +4927,7 @@ function generateTestReceiptHTML(printerName, businessName, options) {
     <p>Pendapat Anda sangat penting bagi kami.</p>
     <p>Untuk kritik dan saran silahkan hubungi :</p>
     <p>0812-1822-2666</p>
-    <p style="margin-top: 5mm;">Untuk layanan kemitraan dan partnership</p>
+    <p style="margin-top: 2mm;">Untuk layanan kemitraan dan partnership</p>
   </div>
 </body>
 </html>
@@ -5175,30 +5175,30 @@ function generateReceiptHTML(data, businessName, options) {
       max-width: 42ch;
       font-size: 10pt;
       font-weight: 500;
-      line-height: 1.4;
-      padding: 5mm ${rightPadding.toFixed(2)}mm 5mm ${leftPadding.toFixed(2)}mm;
+      line-height: 1.2;
+      padding: 2mm ${rightPadding.toFixed(2)}mm 2mm ${leftPadding.toFixed(2)}mm;
       word-wrap: break-word;
       overflow-wrap: break-word;
     }
-    .contact { text-align: center; font-size: 8pt; font-weight: 600; margin-bottom: 3mm; }
-    .logo-container { text-align: center; margin-bottom: 2mm; }
-    .logo { max-width: 100%; height: auto; max-height: 20mm; }
-    .store-name { text-align: center; font-size: 13pt; font-weight: bold; margin-bottom: 2mm; }
-    .branch { text-align: center; font-size: 11pt; font-weight: 600; margin-bottom: 2mm; }
-    .address { text-align: center; font-size: 8pt; font-weight: 500; margin-bottom: 3mm; max-width: 100%; line-height: 1.5; }
-    .transaction-type { text-align: center; font-size: 10pt; font-weight: 700; margin-bottom: 3mm; }
-    .dashed-line { border-top: 1px dashed #000; margin: 3mm 0; }
-    .info-line { display: flex; justify-content: space-between; margin-bottom: 1mm; }
+    .contact { text-align: center; font-size: 8pt; font-weight: 600; margin-bottom: 1mm; }
+    .logo-container { text-align: center; margin-bottom: 1mm; }
+    .logo { max-width: 100%; height: auto; max-height: 18mm; }
+    .store-name { text-align: center; font-size: 13pt; font-weight: bold; margin-bottom: 1mm; }
+    .branch { text-align: center; font-size: 11pt; font-weight: 600; margin-bottom: 1mm; }
+    .address { text-align: center; font-size: 8pt; font-weight: 500; margin-bottom: 1.5mm; max-width: 100%; line-height: 1.3; }
+    .transaction-type { text-align: center; font-size: 10pt; font-weight: 700; margin-bottom: 1.5mm; }
+    .dashed-line { border-top: 1px dashed #000; margin: 1.5mm 0; }
+    .info-line { display: flex; justify-content: space-between; margin-bottom: 0.5mm; }
     .info-label { font-size: 9pt; font-weight: 500; }
     .info-value { font-size: 9pt; font-weight: 700; }
     .order-number-value { font-size: 9pt; font-weight: 700; }
-    table { width: 100%; border-collapse: collapse; margin: 2mm 0; font-size: 9pt; }
-    th { text-align: left; font-weight: 700; border-bottom: 1px solid #000; padding: 1mm 0; font-size: 8pt; }
-    td { padding: 1mm 0; font-weight: 500; }
-    .summary-line { display: flex; justify-content: space-between; margin-bottom: 1mm; font-size: 9pt; font-weight: 500; }
+    table { width: 100%; border-collapse: collapse; margin: 1mm 0; font-size: 9pt; }
+    th { text-align: left; font-weight: 700; border-bottom: 1px solid #000; padding: 0.5mm 0; font-size: 8pt; }
+    td { padding: 0.5mm 0; font-weight: 500; }
+    .summary-line { display: flex; justify-content: space-between; margin-bottom: 0.5mm; font-size: 9pt; font-weight: 500; }
     .summary-label { font-weight: 500; }
     .summary-value { font-weight: 700; }
-    .footer { margin-top: 5mm; font-size: 8pt; text-align: left; line-height: 1.4; font-weight: 500; }
+    .footer { margin-top: 2mm; font-size: 8pt; text-align: left; line-height: 1.3; font-weight: 500; }
   </style>
 </head>
 <body>
@@ -5206,7 +5206,7 @@ function generateReceiptHTML(data, businessName, options) {
   
   ${logoDataUri ? `<div class="logo-container"><img src="${logoDataUri}" class="logo" alt="Momoyo Logo"></div>` : '<div class="store-name">MOMOYO</div>'}
   <div class="branch">${businessName}</div>
-  ${data.isReprint && data.reprintCount ? `<div class="reprint-notice" style="text-align: center; font-size: 10pt; font-weight: bold; margin: 2mm 0; color: #000;">REPRINT KE-${data.reprintCount}</div>` : ''}
+  ${data.isReprint && data.reprintCount ? `<div class="reprint-notice" style="text-align: center; font-size: 10pt; font-weight: bold; margin: 1mm 0; color: #000;">REPRINT KE-${data.reprintCount}</div>` : ''}
   <div class="address">Jl. Kalimantan no. 21, Kartoharjo<br>Kec. Kartoharjo, Kota Madiun</div>
   
   ${(() => {
@@ -5299,7 +5299,7 @@ function generateReceiptHTML(data, businessName, options) {
     <p>Pendapat Anda sangat penting bagi kami.</p>
     <p>Untuk kritik dan saran silahkan hubungi :</p>
     <p>0812-1822-2666</p>
-    <p style="margin-top: 5mm;">Untuk layanan kemitraan dan partnership</p>
+    <p style="margin-top: 2mm;">Untuk layanan kemitraan dan partnership</p>
   </div>
 </body>
 </html>
