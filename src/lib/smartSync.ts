@@ -542,6 +542,8 @@ class SmartSyncService {
         return 0;
       }
       // Get unsynced transactions (where synced_at IS NULL)
+      // TODO: Make businessId dynamic - for now using default 14 for backward compatibility
+      // This service needs refactoring to accept businessId from the auth context
       const transactions = await (electronAPI.localDbGetUnsyncedTransactions as (businessId: number) => Promise<unknown[]>)(14);
       
       return Array.isArray(transactions) ? transactions.length : 0;

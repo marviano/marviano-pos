@@ -80,14 +80,12 @@ node scripts/hash-password.js "your password here"
 
 ## 🏗️ System Architecture
 
-### Hard-coded Configuration
-- **Business ID**: Currently hard-coded to `business_id = 14` for all product operations
-  - This affects: Category loading, product fetching, and all POS operations
-  - Location: API routes and POS page components
-  - Files affected:
-    - `src/app/api/categories/route.ts` - Category fetching
-    - `src/app/api/products/route.ts` - Product fetching
-  - TODO: Implement dynamic business selection in the future
+### Business ID Configuration
+- **Business ID**: Now dynamically uses `user.selectedBusinessId` from the authenticated user
+  - The system supports multiple businesses through user business selection during login
+  - All components, API routes, and database queries use the selected business ID
+  - Fallback to `business_id = 14` for backward compatibility when not set
+  - Location: All React components, API routes, and Electron IPC handlers accept dynamic businessId
 
 ## 🎨 POS Interface Layout
 
@@ -157,7 +155,7 @@ src/app/page.tsx (Main Entry with Authentication)
 
 ### Core POS APIs
 - **`GET /api/categories`** - Fetch product categories from database
-  - Returns: Unique product types (`jenis`) for business_id = 14
+  - Returns: Unique product types (`jenis`) for the selected business
   - Fallback: Mock data if database unavailable
 - **`GET /api/products?jenis=<category>`** - Fetch products by category
   - Parameters: `jenis` (product type/category)
@@ -404,7 +402,7 @@ CREATE TABLE `role_permissions` (
 ### 🎉 Completed Features:
 
 #### 1. Core POS Functionality
-- **✅ Category Loading**: Dynamic category fetching from database (business_id = 14)
+- **✅ Category Loading**: Dynamic category fetching from database for selected business
 - **✅ Product Management**: Complete product catalog with category filtering
 - **✅ Shopping Cart**: Advanced cart with quantity management and customization support
 - **✅ Transaction Processing**: Payment handling with order status updates

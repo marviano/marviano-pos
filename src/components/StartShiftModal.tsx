@@ -3,8 +3,6 @@
 import { useState, useEffect, useRef } from 'react';
 import { generateUUID } from '@/lib/uuid';
 
-const BUSINESS_ID = 14;
-
 const getElectronAPI = () => (typeof window !== 'undefined' ? window.electronAPI : undefined);
 
 // Format number for input (remove dots, allow only digits)
@@ -30,9 +28,10 @@ interface StartShiftModalProps {
   userId: number;
   userName: string;
   onShiftStarted: () => void;
+  businessId?: number;
 }
 
-export default function StartShiftModal({ isOpen, userId, userName, onShiftStarted }: StartShiftModalProps) {
+export default function StartShiftModal({ isOpen, userId, userName, onShiftStarted, businessId = 14 }: StartShiftModalProps) {
   const [modalAwal, setModalAwal] = useState<string>('');
   const [isStartingShift, setIsStartingShift] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -57,7 +56,7 @@ export default function StartShiftModal({ isOpen, userId, userName, onShiftStart
 
     // Check if there's already an active shift (double-check)
     try {
-      const existingResponse = await electronAPI?.localDbGetActiveShift?.(userId, BUSINESS_ID);
+      const existingResponse = await electronAPI?.localDbGetActiveShift?.(userId, businessId);
       const existingShift = existingResponse?.shift ?? null;
       if (existingShift) {
         const ownerName = existingShift.user_name || 'Kasir lain';
@@ -96,7 +95,7 @@ export default function StartShiftModal({ isOpen, userId, userName, onShiftStart
       const uuid_id = generateUUID();
       const result = await electronAPI.localDbCreateShift({
         uuid_id,
-        business_id: BUSINESS_ID,
+        business_id: businessId,
         user_id: userId,
         user_name: userName,
         modal_awal: amount

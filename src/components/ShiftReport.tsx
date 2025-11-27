@@ -127,6 +127,10 @@ const formatPlatformLabel = (platform: string): string => {
 const getElectronAPI = () => (typeof window !== 'undefined' ? window.electronAPI : undefined);
 
 export default function ShiftReport() {
+  // Get business ID from logged-in user (fallback to 14 for backward compatibility)
+  // TODO: Get from auth context when available
+  const businessId = 14; // For now, keep hardcoded as this component needs refactoring
+  
   const [viewMode, setViewMode] = useState<'list' | 'detail'>('list');
   const [selectedShift, setSelectedShift] = useState<Shift | null>(null);
   
@@ -209,7 +213,6 @@ export default function ShiftReport() {
       const shiftOwnerId = shift.user_id;
       const shiftStart = shift.shift_start;
       const shiftEnd = shift.shift_end || new Date().toISOString(); // Use current time if active
-      const businessId = 14;
 
       const [statsResult, breakdownResult, cashResult, productSalesResult] = await Promise.allSettled([
         electronAPI.localDbGetShiftStatistics?.(shiftOwnerId, shiftStart, shiftEnd, businessId),
@@ -293,7 +296,7 @@ export default function ShiftReport() {
             kas_selisih: varianceValue,
             kas_selisih_label: varianceLabelValue
           },
-          business_id: 14,
+          business_id: businessId,
           printerType: 'receiptPrinter'
         });
       } catch (error) {

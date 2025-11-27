@@ -6,6 +6,7 @@ import { offlineSyncService } from '@/lib/offlineSync';
 import { smartSyncService } from '@/lib/smartSync';
 import { restorePrinterStateFromCloud } from '@/lib/printerSyncUtils';
 import { getApiUrl } from '@/lib/api';
+import { useAuth } from '@/hooks/useAuth';
 
 type UnknownRecord = Record<string, unknown>;
 type TransactionRow = UnknownRecord & { id?: number | string; synced_at?: number | null };
@@ -67,6 +68,11 @@ interface SyncStatusState {
 }
 
 export default function SyncPanel({ isOpen, onClose }: SyncPanelProps) {
+  const { user } = useAuth();
+  
+  // Get business ID from logged-in user (fallback to 14 for backward compatibility)
+  const businessId = user?.selectedBusinessId ?? 14;
+  
   const [syncStatus, setSyncStatus] = useState<SyncStatusState>({
     isOnline: true,
     lastSync: null,
@@ -256,10 +262,10 @@ export default function SyncPanel({ isOpen, onClose }: SyncPanelProps) {
       // Prefer dedicated helper if available; otherwise fallback to filter by synced_at
       let transactionsToUpload: TransactionRow[] = [];
       if (electronAPI.localDbGetUnsyncedTransactions) {
-        const unsynced = await electronAPI.localDbGetUnsyncedTransactions(14);
+        const unsynced = await electronAPI.localDbGetUnsyncedTransactions(businessId);
         transactionsToUpload = toTransactionRows(unsynced);
       } else if (electronAPI.localDbGetTransactions) {
-        const localTransactions = await electronAPI.localDbGetTransactions(14, 1000);
+        const localTransactions = await electronAPI.localDbGetTransactions(businessId, 1000);
         const parsedTransactions = toTransactionRows(localTransactions);
         transactionsToUpload = parsedTransactions.filter(tx => !tx.synced_at);
       }

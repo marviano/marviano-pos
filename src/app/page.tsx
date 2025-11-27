@@ -23,7 +23,8 @@ export default function Home() {
   const userDebugButtonRef = useRef<HTMLButtonElement | null>(null);
   const userDebugPanelRef = useRef<HTMLDivElement | null>(null);
 
-  const BUSINESS_ID = 14;
+  // Get business ID from logged-in user (fallback to 14 for backward compatibility)
+  const businessId = user?.selectedBusinessId ?? 14;
   const getElectronAPI = () => (typeof window !== 'undefined' ? window.electronAPI : undefined);
 
   const appPermissions = useMemo(() => {
@@ -83,7 +84,7 @@ export default function Home() {
           const electronAPI = getElectronAPI();
           if (electronAPI?.localDbGetActiveShift) {
             const userId = typeof user.id === 'string' ? parseInt(user.id, 10) : user.id;
-            const response = await electronAPI.localDbGetActiveShift(userId, BUSINESS_ID);
+            const response = await electronAPI.localDbGetActiveShift(userId, businessId);
             if (!response.shift) {
               // No active shift, show modal
               setShowStartShiftModal(true);
@@ -357,6 +358,7 @@ export default function Home() {
           isOpen={showStartShiftModal}
           userId={typeof user.id === 'string' ? parseInt(user.id, 10) : user.id}
           userName={user.name || 'Cashier'}
+          businessId={businessId}
           onShiftStarted={() => {
             setShowStartShiftModal(false);
           }}

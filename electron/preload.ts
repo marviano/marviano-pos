@@ -253,5 +253,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
   openSlideshowFolder: () => ipcRenderer.invoke('open-slideshow-folder'),
   readSlideshowImage: (filename: string) => ipcRenderer.invoke('read-slideshow-image', filename),
   migrateSlideshowImages: () => ipcRenderer.invoke('migrate-slideshow-images'),
+  
+  // Database Restore
+  restoreFromServer: (options: {
+    businessId: number;
+    apiUrl: string;
+    includeTransactions?: boolean;
+  }) => ipcRenderer.invoke('restore-from-server', options),
 });
 

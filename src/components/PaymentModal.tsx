@@ -117,6 +117,9 @@ export default function PaymentModal({
   selectedOnlinePlatform = null
 }: PaymentModalProps) {
   const { user } = useAuth();
+  
+  // Get business ID from logged-in user (fallback to 14 for backward compatibility)
+  const businessId = user?.selectedBusinessId ?? 14;
   const [selectedPaymentMethod, setSelectedPaymentMethod] = useState<PaymentMethod>('cash');
   const [selectedPickupMethod, setSelectedPickupMethod] = useState<PickupMethod>('dine-in');
   const [amountReceived, setAmountReceived] = useState<string>('');
@@ -572,7 +575,7 @@ export default function PaymentModal({
       // Generate 19-digit numeric UUID instead of random UUID
       let transactionId = '';
       if (window.electronAPI?.generateNumericUuid) {
-        const uuidResult = await window.electronAPI.generateNumericUuid(14); // business_id
+        const uuidResult = await window.electronAPI.generateNumericUuid(businessId);
         if (uuidResult?.success && uuidResult?.uuid) {
           transactionId = uuidResult.uuid;
         } else {
@@ -587,7 +590,7 @@ export default function PaymentModal({
       
       const transactionData = {
         id: transactionId,
-        business_id: 14, // Momoyo Bakery Kalimantan business_id
+        business_id: businessId,
         user_id: user?.id ? parseInt(user.id) : 1, // Get user ID from auth context
         payment_method: selectedPaymentMethod,
         pickup_method: finalPickupMethod,
@@ -808,7 +811,7 @@ export default function PaymentModal({
         let globalCounter = 1;
         if (window.electronAPI?.getPrinterCounter) {
           try {
-            const globalCounterResult = await window.electronAPI.getPrinterCounter('globalPrinter', 14, true);
+            const globalCounterResult = await window.electronAPI.getPrinterCounter('globalPrinter', businessId, true);
             if (isCounterResponse(globalCounterResult) && typeof globalCounterResult.counter === 'number') {
               globalCounter = globalCounterResult.counter;
             }
@@ -1021,7 +1024,7 @@ export default function PaymentModal({
             // Get Printer 1 counter and increment
             printer1Counter = 1;
             if (window.electronAPI?.getPrinterCounter) {
-              const counterResult = await window.electronAPI.getPrinterCounter('receiptPrinter', 14, true); // true = increment
+              const counterResult = await window.electronAPI.getPrinterCounter('receiptPrinter', businessId, true); // true = increment
               if (isCounterResponse(counterResult) && typeof counterResult.counter === 'number') {
                 printer1Counter = counterResult.counter;
               }
@@ -1074,7 +1077,7 @@ export default function PaymentModal({
             // Get Printer 2 counter and increment
             printer2Counter = 1;
             if (window.electronAPI?.getPrinterCounter) {
-              const counterResult = await window.electronAPI.getPrinterCounter('receiptizePrinter', 14, true); // true = increment
+              const counterResult = await window.electronAPI.getPrinterCounter('receiptizePrinter', businessId, true); // true = increment
               if (isCounterResponse(counterResult) && typeof counterResult.counter === 'number') {
                 printer2Counter = counterResult.counter;
               }
@@ -1130,7 +1133,7 @@ export default function PaymentModal({
           } else if (shouldPrintReceiptize && typeof printer2Counter === 'number') {
             labelCounter = printer2Counter;
           } else if (!shouldPrintReceipt && shouldPrintReceiptize && window.electronAPI?.getPrinterCounter) {
-            const counterResult = await window.electronAPI.getPrinterCounter('receiptizePrinter', 14, false); // Don't increment
+            const counterResult = await window.electronAPI.getPrinterCounter('receiptizePrinter', businessId, false); // Don't increment
             if (isCounterResponse(counterResult) && typeof counterResult.counter === 'number') {
               labelCounter = counterResult.counter;
             }

@@ -389,6 +389,18 @@ declare global {
       localDbResetPrinterDailyCounters?: (businessId: number) => Promise<{ success: boolean }>;
       localDbGetUnsyncedPrinterAudits?: () => Promise<{ p1: unknown[]; p2: unknown[] }>;
       localDbMarkPrinterAuditsSynced?: (payload: { p1Ids?: number[]; p2Ids?: number[] }) => Promise<{ success: boolean }>;
+      
+      // Database Restore
+      restoreFromServer?: (options: {
+        businessId: number;
+        apiUrl: string;
+        includeTransactions?: boolean;
+      }) => Promise<{
+        success: boolean;
+        message?: string;
+        error?: string;
+        stats: Record<string, number>;
+      }>;
     };
   }
 }

@@ -157,7 +157,6 @@ const getGmt7DayBounds = (dateString?: string | null): { dayStartUtc: string; da
   };
 };
 
-const BUSINESS_ID = 14;
 const AUTO_REFRESH_INTERVAL = 30000; // 30 seconds
 
 const getElectronAPI = () => (typeof window !== 'undefined' ? window.electronAPI : undefined);
@@ -208,6 +207,10 @@ const formatTime = (dateString: string): string => {
 
 export default function GantiShift() {
   const { user } = useAuth();
+  
+  // Get business ID from logged-in user (fallback to 14 for backward compatibility)
+  const businessId = user?.selectedBusinessId ?? 14;
+  
   const [activeShift, setActiveShift] = useState<Shift | null>(null);
   const [modalAwal, setModalAwal] = useState<string>('');
   const [isStartingShift, setIsStartingShift] = useState(false);
@@ -316,7 +319,7 @@ export default function GantiShift() {
       const info = await electronAPI.localDbCheckTodayTransactions(
         shiftOwnerId,
         activeShift.shift_start,
-        BUSINESS_ID
+        businessId
       );
       setTodayTransactionsInfo(info);
     } catch (error) {
@@ -413,7 +416,7 @@ export default function GantiShift() {
     const loadSequence = async () => {
       try {
         const response = await localDbGetShifts({
-          businessId: BUSINESS_ID,
+          businessId: businessId,
           startDate: bounds.dayStartUtc,
           endDate: bounds.dayEndUtc,
           limit: 50
@@ -481,7 +484,7 @@ export default function GantiShift() {
     }
 
     try {
-      const response = await electronAPI.localDbGetActiveShift(currentUserId, BUSINESS_ID);
+      const response = await electronAPI.localDbGetActiveShift(currentUserId, businessId);
       const shift = response?.shift ?? null;
       setActiveShift(shift);
       setIsCurrentUsersShift(Boolean(shift && response?.isCurrentUserShift));
@@ -513,19 +516,19 @@ export default function GantiShift() {
       // Load all statistics in parallel with error handling
       const [statsResult, breakdownResult, category2BreakdownResult, cashResult, productSalesResult] = await Promise.allSettled([
         electronAPI.localDbGetShiftStatistics
-          ? electronAPI.localDbGetShiftStatistics(shiftOwnerId, activeShift.shift_start, activeShift.shift_end, BUSINESS_ID)
+          ? electronAPI.localDbGetShiftStatistics(shiftOwnerId, activeShift.shift_start, activeShift.shift_end, businessId)
           : Promise.resolve(defaultStats),
         electronAPI.localDbGetPaymentBreakdown
-          ? electronAPI.localDbGetPaymentBreakdown(shiftOwnerId, activeShift.shift_start, activeShift.shift_end, BUSINESS_ID)
+          ? electronAPI.localDbGetPaymentBreakdown(shiftOwnerId, activeShift.shift_start, activeShift.shift_end, businessId)
           : Promise.resolve<PaymentBreakdown[]>([]),
         electronAPI.localDbGetCategory2Breakdown
-          ? electronAPI.localDbGetCategory2Breakdown(shiftOwnerId, activeShift.shift_start, activeShift.shift_end, BUSINESS_ID)
+          ? electronAPI.localDbGetCategory2Breakdown(shiftOwnerId, activeShift.shift_start, activeShift.shift_end, businessId)
           : Promise.resolve<Category2Breakdown[]>([]),
         electronAPI.localDbGetCashSummary
-          ? electronAPI.localDbGetCashSummary(shiftOwnerId, activeShift.shift_start, activeShift.shift_end, BUSINESS_ID)
+          ? electronAPI.localDbGetCashSummary(shiftOwnerId, activeShift.shift_start, activeShift.shift_end, businessId)
           : Promise.resolve(defaultCash),
         electronAPI.localDbGetProductSales
-          ? electronAPI.localDbGetProductSales(shiftOwnerId, activeShift.shift_start, activeShift.shift_end, BUSINESS_ID)
+          ? electronAPI.localDbGetProductSales(shiftOwnerId, activeShift.shift_start, activeShift.shift_end, businessId)
           : Promise.resolve<ProductSalesPayload>({ products: [], customizations: [] })
       ]);
 
@@ -575,7 +578,7 @@ export default function GantiShift() {
   }, [activeShift]);
 
   const fetchReportPayload = useCallback(
-    async ({ start, end, userId, businessId = BUSINESS_ID }: { start: string; end: string | null; userId: number; businessId?: number; }): Promise<ReportDataPayload> => {
+    async ({ start, end, userId, businessId: reportBusinessId = businessId }: { start: string; end: string | null; userId: number; businessId?: number; }): Promise<ReportDataPayload> => {
       const electronAPI = getElectronAPI();
       if (!electronAPI) {
         throw new Error('Aplikasi Electron tidak terdeteksi.');
@@ -597,19 +600,19 @@ export default function GantiShift() {
       try {
         const [statsResult, breakdownResult, category2BreakdownResult, cashResult, productSalesResult] = await Promise.allSettled([
           electronAPI.localDbGetShiftStatistics
-            ? electronAPI.localDbGetShiftStatistics(userId, start, end, businessId)
+            ? electronAPI.localDbGetShiftStatistics(userId, start, end, reportBusinessId)
             : Promise.resolve(defaultStats),
           electronAPI.localDbGetPaymentBreakdown
-            ? electronAPI.localDbGetPaymentBreakdown(userId, start, end, businessId)
+            ? electronAPI.localDbGetPaymentBreakdown(userId, start, end, reportBusinessId)
             : Promise.resolve<PaymentBreakdown[]>([]),
           electronAPI.localDbGetCategory2Breakdown
-            ? electronAPI.localDbGetCategory2Breakdown(userId, start, end, businessId)
+            ? electronAPI.localDbGetCategory2Breakdown(userId, start, end, reportBusinessId)
             : Promise.resolve<Category2Breakdown[]>([]),
           electronAPI.localDbGetCashSummary
-            ? electronAPI.localDbGetCashSummary(userId, start, end, businessId)
+            ? electronAPI.localDbGetCashSummary(userId, start, end, reportBusinessId)
             : Promise.resolve(defaultCash),
           electronAPI.localDbGetProductSales
-            ? electronAPI.localDbGetProductSales(userId, start, end, businessId)
+            ? electronAPI.localDbGetProductSales(userId, start, end, reportBusinessId)
             : Promise.resolve<ProductSalesPayload>({ products: [], customizations: [] })
         ]);
 
@@ -664,7 +667,7 @@ export default function GantiShift() {
 
     // Check if there's already an active shift (double-check)
     try {
-      const existingResponse = await electronAPI?.localDbGetActiveShift?.(currentUserId, BUSINESS_ID);
+      const existingResponse = await electronAPI?.localDbGetActiveShift?.(currentUserId, businessId);
       const existingShift = existingResponse?.shift ?? null;
       if (existingShift) {
         const ownerName = existingShift.user_name || 'Kasir lain';
@@ -712,7 +715,7 @@ export default function GantiShift() {
       const uuid_id = generateUUID();
       const result = await electronAPI.localDbCreateShift({
         uuid_id,
-        business_id: BUSINESS_ID,
+        business_id: businessId,
         user_id: currentUserId,
         user_name: user.name,
         modal_awal: amount
@@ -898,6 +901,18 @@ export default function GantiShift() {
       return;
     }
     
+    // Check if any printer is configured
+    const printerConfigs = await electronAPI.localDbGetPrinterConfigs?.();
+    const hasReceiptPrinter = Array.isArray(printerConfigs) && printerConfigs.some((config) => {
+      const cfg = config as { printer_type?: string; system_printer_name?: string };
+      return cfg.printer_type === 'receiptPrinter' && cfg.system_printer_name;
+    });
+    
+    if (!hasReceiptPrinter) {
+      setError('⚠️ Receipt Printer belum dikonfigurasi! Silakan konfigurasi printer di menu Settings → Printer Selector terlebih dahulu.');
+      return;
+    }
+    
     setIsPrintingSelected(true);
     setError(null);
     setShowPrintSelectionModal(false);
@@ -908,15 +923,24 @@ export default function GantiShift() {
         throw new Error('User ID tidak valid');
       }
       
+      console.log('🖨️ Starting print job for selected shifts...');
+      
       // Print whole day if selected
       if (printWholeDaySelected) {
         try {
-          console.log('📊 [PRINT ALL] Printing whole day report from day start');
+          console.log('📊 [PRINT WHOLE DAY] Starting...');
+          console.log('   Day range:', shiftSequenceInfo.dayStartUtc, 'to', shiftSequenceInfo.dayEndUtc);
           
           const dayReportData = await fetchReportPayload({
             start: shiftSequenceInfo.dayStartUtc, // START FROM DAY START - INCLUDES SHIFT 1
             end: shiftSequenceInfo.dayEndUtc,
             userId: shiftOwnerId
+          });
+          
+          console.log('📊 [PRINT WHOLE DAY] Data fetched:', {
+            orders: dayReportData.statistics.order_count,
+            total: dayReportData.statistics.total_amount,
+            products: dayReportData.productSales.length
           });
           
           const dayCash = dayReportData.cashSummary;
@@ -929,6 +953,8 @@ export default function GantiShift() {
           if (shiftSequenceInfo.shifts.length > 0) {
             modalAwalWholeDay = shiftSequenceInfo.shifts[0].modal_awal || 0;
           }
+          
+          console.log('🖨️ [PRINT WHOLE DAY] Sending to printer...');
           
           const result = await electronAPI.printShiftBreakdown({
             user_name: 'Semua Shift',
@@ -954,17 +980,22 @@ export default function GantiShift() {
               total_cash_in_cashier: modalAwalWholeDay + dayCashSales - dayCashRefunds,
               kas_mulai: modalAwalWholeDay,
               kas_expected: modalAwalWholeDay + dayCashSales - dayCashRefunds,
-              kas_akhir: null,
-              kas_selisih: null,
-              kas_selisih_label: null
-            },
-            business_id: BUSINESS_ID,
-            printerType: 'receiptPrinter'
-          });
-          
-          if (!result.success) {
-            throw new Error(result.error || 'Gagal mencetak laporan harian');
-          }
+            kas_akhir: null,
+            kas_selisih: null,
+            kas_selisih_label: null
+          },
+          business_id: businessId,
+          printerType: 'receiptPrinter'
+        });
+        
+        console.log('📄 [PRINT WHOLE DAY] Result:', result);
+        
+        if (!result.success) {
+          console.error('❌ [PRINT WHOLE DAY] Failed:', result.error);
+          throw new Error(result.error || 'Gagal mencetak laporan harian');
+        }
+        
+        console.log('✅ [PRINT WHOLE DAY] Success!');
           
           // Small delay between prints
           await new Promise(r => setTimeout(r, 500));
@@ -976,11 +1007,15 @@ export default function GantiShift() {
       
       // Print selected individual shifts
       const selectedShifts = printSelections.filter(s => s.selected);
+      console.log(`📋 [PRINT SHIFTS] Printing ${selectedShifts.length} individual shift(s)...`);
+      
       for (const selection of selectedShifts) {
         const shift = shiftSequenceInfo.shifts.find(s => s.id === selection.shiftId);
         if (!shift) continue;
         
         try {
+          console.log(`🖨️ [PRINT SHIFT ${selection.shiftIndex}] Starting - ${shift.user_name}`);
+          
           const shiftUserId = Number(shift.user_id ?? 0);
           const shiftReportData = await fetchReportPayload({
             start: shift.shift_start,
@@ -988,10 +1023,17 @@ export default function GantiShift() {
             userId: shiftUserId
           });
           
+          console.log(`📊 [PRINT SHIFT ${selection.shiftIndex}] Data:`, {
+            orders: shiftReportData.statistics.order_count,
+            total: shiftReportData.statistics.total_amount
+          });
+          
           const shiftCash = shiftReportData.cashSummary;
           const shiftCashSales = shiftCash.cash_shift_sales ?? shiftCash.cash_shift ?? 0;
           const shiftCashRefunds = shiftCash.cash_shift_refunds ?? 0;
           const shiftKasExpected = shift.modal_awal + shiftCashSales - shiftCashRefunds;
+          
+          console.log(`🖨️ [PRINT SHIFT ${selection.shiftIndex}] Sending to printer...`);
           
           const result = await electronAPI.printShiftBreakdown({
             user_name: shift.user_name,
@@ -1017,17 +1059,22 @@ export default function GantiShift() {
               total_cash_in_cashier: shiftKasExpected,
               kas_mulai: shift.modal_awal,
               kas_expected: shiftKasExpected,
-              kas_akhir: shift.kas_akhir ?? null,
-              kas_selisih: shift.kas_selisih ?? null,
-              kas_selisih_label: shift.kas_selisih_label ?? null
-            },
-            business_id: BUSINESS_ID,
-            printerType: 'receiptPrinter'
-          });
-          
-          if (!result.success) {
-            throw new Error(result.error || `Gagal mencetak laporan Shift ${selection.shiftIndex}`);
-          }
+            kas_akhir: shift.kas_akhir ?? null,
+            kas_selisih: shift.kas_selisih ?? null,
+            kas_selisih_label: shift.kas_selisih_label ?? null
+          },
+          business_id: businessId,
+          printerType: 'receiptPrinter'
+        });
+        
+        console.log(`📄 [PRINT SHIFT ${selection.shiftIndex}] Result:`, result);
+        
+        if (!result.success) {
+          console.error(`❌ [PRINT SHIFT ${selection.shiftIndex}] Failed:`, result.error);
+          throw new Error(result.error || `Gagal mencetak laporan Shift ${selection.shiftIndex}`);
+        }
+        
+        console.log(`✅ [PRINT SHIFT ${selection.shiftIndex}] Success!`);
           
           // Small delay between prints
           await new Promise(r => setTimeout(r, 500));
@@ -1130,7 +1177,7 @@ export default function GantiShift() {
           kas_selisih: null,
           kas_selisih_label: null
         },
-        business_id: BUSINESS_ID,
+        business_id: businessId,
         printerType: 'receiptPrinter'
       });
 

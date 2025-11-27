@@ -180,3 +180,4 @@ Customer display now shows **exactly** what the cashier sees, including:
 The customer can see their complete order with full transparency! 🎉
 
 
+

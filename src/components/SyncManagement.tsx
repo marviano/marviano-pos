@@ -21,6 +21,7 @@ import { offlineSyncService } from '@/lib/offlineSync';
 import { smartSyncService } from '@/lib/smartSync';
 import { restorePrinterStateFromCloud } from '@/lib/printerSyncUtils';
 import { getApiUrl } from '@/lib/api';
+import { useAuth } from '@/hooks/useAuth';
 
 type UnknownRecord = Record<string, unknown>;
 type SmartSyncStatus = ReturnType<typeof smartSyncService.getStatus>;
@@ -184,6 +185,11 @@ const normalizeDateInput = (value: string | null | undefined, isEnd: boolean): s
 };
 
 export default function SyncManagement() {
+  const { user } = useAuth();
+  
+  // Get business ID from logged-in user (fallback to 14 for backward compatibility)
+  const businessId = user?.selectedBusinessId ?? 14;
+  
   const [syncStatus, setSyncStatus] = useState<SyncStatus>({
     isOnline: true,
     lastSync: null,
@@ -218,6 +224,7 @@ export default function SyncManagement() {
   const [dangerFrom, setDangerFrom] = useState<string>('');
   const [dangerTo, setDangerTo] = useState<string>('');
   const [deleteByEmailPreview, setDeleteByEmailPreview] = useState<string>('');
+  const [isRestoring, setIsRestoring] = useState(false);
   const logsEndRef = useRef<HTMLDivElement>(null);
 
   // Initialize preview with default email when danger zone opens
@@ -364,7 +371,7 @@ export default function SyncManagement() {
     }
 
     try {
-      const shifts = await electronAPI.localDbGetUnsyncedShifts(14);
+      const shifts = await electronAPI.localDbGetUnsyncedShifts(businessId);
       const normalized = normalizeOfflineShifts(shifts);
       setOfflineShifts(normalized);
       if (normalized.length > 0) {
@@ -388,7 +395,7 @@ export default function SyncManagement() {
 
     setIsLoadingOfflineData(true);
     try {
-      const transactions = await electronAPI.localDbGetUnsyncedTransactions(14);
+      const transactions = await electronAPI.localDbGetUnsyncedTransactions(businessId);
       const normalized = normalizeOfflineTransactions(transactions);
       setOfflineTransactions(normalized);
       addLog('success', `Loaded ${normalized.length} offline transactions pending upload`);
@@ -406,12 +413,12 @@ export default function SyncManagement() {
     try {
       const electronAPI = getElectronAPI();
       if (electronAPI?.localDbGetTransactions) {
-        const offlineTx = await electronAPI.localDbGetTransactions(14, 10000);
+        const offlineTx = await electronAPI.localDbGetTransactions(businessId, 10000);
         setOfflineTransactionCount(Array.isArray(offlineTx) ? offlineTx.length : 0);
       }
 
       try {
-        const response = await fetch(getApiUrl('/api/transactions?business_id=14&limit=10000'));
+        const response = await fetch(getApiUrl(`/api/transactions?business_id=${businessId}&limit=10000`));
         if (response.ok) {
           const data = await response.json();
           setOnlineTransactionCount(Array.isArray(data.transactions) ? data.transactions.length : 0);
@@ -425,6 +432,83 @@ export default function SyncManagement() {
       console.error('Failed to fetch transaction counts:', error);
     }
   }, []);
+
+  // Restore database from server (Emergency recovery)
+  const handleRestoreFromServer = useCallback(async () => {
+    const electronAPI = getElectronAPI();
+    if (!electronAPI?.restoreFromServer) {
+      addLog('error', 'Restore feature not available. Please update your app.');
+      return;
+    }
+
+    const confirmed = window.confirm(
+      '⚠️ RESTORE FROM SERVER\n\n' +
+      'This will download ALL data from the server and restore to your local database.\n\n' +
+      '✅ What will be restored:\n' +
+      '• Master data (products, categories, users, etc.)\n' +
+      '• All transactions\n' +
+      '• No duplicates (uses INSERT OR REPLACE)\n\n' +
+      '⚠️ This is safe and will not delete existing data.\n\n' +
+      'Continue with restore?'
+    );
+
+    if (!confirmed) return;
+
+    setIsRestoring(true);
+    addLog('info', '🔄 Starting database restore from server...');
+    
+    try {
+      const result = await electronAPI.restoreFromServer({
+        businessId: businessId,
+        apiUrl: getApiUrl(''),
+        includeTransactions: true
+      });
+
+      if (result.success) {
+        addLog('success', `✅ Restore completed successfully!`);
+        
+        // Show detailed stats
+        const stats = result.stats;
+        if (stats.businesses) addLog('success', `✅ ${stats.businesses} businesses restored`);
+        if (stats.users) addLog('success', `✅ ${stats.users} users restored`);
+        if (stats.products) addLog('success', `✅ ${stats.products} products restored`);
+        if (stats.category1) addLog('success', `✅ ${stats.category1} category1 restored`);
+        if (stats.category2) addLog('success', `✅ ${stats.category2} category2 restored`);
+        if (stats.customizationTypes) addLog('success', `✅ ${stats.customizationTypes} customization types restored`);
+        if (stats.customizationOptions) addLog('success', `✅ ${stats.customizationOptions} customization options restored`);
+        if (stats.productCustomizations) addLog('success', `✅ ${stats.productCustomizations} product customizations restored`);
+        if (stats.bundleItems) addLog('success', `✅ ${stats.bundleItems} bundle items restored`);
+        if (stats.paymentMethods) addLog('success', `✅ ${stats.paymentMethods} payment methods restored`);
+        if (stats.banks) addLog('success', `✅ ${stats.banks} banks restored`);
+        if (stats.clAccounts) addLog('success', `✅ ${stats.clAccounts} CL accounts restored`);
+        if (stats.transactions) addLog('success', `✅ ${stats.transactions} transactions restored`);
+        if (stats.transactionItems) addLog('success', `✅ ${stats.transactionItems} transaction items restored`);
+        
+        // Reload offline data
+        await loadOfflineTransactions();
+        await loadOfflineShifts();
+        await fetchTransactionCounts();
+        
+        alert(
+          `✅ Database Restored Successfully!\n\n` +
+          `${stats.transactions || 0} transactions restored\n` +
+          `${stats.transactionItems || 0} transaction items (products) restored\n` +
+          `${stats.products || 0} product definitions restored\n` +
+          `Check the logs for full details.`
+        );
+      } else {
+        addLog('error', `❌ Restore failed: ${result.error}`);
+        alert(`❌ Restore Failed\n\n${result.error}`);
+      }
+    } catch (error) {
+      console.error('Restore error:', error);
+      const message = error instanceof Error ? error.message : 'Unknown error';
+      addLog('error', `❌ Restore error: ${message}`);
+      alert(`❌ Restore Error\n\n${message}`);
+    } finally {
+      setIsRestoring(false);
+    }
+  }, [businessId, addLog, loadOfflineTransactions, loadOfflineShifts, fetchTransactionCounts]);
 
   // Full database sync (Download from cloud)
   const syncFromCloud = useCallback(async () => {
@@ -790,7 +874,7 @@ export default function SyncManagement() {
         return;
       }
       const archiveCount = await electronAPI.localDbArchiveTransactions({
-        businessId: 14,
+        businessId: businessId,
         from: dangerRange.fromIso,
         to: dangerRange.toIso
       });
@@ -803,7 +887,7 @@ export default function SyncManagement() {
           headers: {
             'Content-Type': 'application/json',
           },
-          body: JSON.stringify({ business_id: 14, from: dangerRange.fromIso, to: dangerRange.toIso })
+          body: JSON.stringify({ business_id: businessId, from: dangerRange.fromIso, to: dangerRange.toIso })
         });
         
         if (response.ok) {
@@ -821,7 +905,7 @@ export default function SyncManagement() {
         );
       }
       
-      const resetCounters = await electronAPI.localDbResetPrinterDailyCounters(14);
+      const resetCounters = await electronAPI.localDbResetPrinterDailyCounters(businessId);
       if (resetCounters?.success) {
         addLog('info', '🧹 Reset offline printer daily counters');
       }
@@ -992,7 +1076,7 @@ export default function SyncManagement() {
       }
       // Delete from offline database
       const deleteCount = await electronAPI.localDbDeleteTransactions({
-        businessId: 14,
+        businessId: businessId,
         from: dangerRange.fromIso,
         to: dangerRange.toIso
       });
@@ -1000,7 +1084,7 @@ export default function SyncManagement() {
       
       // Delete transaction items
       const itemsResult = await electronAPI.localDbDeleteTransactionItems({
-        businessId: 14,
+        businessId: businessId,
         from: dangerRange.fromIso,
         to: dangerRange.toIso
       });
@@ -1014,7 +1098,7 @@ export default function SyncManagement() {
           headers: {
             'Content-Type': 'application/json',
           },
-          body: JSON.stringify({ business_id: 14, from: dangerRange.fromIso, to: dangerRange.toIso })
+          body: JSON.stringify({ business_id: businessId, from: dangerRange.fromIso, to: dangerRange.toIso })
         });
         
         if (response.ok) {
@@ -1032,7 +1116,7 @@ export default function SyncManagement() {
         );
       }
       
-      const resetCounters = await electronAPI.localDbResetPrinterDailyCounters(14);
+      const resetCounters = await electronAPI.localDbResetPrinterDailyCounters(businessId);
       if (resetCounters?.success) {
         addLog('info', '🧹 Reset offline printer daily counters');
       }
@@ -1070,7 +1154,7 @@ export default function SyncManagement() {
       
       let onlineTransactionIds: string[] = [];
       try {
-        const response = await fetch(getApiUrl('/api/transactions?business_id=14&limit=10000'));
+        const response = await fetch(getApiUrl(`/api/transactions?business_id=${businessId}&limit=10000`));
         if (response.ok) {
           const data = await response.json();
           onlineTransactionIds = Array.isArray(data.transactions)
@@ -1213,7 +1297,7 @@ export default function SyncManagement() {
 
   const buildSqlWherePreview = useCallback((alias?: string, statusCondition?: string) => {
     const prefix = alias ? `${alias}.` : '';
-    const clauses: string[] = [`${prefix}business_id = 14`];
+    const clauses: string[] = [`${prefix}business_id = ${businessId}`];
     if (dangerRange.fromIso) {
       clauses.push(`${prefix}created_at >= '${formatSqlPreviewDate(dangerRange.fromIso)}'`);
     }
@@ -1384,6 +1468,31 @@ WHERE ${baseWhere};`;
               >
                 <AlertTriangle className="w-4 h-4" />
                 <span>Cari Transaksi Hilang</span>
+              </button>
+
+              <button
+                onClick={handleRestoreFromServer}
+                disabled={isRestoring}
+                className={`
+                  flex items-center justify-center gap-2 px-4 py-2 rounded-lg font-medium transition-all text-sm
+                  ${isRestoring 
+                    ? 'bg-gray-400 text-white cursor-not-allowed' 
+                    : 'bg-green-600 hover:bg-green-700 text-white'
+                  }
+                `}
+                title="Restore database from server (Emergency recovery)"
+              >
+                {isRestoring ? (
+                  <>
+                    <Database className="w-4 h-4 animate-pulse" />
+                    <span>Restoring...</span>
+                  </>
+                ) : (
+                  <>
+                    <Database className="w-4 h-4" />
+                    <span>Restore from Server</span>
+                  </>
+                )}
               </button>
             </div>
           </div>
@@ -1903,7 +2012,7 @@ WHERE ${baseWhere};`;
                 <strong>Warning:</strong>{' '}
                 {hasDangerRange
                   ? `Only transactions between ${rangeDescription} will be archived. They will be hidden but still stored.`
-                  : 'This will archive all transactions for business ID 14. Archived transactions will be hidden from the transaction list but preserved.'}
+                  : `This will archive all transactions for business ID ${businessId}. Archived transactions will be hidden from the transaction list but preserved.`}
               </p>
             </div>
             <div className="flex gap-3">
@@ -1959,8 +2068,8 @@ WHERE ${baseWhere};`;
               <ul className="text-sm text-red-700 list-disc list-inside space-y-1">
                 <li>
                   {hasDangerRange
-                    ? `Transactions for business ID 14 between ${rangeDescription}`
-                    : 'All transactions for business ID 14'}
+                    ? `Transactions for business ID ${businessId} between ${rangeDescription}`
+                    : `All transactions for business ID ${businessId}`}
                 </li>
                 <li>All transaction items</li>
                 <li>Data in both online and offline databases</li>

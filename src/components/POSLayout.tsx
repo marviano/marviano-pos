@@ -48,6 +48,9 @@ export default function POSLayout() {
   const { user } = useAuth();
   const permissions = user?.permissions ?? [];
   const isAdmin = isSuperAdmin(user);
+  
+  // Get business ID from logged-in user (fallback to 14 for backward compatibility)
+  const businessId = user?.selectedBusinessId ?? 14;
   const canAccessSync = isAdmin ||
     permissions.includes('setelan.sinkronisasi') ||
     permissions.includes('marviano-pos_setelan_sinkronisasi');
@@ -122,7 +125,7 @@ export default function POSLayout() {
     });
   };
 
-  // Fetch categories from database (business_id = 14) with offline fallback
+  // Fetch categories from database with offline fallback
   // NEW: Fetch both drinks AND bakery categories together
   useEffect(() => {
     let isCancelled = false;
@@ -195,7 +198,7 @@ export default function POSLayout() {
     };
   }, [isOnlineTab, selectedOnlinePlatform]);
 
-  // Fetch products when category or tab changes (business_id = 14) with offline fallback
+  // Fetch products when category or tab changes with offline fallback
   // NEW: We need to determine transactionType from the selected category's products
   useEffect(() => {
     let isCancelled = false;
@@ -465,7 +468,7 @@ export default function POSLayout() {
                 selectedOnlinePlatform={selectedOnlinePlatform}
               />
               
-              {/* Right Sidebar - Categories from database (business_id = 14) */}
+              {/* Right Sidebar - Categories from database */}
               <RightSidebar 
                 categories={categories}
                 selectedCategory={selectedCategory}
@@ -477,7 +480,7 @@ export default function POSLayout() {
         );
       
       case 'Daftar Transaksi':
-        return <TransactionList businessId={14} />;
+        return <TransactionList businessId={businessId} />;
       
       case 'Ganti Shift':
         return <GantiShift />;

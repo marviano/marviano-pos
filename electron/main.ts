@@ -331,6 +331,12 @@ type TransactionItemRow = {
   transaction_type: string;
   payment_method_code?: string;
   payment_method?: string;
+  harga_jual?: number;
+  harga_gofood?: number;
+  harga_grabfood?: number;
+  harga_shopeefood?: number;
+  harga_qpon?: number;
+  harga_tiktok?: number;
 };
 
 type TransactionRefundRow = {
@@ -2747,7 +2753,19 @@ function createWindows(): void {
     query += ' ORDER BY t.created_at DESC';
     
     const stmt = localDb.prepare(query);
-    return stmt.all(...params);
+    const transactions = stmt.all(...params);
+    
+    // ✅ NEW: Fetch transaction items for each transaction
+    if (Array.isArray(transactions) && transactions.length > 0) {
+      const itemsStmt = localDb.prepare('SELECT * FROM transaction_items WHERE transaction_id = ?');
+      
+      for (const transaction of transactions as any[]) {
+        const items = itemsStmt.all(transaction.id);
+        transaction.items = items || [];
+      }
+    }
+    
+    return transactions;
   });
 
   // Transaction Items
@@ -3517,7 +3535,8 @@ function createWindows(): void {
         SELECT 
           pm.name as payment_method_name,
           pm.code as payment_method_code,
-          COUNT(t.id) as transaction_count
+          COUNT(t.id) as transaction_count,
+          SUM(t.final_amount) as total_amount
         FROM transactions t
         LEFT JOIN payment_methods pm ON t.payment_method_id = pm.id
         WHERE t.user_id = ? AND t.business_id = ?
@@ -3857,7 +3876,13 @@ function createWindows(): void {
           ti.bundle_selections_json,
           t.transaction_type,
           pm.code as payment_method_code,
-          t.payment_method as payment_method
+          t.payment_method as payment_method,
+          p.harga_jual,
+          p.harga_gofood,
+          p.harga_grabfood,
+          p.harga_shopeefood,
+          p.harga_qpon,
+          p.harga_tiktok
         FROM transaction_items ti
         INNER JOIN transactions t ON ti.transaction_id = t.id
         LEFT JOIN payment_methods pm ON t.payment_method_id = pm.id
@@ -3953,7 +3978,9 @@ function createWindows(): void {
               const totalQty = selectionQty * unitQuantity;
 
               if (selectedProduct?.product?.id) {
-                const bundleItemKey = `${selectedProduct.product.id}-${platformCode}-${transactionType}`;
+                // Use the same platform detection for bundle items (from parent row)
+                const bundlePlatform = determinePlatform(row);
+                const bundleItemKey = `${selectedProduct.product.id}-${bundlePlatform}-${transactionType}`;
                 const existingBundleItem = bundleItemsAggregate.get(bundleItemKey);
 
                 if (existingBundleItem) {
@@ -3963,7 +3990,7 @@ function createWindows(): void {
                     product_id: Number(selectedProduct.product.id),
                     product_name: selectedProduct.product.nama || 'Unknown Product',
                     product_code: '',
-                    platform: platformCode,
+                    platform: bundlePlatform,
                     transaction_type: transactionType,
                     total_quantity: totalQty,
                     total_subtotal: 0,
@@ -4011,6 +4038,34 @@ function createWindows(): void {
         return customizationTotal * unitQuantity || 0;
       };
 
+      // Helper function to determine platform from unit price
+      const determinePlatform = (row: TransactionItemRow): string => {
+        const unitPrice = Number(row.unit_price || 0);
+        
+        // Compare unit price with platform-specific prices
+        // Allow small tolerance for floating point comparison (0.01)
+        const tolerance = 0.01;
+        
+        if (row.harga_gofood && Math.abs(unitPrice - Number(row.harga_gofood)) < tolerance) {
+          return 'gofood';
+        }
+        if (row.harga_grabfood && Math.abs(unitPrice - Number(row.harga_grabfood)) < tolerance) {
+          return 'grabfood';
+        }
+        if (row.harga_shopeefood && Math.abs(unitPrice - Number(row.harga_shopeefood)) < tolerance) {
+          return 'shopeefood';
+        }
+        if (row.harga_qpon && Math.abs(unitPrice - Number(row.harga_qpon)) < tolerance) {
+          return 'qpon';
+        }
+        if (row.harga_tiktok && Math.abs(unitPrice - Number(row.harga_tiktok)) < tolerance) {
+          return 'tiktok';
+        }
+        
+        // Default to offline
+        return 'offline';
+      };
+
       for (const row of rows) {
         const quantity = Number(row.quantity || 0);
         const totalPrice = Number(row.total_price || 0);
@@ -4021,8 +4076,8 @@ function createWindows(): void {
           baseSubtotal = 0;
         }
 
-        const rawPlatform = (row.payment_method_code || row.payment_method || '').toString().toLowerCase();
-        const platformCode = rawPlatform && !OFFLINE_METHODS.has(rawPlatform) ? rawPlatform : 'offline';
+        // Determine platform based on product price, not payment method
+        const platformCode = determinePlatform(row);
         const transactionType = row.transaction_type || 'drinks';
         const key = `${row.product_id}-${platformCode}-${transactionType}`;
 
@@ -5349,20 +5404,20 @@ function generateTestReceiptHTML(printerName: string, businessName: string, opti
       max-width: 42ch;
       font-size: 10pt;
       font-weight: 500;
-      line-height: 1.4;
-      padding: 5mm ${rightPadding.toFixed(2)}mm 5mm ${leftPadding.toFixed(2)}mm;
+      line-height: 1.2;
+      padding: 2mm ${rightPadding.toFixed(2)}mm 2mm ${leftPadding.toFixed(2)}mm;
       word-wrap: break-word;
       overflow-wrap: break-word;
     }
-    .contact { text-align: center; font-size: 8pt; font-weight: 600; margin-bottom: 3mm; }
-    .logo-container { text-align: center; margin-bottom: 2mm; }
-    .logo { max-width: 100%; height: auto; max-height: 20mm; }
-    .store-name { text-align: center; font-size: 13pt; font-weight: bold; margin-bottom: 2mm; }
-    .branch { text-align: center; font-size: 11pt; font-weight: 600; margin-bottom: 2mm; }
-    .address { text-align: center; font-size: 8pt; font-weight: 500; margin-bottom: 3mm; max-width: 100%; line-height: 1.5; }
-    .transaction-type { text-align: center; font-size: 10pt; font-weight: 700; margin-bottom: 3mm; }
-    .dashed-line { border-top: 1px dashed #000; margin: 3mm 0; }
-    .info-line { display: flex; justify-content: space-between; margin-bottom: 1mm; }
+    .contact { text-align: center; font-size: 8pt; font-weight: 600; margin-bottom: 1mm; }
+    .logo-container { text-align: center; margin-bottom: 1mm; }
+    .logo { max-width: 100%; height: auto; max-height: 18mm; }
+    .store-name { text-align: center; font-size: 13pt; font-weight: bold; margin-bottom: 1mm; }
+    .branch { text-align: center; font-size: 11pt; font-weight: 600; margin-bottom: 1mm; }
+    .address { text-align: center; font-size: 8pt; font-weight: 500; margin-bottom: 1.5mm; max-width: 100%; line-height: 1.3; }
+    .transaction-type { text-align: center; font-size: 10pt; font-weight: 700; margin-bottom: 1.5mm; }
+    .dashed-line { border-top: 1px dashed #000; margin: 1.5mm 0; }
+    .info-line { display: flex; justify-content: space-between; margin-bottom: 0.5mm; }
     .info-label { font-size: 9pt; font-weight: 500; }
     .info-value { font-size: 9pt; font-weight: 700; }
     .mono-value {
@@ -5373,13 +5428,13 @@ function generateTestReceiptHTML(printerName: string, businessName: string, opti
       font-feature-settings: 'tnum' 1, 'lnum' 1;
     }
     .order-number-value { font-size: 9pt; font-weight: 700; }
-    table { width: 100%; border-collapse: collapse; margin: 2mm 0; font-size: 9pt; }
-    th { text-align: left; font-weight: 700; border-bottom: 1px solid #000; padding: 1mm 0; font-size: 8pt; }
-    td { padding: 1mm 0; font-weight: 500; }
-    .summary-line { display: flex; justify-content: space-between; margin-bottom: 1mm; font-size: 9pt; font-weight: 500; }
+    table { width: 100%; border-collapse: collapse; margin: 1mm 0; font-size: 9pt; }
+    th { text-align: left; font-weight: 700; border-bottom: 1px solid #000; padding: 0.5mm 0; font-size: 8pt; }
+    td { padding: 0.5mm 0; font-weight: 500; }
+    .summary-line { display: flex; justify-content: space-between; margin-bottom: 0.5mm; font-size: 9pt; font-weight: 500; }
     .summary-label { font-weight: 500; }
     .summary-value { font-weight: 700; }
-    .footer { margin-top: 5mm; font-size: 8pt; text-align: left; line-height: 1.4; font-weight: 500; }
+    .footer { margin-top: 2mm; font-size: 8pt; text-align: left; line-height: 1.3; font-weight: 500; }
   </style>
 </head>
 <body>
@@ -5474,7 +5529,7 @@ function generateTestReceiptHTML(printerName: string, businessName: string, opti
     <p>Pendapat Anda sangat penting bagi kami.</p>
     <p>Untuk kritik dan saran silahkan hubungi :</p>
     <p>0812-1822-2666</p>
-    <p style="margin-top: 5mm;">Untuk layanan kemitraan dan partnership</p>
+    <p style="margin-top: 2mm;">Untuk layanan kemitraan dan partnership</p>
   </div>
 </body>
 </html>
@@ -5736,30 +5791,30 @@ function generateReceiptHTML(data: ReceiptPrintData, businessName: string, optio
       max-width: 42ch;
       font-size: 10pt;
       font-weight: 500;
-      line-height: 1.4;
-      padding: 5mm ${rightPadding.toFixed(2)}mm 5mm ${leftPadding.toFixed(2)}mm;
+      line-height: 1.2;
+      padding: 2mm ${rightPadding.toFixed(2)}mm 2mm ${leftPadding.toFixed(2)}mm;
       word-wrap: break-word;
       overflow-wrap: break-word;
     }
-    .contact { text-align: center; font-size: 8pt; font-weight: 600; margin-bottom: 3mm; }
-    .logo-container { text-align: center; margin-bottom: 2mm; }
-    .logo { max-width: 100%; height: auto; max-height: 20mm; }
-    .store-name { text-align: center; font-size: 13pt; font-weight: bold; margin-bottom: 2mm; }
-    .branch { text-align: center; font-size: 11pt; font-weight: 600; margin-bottom: 2mm; }
-    .address { text-align: center; font-size: 8pt; font-weight: 500; margin-bottom: 3mm; max-width: 100%; line-height: 1.5; }
-    .transaction-type { text-align: center; font-size: 10pt; font-weight: 700; margin-bottom: 3mm; }
-    .dashed-line { border-top: 1px dashed #000; margin: 3mm 0; }
-    .info-line { display: flex; justify-content: space-between; margin-bottom: 1mm; }
+    .contact { text-align: center; font-size: 8pt; font-weight: 600; margin-bottom: 1mm; }
+    .logo-container { text-align: center; margin-bottom: 1mm; }
+    .logo { max-width: 100%; height: auto; max-height: 18mm; }
+    .store-name { text-align: center; font-size: 13pt; font-weight: bold; margin-bottom: 1mm; }
+    .branch { text-align: center; font-size: 11pt; font-weight: 600; margin-bottom: 1mm; }
+    .address { text-align: center; font-size: 8pt; font-weight: 500; margin-bottom: 1.5mm; max-width: 100%; line-height: 1.3; }
+    .transaction-type { text-align: center; font-size: 10pt; font-weight: 700; margin-bottom: 1.5mm; }
+    .dashed-line { border-top: 1px dashed #000; margin: 1.5mm 0; }
+    .info-line { display: flex; justify-content: space-between; margin-bottom: 0.5mm; }
     .info-label { font-size: 9pt; font-weight: 500; }
     .info-value { font-size: 9pt; font-weight: 700; }
     .order-number-value { font-size: 9pt; font-weight: 700; }
-    table { width: 100%; border-collapse: collapse; margin: 2mm 0; font-size: 9pt; }
-    th { text-align: left; font-weight: 700; border-bottom: 1px solid #000; padding: 1mm 0; font-size: 8pt; }
-    td { padding: 1mm 0; font-weight: 500; }
-    .summary-line { display: flex; justify-content: space-between; margin-bottom: 1mm; font-size: 9pt; font-weight: 500; }
+    table { width: 100%; border-collapse: collapse; margin: 1mm 0; font-size: 9pt; }
+    th { text-align: left; font-weight: 700; border-bottom: 1px solid #000; padding: 0.5mm 0; font-size: 8pt; }
+    td { padding: 0.5mm 0; font-weight: 500; }
+    .summary-line { display: flex; justify-content: space-between; margin-bottom: 0.5mm; font-size: 9pt; font-weight: 500; }
     .summary-label { font-weight: 500; }
     .summary-value { font-weight: 700; }
-    .footer { margin-top: 5mm; font-size: 8pt; text-align: left; line-height: 1.4; font-weight: 500; }
+    .footer { margin-top: 2mm; font-size: 8pt; text-align: left; line-height: 1.3; font-weight: 500; }
   </style>
 </head>
 <body>
@@ -5767,7 +5822,7 @@ function generateReceiptHTML(data: ReceiptPrintData, businessName: string, optio
   
   ${logoDataUri ? `<div class="logo-container"><img src="${logoDataUri}" class="logo" alt="Momoyo Logo"></div>` : '<div class="store-name">MOMOYO</div>'}
   <div class="branch">${businessName}</div>
-  ${data.isReprint && data.reprintCount ? `<div class="reprint-notice" style="text-align: center; font-size: 10pt; font-weight: bold; margin: 2mm 0; color: #000;">REPRINT KE-${data.reprintCount}</div>` : ''}
+  ${data.isReprint && data.reprintCount ? `<div class="reprint-notice" style="text-align: center; font-size: 10pt; font-weight: bold; margin: 1mm 0; color: #000;">REPRINT KE-${data.reprintCount}</div>` : ''}
   <div class="address">Jl. Kalimantan no. 21, Kartoharjo<br>Kec. Kartoharjo, Kota Madiun</div>
   
   ${(() => {
@@ -5860,7 +5915,7 @@ function generateReceiptHTML(data: ReceiptPrintData, businessName: string, optio
     <p>Pendapat Anda sangat penting bagi kami.</p>
     <p>Untuk kritik dan saran silahkan hubungi :</p>
     <p>0812-1822-2666</p>
-    <p style="margin-top: 5mm;">Untuk layanan kemitraan dan partnership</p>
+    <p style="margin-top: 2mm;">Untuk layanan kemitraan dan partnership</p>
   </div>
 </body>
 </html>
@@ -5936,53 +5991,83 @@ function generateShiftBreakdownHTML(
     });
 
     const productRows = sortedProducts.map(product => {
-      const quantity = product.total_quantity || 0;
-      const baseSubtotal = product.base_subtotal ?? (product.total_subtotal - product.customization_subtotal);
-      const unitPrice = product.base_unit_price ?? (quantity > 0 ? baseSubtotal / quantity : 0);
-      const platformLabel = formatPlatformLabel(product.platform);
-      const transactionLabel = formatTransactionLabel(product.transaction_type);
-      const isBundleItem = Boolean(product.is_bundle_item);
-      if (isBundleItem) {
-        console.log(`[SHIFT PRINT] Displaying bundle item: ${product.product_name}, is_bundle_item: ${product.is_bundle_item}`);
-      }
-      const productNameDisplay = isBundleItem
-        ? `<span style="font-size: 4.8pt;">(Bundle)</span> ${product.product_name}`
-        : product.product_name;
-      return `
+      try {
+        const quantity = product.total_quantity || 0;
+        const baseSubtotal = product.base_subtotal ?? (product.total_subtotal - product.customization_subtotal);
+        const unitPrice = product.base_unit_price ?? (quantity > 0 ? baseSubtotal / quantity : 0);
+        const platformLabel = formatPlatformLabel(product.platform);
+        const transactionLabel = formatTransactionLabel(product.transaction_type);
+        const isBundleItem = Boolean(product.is_bundle_item);
+        
+        // Validate numeric values
+        if (isNaN(quantity) || isNaN(baseSubtotal) || isNaN(unitPrice)) {
+          console.error(`❌ [HTML GEN] Invalid numbers in product: ${product.product_name}`, {
+            quantity, baseSubtotal, unitPrice
+          });
+        }
+        
+        if (isBundleItem) {
+          console.log(`[SHIFT PRINT] Displaying bundle item: ${product.product_name}, is_bundle_item: ${product.is_bundle_item}`);
+        }
+        const productNameDisplay = isBundleItem
+          ? `<span style="font-size: 4.8pt;">(Bundle)</span> ${product.product_name}`
+          : product.product_name;
+        return `
       <tr>
-        <td style="text-align: left; padding: 1mm 0;">
+        <td style="text-align: left; padding: 0.3mm 0;">
           <div>${productNameDisplay}</div>
           <div style="font-size: 7pt; color: #555;">${transactionLabel} · ${platformLabel}</div>
         </td>
-        <td style="text-align: right; padding: 1mm 0;">${quantity}</td>
-        <td style="text-align: right; padding: 1mm 0;">${isBundleItem ? '-' : unitPrice.toLocaleString('id-ID')}</td>
-        <td style="text-align: right; padding: 1mm 0;">${isBundleItem ? '-' : baseSubtotal.toLocaleString('id-ID')}</td>
+        <td style="text-align: right; padding: 0.3mm 0;">${quantity}</td>
+        <td style="text-align: right; padding: 0.3mm 0;">${isBundleItem ? '-' : (isNaN(unitPrice) ? '0' : unitPrice.toLocaleString('id-ID'))}</td>
+        <td style="text-align: right; padding: 0.3mm 0;">${isBundleItem ? '-' : (isNaN(baseSubtotal) ? '0' : baseSubtotal.toLocaleString('id-ID'))}</td>
       </tr>
       `;
+      } catch (productError) {
+        console.error(`❌ [HTML GEN] Error processing product:`, product, productError);
+        return `<tr><td colspan="4">Error processing product: ${product?.product_name || 'Unknown'}</td></tr>`;
+      }
     }).join('');
 
     const regularProducts = report.productSales.filter((p) => !p.is_bundle_item);
     const totalProductQty = report.productSales.reduce((sum, p) => sum + p.total_quantity, 0);
     const totalProductBaseSubtotal = regularProducts.reduce((sum, p) => sum + (p.base_subtotal ?? (p.total_subtotal - p.customization_subtotal)), 0);
 
-    const customizationRows = report.customizationSales.map(item => `
+    const customizationRows = report.customizationSales.map(item => {
+      try {
+        const quantity = item.total_quantity || 0;
+        const revenue = item.total_revenue || 0;
+        
+        if (isNaN(quantity) || isNaN(revenue)) {
+          console.error(`❌ [HTML GEN] Invalid numbers in customization: ${item.option_name}`, {
+            quantity, revenue
+          });
+        }
+        
+        return `
       <tr>
-        <td style="text-align: left; padding: 1mm 0;">
-          <div>${item.option_name}</div>
-          <div style="font-size: 7pt; color: #555;">${item.customization_name}</div>
+        <td style="text-align: left; padding: 0.3mm 0;">
+          <div>${item.option_name || 'Unknown'}</div>
+          <div style="font-size: 7pt; color: #555;">${item.customization_name || 'N/A'}</div>
         </td>
-        <td style="text-align: right; padding: 1mm 0;">${item.total_quantity}</td>
-        <td style="text-align: right; padding: 1mm 0;">${item.total_revenue.toLocaleString('id-ID')}</td>
+        <td style="text-align: right; padding: 0.3mm 0;">${isNaN(quantity) ? '0' : quantity}</td>
+        <td style="text-align: right; padding: 0.3mm 0;">${isNaN(revenue) ? '0' : revenue.toLocaleString('id-ID')}</td>
       </tr>
-    `).join('');
+    `;
+      } catch (customizationError) {
+        console.error(`❌ [HTML GEN] Error processing customization:`, item, customizationError);
+        return `<tr><td colspan="3">Error processing customization</td></tr>`;
+      }
+    }).join('');
 
     const totalCustomizationUnits = report.customizationSales.reduce((sum, item) => sum + item.total_quantity, 0);
     const totalCustomizationRevenue = report.customizationSales.reduce((sum, item) => sum + item.total_revenue, 0);
 
     const paymentRows = report.paymentBreakdown.map(payment => `
       <tr>
-        <td style="text-align: left; padding: 1mm 0;">${payment.payment_method_name || 'N/A'}</td>
-        <td style="text-align: right; padding: 1mm 0;">${payment.transaction_count}</td>
+        <td style="text-align: left; padding: 0.3mm 0;">${payment.payment_method_name || 'N/A'}</td>
+        <td style="text-align: right; padding: 0.3mm 0;">${payment.transaction_count}</td>
+        <td style="text-align: right; padding: 0.3mm 0;">${(payment.total_amount || 0).toLocaleString('id-ID')}</td>
       </tr>
     `).join('');
 
@@ -5991,9 +6076,9 @@ function generateShiftBreakdownHTML(
 
     const category2Rows = (report.category2Breakdown || []).map((category2: { category2_name: string; total_quantity: number; total_amount: number }) => `
       <tr>
-        <td style="text-align: left; padding: 1mm 0;">${category2.category2_name || 'N/A'}</td>
-        <td style="text-align: right; padding: 1mm 0;">${category2.total_quantity || 0}</td>
-        <td style="text-align: right; padding: 1mm 0;">${(category2.total_amount || 0).toLocaleString('id-ID')}</td>
+        <td style="text-align: left; padding: 0.3mm 0;">${category2.category2_name || 'N/A'}</td>
+        <td style="text-align: right; padding: 0.3mm 0;">${category2.total_quantity || 0}</td>
+        <td style="text-align: right; padding: 0.3mm 0;">${(category2.total_amount || 0).toLocaleString('id-ID')}</td>
       </tr>
     `).join('');
 
@@ -6161,11 +6246,11 @@ function generateShiftBreakdownHTML(
       <table>
         <tbody>
           <tr>
-            <td style="text-align: left; padding: 1mm 0;">Voucher Digunakan</td>
+            <td style="text-align: left; padding: 0.3mm 0;">Voucher Digunakan</td>
             <td class="right">${report.statistics.voucher_count}</td>
           </tr>
           <tr>
-            <td style="text-align: left; padding: 1mm 0;">Total Diskon Voucher</td>
+            <td style="text-align: left; padding: 0.3mm 0;">Total Diskon Voucher</td>
             <td class="right">${formattedTotalDiscount}</td>
           </tr>
         </tbody>
@@ -6277,38 +6362,38 @@ function generateShiftBreakdownHTML(
       max-width: 42ch;
       font-size: 9pt;
       font-weight: 500;
-      line-height: 1.4;
-      padding: 5mm 7mm;
+      line-height: 1.2;
+      padding: 2mm 7mm;
       word-wrap: break-word;
       overflow-wrap: break-word;
     }
     .report-block + .report-block {
-      margin-top: 6mm;
-      padding-top: 6mm;
+      margin-top: 3mm;
+      padding-top: 3mm;
       border-top: 1px dashed #000;
     }
     .header {
       text-align: center;
-      margin-bottom: 4mm;
+      margin-bottom: 2mm;
     }
     .title {
       font-size: 11pt;
       font-weight: 700;
-      margin-bottom: 2mm;
+      margin-bottom: 0.5mm;
     }
     .business-name {
       font-size: 10pt;
       font-weight: 600;
-      margin-bottom: 1mm;
+      margin-bottom: 0mm;
     }
     .divider {
       border-top: 1px dashed #000;
-      margin: 3mm 0;
+      margin: 1.5mm 0;
     }
     .info-line {
       display: flex;
       justify-content: space-between;
-      margin-bottom: 1mm;
+      margin-bottom: 0.5mm;
       font-size: 8pt;
     }
     .info-label {
@@ -6320,28 +6405,28 @@ function generateShiftBreakdownHTML(
     .section-title {
       font-size: 9pt;
       font-weight: 700;
-      margin: 3mm 0 2mm 0;
+      margin: 1.5mm 0 1mm 0;
       text-align: center;
       text-decoration: underline;
     }
     table {
       width: 100%;
       border-collapse: collapse;
-      margin: 2mm 0;
+      margin: 1mm 0;
       font-size: 8pt;
     }
     th {
       text-align: left;
       font-weight: 700;
       border-bottom: 1px solid #000;
-      padding: 1mm 0;
+      padding: 0.5mm 0;
       font-size: 8pt;
     }
     th.right, td.right {
       text-align: right;
     }
     td {
-      padding: 1mm 0;
+      padding: 0.5mm 0;
       font-weight: 500;
     }
     .total-row {
@@ -6350,13 +6435,13 @@ function generateShiftBreakdownHTML(
       background-color: #f0f0f0;
     }
     .summary {
-      margin-top: 3mm;
+      margin-top: 1.5mm;
       font-size: 8pt;
     }
     .summary-line {
       display: flex;
       justify-content: space-between;
-      margin-bottom: 1mm;
+      margin-bottom: 0.5mm;
     }
     .summary-label {
       font-weight: 500;
@@ -6371,7 +6456,7 @@ function generateShiftBreakdownHTML(
 
   <div class="divider"></div>
 
-  <div class="info-line" style="margin-top: 3mm;">
+  <div class="info-line" style="margin-top: 1mm;">
     <span class="info-label">Waktu Print:</span>
     <span class="info-value">${printTime}</span>
   </div>
@@ -6429,18 +6514,98 @@ type PrintableShiftReportSection = {
 // Print shift breakdown report
 ipcMain.handle('print-shift-breakdown', async (event, data: PrintableShiftReportSection & { business_id?: number; printerType?: string; wholeDayReport?: PrintableShiftReportSection | null }) => {
   try {
-    let printerName = data.printerType || 'receiptPrinter';
+    console.log('🖨️ [SHIFT PRINT] Starting shift breakdown print...');
+    console.log('   - Shift:', data.user_name);
+    console.log('   - Products:', data.productSales?.length || 0);
+    console.log('   - Customizations:', data.customizationSales?.length || 0);
+    console.log('   - Payments:', data.paymentBreakdown?.length || 0);
+    console.log('   - Orders:', data.statistics?.order_count || 0);
+    console.log('   - Printer Type:', data.printerType);
     
-    // Get printer name from config if printerType is provided
-    if (data.printerType && localDb) {
+    let printerName: string | null = null;
+    const printerType = data.printerType || 'receiptPrinter';
+    
+    console.log('🔍 [SHIFT PRINT] Looking up printer config for type:', printerType);
+    
+    // Get printer name from config
+    if (localDb) {
       try {
-        const config = localDb.prepare('SELECT * FROM printer_configs WHERE printer_type = ?').get(data.printerType) as PrinterConfigRow | undefined;
+        // First, list ALL printer configs for debugging
+        const allConfigs = localDb.prepare('SELECT * FROM printer_configs').all() as PrinterConfigRow[];
+        console.log('📋 [SHIFT PRINT] All printer configs in database:');
+        allConfigs.forEach((cfg: PrinterConfigRow) => {
+          console.log(`   - Type: ${cfg.printer_type}, Name: "${cfg.system_printer_name}"`);
+        });
+        
+        const config = localDb.prepare('SELECT * FROM printer_configs WHERE printer_type = ?').get(printerType) as PrinterConfigRow | undefined;
+        console.log('📋 [SHIFT PRINT] Printer config query result:', config ? JSON.stringify(config) : 'null');
+        
         if (config && config.system_printer_name) {
-          printerName = config.system_printer_name;
+          printerName = config.system_printer_name.trim();
+          console.log('✅ [SHIFT PRINT] Found printer config:', printerName);
+          
+          // Validate printer name is not empty after trim
+          if (!printerName || printerName.length === 0) {
+            console.error('❌ [SHIFT PRINT] Printer name is empty after trim');
+            return { 
+              success: false, 
+              error: 'Printer name is empty. Please reconfigure your printer in Settings → Printer Selector.' 
+            };
+          }
+        } else {
+          console.error('❌ [SHIFT PRINT] No printer config found or system_printer_name is null');
+          console.log('   - Config exists:', !!config);
+          console.log('   - system_printer_name:', config?.system_printer_name);
+          return { 
+            success: false, 
+            error: `Receipt Printer not configured. Please configure it in Settings → Printer Selector.` 
+          };
         }
       } catch (error) {
-        console.error('Error fetching printer config:', error);
+        console.error('❌ [SHIFT PRINT] Error fetching printer config:', error);
+        return { success: false, error: 'Failed to fetch printer configuration' };
       }
+    } else {
+      console.error('❌ [SHIFT PRINT] Local database not available');
+      return { success: false, error: 'Database not available' };
+    }
+    
+    // Double-check printer name is valid before proceeding
+    if (!printerName || typeof printerName !== 'string' || printerName.trim().length === 0) {
+      console.error('❌ [SHIFT PRINT] Invalid printer name:', printerName);
+      return { 
+        success: false, 
+        error: 'Invalid printer name. Please reconfigure your printer in Settings → Printer Selector.' 
+      };
+    }
+    
+    console.log('🖨️ [SHIFT PRINT] Final deviceName to be used:', printerName);
+    
+    // Verify printer exists in system
+    try {
+      const printers = await mainWindow?.webContents.getPrintersAsync() || [];
+      console.log('🖨️ [SHIFT PRINT] Available system printers:', printers.map(p => p.name));
+      
+      const printerExists = printers.some(p => p.name === printerName);
+      if (!printerExists) {
+        console.error('❌ [SHIFT PRINT] Printer not found in system!');
+        console.error(`   - Looking for: "${printerName}"`);
+        console.error(`   - Available: ${printers.map(p => `"${p.name}"`).join(', ')}`);
+        
+        const suggestion = printers.length > 0 
+          ? `\n\nAvailable printers:\n${printers.map(p => `  - ${p.name}`).join('\n')}\n\nPlease select one of these in Settings → Printer Selector.`
+          : '\n\nNo printers detected in Windows. Please check Windows printer settings.';
+        
+        return {
+          success: false,
+          error: `Printer "${printerName}" not found.${suggestion}`
+        };
+      }
+      
+      console.log('✅ [SHIFT PRINT] Printer verified in system');
+    } catch (printerCheckError) {
+      console.warn('⚠️ [SHIFT PRINT] Could not verify printer list:', printerCheckError);
+      // Continue anyway - the print attempt will fail with proper error if needed
     }
 
     // Fetch business name
@@ -6456,54 +6621,185 @@ ipcMain.handle('print-shift-breakdown', async (event, data: PrintableShiftReport
       }
     }
 
-    // Generate HTML
-    const htmlContent = generateShiftBreakdownHTML({
-      ...data,
-      productSales: data.productSales || [],
-      customizationSales: data.customizationSales || [],
-      paymentBreakdown: data.paymentBreakdown || [],
-      category2Breakdown: data.category2Breakdown || [],
-      cashSummary: data.cashSummary,
-      wholeDayReport: data.wholeDayReport || null,
-      businessName
-    });
+    // Validate data before HTML generation
+    console.log('🔍 [SHIFT PRINT] Validating data...');
+    try {
+      // Log data structure for debugging
+      console.log('   - productSales count:', data.productSales?.length || 0);
+      console.log('   - customizationSales count:', data.customizationSales?.length || 0);
+      console.log('   - paymentBreakdown count:', data.paymentBreakdown?.length || 0);
+      console.log('   - cashSummary:', JSON.stringify(data.cashSummary));
+      
+      // Check for problematic data
+      if (data.productSales) {
+        const invalidProducts = data.productSales.filter((p: any) => 
+          !p.product_name || 
+          typeof p.total_quantity !== 'number' || 
+          isNaN(p.total_quantity)
+        );
+        if (invalidProducts.length > 0) {
+          console.error('❌ [SHIFT PRINT] Found invalid products:', invalidProducts);
+        }
+      }
+      
+      if (data.customizationSales) {
+        const invalidCustomizations = data.customizationSales.filter((c: any) =>
+          !c.option_name ||
+          typeof c.total_quantity !== 'number' ||
+          isNaN(c.total_quantity)
+        );
+        if (invalidCustomizations.length > 0) {
+          console.error('❌ [SHIFT PRINT] Found invalid customizations:', invalidCustomizations);
+        }
+      }
+      
+      // Check cash summary for NaN values
+      if (data.cashSummary) {
+        const cashKeys = Object.keys(data.cashSummary);
+        for (const key of cashKeys) {
+          const value = (data.cashSummary as any)[key];
+          if (typeof value === 'number' && isNaN(value)) {
+            console.error(`❌ [SHIFT PRINT] NaN detected in cashSummary.${key}`);
+          }
+        }
+      }
+      
+      console.log('✅ [SHIFT PRINT] Data validation passed');
+    } catch (validationError) {
+      console.error('❌ [SHIFT PRINT] Data validation error:', validationError);
+    }
+    
+    // Generate HTML with error handling
+    let htmlContent: string;
+    try {
+      console.log('🎨 [SHIFT PRINT] Generating HTML...');
+      htmlContent = generateShiftBreakdownHTML({
+        ...data,
+        productSales: data.productSales || [],
+        customizationSales: data.customizationSales || [],
+        paymentBreakdown: data.paymentBreakdown || [],
+        category2Breakdown: data.category2Breakdown || [],
+        cashSummary: data.cashSummary,
+        wholeDayReport: data.wholeDayReport || null,
+        businessName
+      });
+      console.log('✅ [SHIFT PRINT] HTML generation successful');
+    } catch (htmlError) {
+      console.error('❌ [SHIFT PRINT] HTML generation failed:', htmlError);
+      console.error('   Error stack:', (htmlError as Error).stack);
+      return { 
+        success: false, 
+        error: `HTML generation failed: ${String(htmlError)}` 
+      };
+    }
+    
+    const htmlSizeKB = (htmlContent.length / 1024).toFixed(2);
+    console.log(`📄 [SHIFT PRINT] Generated HTML size: ${htmlSizeKB} KB (${htmlContent.length} chars)`);
+    
+    if (htmlContent.length > 500000) {  // > 500KB
+      console.warn(`⚠️ [SHIFT PRINT] Large print job detected! This may cause printing issues.`);
+    }
 
     // Close existing print window if any
     if (printWindow) {
+      console.log('🗑️ [SHIFT PRINT] Closing existing print window');
       printWindow.close();
     }
 
     // Create new print window
-    printWindow = new BrowserWindow({
-      width: 400,
-      height: 600,
-      show: false,
-      webPreferences: {
-        nodeIntegration: false,
-        contextIsolation: true,
-      }
-    });
+    console.log('🪟 [SHIFT PRINT] Creating print window');
+    try {
+      printWindow = new BrowserWindow({
+        width: 400,
+        height: 600,
+        show: false,
+        webPreferences: {
+          nodeIntegration: false,
+          contextIsolation: true,
+        }
+      });
+    } catch (windowError) {
+      console.error('❌ [SHIFT PRINT] Failed to create print window:', windowError);
+      return { success: false, error: `Failed to create print window: ${String(windowError)}` };
+    }
 
-    await printWindow.loadURL(`data:text/html,${encodeURIComponent(htmlContent)}`);
+    console.log('📝 [SHIFT PRINT] Loading HTML into print window...');
+    try {
+      await printWindow.loadURL(`data:text/html,${encodeURIComponent(htmlContent)}`);
+      console.log('✅ [SHIFT PRINT] HTML loaded successfully');
+    } catch (loadError) {
+      console.error('❌ [SHIFT PRINT] Failed to load HTML:', loadError);
+      if (printWindow && !printWindow.isDestroyed()) {
+        printWindow.close();
+        printWindow = null;
+      }
+      return { success: false, error: `Failed to load HTML: ${String(loadError)}` };
+    }
 
     const printOptions = {
       silent: true,
       printBackground: false,
       deviceName: printerName,
     };
-
-    await printWindow.webContents.print(printOptions);
     
-    // Close print window after a delay
-    setTimeout(() => {
-      if (printWindow) {
-        printWindow.close();
-        printWindow = null;
-      }
-    }, 1000);
+    console.log('🖨️ [SHIFT PRINT] Print options:', JSON.stringify(printOptions, null, 2));
+    console.log('   - deviceName type:', typeof printerName);
+    console.log('   - deviceName length:', printerName?.length || 0);
+    console.log('   - deviceName value:', `"${printerName}"`);
 
-    console.log('✅ [SHIFT PRINT] Shift breakdown printed successfully');
-    return { success: true };
+    // Use callback-based print to properly wait for completion and catch errors
+    return new Promise((resolve) => {
+      const currentWindow = printWindow;
+      setTimeout(() => {
+        try {
+          if (!currentWindow || currentWindow.isDestroyed()) {
+            console.error('❌ [SHIFT PRINT] Print window not available');
+            resolve({ success: false, error: 'Print window unavailable' });
+            return;
+          }
+
+          currentWindow.webContents.print(printOptions, (success: boolean, errorType: string) => {
+            if (success) {
+              console.log('✅ [SHIFT PRINT] Shift breakdown printed successfully');
+              resolve({ success: true });
+            } else {
+              console.error('❌ [SHIFT PRINT] Print failed:', errorType);
+              console.error('   - deviceName used:', printerName);
+              
+              let userFriendlyError = errorType || 'Print failed';
+              
+              // Provide helpful error messages
+              if (errorType && errorType.toLowerCase().includes('devicename')) {
+                userFriendlyError = `Invalid printer: "${printerName}". Please:\n1. Go to Settings → Printer Selector\n2. Click "Scan Printers"\n3. Select your printer again\n4. Click "Save"\n5. Try printing again`;
+              } else if (errorType && errorType.toLowerCase().includes('offline')) {
+                userFriendlyError = `Printer "${printerName}" is offline. Please check:\n1. Printer is powered on\n2. Printer is connected\n3. Printer shows "Ready" in Windows settings`;
+              }
+              
+              resolve({ success: false, error: userFriendlyError });
+            }
+            
+            // Close window after print completes (success or failure)
+            setTimeout(() => {
+              if (currentWindow && !currentWindow.isDestroyed()) {
+                currentWindow.close();
+              }
+              if (printWindow === currentWindow) {
+                printWindow = null;
+              }
+            }, 1000);
+          });
+        } catch (err) {
+          console.error('❌ [SHIFT PRINT] Exception during print:', err);
+          resolve({ success: false, error: String(err) });
+          if (currentWindow && !currentWindow.isDestroyed()) {
+            currentWindow.close();
+          }
+          if (printWindow === currentWindow) {
+            printWindow = null;
+          }
+        }
+      }, 500);  // Give window time to fully load before printing
+    });
   } catch (error) {
     console.error('❌ [SHIFT PRINT] Error printing shift breakdown:', error);
     return { success: false, error: String(error) };
@@ -6941,6 +7237,457 @@ ipcMain.handle('migrate-slideshow-images', async () => {
     return {
       success: false,
       error: 'Failed to migrate images'
+    };
+  }
+});
+
+// =====================================================
+// RESTORE FROM SERVER - FULL DATABASE RESTORE
+// =====================================================
+
+/**
+ * Restore full database from server
+ * Downloads master data + transactions and restores to local DB
+ */
+ipcMain.handle('restore-from-server', async (event, options: {
+  businessId: number;
+  apiUrl: string;
+  includeTransactions?: boolean;
+}) => {
+  if (!localDb) {
+    return {
+      success: false,
+      error: 'Local database not available',
+      stats: {}
+    };
+  }
+
+  const { businessId, apiUrl, includeTransactions = true } = options;
+  const stats: Record<string, number> = {};
+
+  try {
+    console.log('🔄 [RESTORE] Starting full restore from server...');
+    console.log('🔄 [RESTORE] Business ID:', businessId);
+    console.log('🔄 [RESTORE] API URL:', apiUrl);
+
+    // Step 1: Download Master Data from /api/sync
+    console.log('📥 [RESTORE] Step 1: Downloading master data...');
+    const syncUrl = `${apiUrl}/api/sync?business_id=${businessId}`;
+    const syncResponse = await fetch(syncUrl);
+    
+    if (!syncResponse.ok) {
+      throw new Error(`Failed to download master data: ${syncResponse.status} ${syncResponse.statusText}`);
+    }
+
+    const syncData = await syncResponse.json() as any;
+    const data = syncData.data || {};
+
+    // Step 2: Restore Master Data (order matters due to foreign keys!)
+    console.log('💾 [RESTORE] Step 2: Restoring master data...');
+
+    // 2.1 Businesses
+    if (Array.isArray(data.businesses) && data.businesses.length > 0) {
+      const stmt = localDb.prepare(`
+        INSERT OR REPLACE INTO businesses (id, name, permission_name, organization_id, management_group_id, image_url, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      `);
+      for (const biz of data.businesses) {
+        stmt.run(
+          biz.id,
+          biz.name,
+          biz.permission_name || biz.name || 'business',
+          biz.organization_id || null,
+          biz.management_group_id || null,
+          biz.image_url || null,
+          biz.created_at || new Date().toISOString(),
+          Date.now()
+        );
+      }
+      stats.businesses = data.businesses.length;
+      console.log(`✅ [RESTORE] ${data.businesses.length} businesses restored`);
+    }
+
+    // 2.2 Users
+    if (Array.isArray(data.users) && data.users.length > 0) {
+      const stmt = localDb.prepare(`
+        INSERT OR REPLACE INTO users (id, email, password, name, googleId, createdAt, role_id, organization_id, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `);
+      for (const usr of data.users) {
+        stmt.run(
+          usr.id,
+          usr.email,
+          usr.password || null,
+          usr.name,
+          usr.googleId || null,
+          usr.created_at || usr.createdAt || new Date().toISOString(),
+          usr.role_id || null,
+          usr.organization_id || null,
+          Date.now()
+        );
+      }
+      stats.users = data.users.length;
+      console.log(`✅ [RESTORE] ${data.users.length} users restored`);
+    }
+
+    // 2.3 Categories
+    if (Array.isArray(data.category1) && data.category1.length > 0) {
+      const stmt = localDb.prepare(`
+        INSERT OR REPLACE INTO category1 (id, name, description, display_order, is_active, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+      `);
+      for (const cat of data.category1) {
+        stmt.run(
+          cat.id,
+          cat.name,
+          cat.description || null,
+          cat.display_order || 0,
+          cat.is_active !== undefined ? cat.is_active : 1,
+          cat.created_at || new Date().toISOString(),
+          Date.now()
+        );
+      }
+      stats.category1 = data.category1.length;
+      console.log(`✅ [RESTORE] ${data.category1.length} category1 restored`);
+    }
+
+    if (Array.isArray(data.category2) && data.category2.length > 0) {
+      const stmt = localDb.prepare(`
+        INSERT OR REPLACE INTO category2 (id, name, business_id, description, display_order, is_active, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      `);
+      for (const cat of data.category2) {
+        stmt.run(
+          cat.id,
+          cat.name,
+          cat.business_id || businessId,
+          cat.description || null,
+          cat.display_order || 0,
+          cat.is_active !== undefined ? cat.is_active : 1,
+          cat.created_at || new Date().toISOString(),
+          Date.now()
+        );
+      }
+      stats.category2 = data.category2.length;
+      console.log(`✅ [RESTORE] ${data.category2.length} category2 restored`);
+    }
+
+    // 2.4 Products (matching local schema: nama, harga_jual, kategori, etc.)
+    if (Array.isArray(data.products) && data.products.length > 0) {
+      const stmt = localDb.prepare(`
+        INSERT OR REPLACE INTO products (
+          id, business_id, menu_code, nama, satuan, kategori, jenis, 
+          category2_id, category2_name, keterangan, harga_beli, ppn, 
+          harga_jual, harga_khusus, harga_online, harga_qpon, harga_gofood, 
+          harga_grabfood, harga_shopeefood, harga_tiktok, fee_kerja, 
+          status, created_at, updated_at, has_customization, is_bundle
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `);
+      for (const prod of data.products) {
+        stmt.run(
+          prod.id,
+          prod.business_id || businessId,
+          prod.menu_code || prod.code || null,
+          prod.nama || prod.name || 'Unknown',
+          prod.satuan || 'pcs',
+          prod.kategori || prod.category2_name || 'Other',
+          prod.jenis || null,
+          prod.category2_id || null,
+          prod.category2_name || null,
+          prod.keterangan || prod.description || null,
+          prod.harga_beli || 0,
+          prod.ppn || 0,
+          prod.harga_jual || prod.price || 0,
+          prod.harga_khusus || null,
+          prod.harga_online || null,
+          prod.harga_qpon || null,
+          prod.harga_gofood || null,
+          prod.harga_grabfood || null,
+          prod.harga_shopeefood || null,
+          prod.harga_tiktok || null,
+          prod.fee_kerja || null,
+          prod.status || 'active',
+          prod.created_at || new Date().toISOString(),
+          Date.now(),
+          prod.has_customization || 0,
+          prod.is_bundle || 0
+        );
+      }
+      stats.products = data.products.length;
+      console.log(`✅ [RESTORE] ${data.products.length} products restored`);
+    }
+
+    // 2.5 Customization Types
+    if (Array.isArray(data.customizationTypes) && data.customizationTypes.length > 0) {
+      const stmt = localDb.prepare(`
+        INSERT OR REPLACE INTO product_customization_types (id, name, selection_mode)
+        VALUES (?, ?, ?)
+      `);
+      for (const type of data.customizationTypes) {
+        stmt.run(
+          type.id,
+          type.name,
+          type.selection_mode || 'single'
+        );
+      }
+      stats.customizationTypes = data.customizationTypes.length;
+      console.log(`✅ [RESTORE] ${data.customizationTypes.length} customization types restored`);
+    }
+
+    // 2.6 Customization Options
+    if (Array.isArray(data.customizationOptions) && data.customizationOptions.length > 0) {
+      const stmt = localDb.prepare(`
+        INSERT OR REPLACE INTO product_customization_options (id, type_id, name, price_adjustment, display_order)
+        VALUES (?, ?, ?, ?, ?)
+      `);
+      for (const opt of data.customizationOptions) {
+        stmt.run(
+          opt.id,
+          opt.type_id,
+          opt.name,
+          opt.price_adjustment || 0,
+          opt.display_order || 0
+        );
+      }
+      stats.customizationOptions = data.customizationOptions.length;
+      console.log(`✅ [RESTORE] ${data.customizationOptions.length} customization options restored`);
+    }
+
+    // 2.7 Product Customizations
+    if (Array.isArray(data.productCustomizations) && data.productCustomizations.length > 0) {
+      const stmt = localDb.prepare(`
+        INSERT OR REPLACE INTO product_customizations (id, product_id, customization_type_id)
+        VALUES (?, ?, ?)
+      `);
+      for (const pc of data.productCustomizations) {
+        stmt.run(
+          pc.id,
+          pc.product_id,
+          pc.customization_type_id
+        );
+      }
+      stats.productCustomizations = data.productCustomizations.length;
+      console.log(`✅ [RESTORE] ${data.productCustomizations.length} product customizations restored`);
+    }
+
+    // 2.8 Bundle Items
+    if (Array.isArray(data.bundleItems) && data.bundleItems.length > 0) {
+      const stmt = localDb.prepare(`
+        INSERT OR REPLACE INTO bundle_items (id, bundle_product_id, category2_id, required_quantity, display_order)
+        VALUES (?, ?, ?, ?, ?)
+      `);
+      for (const bundle of data.bundleItems) {
+        stmt.run(
+          bundle.id,
+          bundle.bundle_product_id,
+          bundle.category2_id,
+          bundle.required_quantity || 1,
+          bundle.display_order || 0
+        );
+      }
+      stats.bundleItems = data.bundleItems.length;
+      console.log(`✅ [RESTORE] ${data.bundleItems.length} bundle items restored`);
+    }
+
+    // 2.9 Payment Methods
+    if (Array.isArray(data.paymentMethods) && data.paymentMethods.length > 0) {
+      const stmt = localDb.prepare(`
+        INSERT OR REPLACE INTO payment_methods (id, name, code, description, is_active, requires_additional_info, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      `);
+      for (const pm of data.paymentMethods) {
+        stmt.run(
+          pm.id,
+          pm.name,
+          pm.code,
+          pm.description || null,
+          pm.is_active !== undefined ? pm.is_active : 1,
+          pm.requires_additional_info || 0,
+          pm.created_at || new Date().toISOString(),
+          Date.now()
+        );
+      }
+      stats.paymentMethods = data.paymentMethods.length;
+      console.log(`✅ [RESTORE] ${data.paymentMethods.length} payment methods restored`);
+    }
+
+    // 2.10 Banks
+    if (Array.isArray(data.banks) && data.banks.length > 0) {
+      const stmt = localDb.prepare(`
+        INSERT OR REPLACE INTO banks (id, bank_code, bank_name, is_popular, is_active, created_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+      `);
+      for (const bank of data.banks) {
+        stmt.run(
+          bank.id,
+          bank.bank_code,
+          bank.bank_name,
+          bank.is_popular || 0,
+          bank.is_active !== undefined ? bank.is_active : 1,
+          bank.created_at || new Date().toISOString()
+        );
+      }
+      stats.banks = data.banks.length;
+      console.log(`✅ [RESTORE] ${data.banks.length} banks restored`);
+    }
+
+    // 2.11 CL Accounts
+    if (Array.isArray(data.clAccounts) && data.clAccounts.length > 0) {
+      const stmt = localDb.prepare(`
+        INSERT OR REPLACE INTO cl_accounts (id, account_code, account_name, contact_info, credit_limit, current_balance, is_active, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `);
+      for (const cl of data.clAccounts) {
+        stmt.run(
+          cl.id,
+          cl.account_code,
+          cl.account_name,
+          cl.contact_info || null,
+          cl.credit_limit || 0,
+          cl.current_balance || 0,
+          cl.is_active !== undefined ? cl.is_active : 1,
+          cl.created_at || new Date().toISOString(),
+          Date.now()
+        );
+      }
+      stats.clAccounts = data.clAccounts.length;
+      console.log(`✅ [RESTORE] ${data.clAccounts.length} CL accounts restored`);
+    }
+
+    // Step 3: Download and Restore Transactions (if requested)
+    if (includeTransactions) {
+      console.log('📥 [RESTORE] Step 3: Downloading transactions...');
+      const transactionsUrl = `${apiUrl}/api/transactions?business_id=${businessId}&limit=10000`;
+      const txResponse = await fetch(transactionsUrl);
+      
+      if (!txResponse.ok) {
+        console.warn(`⚠️ [RESTORE] Failed to download transactions: ${txResponse.status}`);
+      } else {
+        const txData = await txResponse.json() as any;
+        const transactions = txData.transactions || [];
+
+        if (transactions.length > 0) {
+          console.log(`💾 [RESTORE] Restoring ${transactions.length} transactions...`);
+          const txStmt = localDb.prepare(`
+            INSERT OR REPLACE INTO transactions (
+              id, business_id, user_id, payment_method, payment_method_id,
+              pickup_method, total_amount, final_amount, amount_received, change_amount,
+              customer_name, status, created_at, updated_at, voucher_discount,
+              voucher_type, voucher_value, transaction_type, receipt_number, shift_uuid
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          `);
+
+          for (const tx of transactions) {
+            const txId = tx.uuid_id || tx.id;
+            txStmt.run(
+              txId,
+              tx.business_id || businessId,
+              tx.user_id,
+              tx.payment_method,
+              tx.payment_method_id || null,
+              tx.pickup_method,
+              tx.total_amount || 0,
+              tx.final_amount || 0,
+              tx.amount_received || 0,
+              tx.change_amount || 0,
+              tx.customer_name || null,
+              tx.status || 'completed',
+              tx.created_at || new Date().toISOString(),
+              Date.now(),
+              tx.voucher_discount || 0,
+              tx.voucher_type || null,
+              tx.voucher_value || null,
+              tx.transaction_type || 'drinks',
+              tx.receipt_number || null,
+              tx.shift_uuid || null
+            );
+          }
+
+          stats.transactions = transactions.length;
+          console.log(`✅ [RESTORE] ${transactions.length} transactions restored`);
+        }
+      }
+      
+      // Step 4: Download and Restore Transaction Items
+      console.log('📥 [RESTORE] Step 4: Downloading transaction items...');
+      const itemsUrl = `${apiUrl}/api/transaction-items?business_id=${businessId}&limit=50000`;
+      console.log('📥 [RESTORE] URL:', itemsUrl);
+      
+      try {
+        const itemsResponse = await fetch(itemsUrl);
+        console.log('📥 [RESTORE] Response status:', itemsResponse.status);
+        
+        if (!itemsResponse.ok) {
+          const errorText = await itemsResponse.text();
+          console.warn(`⚠️ [RESTORE] Failed to download transaction items: ${itemsResponse.status}`, errorText);
+        } else {
+          const itemsData = await itemsResponse.json() as any;
+          const items = itemsData.items || [];
+          console.log('📥 [RESTORE] Received', items.length, 'transaction items');
+
+          if (items.length > 0) {
+          console.log(`💾 [RESTORE] Restoring ${items.length} transaction items...`);
+          const itemStmt = localDb.prepare(`
+            INSERT OR REPLACE INTO transaction_items (
+              id, transaction_id, product_id, quantity, unit_price, total_price,
+              custom_note, bundle_selections_json, created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+          `);
+
+          for (const item of items) {
+            const itemId = item.uuid_id || item.id;
+            const transactionId = item.uuid_transaction_id || item.transaction_id;
+            
+            // Convert bundle_selections_json to string if it's an object
+            let bundleSelectionsStr = null;
+            if (item.bundle_selections_json) {
+              bundleSelectionsStr = typeof item.bundle_selections_json === 'string' 
+                ? item.bundle_selections_json 
+                : JSON.stringify(item.bundle_selections_json);
+            }
+            
+            itemStmt.run(
+              itemId,
+              transactionId,
+              item.product_id,
+              item.quantity || 1,
+              item.unit_price || 0,
+              item.total_price || 0,
+              item.custom_note || null,
+              bundleSelectionsStr,
+              item.created_at || new Date().toISOString()
+            );
+          }
+
+            stats.transactionItems = items.length;
+            console.log(`✅ [RESTORE] ${items.length} transaction items restored`);
+          } else {
+            console.warn('⚠️ [RESTORE] No transaction items found in response');
+          }
+        }
+      } catch (itemsError) {
+        console.error('❌ [RESTORE] Error downloading transaction items:', itemsError);
+      }
+    }
+
+    console.log('✅ [RESTORE] Full restore completed successfully!');
+    console.log('📊 [RESTORE] Stats:', stats);
+
+    return {
+      success: true,
+      message: 'Database restored successfully',
+      stats
+    };
+
+  } catch (error) {
+    console.error('❌ [RESTORE] Restore failed:', error);
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : 'Unknown error during restore',
+      stats
     };
   }
 });

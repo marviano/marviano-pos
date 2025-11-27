@@ -179,4 +179,6 @@ electron_1.contextBridge.exposeInMainWorld('electronAPI', {
     openSlideshowFolder: () => electron_1.ipcRenderer.invoke('open-slideshow-folder'),
     readSlideshowImage: (filename) => electron_1.ipcRenderer.invoke('read-slideshow-image', filename),
     migrateSlideshowImages: () => electron_1.ipcRenderer.invoke('migrate-slideshow-images'),
+    // Database Restore
+    restoreFromServer: (options) => electron_1.ipcRenderer.invoke('restore-from-server', options),
 });

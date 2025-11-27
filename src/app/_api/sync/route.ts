@@ -1,12 +1,14 @@
-import { NextResponse } from 'next/server';
+import { NextResponse, NextRequest } from 'next/server';
 import { query } from '@/lib/db';
 
-// Hard-coded business_id = 14 (as per requirements)
-const BUSINESS_ID = 14;
-
-export async function GET() {
+export async function GET(request: NextRequest) {
   try {
-    console.log('🔄 Starting comprehensive sync for all POS tables...');
+    // Get business_id from query parameter (default to 14 for backward compatibility)
+    const searchParams = request.nextUrl.searchParams;
+    const businessIdParam = searchParams.get('business_id');
+    const BUSINESS_ID = businessIdParam ? parseInt(businessIdParam, 10) : 14;
+    
+    console.log(`🔄 Starting comprehensive sync for business ${BUSINESS_ID}...`);
     
     const syncResults: Record<string, unknown[]> = {};
     const counts: Record<string, number> = {};
