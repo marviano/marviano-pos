@@ -25,7 +25,8 @@ declare global {
       total_quantity: number;
       total_revenue: number;
     }>;
-    paymentBreakdown: Array<{ payment_method_name: string; transaction_count: number }>;
+    paymentBreakdown: Array<{ payment_method_name: string; transaction_count: number; total_amount: number }>;
+    category2Breakdown: Array<{ category2_name: string; category2_id: number; total_quantity: number; total_amount: number }>;
     cashSummary: {
       cash_shift: number;
       cash_shift_sales?: number;
@@ -63,6 +64,7 @@ declare global {
       minimizeWindow: () => Promise<unknown>;
       maximizeWindow: () => Promise<unknown>;
       navigateTo: (path: string) => Promise<unknown>;
+      focusWindow: () => Promise<{ success: boolean; error?: string }>;
       
       // Authentication events
       notifyLoginSuccess: () => Promise<unknown>;
@@ -80,6 +82,56 @@ declare global {
       // Customer display event listeners
       onOrderUpdate?: (callback: (data: unknown) => void) => void;
       onSlideshowUpdate?: (callback: (data: unknown) => void) => void;
+      
+      // Slideshow image management (userData storage)
+      getSlideshowImages?: () => Promise<{
+        success: boolean;
+        images: Array<{
+          id: string;
+          filename: string;
+          path: string;
+          localPath: string;
+          title: string;
+          duration: number;
+          order: number;
+          size: number;
+          createdAt: string;
+        }>;
+        count: number;
+        path?: string;
+        error?: string;
+      }>;
+      saveSlideshowImage?: (imageData: { filename: string; buffer: Buffer }) => Promise<{
+        success: boolean;
+        message?: string;
+        filename?: string;
+        error?: string;
+      }>;
+      deleteSlideshowImage?: (filename: string) => Promise<{
+        success: boolean;
+        message?: string;
+        error?: string;
+      }>;
+      openSlideshowFolder?: () => Promise<{
+        success: boolean;
+        message?: string;
+        path?: string;
+        error?: string;
+      }>;
+      readSlideshowImage?: (filename: string) => Promise<{
+        success: boolean;
+        buffer?: Buffer;
+        mimeType?: string;
+        filename?: string;
+        error?: string;
+      }>;
+      migrateSlideshowImages?: () => Promise<{
+        success: boolean;
+        message?: string;
+        migrated?: number;
+        existing?: number;
+        error?: string;
+      }>;
       
       // Offline/local DB operations
       localDbUpsertCategories?: (rows: { category2_name: string; updated_at?: number }[]) => Promise<{ success: boolean }>;
@@ -117,6 +169,7 @@ declare global {
       localDbMarkTransactionsSyncedByIds?: (transactionIds: number[]) => Promise<{ success: boolean }>;
       localDbArchiveTransactions?: (payload: { businessId: number; from?: string | null; to?: string | null }) => Promise<number>;
       localDbDeleteTransactions?: (payload: { businessId: number; from?: string | null; to?: string | null }) => Promise<number>;
+      localDbDeleteTransactionsByEmail?: (payload: { userEmail: string }) => Promise<{ success: boolean; deleted: number; deletedItems?: number; error?: string }>;
       localDbDeleteTransactionItems?: (payload: { businessId: number; from?: string | null; to?: string | null }) => Promise<{ success: boolean; deleted?: number }>;
       
       // Comprehensive POS table operations
@@ -264,6 +317,13 @@ declare global {
         payment_method_name: string;
         payment_method_code: string;
         transaction_count: number;
+        total_amount: number;
+      }>>;
+      localDbGetCategory2Breakdown?: (userId: number, shiftStart: string, shiftEnd: string | null, businessId?: number) => Promise<Array<{
+        category2_name: string;
+        category2_id: number;
+        total_quantity: number;
+        total_amount: number;
       }>>;
       localDbGetCashSummary?: (userId: number, shiftStart: string, shiftEnd: string | null, businessId?: number) => Promise<{
         cash_shift: number;

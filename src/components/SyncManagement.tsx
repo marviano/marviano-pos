@@ -217,7 +217,24 @@ export default function SyncManagement() {
   const [showOrphanedData, setShowOrphanedData] = useState(false);
   const [dangerFrom, setDangerFrom] = useState<string>('');
   const [dangerTo, setDangerTo] = useState<string>('');
+  const [deleteByEmailPreview, setDeleteByEmailPreview] = useState<string>('');
   const logsEndRef = useRef<HTMLDivElement>(null);
+
+  // Initialize preview with default email when danger zone opens
+  useEffect(() => {
+    if (showDangerZone) {
+      // Set initial preview with default email
+      const defaultEmail = 'marviano.austin@gmail.com';
+      setDeleteByEmailPreview(defaultEmail);
+      // Also set the input field value after a short delay to ensure DOM is ready
+      setTimeout(() => {
+        const emailInput = document.getElementById('deleteUserEmail') as HTMLInputElement;
+        if (emailInput && !emailInput.value) {
+          emailInput.value = defaultEmail;
+        }
+      }, 100);
+    }
+  }, [showDangerZone]);
 
   const [smartSyncStatus, setSmartSyncStatus] = useState<SmartSyncStatus | null>(null);
 
@@ -846,6 +863,109 @@ export default function SyncManagement() {
   const handleDeleteClick = () => {
     setActivePasswordAction('delete');
     setShowPasswordModal(true);
+  };
+
+  // Generate SQL preview for delete by email
+  const generateDeleteByEmailPreview = (email: string, type: 'offline' | 'online'): string => {
+    const queries = [
+      `-- Step 1: Get user ID from email`,
+      `SELECT id FROM users WHERE email = '${email}' LIMIT 1;`,
+      ``,
+      `-- Step 2: Delete printer1 audit logs`,
+      `DELETE FROM printer1_audit_log`,
+      `WHERE transaction_id IN (`,
+      `  SELECT id FROM transactions WHERE user_id = ?`,
+      `);`,
+      ``,
+      `-- Step 3: Delete printer2 audit logs`,
+      `DELETE FROM printer2_audit_log`,
+      `WHERE transaction_id IN (`,
+      `  SELECT id FROM transactions WHERE user_id = ?`,
+      `);`,
+      ``,
+      `-- Step 4: Delete transaction items (foreign key constraint)`,
+      `DELETE FROM transaction_items`,
+      `WHERE transaction_id IN (`,
+      `  SELECT id FROM transactions WHERE user_id = ?`,
+      `);`,
+      ``,
+      `-- Step 5: Delete transactions`,
+      `DELETE FROM transactions WHERE user_id = ?;`
+    ];
+    return queries.join('\n');
+  };
+
+  // Update preview when email changes
+  const updateDeleteByEmailPreview = (email: string) => {
+    if (email && email.trim()) {
+      setDeleteByEmailPreview(email.trim());
+    } else {
+      setDeleteByEmailPreview('');
+    }
+  };
+
+  // Delete transactions by user email
+  const deleteTransactionsByEmail = async (userEmail: string) => {
+    if (!userEmail || !userEmail.trim()) {
+      addLog('error', '❌ User email is required');
+      return;
+    }
+
+    const confirmed = window.confirm(
+      `⚠️ WARNING: This will PERMANENTLY DELETE ALL transactions created by user "${userEmail}" from both offline and online databases.\n\n` +
+      `This action CANNOT be undone!\n\n` +
+      `Are you absolutely sure you want to proceed?`
+    );
+
+    if (!confirmed) {
+      addLog('info', '❌ Deletion cancelled by user');
+      return;
+    }
+
+    addLog('info', `🗑️ Starting deletion of all transactions for user: ${userEmail}...`);
+    
+    try {
+      const electronAPI = getElectronAPI();
+      if (!electronAPI?.localDbDeleteTransactionsByEmail) {
+        addLog('error', '❌ Offline database API not available');
+        return;
+      }
+
+      // Delete from offline database
+      const offlineResult = await electronAPI.localDbDeleteTransactionsByEmail({ userEmail });
+      
+      if (offlineResult.success) {
+        addLog('success', `✅ Deleted ${offlineResult.deleted} offline transactions and ${offlineResult.deletedItems || 0} transaction items for user: ${userEmail}`);
+      } else {
+        addLog('error', `❌ Failed to delete offline transactions: ${offlineResult.error || 'Unknown error'}`);
+      }
+
+      // Delete from online database
+      try {
+        const response = await fetch(getApiUrl('/api/transactions/delete-by-email'), {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({ user_email: userEmail })
+        });
+        
+        if (response.ok) {
+          const data = await response.json();
+          addLog('success', `✅ Deleted ${data.deleted || 0} online transactions for user: ${userEmail}`);
+        } else {
+          const errorData = await response.json().catch(() => ({ error: 'Unknown error' }));
+          addLog('warning', `⚠️ Could not delete online transactions: ${errorData.error || 'Unknown error'} (may be offline)`);
+        }
+      } catch (error) {
+        addLog('warning', `⚠️ Could not delete online transactions: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      }
+
+      addLog('success', `🎉 Deletion process completed for user: ${userEmail}`);
+      await fetchTransactionCounts();
+    } catch (error) {
+      addLog('error', `❌ Deletion failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    }
   };
 
   // Delete all transactions permanently
@@ -1943,6 +2063,57 @@ WHERE ${baseWhere};`;
                 <div className="mt-2 text-xs text-gray-500">
                   Target range: <span className="font-medium text-gray-700">{rangeDescription}</span>
                 </div>
+              </div>
+
+              {/* Delete by User Email Section */}
+              <div className="mb-6 border-t border-gray-200 pt-6">
+                <h4 className="font-semibold text-gray-900 mb-3">Delete Transactions by User Email</h4>
+                <p className="text-sm text-gray-600 mb-4">
+                  Permanently delete ALL transactions created by a specific user from both offline and online databases.
+                </p>
+                <div className="flex gap-3">
+                  <input
+                    type="email"
+                    id="deleteUserEmail"
+                    placeholder="marviano.austin@gmail.com"
+                    defaultValue="marviano.austin@gmail.com"
+                    onChange={(e) => {
+                      const email = e.target.value.trim();
+                      updateDeleteByEmailPreview(email);
+                    }}
+                    className="flex-1 px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-red-500 focus:border-transparent text-black"
+                  />
+                  <button
+                    onClick={() => {
+                      const emailInput = document.getElementById('deleteUserEmail') as HTMLInputElement;
+                      const email = emailInput?.value?.trim();
+                      if (email) {
+                        deleteTransactionsByEmail(email);
+                      } else {
+                        addLog('error', '❌ Please enter a user email');
+                      }
+                    }}
+                    className="px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 transition-colors font-medium"
+                  >
+                    Delete by Email
+                  </button>
+                </div>
+                <p className="text-xs text-red-600 mt-2">
+                  ⚠️ This action cannot be undone. All transactions, transaction items, and audit logs for this user will be permanently deleted.
+                </p>
+                
+                {/* SQL Query Preview */}
+                {deleteByEmailPreview && (
+                  <div className="mt-4 bg-gradient-to-r from-red-50 to-orange-50 rounded-lg p-4 border border-red-200">
+                    <h5 className="font-semibold text-gray-900 mb-3">SQL Queries to be Executed:</h5>
+                    <div className="bg-white p-3 rounded border border-red-300 font-mono text-xs overflow-x-auto">
+                      <div className="text-red-700 mb-2 font-semibold">-- Offline SQLite:</div>
+                      <pre className="text-red-900 whitespace-pre-wrap mb-4">{generateDeleteByEmailPreview(deleteByEmailPreview, 'offline')}</pre>
+                      <div className="text-red-700 mb-2 font-semibold border-t border-red-200 pt-2">-- Online MySQL:</div>
+                      <pre className="text-red-900 whitespace-pre-wrap">{generateDeleteByEmailPreview(deleteByEmailPreview, 'online')}</pre>
+                    </div>
+                  </div>
+                )}
               </div>
 
               {/* Information Box */}

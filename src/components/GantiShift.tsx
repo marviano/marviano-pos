@@ -64,6 +64,14 @@ interface PaymentBreakdown {
   payment_method_name: string;
   payment_method_code: string;
   transaction_count: number;
+  total_amount: number;
+}
+
+interface Category2Breakdown {
+  category2_name: string;
+  category2_id: number;
+  total_quantity: number;
+  total_amount: number;
 }
 
 interface CashSummary {
@@ -108,11 +116,21 @@ interface ShiftSequenceInfo {
   total: number;
   dayStartUtc: string;
   dayEndUtc: string;
+  shifts: Shift[];
 }
+
+interface ShiftPrintSelection {
+  shiftId: number;
+  shiftIndex: number;
+  selected: boolean;
+}
+
+type TabView = 'all-day' | number; // 'all-day' or shift ID
 
 interface ReportDataPayload {
   statistics: ShiftStatistics;
   paymentBreakdown: PaymentBreakdown[];
+  category2Breakdown: Category2Breakdown[];
   cashSummary: CashSummary;
   productSales: ProductSale[];
   customizationSales: CustomizationSale[];
@@ -220,6 +238,7 @@ export default function GantiShift() {
   });
   
   const [paymentBreakdown, setPaymentBreakdown] = useState<PaymentBreakdown[]>([]);
+  const [category2Breakdown, setCategory2Breakdown] = useState<Category2Breakdown[]>([]);
   const [cashSummary, setCashSummary] = useState<CashSummary>({
     cash_shift: 0,
     cash_shift_sales: 0,
@@ -236,6 +255,16 @@ export default function GantiShift() {
   const [startDateTime, setStartDateTime] = useState<string>('');
   const [endDateTime, setEndDateTime] = useState<string>('');
   const [isPrintingCustomRange, setIsPrintingCustomRange] = useState(false);
+  
+  // Print selection modal states
+  const [showPrintSelectionModal, setShowPrintSelectionModal] = useState(false);
+  const [printSelections, setPrintSelections] = useState<ShiftPrintSelection[]>([]);
+  const [printWholeDaySelected, setPrintWholeDaySelected] = useState(false);
+  const [isPrintingSelected, setIsPrintingSelected] = useState(false);
+  
+  // Tab view states
+  const [activeTab, setActiveTab] = useState<TabView>('all-day');
+  const [tabData, setTabData] = useState<Record<string, ReportDataPayload>>({});
   
   const modalInputRef = useRef<HTMLInputElement>(null);
   const autoRefreshIntervalRef = useRef<NodeJS.Timeout | null>(null);
@@ -304,6 +333,7 @@ export default function GantiShift() {
       // Reset stats when no active shift
       setStatistics({ order_count: 0, total_amount: 0, total_discount: 0, voucher_count: 0 });
       setPaymentBreakdown([]);
+      setCategory2Breakdown([]);
       setCashSummary({
         cash_shift: 0,
         cash_shift_sales: 0,
@@ -372,7 +402,8 @@ export default function GantiShift() {
         index: 1,
         total: 1,
         dayStartUtc: bounds.dayStartUtc,
-        dayEndUtc: bounds.dayEndUtc
+        dayEndUtc: bounds.dayEndUtc,
+        shifts: [activeShift]
       });
       return;
     }
@@ -397,8 +428,17 @@ export default function GantiShift() {
             index: index || 1,
             total: sortedShifts.length || 1,
             dayStartUtc: bounds.dayStartUtc,
-            dayEndUtc: bounds.dayEndUtc
+            dayEndUtc: bounds.dayEndUtc,
+            shifts: sortedShifts
           });
+          
+          // Initialize print selections
+          const selections: ShiftPrintSelection[] = sortedShifts.map((shift, idx) => ({
+            shiftId: shift.id,
+            shiftIndex: idx + 1,
+            selected: false
+          }));
+          setPrintSelections(selections);
         }
       } catch (error) {
         console.error('Error determining shift sequence:', error);
@@ -407,7 +447,8 @@ export default function GantiShift() {
             index: 1,
             total: 1,
             dayStartUtc: bounds.dayStartUtc,
-            dayEndUtc: bounds.dayEndUtc
+            dayEndUtc: bounds.dayEndUtc,
+            shifts: [activeShift]
           });
         }
       }
@@ -470,13 +511,16 @@ export default function GantiShift() {
       const defaultCash: CashSummary = { cash_shift: 0, cash_whole_day: 0 };
 
       // Load all statistics in parallel with error handling
-      const [statsResult, breakdownResult, cashResult, productSalesResult] = await Promise.allSettled([
+      const [statsResult, breakdownResult, category2BreakdownResult, cashResult, productSalesResult] = await Promise.allSettled([
         electronAPI.localDbGetShiftStatistics
           ? electronAPI.localDbGetShiftStatistics(shiftOwnerId, activeShift.shift_start, activeShift.shift_end, BUSINESS_ID)
           : Promise.resolve(defaultStats),
         electronAPI.localDbGetPaymentBreakdown
           ? electronAPI.localDbGetPaymentBreakdown(shiftOwnerId, activeShift.shift_start, activeShift.shift_end, BUSINESS_ID)
           : Promise.resolve<PaymentBreakdown[]>([]),
+        electronAPI.localDbGetCategory2Breakdown
+          ? electronAPI.localDbGetCategory2Breakdown(shiftOwnerId, activeShift.shift_start, activeShift.shift_end, BUSINESS_ID)
+          : Promise.resolve<Category2Breakdown[]>([]),
         electronAPI.localDbGetCashSummary
           ? electronAPI.localDbGetCashSummary(shiftOwnerId, activeShift.shift_start, activeShift.shift_end, BUSINESS_ID)
           : Promise.resolve(defaultCash),
@@ -490,6 +534,10 @@ export default function GantiShift() {
       const breakdown =
         breakdownResult.status === 'fulfilled'
           ? (breakdownResult.value as PaymentBreakdown[])
+          : [];
+      const category2BreakdownData =
+        category2BreakdownResult.status === 'fulfilled'
+          ? (category2BreakdownResult.value as Category2Breakdown[])
           : [];
       const cash =
         cashResult.status === 'fulfilled' ? (cashResult.value as CashSummary) : defaultCash;
@@ -505,6 +553,7 @@ export default function GantiShift() {
         voucher_count: stats.voucher_count ?? 0
       });
       setPaymentBreakdown(breakdown);
+      setCategory2Breakdown(category2BreakdownData);
       setCashSummary(cash);
       setProductSales(productSalesData.products || []);
       setCustomizationSales(productSalesData.customizations || []);
@@ -546,13 +595,16 @@ export default function GantiShift() {
       };
 
       try {
-        const [statsResult, breakdownResult, cashResult, productSalesResult] = await Promise.allSettled([
+        const [statsResult, breakdownResult, category2BreakdownResult, cashResult, productSalesResult] = await Promise.allSettled([
           electronAPI.localDbGetShiftStatistics
             ? electronAPI.localDbGetShiftStatistics(userId, start, end, businessId)
             : Promise.resolve(defaultStats),
           electronAPI.localDbGetPaymentBreakdown
             ? electronAPI.localDbGetPaymentBreakdown(userId, start, end, businessId)
             : Promise.resolve<PaymentBreakdown[]>([]),
+          electronAPI.localDbGetCategory2Breakdown
+            ? electronAPI.localDbGetCategory2Breakdown(userId, start, end, businessId)
+            : Promise.resolve<Category2Breakdown[]>([]),
           electronAPI.localDbGetCashSummary
             ? electronAPI.localDbGetCashSummary(userId, start, end, businessId)
             : Promise.resolve(defaultCash),
@@ -564,6 +616,8 @@ export default function GantiShift() {
         const statsPayload = statsResult.status === 'fulfilled' ? (statsResult.value as ShiftStatistics) : defaultStats;
         const breakdownPayload =
           breakdownResult.status === 'fulfilled' ? (breakdownResult.value as PaymentBreakdown[]) : [];
+        const category2BreakdownPayload =
+          category2BreakdownResult.status === 'fulfilled' ? (category2BreakdownResult.value as Category2Breakdown[]) : [];
         const rawCash = cashResult.status === 'fulfilled' ? (cashResult.value as CashSummary) : defaultCash;
         const productSalesPayload =
           productSalesResult.status === 'fulfilled'
@@ -587,6 +641,7 @@ export default function GantiShift() {
             voucher_count: statsPayload.voucher_count ?? 0
           },
           paymentBreakdown: breakdownPayload,
+          category2Breakdown: category2BreakdownPayload,
           cashSummary: resolvedCash,
           productSales: productSalesPayload.products || [],
           customizationSales: productSalesPayload.customizations || []
@@ -793,6 +848,7 @@ export default function GantiShift() {
         setModalAwal('');
         setStatistics({ order_count: 0, total_amount: 0, total_discount: 0, voucher_count: 0 });
         setPaymentBreakdown([]);
+        setCategory2Breakdown([]);
         setCashSummary({
           cash_shift: 0,
           cash_shift_sales: 0,
@@ -831,37 +887,63 @@ export default function GantiShift() {
       return;
     }
 
+    // Show print selection modal
+    setShowPrintSelectionModal(true);
+  };
+  
+  const handlePrintSelected = async () => {
+    const electronAPI = getElectronAPI();
+    if (!activeShift || !electronAPI?.printShiftBreakdown || !shiftSequenceInfo) {
+      setError('Fitur print belum tersedia. Silakan restart aplikasi.');
+      return;
+    }
+    
+    setIsPrintingSelected(true);
+    setError(null);
+    setShowPrintSelectionModal(false);
+    
     try {
-      let wholeDayReportSection: ShiftPrintBreakdownSection | undefined;
       const shiftOwnerId = Number(activeShift.user_id ?? 0);
-      const shouldIncludeWholeDay =
-        Boolean(shiftSequenceInfo && shiftSequenceInfo.index >= 2) && Boolean(shiftOwnerId);
-
-      if (shouldIncludeWholeDay && shiftSequenceInfo && shiftOwnerId) {
+      if (!shiftOwnerId) {
+        throw new Error('User ID tidak valid');
+      }
+      
+      // Print whole day if selected
+      if (printWholeDaySelected) {
         try {
+          console.log('📊 [PRINT ALL] Printing whole day report from day start');
+          
           const dayReportData = await fetchReportPayload({
-            start: shiftSequenceInfo.dayStartUtc,
+            start: shiftSequenceInfo.dayStartUtc, // START FROM DAY START - INCLUDES SHIFT 1
             end: shiftSequenceInfo.dayEndUtc,
             userId: shiftOwnerId
           });
+          
           const dayCash = dayReportData.cashSummary;
           const dayCashSales = dayCash.cash_shift_sales ?? dayCash.cash_shift ?? 0;
           const dayCashRefunds = dayCash.cash_shift_refunds ?? 0;
           const dailyKasExpected = (dayCash.cash_whole_day ?? dayCash.cash_shift ?? 0) || dayCashSales - dayCashRefunds;
-
-          wholeDayReportSection = {
-            title: 'Ringkasan Harian',
+          
+          // Get modal awal from first shift
+          let modalAwalWholeDay = 0;
+          if (shiftSequenceInfo.shifts.length > 0) {
+            modalAwalWholeDay = shiftSequenceInfo.shifts[0].modal_awal || 0;
+          }
+          
+          const result = await electronAPI.printShiftBreakdown({
             user_name: 'Semua Shift',
             shift_start: shiftSequenceInfo.dayStartUtc,
             shift_end: shiftSequenceInfo.dayEndUtc,
-            modal_awal: 0,
+            modal_awal: modalAwalWholeDay,
             statistics: dayReportData.statistics,
             productSales: dayReportData.productSales,
             customizationSales: dayReportData.customizationSales,
             paymentBreakdown: dayReportData.paymentBreakdown.map(p => ({
               payment_method_name: p.payment_method_name || p.payment_method_code,
-              transaction_count: p.transaction_count
+              transaction_count: p.transaction_count,
+              total_amount: p.total_amount || 0
             })),
+            category2Breakdown: dayReportData.category2Breakdown || [],
             cashSummary: {
               cash_shift: dayCash.cash_shift ?? 0,
               cash_shift_sales: dayCashSales,
@@ -869,81 +951,100 @@ export default function GantiShift() {
               cash_whole_day: dayCash.cash_whole_day ?? 0,
               cash_whole_day_sales: dayCash.cash_whole_day_sales ?? dayCash.cash_whole_day ?? 0,
               cash_whole_day_refunds: dayCash.cash_whole_day_refunds ?? 0,
-              total_cash_in_cashier: dailyKasExpected,
-              kas_mulai: 0,
-              kas_expected: dailyKasExpected,
+              total_cash_in_cashier: modalAwalWholeDay + dayCashSales - dayCashRefunds,
+              kas_mulai: modalAwalWholeDay,
+              kas_expected: modalAwalWholeDay + dayCashSales - dayCashRefunds,
               kas_akhir: null,
               kas_selisih: null,
               kas_selisih_label: null
-            }
-          };
+            },
+            business_id: BUSINESS_ID,
+            printerType: 'receiptPrinter'
+          });
+          
+          if (!result.success) {
+            throw new Error(result.error || 'Gagal mencetak laporan harian');
+          }
+          
+          // Small delay between prints
+          await new Promise(r => setTimeout(r, 500));
         } catch (error) {
-          console.error('Error preparing whole-day report:', error);
+          console.error('Error printing whole day report:', error);
+          throw error;
         }
       }
-
-      const result = await electronAPI.printShiftBreakdown({
-        user_name: activeShift.user_name,
-        shift_start: activeShift.shift_start,
-        shift_end: activeShift.shift_end,
-        modal_awal: activeShift.modal_awal,
-        statistics: {
-          order_count: statistics.order_count,
-          total_amount: statistics.total_amount,
-          total_discount: statistics.total_discount,
-          voucher_count: statistics.voucher_count
-        },
-        productSales: productSales.map(p => ({
-          product_name: p.product_name,
-          total_quantity: p.total_quantity,
-          total_subtotal: p.total_subtotal,
-          customization_subtotal: p.customization_subtotal,
-          base_subtotal: p.base_subtotal,
-          base_unit_price: p.base_unit_price,
-          platform: p.platform,
-          transaction_type: p.transaction_type,
-          is_bundle_item: p.is_bundle_item
-        })),
-        customizationSales: customizationSales.map(item => ({
-          option_id: item.option_id,
-          option_name: item.option_name,
-          customization_id: item.customization_id,
-          customization_name: item.customization_name,
-          total_quantity: item.total_quantity,
-          total_revenue: item.total_revenue
-        })),
-        paymentBreakdown: paymentBreakdown.map(p => ({
-          payment_method_name: p.payment_method_name || p.payment_method_code,
-          transaction_count: p.transaction_count
-        })),
-        cashSummary: {
-          cash_shift: cashSummary.cash_shift,
-          cash_shift_sales: cashShiftSales,
-          cash_shift_refunds: cashShiftRefunds,
-          cash_whole_day: cashSummary.cash_whole_day,
-          cash_whole_day_sales: cashWholeDaySales,
-          cash_whole_day_refunds: cashWholeDayRefunds,
-          total_cash_in_cashier: totalCashInCashier,
-          kas_mulai: kasMulaiActive,
-          kas_expected: kasExpectedActive,
-          kas_akhir: kasAkhirActive,
-          kas_selisih: kasSelisihValue,
-          kas_selisih_label: kasSelisihLabelValue
-        },
-        business_id: BUSINESS_ID,
-        printerType: 'receiptPrinter',
-        wholeDayReport: wholeDayReportSection
-      });
-
-      if (result.success) {
-        setSuccessMessage('Laporan shift berhasil dicetak!');
-      } else {
-        throw new Error(result.error || 'Gagal mencetak laporan');
+      
+      // Print selected individual shifts
+      const selectedShifts = printSelections.filter(s => s.selected);
+      for (const selection of selectedShifts) {
+        const shift = shiftSequenceInfo.shifts.find(s => s.id === selection.shiftId);
+        if (!shift) continue;
+        
+        try {
+          const shiftUserId = Number(shift.user_id ?? 0);
+          const shiftReportData = await fetchReportPayload({
+            start: shift.shift_start,
+            end: shift.shift_end,
+            userId: shiftUserId
+          });
+          
+          const shiftCash = shiftReportData.cashSummary;
+          const shiftCashSales = shiftCash.cash_shift_sales ?? shiftCash.cash_shift ?? 0;
+          const shiftCashRefunds = shiftCash.cash_shift_refunds ?? 0;
+          const shiftKasExpected = shift.modal_awal + shiftCashSales - shiftCashRefunds;
+          
+          const result = await electronAPI.printShiftBreakdown({
+            user_name: shift.user_name,
+            shift_start: shift.shift_start,
+            shift_end: shift.shift_end,
+            modal_awal: shift.modal_awal,
+            statistics: shiftReportData.statistics,
+            productSales: shiftReportData.productSales,
+            customizationSales: shiftReportData.customizationSales,
+            paymentBreakdown: shiftReportData.paymentBreakdown.map(p => ({
+              payment_method_name: p.payment_method_name || p.payment_method_code,
+              transaction_count: p.transaction_count,
+              total_amount: p.total_amount || 0
+            })),
+            category2Breakdown: shiftReportData.category2Breakdown || [],
+            cashSummary: {
+              cash_shift: shiftCash.cash_shift ?? 0,
+              cash_shift_sales: shiftCashSales,
+              cash_shift_refunds: shiftCashRefunds,
+              cash_whole_day: shiftCash.cash_whole_day ?? 0,
+              cash_whole_day_sales: shiftCash.cash_whole_day_sales ?? shiftCash.cash_whole_day ?? 0,
+              cash_whole_day_refunds: shiftCash.cash_whole_day_refunds ?? 0,
+              total_cash_in_cashier: shiftKasExpected,
+              kas_mulai: shift.modal_awal,
+              kas_expected: shiftKasExpected,
+              kas_akhir: shift.kas_akhir ?? null,
+              kas_selisih: shift.kas_selisih ?? null,
+              kas_selisih_label: shift.kas_selisih_label ?? null
+            },
+            business_id: BUSINESS_ID,
+            printerType: 'receiptPrinter'
+          });
+          
+          if (!result.success) {
+            throw new Error(result.error || `Gagal mencetak laporan Shift ${selection.shiftIndex}`);
+          }
+          
+          // Small delay between prints
+          await new Promise(r => setTimeout(r, 500));
+        } catch (error) {
+          console.error(`Error printing shift ${selection.shiftIndex}:`, error);
+          throw error;
+        }
       }
+      
+      const printCount = (printWholeDaySelected ? 1 : 0) + selectedShifts.length;
+      setSuccessMessage(`${printCount} laporan berhasil dicetak!`);
     } catch (error) {
-      console.error('Error printing shift breakdown:', error);
+      console.error('Error printing selected reports:', error);
       const message = error instanceof Error ? error.message : 'Gagal mencetak laporan. Silakan coba lagi.';
       setError(message);
+    } finally {
+      setIsPrintingSelected(false);
     }
   };
 
@@ -1011,8 +1112,10 @@ export default function GantiShift() {
         customizationSales: reportData.customizationSales,
         paymentBreakdown: reportData.paymentBreakdown.map((p) => ({
           payment_method_name: p.payment_method_name || p.payment_method_code,
-          transaction_count: p.transaction_count
+          transaction_count: p.transaction_count,
+          total_amount: p.total_amount || 0
         })),
+        category2Breakdown: reportData.category2Breakdown || [],
         cashSummary: {
           cash_shift: reportData.cashSummary.cash_shift,
           cash_shift_sales: customCashSales,
@@ -1046,6 +1149,70 @@ export default function GantiShift() {
     } finally {
       setIsPrintingCustomRange(false);
     }
+  };
+
+  // Load data for a specific tab
+  const loadTabData = useCallback(async (tabView: TabView) => {
+    if (!shiftSequenceInfo) return;
+    
+    const electronAPI = getElectronAPI();
+    if (!electronAPI) return;
+    
+    try {
+      if (tabView === 'all-day') {
+        // Load whole day data
+        const shiftOwnerId = Number(activeShift?.user_id ?? 0);
+        if (!shiftOwnerId) return;
+        
+        const dayData = await fetchReportPayload({
+          start: shiftSequenceInfo.dayStartUtc,
+          end: shiftSequenceInfo.dayEndUtc,
+          userId: shiftOwnerId
+        });
+        
+        setTabData(prev => ({ ...prev, 'all-day': dayData }));
+        setStatistics(dayData.statistics);
+        setPaymentBreakdown(dayData.paymentBreakdown);
+        setCategory2Breakdown(dayData.category2Breakdown);
+        setCashSummary(dayData.cashSummary);
+        setProductSales(dayData.productSales);
+        setCustomizationSales(dayData.customizationSales);
+      } else {
+        // Load specific shift data
+        const shift = shiftSequenceInfo.shifts.find(s => s.id === tabView);
+        if (!shift) return;
+        
+        const shiftUserId = Number(shift.user_id ?? 0);
+        if (!shiftUserId) return;
+        
+        const shiftData = await fetchReportPayload({
+          start: shift.shift_start,
+          end: shift.shift_end,
+          userId: shiftUserId
+        });
+        
+        setTabData(prev => ({ ...prev, [tabView]: shiftData }));
+        setStatistics(shiftData.statistics);
+        setPaymentBreakdown(shiftData.paymentBreakdown);
+        setCategory2Breakdown(shiftData.category2Breakdown);
+        setCashSummary(shiftData.cashSummary);
+        setProductSales(shiftData.productSales);
+        setCustomizationSales(shiftData.customizationSales);
+      }
+    } catch (error) {
+      console.error(`Error loading tab data for ${tabView}:`, error);
+    }
+  }, [shiftSequenceInfo, activeShift, fetchReportPayload]);
+  
+  // Load tab data when active tab changes
+  useEffect(() => {
+    if (activeShift && shiftSequenceInfo) {
+      loadTabData(activeTab);
+    }
+  }, [activeTab, activeShift, shiftSequenceInfo, loadTabData]);
+  
+  const handleTabChange = (tab: TabView) => {
+    setActiveTab(tab);
   };
 
   const handleMigrateTodayTransactions = async () => {
@@ -1096,29 +1263,44 @@ export default function GantiShift() {
     }
   };
 
-  // Cash reconciliation helpers
+  // Cash reconciliation helpers - based on active tab
   const cashShiftSales = cashSummary.cash_shift_sales ?? cashSummary.cash_shift ?? 0;
   const cashShiftRefunds = cashSummary.cash_shift_refunds ?? 0;
   const cashWholeDaySales = cashSummary.cash_whole_day_sales ?? cashSummary.cash_whole_day ?? 0;
   const cashWholeDayRefunds = cashSummary.cash_whole_day_refunds ?? 0;
-  const kasMulaiActive = activeShift?.modal_awal ?? 0;
-  const kasExpectedActive = activeShift ? kasMulaiActive + cashShiftSales - cashShiftRefunds : 0;
-  const kasAkhirActive = activeShift?.kas_akhir ?? null;
+  
+  // Get the correct modal awal based on active tab
+  let kasMulaiActive = 0;
+  let kasAkhirActive: number | null = null;
   let kasSelisihValue: number | null = null;
   let kasSelisihLabelValue: 'balanced' | 'plus' | 'minus' | null = null;
-  if (kasAkhirActive !== null) {
-    const delta = Number((kasAkhirActive - kasExpectedActive).toFixed(2));
-    if (Math.abs(delta) < 0.01) {
-      kasSelisihValue = 0;
-      kasSelisihLabelValue = 'balanced';
-    } else {
-      kasSelisihValue = delta;
-      kasSelisihLabelValue = delta > 0 ? 'plus' : 'minus';
+  
+  if (activeTab === 'all-day') {
+    // For all-day view, use the first shift's modal awal
+    kasMulaiActive = shiftSequenceInfo?.shifts[0]?.modal_awal ?? 0;
+  } else {
+    // For individual shift view
+    const displayShift = shiftSequenceInfo?.shifts.find(s => s.id === activeTab) || activeShift;
+    kasMulaiActive = displayShift?.modal_awal ?? 0;
+    kasAkhirActive = displayShift?.kas_akhir ?? null;
+    
+    if (kasAkhirActive !== null) {
+      const kasExpectedForShift = kasMulaiActive + cashShiftSales - cashShiftRefunds;
+      const delta = Number((kasAkhirActive - kasExpectedForShift).toFixed(2));
+      if (Math.abs(delta) < 0.01) {
+        kasSelisihValue = 0;
+        kasSelisihLabelValue = 'balanced';
+      } else {
+        kasSelisihValue = delta;
+        kasSelisihLabelValue = delta > 0 ? 'plus' : 'minus';
+      }
+    } else if (displayShift && typeof displayShift.kas_selisih === 'number') {
+      kasSelisihValue = displayShift.kas_selisih;
+      kasSelisihLabelValue = displayShift.kas_selisih_label ?? null;
     }
-  } else if (typeof activeShift?.kas_selisih === 'number') {
-    kasSelisihValue = activeShift.kas_selisih;
-    kasSelisihLabelValue = activeShift.kas_selisih_label ?? null;
   }
+  
+  const kasExpectedActive = kasMulaiActive + cashShiftSales - cashShiftRefunds;
   const kasExpectedDisplay = activeShift ? kasExpectedActive : 0;
   const totalCashInCashier = activeShift ? kasExpectedActive : 0;
 
@@ -1398,27 +1580,117 @@ export default function GantiShift() {
               </div>
             )}
 
+            {/* Tabs for different shift views */}
+            {shiftSequenceInfo && shiftSequenceInfo.shifts.length > 0 && (
+              <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-4">
+                <div className="flex items-center space-x-2 overflow-x-auto">
+                  {/* All Day Tab */}
+                  <button
+                    onClick={() => handleTabChange('all-day')}
+                    className={`px-4 py-2 rounded-lg font-medium transition-colors whitespace-nowrap ${
+                      activeTab === 'all-day'
+                        ? 'bg-blue-600 text-white'
+                        : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+                    }`}
+                  >
+                    All Day
+                  </button>
+                  
+                  {/* Individual Shift Tabs */}
+                  {shiftSequenceInfo.shifts.map((shift, idx) => (
+                    <button
+                      key={shift.id}
+                      onClick={() => handleTabChange(shift.id)}
+                      className={`px-4 py-2 rounded-lg font-medium transition-colors whitespace-nowrap ${
+                        activeTab === shift.id
+                          ? 'bg-green-600 text-white'
+                          : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+                      }`}
+                    >
+                      Shift {idx + 1}
+                      {shift.status === 'active' && (
+                        <span className="ml-1 inline-flex items-center">
+                          <span className="w-2 h-2 bg-white rounded-full animate-pulse"></span>
+                        </span>
+                      )}
+                    </button>
+                  ))}
+                </div>
+                
+                {/* Tab description */}
+                <div className="mt-3 text-sm text-gray-600">
+                  {activeTab === 'all-day' ? (
+                    <p>Menampilkan data gabungan untuk semua shift hari ini (termasuk Shift 1)</p>
+                  ) : (
+                    (() => {
+                      const shift = shiftSequenceInfo.shifts.find(s => s.id === activeTab);
+                      if (!shift) return null;
+                      const idx = shiftSequenceInfo.shifts.findIndex(s => s.id === activeTab);
+                      return (
+                        <p>
+                          Menampilkan data untuk Shift {idx + 1} - {shift.user_name}
+                          {shift.status === 'active' && <span className="ml-2 text-green-600 font-medium">(Sedang Aktif)</span>}
+                        </p>
+                      );
+                    })()
+                  )}
+                </div>
+              </div>
+            )}
+
             {/* Shift Info, Modal Awal, Shift Summary, and Cash Summary - Compact 4 columns */}
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
               {/* Shift Info */}
               <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-4">
                 <h2 className="text-base font-semibold text-gray-800 mb-3">Shift Info</h2>
                 <div className="space-y-2">
-                  <div className="flex items-center justify-between">
-                    <span className="text-sm text-gray-600">Cashier:</span>
-                    <span className="text-sm font-medium text-black">{activeShift.user_name}</span>
-                  </div>
-                  <div className="flex items-center justify-between">
-                    <span className="text-sm text-gray-600">Started:</span>
-                    <span className="text-sm font-medium text-black">{formatTime(activeShift.shift_start)}</span>
-                  </div>
-                  <div className="flex items-center justify-between">
-                    <span className="text-sm text-gray-600">Status:</span>
-                    <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-800">
-                      <span className="w-1.5 h-1.5 bg-green-500 rounded-full mr-1.5"></span>
-                      Aktif
-                    </span>
-                  </div>
+                  {activeTab === 'all-day' ? (
+                    <>
+                      <div className="flex items-center justify-between">
+                        <span className="text-sm text-gray-600">Period:</span>
+                        <span className="text-sm font-medium text-black">All Day</span>
+                      </div>
+                      <div className="flex items-center justify-between">
+                        <span className="text-sm text-gray-600">Shifts:</span>
+                        <span className="text-sm font-medium text-black">{shiftSequenceInfo?.total || 0} shift(s)</span>
+                      </div>
+                      <div className="flex items-center justify-between">
+                        <span className="text-sm text-gray-600">Started:</span>
+                        <span className="text-sm font-medium text-black">
+                          {shiftSequenceInfo?.dayStartUtc ? formatTime(shiftSequenceInfo.dayStartUtc) : '-'}
+                        </span>
+                      </div>
+                    </>
+                  ) : (
+                    (() => {
+                      const displayShift = shiftSequenceInfo?.shifts.find(s => s.id === activeTab) || activeShift;
+                      return (
+                        <>
+                          <div className="flex items-center justify-between">
+                            <span className="text-sm text-gray-600">Cashier:</span>
+                            <span className="text-sm font-medium text-black">{displayShift.user_name}</span>
+                          </div>
+                          <div className="flex items-center justify-between">
+                            <span className="text-sm text-gray-600">Started:</span>
+                            <span className="text-sm font-medium text-black">{formatTime(displayShift.shift_start)}</span>
+                          </div>
+                          <div className="flex items-center justify-between">
+                            <span className="text-sm text-gray-600">Status:</span>
+                            {displayShift.status === 'active' ? (
+                              <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-800">
+                                <span className="w-1.5 h-1.5 bg-green-500 rounded-full mr-1.5"></span>
+                                Aktif
+                              </span>
+                            ) : (
+                              <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-gray-100 text-gray-800">
+                                Selesai
+                              </span>
+                            )}
+                          </div>
+                        </>
+                      );
+                    })()
+                  )}
                 </div>
               </div>
 
@@ -1426,9 +1698,13 @@ export default function GantiShift() {
               <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-4">
                 <h2 className="text-base font-semibold text-gray-800 mb-3">Modal Awal</h2>
                 <div className="text-xl font-bold text-blue-600">
-                  {formatRupiah(activeShift.modal_awal)}
+                  {activeTab === 'all-day'
+                    ? formatRupiah(shiftSequenceInfo?.shifts[0]?.modal_awal || 0)
+                    : formatRupiah((shiftSequenceInfo?.shifts.find(s => s.id === activeTab) || activeShift).modal_awal)}
                 </div>
-                <p className="text-xs text-gray-500 mt-1">(saat mulai shift)</p>
+                <p className="text-xs text-gray-500 mt-1">
+                  {activeTab === 'all-day' ? '(dari Shift 1)' : '(saat mulai shift)'}
+                </p>
               </div>
 
               {/* Shift Summary */}
@@ -1710,6 +1986,110 @@ export default function GantiShift() {
           </>
         )}
       </div>
+      )}
+
+      {/* Print Selection Modal */}
+      {showPrintSelectionModal && shiftSequenceInfo && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-lg shadow-xl max-w-md w-full p-6 animate-in zoom-in">
+            <h3 className="text-xl font-bold text-gray-800 mb-4">Pilih Laporan untuk Print</h3>
+            
+            <div className="space-y-3 mb-6 max-h-96 overflow-y-auto">
+              {/* Whole Day Option */}
+              <label className="flex items-center space-x-3 cursor-pointer p-3 rounded-lg hover:bg-gray-50 border border-gray-200">
+                <input
+                  type="checkbox"
+                  checked={printWholeDaySelected}
+                  onChange={(e) => setPrintWholeDaySelected(e.target.checked)}
+                  className="w-5 h-5 text-blue-600 rounded focus:ring-2 focus:ring-blue-500"
+                />
+                <div className="flex-1">
+                  <span className="font-semibold text-gray-900">Whole Day (Semua Shift)</span>
+                  <p className="text-sm text-gray-600">
+                    {formatTime(shiftSequenceInfo.dayStartUtc)} - Sekarang
+                  </p>
+                </div>
+              </label>
+              
+              <div className="border-t border-gray-300 my-3"></div>
+              
+              {/* Individual Shift Options */}
+              {printSelections.map((selection) => {
+                const shift = shiftSequenceInfo.shifts.find(s => s.id === selection.shiftId);
+                if (!shift) return null;
+                
+                return (
+                  <label
+                    key={selection.shiftId}
+                    className="flex items-center space-x-3 cursor-pointer p-3 rounded-lg hover:bg-gray-50 border border-gray-200"
+                  >
+                    <input
+                      type="checkbox"
+                      checked={selection.selected}
+                      onChange={(e) => {
+                        setPrintSelections(prev =>
+                          prev.map(s =>
+                            s.shiftId === selection.shiftId
+                              ? { ...s, selected: e.target.checked }
+                              : s
+                          )
+                        );
+                      }}
+                      className="w-5 h-5 text-green-600 rounded focus:ring-2 focus:ring-green-500"
+                    />
+                    <div className="flex-1">
+                      <span className="font-semibold text-gray-900">
+                        Shift {selection.shiftIndex} - {shift.user_name}
+                      </span>
+                      <p className="text-sm text-gray-600">
+                        {formatTime(shift.shift_start)}
+                        {shift.shift_end && ` - ${formatTime(shift.shift_end)}`}
+                        {shift.status === 'active' && <span className="ml-2 text-green-600 font-medium">(Aktif)</span>}
+                      </p>
+                    </div>
+                  </label>
+                );
+              })}
+            </div>
+            
+            <div className="bg-blue-50 border border-blue-200 rounded-lg p-3 mb-4">
+              <p className="text-sm text-blue-800">
+                💡 Anda dapat memilih lebih dari satu laporan untuk dicetak sekaligus.
+              </p>
+            </div>
+            
+            <div className="flex space-x-3">
+              <button
+                onClick={() => {
+                  setShowPrintSelectionModal(false);
+                  setPrintWholeDaySelected(false);
+                  setPrintSelections(prev => prev.map(s => ({ ...s, selected: false })));
+                }}
+                disabled={isPrintingSelected}
+                className="flex-1 px-4 py-2 border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed font-medium transition-colors"
+              >
+                Batal
+              </button>
+              <button
+                onClick={handlePrintSelected}
+                disabled={isPrintingSelected || (!printWholeDaySelected && printSelections.filter(s => s.selected).length === 0)}
+                className="flex-1 px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:opacity-50 disabled:cursor-not-allowed font-medium transition-colors flex items-center justify-center space-x-2"
+              >
+                {isPrintingSelected ? (
+                  <>
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                    <span>Mencetak...</span>
+                  </>
+                ) : (
+                  <>
+                    <Printer className="w-4 h-4" />
+                    <span>Print ({(printWholeDaySelected ? 1 : 0) + printSelections.filter(s => s.selected).length})</span>
+                  </>
+                )}
+              </button>
+            </div>
+          </div>
+        </div>
       )}
 
       {/* Date-Time Picker Modal */}

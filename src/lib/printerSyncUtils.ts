@@ -33,7 +33,10 @@ const buildDailyCounters = (
     const epoch = parseEpoch(audit);
     if (!epoch) continue;
 
-    const dateKey = new Date(epoch).toISOString().split('T')[0];
+    // Convert epoch to GMT+7 date (not UTC) to match local business day
+    const date = new Date(epoch);
+    const utc7Time = new Date(date.getTime() + (7 * 60 * 60 * 1000));
+    const dateKey = utc7Time.toISOString().split('T')[0];
     const current = map.get(dateKey);
     if (current == null || counterValue > current) {
       map.set(dateKey, counterValue);

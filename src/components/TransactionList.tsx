@@ -169,6 +169,7 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
   const [showPrintingLogs, setShowPrintingLogs] = useState(false);
   
   // Get today's date in UTC+7 timezone
+  // Import from shared utility for consistency
   const getTodayUTC7 = () => {
     const now = new Date();
     const utc7Time = new Date(now.getTime() + (7 * 60 * 60 * 1000));
@@ -502,7 +503,8 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
       if (isOnlineMode) {
         console.log('🌐 [TransactionList] Fetching from online API');
         // Fetch from online API only
-        const response = await fetch(getApiUrl(`/api/transactions?business_id=${businessId}&from_date=${fromDate}&to_date=${toDate}&limit=1000`));
+        // Using 10000 limit to ensure we get all transactions in the date range
+        const response = await fetch(getApiUrl(`/api/transactions?business_id=${businessId}&from_date=${fromDate}&to_date=${toDate}&limit=10000`));
         if (!response.ok) {
           throw new Error('Failed to fetch transactions');
         }
@@ -524,7 +526,10 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
           return true;
         }
         
-        const offlineTransactions: ElectronTransaction[] = await (window as { electronAPI: ElectronAPI }).electronAPI.localDbGetTransactions(businessId, 100);
+        // Fetch a large number of transactions to ensure we get all transactions in the date range
+        // Using 50000 limit to match printing page (offline-first, need all transactions)
+        // This ensures we capture all transactions even for busy days with many transactions
+        const offlineTransactions: ElectronTransaction[] = await (window as { electronAPI: ElectronAPI }).electronAPI.localDbGetTransactions(businessId, 50000);
         console.log('💾 [TransactionList] Raw offline transactions count:', offlineTransactions.length);
         
         // Get users and businesses to show actual names (fetch once for all transactions)
@@ -532,7 +537,8 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
         const businesses: ElectronBusiness[] = await (window as { electronAPI: ElectronAPI }).electronAPI.localDbGetBusinesses();
         
         
-        // Filter by date range - need to convert to local date for comparison
+        // Filter by date range - need to convert to local date for accurate filtering
+        // This ensures we only show transactions within the selected date range
         const filteredTransactions = offlineTransactions.filter((tx) => {
           // Convert UTC to local date for accurate filtering
           const localDate = new Date(tx.created_at);
@@ -542,6 +548,8 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
           const isInRange = localDateString >= fromDate && localDateString <= toDate;
           return isInRange;
         });
+        
+        console.log('💾 [TransactionList] Filtered transactions (date range):', filteredTransactions.length, 'from', fromDate, 'to', toDate);
         
         transactionsData = filteredTransactions.map((tx) => {
           const user = users.find((u) => u.id === tx.user_id);
@@ -575,6 +583,8 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
           };
         });
         
+        console.log('💾 [TransactionList] Processed transactions for display:', transactionsData.length);
+        
       }
       
       // Apply permission-based filtering
@@ -599,6 +609,25 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
       }
       
       setTransactions(filteredTransactions);
+      
+      // Debug logging for offline mode revenue calculation (offline-first priority)
+      if (!isOnlineMode) {
+        const totalRevenueDebug = filteredTransactions.reduce((sum, t) => {
+          const amount = typeof t.final_amount === 'string' ? parseFloat(t.final_amount) : t.final_amount;
+          return sum + (isNaN(amount) ? 0 : amount);
+        }, 0);
+        console.log('💾 [TransactionList] Offline mode summary:', {
+          afterDateFilter: transactionsData.length,
+          afterPermissionFilter: filteredTransactions.length,
+          totalRevenue: totalRevenueDebug,
+          dateRange: { fromDate, toDate },
+          businessId,
+          paymentMethods: filteredTransactions.reduce((acc, tx) => {
+            acc[tx.payment_method] = (acc[tx.payment_method] || 0) + 1;
+            return acc;
+          }, {} as Record<string, number>)
+        });
+      }
 
       // Fetch original Receiptize counters (from Printer2 audit log)
       const receiptizeResult = await fetchReceiptizePrintedIds();

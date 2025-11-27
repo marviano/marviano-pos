@@ -18,6 +18,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   minimizeWindow: () => ipcRenderer.invoke('minimize-window'),
   maximizeWindow: () => ipcRenderer.invoke('maximize-window'),
   navigateTo: (path: string) => ipcRenderer.invoke('navigate-to', path),
+  focusWindow: () => ipcRenderer.invoke('focus-window'),
   
   // Authentication events
   notifyLoginSuccess: () => ipcRenderer.invoke('login-success'),
@@ -121,6 +122,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.invoke('localdb-archive-transactions', payload),
   localDbDeleteTransactions: (payload: { businessId: number; from?: string | null; to?: string | null }) =>
     ipcRenderer.invoke('localdb-delete-transactions', payload),
+  localDbDeleteTransactionsByEmail: (payload: { userEmail: string }) =>
+    ipcRenderer.invoke('localdb-delete-transactions-by-email', payload),
   localDbDeleteTransactionItems: (payload: { businessId: number; from?: string | null; to?: string | null }) =>
     ipcRenderer.invoke('localdb-delete-transaction-items', payload),
   localDbGetUnsyncedTransactions: (businessId?: number) => ipcRenderer.invoke('localdb-get-unsynced-transactions', businessId),
@@ -198,6 +201,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   localDbEndShift: (shiftId: number) => ipcRenderer.invoke('localdb-end-shift', shiftId),
   localDbGetShiftStatistics: (userId: number, shiftStart: string, shiftEnd: string | null, businessId?: number) => ipcRenderer.invoke('localdb-get-shift-statistics', userId, shiftStart, shiftEnd, businessId),
   localDbGetPaymentBreakdown: (userId: number, shiftStart: string, shiftEnd: string | null, businessId?: number) => ipcRenderer.invoke('localdb-get-payment-breakdown', userId, shiftStart, shiftEnd, businessId),
+  localDbGetCategory2Breakdown: (userId: number, shiftStart: string, shiftEnd: string | null, businessId?: number) => ipcRenderer.invoke('localdb-get-category2-breakdown', userId, shiftStart, shiftEnd, businessId),
   localDbGetCashSummary: (userId: number, shiftStart: string, shiftEnd: string | null, businessId?: number) => ipcRenderer.invoke('localdb-get-cash-summary', userId, shiftStart, shiftEnd, businessId),
   localDbGetShifts: (filters: { businessId?: number; startDate?: string; endDate?: string; userId?: number; limit?: number; offset?: number } | undefined) => ipcRenderer.invoke('localdb-get-shifts', filters),
   localDbGetShiftUsers: (businessId?: number) => ipcRenderer.invoke('localdb-get-shift-users', businessId),
@@ -214,7 +218,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
     statistics: { order_count: number; total_amount: number; total_discount: number; voucher_count: number };
     productSales: Array<{ product_name: string; total_quantity: number; total_subtotal: number; customization_subtotal: number; base_subtotal: number; base_unit_price: number; platform: string; transaction_type: string }>;
     customizationSales: Array<{ option_id: number; option_name: string; customization_id: number; customization_name: string; total_quantity: number; total_revenue: number }>;
-    paymentBreakdown: Array<{ payment_method_name: string; transaction_count: number }>;
+    paymentBreakdown: Array<{ payment_method_name: string; transaction_count: number; total_amount: number }>;
+    category2Breakdown: Array<{ category2_name: string; category2_id: number; total_quantity: number; total_amount: number }>;
     cashSummary: {
       cash_shift: number;
       cash_shift_sales?: number;
@@ -240,5 +245,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
   onSlideshowUpdate: (callback: (data: UnknownRecord) => void) => {
     ipcRenderer.on('slideshow-update', (event, data) => callback(data));
   },
+  
+  // Slideshow image management (userData storage)
+  getSlideshowImages: () => ipcRenderer.invoke('get-slideshow-images'),
+  saveSlideshowImage: (imageData: { filename: string; buffer: Buffer }) => ipcRenderer.invoke('save-slideshow-image', imageData),
+  deleteSlideshowImage: (filename: string) => ipcRenderer.invoke('delete-slideshow-image', filename),
+  openSlideshowFolder: () => ipcRenderer.invoke('open-slideshow-folder'),
+  readSlideshowImage: (filename: string) => ipcRenderer.invoke('read-slideshow-image', filename),
+  migrateSlideshowImages: () => ipcRenderer.invoke('migrate-slideshow-images'),
 });
 

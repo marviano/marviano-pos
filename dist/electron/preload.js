@@ -16,6 +16,7 @@ electron_1.contextBridge.exposeInMainWorld('electronAPI', {
     minimizeWindow: () => electron_1.ipcRenderer.invoke('minimize-window'),
     maximizeWindow: () => electron_1.ipcRenderer.invoke('maximize-window'),
     navigateTo: (path) => electron_1.ipcRenderer.invoke('navigate-to', path),
+    focusWindow: () => electron_1.ipcRenderer.invoke('focus-window'),
     // Authentication events
     notifyLoginSuccess: () => electron_1.ipcRenderer.invoke('login-success'),
     notifyLogout: () => electron_1.ipcRenderer.invoke('logout'),
@@ -98,6 +99,7 @@ electron_1.contextBridge.exposeInMainWorld('electronAPI', {
     localDbGetTransactions: (businessId, limit) => electron_1.ipcRenderer.invoke('localdb-get-transactions', businessId, limit),
     localDbArchiveTransactions: (payload) => electron_1.ipcRenderer.invoke('localdb-archive-transactions', payload),
     localDbDeleteTransactions: (payload) => electron_1.ipcRenderer.invoke('localdb-delete-transactions', payload),
+    localDbDeleteTransactionsByEmail: (payload) => electron_1.ipcRenderer.invoke('localdb-delete-transactions-by-email', payload),
     localDbDeleteTransactionItems: (payload) => electron_1.ipcRenderer.invoke('localdb-delete-transaction-items', payload),
     localDbGetUnsyncedTransactions: (businessId) => electron_1.ipcRenderer.invoke('localdb-get-unsynced-transactions', businessId),
     localDbMarkTransactionsSynced: (transactionIds) => electron_1.ipcRenderer.invoke('localdb-mark-transactions-synced', transactionIds),
@@ -153,6 +155,7 @@ electron_1.contextBridge.exposeInMainWorld('electronAPI', {
     localDbEndShift: (shiftId) => electron_1.ipcRenderer.invoke('localdb-end-shift', shiftId),
     localDbGetShiftStatistics: (userId, shiftStart, shiftEnd, businessId) => electron_1.ipcRenderer.invoke('localdb-get-shift-statistics', userId, shiftStart, shiftEnd, businessId),
     localDbGetPaymentBreakdown: (userId, shiftStart, shiftEnd, businessId) => electron_1.ipcRenderer.invoke('localdb-get-payment-breakdown', userId, shiftStart, shiftEnd, businessId),
+    localDbGetCategory2Breakdown: (userId, shiftStart, shiftEnd, businessId) => electron_1.ipcRenderer.invoke('localdb-get-category2-breakdown', userId, shiftStart, shiftEnd, businessId),
     localDbGetCashSummary: (userId, shiftStart, shiftEnd, businessId) => electron_1.ipcRenderer.invoke('localdb-get-cash-summary', userId, shiftStart, shiftEnd, businessId),
     localDbGetShifts: (filters) => electron_1.ipcRenderer.invoke('localdb-get-shifts', filters),
     localDbGetShiftUsers: (businessId) => electron_1.ipcRenderer.invoke('localdb-get-shift-users', businessId),
@@ -169,4 +172,11 @@ electron_1.contextBridge.exposeInMainWorld('electronAPI', {
     onSlideshowUpdate: (callback) => {
         electron_1.ipcRenderer.on('slideshow-update', (event, data) => callback(data));
     },
+    // Slideshow image management (userData storage)
+    getSlideshowImages: () => electron_1.ipcRenderer.invoke('get-slideshow-images'),
+    saveSlideshowImage: (imageData) => electron_1.ipcRenderer.invoke('save-slideshow-image', imageData),
+    deleteSlideshowImage: (filename) => electron_1.ipcRenderer.invoke('delete-slideshow-image', filename),
+    openSlideshowFolder: () => electron_1.ipcRenderer.invoke('open-slideshow-folder'),
+    readSlideshowImage: (filename) => electron_1.ipcRenderer.invoke('read-slideshow-image', filename),
+    migrateSlideshowImages: () => electron_1.ipcRenderer.invoke('migrate-slideshow-images'),
 });

@@ -289,7 +289,7 @@ export default function PaymentModal({
   const promotionValue = promotionDetails.value;
   const isPromotionApplied = promotionSelection !== 'none' && voucherDiscount > 0;
   const requiresCashInput = selectedPaymentMethod !== 'cl' && finalTotal > 0;
-  const promotionsDisabled = selectedPaymentMethod === 'cl';
+  const promotionsDisabled = false;
   const hasEnteredAmount = amountReceived !== '' && parseFloat(amountReceived) > 0;
   const amountIsSufficient = !requiresCashInput || receivedAmount >= finalTotal;
   const hasValidCustomPromotion = promotionsDisabled || promotionSelection !== 'custom' || ((promotionValue ?? 0) > 0);
@@ -983,7 +983,8 @@ export default function PaymentModal({
         try {
           const configsRaw = await window.electronAPI?.localDbGetPrinterConfigs?.();
           if (Array.isArray(configsRaw)) {
-            configsRaw.forEach((config: any) => {
+            type PrinterConfig = { printer_type?: string; extra_settings?: string | Record<string, unknown> | null };
+            (configsRaw as PrinterConfig[]).forEach((config) => {
               if (config?.printer_type === 'receiptPrinter' && config?.extra_settings) {
                 try {
                   const extra = typeof config.extra_settings === 'string'
@@ -1891,12 +1892,7 @@ export default function PaymentModal({
                       </button>
                     )}
                   </div>
-                  {promotionsDisabled && (
-                    <p className="text-[11px] text-gray-500">
-                      Promo tidak tersedia untuk pembayaran City Ledger.
-                    </p>
-                  )}
-                  {!promotionsDisabled && promotionSelection === 'custom' && (
+                  {promotionSelection === 'custom' && (
                     <div className="max-w-xs">
                       <label className="block text-xs font-medium text-gray-600 mb-1">
                         Nominal Voucher Custom

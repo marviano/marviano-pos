@@ -144,28 +144,6 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
   const [loadingProductId, setLoadingProductId] = useState<number | null>(null);
   const [showPaymentModal, setShowPaymentModal] = useState(false);
   const [bundleItems, setBundleItems] = useState<BundleItem[]>([]);
-  // Send order updates to customer display
-  interface CustomerDisplayOrderItem {
-    id: string;
-    name: string;
-    quantity: number;
-    price: number;
-    status: string;
-  }
-
-  interface CustomerDisplayOrder {
-    id: string;
-    items: CustomerDisplayOrderItem[];
-    total: number;
-    status: string;
-    timestamp: Date;
-  }
-
-  const sendOrderUpdate = (orderData: CustomerDisplayOrder) => {
-    if (typeof window !== 'undefined' && window.electronAPI?.updateCustomerDisplay) {
-      window.electronAPI.updateCustomerDisplay({ order: orderData });
-    }
-  };
 
   // Send cart updates to customer display
   const sendCartUpdate = (cartItems: CartItem[]) => {
@@ -445,43 +423,9 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
   const handlePaymentComplete = () => {
     if (cartItems.length === 0) return;
     
-    // Update order status to preparing
-    const orderData = {
-      id: `order-${Date.now()}`,
-      items: cartItems.map(item => ({
-        id: item.id.toString(),
-        name: item.product.nama,
-        quantity: item.quantity,
-        price: (() => {
-          let itemPrice = effectiveProductPrice(item.product);
-          itemPrice += sumCustomizationPrice(item.customizations);
-          if (item.bundleSelections) {
-            itemPrice += calculateBundleCustomizationCharge(item.bundleSelections);
-          }
-          return itemPrice;
-        })(),
-        status: 'preparing'
-      })),
-      total: totalPrice,
-      status: 'preparing',
-      timestamp: new Date()
-    };
-    
-    sendOrderUpdate(orderData);
-    
-    // Clear cart immediately after payment completion
+    // Clear cart immediately after payment completion (receipt printed)
     setCartItems([]);
     sendCartUpdate([]);
-    
-    // Simulate order completion after 10 seconds
-    setTimeout(() => {
-      const completedOrderData = {
-        ...orderData,
-        items: orderData.items.map(item => ({ ...item, status: 'ready' })),
-        status: 'ready'
-      };
-      sendOrderUpdate(completedOrderData);
-    }, 10000);
   };
 
   const formatPrice = (price: number) => {

@@ -112,10 +112,14 @@ export default function POSLayout() {
     }
   };
 
-  // Send tab updates to customer display
+  // Send tab updates to customer display (includes cart items for the active tab)
   const sendTabUpdate = (tabInfo: { activeTab: string; isOnline: boolean; selectedPlatform?: OnlinePlatform | null }) => {
     const electronAPI = getElectronAPI();
-    electronAPI?.updateCustomerDisplay?.({ tabInfo });
+    const currentCart = getCurrentCart();
+    electronAPI?.updateCustomerDisplay?.({ 
+      tabInfo,
+      cartItems: currentCart 
+    });
   };
 
   // Fetch categories from database (business_id = 14) with offline fallback
@@ -265,7 +269,7 @@ export default function POSLayout() {
       return;
     }
     sendTabUpdate({ activeTab: tabName, isOnline: isOnlineTab, selectedPlatform: selectedOnlinePlatform });
-  }, [isOnlineTab, selectedOnlinePlatform]);
+  }, [isOnlineTab, selectedOnlinePlatform, sendTabUpdate]);
 
   // Check database health on mount and ensure it's populated
   useEffect(() => {
@@ -455,7 +459,7 @@ export default function POSLayout() {
                 products={products}
                 cartItems={getCurrentCart()}
                 setCartItems={setCurrentCart}
-                transactionType={undefined}
+                transactionType={categories.find(c => c.jenis === selectedCategory)?.productType || 'drinks'}
                 isLoadingProducts={isLoadingProducts}
                 isOnline={isOnlineTab}
                 selectedOnlinePlatform={selectedOnlinePlatform}

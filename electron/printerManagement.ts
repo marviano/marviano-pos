@@ -153,9 +153,13 @@ export class PrinterManagementService {
 
   /**
    * Get or increment printer daily counter
+   * Uses GMT+7 timezone to match local business day
    */
   getPrinterCounter(printerType: string, businessId: number, increment: boolean = false): number {
-    const today = new Date().toISOString().split('T')[0];
+    // Get today's date in GMT+7 (Indonesia timezone)
+    const now = new Date();
+    const utc7Time = new Date(now.getTime() + (7 * 60 * 60 * 1000));
+    const today = utc7Time.toISOString().split('T')[0];
     
     try {
       const existing = this.db.prepare('SELECT counter FROM printer_daily_counters WHERE printer_type = ? AND business_id = ? AND date = ?')

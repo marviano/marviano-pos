@@ -1,24 +1,11 @@
 'use client';
 
 import { useEffect, useMemo, useState, useCallback } from 'react';
-import { ShoppingCart, Clock, CheckCircle } from 'lucide-react';
+import { ShoppingCart } from 'lucide-react';
 import { getApiUrl } from '@/lib/api';
 
-interface OrderItem {
-  id: string;
-  name: string;
-  quantity: number;
-  price: number;
-  status: 'pending' | 'preparing' | 'ready';
-}
-
-interface CurrentOrder {
-  id: string;
-  items: OrderItem[];
-  total: number;
-  status: 'pending' | 'preparing' | 'ready';
-  timestamp: Date;
-}
+// Removed OrderItem and CurrentOrder interfaces - not needed anymore
+// Customer display only shows cart items, not order status
 
 interface SelectedCustomization {
   customization_id: number;
@@ -30,6 +17,29 @@ interface SelectedCustomization {
   }[];
 }
 
+interface BundleSelection {
+  category2_id: number;
+  category2_name: string;
+  selectedProducts: {
+    product: {
+      id: number;
+      nama: string;
+    };
+    quantity?: number;
+    customizations?: {
+      customization_id: number;
+      customization_name: string;
+      selected_options: {
+        option_id: number;
+        option_name: string;
+        price_adjustment: number;
+      }[];
+    }[];
+    customNote?: string;
+  }[];
+  requiredQuantity: number;
+}
+
 interface CartItem {
   id: number;
   product: {
@@ -39,6 +49,8 @@ interface CartItem {
   };
   quantity: number;
   customizations?: SelectedCustomization[];
+  customNote?: string;
+  bundleSelections?: BundleSelection[];
 }
 
 interface SlideshowItem {
@@ -56,14 +68,13 @@ interface SlideshowImage {
   title: string;
   duration: number;
   order: number;
+  dataUrl?: string; // Add data URL for display
 }
 
 type OnlinePlatform = 'qpon' | 'gofood' | 'grabfood' | 'shopeefood' | 'tiktok';
 type TabName = 'Offline' | 'Gofood' | 'Grabfood' | 'Shopeefood' | 'Tiktok' | 'Qpon' | 'drinks' | 'bakery' | 'drinks (Online)' | 'bakery (Online)';
 
-interface CustomerDisplayOrderPayload extends Omit<CurrentOrder, 'timestamp'> {
-  timestamp: string | Date;
-}
+// Removed CustomerDisplayOrderPayload - not needed anymore
 
 interface CustomerDisplayTabInfo {
   activeTab: TabName;
@@ -72,7 +83,6 @@ interface CustomerDisplayTabInfo {
 }
 
 interface CustomerDisplayUpdatePayload {
-  order?: CustomerDisplayOrderPayload;
   cartItems?: CartItem[];
   tabInfo?: CustomerDisplayTabInfo;
 }
@@ -99,11 +109,6 @@ const defaultSlideshowItems: SlideshowItem[] = [
 const isSlideshowImage = (slide: SlideshowItem | SlideshowImage): slide is SlideshowImage =>
   'path' in slide;
 
-const normalizeOrderPayload = (order: CustomerDisplayOrderPayload): CurrentOrder => ({
-  ...order,
-  timestamp: order.timestamp instanceof Date ? order.timestamp : new Date(order.timestamp),
-});
-
 const normalizePlatform = (platform?: string | null): OnlinePlatform | null => {
   if (!platform) return null;
   if (['qpon', 'gofood', 'grabfood', 'shopeefood', 'tiktok'].includes(platform)) {
@@ -113,8 +118,6 @@ const normalizePlatform = (platform?: string | null): OnlinePlatform | null => {
 };
 
 export default function CustomerDisplay() {
-  const [currentOrder, setCurrentOrder] = useState<CurrentOrder | null>(null);
-  
   // NEW STRUCTURE: 6 carts total - 1 offline + 5 online platforms
   // Each cart can contain both drinks AND bakery items
   const [offlineCart, setOfflineCart] = useState<CartItem[]>([]);
@@ -196,15 +199,52 @@ export default function CustomerDisplay() {
     }
   }, [activeTab]);
 
-  // Load slideshow images from API
+  // Load slideshow images from userData via Electron
   const loadSlideshowImages = useCallback(async () => {
     try {
+      // Try electron API first (offline-first)
+      if (typeof window !== 'undefined' && window.electronAPI?.getSlideshowImages) {
+        const result = await window.electronAPI.getSlideshowImages();
+        
+        if (result.success && result.images && result.images.length > 0) {
+          // Load each image as data URL for display
+          const imagesWithDataUrls = await Promise.all(
+            result.images.map(async (image) => {
+              try {
+                const imageData = await window.electronAPI?.readSlideshowImage?.(image.filename);
+                if (imageData?.success && imageData.buffer) {
+                  // Convert buffer to base64 data URL
+                  const base64 = btoa(
+                    new Uint8Array(imageData.buffer).reduce(
+                      (data, byte) => data + String.fromCharCode(byte),
+                      ''
+                    )
+                  );
+                  return {
+                    ...image,
+                    dataUrl: `data:${imageData.mimeType};base64,${base64}`
+                  };
+                }
+              } catch (error) {
+                console.error('❌ Failed to load image:', image.filename, error);
+              }
+              return image;
+            })
+          );
+          
+          setSlideshowImages(imagesWithDataUrls);
+          console.log('📸 Loaded slideshow images from userData:', imagesWithDataUrls.length);
+          return;
+        }
+      }
+      
+      // Fallback to web API (shouldn't happen in electron app)
       const response = await fetch(getApiUrl('/api/slideshow/images'));
       const data: SlideshowImageResponse = await response.json();
       
       if (data.success && data.images.length > 0) {
         setSlideshowImages(data.images);
-        console.log('📸 Loaded slideshow images:', data.images.length);
+        console.log('📸 Loaded slideshow images from API:', data.images.length);
       } else {
         console.log('📸 No slideshow images found, using default content');
         setSlideshowImages([]);
@@ -276,10 +316,7 @@ export default function CustomerDisplay() {
 
     const handleOrderUpdate = (data: unknown) => {
       const payload = data as CustomerDisplayUpdatePayload;
-      console.log('📱 Customer display received order update:', payload);
-      if (payload.order) {
-        setCurrentOrder(normalizeOrderPayload(payload.order));
-      }
+      console.log('📱 Customer display received cart update:', payload);
       if (Array.isArray(payload.cartItems)) {
         applyCartUpdate(payload.cartItems, payload.tabInfo);
       }
@@ -389,17 +426,36 @@ export default function CustomerDisplay() {
     return `Rp ${price.toLocaleString('id-ID')}`;
   };
 
+  const sumCustomizationPrice = (customizations?: SelectedCustomization[]) => {
+    if (!customizations || customizations.length === 0) return 0;
+    return customizations.reduce((sum, customization) => {
+      const optionTotal = customization.selected_options.reduce((optionSum, option) => optionSum + option.price_adjustment, 0);
+      return sum + optionTotal;
+    }, 0);
+  };
+
+  const calculateBundleCustomizationCharge = (bundleSelections?: BundleSelection[]) => {
+    if (!bundleSelections || bundleSelections.length === 0) return 0;
+
+    return bundleSelections.reduce((bundleSum, bundleSelection) => {
+      const selectionTotal = bundleSelection.selectedProducts.reduce((productSum, selectedProduct) => {
+        const perUnitAdjustment = sumCustomizationPrice(selectedProduct.customizations);
+        return productSum + perUnitAdjustment;
+      }, 0);
+      return bundleSum + selectionTotal;
+    }, 0);
+  };
+
   const totalItems = currentCartItems.reduce((sum, item) => sum + item.quantity, 0);
   const totalPrice = currentCartItems.reduce((sum, item) => {
     let itemPrice = item.product.harga_jual;
     
     // Add customization prices
-    if (item.customizations) {
-      item.customizations.forEach(customization => {
-        customization.selected_options.forEach(option => {
-          itemPrice += option.price_adjustment;
-        });
-      });
+    itemPrice += sumCustomizationPrice(item.customizations);
+    
+    // Add bundle customization charges
+    if (item.bundleSelections) {
+      itemPrice += calculateBundleCustomizationCharge(item.bundleSelections);
     }
     
     return sum + (itemPrice * item.quantity);
@@ -447,7 +503,7 @@ export default function CustomerDisplay() {
         {/* Cart Items Area */}
         <div className="flex-1 overflow-y-auto p-4">
           {/* Empty Cart Indicator */}
-          {currentCartItems.length === 0 && !currentOrder && (
+          {currentCartItems.length === 0 && (
             <div className="text-center py-12">
               <div className="w-24 h-24 mx-auto mb-4 text-gray-300">
                 <ShoppingCart className="w-full h-full" />
@@ -461,77 +517,111 @@ export default function CustomerDisplay() {
             <div className="space-y-1">
               {currentCartItems.map((item) => (
                 <div key={item.id} className="bg-white rounded border border-gray-200 p-2">
-                  <div className="flex justify-between items-center">
-                    <div className="flex-1">
-                      <h4 className="font-medium text-gray-800 text-xs">{item.product.nama}</h4>
-                      
-                      {/* Customizations */}
-                      {item.customizations && item.customizations.length > 0 && (
-                        <div className="mt-0.5 space-y-0.5">
-                          {item.customizations.map((customization) => (
-                            <div key={customization.customization_id} className="text-xs">
-                              <span className="text-gray-500">{customization.customization_name}:</span>
-                              <div className="ml-1">
-                                {customization.selected_options.map((option) => (
-                                  <span key={option.option_id} className="text-gray-600 text-xs">
-                                    {option.option_name}
-                                    {option.price_adjustment !== 0 && (
-                                      <span className={`ml-1 ${
-                                        option.price_adjustment > 0 ? 'text-green-600' : 'text-red-600'
-                                      }`}>
-                                        ({option.price_adjustment > 0 ? '+' : ''}{formatPrice(option.price_adjustment)})
-                                      </span>
+                  <div>
+                    <h4 className="font-medium text-gray-800 text-xs">{item.product.nama}</h4>
+                    
+                    {/* Customizations */}
+                    {item.customizations && item.customizations.length > 0 && (
+                      <div className="mt-1 space-y-1">
+                        {item.customizations.map((customization) => (
+                          <div key={customization.customization_id} className="text-xs">
+                            <span className="text-gray-500">{customization.customization_name}:</span>
+                            <div className="ml-2 space-y-0.5">
+                              {customization.selected_options.map((option) => (
+                                <div key={option.option_id} className="flex items-center justify-between">
+                                  <span className="text-gray-600">• {option.option_name}</span>
+                                  {option.price_adjustment !== 0 && (
+                                    <span className={`text-xs ${
+                                      option.price_adjustment > 0 ? 'text-green-600' : 'text-red-600'
+                                    }`}>
+                                      {option.price_adjustment > 0 ? '+' : ''}{formatPrice(option.price_adjustment)}
+                                    </span>
+                                  )}
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                    
+                    {/* Custom Note */}
+                    {item.customNote && (
+                      <div className="mt-1">
+                        <div className="text-xs">
+                          <span className="text-gray-500">Note:</span>
+                          <span className="text-gray-700 ml-1 italic">&ldquo;{item.customNote}&rdquo;</span>
+                        </div>
+                      </div>
+                    )}
+                    
+                    {/* Bundle Selections */}
+                    {item.bundleSelections && item.bundleSelections.length > 0 && (
+                      <div className="mt-2 space-y-2">
+                        <div className="text-xs font-semibold text-purple-700">Bundle Items:</div>
+                        {item.bundleSelections.map((bundleSel, idx) => {
+                          const totalQuantity = bundleSel.selectedProducts.length;
+                          return (
+                            <div key={idx} className="ml-2 border-l-2 border-purple-300 pl-2">
+                              <div className="text-xs font-medium text-purple-600">
+                                {bundleSel.category2_name} ({totalQuantity}/{bundleSel.requiredQuantity}):
+                              </div>
+                              <div className="ml-2 mt-1 space-y-1">
+                                {bundleSel.selectedProducts.map((sp, spIdx) => (
+                                  <div key={spIdx} className="text-xs text-gray-600 border border-gray-200 rounded px-2 py-1 bg-gray-50 space-y-1">
+                                    <div className="font-medium text-gray-700">• {sp.product.nama}</div>
+                                    {sp.customizations && sp.customizations.length > 0 && (
+                                      <div className="ml-3 text-[11px] text-gray-500 space-y-0.5">
+                                        {sp.customizations.map((customization) => (
+                                          <div key={customization.customization_id}>
+                                            <div className="font-semibold text-gray-600">{customization.customization_name}</div>
+                                            <ul className="ml-3 list-disc">
+                                              {customization.selected_options.map(option => (
+                                                <li key={option.option_id}>
+                                                  {option.option_name}
+                                                  {option.price_adjustment !== 0 && (
+                                                    <span className={`ml-1 ${option.price_adjustment > 0 ? 'text-green-600' : 'text-red-600'}`}>
+                                                      ({option.price_adjustment > 0 ? '+' : ''}{formatPrice(option.price_adjustment)})
+                                                    </span>
+                                                  )}
+                                                </li>
+                                              ))}
+                                            </ul>
+                                          </div>
+                                        ))}
+                                      </div>
                                     )}
-                                  </span>
+                                    {sp.customNote && (
+                                      <div className="text-[11px] text-gray-500 italic">
+                                        Note: &ldquo;{sp.customNote}&rdquo;
+                                      </div>
+                                    )}
+                                  </div>
                                 ))}
                               </div>
                             </div>
-                          ))}
-                        </div>
-                      )}
-                    </div>
-                    <div className="flex items-center space-x-2 text-xs">
-                      <span className="text-gray-600">{formatPrice(item.product.harga_jual)}</span>
-                      <span className="font-medium text-gray-800">x{item.quantity}</span>
-                      <span className="font-semibold text-green-600">
-                        {formatPrice((() => {
-                          let itemPrice = item.product.harga_jual;
-                          if (item.customizations) {
-                            item.customizations.forEach(customization => {
-                              customization.selected_options.forEach(option => {
-                                itemPrice += option.price_adjustment;
-                              });
-                            });
-                          }
-                          return itemPrice * item.quantity;
-                        })())}
-                      </span>
-                    </div>
+                          );
+                        })}
+                      </div>
+                    )}
                   </div>
-                </div>
-              ))}
-            </div>
-          )}
-
-          {/* Order Items (when payment is processed) - Compact */}
-          {currentOrder && (
-            <div className="space-y-1">
-              {currentOrder.items.map((item) => (
-                <div key={item.id} className="bg-white rounded border border-gray-200 p-2">
-                  <div className="flex justify-between items-center">
-                    <div className="flex-1">
-                      <h4 className="font-medium text-gray-800 text-xs">{item.name}</h4>
+                  
+                  {/* Price Section - Separate row at bottom */}
+                  <div className="mt-2 flex justify-between items-center">
+                    <div className="flex items-center space-x-2 text-xs text-gray-500">
+                      <span>{formatPrice(item.product.harga_jual)}</span>
+                      <span>x{item.quantity}</span>
                     </div>
-                    <div className="flex items-center space-x-2 text-xs">
-                      <span className="text-gray-600">Rp {item.price.toLocaleString('id-ID')}</span>
-                      <span className="font-medium text-gray-800">x{item.quantity}</span>
-                      <span className="font-semibold text-green-600">
-                        Rp {(item.price * item.quantity).toLocaleString('id-ID')}
-                      </span>
-                      {item.status === 'ready' && (
-                        <CheckCircle className="w-3 h-3 text-green-400" />
-                      )}
-                    </div>
+                    <span className="font-semibold text-green-600 text-xs">
+                      {formatPrice((() => {
+                        let itemPrice = item.product.harga_jual;
+                        itemPrice += sumCustomizationPrice(item.customizations);
+                        if (item.bundleSelections) {
+                          itemPrice += calculateBundleCustomizationCharge(item.bundleSelections);
+                        }
+                        return itemPrice * item.quantity;
+                      })())}
+                    </span>
                   </div>
                 </div>
               ))}
@@ -545,7 +635,7 @@ export default function CustomerDisplay() {
             <div className="flex justify-between">
               <span className="text-gray-600">Produk:</span>
               <span className="font-medium">
-                {currentCartItems.length > 0 ? formatPrice(totalPrice) : currentOrder ? `Rp ${currentOrder.total.toLocaleString('id-ID')}` : 'Rp 0'}
+                {formatPrice(totalPrice)}
               </span>
             </div>
             <div className="flex justify-between">
@@ -557,52 +647,33 @@ export default function CustomerDisplay() {
               <span className="text-gray-600">{totalItems} item</span>
               <div className="bg-blue-100 px-2 py-1 rounded">
                 <span className="font-semibold text-blue-800 text-xs">
-                  Total: {currentCartItems.length > 0 ? formatPrice(totalPrice) : currentOrder ? `Rp ${currentOrder.total.toLocaleString('id-ID')}` : 'Rp 0'}
+                  Total: {formatPrice(totalPrice)}
                 </span>
               </div>
-            </div>
-          </div>
-          
-          {/* Status Indicator - Compact */}
-          <div className="mt-2 flex justify-center">
-            <div className="flex items-center space-x-1">
-              {currentOrder?.status === 'ready' && (
-                <>
-                  <CheckCircle className="w-3 h-3 text-green-400" />
-                  <span className="text-xs text-green-400 font-medium">Ready!</span>
-                </>
-              )}
-              {currentOrder?.status === 'preparing' && (
-                <>
-                  <Clock className="w-3 h-3 text-yellow-400" />
-                  <span className="text-xs text-yellow-400 font-medium">Preparing...</span>
-                </>
-              )}
-              {!currentOrder && currentCartItems.length > 0 && (
-                <>
-                  <Clock className="w-3 h-3 text-blue-400" />
-                  <span className="text-xs text-blue-400 font-medium">Ordering...</span>
-                </>
-              )}
             </div>
           </div>
         </div>
       </div>
 
       {/* Right Side - Slideshow (60% width) */}
-      <div className="w-[60%] bg-black relative overflow-hidden">
+      <div className="w-[60%] bg-black relative flex items-center justify-center">
         {/* Slideshow Content - Full Screen Images */}
         {currentSlide ? (
-          <div key={`${activeTab}-${currentSlideIndex}`}>
+          <div key={`${activeTab}-${currentSlideIndex}`} className="w-full h-full flex items-center justify-center">
             {/* Show actual image if available */}
             {isSlideshowImage(currentSlide) ? (
-              <div className="w-full h-full p-6 flex items-center justify-center">
-                {/* eslint-disable-next-line @next/next/no-img-element */}
-                <img
-                  src={currentSlide.path}
-                  alt={currentSlide.title}
-                  className="max-w-full max-h-full object-contain rounded-lg shadow-lg"
-                />
+              <div className="w-full h-full p-8 flex items-center justify-center">
+                {currentSlide.dataUrl ? (
+                  // eslint-disable-next-line @next/next/no-img-element
+                  <img
+                    src={currentSlide.dataUrl}
+                    alt={currentSlide.title}
+                    className="max-w-full max-h-full object-contain"
+                    style={{ maxHeight: 'calc(100vh - 64px)' }}
+                  />
+                ) : (
+                  <div className="text-white text-xl">Loading...</div>
+                )}
               </div>
             ) : (
               <div className="w-full h-full bg-gradient-to-br from-red-500 to-red-700 flex items-center justify-center relative overflow-hidden">

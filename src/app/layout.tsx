@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import "./globals.css";
+import WindowFocusHandler from "@/components/WindowFocusHandler";
 
 export const metadata: Metadata = {
   title: "Marviano POS",
@@ -16,6 +17,7 @@ export default function RootLayout({
       <body
         className={`antialiased overflow-hidden font-sans`}
       >
+        <WindowFocusHandler />
         {children}
       </body>
     </html>

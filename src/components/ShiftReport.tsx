@@ -45,6 +45,7 @@ interface PaymentBreakdown {
   payment_method_name: string;
   payment_method_code: string;
   transaction_count: number;
+  total_amount: number;
 }
 
 interface CashSummary {
@@ -277,6 +278,7 @@ export default function ShiftReport() {
           })),
           customizationSales: customizationSales,
           paymentBreakdown,
+          category2Breakdown: [],
           cashSummary: {
             cash_shift: cashSummary.cash_shift,
             cash_shift_sales: cashSalesTotal,

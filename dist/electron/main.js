@@ -41,6 +41,19 @@ const better_sqlite3_1 = __importDefault(require("better-sqlite3"));
 const path = __importStar(require("path"));
 const fs = __importStar(require("fs"));
 const printerManagement_1 = require("./printerManagement");
+// Register custom protocol before app is ready
+electron_1.protocol.registerSchemesAsPrivileged([
+    {
+        scheme: 'slideshow-file',
+        privileges: {
+            secure: true,
+            supportFetchAPI: true,
+            bypassCSP: true,
+            corsEnabled: true,
+            standard: true
+        }
+    }
+]);
 const parseJsonArray = (value, context) => {
     if (!value) {
         return [];
@@ -303,7 +316,29 @@ function createWindows() {
             const hasHargaTiktok = productSchema.some(col => col.name === 'harga_tiktok');
             const hasHargaQpon = productSchema.some(col => col.name === 'harga_qpon');
             const hasCategory2Name = productSchema.some(col => col.name === 'category2_name');
+            const hasCategory2Id = productSchema.some(col => col.name === 'category2_id');
             const hasIsBundle = productSchema.some(col => col.name === 'is_bundle');
+            if (!hasCategory2Id) {
+                console.log('📋 Migrating database: Adding products.category2_id column...');
+                localDb.prepare('ALTER TABLE products ADD COLUMN category2_id INTEGER').run();
+                // Try to backfill category2_id from category2 table using category2_name
+                try {
+                    localDb.prepare(`
+              UPDATE products 
+              SET category2_id = (
+                SELECT c2.id 
+                FROM category2 c2 
+                WHERE c2.name = products.category2_name 
+                LIMIT 1
+              )
+              WHERE category2_name IS NOT NULL AND category2_name != ''
+            `).run();
+                    console.log('✅ Backfilled category2_id from category2 table');
+                }
+                catch (e) {
+                    console.log('⚠️ Failed to backfill category2_id:', e);
+                }
+            }
             if (!hasHargaGofood) {
                 console.log('📋 Migrating database: Adding products.harga_gofood column...');
                 localDb.prepare('ALTER TABLE products ADD COLUMN harga_gofood REAL').run();
@@ -430,6 +465,7 @@ function createWindows() {
         satuan TEXT NOT NULL,
         kategori TEXT NOT NULL,
         jenis TEXT,
+        category2_id INTEGER,
         category2_name TEXT,
         keterangan TEXT,
         harga_beli REAL,
@@ -1044,6 +1080,47 @@ function createWindows() {
                 printerService = new printerManagement_1.PrinterManagementService(localDb);
                 console.log('✅ Printer Management Service initialized');
             }
+            // Migrate slideshow images from /public/ to userData on first run
+            try {
+                const slideshowPath = getSlideshowPath();
+                const publicSlideshowPath = path.join(process.cwd(), 'public', 'images', 'slideshow');
+                if (fs.existsSync(publicSlideshowPath)) {
+                    const existingFiles = fs.readdirSync(slideshowPath);
+                    const imageExtensions = ['.jpg', '.jpeg', '.png', '.webp', '.gif'];
+                    const existingImages = existingFiles.filter(file => {
+                        const ext = path.extname(file).toLowerCase();
+                        return imageExtensions.includes(ext);
+                    });
+                    if (existingImages.length === 0) {
+                        const publicFiles = fs.readdirSync(publicSlideshowPath);
+                        const imagesToMigrate = publicFiles.filter(file => {
+                            const ext = path.extname(file).toLowerCase();
+                            return imageExtensions.includes(ext);
+                        });
+                        if (imagesToMigrate.length > 0) {
+                            console.log(`📸 Migrating ${imagesToMigrate.length} slideshow images from /public/ to userData...`);
+                            let migratedCount = 0;
+                            for (const file of imagesToMigrate) {
+                                try {
+                                    const sourcePath = path.join(publicSlideshowPath, file);
+                                    const destPath = path.join(slideshowPath, file);
+                                    fs.copyFileSync(sourcePath, destPath);
+                                    migratedCount++;
+                                }
+                                catch (error) {
+                                    console.error('❌ Failed to migrate:', file, error);
+                                }
+                            }
+                            if (migratedCount > 0) {
+                                console.log(`✅ Migrated ${migratedCount} slideshow images to userData`);
+                            }
+                        }
+                    }
+                }
+            }
+            catch (error) {
+                console.error('❌ Error during slideshow migration:', error);
+            }
             console.log('🔍 Testing database connection...');
             // Test the database connection
             try {
@@ -1241,6 +1318,23 @@ function createWindows() {
             mainWindow.setFullScreen(true);
         }
     });
+    // Add IPC handler for focusing window (fix for Windows 11 frameless window focus issue)
+    electron_1.ipcMain.handle('focus-window', async () => {
+        try {
+            if (mainWindow && !mainWindow.isDestroyed()) {
+                if (mainWindow.isMinimized()) {
+                    mainWindow.restore();
+                }
+                mainWindow.focus();
+                return { success: true };
+            }
+            return { success: false, error: 'Window not available' };
+        }
+        catch (error) {
+            console.error('Error focusing window:', error);
+            return { success: false, error: String(error) };
+        }
+    });
     // Listen for successful login via IPC - THIS is when we go fullscreen
     electron_1.ipcMain.handle('login-success', async () => {
         console.log('🔍 [ELECTRON] Login success IPC received!');
@@ -1305,9 +1399,9 @@ function createWindows() {
         console.log(`🔄 [PRODUCTS UPSERT] Received ${rows.length} products to upsert`);
         const tx = localDb.transaction((data) => {
             const stmt = localDb.prepare(`INSERT INTO products (
-        id, business_id, menu_code, nama, satuan, kategori, jenis, category2_name, keterangan,
+        id, business_id, menu_code, nama, satuan, kategori, jenis, category2_id, category2_name, keterangan,
         harga_beli, ppn, harga_jual, harga_khusus, harga_online, harga_qpon, harga_gofood, harga_grabfood, harga_shopeefood, harga_tiktok, fee_kerja, status, is_bundle, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET
         business_id=excluded.business_id,
         menu_code=excluded.menu_code,
@@ -1315,6 +1409,7 @@ function createWindows() {
         satuan=excluded.satuan,
         kategori=excluded.kategori,
         jenis=excluded.jenis,
+        category2_id=excluded.category2_id,
         category2_name=excluded.category2_name,
         keterangan=excluded.keterangan,
         harga_beli=excluded.harga_beli,
@@ -1337,9 +1432,24 @@ function createWindows() {
                 try {
                     // Map MySQL columns to SQLite columns
                     const kategori = r.kategori || r.category1_name || '';
+                    let category2Id = r.category2_id ? Number(r.category2_id) : null;
                     const category2Name = r.category2_name || r.jenis || '';
+                    // If category2_id is missing but category2_name exists, try to look it up from category2 table
+                    if (!category2Id && category2Name && localDb) {
+                        try {
+                            const lookupStmt = localDb.prepare('SELECT id FROM category2 WHERE name = ? LIMIT 1');
+                            const category2Lookup = lookupStmt.get(category2Name);
+                            if (category2Lookup) {
+                                category2Id = category2Lookup.id;
+                                console.log(`✅ [PRODUCTS UPSERT] Looked up category2_id ${category2Id} for category2_name "${category2Name}"`);
+                            }
+                        }
+                        catch (lookupError) {
+                            console.warn(`⚠️ [PRODUCTS UPSERT] Failed to lookup category2_id for "${category2Name}":`, lookupError);
+                        }
+                    }
                     const isBundle = r.is_bundle === 1 || r.is_bundle === true ? 1 : 0;
-                    stmt.run(r.id, r.business_id, r.menu_code, r.nama, r.satuan || '', kategori, null, category2Name, r.keterangan || null, r.harga_beli || null, r.ppn || null, r.harga_jual, r.harga_khusus || null, r.harga_online || null, r.harga_qpon || null, r.harga_gofood || null, r.harga_grabfood || null, r.harga_shopeefood || null, r.harga_tiktok || null, r.fee_kerja || null, r.status, isBundle, Date.now());
+                    stmt.run(r.id, r.business_id, r.menu_code, r.nama, r.satuan || '', kategori, null, category2Id, category2Name, r.keterangan || null, r.harga_beli || null, r.ppn || null, r.harga_jual, r.harga_khusus || null, r.harga_online || null, r.harga_qpon || null, r.harga_gofood || null, r.harga_grabfood || null, r.harga_shopeefood || null, r.harga_tiktok || null, r.fee_kerja || null, r.status, isBundle, Date.now());
                     successCount++;
                 }
                 catch (error) {
@@ -2257,6 +2367,59 @@ function createWindows() {
             throw error;
         }
     });
+    // Delete transactions by user email (both offline and online)
+    electron_1.ipcMain.handle('localdb-delete-transactions-by-email', async (event, payload) => {
+        if (!localDb)
+            return { success: false, deleted: 0, error: 'Database not available' };
+        const userEmail = payload?.userEmail;
+        if (!userEmail)
+            return { success: false, deleted: 0, error: 'User email is required' };
+        try {
+            // First, get user ID from email
+            const userStmt = localDb.prepare('SELECT id FROM users WHERE email = ? LIMIT 1');
+            const user = userStmt.get(userEmail);
+            if (!user) {
+                return { success: false, deleted: 0, error: `User with email ${userEmail} not found` };
+            }
+            const userId = user.id;
+            console.log(`🗑️ [DELETE BY EMAIL] Found user ID ${userId} for email ${userEmail}`);
+            // Delete printer audit logs first
+            const delP1 = localDb.prepare(`
+        DELETE FROM printer1_audit_log 
+        WHERE transaction_id IN (
+          SELECT id FROM transactions WHERE user_id = ?
+        )
+      `);
+            const p1Result = delP1.run(userId);
+            console.log(`🗑️ [DELETE BY EMAIL] Deleted ${p1Result.changes} printer1 audit log entries`);
+            const delP2 = localDb.prepare(`
+        DELETE FROM printer2_audit_log 
+        WHERE transaction_id IN (
+          SELECT id FROM transactions WHERE user_id = ?
+        )
+      `);
+            const p2Result = delP2.run(userId);
+            console.log(`🗑️ [DELETE BY EMAIL] Deleted ${p2Result.changes} printer2 audit log entries`);
+            // Delete transaction items first (foreign key constraint)
+            const delItemsStmt = localDb.prepare(`
+        DELETE FROM transaction_items 
+        WHERE transaction_id IN (
+          SELECT id FROM transactions WHERE user_id = ?
+        )
+      `);
+            const itemsResult = delItemsStmt.run(userId);
+            console.log(`🗑️ [DELETE BY EMAIL] Deleted ${itemsResult.changes} transaction items`);
+            // Delete transactions
+            const delTxStmt = localDb.prepare('DELETE FROM transactions WHERE user_id = ?');
+            const txResult = delTxStmt.run(userId);
+            console.log(`🗑️ [DELETE BY EMAIL] Deleted ${txResult.changes} transactions for user ${userEmail} (ID: ${userId})`);
+            return { success: true, deleted: txResult.changes, deletedItems: itemsResult.changes };
+        }
+        catch (error) {
+            console.error('❌ [DELETE BY EMAIL] Failed to delete transactions:', error);
+            return { success: false, deleted: 0, error: error instanceof Error ? error.message : 'Unknown error' };
+        }
+    });
     // Delete transaction items permanently
     electron_1.ipcMain.handle('localdb-delete-transaction-items', async (event, payload) => {
         if (!localDb)
@@ -2933,6 +3096,46 @@ function createWindows() {
         }
         catch (error) {
             console.error('Error getting payment breakdown:', error);
+            return [];
+        }
+    });
+    // Get Category II breakdown
+    electron_1.ipcMain.handle('localdb-get-category2-breakdown', async (event, userId, shiftStart, shiftEnd, businessId = 14) => {
+        if (!localDb)
+            return [];
+        try {
+            let query = `
+        SELECT 
+          COALESCE(c2_by_id.name, c2_by_name.name, p.category2_name, 'Unknown') as category2_name,
+          COALESCE(c2_by_id.id, c2_by_name.id, 0) as category2_id,
+          COALESCE(SUM(ti.quantity), 0) as total_quantity,
+          COALESCE(SUM(ti.total_price), 0) as total_amount
+        FROM transaction_items ti
+        INNER JOIN transactions t ON ti.transaction_id = t.id
+        INNER JOIN products p ON ti.product_id = p.id
+        LEFT JOIN category2 c2_by_id ON p.category2_id = c2_by_id.id
+        LEFT JOIN category2 c2_by_name ON p.category2_name = c2_by_name.name AND (p.category2_id IS NULL OR p.category2_id = 0)
+        WHERE t.user_id = ? AND t.business_id = ?
+        AND datetime(t.created_at) >= datetime(?)
+        AND t.status = 'completed'
+        AND (p.category2_id IS NOT NULL OR (p.category2_name IS NOT NULL AND p.category2_name != ''))
+      `;
+            const params = [userId, businessId, shiftStart];
+            if (shiftEnd) {
+                query += ' AND datetime(t.created_at) <= datetime(?)';
+                params.push(shiftEnd);
+            }
+            query += ' GROUP BY category2_name ORDER BY total_amount DESC';
+            const stmt = localDb.prepare(query);
+            const results = stmt.all(...params);
+            console.log(`[CATEGORY2 BREAKDOWN] Found ${results.length} Category II entries for user ${userId}, shift ${shiftStart} to ${shiftEnd || 'now'}`);
+            if (results.length > 0) {
+                console.log('[CATEGORY2 BREAKDOWN] Sample result:', results[0]);
+            }
+            return results;
+        }
+        catch (error) {
+            console.error('Error getting Category II breakdown:', error);
             return [];
         }
     });
@@ -4100,10 +4303,8 @@ function createWindows() {
     // Show windows when ready
     mainWindow.once('ready-to-show', () => {
         mainWindow.show();
-        // Focus on the window
-        if (isDev) {
-            mainWindow.focus();
-        }
+        // Always focus on the window (fixes Windows 11 frameless window focus issues)
+        mainWindow.focus();
     });
     if (customerWindow) {
         customerWindow.once('ready-to-show', () => {
@@ -4176,6 +4377,33 @@ function createWindows() {
 }
 // This method will be called when Electron has finished initialization
 electron_1.app.whenReady().then(() => {
+    // Register custom protocol handler for slideshow images
+    electron_1.protocol.registerFileProtocol('slideshow-file', (request, callback) => {
+        try {
+            const url = request.url.replace('slideshow-file://', '');
+            const slideshowPath = getSlideshowPath();
+            const filePath = path.join(slideshowPath, url);
+            // Security check: ensure file is within slideshow directory
+            const normalizedPath = path.normalize(filePath);
+            const normalizedSlideshowPath = path.normalize(slideshowPath);
+            if (!normalizedPath.startsWith(normalizedSlideshowPath)) {
+                console.error('❌ Security: Attempted to access file outside slideshow directory');
+                callback({ error: -10 }); // ACCESS_DENIED
+                return;
+            }
+            if (fs.existsSync(filePath)) {
+                callback({ path: filePath });
+            }
+            else {
+                console.error('❌ Slideshow image not found:', filePath);
+                callback({ error: -6 }); // FILE_NOT_FOUND
+            }
+        }
+        catch (error) {
+            console.error('❌ Error handling slideshow-file protocol:', error);
+            callback({ error: -2 }); // FAILED
+        }
+    });
     createWindows();
     electron_1.app.on('activate', () => {
         // On macOS, re-create windows when the dock icon is clicked
@@ -5140,6 +5368,16 @@ function generateShiftBreakdownHTML(shiftData) {
       </tr>
     `).join('');
         const totalPaymentCount = report.paymentBreakdown.reduce((sum, p) => sum + p.transaction_count, 0);
+        const totalPaymentAmount = report.paymentBreakdown.reduce((sum, p) => sum + (p.total_amount || 0), 0);
+        const category2Rows = (report.category2Breakdown || []).map((category2) => `
+      <tr>
+        <td style="text-align: left; padding: 1mm 0;">${category2.category2_name || 'N/A'}</td>
+        <td style="text-align: right; padding: 1mm 0;">${category2.total_quantity || 0}</td>
+        <td style="text-align: right; padding: 1mm 0;">${(category2.total_amount || 0).toLocaleString('id-ID')}</td>
+      </tr>
+    `).join('');
+        const totalCategory2Quantity = (report.category2Breakdown || []).reduce((sum, c) => sum + (c.total_quantity || 0), 0);
+        const totalCategory2Amount = (report.category2Breakdown || []).reduce((sum, c) => sum + (c.total_amount || 0), 0);
         const formattedTotalDiscount = report.statistics.total_discount > 0
             ? formatCurrency(-Math.abs(report.statistics.total_discount))
             : formatCurrency(0);
@@ -5237,13 +5475,36 @@ function generateShiftBreakdownHTML(shiftData) {
           <tr>
             <th>Payment Method</th>
             <th class="right">Count</th>
+            <th class="right">Total</th>
           </tr>
         </thead>
         <tbody>
-          ${paymentRows || '<tr><td colSpan="2" style="text-align: center;">Tidak ada transaksi</td></tr>'}
+          ${paymentRows || '<tr><td colSpan="3" style="text-align: center;">Tidak ada transaksi</td></tr>'}
           <tr class="total-row">
             <td>TOTAL</td>
             <td class="right">${totalPaymentCount}</td>
+            <td class="right">${totalPaymentAmount.toLocaleString('id-ID')}</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <div class="divider"></div>
+
+      <div class="section-title">CATEGORY II</div>
+      <table>
+        <thead>
+          <tr>
+            <th>Category II</th>
+            <th class="right">Quantity</th>
+            <th class="right">Total</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${category2Rows || '<tr><td colSpan="3" style="text-align: center;">Tidak ada Category II</td></tr>'}
+          <tr class="total-row">
+            <td>TOTAL</td>
+            <td class="right">${totalCategory2Quantity}</td>
+            <td class="right">${totalCategory2Amount.toLocaleString('id-ID')}</td>
           </tr>
         </tbody>
       </table>
@@ -5522,6 +5783,7 @@ electron_1.ipcMain.handle('print-shift-breakdown', async (event, data) => {
             productSales: data.productSales || [],
             customizationSales: data.customizationSales || [],
             paymentBreakdown: data.paymentBreakdown || [],
+            category2Breakdown: data.category2Breakdown || [],
             cashSummary: data.cashSummary,
             wholeDayReport: data.wholeDayReport || null,
             businessName
@@ -5706,4 +5968,246 @@ electron_1.ipcMain.handle('create-customer-display', async () => {
         customerWindow.show();
     }
     return { success: true, message: 'Customer display created successfully' };
+});
+// ============================================================================
+// SLIDESHOW IMAGE MANAGEMENT (userData storage)
+// ============================================================================
+function getSlideshowPath() {
+    const userDataPath = electron_1.app.getPath('userData');
+    const slideshowPath = path.join(userDataPath, 'slideshow');
+    // Create directory if it doesn't exist
+    if (!fs.existsSync(slideshowPath)) {
+        fs.mkdirSync(slideshowPath, { recursive: true });
+        console.log('📁 Created slideshow directory:', slideshowPath);
+    }
+    return slideshowPath;
+}
+// Get all slideshow images from userData
+electron_1.ipcMain.handle('get-slideshow-images', async () => {
+    try {
+        const slideshowPath = getSlideshowPath();
+        const files = fs.readdirSync(slideshowPath);
+        // Filter for image files only
+        const imageExtensions = ['.jpg', '.jpeg', '.png', '.webp', '.gif'];
+        const imageFiles = files.filter(file => {
+            const ext = path.extname(file).toLowerCase();
+            return imageExtensions.includes(ext);
+        });
+        // Sort files alphabetically
+        imageFiles.sort();
+        // Create image objects with metadata
+        const images = imageFiles.map((file, index) => {
+            const filePath = path.join(slideshowPath, file);
+            const stats = fs.statSync(filePath);
+            return {
+                id: `slide-${index + 1}`,
+                filename: file,
+                path: `slideshow-file://${file}`, // Custom protocol
+                localPath: filePath, // Full system path
+                title: file.replace(/\.[^/.]+$/, '').replace(/[-_]/g, ' '),
+                duration: 5,
+                order: index + 1,
+                size: stats.size,
+                createdAt: stats.birthtime.toISOString()
+            };
+        });
+        console.log(`📸 Found ${images.length} slideshow images in userData`);
+        return {
+            success: true,
+            images,
+            count: images.length,
+            path: slideshowPath
+        };
+    }
+    catch (error) {
+        console.error('❌ Error reading slideshow images:', error);
+        return {
+            success: false,
+            error: 'Failed to read slideshow images',
+            images: [],
+            count: 0
+        };
+    }
+});
+// Save a new slideshow image to userData
+electron_1.ipcMain.handle('save-slideshow-image', async (event, imageData) => {
+    try {
+        const slideshowPath = getSlideshowPath();
+        const filePath = path.join(slideshowPath, imageData.filename);
+        // Check if file already exists
+        if (fs.existsSync(filePath)) {
+            return {
+                success: false,
+                error: 'File already exists. Please rename or delete the existing file first.'
+            };
+        }
+        // Write the file
+        fs.writeFileSync(filePath, imageData.buffer);
+        console.log('✅ Saved slideshow image:', imageData.filename);
+        return {
+            success: true,
+            message: 'Image saved successfully',
+            filename: imageData.filename
+        };
+    }
+    catch (error) {
+        console.error('❌ Error saving slideshow image:', error);
+        return {
+            success: false,
+            error: 'Failed to save image'
+        };
+    }
+});
+// Delete a slideshow image from userData
+electron_1.ipcMain.handle('delete-slideshow-image', async (event, filename) => {
+    try {
+        const slideshowPath = getSlideshowPath();
+        const filePath = path.join(slideshowPath, filename);
+        if (!fs.existsSync(filePath)) {
+            return {
+                success: false,
+                error: 'File not found'
+            };
+        }
+        fs.unlinkSync(filePath);
+        console.log('🗑️ Deleted slideshow image:', filename);
+        return {
+            success: true,
+            message: 'Image deleted successfully'
+        };
+    }
+    catch (error) {
+        console.error('❌ Error deleting slideshow image:', error);
+        return {
+            success: false,
+            error: 'Failed to delete image'
+        };
+    }
+});
+// Open slideshow folder in file explorer
+electron_1.ipcMain.handle('open-slideshow-folder', async () => {
+    try {
+        const slideshowPath = getSlideshowPath();
+        const { shell } = require('electron');
+        await shell.openPath(slideshowPath);
+        return {
+            success: true,
+            message: 'Opened slideshow folder',
+            path: slideshowPath
+        };
+    }
+    catch (error) {
+        console.error('❌ Error opening slideshow folder:', error);
+        return {
+            success: false,
+            error: 'Failed to open folder'
+        };
+    }
+});
+// Read slideshow image file (for serving to renderer)
+electron_1.ipcMain.handle('read-slideshow-image', async (event, filename) => {
+    try {
+        const slideshowPath = getSlideshowPath();
+        const filePath = path.join(slideshowPath, filename);
+        if (!fs.existsSync(filePath)) {
+            return {
+                success: false,
+                error: 'File not found'
+            };
+        }
+        const buffer = fs.readFileSync(filePath);
+        const ext = path.extname(filename).toLowerCase();
+        // Determine MIME type
+        let mimeType = 'image/jpeg';
+        if (ext === '.png')
+            mimeType = 'image/png';
+        else if (ext === '.webp')
+            mimeType = 'image/webp';
+        else if (ext === '.gif')
+            mimeType = 'image/gif';
+        return {
+            success: true,
+            buffer: buffer,
+            mimeType: mimeType,
+            filename: filename
+        };
+    }
+    catch (error) {
+        console.error('❌ Error reading slideshow image:', error);
+        return {
+            success: false,
+            error: 'Failed to read image'
+        };
+    }
+});
+// Migrate images from /public/images/slideshow/ to userData (one-time migration)
+electron_1.ipcMain.handle('migrate-slideshow-images', async () => {
+    try {
+        const slideshowPath = getSlideshowPath();
+        const publicSlideshowPath = path.join(process.cwd(), 'public', 'images', 'slideshow');
+        // Check if public folder exists
+        if (!fs.existsSync(publicSlideshowPath)) {
+            return {
+                success: true,
+                message: 'No public slideshow folder found, nothing to migrate',
+                migrated: 0
+            };
+        }
+        // Check if userData folder already has images (skip migration if already done)
+        const existingFiles = fs.readdirSync(slideshowPath);
+        const imageExtensions = ['.jpg', '.jpeg', '.png', '.webp', '.gif'];
+        const existingImages = existingFiles.filter(file => {
+            const ext = path.extname(file).toLowerCase();
+            return imageExtensions.includes(ext);
+        });
+        if (existingImages.length > 0) {
+            console.log('📸 Slideshow images already exist in userData, skipping migration');
+            return {
+                success: true,
+                message: 'Images already exist in userData, skipping migration',
+                migrated: 0,
+                existing: existingImages.length
+            };
+        }
+        // Read files from public folder
+        const publicFiles = fs.readdirSync(publicSlideshowPath);
+        const imagesToMigrate = publicFiles.filter(file => {
+            const ext = path.extname(file).toLowerCase();
+            return imageExtensions.includes(ext);
+        });
+        if (imagesToMigrate.length === 0) {
+            return {
+                success: true,
+                message: 'No images found in public folder to migrate',
+                migrated: 0
+            };
+        }
+        // Copy images to userData
+        let migratedCount = 0;
+        for (const file of imagesToMigrate) {
+            try {
+                const sourcePath = path.join(publicSlideshowPath, file);
+                const destPath = path.join(slideshowPath, file);
+                fs.copyFileSync(sourcePath, destPath);
+                migratedCount++;
+                console.log('📸 Migrated:', file);
+            }
+            catch (error) {
+                console.error('❌ Failed to migrate:', file, error);
+            }
+        }
+        console.log(`✅ Successfully migrated ${migratedCount} images to userData`);
+        return {
+            success: true,
+            message: `Migrated ${migratedCount} images to userData`,
+            migrated: migratedCount
+        };
+    }
+    catch (error) {
+        console.error('❌ Error migrating slideshow images:', error);
+        return {
+            success: false,
+            error: 'Failed to migrate images'
+        };
+    }
 });

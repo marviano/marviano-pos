@@ -1,5 +1,6 @@
 import React, { useState, useCallback, useEffect, useMemo } from 'react';
 import RefundModal from './RefundModal';
+import { useAuth } from '@/hooks/useAuth';
 
 export interface TransactionItem {
   id: string; // Changed to string for UUID
@@ -124,6 +125,7 @@ const TransactionDetailModal: React.FC<TransactionDetailModalProps> = ({
   canRefund = false,
   onTransactionUpdated
 }) => {
+  const { user } = useAuth();
   const [isReprinting, setIsReprinting] = useState(false);
   const [reprintStatus, setReprintStatus] = useState<'idle' | 'success' | 'error'>('idle');
   const [receiptizeCounter, setReceiptizeCounter] = useState<number | null>(null);
@@ -179,6 +181,18 @@ const TransactionDetailModal: React.FC<TransactionDetailModalProps> = ({
     };
     return labels[method] || method;
   }, [getPaymentMethodCode]);
+
+  // Helper function to calculate customization price adjustments
+  const sumCustomizationPrice = useCallback((customizations?: TransactionItem['customizations']) => {
+    if (!customizations || customizations.length === 0) return 0;
+    return customizations.reduce((sum, customization) => {
+      const optionTotal = customization.selected_options.reduce(
+        (optionSum, option) => optionSum + (option.price_adjustment || 0),
+        0
+      );
+      return sum + optionTotal;
+    }, 0);
+  }, []);
 
   // Reprint functionality
   const handleReprint = useCallback(async () => {
@@ -278,24 +292,100 @@ const TransactionDetailModal: React.FC<TransactionDetailModalProps> = ({
         console.log(`[Reprint] Found ${existingReprints.length} existing reprints for transaction ${transaction.id}, new count will be ${reprintCount}`);
       }
 
+      // Transform transaction items to receipt format with customizations and bundle selections
+      const receiptItems: Array<{ name: string; quantity: number; price: number; total_price: number }> = [];
+      
+      transaction.items.forEach(item => {
+        // Calculate base price (unit_price already includes customizations, but we need to format the name)
+        const itemPrice = item.unit_price;
+        
+        // Format item name with customizations and custom note if any
+        let itemName = item.product_name;
+        if (item.customizations && item.customizations.length > 0) {
+          const customizationText = item.customizations.map(c => 
+            `${c.customization_name}: ${c.selected_options.map(opt => opt.option_name).join(', ')}`
+          ).join(', ');
+          itemName = `${itemName} (${customizationText})`;
+        }
+        // Add custom note if exists
+        if (item.custom_note) {
+          if (itemName.includes('(')) {
+            itemName = `${itemName}, ${item.custom_note})`;
+          } else {
+            itemName = `${itemName} (${item.custom_note})`;
+          }
+        }
+        
+        // Add main bundle item
+        receiptItems.push({
+          name: itemName,
+          quantity: item.quantity,
+          price: itemPrice,
+          total_price: item.total_price
+        });
+        
+        // Add bundle selections as sub-items
+        if (item.bundleSelections && item.bundleSelections.length > 0) {
+          item.bundleSelections.forEach(bundleSel => {
+            bundleSel.selectedProducts.forEach(sp => {
+              // Multiply by bundle quantity and selected product quantity
+              const selectionQty =
+                typeof sp.quantity === 'number' && !Number.isNaN(sp.quantity) ? sp.quantity : 1;
+              const totalQty = item.quantity * selectionQty;
+              const customizationDetails: string[] = [];
+
+              if (sp.customizations && sp.customizations.length > 0) {
+                sp.customizations.forEach(customization => {
+                  const optionNames = customization.selected_options.map(opt => opt.option_name).join(', ');
+                  if (optionNames) {
+                    customizationDetails.push(
+                      customization.customization_name
+                        ? `${customization.customization_name}: ${optionNames}`
+                        : optionNames
+                    );
+                  }
+                });
+              }
+
+              if (sp.customNote && sp.customNote.trim() !== '') {
+                customizationDetails.push(sp.customNote.trim());
+              }
+
+              let subItemName = `  └ ${sp.product.nama}${selectionQty > 1 ? ` (×${selectionQty})` : ''}`;
+              if (customizationDetails.length > 0) {
+                subItemName = `${subItemName} (${customizationDetails.join(', ')})`;
+              }
+
+              const perUnitAdjustment = sumCustomizationPrice(sp.customizations);
+              const perUnitTotal = perUnitAdjustment;
+
+              receiptItems.push({
+                name: subItemName,
+                quantity: totalQty,
+                price: perUnitTotal,
+                total_price: perUnitTotal * totalQty
+              });
+            });
+          });
+        }
+      });
+
+      // Get cashier name with fallback
+      const cashierName = transaction.user_name || user?.name || 'Kasir';
+
       // Prepare reprint data using original counter
       const reprintData = {
         type: 'transaction',
         printerType: originalPrinterType,
         business_id: transaction.business_id,
-        items: transaction.items.map(item => ({
-          name: item.product_name,
-          quantity: item.quantity,
-          price: item.unit_price,
-          total_price: item.total_price
-        })),
+        items: receiptItems,
         total: transaction.final_amount,
         paymentMethod: getPaymentMethodLabel(transaction),
         amountReceived: transaction.amount_received,
         change: transaction.change_amount,
         date: transaction.created_at,
         receiptNumber: transaction.id,
-        cashier: transaction.user_name,
+        cashier: cashierName,
         transactionType: transaction.transaction_type || 'drinks',
         pickupMethod: transaction.pickup_method,
         // Use original counters for reprint
@@ -346,7 +436,7 @@ const TransactionDetailModal: React.FC<TransactionDetailModalProps> = ({
     } finally {
       setIsReprinting(false);
     }
-  }, [transaction, isReprinting, getPaymentMethodLabel]);
+  }, [transaction, isReprinting, getPaymentMethodLabel, sumCustomizationPrice, user]);
 
   // Fetch receiptize counter when modal opens
   useEffect(() => {
