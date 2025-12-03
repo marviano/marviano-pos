@@ -1,11 +1,11 @@
 'use client';
 
 import {
-  ShoppingCart,
+  Database,
   Clock,
   Mail,
   Heart,
-  BarChart3,
+  PieChart,
   Settings,
   Grid3X3,
   Wifi,
@@ -50,7 +50,7 @@ export default function LeftSidebar({ menuItems, activeMenuItem, onMenuItemClick
   const getIcon = (name: string) => {
     switch (name) {
       case 'Kasir':
-        return <ShoppingCart className="w-5 h-5" />;
+        return <Database className="w-5 h-5" />;
       case 'Daftar Transaksi':
         return <Receipt className="w-5 h-5" />;
       case 'Pesanan':
@@ -60,28 +60,30 @@ export default function LeftSidebar({ menuItems, activeMenuItem, onMenuItemClick
       case 'Ganti Shift':
         return <Heart className="w-5 h-5" />;
       case 'Laporan':
-        return <BarChart3 className="w-5 h-5" />;
+        return <PieChart className="w-5 h-5" />;
       case 'Setelan':
+      case 'Setelan Global':
         return <Settings className="w-5 h-5" />;
       case 'Lainnya':
         return <Grid3X3 className="w-5 h-5" />;
       default:
-        return <ShoppingCart className="w-5 h-5" />;
+        return <Database className="w-5 h-5" />;
     }
   };
 
   return (
-    <div className="w-40 bg-blue-900 flex flex-col h-full">
+    <div className="w-24 bg-blue-800 flex flex-col h-full">
       {/* Logo */}
-      <div className="p-6">
-        <div className="w-12 h-12 bg-green-500 rounded-full flex items-center justify-center">
-          <span className="text-white font-bold text-lg">E</span>
+      <div className="pt-5 pb-5 flex justify-center">
+        <div className="w-10 h-10 bg-green-500 rounded-full flex items-center justify-center">
+          <span className="text-white font-bold text-base">E</span>
         </div>
       </div>
 
       {/* Menu Items */}
-      <div className="flex-1 px-4">
+      <div className="flex-1 px-2">
         {menuItems.map((item) => {
+          // Old Setelan - requires permissions
           if (item.name === 'Setelan') {
             const canAccessSync = isAdmin ||
               permissions.includes('setelan.sinkronisasi') ||
@@ -102,33 +104,33 @@ export default function LeftSidebar({ menuItems, activeMenuItem, onMenuItemClick
               return null;
             }
           }
+          // Setelan Global - always accessible, but display as "Setelan"
+          const displayName = item.name === 'Setelan Global' ? 'Setelan' : item.name;
           return (
             <button
               key={item.id}
               onClick={() => !item.disabled && onMenuItemClick(item.name)}
               disabled={item.disabled}
-              className={`w-full flex items-center space-x-3 px-4 py-3 rounded-lg mb-2 transition-colors ${
+              className={`w-full flex flex-col items-center justify-center space-y-1 px-2 py-3 rounded-lg mb-2 transition-colors ${
                 item.disabled
-                  ? 'text-gray-400 cursor-not-allowed opacity-50'
+                  ? 'text-gray-300 cursor-not-allowed opacity-50'
                   : activeMenuItem === item.name
                   ? 'bg-green-500 text-white'
-                  : 'text-white hover:bg-blue-800'
+                  : 'text-white hover:bg-blue-900'
               }`}
             >
               {getIcon(item.name)}
-              <span className={`font-medium ${item.disabled ? 'line-through' : ''}`}>{item.name}</span>
+              <span className={`text-xs font-medium text-center ${item.disabled ? 'line-through' : ''}`}>{displayName}</span>
             </button>
           );
         })}
       </div>
 
       {/* Bottom Status */}
-      <div className="p-4 border-t border-blue-800">
-        <div className="flex items-center justify-between">
-          <div className="flex items-center space-x-2">
-            <Wifi className="w-5 h-5 text-white" />
-            <span className="text-white text-sm">Online</span>
-          </div>
+      <div className="p-3">
+        <div className="flex flex-col items-center space-y-3">
+          <Wifi className="w-5 h-5 text-white" />
+          <div className="w-[30%] border-t border-blue-600"></div>
           <button
             onClick={() => {
               if (window.electronAPI) {
@@ -141,7 +143,7 @@ export default function LeftSidebar({ menuItems, activeMenuItem, onMenuItemClick
                 window.electronAPI.minimizeWindow();
               }
             }}
-            className="p-2 text-white hover:bg-blue-800 rounded"
+            className="p-2 text-white hover:bg-blue-900 rounded"
             title="Minimize"
           >
             <Minimize2 className="w-4 h-4" />

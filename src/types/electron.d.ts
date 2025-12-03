@@ -54,6 +54,7 @@ declare global {
       // POS functionality
       printReceipt: (data: unknown) => Promise<unknown>;
       printLabel: (data: unknown) => Promise<unknown>;
+      printLabelsBatch: (data: { labels: unknown[]; printerName?: string; printerType?: string }) => Promise<{ success: boolean; error?: string }>;
       openCashDrawer: () => Promise<unknown>;
       playSound: (soundType: string) => Promise<unknown>;
       // System printers
@@ -159,7 +160,26 @@ declare global {
       localDbGetTransactions?: (businessId?: number, limit?: number) => Promise<unknown[]>;
       localDbUpsertTransactions?: (rows: unknown[]) => Promise<unknown>;
       localDbGetTransactionItems?: (transactionId?: number | string) => Promise<unknown[]>;
+      localDbGetTransactionItemCustomizationsNormalized?: (transactionId: string) => Promise<{
+        customizations: Array<{
+          id: number;
+          transaction_item_id: string;
+          customization_type_id: number;
+          bundle_product_id: number | null;
+          created_at: string;
+        }>;
+        options: Array<{
+          id: number;
+          transaction_item_customization_id: number;
+          customization_option_id: number;
+          option_name: string;
+          price_adjustment: number;
+          created_at: string;
+        }>;
+      }>;
       localDbUpsertTransactionItems?: (rows: unknown[]) => Promise<unknown>;
+      localDbUpsertTransactionItemCustomizations?: (rows: unknown[]) => Promise<{ success: boolean; count: number; error?: string }>;
+      localDbUpsertTransactionItemCustomizationOptions?: (rows: unknown[]) => Promise<{ success: boolean; count: number; error?: string }>;
       localDbGetTransactionRefunds?: (transactionUuid: string) => Promise<unknown[]>;
       localDbUpsertTransactionRefunds?: (rows: unknown[]) => Promise<{ success: boolean; error?: string }>;
       localDbApplyTransactionRefund?: (payload: unknown) => Promise<{ success: boolean; error?: string }>;
@@ -337,6 +357,7 @@ declare global {
       localDbGetShiftUsers?: (businessId?: number) => Promise<unknown[]>;
       localDbGetUnsyncedShifts?: (businessId?: number) => Promise<unknown[]>;
       localDbMarkShiftsSynced?: (shiftIds: number[]) => Promise<{ success: boolean }>;
+      localDbUpsertShifts?: (rows: unknown[]) => Promise<{ success: boolean; count: number; error?: string }>;
       localDbCheckTodayTransactions?: (userId: number, shiftStart: string, businessId?: number) => Promise<{
         hasTransactions: boolean;
         count: number;

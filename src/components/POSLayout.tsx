@@ -7,10 +7,10 @@ import CenterContent from './CenterContent';
 import SlideshowManager from './SlideshowManager';
 import TransactionList from './TransactionList';
 import PrinterSetup from './PrinterSetup';
-import OfflineDebugPanel from './OfflineDebugPanel';
 import SyncManagement from './SyncManagement';
 import GantiShift from './GantiShift';
 import Laporan from './Laporan';
+import GlobalSettings from './GlobalSettings';
 import { mockMenuItems } from '@/data/mockData';
 import { fetchCategories, fetchProducts } from '@/lib/offlineDataFetcher';
 import { databaseHealthService } from '@/lib/databaseHealth';
@@ -44,7 +44,13 @@ type OnlinePlatform = NonNullable<CenterContentProps['selectedOnlinePlatform']>;
 
 const getElectronAPI = () => (typeof window !== 'undefined' ? window.electronAPI : undefined);
 
-export default function POSLayout() {
+interface POSLayoutProps {
+  activeMenuItem?: string;
+  setActiveMenuItem?: (item: string) => void;
+  shouldBlurKasir?: boolean;
+}
+
+export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setActiveMenuItem: externalSetActiveMenuItem, shouldBlurKasir = false }: POSLayoutProps = {}) {
   const { user } = useAuth();
   const permissions = user?.permissions ?? [];
   const isAdmin = isSuperAdmin(user);
@@ -59,6 +65,11 @@ export default function POSLayout() {
     permissions.includes('marviano-pos_setelan_printer-setup');
   const [selectedCategory, setSelectedCategory] = useState('');
   
+  // Use external state if provided, otherwise use internal state
+  const [internalActiveMenuItem, setInternalActiveMenuItem] = useState('Kasir');
+  const activeMenuItem = externalActiveMenuItem ?? internalActiveMenuItem;
+  const setActiveMenuItem = externalSetActiveMenuItem ?? setInternalActiveMenuItem;
+  
   // NEW STRUCTURE: 6 carts total - 1 offline + 5 online platforms
   // Each cart can contain both drinks AND bakery items
   const [offlineCart, setOfflineCart] = useState<CartItem[]>([]);
@@ -68,7 +79,6 @@ export default function POSLayout() {
   const [tiktokCart, setTiktokCart] = useState<CartItem[]>([]);
   const [qponCart, setQponCart] = useState<CartItem[]>([]);
   
-  const [activeMenuItem, setActiveMenuItem] = useState('Kasir');
   const [isOnlineTab, setIsOnlineTab] = useState<boolean>(false);
   const [selectedOnlinePlatform, setSelectedOnlinePlatform] = useState<OnlinePlatform | null>(null);
   const [activeSettingsTab, setActiveSettingsTab] = useState('sync');
@@ -76,6 +86,7 @@ export default function POSLayout() {
   const [isLoadingCategories, setIsLoadingCategories] = useState(true);
   const [products, setProducts] = useState<Product[]>([]); // Start with empty array
   const [isLoadingProducts, setIsLoadingProducts] = useState(true);
+  const [searchQuery, setSearchQuery] = useState('');
 
   // Helper functions to get current cart based on online status and platform
   const getCurrentCart = (): CartItem[] => {
@@ -137,11 +148,13 @@ export default function POSLayout() {
         const [drinksCategories, bakeryCategories] = await Promise.all([
           fetchCategories('drinks', { 
             isOnline: isOnlineTab,
-            platform: isOnlineTab ? (selectedOnlinePlatform ?? undefined) : undefined
+            platform: isOnlineTab ? (selectedOnlinePlatform ?? undefined) : undefined,
+            businessId: businessId
           }) as Promise<Array<{ jenis: string; active?: boolean }>>,
           fetchCategories('bakery', { 
             isOnline: isOnlineTab,
-            platform: isOnlineTab ? (selectedOnlinePlatform ?? undefined) : undefined
+            platform: isOnlineTab ? (selectedOnlinePlatform ?? undefined) : undefined,
+            businessId: businessId
           }) as Promise<Array<{ jenis: string; active?: boolean }>>
         ]);
         
@@ -219,11 +232,13 @@ export default function POSLayout() {
         const [drinksData, bakeryData] = await Promise.all([
           fetchProducts(selectedCategory, 'drinks', { 
             isOnline: isOnlineTab,
-            platform: isOnlineTab ? (selectedOnlinePlatform ?? undefined) : undefined
+            platform: isOnlineTab ? (selectedOnlinePlatform ?? undefined) : undefined,
+            businessId: businessId
           }),
           fetchProducts(selectedCategory, 'bakery', { 
             isOnline: isOnlineTab,
-            platform: isOnlineTab ? (selectedOnlinePlatform ?? undefined) : undefined
+            platform: isOnlineTab ? (selectedOnlinePlatform ?? undefined) : undefined,
+            businessId: businessId
           })
         ]);
         
@@ -309,11 +324,13 @@ export default function POSLayout() {
         const [drinksCategories, bakeryCategories] = await Promise.all([
           fetchCategories('drinks', { 
             isOnline: isOnlineTab,
-            platform: isOnlineTab ? (selectedOnlinePlatform ?? undefined) : undefined
+            platform: isOnlineTab ? (selectedOnlinePlatform ?? undefined) : undefined,
+            businessId: businessId
           }),
           fetchCategories('bakery', { 
             isOnline: isOnlineTab,
-            platform: isOnlineTab ? (selectedOnlinePlatform ?? undefined) : undefined
+            platform: isOnlineTab ? (selectedOnlinePlatform ?? undefined) : undefined,
+            businessId: businessId
           })
         ]);
         
@@ -344,11 +361,13 @@ export default function POSLayout() {
           const [drinksProducts, bakeryProducts] = await Promise.all([
             fetchProducts(validCategories[0].jenis, 'drinks', { 
               isOnline: isOnlineTab,
-              platform: isOnlineTab ? (selectedOnlinePlatform ?? undefined) : undefined
+              platform: isOnlineTab ? (selectedOnlinePlatform ?? undefined) : undefined,
+              businessId: businessId
             }),
             fetchProducts(validCategories[0].jenis, 'bakery', { 
               isOnline: isOnlineTab,
-              platform: isOnlineTab ? (selectedOnlinePlatform ?? undefined) : undefined
+              platform: isOnlineTab ? (selectedOnlinePlatform ?? undefined) : undefined,
+              businessId: businessId
             })
           ]);
           setProducts([...drinksProducts, ...bakeryProducts]);
@@ -374,82 +393,84 @@ export default function POSLayout() {
           <div className="flex-1 flex flex-col h-full min-h-0">
             {/* Kasir Tabs - NEW STRUCTURE */}
             <div className="bg-white border-b border-gray-200 px-4 py-2">
-              <div className="flex space-x-2 flex-wrap items-center">
-                {/* Offline Tab */}
-                <button
-                  onClick={() => { setIsOnlineTab(false); setSelectedOnlinePlatform(null); }}
-                  className={`px-6 py-2 rounded-lg font-medium transition-colors ${
-                    !isOnlineTab
-                      ? 'bg-blue-600 text-white'
-                      : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
-                  }`}
-                >
-                  🏪 Offline
-                </button>
-
-                {/* Online Section with Platform Buttons */}
-                <div className={`flex items-center rounded-lg overflow-hidden ${
-                  isOnlineTab ? 'bg-blue-600' : 'bg-gray-100'
-                }`}>
-                  <div
-                    className={`px-4 py-2 font-medium cursor-default ${
-                      isOnlineTab ? 'text-white' : 'text-gray-700'
+              <div className="flex space-x-2 flex-wrap items-center justify-between">
+                <div className="flex space-x-2 flex-wrap items-center">
+                  {/* Offline Tab */}
+                  <button
+                    onClick={() => { setIsOnlineTab(false); setSelectedOnlinePlatform(null); }}
+                    className={`px-6 py-2 rounded-lg font-medium transition-colors ${
+                      !isOnlineTab
+                        ? 'bg-blue-600 text-white'
+                        : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
                     }`}
                   >
-                    🌐 Online
-                  </div>
-                  
-                  <div className="flex h-full">
-                    <button
-                      onClick={() => { setSelectedOnlinePlatform('gofood'); setIsOnlineTab(true); }}
-                      className={`px-3 py-1 text-sm font-medium transition-colors h-full ${
-                        selectedOnlinePlatform === 'gofood' && isOnlineTab
-                          ? 'bg-green-600 text-white'
-                          : isOnlineTab ? 'text-white hover:bg-blue-700' : 'text-gray-700 hover:bg-gray-200'
+                    🏪 Offline
+                  </button>
+
+                  {/* Online Section with Platform Buttons */}
+                  <div className={`flex items-center rounded-lg overflow-hidden ${
+                    isOnlineTab ? 'bg-blue-600' : 'bg-gray-100'
+                  }`}>
+                    <div
+                      className={`px-4 py-2 font-medium cursor-default ${
+                        isOnlineTab ? 'text-white' : 'text-gray-700'
                       }`}
                     >
-                      GoFood
-                    </button>
-                    <button
-                      onClick={() => { setSelectedOnlinePlatform('grabfood'); setIsOnlineTab(true); }}
-                      className={`px-3 py-1 text-sm font-medium transition-colors h-full ${
-                        selectedOnlinePlatform === 'grabfood' && isOnlineTab
-                          ? 'bg-green-600 text-white'
-                          : isOnlineTab ? 'text-white hover:bg-blue-700' : 'text-gray-700 hover:bg-gray-200'
-                      }`}
-                    >
-                      Grab
-                    </button>
-                    <button
-                      onClick={() => { setSelectedOnlinePlatform('shopeefood'); setIsOnlineTab(true); }}
-                      className={`px-3 py-1 text-sm font-medium transition-colors h-full ${
-                        selectedOnlinePlatform === 'shopeefood' && isOnlineTab
-                          ? 'bg-green-600 text-white'
-                          : isOnlineTab ? 'text-white hover:bg-blue-700' : 'text-gray-700 hover:bg-gray-200'
-                      }`}
-                    >
-                      Shopee
-                    </button>
-                    <button
-                      onClick={() => { setSelectedOnlinePlatform('qpon'); setIsOnlineTab(true); }}
-                      className={`px-3 py-1 text-sm font-medium transition-colors h-full ${
-                        selectedOnlinePlatform === 'qpon' && isOnlineTab
-                          ? 'bg-green-600 text-white'
-                          : isOnlineTab ? 'text-white hover:bg-blue-700' : 'text-gray-700 hover:bg-gray-200'
-                      }`}
-                    >
-                      Qpon
-                    </button>
-                    <button
-                      onClick={() => { setSelectedOnlinePlatform('tiktok'); setIsOnlineTab(true); }}
-                      className={`px-3 py-1 text-sm font-medium transition-colors h-full rounded-r-lg ${
-                        selectedOnlinePlatform === 'tiktok' && isOnlineTab
-                          ? 'bg-green-600 text-white'
-                          : isOnlineTab ? 'text-white hover:bg-blue-700' : 'text-gray-700 hover:bg-gray-200'
-                      }`}
-                    >
-                      TikTok
-                    </button>
+                      🌐 Online
+                    </div>
+                    
+                    <div className="flex h-full">
+                      <button
+                        onClick={() => { setSelectedOnlinePlatform('gofood'); setIsOnlineTab(true); }}
+                        className={`px-3 py-1 text-sm font-medium transition-colors h-full ${
+                          selectedOnlinePlatform === 'gofood' && isOnlineTab
+                            ? 'bg-green-600 text-white'
+                            : isOnlineTab ? 'text-white hover:bg-blue-700' : 'text-gray-700 hover:bg-gray-200'
+                        }`}
+                      >
+                        GoFood
+                      </button>
+                      <button
+                        onClick={() => { setSelectedOnlinePlatform('grabfood'); setIsOnlineTab(true); }}
+                        className={`px-3 py-1 text-sm font-medium transition-colors h-full ${
+                          selectedOnlinePlatform === 'grabfood' && isOnlineTab
+                            ? 'bg-green-600 text-white'
+                            : isOnlineTab ? 'text-white hover:bg-blue-700' : 'text-gray-700 hover:bg-gray-200'
+                        }`}
+                      >
+                        Grab
+                      </button>
+                      <button
+                        onClick={() => { setSelectedOnlinePlatform('shopeefood'); setIsOnlineTab(true); }}
+                        className={`px-3 py-1 text-sm font-medium transition-colors h-full ${
+                          selectedOnlinePlatform === 'shopeefood' && isOnlineTab
+                            ? 'bg-green-600 text-white'
+                            : isOnlineTab ? 'text-white hover:bg-blue-700' : 'text-gray-700 hover:bg-gray-200'
+                        }`}
+                      >
+                        Shopee
+                      </button>
+                      <button
+                        onClick={() => { setSelectedOnlinePlatform('qpon'); setIsOnlineTab(true); }}
+                        className={`px-3 py-1 text-sm font-medium transition-colors h-full ${
+                          selectedOnlinePlatform === 'qpon' && isOnlineTab
+                            ? 'bg-green-600 text-white'
+                            : isOnlineTab ? 'text-white hover:bg-blue-700' : 'text-gray-700 hover:bg-gray-200'
+                        }`}
+                      >
+                        Qpon
+                      </button>
+                      <button
+                        onClick={() => { setSelectedOnlinePlatform('tiktok'); setIsOnlineTab(true); }}
+                        className={`px-3 py-1 text-sm font-medium transition-colors h-full rounded-r-lg ${
+                          selectedOnlinePlatform === 'tiktok' && isOnlineTab
+                            ? 'bg-green-600 text-white'
+                            : isOnlineTab ? 'text-white hover:bg-blue-700' : 'text-gray-700 hover:bg-gray-200'
+                        }`}
+                      >
+                        TikTok
+                      </button>
+                    </div>
                   </div>
                 </div>
               </div>
@@ -466,6 +487,8 @@ export default function POSLayout() {
                 isLoadingProducts={isLoadingProducts}
                 isOnline={isOnlineTab}
                 selectedOnlinePlatform={selectedOnlinePlatform}
+                searchQuery={searchQuery}
+                setSearchQuery={setSearchQuery}
               />
               
               {/* Right Sidebar - Categories from database */}
@@ -541,16 +564,6 @@ export default function POSLayout() {
                       Printer Setup
                     </button>
                   )}
-                  <button
-                    onClick={() => setActiveSettingsTab('debug')}
-                    className={`py-2 px-1 border-b-2 font-semibold text-lg ${
-                      activeSettingsTab === 'debug'
-                        ? 'border-blue-500 text-blue-600'
-                        : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
-                    }`}
-                  >
-                    Offline Debug
-                  </button>
                 </nav>
               </div>
               
@@ -559,8 +572,16 @@ export default function POSLayout() {
                 {activeSettingsTab === 'sync' && canAccessSync && <SyncManagement />}
                 {activeSettingsTab === 'slideshow' && <SlideshowManager />}
                 {activeSettingsTab === 'printers' && canAccessPrinter && <PrinterSetup />}
-                {activeSettingsTab === 'debug' && <OfflineDebugPanel />}
               </div>
+            </div>
+          </div>
+        );
+      
+      case 'Setelan Global':
+        return (
+          <div className="flex-1 flex flex-col overflow-hidden min-h-0 bg-gray-100">
+            <div className="flex-1 overflow-y-auto">
+              <GlobalSettings />
             </div>
           </div>
         );
@@ -581,15 +602,17 @@ export default function POSLayout() {
 
   return (
     <div className="flex flex-1 h-full min-h-0 bg-gray-100 overflow-hidden">
-      {/* Left Sidebar */}
+      {/* Left Sidebar - Always accessible */}
       <LeftSidebar 
         menuItems={mockMenuItems}
         activeMenuItem={activeMenuItem}
         onMenuItemClick={setActiveMenuItem}
       />
       
-      {/* Main Content Area */}
-      {renderMainContent()}
+      {/* Main Content Area - Blurred when shift modal is shown on Kasir page */}
+      <div className={`flex-1 relative ${shouldBlurKasir ? 'blur-sm pointer-events-none' : ''}`}>
+        {renderMainContent()}
+      </div>
     </div>
   );
 }

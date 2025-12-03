@@ -2568,14 +2568,25 @@ function createWindows() {
     electron_1.ipcMain.handle('localdb-get-transaction-items', async (event, transactionId) => {
         if (!localDb)
             return [];
-        // Get transaction items
+        // Get transaction items with product name from LEFT JOIN (includes inactive products)
         let items = [];
         if (transactionId) {
-            const stmt = localDb.prepare('SELECT * FROM transaction_items WHERE transaction_id = ? ORDER BY id ASC');
+            const stmt = localDb.prepare(`
+        SELECT ti.*, p.nama as product_name 
+        FROM transaction_items ti
+        LEFT JOIN products p ON ti.product_id = p.id
+        WHERE ti.transaction_id = ? 
+        ORDER BY ti.id ASC
+      `);
             items = stmt.all(transactionId);
         }
         else {
-            const stmt = localDb.prepare('SELECT * FROM transaction_items ORDER BY created_at DESC');
+            const stmt = localDb.prepare(`
+        SELECT ti.*, p.nama as product_name 
+        FROM transaction_items ti
+        LEFT JOIN products p ON ti.product_id = p.id
+        ORDER BY ti.created_at DESC
+      `);
             items = stmt.all();
         }
         // For each item, load customizations from normalized tables
@@ -2624,6 +2635,120 @@ function createWindows() {
             };
         });
         return itemsWithCustomizations;
+    });
+    // NEW: Get normalized customizations for transaction items (for sync upload)
+    electron_1.ipcMain.handle('localdb-get-transaction-item-customizations-normalized', async (event, transactionId) => {
+        if (!localDb)
+            return { customizations: [], options: [] };
+        try {
+            // Get all transaction items for this transaction
+            const itemsStmt = localDb.prepare('SELECT id FROM transaction_items WHERE transaction_id = ?');
+            const items = itemsStmt.all(transactionId);
+            const allCustomizations = [];
+            const allOptions = [];
+            for (const item of items) {
+                const itemId = item.id;
+                // Get customizations for this item
+                const customizationsStmt = localDb.prepare(`
+          SELECT 
+            id,
+            transaction_item_id,
+            customization_type_id,
+            bundle_product_id,
+            created_at
+          FROM transaction_item_customizations
+          WHERE transaction_item_id = ?
+        `);
+                const customizations = customizationsStmt.all(itemId);
+                for (const customization of customizations) {
+                    allCustomizations.push(customization);
+                    // Get options for this customization
+                    const optionsStmt = localDb.prepare(`
+            SELECT 
+              id,
+              transaction_item_customization_id,
+              customization_option_id,
+              option_name,
+              price_adjustment,
+              created_at
+            FROM transaction_item_customization_options
+            WHERE transaction_item_customization_id = ?
+          `);
+                    const options = optionsStmt.all(customization.id);
+                    allOptions.push(...options);
+                }
+            }
+            return {
+                customizations: allCustomizations,
+                options: allOptions
+            };
+        }
+        catch (error) {
+            console.error('Error getting normalized customizations:', error);
+            return { customizations: [], options: [] };
+        }
+    });
+    // Upsert transaction item customizations (for downloading from server)
+    electron_1.ipcMain.handle('localdb-upsert-transaction-item-customizations', async (event, rows) => {
+        if (!localDb)
+            return { success: false, error: 'Database not available' };
+        if (!Array.isArray(rows) || rows.length === 0)
+            return { success: true, count: 0 };
+        try {
+            const tx = localDb.transaction((data) => {
+                const stmt = localDb.prepare(`
+          INSERT INTO transaction_item_customizations (
+            id, transaction_item_id, customization_type_id, bundle_product_id, created_at
+          ) VALUES (?, ?, ?, ?, ?)
+          ON CONFLICT(id) DO UPDATE SET
+            transaction_item_id = excluded.transaction_item_id,
+            customization_type_id = excluded.customization_type_id,
+            bundle_product_id = excluded.bundle_product_id,
+            created_at = excluded.created_at
+        `);
+                for (const row of data) {
+                    stmt.run(row.id, row.transaction_item_id, row.customization_type_id, row.bundle_product_id ?? null, row.created_at);
+                }
+            });
+            tx(rows);
+            return { success: true, count: rows.length };
+        }
+        catch (error) {
+            console.error('Error upserting transaction item customizations:', error);
+            return { success: false, error: error instanceof Error ? error.message : 'Unknown error' };
+        }
+    });
+    // Upsert transaction item customization options (for downloading from server)
+    electron_1.ipcMain.handle('localdb-upsert-transaction-item-customization-options', async (event, rows) => {
+        if (!localDb)
+            return { success: false, error: 'Database not available' };
+        if (!Array.isArray(rows) || rows.length === 0)
+            return { success: true, count: 0 };
+        try {
+            const tx = localDb.transaction((data) => {
+                const stmt = localDb.prepare(`
+          INSERT INTO transaction_item_customization_options (
+            id, transaction_item_customization_id, customization_option_id, 
+            option_name, price_adjustment, created_at
+          ) VALUES (?, ?, ?, ?, ?, ?)
+          ON CONFLICT(id) DO UPDATE SET
+            transaction_item_customization_id = excluded.transaction_item_customization_id,
+            customization_option_id = excluded.customization_option_id,
+            option_name = excluded.option_name,
+            price_adjustment = excluded.price_adjustment,
+            created_at = excluded.created_at
+        `);
+                for (const row of data) {
+                    stmt.run(row.id, row.transaction_item_customization_id, row.customization_option_id, row.option_name, row.price_adjustment ?? 0, row.created_at);
+                }
+            });
+            tx(rows);
+            return { success: true, count: rows.length };
+        }
+        catch (error) {
+            console.error('Error upserting transaction item customization options:', error);
+            return { success: false, error: error instanceof Error ? error.message : 'Unknown error' };
+        }
     });
     electron_1.ipcMain.handle('localdb-get-transaction-refunds', async (event, transactionUuid) => {
         if (!localDb)
@@ -3289,6 +3414,51 @@ function createWindows() {
         catch (error) {
             console.error('Error marking shifts as synced:', error);
             return { success: false };
+        }
+    });
+    // Upsert shifts (for downloading from server)
+    electron_1.ipcMain.handle('localdb-upsert-shifts', async (event, rows) => {
+        if (!localDb)
+            return { success: false, error: 'Database not available' };
+        if (!Array.isArray(rows) || rows.length === 0)
+            return { success: true, count: 0 };
+        try {
+            const tx = localDb.transaction((data) => {
+                const stmt = localDb.prepare(`
+          INSERT INTO shifts (
+            id, uuid_id, business_id, user_id, user_name, shift_start, shift_end,
+            modal_awal, kas_akhir, kas_expected, kas_selisih, kas_selisih_label,
+            cash_sales_total, cash_refund_total, status, created_at, updated_at, synced_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          ON CONFLICT(uuid_id) DO UPDATE SET
+            id = excluded.id,
+            business_id = excluded.business_id,
+            user_id = excluded.user_id,
+            user_name = excluded.user_name,
+            shift_start = excluded.shift_start,
+            shift_end = excluded.shift_end,
+            modal_awal = excluded.modal_awal,
+            kas_akhir = excluded.kas_akhir,
+            kas_expected = excluded.kas_expected,
+            kas_selisih = excluded.kas_selisih,
+            kas_selisih_label = excluded.kas_selisih_label,
+            cash_sales_total = excluded.cash_sales_total,
+            cash_refund_total = excluded.cash_refund_total,
+            status = excluded.status,
+            created_at = excluded.created_at,
+            updated_at = excluded.updated_at,
+            synced_at = excluded.synced_at
+        `);
+                for (const row of data) {
+                    stmt.run(row.id ?? null, row.uuid_id, row.business_id, row.user_id, row.user_name, row.shift_start, row.shift_end ?? null, row.modal_awal ?? 0, row.kas_akhir ?? null, row.kas_expected ?? null, row.kas_selisih ?? null, row.kas_selisih_label ?? 'balanced', row.cash_sales_total ?? null, row.cash_refund_total ?? null, row.status ?? 'active', row.created_at, row.updated_at ?? null, row.synced_at ?? Date.now());
+                }
+            });
+            tx(rows);
+            return { success: true, count: rows.length };
+        }
+        catch (error) {
+            console.error('Error upserting shifts:', error);
+            return { success: false, error: error instanceof Error ? error.message : 'Unknown error' };
         }
     });
     // Check for transactions before shift start (today)
@@ -4479,8 +4649,14 @@ electron_1.ipcMain.handle('print-receipt', async (event, data) => {
                     .get(data.printerType) ?? null;
                 console.log('📋 Printer config query result for type', data.printerType, ':', printerConfig);
                 if (!printerName && printerConfig && printerConfig.system_printer_name) {
-                    printerName = printerConfig.system_printer_name;
-                    console.log('✅ Found saved printer:', printerName);
+                    const configPrinterName = String(printerConfig.system_printer_name).trim();
+                    if (configPrinterName) {
+                        printerName = configPrinterName;
+                        console.log('✅ Found saved printer:', printerName);
+                    }
+                    else {
+                        console.warn('⚠️ Printer config exists but system_printer_name is empty');
+                    }
                 }
                 if (marginAdjustMm === undefined && printerConfig && printerConfig.extra_settings) {
                     try {
@@ -4499,7 +4675,12 @@ electron_1.ipcMain.handle('print-receipt', async (event, data) => {
                 if (!printerName) {
                     console.log('⚠️ No system printer configured for type:', data.printerType);
                     console.log('💡 Available printer configs:', allConfigs.map(c => ({ type: c.printer_type, name: c.system_printer_name })));
-                    return { success: false, error: 'No printer configured. Please set up a printer in Settings.' };
+                    return { success: false, error: `No printer configured for ${data.printerType}. Please set up a printer in Settings → Printer Selector.` };
+                }
+                // Validate printer name is not empty after trim
+                if (printerName && typeof printerName === 'string' && !printerName.trim()) {
+                    console.error('❌ Printer name is empty after trim');
+                    return { success: false, error: `Printer name is empty for ${data.printerType}. Please reconfigure the printer in Settings → Printer Selector.` };
                 }
             }
             catch (error) {
@@ -4514,13 +4695,15 @@ electron_1.ipcMain.handle('print-receipt', async (event, data) => {
         else if (printerName) {
             console.log('✅ Using provided printer name:', printerName);
         }
-        // Still no printer name? Try fallback to printerType as printer name
-        if (!printerName) {
-            printerName = data.printerType;
-            console.log('⚠️ Using printerType as fallback printer name:', printerName);
+        // Validate printerName is a valid string (not printerType identifier)
+        if (!printerName || (typeof printerName === 'string' && !printerName.trim())) {
+            console.error('❌ No valid printer name found. printerName:', printerName, 'printerType:', data.printerType);
+            return { success: false, error: `No printer configured. Please set up a printer in Settings → Printer Selector for ${data.printerType || 'the selected printer type'}.` };
         }
+        // Ensure printerName is a string and trimmed
+        printerName = String(printerName).trim();
         if (!printerName) {
-            console.error('❌ No printer name or type provided in data:', data);
+            console.error('❌ Printer name is empty after validation');
             return { success: false, error: 'No printer specified. Please set up a printer in Settings first.' };
         }
         // Use HTML printing with character-based formatting
@@ -4737,6 +4920,119 @@ electron_1.ipcMain.handle('print-label', async (event, data) => {
     }
     catch (error) {
         console.error('❌ Error in print-label handler:', error);
+        return { success: false, error: String(error) };
+    }
+});
+// IPC handler for batch printing labels (multiple labels in one print job)
+electron_1.ipcMain.handle('print-labels-batch', async (event, data) => {
+    try {
+        console.log('🏷️ Printing labels batch - Count:', data.labels?.length || 0);
+        if (!data.labels || !Array.isArray(data.labels) || data.labels.length === 0) {
+            console.error('❌ No labels provided for batch printing');
+            return { success: false, error: 'No labels provided for batch printing.' };
+        }
+        let printerName = data.printerName;
+        // If printer name is not specified, try to get it from saved config
+        if (!printerName) {
+            if (!data.printerType) {
+                console.error('❌ No printer type provided!');
+                return { success: false, error: 'No printer specified.' };
+            }
+            if (!localDb) {
+                console.error('❌ Local database not available!');
+                return { success: false, error: 'Database not available.' };
+            }
+            console.log('🔍 No printer name specified, fetching from saved config for printer type:', data.printerType);
+            try {
+                const config = localDb.prepare('SELECT * FROM printer_configs WHERE printer_type = ?').get(data.printerType);
+                console.log('📋 Printer config query result for type', data.printerType, ':', JSON.stringify(config, null, 2));
+                if (!config) {
+                    console.log('⚠️ No saved printer config found for type:', data.printerType);
+                    return { success: false, error: 'Label printer not configured. Please set up a valid printer in Settings.' };
+                }
+                if (!config.system_printer_name || config.system_printer_name.trim() === '') {
+                    console.log('⚠️ Printer config found but system_printer_name is empty:', config);
+                    return { success: false, error: 'Label printer not configured. Please set up a valid printer in Settings.' };
+                }
+                printerName = config.system_printer_name;
+                console.log('✅ Found saved printer:', printerName);
+            }
+            catch (error) {
+                console.error('❌ Error fetching printer config:', error);
+                return { success: false, error: 'Error loading printer configuration.' };
+            }
+        }
+        if (!printerName) {
+            console.error('❌ No printer name provided!');
+            return { success: false, error: 'No printer specified.' };
+        }
+        // Close existing print window if any
+        if (printWindow) {
+            printWindow.close();
+        }
+        // Create new print window
+        printWindow = new electron_1.BrowserWindow({
+            width: 400,
+            height: 600,
+            show: false,
+            webPreferences: {
+                nodeIntegration: false,
+                contextIsolation: true,
+            }
+        });
+        // Generate batch label HTML
+        const htmlContent = generateMultipleLabelsHTML(data.labels);
+        await printWindow.loadURL(`data:text/html,${encodeURIComponent(htmlContent)}`);
+        const printOptions = {
+            silent: true,
+            printBackground: false,
+            deviceName: printerName,
+        };
+        return new Promise((resolve) => {
+            const currentWindow = printWindow;
+            setTimeout(() => {
+                try {
+                    if (!currentWindow || currentWindow.isDestroyed()) {
+                        console.error('❌ Print window not available when attempting to print labels batch');
+                        resolve({ success: false, error: 'Print window unavailable' });
+                        return;
+                    }
+                    currentWindow.webContents.print(printOptions, (success, errorType) => {
+                        if (success) {
+                            console.log(`✅ Batch labels (${data.labels.length} labels) sent successfully`);
+                            resolve({ success: true });
+                        }
+                        else {
+                            console.error('❌ Batch labels print failed:', errorType);
+                            resolve({ success: false, error: errorType });
+                        }
+                        setTimeout(() => {
+                            if (currentWindow && !currentWindow.isDestroyed()) {
+                                currentWindow.close();
+                            }
+                            if (printWindow === currentWindow) {
+                                printWindow = null;
+                            }
+                        }, 5000);
+                    });
+                }
+                catch (err) {
+                    console.error('❌ Exception during webContents.print:', err);
+                    resolve({ success: false, error: String(err) });
+                    setTimeout(() => {
+                        if (currentWindow && !currentWindow.isDestroyed()) {
+                            currentWindow.close();
+                        }
+                        if (printWindow === currentWindow) {
+                            printWindow = null;
+                        }
+                    }, 5000);
+                }
+            }, 500);
+        });
+    }
+    catch (error) {
+        console.error('❌ Error in print-labels-batch handler:', error);
         return { success: false, error: String(error) };
     }
 });
@@ -5106,6 +5402,142 @@ function generateLabelHTML(data) {
   <div class="footer">
     <div class="time">${orderTime}</div>
   </div>
+</body>
+</html>
+  `;
+}
+// Generate HTML for multiple labels in a single document (batch printing)
+function generateMultipleLabelsHTML(labels) {
+    const formatDateTime = (date) => {
+        const year = date.getFullYear();
+        const month = String(date.getMonth() + 1).padStart(2, '0');
+        const day = String(date.getDate()).padStart(2, '0');
+        const hours = String(date.getHours()).padStart(2, '0');
+        const minutes = String(date.getMinutes()).padStart(2, '0');
+        const seconds = String(date.getSeconds()).padStart(2, '0');
+        return `${year}-${month}-${day} ${hours}:${minutes}:${seconds}`;
+    };
+    const labelHTMLs = labels.map((data) => {
+        const counter = data.counter || 0;
+        const itemNumber = data.itemNumber || 0;
+        const totalItems = data.totalItems || 0;
+        const pickupMethod = data.pickupMethod || 'dine-in';
+        const productName = data.productName || '';
+        const customizations = data.customizations || '';
+        const labelContinuation = data.labelContinuation || '';
+        const orderTime = data.orderTime ? formatDateTime(new Date(data.orderTime)) : formatDateTime(new Date());
+        const pickupLabel = pickupMethod === 'dine-in' ? 'DINE IN' : 'TAKE AWAY';
+        return `
+    <div class="label-page">
+      <div class="content">
+        <div class="row">
+          <div class="counter">${counter}</div>
+          ${labelContinuation ? `<div class="continuation">${labelContinuation}</div>` : '<div class="continuation"></div>'}
+          <div class="number">${itemNumber}/${totalItems}</div>
+        </div>
+        <div class="pickup">${pickupLabel}</div>
+        <div class="product">${productName}</div>
+        ${customizations ? `<div class="customizations">${customizations}</div>` : ''}
+      </div>
+      <div class="footer">
+        <div class="time">${orderTime}</div>
+      </div>
+    </div>
+    `;
+    }).join('');
+    return `
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <style>
+    @page { 
+      size: 40mm auto; 
+      margin: 0;
+    }
+    * { 
+      margin: 0; 
+      padding: 0; 
+      box-sizing: border-box; 
+      color: black; 
+    }
+    body {
+      font-family: 'Arial', 'Helvetica', sans-serif;
+      width: 22ch;
+      max-width: 22ch;
+      font-size: 8pt;
+      font-weight: 600;
+      line-height: 1.4;
+      word-wrap: break-word;
+      overflow-wrap: break-word;
+      color: black;
+    }
+    .label-page {
+      padding: 3mm 0 3mm 3mm;
+      display: flex;
+      flex-direction: column;
+      min-height: 30mm;
+      page-break-after: always;
+    }
+    .label-page:last-child {
+      page-break-after: auto;
+    }
+    .content {
+      flex: 1;
+    }
+    .row {
+      display: table;
+      width: calc(100% + 3mm);
+      table-layout: fixed;
+      margin-right: -3mm;
+    }
+    .row > div {
+      display: table-cell;
+    }
+    .counter {
+      font-size: 9pt;
+      font-weight: 700;
+    }
+    .pickup {
+      text-align: left;
+      font-size: 7pt;
+      font-weight: 700;
+      text-transform: uppercase;
+    }
+    .product {
+      text-align: left;
+      font-size: 7pt;
+      font-weight: 600;
+    }
+    .customizations {
+      text-align: left;
+      font-size: 7pt;
+      font-weight: 500;
+    }
+    .number {
+      font-size: 9pt;
+      font-weight: 700;
+      text-align: right;
+    }
+    .continuation {
+      font-size: 7pt;
+      font-weight: 600;
+      color: #666;
+      text-align: center;
+    }
+    .footer {
+      margin-top: auto;
+      padding-top: 2mm;
+    }
+    .time {
+      text-align: left;
+      font-size: 7pt;
+      font-weight: 500;
+    }
+  </style>
+</head>
+<body>
+  ${labelHTMLs}
 </body>
 </html>
   `;
@@ -5802,6 +6234,12 @@ function generateShiftBreakdownHTML(shiftData) {
     }
     .summary-value {
       font-weight: 700;
+    }
+    /* Prevent table headers from repeating on every page */
+    @media print {
+      thead {
+        display: table-row-group;
+      }
     }
   </style>
 </head>
@@ -6732,6 +7170,96 @@ electron_1.ipcMain.handle('restore-from-server', async (event, options) => {
             }
             catch (itemsError) {
                 console.error('❌ [RESTORE] Error downloading transaction items:', itemsError);
+            }
+            // Step 5: Restore Transaction Item Customizations (from /api/sync)
+            console.log('💾 [RESTORE] Step 5: Restoring transaction item customizations...');
+            if (Array.isArray(data.transactionItemCustomizations) && data.transactionItemCustomizations.length > 0) {
+                const ticStmt = localDb.prepare(`
+          INSERT OR REPLACE INTO transaction_item_customizations (
+            id, transaction_item_id, customization_type_id, bundle_product_id, created_at
+          ) VALUES (?, ?, ?, ?, ?)
+        `);
+                for (const tic of data.transactionItemCustomizations) {
+                    ticStmt.run(tic.id, tic.transaction_item_id, tic.customization_type_id, tic.bundle_product_id || null, tic.created_at || new Date().toISOString());
+                }
+                stats.transactionItemCustomizations = data.transactionItemCustomizations.length;
+                console.log(`✅ [RESTORE] ${data.transactionItemCustomizations.length} transaction item customizations restored`);
+            }
+            // Step 6: Restore Transaction Item Customization Options (from /api/sync)
+            console.log('💾 [RESTORE] Step 6: Restoring transaction item customization options...');
+            if (Array.isArray(data.transactionItemCustomizationOptions) && data.transactionItemCustomizationOptions.length > 0) {
+                const ticoStmt = localDb.prepare(`
+          INSERT OR REPLACE INTO transaction_item_customization_options (
+            id, transaction_item_customization_id, customization_option_id, option_name, price_adjustment, created_at
+          ) VALUES (?, ?, ?, ?, ?, ?)
+        `);
+                for (const tico of data.transactionItemCustomizationOptions) {
+                    ticoStmt.run(tico.id, tico.transaction_item_customization_id, tico.customization_option_id, tico.option_name, tico.price_adjustment || 0, tico.created_at || new Date().toISOString());
+                }
+                stats.transactionItemCustomizationOptions = data.transactionItemCustomizationOptions.length;
+                console.log(`✅ [RESTORE] ${data.transactionItemCustomizationOptions.length} transaction item customization options restored`);
+            }
+            // Step 7: Restore Shifts (from /api/sync)
+            console.log('💾 [RESTORE] Step 7: Restoring shifts...');
+            if (Array.isArray(data.shifts) && data.shifts.length > 0) {
+                const shiftStmt = localDb.prepare(`
+          INSERT OR REPLACE INTO shifts (
+            id, uuid_id, business_id, user_id, user_name, shift_start, shift_end,
+            modal_awal, kas_akhir, kas_expected, kas_selisih, kas_selisih_label,
+            cash_sales_total, cash_refund_total, status, created_at, updated_at, synced_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `);
+                for (const shift of data.shifts) {
+                    shiftStmt.run(shift.id || null, shift.uuid_id, shift.business_id, shift.user_id, shift.user_name, shift.shift_start, shift.shift_end || null, shift.modal_awal || 0, shift.kas_akhir || null, shift.kas_expected || null, shift.kas_selisih || null, shift.kas_selisih_label || 'balanced', shift.cash_sales_total || null, shift.cash_refund_total || null, shift.status || 'active', shift.created_at || new Date().toISOString(), shift.updated_at || null, shift.synced_at || Date.now());
+                }
+                stats.shifts = data.shifts.length;
+                console.log(`✅ [RESTORE] ${data.shifts.length} shifts restored`);
+            }
+            // Step 8: Restore Transaction Refunds (from /api/sync)
+            console.log('💾 [RESTORE] Step 8: Restoring transaction refunds...');
+            if (Array.isArray(data.transactionRefunds) && data.transactionRefunds.length > 0) {
+                const refundStmt = localDb.prepare(`
+          INSERT OR REPLACE INTO transaction_refunds (
+            id, uuid_id, transaction_uuid, business_id, shift_uuid, refunded_by,
+            refund_amount, cash_delta, payment_method_id, reason, note, refund_type,
+            status, refunded_at, created_at, updated_at, synced_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `);
+                for (const refund of data.transactionRefunds) {
+                    refundStmt.run(refund.id || null, refund.uuid_id, refund.transaction_uuid, refund.business_id, refund.shift_uuid || null, refund.refunded_by, refund.refund_amount, refund.cash_delta || 0, refund.payment_method_id || null, refund.reason || null, refund.note || null, refund.refund_type || 'full', refund.status || 'completed', refund.refunded_at, refund.created_at || new Date().toISOString(), refund.updated_at || null, refund.synced_at || Date.now());
+                }
+                stats.transactionRefunds = data.transactionRefunds.length;
+                console.log(`✅ [RESTORE] ${data.transactionRefunds.length} transaction refunds restored`);
+            }
+            // Step 9: Restore Printer 1 Audit Logs (from /api/sync)
+            console.log('💾 [RESTORE] Step 9: Restoring printer 1 audit logs...');
+            if (Array.isArray(data.printer1AuditLog) && data.printer1AuditLog.length > 0) {
+                const p1Stmt = localDb.prepare(`
+          INSERT OR REPLACE INTO printer1_audit_log (
+            id, transaction_id, printer1_receipt_number, global_counter,
+            printed_at, printed_at_epoch, is_reprint, reprint_count, synced_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `);
+                for (const p1 of data.printer1AuditLog) {
+                    p1Stmt.run(p1.id || null, p1.transaction_id, p1.printer1_receipt_number, p1.global_counter || null, p1.printed_at, p1.printed_at_epoch, p1.is_reprint || 0, p1.reprint_count || 0, p1.synced_at || Date.now());
+                }
+                stats.printer1AuditLog = data.printer1AuditLog.length;
+                console.log(`✅ [RESTORE] ${data.printer1AuditLog.length} printer 1 audit logs restored`);
+            }
+            // Step 10: Restore Printer 2 Audit Logs (from /api/sync)
+            console.log('💾 [RESTORE] Step 10: Restoring printer 2 audit logs...');
+            if (Array.isArray(data.printer2AuditLog) && data.printer2AuditLog.length > 0) {
+                const p2Stmt = localDb.prepare(`
+          INSERT OR REPLACE INTO printer2_audit_log (
+            id, transaction_id, printer2_receipt_number, print_mode, cycle_number,
+            global_counter, printed_at, printed_at_epoch, is_reprint, reprint_count, synced_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `);
+                for (const p2 of data.printer2AuditLog) {
+                    p2Stmt.run(p2.id || null, p2.transaction_id, p2.printer2_receipt_number, p2.print_mode || 'auto', p2.cycle_number || null, p2.global_counter || null, p2.printed_at, p2.printed_at_epoch, p2.is_reprint || 0, p2.reprint_count || 0, p2.synced_at || Date.now());
+                }
+                stats.printer2AuditLog = data.printer2AuditLog.length;
+                console.log(`✅ [RESTORE] ${data.printer2AuditLog.length} printer 2 audit logs restored`);
             }
         }
         console.log('✅ [RESTORE] Full restore completed successfully!');

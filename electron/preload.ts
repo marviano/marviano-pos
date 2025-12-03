@@ -8,6 +8,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // POS functionality
   printReceipt: (data: UnknownRecord) => ipcRenderer.invoke('print-receipt', data),
   printLabel: (data: UnknownRecord) => ipcRenderer.invoke('print-label', data),
+  printLabelsBatch: (data: { labels: UnknownRecord[]; printerName?: string; printerType?: string }) => ipcRenderer.invoke('print-labels-batch', data),
   openCashDrawer: () => ipcRenderer.invoke('open-cash-drawer'),
   playSound: (soundType: string) => ipcRenderer.invoke('play-sound', soundType),
   // System printers
@@ -133,6 +134,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // Transaction Items
   localDbUpsertTransactionItems: (rows: UnknownRecord[]) => ipcRenderer.invoke('localdb-upsert-transaction-items', rows),
   localDbGetTransactionItems: (transactionId?: number | string) => ipcRenderer.invoke('localdb-get-transaction-items', transactionId),
+  localDbGetTransactionItemCustomizationsNormalized: (transactionId: string) => ipcRenderer.invoke('localdb-get-transaction-item-customizations-normalized', transactionId),
+  localDbUpsertTransactionItemCustomizations: (rows: UnknownRecord[]) => ipcRenderer.invoke('localdb-upsert-transaction-item-customizations', rows),
+  localDbUpsertTransactionItemCustomizationOptions: (rows: UnknownRecord[]) => ipcRenderer.invoke('localdb-upsert-transaction-item-customization-options', rows),
   localDbGetTransactionRefunds: (transactionUuid: string) => ipcRenderer.invoke('localdb-get-transaction-refunds', transactionUuid),
   localDbUpsertTransactionRefunds: (rows: UnknownRecord[]) => ipcRenderer.invoke('localdb-upsert-transaction-refunds', rows),
   localDbApplyTransactionRefund: (payload: UnknownRecord) => ipcRenderer.invoke('localdb-apply-transaction-refund', payload),
@@ -207,6 +211,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   localDbGetShiftUsers: (businessId?: number) => ipcRenderer.invoke('localdb-get-shift-users', businessId),
   localDbGetUnsyncedShifts: (businessId?: number) => ipcRenderer.invoke('localdb-get-unsynced-shifts', businessId),
   localDbMarkShiftsSynced: (shiftIds: number[]) => ipcRenderer.invoke('localdb-mark-shifts-synced', shiftIds),
+  localDbUpsertShifts: (rows: UnknownRecord[]) => ipcRenderer.invoke('localdb-upsert-shifts', rows),
   localDbCheckTodayTransactions: (userId: number, shiftStart: string, businessId?: number) => ipcRenderer.invoke('localdb-check-today-transactions', userId, shiftStart, businessId),
   localDbUpdateShiftStart: (shiftId: number, newStartTime: string) => ipcRenderer.invoke('localdb-update-shift-start', shiftId, newStartTime),
   localDbGetProductSales: (userId: number, shiftStart: string, shiftEnd: string | null, businessId?: number) => ipcRenderer.invoke('localdb-get-product-sales', userId, shiftStart, shiftEnd, businessId),

@@ -70,6 +70,13 @@
       "icon": "public/app.ico",
       "forceCodeSigning": false
     },
+    "mac": {
+      "icon": "public/logo/Momoyo.png",
+      "category": "public.app-category.business"
+    },
+    "linux": {
+      "icon": "public/logo/Momoyo.png"
+    },
     "nsis": {
       "oneClick": false,
       "allowToChangeInstallationDirectory": true

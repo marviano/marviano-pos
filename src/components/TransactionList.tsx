@@ -103,6 +103,7 @@ interface ElectronProduct {
 interface ElectronTransactionItem {
   id: string;
   product_id: number;
+  product_name?: string; // Added: product name from JOIN with products table
   quantity: number;
   unit_price: number;
   total_price: number;
@@ -209,7 +210,44 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
       }
       const data = await response.json();
       if (data.success) {
-            return data.transaction;
+            const transaction = data.transaction;
+            // Ensure all items have product_name - fetch products if needed for fallback
+            if (transaction && transaction.items && Array.isArray(transaction.items)) {
+              // If any item is missing product_name, try to get it from local DB as fallback
+              const needsProductName = transaction.items.some((item: { product_name?: string; product_id?: number }) => 
+                !item.product_name && item.product_id
+              );
+              
+              if (needsProductName && typeof window !== 'undefined' && (window as { electronAPI?: ElectronAPI }).electronAPI) {
+                try {
+                  const products: ElectronProduct[] = await (window as { electronAPI: ElectronAPI }).electronAPI.localDbGetAllProducts();
+                  transaction.items = transaction.items.map((item: { product_name?: string; product_id?: number }) => {
+                    if (!item.product_name && item.product_id) {
+                      const product = products.find((p) => p.id === item.product_id);
+                      return {
+                        ...item,
+                        product_name: product?.nama || 'Unknown Product'
+                      };
+                    }
+                    return item;
+                  });
+                } catch (error) {
+                  console.warn('Failed to fetch products for fallback:', error);
+                  // Ensure at least Unknown Product is set
+                  transaction.items = transaction.items.map((item: { product_name?: string }) => ({
+                    ...item,
+                    product_name: item.product_name || 'Unknown Product'
+                  }));
+                }
+              } else {
+                // Ensure at least Unknown Product is set for items without product_name
+                transaction.items = transaction.items.map((item: { product_name?: string }) => ({
+                  ...item,
+                  product_name: item.product_name || 'Unknown Product'
+                }));
+              }
+            }
+            return transaction;
       } else {
         throw new Error(data.message || 'Failed to fetch transaction details');
       }
@@ -228,10 +266,10 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
             throw new Error('Transaction not found in offline database');
           }
           
-          // Get transaction items
+          // Get transaction items (now includes product_name from JOIN with products table)
           const items: ElectronTransactionItem[] = await (window as { electronAPI: ElectronAPI }).electronAPI.localDbGetTransactionItems(transactionId);
           
-          // Get all products to map product_id to product_name
+          // Products fetch as fallback in case product_name wasn't in JOIN result
           const products: ElectronProduct[] = await (window as { electronAPI: ElectronAPI }).electronAPI.localDbGetAllProducts();
           
           // Get users and businesses to show actual names
@@ -258,10 +296,19 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
             ...transaction,
             payment_method: (transaction.payment_method || 'cash') as TransactionDetail['payment_method'],
             items: items.map((item) => {
-              const product = products.find((p) => p.id === item.product_id);
+              // Use product_name from JOIN first, then fallback to active products lookup
+              // Ensure product_id is properly compared (handle both number and string)
+              const productId = typeof item.product_id === 'number' ? item.product_id : Number(item.product_id);
+              const product = products.find((p) => p.id === productId);
+              // Check if product_name is null, undefined, or empty string
+              const productName = (item.product_name && String(item.product_name).trim()) 
+                ? String(item.product_name).trim() 
+                : (product?.nama && String(product.nama).trim()) 
+                  ? String(product.nama).trim() 
+                  : 'Unknown Product';
               return {
                 id: item.id,
-                product_name: product?.nama || 'Unknown Product',
+                product_name: productName,
                 quantity: item.quantity,
                 unit_price: item.unit_price,
                 total_price: item.total_price,
@@ -916,9 +963,9 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
       if (sortField === 'receipt_number') {
         aValue = resolveReceiptSequence(a);
         bValue = resolveReceiptSequence(b);
-      } else if (sortField === 'id' || sortField === 'total_amount' || sortField === 'voucher_discount' || sortField === 'final_amount' || sortField === 'amount_received' || sortField === 'change_amount' || sortField === 'customer_unit') {
-        aValue = typeof aValue === 'string' ? parseFloat(aValue) : (aValue as number);
-        bValue = typeof bValue === 'string' ? parseFloat(bValue) : (bValue as number);
+      } else if (sortField === 'id' || sortField === 'total_amount' || sortField === 'voucher_discount' || sortField === 'final_amount' || sortField === 'amount_received' || sortField === 'change_amount' || sortField === 'customer_unit' || sortField === 'refund_total') {
+        aValue = typeof aValue === 'string' ? parseFloat(aValue) : (aValue as number || 0);
+        bValue = typeof bValue === 'string' ? parseFloat(bValue) : (bValue as number || 0);
       } else if (sortField === 'created_at') {
         aValue = new Date(aValue as string).getTime();
         bValue = new Date(bValue as string).getTime();
@@ -938,14 +985,34 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
     const amount = typeof t.final_amount === 'string' ? parseFloat(t.final_amount) : t.final_amount;
     return sum + (isNaN(amount) ? 0 : amount);
   }, 0);
+  const totalRefund = filteredTransactions.reduce((sum, t) => {
+    const amount = typeof t.refund_total === 'string' ? parseFloat(t.refund_total) : (t.refund_total || 0);
+    return sum + (isNaN(amount) ? 0 : amount);
+  }, 0);
   const totalVoucherDiscount = filteredTransactions.reduce((sum, t) => {
     const amount = typeof t.voucher_discount === 'string' ? parseFloat(t.voucher_discount) : t.voucher_discount;
     return sum + (isNaN(amount) ? 0 : amount);
   }, 0);
-  const totalCustomerUnit = filteredTransactions.reduce((sum, t) => {
-    const value = typeof t.customer_unit === 'number' ? t.customer_unit : 0;
-    return sum + (Number.isFinite(value) ? value : 0);
-  }, 0);
+  // Calculate Total CU and Transaction Count from both receipt (Printer 1) and receiptize (Printer 2)
+  const { totalCustomerUnit, totalTransactionCount } = (() => {
+    let totalCU = 0;
+    let txCount = 0;
+    
+    transactions.forEach((tx) => {
+      const txId = String(tx.id);
+      const hasReceiptCounter = typeof receiptCounters[txId] === 'number' && receiptCounters[txId] > 0;
+      const hasReceiptizeCounter = typeof receiptizeCounters[txId] === 'number' && receiptizeCounters[txId] > 0;
+      
+      // Include transaction if it has either receipt or receiptize counter
+      if (hasReceiptCounter || hasReceiptizeCounter) {
+        txCount += 1;
+        const cuValue = typeof tx.customer_unit === 'number' ? tx.customer_unit : 0;
+        totalCU += Number.isFinite(cuValue) ? cuValue : 0;
+      }
+    });
+    
+    return { totalCustomerUnit: totalCU, totalTransactionCount: txCount };
+  })();
 
   // Aggregations for footer
   const paymentMethodCounts: Record<string, number> = {
@@ -1175,7 +1242,7 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
           </div>
 
           {/* Grand Total Card */}
-          <GrandTotalCard totalRevenue={totalRevenue} totalCustomerUnit={totalCustomerUnit} />
+          <GrandTotalCard totalRevenue={totalRevenue} totalRefund={totalRefund} totalCustomerUnit={totalCustomerUnit} totalTransactionCount={totalTransactionCount} />
         </div>
 
         {/* Search and Filter */}
@@ -1353,6 +1420,15 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
                       <div className="flex items-center gap-1">
                         Final
                         {getSortIcon('final_amount')}
+                      </div>
+                    </th>
+                    <th 
+                      className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider cursor-pointer hover:bg-gray-100 select-none"
+                      onClick={() => handleSort('refund_total')}
+                    >
+                      <div className="flex items-center gap-1">
+                        Refund
+                        {getSortIcon('refund_total')}
                       </div>
                     </th>
                     <th 
@@ -1563,6 +1639,26 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
                           {formatPrice(transaction.final_amount)}
                         </span>
                       </td>
+                      <td className="px-4 py-4 whitespace-nowrap">
+                        {transaction.refund_total && transaction.refund_total > 0 ? (
+                          <div className="flex flex-col">
+                            <span className="text-xs text-red-600 font-medium">
+                              -{formatPrice(transaction.refund_total)}
+                            </span>
+                            {transaction.refund_status && (
+                              <span className={`text-[10px] font-medium ${
+                                transaction.refund_status === 'full' 
+                                  ? 'text-red-600' 
+                                  : 'text-orange-600'
+                              }`}>
+                                {transaction.refund_status === 'full' ? 'Full' : 'Partial'}
+                              </span>
+                            )}
+                          </div>
+                        ) : (
+                          <span className="text-xs text-gray-400">-</span>
+                        )}
+                      </td>
                       <td className="px-2 py-4 whitespace-nowrap">
                         <span className="text-xs text-gray-900">
                           {transaction.customer_unit !== undefined && transaction.customer_unit !== null
@@ -1671,20 +1767,38 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
 
 interface GrandTotalCardProps {
   totalRevenue: number;
+  totalRefund: number;
   totalCustomerUnit: number;
+  totalTransactionCount: number;
 }
 
-function GrandTotalCard({ totalRevenue, totalCustomerUnit }: GrandTotalCardProps) {
+function GrandTotalCard({ totalRevenue, totalRefund, totalCustomerUnit, totalTransactionCount }: GrandTotalCardProps) {
+  const netRevenue = totalRevenue - totalRefund;
+  
   return (
     <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-4 md:col-span-1">
       <div className="flex items-center gap-2 mb-3">
         <div className="w-3 h-3 bg-purple-500 rounded-full"></div>
         <h3 className="font-semibold text-gray-900 text-sm">Grand Total</h3>
       </div>
-      <div className="text-center">
-        <div className="text-lg font-bold text-gray-900">{formatPrice(totalRevenue)}</div>
-        <div className="text-xs text-gray-600 mt-2">
-          Total Customer Unit: <span className="font-semibold text-gray-900">{totalCustomerUnit}</span>
+      <div className="space-y-1.5">
+        <div className="flex justify-between text-xs">
+          <span className="text-gray-600">Gross:</span>
+          <span className="font-medium text-gray-900">{formatPrice(totalRevenue)}</span>
+        </div>
+        {totalRefund > 0 && (
+          <div className="flex justify-between text-xs">
+            <span className="text-gray-600">Refund:</span>
+            <span className="font-medium text-red-600">-{formatPrice(totalRefund)}</span>
+          </div>
+        )}
+        <div className="flex justify-between text-sm border-t pt-1.5">
+          <span className="font-semibold text-gray-900">Net:</span>
+          <span className="font-bold text-gray-900">{formatPrice(netRevenue)}</span>
+        </div>
+        <div className="flex justify-between text-xs pt-1 border-t">
+          <span className="text-gray-600">Txs/CU:</span>
+          <span className="font-semibold text-gray-900">{totalTransactionCount}/{totalCustomerUnit}</span>
         </div>
       </div>
     </div>

@@ -1,7 +1,7 @@
 'use client';
 
-import { ShoppingCart } from 'lucide-react';
-import { useState } from 'react';
+import { ShoppingCart, Grid3x3, LayoutGrid, Search, X } from 'lucide-react';
+import { useState, useEffect, useMemo } from 'react';
 import Image from 'next/image';
 import ProductCustomizationModal from './ProductCustomizationModal';
 import CustomNoteModal from './CustomNoteModal';
@@ -96,16 +96,18 @@ function ProductCardImage({
   imageUrl,
   productName,
   categoryName,
+  emojiSize = 'text-2xl',
 }: {
   imageUrl: string | null;
   productName: string;
   categoryName?: string | null;
+  emojiSize?: string;
 }) {
   const [hasError, setHasError] = useState(false);
 
   if (!imageUrl || hasError) {
     return (
-      <span className="text-gray-400 text-2xl">
+      <span className={`text-gray-400 ${emojiSize}`}>
         {categoryEmoji(categoryName)}
       </span>
     );
@@ -132,9 +134,11 @@ interface CenterContentProps {
   isLoadingProducts?: boolean;
   isOnline?: boolean;
   selectedOnlinePlatform?: 'qpon' | 'gofood' | 'grabfood' | 'shopeefood' | 'tiktok' | null;
+  searchQuery?: string;
+  setSearchQuery?: (query: string) => void;
 }
 
-export default function CenterContent({ products, cartItems, setCartItems, transactionType, isLoadingProducts = false, isOnline = false, selectedOnlinePlatform = null }: CenterContentProps) {
+export default function CenterContent({ products, cartItems, setCartItems, transactionType, isLoadingProducts = false, isOnline = false, selectedOnlinePlatform = null, searchQuery = '', setSearchQuery }: CenterContentProps) {
   const [showCustomizationModal, setShowCustomizationModal] = useState(false);
   const [showCustomNoteModal, setShowCustomNoteModal] = useState(false);
   const [showEditModal, setShowEditModal] = useState(false);
@@ -144,6 +148,67 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
   const [loadingProductId, setLoadingProductId] = useState<number | null>(null);
   const [showPaymentModal, setShowPaymentModal] = useState(false);
   const [bundleItems, setBundleItems] = useState<BundleItem[]>([]);
+  
+  // Column count state - load from localStorage, default to 5
+  const [columnCount, setColumnCount] = useState<number>(() => {
+    if (typeof window !== 'undefined') {
+      const saved = localStorage.getItem('product-grid-columns');
+      if (saved) {
+        const parsed = parseInt(saved, 10);
+        if (parsed >= 3 && parsed <= 7) {
+          return parsed;
+        }
+      }
+    }
+    return 5;
+  });
+
+  // Save column count to localStorage when it changes
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      localStorage.setItem('product-grid-columns', columnCount.toString());
+    }
+  }, [columnCount]);
+
+  // Calculate responsive sizes based on column count
+  const gridStyles = useMemo(() => {
+    const baseSizes = {
+      3: {
+        gridCols: 'grid-cols-3',
+        colSpan: 'col-span-3',
+        cardPadding: 'p-3',
+        productNameSize: 'text-sm',
+        priceLabelSize: 'text-xs',
+        priceValueSize: 'text-sm',
+        bundleBadgeSize: 'text-xs',
+        bundleBadgePadding: 'px-2 py-1',
+        emojiSize: 'text-3xl',
+      },
+      4: {
+        gridCols: 'grid-cols-4',
+        colSpan: 'col-span-4',
+        cardPadding: 'p-4',
+        productNameSize: 'text-[18.48px]',
+        priceLabelSize: 'text-[15.4px]',
+        priceValueSize: 'text-[18.48px]',
+        bundleBadgeSize: 'text-[15.4px]',
+        bundleBadgePadding: 'px-3 py-1',
+        emojiSize: 'text-[36.96px]',
+      },
+      5: {
+        gridCols: 'grid-cols-5',
+        colSpan: 'col-span-5',
+        cardPadding: 'p-2',
+        productNameSize: 'text-[10.8px]',
+        priceLabelSize: 'text-[10px]',
+        priceValueSize: 'text-xs',
+        bundleBadgeSize: 'text-[10px]',
+        bundleBadgePadding: 'px-1.5 py-0.5',
+        emojiSize: 'text-2xl',
+      },
+    };
+    return baseSizes[columnCount as keyof typeof baseSizes] || baseSizes[5];
+  }, [columnCount]);
 
   // Send cart updates to customer display
   const sendCartUpdate = (cartItems: CartItem[]) => {
@@ -456,7 +521,7 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
   return (
     <div className="flex-1 bg-gray-50 flex">
       {/* Left Side - Cart Area */}
-      <div className="w-[40%] p-4 flex flex-col relative" style={{ height: 'calc(100vh - 80px)', maxHeight: 'calc(100vh - 80px)' }}>
+      <div className="w-[34%] p-4 flex flex-col relative" style={{ height: 'calc(100vh - 80px)', maxHeight: 'calc(100vh - 80px)' }}>
         {/* Top Navigation */}
         <div className="flex items-center justify-between mb-6 flex-shrink-0">
           <div className="flex space-x-2">
@@ -701,7 +766,53 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
       </div>
 
       {/* Right Side - Product Grid */}
-      <div className="w-[60%] p-4 flex flex-col h-full relative">
+      <div className="w-[66%] p-4 flex flex-col h-full relative">
+        {/* Column Count Control and Search */}
+        <div className="flex items-center justify-between mb-3 flex-shrink-0 gap-4">
+          <div className="flex items-center gap-2">
+            <LayoutGrid className="w-4 h-4 text-gray-600" />
+            <span className="text-xs text-gray-600">Columns:</span>
+            <div className="flex items-center gap-1">
+              {[3, 4, 5].map((cols) => (
+                <button
+                  key={cols}
+                  onClick={() => setColumnCount(cols)}
+                  className={`px-2 py-1 text-xs rounded transition-colors ${
+                    columnCount === cols
+                      ? 'bg-blue-600 text-white'
+                      : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
+                  }`}
+                  title={`${cols} columns`}
+                >
+                  {cols}
+                </button>
+              ))}
+            </div>
+          </div>
+          
+          {/* Search Bar */}
+          {setSearchQuery && (
+            <div className="relative flex-1 max-w-xs">
+              <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 w-4 h-4 text-gray-400" />
+              <input
+                type="text"
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                placeholder="Cari produk atau harga..."
+                className="pl-10 pr-10 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 text-sm w-full text-black placeholder:text-gray-400"
+              />
+              {searchQuery && (
+                <button
+                  onClick={() => setSearchQuery('')}
+                  className="absolute right-2 top-1/2 transform -translate-y-1/2 text-gray-400 hover:text-gray-600"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              )}
+            </div>
+          )}
+        </div>
+
         {/* Loading Overlay for Category Switching */}
         {isLoadingProducts && (
           <div className="absolute inset-0 bg-white/80 z-20 flex items-center justify-center rounded-lg">
@@ -713,23 +824,49 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
         )}
         
         {/* Product Grid - Scrollable with Fixed Height */}
-        <div className="overflow-y-auto mb-4" style={{ maxHeight: 'calc(97vh - 200px)' }}>
-          <div className="grid grid-cols-3 gap-3">
+        <div className="overflow-y-auto mb-4" style={{ height: 'calc(97vh)' }}>
+          <div className={`grid ${gridStyles.gridCols} gap-2`}>
             {(() => {
-              const filteredProducts = products.filter((product) => {
+              // First filter by platform/online status
+              let filteredProducts = products.filter((product) => {
                 if (!isOnline) return true;
                 if (!selectedOnlinePlatform) return true;
                 const p = getOnlinePriceForPlatform(product);
                 return !!p && p > 0;
               });
 
+              // Then filter by search query if provided
+              if (searchQuery.trim()) {
+                const query = searchQuery.trim().toLowerCase();
+                const numericQuery = query.replace(/[^\d]/g, ''); // Extract only digits
+                const isNumericQuery = numericQuery.length > 0;
+
+                filteredProducts = filteredProducts.filter((product) => {
+                  // Check product name match (case-insensitive)
+                  const nameMatch = product.nama.toLowerCase().includes(query);
+                  
+                  // Check price match if query contains numbers
+                  let priceMatch = false;
+                  if (isNumericQuery) {
+                    const productPrice = effectiveProductPrice(product);
+                    // Convert price to string and check if it contains the numeric query
+                    const priceString = productPrice.toString();
+                    priceMatch = priceString.includes(numericQuery);
+                  }
+                  
+                  return nameMatch || priceMatch;
+                });
+              }
+
               if (filteredProducts.length === 0 && !isLoadingProducts) {
                 return (
-                  <div className="col-span-3 flex items-center justify-center h-32">
+                  <div className={`${gridStyles.colSpan} flex items-center justify-center h-32`}>
                     <p className="text-gray-500">
-                      {isOnline && selectedOnlinePlatform 
-                        ? `No products available for ${PLATFORM_LABELS[selectedOnlinePlatform]}` 
-                        : 'No products available'}
+                      {searchQuery.trim()
+                        ? 'No products found matching your search'
+                        : isOnline && selectedOnlinePlatform 
+                          ? `No products available for ${PLATFORM_LABELS[selectedOnlinePlatform]}` 
+                          : 'No products available'}
                     </p>
                   </div>
                 );
@@ -743,39 +880,42 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
                 key={product.id}
                   onClick={() => handleProductClick(product)}
                   disabled={loadingProductId === product.id || isDisabledOnline}
-                  className={`bg-white rounded-lg border border-gray-200 p-3 hover:shadow-md transition-shadow w-full text-left relative ${
+                  className={`bg-white rounded-lg border border-gray-200 ${gridStyles.cardPadding} hover:shadow-md transition-shadow w-full text-left relative ${
                     loadingProductId === product.id || isDisabledOnline ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'
                   }`}
               >
                 {/* Loading Overlay */}
                 {loadingProductId === product.id && (
                   <div className="absolute inset-0 bg-white/80 rounded-lg flex items-center justify-center z-10">
-                    <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600"></div>
+                    <div className="animate-spin rounded-full h-6 w-6 border-b-2 border-blue-600"></div>
                   </div>
                 )}
                 
                 {/* Bundle Badge */}
                 {isBundle && (
-                  <div className="absolute top-2 right-2 bg-purple-500 text-white px-2 py-1 rounded-full text-xs font-semibold z-10">
+                  <div className={`absolute top-1 right-1 bg-purple-500 text-white ${gridStyles.bundleBadgePadding} rounded-full ${gridStyles.bundleBadgeSize} font-semibold z-10`}>
                     Bundle
                   </div>
                 )}
                 
-                {/* Product Image */}
-                <div className="relative w-full aspect-square bg-gray-50 rounded-lg mb-3 flex items-center justify-center overflow-hidden">
+                {/* Product Image - 1st Row */}
+                <div className="relative w-full aspect-square bg-gray-50 rounded-lg mb-2 flex items-center justify-center overflow-hidden">
                   <ProductCardImage
                     imageUrl={product.image_url}
                     productName={product.nama}
                     categoryName={product.category2_name}
+                    emojiSize={gridStyles.emojiSize}
                   />
                 </div>
                 
-                {/* Product Info */}
-                <div className="space-y-2">
-                  <h3 className="font-medium text-gray-800 text-sm leading-tight">{product.nama}</h3>
+                {/* Product Info - 2nd Row */}
+                <div className="space-y-1">
+                  {/* Product Name */}
+                    <h3 className={`font-medium text-gray-800 ${gridStyles.productNameSize} leading-tight line-clamp-2`}>{product.nama}</h3>
+                  {/* Price */}
                   <div className="flex items-baseline">
-                    <span className="text-gray-600 text-xs">RP</span>
-                    <span className="text-green-600 font-bold text-base ml-1">
+                    <span className={`text-gray-600 ${gridStyles.priceLabelSize}`}>RP</span>
+                    <span className={`text-green-600 font-bold ${gridStyles.priceValueSize} ml-0.5`}>
                       {effectiveProductPrice(product).toLocaleString('id-ID')}
                     </span>
                   </div>

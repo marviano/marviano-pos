@@ -267,7 +267,12 @@ export default function GantiShift() {
   
   // Tab view states
   const [activeTab, setActiveTab] = useState<TabView>('all-day');
-  const [tabData, setTabData] = useState<Record<string, ReportDataPayload>>({});
+  // const [tabData, setTabData] = useState<Record<string, ReportDataPayload>>({});
+  
+  // Historical date viewing states
+  const [viewMode, setViewMode] = useState<'current' | 'historical'>('current');
+  const [selectedDate, setSelectedDate] = useState<string>(''); // Format: YYYY-MM-DD in GMT+7
+  // const [historicalShifts, setHistoricalShifts] = useState<Shift[]>([]);
   
   const modalInputRef = useRef<HTMLInputElement>(null);
   const autoRefreshIntervalRef = useRef<NodeJS.Timeout | null>(null);
@@ -875,12 +880,101 @@ export default function GantiShift() {
   };
 
   const handleRefresh = () => {
-    if (activeShift) {
+    if (viewMode === 'historical' && selectedDate) {
+      loadHistoricalShifts(selectedDate);
+    } else if (activeShift) {
       loadStatistics();
       checkTodayTransactions();
     } else {
       loadActiveShift();
     }
+  };
+
+  // Get today's date in GMT+7 format (YYYY-MM-DD)
+  const getTodayGmt7 = (): string => {
+    const now = new Date();
+    const gmt7Date = new Date(now.getTime() + (7 * 60 * 60 * 1000));
+    const year = gmt7Date.getUTCFullYear();
+    const month = String(gmt7Date.getUTCMonth() + 1).padStart(2, '0');
+    const day = String(gmt7Date.getUTCDate()).padStart(2, '0');
+    return `${year}-${month}-${day}`;
+  };
+
+  // Load shifts for a specific date
+  const loadHistoricalShifts = useCallback(async (dateStr: string) => {
+    const electronAPI = getElectronAPI();
+    if (!electronAPI?.localDbGetShifts) {
+      setError('Fitur melihat shift historis belum tersedia. Silakan restart aplikasi.');
+      return;
+    }
+
+    try {
+      setIsRefreshing(true);
+      setError(null);
+      
+      // Parse the date string (YYYY-MM-DD) and get day bounds in GMT+7
+      const [year, month, day] = dateStr.split('-').map(Number);
+      const gmt7Offset = 7 * 60 * 60 * 1000;
+      
+      // Create start and end of day in GMT+7
+      const dayStartGmt7 = new Date(Date.UTC(year, month - 1, day, 0, 0, 0, 0));
+      const dayEndGmt7 = new Date(Date.UTC(year, month - 1, day, 23, 59, 59, 999));
+      
+      // Convert to UTC for database query
+      const dayStartUtc = new Date(dayStartGmt7.getTime() - gmt7Offset).toISOString();
+      const dayEndUtc = new Date(dayEndGmt7.getTime() - gmt7Offset).toISOString();
+      
+      const result = await electronAPI.localDbGetShifts({
+        businessId: businessId,
+        startDate: dayStartUtc,
+        endDate: dayEndUtc
+      });
+      
+      const shifts = result?.shifts || [];
+      // setHistoricalShifts(shifts as Shift[]);
+      
+      if (shifts && shifts.length > 0) {
+        // Create shift sequence info for historical view
+        const shiftSeqInfo: ShiftSequenceInfo = {
+          index: 0,
+          total: shifts.length,
+          dayStartUtc: dayStartUtc,
+          dayEndUtc: dayEndUtc,
+          shifts: shifts as Shift[]
+        };
+        setShiftSequenceInfo(shiftSeqInfo);
+        
+        // Load statistics for the first shift by default
+        if (shifts[0]) {
+          setActiveShift(shifts[0] as Shift);
+          setActiveTab((shifts[0] as Shift).id);
+        }
+      } else {
+        setShiftSequenceInfo(null);
+        setActiveShift(null);
+        setError(`Tidak ada shift ditemukan untuk tanggal ${dateStr}`);
+      }
+    } catch (error) {
+      console.error('Error loading historical shifts:', error);
+      setError('Gagal memuat shift historis. Silakan coba lagi.');
+    } finally {
+      setIsRefreshing(false);
+    }
+  }, [businessId]);
+
+  // Handle date selection change
+  const handleDateChange = (dateStr: string) => {
+    setSelectedDate(dateStr);
+    setViewMode('historical');
+    loadHistoricalShifts(dateStr);
+  };
+
+  // Switch back to current/active shift view
+  const handleBackToCurrent = () => {
+    setViewMode('current');
+    setSelectedDate('');
+    // setHistoricalShifts([]);
+    loadActiveShift();
   };
 
   const handlePrintAll = async () => {
@@ -946,7 +1040,7 @@ export default function GantiShift() {
           const dayCash = dayReportData.cashSummary;
           const dayCashSales = dayCash.cash_shift_sales ?? dayCash.cash_shift ?? 0;
           const dayCashRefunds = dayCash.cash_shift_refunds ?? 0;
-          const dailyKasExpected = (dayCash.cash_whole_day ?? dayCash.cash_shift ?? 0) || dayCashSales - dayCashRefunds;
+          // const dailyKasExpected = (dayCash.cash_whole_day ?? dayCash.cash_shift ?? 0) || dayCashSales - dayCashRefunds;
           
           // Get modal awal from first shift
           let modalAwalWholeDay = 0;
@@ -1217,7 +1311,7 @@ export default function GantiShift() {
           userId: shiftOwnerId
         });
         
-        setTabData(prev => ({ ...prev, 'all-day': dayData }));
+        // setTabData(prev => ({ ...prev, 'all-day': dayData }));
         setStatistics(dayData.statistics);
         setPaymentBreakdown(dayData.paymentBreakdown);
         setCategory2Breakdown(dayData.category2Breakdown);
@@ -1238,7 +1332,7 @@ export default function GantiShift() {
           userId: shiftUserId
         });
         
-        setTabData(prev => ({ ...prev, [tabView]: shiftData }));
+        // setTabData(prev => ({ ...prev, [tabView]: shiftData }));
         setStatistics(shiftData.statistics);
         setPaymentBreakdown(shiftData.paymentBreakdown);
         setCategory2Breakdown(shiftData.category2Breakdown);
@@ -1315,6 +1409,8 @@ export default function GantiShift() {
   const cashShiftRefunds = cashSummary.cash_shift_refunds ?? 0;
   const cashWholeDaySales = cashSummary.cash_whole_day_sales ?? cashSummary.cash_whole_day ?? 0;
   const cashWholeDayRefunds = cashSummary.cash_whole_day_refunds ?? 0;
+  const cashNetShift = cashShiftSales - cashShiftRefunds;
+  const cashNetWholeDay = cashWholeDaySales - cashWholeDayRefunds;
   
   // Get the correct modal awal based on active tab
   let kasMulaiActive = 0;
@@ -1360,36 +1456,33 @@ export default function GantiShift() {
   return (
     <div className="flex-1 flex flex-col h-full bg-gray-50 overflow-y-auto">
       {/* Header */}
-      <div className="bg-white border-b border-gray-200 px-6 py-4 flex items-center gap-4">
+      <div className="bg-white border-b border-gray-200 px-6 py-4 flex items-center gap-4 flex-wrap">
         <h1 className="text-2xl font-bold text-gray-800">Ganti Shift</h1>
+        
+        {/* Date Picker for Historical View */}
+        <div className="flex items-center gap-2">
+          {!selectedDate && viewMode === 'current' ? (
+            <span className="px-3 py-2 text-sm font-medium text-gray-700">Hari Ini</span>
+          ) : null}
+          <input
+            type="date"
+            value={selectedDate}
+            max={getTodayGmt7()}
+            onChange={(e) => handleDateChange(e.target.value)}
+            className="px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 text-gray-900 bg-white"
+          />
+          {viewMode === 'historical' && (
+            <button
+              onClick={handleBackToCurrent}
+              className="px-4 py-2 bg-yellow-500 text-white rounded-lg hover:bg-yellow-600 transition-colors text-sm font-medium"
+            >
+              Kembali ke Shift Aktif
+            </button>
+          )}
+        </div>
+        
         {activeShift && (
           <>
-            <button
-              onClick={() => {
-                // Set default to today's date range
-                const now = new Date();
-                const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0);
-                const todayEnd = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59);
-                
-                // Format as YYYY-MM-DDTHH:mm for datetime-local input
-                const formatForInput = (date: Date) => {
-                  const year = date.getFullYear();
-                  const month = String(date.getMonth() + 1).padStart(2, '0');
-                  const day = String(date.getDate()).padStart(2, '0');
-                  const hours = String(date.getHours()).padStart(2, '0');
-                  const minutes = String(date.getMinutes()).padStart(2, '0');
-                  return `${year}-${month}-${day}T${hours}:${minutes}`;
-                };
-                
-                setStartDateTime(formatForInput(todayStart));
-                setEndDateTime(formatForInput(todayEnd));
-                setShowDatePicker(true);
-              }}
-              className="flex items-center space-x-2 px-4 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700 transition-colors"
-            >
-              <Printer className="w-4 h-4" />
-              <span>Print Custom Range</span>
-            </button>
             <button
               onClick={handlePrintAll}
               className="flex items-center space-x-2 px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 transition-colors"
@@ -1397,7 +1490,7 @@ export default function GantiShift() {
               <Printer className="w-4 h-4" />
               <span>Print All</span>
             </button>
-            {isCurrentUsersShift ? (
+            {viewMode === 'current' && isCurrentUsersShift ? (
               <button
                 onClick={handleEndShiftClick}
                 disabled={isEndingShift}
@@ -1406,7 +1499,7 @@ export default function GantiShift() {
                 <StopCircle className="w-5 h-5" />
                 <span>{isEndingShift ? 'Mengakhiri Shift...' : 'End Shift'}</span>
               </button>
-            ) : canForceCloseShift ? (
+            ) : viewMode === 'current' && canForceCloseShift ? (
               <button
                 onClick={handleForceCloseClick}
                 disabled={isEndingShift}
@@ -1415,19 +1508,21 @@ export default function GantiShift() {
                 <StopCircle className="w-5 h-5" />
                 <span>{isEndingShift ? 'Menutup Shift...' : 'Force Close Shift'}</span>
               </button>
-            ) : (
+            ) : viewMode === 'current' ? (
               <div className="flex-1 px-4 py-2 bg-yellow-100 text-yellow-900 rounded-lg text-sm font-semibold flex items-center justify-center">
                 Shift aktif oleh {activeShift.user_name}
               </div>
+            ) : null}
+            {viewMode === 'current' && (
+              <button
+                onClick={handleRefresh}
+                disabled={isRefreshing}
+                className="flex items-center justify-center w-10 h-10 bg-blue-600 text-white rounded-full hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                title="Refresh"
+              >
+                <RefreshCw className={`w-5 h-5 ${isRefreshing ? 'animate-spin' : ''}`} />
+              </button>
             )}
-            <button
-              onClick={handleRefresh}
-              disabled={isRefreshing}
-              className="flex items-center space-x-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-            >
-              <RefreshCw className={`w-4 h-4 ${isRefreshing ? 'animate-spin' : ''}`} />
-              <span>Refresh</span>
-            </button>
           </>
         )}
       </div>
@@ -1462,7 +1557,7 @@ export default function GantiShift() {
         </div>
       )}
 
-      {activeShift && !isCurrentUsersShift && !canForceCloseShift && (
+      {activeShift && viewMode === 'current' && !isCurrentUsersShift && !canForceCloseShift && (
         <div className="mx-6 mt-4 p-4 bg-yellow-50 border border-yellow-200 rounded-lg flex items-start space-x-3">
           <AlertCircle className="w-5 h-5 text-yellow-600 flex-shrink-0 mt-0.5" />
           <div className="flex-1 text-sm text-yellow-900">
@@ -1476,7 +1571,7 @@ export default function GantiShift() {
         </div>
       )}
 
-      {activeShift && !isCurrentUsersShift && canForceCloseShift && (
+      {activeShift && viewMode === 'current' && !isCurrentUsersShift && canForceCloseShift && (
         <div className="mx-6 mt-4 p-4 bg-orange-50 border border-orange-200 rounded-lg flex items-start space-x-3">
           <AlertCircle className="w-5 h-5 text-orange-600 flex-shrink-0 mt-0.5" />
           <div className="flex-1 text-sm text-orange-900">
@@ -1502,8 +1597,8 @@ export default function GantiShift() {
 
       {!isLoadingInitial && (
       <div className="flex-1 px-6 py-6 space-y-6">
-        {/* STATE 1: No Active Shift */}
-        {!activeShift && (
+        {/* STATE 1: No Active Shift (Only show in current mode) */}
+        {!activeShift && viewMode === 'current' && (
           <>
             {/* Modal Awal Input */}
             <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-6">
@@ -1594,8 +1689,8 @@ export default function GantiShift() {
         {/* STATE 2: Active Shift */}
         {activeShift && (
           <>
-            {/* Migration Banner */}
-            {todayTransactionsInfo?.hasTransactions && (
+            {/* Migration Banner - only show in current mode */}
+            {viewMode === 'current' && todayTransactionsInfo?.hasTransactions && (
               <div className="bg-yellow-50 border-l-4 border-yellow-400 p-4 rounded-lg">
                 <div className="flex items-start">
                   <AlertCircle className="w-5 h-5 text-yellow-600 mt-0.5 mr-3 flex-shrink-0" />
@@ -1629,15 +1724,16 @@ export default function GantiShift() {
 
             {/* Tabs for different shift views */}
             {shiftSequenceInfo && shiftSequenceInfo.shifts.length > 0 && (
-              <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-4">
-                <div className="flex items-center space-x-2 overflow-x-auto">
+              <div className="bg-white rounded-lg shadow-sm border border-gray-200 overflow-hidden">
+                {/* Tab buttons */}
+                <div className="flex items-center border-b border-gray-200 overflow-x-auto">
                   {/* All Day Tab */}
                   <button
                     onClick={() => handleTabChange('all-day')}
-                    className={`px-4 py-2 rounded-lg font-medium transition-colors whitespace-nowrap ${
+                    className={`px-6 py-3 font-medium transition-all whitespace-nowrap relative ${
                       activeTab === 'all-day'
-                        ? 'bg-blue-600 text-white'
-                        : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+                        ? 'text-blue-600 bg-blue-50 border-b-2 border-blue-600'
+                        : 'text-gray-600 hover:text-gray-900 hover:bg-gray-50'
                     }`}
                   >
                     All Day
@@ -1648,64 +1744,34 @@ export default function GantiShift() {
                     <button
                       key={shift.id}
                       onClick={() => handleTabChange(shift.id)}
-                      className={`px-4 py-2 rounded-lg font-medium transition-colors whitespace-nowrap ${
+                      className={`px-6 py-3 font-medium transition-all whitespace-nowrap relative ${
                         activeTab === shift.id
-                          ? 'bg-green-600 text-white'
-                          : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+                          ? 'text-green-600 bg-green-50 border-b-2 border-green-600'
+                          : 'text-gray-600 hover:text-gray-900 hover:bg-gray-50'
                       }`}
                     >
                       Shift {idx + 1}
                       {shift.status === 'active' && (
-                        <span className="ml-1 inline-flex items-center">
-                          <span className="w-2 h-2 bg-white rounded-full animate-pulse"></span>
+                        <span className="ml-2 inline-flex items-center">
+                          <span className="w-2 h-2 bg-green-500 rounded-full animate-pulse"></span>
                         </span>
                       )}
                     </button>
                   ))}
                 </div>
                 
-                {/* Tab description */}
-                <div className="mt-3 text-sm text-gray-600">
-                  {activeTab === 'all-day' ? (
-                    <p>Menampilkan data gabungan untuk semua shift hari ini (termasuk Shift 1)</p>
-                  ) : (
-                    (() => {
-                      const shift = shiftSequenceInfo.shifts.find(s => s.id === activeTab);
-                      if (!shift) return null;
-                      const idx = shiftSequenceInfo.shifts.findIndex(s => s.id === activeTab);
-                      return (
-                        <p>
-                          Menampilkan data untuk Shift {idx + 1} - {shift.user_name}
-                          {shift.status === 'active' && <span className="ml-2 text-green-600 font-medium">(Sedang Aktif)</span>}
-                        </p>
-                      );
-                    })()
-                  )}
-                </div>
-              </div>
-            )}
-
-            {/* Shift Info, Modal Awal, Shift Summary, and Cash Summary - Compact 4 columns */}
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
-              {/* Shift Info */}
-              <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-4">
-                <h2 className="text-base font-semibold text-gray-800 mb-3">Shift Info</h2>
-                <div className="space-y-2">
+                {/* Shift Info and Modal Awal row below tabs */}
+                <div className="flex items-center gap-6 px-6 py-3 bg-gray-50">
+                  {/* Shift Info */}
                   {activeTab === 'all-day' ? (
                     <>
-                      <div className="flex items-center justify-between">
-                        <span className="text-sm text-gray-600">Period:</span>
+                      <div className="flex items-center gap-2">
+                        <span className="text-xs text-gray-600">Period:</span>
                         <span className="text-sm font-medium text-black">All Day</span>
                       </div>
-                      <div className="flex items-center justify-between">
-                        <span className="text-sm text-gray-600">Shifts:</span>
+                      <div className="flex items-center gap-2">
+                        <span className="text-xs text-gray-600">Shifts:</span>
                         <span className="text-sm font-medium text-black">{shiftSequenceInfo?.total || 0} shift(s)</span>
-                      </div>
-                      <div className="flex items-center justify-between">
-                        <span className="text-sm text-gray-600">Started:</span>
-                        <span className="text-sm font-medium text-black">
-                          {shiftSequenceInfo?.dayStartUtc ? formatTime(shiftSequenceInfo.dayStartUtc) : '-'}
-                        </span>
                       </div>
                     </>
                   ) : (
@@ -1713,75 +1779,73 @@ export default function GantiShift() {
                       const displayShift = shiftSequenceInfo?.shifts.find(s => s.id === activeTab) || activeShift;
                       return (
                         <>
-                          <div className="flex items-center justify-between">
-                            <span className="text-sm text-gray-600">Cashier:</span>
+                          <div className="flex items-center gap-2">
+                            <span className="text-xs text-gray-600">Cashier:</span>
                             <span className="text-sm font-medium text-black">{displayShift.user_name}</span>
                           </div>
-                          <div className="flex items-center justify-between">
-                            <span className="text-sm text-gray-600">Started:</span>
+                          <div className="flex items-center gap-2">
+                            <span className="text-xs text-gray-600">Started:</span>
                             <span className="text-sm font-medium text-black">{formatTime(displayShift.shift_start)}</span>
                           </div>
-                          <div className="flex items-center justify-between">
-                            <span className="text-sm text-gray-600">Status:</span>
-                            {displayShift.status === 'active' ? (
-                              <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-800">
-                                <span className="w-1.5 h-1.5 bg-green-500 rounded-full mr-1.5"></span>
-                                Aktif
-                              </span>
-                            ) : (
-                              <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-gray-100 text-gray-800">
-                                Selesai
-                              </span>
-                            )}
+                          <div className="flex items-center gap-2">
+                            <span className="text-xs text-gray-600">Ended:</span>
+                            <span className="text-sm font-medium text-black">
+                              {displayShift.shift_end ? formatTime(displayShift.shift_end) : (
+                                <span className="inline-flex items-center text-green-600 text-xs">
+                                  <span className="w-1.5 h-1.5 bg-green-500 rounded-full mr-1 animate-pulse"></span>
+                                  Active
+                                </span>
+                              )}
+                            </span>
                           </div>
                         </>
                       );
                     })()
                   )}
+                  
+                  {/* Modal Awal */}
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs text-gray-600">Modal Awal:</span>
+                    <span className="text-sm font-medium text-black">
+                      {activeTab === 'all-day'
+                        ? formatRupiah(shiftSequenceInfo?.shifts[0]?.modal_awal || 0)
+                        : formatRupiah((shiftSequenceInfo?.shifts.find(s => s.id === activeTab) || activeShift).modal_awal)}
+                    </span>
+                  </div>
                 </div>
               </div>
+            )}
 
-              {/* Modal Awal */}
-              <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-4">
-                <h2 className="text-base font-semibold text-gray-800 mb-3">Modal Awal</h2>
-                <div className="text-xl font-bold text-blue-600">
-                  {activeTab === 'all-day'
-                    ? formatRupiah(shiftSequenceInfo?.shifts[0]?.modal_awal || 0)
-                    : formatRupiah((shiftSequenceInfo?.shifts.find(s => s.id === activeTab) || activeShift).modal_awal)}
-                </div>
-                <p className="text-xs text-gray-500 mt-1">
-                  {activeTab === 'all-day' ? '(dari Shift 1)' : '(saat mulai shift)'}
-                </p>
-              </div>
-
+            {/* Shift Summary and Cash Summary - 2 columns */}
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               {/* Shift Summary */}
-              <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-4">
-                <h2 className="text-base font-semibold text-gray-800 mb-3">Shift Summary</h2>
-                <div className="space-y-2">
+              <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-3">
+                <h2 className="text-sm font-semibold text-gray-800 mb-2">Shift Summary</h2>
+                <div className="space-y-1">
                   <div className="flex items-center justify-between">
-                    <div className="flex items-center space-x-2">
-                      <Package className="w-4 h-4 text-blue-600" />
-                      <span className="text-sm text-gray-600">Pesanan:</span>
+                    <div className="flex items-center space-x-1.5">
+                      <Package className="w-3 h-3 text-blue-600" />
+                      <span className="text-xs text-gray-600">Pesanan:</span>
                     </div>
-                    <span className="text-sm font-semibold text-black">{statistics.order_count} transaksi</span>
+                    <span className="text-xs font-semibold text-black">{statistics.order_count} transaksi</span>
                   </div>
                   <div className="flex items-center justify-between">
-                    <span className="text-sm text-gray-600">Total Transaksi:</span>
-                    <span className="text-sm font-semibold text-black">{formatRupiah(statistics.total_amount)}</span>
+                    <span className="text-xs text-gray-600">Total Transaksi:</span>
+                    <span className="text-xs font-semibold text-black">{formatRupiah(statistics.total_amount)}</span>
                   </div>
                   <div className="flex items-center justify-between">
-                    <div className="flex items-center space-x-2">
-                      <Ticket className="w-4 h-4 text-orange-600" />
-                      <span className="text-sm text-gray-600">Voucher Dipakai:</span>
+                    <div className="flex items-center space-x-1.5">
+                      <Ticket className="w-3 h-3 text-orange-600" />
+                      <span className="text-xs text-gray-600">Voucher Dipakai:</span>
                     </div>
-                    <span className="text-sm font-semibold text-black">{statistics.voucher_count} transaksi</span>
+                    <span className="text-xs font-semibold text-black">{statistics.voucher_count} transaksi</span>
                   </div>
                   <div className="flex items-center justify-between">
-                    <div className="flex items-center space-x-2">
-                      <Ticket className="w-4 h-4 text-green-600" />
-                      <span className="text-sm text-gray-600">Total Diskon Voucher:</span>
+                    <div className="flex items-center space-x-1.5">
+                      <Ticket className="w-3 h-3 text-green-600" />
+                      <span className="text-xs text-gray-600">Total Diskon Voucher:</span>
                     </div>
-                    <span className="text-sm font-semibold text-green-600">
+                    <span className="text-xs font-semibold text-green-600">
                       {statistics.total_discount > 0 ? formatRupiah(-statistics.total_discount) : formatRupiah(0)}
                     </span>
                   </div>
@@ -1789,63 +1853,166 @@ export default function GantiShift() {
               </div>
 
               {/* Cash Summary */}
-              <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-4">
-                <h2 className="text-base font-semibold text-gray-800 mb-3">Cash Summary</h2>
-                <div className="space-y-2">
+              <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-3">
+                <h2 className="text-sm font-semibold text-gray-800 mb-2">Cash Summary</h2>
+                <div className="space-y-1">
                 <div className="flex items-center justify-between">
-                  <span className="text-sm text-gray-600">Kas Mulai:</span>
-                  <span className="text-sm font-semibold text-black">
+                  <span className="text-xs text-gray-600">Kas Mulai:</span>
+                  <span className="text-xs font-semibold text-black">
                     {formatRupiah(activeShift?.modal_awal || 0)}
                   </span>
                 </div>
                   <div className="flex items-center justify-between">
-                    <div className="flex items-center space-x-2">
-                      <Wallet className="w-4 h-4 text-green-600" />
-                      <span className="text-sm text-gray-600">Cash (Shift):</span>
+                    <div className="flex items-center space-x-1.5">
+                      <Wallet className="w-3 h-3 text-green-600" />
+                      <span className="text-xs text-gray-600">Cash (Shift):</span>
                     </div>
-                    <span className="text-sm font-semibold text-black">{formatRupiah(cashSummary.cash_shift)}</span>
+                    <span className="text-xs font-semibold text-black">{formatRupiah(cashSummary.cash_shift)}</span>
                   </div>
                 <div className="flex items-center justify-between">
-                  <span className="text-sm text-gray-600">Cash Refund:</span>
-                  <span className="text-sm font-semibold text-black">
+                  <span className="text-xs text-gray-600">Cash Refund:</span>
+                  <span className="text-xs font-semibold text-black">
                     {formatRupiah(cashSummary.cash_shift_refunds || 0)}
                   </span>
                 </div>
                   <div className="flex items-center justify-between">
-                    <div className="flex items-center space-x-2">
-                      <Wallet className="w-4 h-4 text-blue-600" />
-                      <span className="text-sm text-gray-600">Cash (Hari):</span>
+                    <div className="flex items-center space-x-1.5">
+                      <Wallet className="w-3 h-3 text-blue-600" />
+                      <span className="text-xs text-gray-600">Cash (Hari):</span>
                     </div>
-                    <span className="text-sm font-semibold text-black">{formatRupiah(cashSummary.cash_whole_day)}</span>
+                    <span className="text-xs font-semibold text-black">{formatRupiah(cashSummary.cash_whole_day)}</span>
                   </div>
                 <div className="flex items-center justify-between">
-                  <span className="text-sm text-gray-600">Kas Diharapkan:</span>
-                  <span className="text-sm font-semibold text-black">
+                  <span className="text-xs text-gray-600">Kas Diharapkan:</span>
+                  <span className="text-xs font-semibold text-black">
                     {formatRupiah(kasExpectedDisplay)}
                   </span>
                 </div>
-                <div className="flex items-center justify-between pt-2 border-t border-gray-200">
-                    <div className="flex items-center space-x-2">
-                      <CreditCard className="w-4 h-4 text-purple-600" />
-                      <span className="text-sm font-medium text-gray-800">Cash in Cashier:</span>
+                <div className="flex items-center justify-between pt-1 border-t border-gray-200">
+                    <div className="flex items-center space-x-1.5">
+                      <CreditCard className="w-3 h-3 text-purple-600" />
+                      <span className="text-xs font-medium text-gray-800">Cash in Cashier:</span>
                     </div>
-                    <span className="text-sm font-bold text-purple-600">{formatRupiah(totalCashInCashier)}</span>
+                    <span className="text-xs font-bold text-purple-600">{formatRupiah(totalCashInCashier)}</span>
                   </div>
                 </div>
               </div>
             </div>
 
-            {/* Product Sales Breakdown */}
+            {/* RINGKASAN (Final Summary) */}
             <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-6">
-              <h2 className="text-xl font-semibold text-gray-800 mb-4">Product Sales Breakdown</h2>
+              <h2 className="text-xl font-semibold text-gray-800 mb-3 text-center">RINGKASAN</h2>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                {/* Left Column - Transaction Summary */}
+                <div className="space-y-0">
+                  <h3 className="text-xs font-semibold text-gray-700 mb-2 pb-1 border-b border-gray-300">Transaksi</h3>
+                  <div className="flex justify-between py-0.5">
+                    <span className="text-xs text-gray-700">Total Pesanan:</span>
+                    <span className="text-xs font-semibold text-gray-900">{statistics.order_count} transaksi</span>
+                  </div>
+                  <div className="flex justify-between py-0.5">
+                    <span className="text-xs text-gray-700">Total Transaksi:</span>
+                    <span className="text-xs font-semibold text-gray-900">{formatRupiah(statistics.total_amount)}</span>
+                  </div>
+                  <div className="flex justify-between py-0.5">
+                    <span className="text-xs text-gray-700">Topping Units:</span>
+                    <span className="text-xs font-semibold text-gray-900">
+                      {customizationSales.reduce((sum, c) => sum + c.total_quantity, 0)}
+                    </span>
+                  </div>
+                  <div className="flex justify-between py-0.5">
+                    <span className="text-xs text-gray-700">Total Topping:</span>
+                    <span className="text-xs font-semibold text-gray-900">
+                      {formatRupiah(customizationSales.reduce((sum, c) => sum + c.total_revenue, 0))}
+                    </span>
+                  </div>
+                  <div className="flex justify-between py-0.5">
+                    <span className="text-xs text-gray-700">Voucher Dipakai:</span>
+                    <span className="text-xs font-semibold text-gray-900">{statistics.voucher_count} transaksi</span>
+                  </div>
+                  <div className="flex justify-between py-0.5">
+                    <span className="text-xs text-gray-700">Total Diskon Voucher:</span>
+                    <span className="text-xs font-semibold text-green-600">
+                      {statistics.total_discount > 0 ? formatRupiah(-statistics.total_discount) : formatRupiah(0)}
+                    </span>
+                  </div>
+                </div>
+
+                {/* Right Column - Cash Summary */}
+                <div className="space-y-0">
+                  <h3 className="text-xs font-semibold text-gray-700 mb-2 pb-1 border-b border-gray-300">Kas</h3>
+                  <div className="flex justify-between py-0.5">
+                    <span className="text-xs text-gray-700">Kas Mulai:</span>
+                    <span className="text-xs font-semibold text-gray-900">{formatRupiah(kasMulaiActive)}</span>
+                  </div>
+                  <div className="flex justify-between py-0.5">
+                    <span className="text-xs text-gray-700">Cash Sales (Shift):</span>
+                    <span className="text-xs font-semibold text-gray-900">{formatRupiah(cashShiftSales)}</span>
+                  </div>
+                  <div className="flex justify-between py-0.5">
+                    <span className="text-xs text-gray-700">Cash Refunds (Shift):</span>
+                    <span className="text-xs font-semibold text-red-600">-{formatRupiah(cashShiftRefunds)}</span>
+                  </div>
+                  <div className="flex justify-between py-0.5">
+                    <span className="text-xs text-gray-700">Net Cash (Shift):</span>
+                    <span className="text-xs font-semibold text-gray-900">{formatRupiah(cashNetShift)}</span>
+                  </div>
+                  <div className="flex justify-between py-0.5 border-t border-gray-200 mt-1 pt-1">
+                    <span className="text-xs font-semibold text-gray-800">Kas Diharapkan:</span>
+                    <span className="text-xs font-bold text-purple-700">{formatRupiah(kasExpectedActive)}</span>
+                  </div>
+                  {kasAkhirActive !== null && (
+                    <>
+                      <div className="flex justify-between py-0.5">
+                        <span className="text-xs text-gray-700">Kas Akhir:</span>
+                        <span className="text-xs font-semibold text-gray-900">{formatRupiah(kasAkhirActive)}</span>
+                      </div>
+                      <div className="flex justify-between py-0.5">
+                        <span className="text-xs text-gray-700">Selisih Kas:</span>
+                        <span className={`text-xs font-semibold ${
+                          kasSelisihLabelValue === 'balanced' ? 'text-green-600' :
+                          kasSelisihLabelValue === 'plus' ? 'text-blue-600' : 'text-red-600'
+                        }`}>
+                          {kasSelisihValue !== null ? (
+                            kasSelisihValue > 0 ? `+${formatRupiah(kasSelisihValue)}` : formatRupiah(kasSelisihValue)
+                          ) : '-'}
+                          {kasSelisihLabelValue && ` (${
+                            kasSelisihLabelValue === 'balanced' ? 'Balanced' :
+                            kasSelisihLabelValue === 'plus' ? 'Plus' : 'Minus'
+                          })`}
+                        </span>
+                      </div>
+                    </>
+                  )}
+                  <div className="border-t border-gray-200 mt-1 pt-1">
+                    <div className="flex justify-between py-0.5">
+                      <span className="text-xs text-gray-700">Cash Sales (Whole Day):</span>
+                      <span className="text-xs font-semibold text-gray-900">{formatRupiah(cashWholeDaySales)}</span>
+                    </div>
+                    <div className="flex justify-between py-0.5">
+                      <span className="text-xs text-gray-700">Cash Refunds (Whole Day):</span>
+                      <span className="text-xs font-semibold text-red-600">-{formatRupiah(cashWholeDayRefunds)}</span>
+                    </div>
+                    <div className="flex justify-between py-0.5">
+                      <span className="text-xs text-gray-700">Net Cash (Whole Day):</span>
+                      <span className="text-xs font-semibold text-gray-900">{formatRupiah(cashNetWholeDay)}</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* BARANG TERJUAL */}
+            <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-4">
+              <h2 className="text-base font-semibold text-gray-800 mb-2 text-center">BARANG TERJUAL</h2>
               <div className="overflow-x-auto">
-                <table className="w-full">
+                <table className="w-full text-xs">
                   <thead>
-                    <tr className="border-b border-gray-200">
-                      <th className="text-left py-3 px-4 font-semibold text-gray-700">Product</th>
-                      <th className="text-right py-3 px-4 font-semibold text-gray-700">Quantity</th>
-                      <th className="text-right py-3 px-4 font-semibold text-gray-700">Unit Price</th>
-                      <th className="text-right py-3 px-4 font-semibold text-gray-700">Subtotal</th>
+                    <tr className="border-b-2 border-gray-300">
+                      <th className="text-left py-1 px-2 font-semibold text-gray-700">Product</th>
+                      <th className="text-right py-1 px-2 font-semibold text-gray-700">Qty</th>
+                      <th className="text-right py-1 px-2 font-semibold text-gray-700">Unit Price</th>
+                      <th className="text-right py-1 px-2 font-semibold text-gray-700">Subtotal</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -1853,19 +2020,19 @@ export default function GantiShift() {
                       <>
                         {productSales.map((product, idx) => (
                           <tr key={`${product.product_id}-${product.platform}-${product.transaction_type}-${idx}`} className="border-b border-gray-200 hover:bg-gray-50">
-                            <td className="py-3 px-4 font-medium">
+                            <td className="py-1 px-2 font-medium">
                               <div className="text-gray-900">
-                                {product.is_bundle_item && <span className="text-xs font-semibold text-purple-600">[Bundle] </span>}
+                                {product.is_bundle_item && <span className="text-[10px] font-semibold text-purple-600">[Bundle] </span>}
                                 {product.product_name}
                               </div>
-                              <div className="text-xs text-gray-700">
+                              <div className="text-[10px] text-gray-600">
                                 {product.transaction_type === 'drinks' ? 'Drinks' : 'Bakery'}
                                 {' · '}
                                 {formatPlatformLabel(product.platform)}
                               </div>
                             </td>
-                            <td className="py-3 px-4 text-right font-medium text-gray-900">{product.total_quantity}</td>
-                            <td className="py-3 px-4 text-right font-medium">
+                            <td className="py-1 px-2 text-right font-medium text-gray-900">{product.total_quantity}</td>
+                            <td className="py-1 px-2 text-right font-medium">
                               {product.is_bundle_item ? (
                                 <span className="text-gray-700">-</span>
                               ) : (
@@ -1877,7 +2044,7 @@ export default function GantiShift() {
                                 </span>
                               )}
                             </td>
-                            <td className="py-3 px-4 text-right font-semibold">
+                            <td className="py-1 px-2 text-right font-semibold">
                               {product.is_bundle_item ? (
                                 <span className="text-gray-700">-</span>
                               ) : (
@@ -1888,12 +2055,12 @@ export default function GantiShift() {
                             </td>
                           </tr>
                         ))}
-                        <tr className="border-t-2 border-gray-300 bg-gray-50">
-                          <td className="py-3 px-4 font-bold text-gray-900">TOTAL</td>
-                          <td className="py-3 px-4 text-right font-bold text-gray-900">
+                        <tr className="border-t-2 border-gray-300 bg-gray-100">
+                          <td className="py-1 px-2 font-bold text-gray-900">TOTAL</td>
+                          <td className="py-1 px-2 text-right font-bold text-gray-900">
                             {productSales.reduce((sum, p) => sum + p.total_quantity, 0)}
                           </td>
-                          <td className="py-3 px-4 text-right font-bold">
+                          <td className="py-1 px-2 text-right font-bold">
                           {(() => {
                             const regularProducts = productSales.filter(p => !p.is_bundle_item);
                             const totalsByKey = regularProducts.reduce((acc, product) => {
@@ -1918,26 +2085,17 @@ export default function GantiShift() {
                                 </div>
                               );
                             });
-                            const totalQty = regularProducts.reduce((sum, p) => sum + p.total_quantity, 0);
-                            const totalBase = regularProducts.reduce((sum, p) => sum + p.base_subtotal, 0);
-                            const overallUnitPrice = totalQty > 0 ? totalBase / totalQty : 0;
-                            rows.push(
-                              <div key="overall" className="flex justify-between text-sm font-semibold text-gray-900">
-                                <span>Overall</span>
-                                <span>{formatRupiah(overallUnitPrice)}</span>
-                              </div>
-                            );
                             return rows;
                           })()}
                           </td>
-                          <td className="py-3 px-4 text-right font-bold text-gray-900">
+                          <td className="py-1 px-2 text-right font-bold text-gray-900">
                             {formatRupiah(productSales.filter(p => !p.is_bundle_item).reduce((sum, p) => sum + p.base_subtotal, 0))}
                           </td>
                         </tr>
                       </>
                     ) : (
                       <tr>
-                        <td colSpan={4} className="py-8 text-center text-gray-500">
+                        <td colSpan={4} className="py-4 text-center text-gray-500 text-xs">
                           Belum ada produk yang terjual
                         </td>
                       </tr>
@@ -1947,16 +2105,102 @@ export default function GantiShift() {
               </div>
             </div>
 
-            {/* Customization Sales Breakdown */}
-            <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-6">
-              <h2 className="text-xl font-semibold text-gray-800 mb-4">Customization Sales Breakdown</h2>
+            {/* Payment Method Breakdown */}
+            <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-4">
+              <h2 className="text-base font-semibold text-gray-800 mb-2 text-center">PAYMENT METHOD</h2>
               <div className="overflow-x-auto">
-                <table className="w-full">
+                <table className="w-full text-xs">
                   <thead>
-                    <tr className="border-b border-gray-200">
-                      <th className="text-left py-3 px-4 font-semibold text-gray-700">Customization</th>
-                      <th className="text-right py-3 px-4 font-semibold text-gray-700">Quantity</th>
-                      <th className="text-right py-3 px-4 font-semibold text-gray-700">Revenue</th>
+                    <tr className="border-b-2 border-gray-300">
+                      <th className="text-left py-1 px-2 font-semibold text-gray-700">Payment Method</th>
+                      <th className="text-right py-1 px-2 font-semibold text-gray-700">Count</th>
+                      <th className="text-right py-1 px-2 font-semibold text-gray-700">Total</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {paymentBreakdown.length > 0 ? (
+                      <>
+                        {paymentBreakdown.map((item, idx) => (
+                          <tr key={idx} className="border-b border-gray-100 hover:bg-gray-50">
+                            <td className="py-1 px-2 text-gray-900 font-medium">{item.payment_method_name || item.payment_method_code}</td>
+                            <td className="py-1 px-2 text-right font-medium text-gray-900">{item.transaction_count}</td>
+                            <td className="py-1 px-2 text-right font-semibold text-gray-900">{formatRupiah(item.total_amount)}</td>
+                          </tr>
+                        ))}
+                        <tr className="border-t-2 border-gray-300 bg-gray-100">
+                          <td className="py-1 px-2 font-bold text-gray-900">TOTAL</td>
+                          <td className="py-1 px-2 text-right font-bold text-gray-900">{totalPaymentCount}</td>
+                          <td className="py-1 px-2 text-right font-bold text-gray-900">
+                            {formatRupiah(paymentBreakdown.reduce((sum, item) => sum + item.total_amount, 0))}
+                          </td>
+                        </tr>
+                      </>
+                    ) : (
+                      <tr>
+                        <td colSpan={3} className="py-4 text-center text-gray-500 text-xs">
+                          Belum ada transaksi
+                        </td>
+                      </tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+            {/* CATEGORY II */}
+            <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-4">
+              <h2 className="text-base font-semibold text-gray-800 mb-2 text-center">CATEGORY II</h2>
+              <div className="overflow-x-auto">
+                <table className="w-full text-xs">
+                  <thead>
+                    <tr className="border-b-2 border-gray-300">
+                      <th className="text-left py-1 px-2 font-semibold text-gray-700">Category II</th>
+                      <th className="text-right py-1 px-2 font-semibold text-gray-700">Quantity</th>
+                      <th className="text-right py-1 px-2 font-semibold text-gray-700">Total</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {category2Breakdown.length > 0 ? (
+                      <>
+                        {category2Breakdown.map((item, idx) => (
+                          <tr key={idx} className="border-b border-gray-100 hover:bg-gray-50">
+                            <td className="py-1 px-2 text-gray-900 font-medium">{item.category2_name}</td>
+                            <td className="py-1 px-2 text-right font-medium text-gray-900">{item.total_quantity}</td>
+                            <td className="py-1 px-2 text-right font-semibold text-gray-900">{formatRupiah(item.total_amount)}</td>
+                          </tr>
+                        ))}
+                        <tr className="border-t-2 border-gray-300 bg-gray-100">
+                          <td className="py-1 px-2 font-bold text-gray-900">TOTAL</td>
+                          <td className="py-1 px-2 text-right font-bold text-gray-900">
+                            {category2Breakdown.reduce((sum, item) => sum + item.total_quantity, 0)}
+                          </td>
+                          <td className="py-1 px-2 text-right font-bold text-gray-900">
+                            {formatRupiah(category2Breakdown.reduce((sum, item) => sum + item.total_amount, 0))}
+                          </td>
+                        </tr>
+                      </>
+                    ) : (
+                      <tr>
+                        <td colSpan={3} className="py-4 text-center text-gray-500">
+                          Tidak ada Category II
+                        </td>
+                      </tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+            {/* TOPPING SALES BREAKDOWN */}
+            <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-4">
+              <h2 className="text-base font-semibold text-gray-800 mb-2 text-center">TOPPING SALES BREAKDOWN</h2>
+              <div className="overflow-x-auto">
+                <table className="w-full text-xs">
+                  <thead>
+                    <tr className="border-b-2 border-gray-300">
+                      <th className="text-left py-1 px-2 font-semibold text-gray-700">Customization</th>
+                      <th className="text-right py-1 px-2 font-semibold text-gray-700">Qty</th>
+                      <th className="text-right py-1 px-2 font-semibold text-gray-700">Revenue</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -1964,27 +2208,27 @@ export default function GantiShift() {
                       <>
                         {customizationSales.map((item, idx) => (
                           <tr key={idx} className="border-b border-gray-200 hover:bg-gray-50">
-                            <td className="py-3 px-4">
+                            <td className="py-1 px-2">
                               <div className="font-medium text-gray-900">{item.option_name}</div>
-                              <div className="text-xs text-gray-700">{item.customization_name}</div>
+                              <div className="text-[10px] text-gray-600">{item.customization_name}</div>
                             </td>
-                            <td className="py-3 px-4 text-right font-medium text-gray-900">{item.total_quantity}</td>
-                            <td className="py-3 px-4 text-right font-semibold text-gray-900">{formatRupiah(item.total_revenue)}</td>
+                            <td className="py-1 px-2 text-right font-medium text-gray-900">{item.total_quantity}</td>
+                            <td className="py-1 px-2 text-right font-semibold text-gray-900">{formatRupiah(item.total_revenue)}</td>
                           </tr>
                         ))}
-                        <tr className="border-t-2 border-gray-300 bg-gray-50">
-                          <td className="py-3 px-4 font-bold text-gray-900">TOTAL</td>
-                          <td className="py-3 px-4 text-right font-bold text-gray-900">
+                        <tr className="border-t-2 border-gray-300 bg-gray-100">
+                          <td className="py-1 px-2 font-bold text-gray-900">TOTAL</td>
+                          <td className="py-1 px-2 text-right font-bold text-gray-900">
                             {customizationSales.reduce((sum, item) => sum + item.total_quantity, 0)}
                           </td>
-                          <td className="py-3 px-4 text-right font-bold text-gray-900">
+                          <td className="py-1 px-2 text-right font-bold text-gray-900">
                             {formatRupiah(customizationSales.reduce((sum, item) => sum + item.total_revenue, 0))}
                           </td>
                         </tr>
                       </>
                     ) : (
                       <tr>
-                        <td colSpan={3} className="py-8 text-center text-gray-500">
+                        <td colSpan={3} className="py-4 text-center text-gray-500">
                           Belum ada kustomisasi terjual
                         </td>
                       </tr>
@@ -1994,38 +2238,22 @@ export default function GantiShift() {
               </div>
             </div>
 
-            {/* Payment Method Breakdown */}
-            <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-6">
-              <h2 className="text-xl font-semibold text-gray-800 mb-4">Payment Method Breakdown</h2>
+            {/* DISKON & VOUCHER */}
+            <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-4">
+              <h2 className="text-base font-semibold text-gray-800 mb-2 text-center">DISKON & VOUCHER</h2>
               <div className="overflow-x-auto">
-                <table className="w-full">
-                  <thead>
-                    <tr className="border-b border-gray-200">
-                      <th className="text-left py-3 px-4 font-semibold text-gray-700">Payment Method</th>
-                      <th className="text-right py-3 px-4 font-semibold text-gray-700">Count</th>
-                    </tr>
-                  </thead>
+                <table className="w-full text-xs">
                   <tbody>
-                    {paymentBreakdown.length > 0 ? (
-                      <>
-                        {paymentBreakdown.map((item, idx) => (
-                          <tr key={idx} className="border-b border-gray-100">
-                            <td className="py-3 px-4 text-gray-900 font-medium">{item.payment_method_name || item.payment_method_code}</td>
-                            <td className="py-3 px-4 text-right font-medium text-gray-900">{item.transaction_count}</td>
-                          </tr>
-                        ))}
-                        <tr className="border-t-2 border-gray-300 bg-gray-50">
-                          <td className="py-3 px-4 font-bold text-gray-900">TOTAL</td>
-                          <td className="py-3 px-4 text-right font-bold text-gray-900">{totalPaymentCount}</td>
-                        </tr>
-                      </>
-                    ) : (
-                      <tr>
-                        <td colSpan={2} className="py-8 text-center text-gray-500">
-                          Belum ada transaksi
-                        </td>
-                      </tr>
-                    )}
+                    <tr className="border-b border-gray-200 hover:bg-gray-50">
+                      <td className="py-1 px-2 text-gray-900 font-medium">Voucher Digunakan</td>
+                      <td className="py-1 px-2 text-right font-semibold text-gray-900">{statistics.voucher_count} transaksi</td>
+                    </tr>
+                    <tr className="border-b border-gray-200 hover:bg-gray-50">
+                      <td className="py-1 px-2 text-gray-900 font-medium">Total Diskon Voucher</td>
+                      <td className="py-1 px-2 text-right font-semibold text-green-600">
+                        {statistics.total_discount > 0 ? formatRupiah(-statistics.total_discount) : formatRupiah(0)}
+                      </td>
+                    </tr>
                   </tbody>
                 </table>
               </div>

@@ -44,7 +44,7 @@ export interface Category {
 export async function fetchProducts(
   category2Name?: string,
   transactionType?: 'drinks' | 'bakery',
-  options?: { isOnline?: boolean, forceOnline?: boolean, platform?: 'qpon' | 'gofood' | 'grabfood' | 'shopeefood' | 'tiktok' }
+  options?: { isOnline?: boolean, forceOnline?: boolean, platform?: 'qpon' | 'gofood' | 'grabfood' | 'shopeefood' | 'tiktok', businessId?: number }
 ): Promise<Product[]> {
 
   // If we're in offline mode (isOnline is false), skip API call entirely
@@ -68,6 +68,7 @@ export async function fetchProducts(
         const backgroundRefresh = async () => {
           try {
             let url = category2Name ? getApiUrl(`/api/products?category2_name=${encodeURIComponent(category2Name)}`) : getApiUrl('/api/products');
+            if (options?.businessId) url += (url.includes('?') ? '&' : '?') + `businessId=${options.businessId}`;
             if (transactionType) url += (url.includes('?') ? '&' : '?') + `transaction_type=${transactionType}`;
             if (options?.isOnline) url += (url.includes('?') ? '&' : '?') + `online=true`;
             if (options?.platform) url += (url.includes('?') ? '&' : '?') + `platform=${options.platform}`;
@@ -99,6 +100,9 @@ export async function fetchProducts(
   try {
     // Try online fetch first
     let url = category2Name ? getApiUrl(`/api/products?category2_name=${encodeURIComponent(category2Name)}`) : getApiUrl('/api/products');
+    if (options?.businessId) {
+      url += (url.includes('?') ? '&' : '?') + `businessId=${options.businessId}`;
+    }
     if (transactionType) {
       url += (url.includes('?') ? '&' : '?') + `transaction_type=${transactionType}`;
     }
@@ -230,7 +234,7 @@ async function fetchFromLocalDatabase(
  */
 export async function fetchCategories(
   transactionType?: 'drinks' | 'bakery',
-  options?: { isOnline?: boolean, platform?: 'qpon' | 'gofood' | 'grabfood' | 'shopeefood' | 'tiktok' }
+  options?: { isOnline?: boolean, platform?: 'qpon' | 'gofood' | 'grabfood' | 'shopeefood' | 'tiktok', businessId?: number }
 ): Promise<Category[]> {
   console.log('🔍 [FETCH CATEGORIES] Starting fetch with params:', {
     transactionType,
@@ -247,14 +251,21 @@ export async function fetchCategories(
   try {
     // Try online fetch first
     let url = getApiUrl('/api/categories');
+    const params = new URLSearchParams();
+    if (options?.businessId) {
+      params.append('businessId', String(options.businessId));
+    }
     if (transactionType) {
-      url += `?transaction_type=${transactionType}`;
+      params.append('transaction_type', transactionType);
     }
     if (options?.isOnline) {
-      url += (url.includes('?') ? '&' : '?') + `online=true`;
+      params.append('online', 'true');
     }
     if (options?.platform) {
-      url += (url.includes('?') ? '&' : '?') + `platform=${options.platform}`;
+      params.append('platform', options.platform);
+    }
+    if (params.toString()) {
+      url += '?' + params.toString();
     }
     
     console.log('🌐 [ONLINE FETCH] Making API request to:', url);

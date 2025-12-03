@@ -790,10 +790,17 @@ export default function PaymentModal({
           await electronAPI.localDbUpsertTransactions?.([sqliteTransactionData]);
           await electronAPI.localDbUpsertTransactionItems?.(transactionItems);
 
-          // If online save failed or was skipped (offline), queue for background sync
-          if (!onlineResult) {
-            console.log('🔄 Queuing transaction for background sync...');
-            await smartSyncService.queueTransaction(transactionData);
+          // ALWAYS queue transaction for safety - even if online save appeared to succeed
+          // This prevents data loss if online save partially failed or network issues occurred
+          console.log('🔄 Queuing transaction for background sync (safety measure)...');
+          const queueResult = await smartSyncService.queueTransaction(transactionData);
+          
+          // If online save succeeded, immediately mark as synced to prevent duplicate uploads
+          if (onlineResult && queueResult.success && queueResult.offlineTransactionId) {
+            console.log('✅ Online save succeeded - marking queued transaction as synced');
+            await electronAPI.localDbMarkTransactionSynced?.(queueResult.offlineTransactionId);
+          } else if (!onlineResult) {
+            console.log('⚠️ Online save failed - transaction will be synced by SmartSync');
           }
           
         } else {
@@ -1214,13 +1221,26 @@ export default function PaymentModal({
             return chunks.length > 0 ? chunks : [customizationText];
           };
           
-          // Print label for each unit of each cart item
+          // Collect all labels first, then print in batch
+          const allLabels: Array<{
+            printerType: string;
+            counter: number;
+            itemNumber: number;
+            totalItems: number;
+            pickupMethod: string;
+            productName: string;
+            customizations: string;
+            customNote: string;
+            orderTime: string;
+            labelContinuation?: string;
+          }> = [];
+          
           for (const item of cartItems) {
             // Check if this is a bundle product
             const isBundle = item.bundleSelections && item.bundleSelections.length > 0;
             
             if (isBundle) {
-              // For bundle products, print labels for each selected product
+              // For bundle products, collect labels for each selected product
               for (const bundleSel of item.bundleSelections!) {
                 for (const selectedProduct of bundleSel.selectedProducts) {
                   // Calculate total quantity (bundle quantity × selected product quantity)
@@ -1246,7 +1266,7 @@ export default function PaymentModal({
                   const customizationText = allOptions.join('/');
                   const customizationChunks = splitCustomizations(customizationText);
                   
-                  // Print one label per unit of each selected product
+                  // Collect one label per unit of each selected product
                   for (let qty = 0; qty < totalQty; qty++) {
                     currentItemNumber++;
                     
@@ -1256,7 +1276,7 @@ export default function PaymentModal({
                       const totalLabels = customizationChunks.length;
 
                       // Prepare label data for bundle selected product
-                      const labelData = {
+                      allLabels.push({
                         printerType: 'labelPrinter',
                         counter: labelCounter,
                         itemNumber: currentItemNumber,
@@ -1267,15 +1287,7 @@ export default function PaymentModal({
                         customNote: '',
                         orderTime: transactionData.created_at,
                         labelContinuation: isMultiLabel ? `${labelNumber}/${totalLabels}` : undefined
-                      };
-                      
-                      // Print label with delay between prints
-                      await new Promise(resolve => setTimeout(resolve, 300));
-                      const labelResult = await window.electronAPI?.printLabel?.(labelData);
-                      if (!isSuccessResponse(labelResult) || !labelResult.success) {
-                        const errorMessage = isSuccessResponse(labelResult) ? labelResult.error : undefined;
-                        console.error(`❌ Bundle label print failed:`, errorMessage);
-                      }
+                      });
                     }
                   }
                 }
@@ -1302,18 +1314,18 @@ export default function PaymentModal({
               // Split customizations into chunks if too long
               const customizationChunks = splitCustomizations(customizationText);
               
-              // Print one label per quantity, and if customizations are split, multiple labels per unit
+              // Collect one label per quantity, and if customizations are split, multiple labels per unit
               for (let qty = 0; qty < item.quantity; qty++) {
                 currentItemNumber++;
                 
-                // Print each chunk as a separate label
+                // Collect each chunk as a separate label
                 for (let chunkIndex = 0; chunkIndex < customizationChunks.length; chunkIndex++) {
                   const isMultiLabel = customizationChunks.length > 1;
                   const labelNumber = chunkIndex + 1;
                   const totalLabels = customizationChunks.length;
                   
                   // Prepare label data
-                  const labelData = {
+                  allLabels.push({
                     printerType: 'labelPrinter',
                     counter: labelCounter,
                     itemNumber: currentItemNumber,
@@ -1324,17 +1336,25 @@ export default function PaymentModal({
                     customNote: '', // No longer used separately
                     orderTime: transactionData.created_at,
                     labelContinuation: isMultiLabel ? `${labelNumber}/${totalLabels}` : undefined
-                  };
-                  
-                  // Print label with delay between prints
-                  await new Promise(resolve => setTimeout(resolve, 300));
-                  const labelResult = await window.electronAPI?.printLabel?.(labelData);
-                  if (!isSuccessResponse(labelResult) || !labelResult.success) {
-                    const errorMessage = isSuccessResponse(labelResult) ? labelResult.error : undefined;
-                    console.error(`❌ Label print failed:`, errorMessage);
-                  }
+                  });
                 }
               }
+            }
+          }
+          
+          // Print all labels in a single batch
+          if (allLabels.length > 0) {
+            console.log(`🏷️ Printing ${allLabels.length} labels in batch...`);
+            const batchResult = await window.electronAPI?.printLabelsBatch?.({
+              labels: allLabels,
+              printerType: 'labelPrinter'
+            });
+            
+            if (!isSuccessResponse(batchResult) || !batchResult.success) {
+              const errorMessage = isSuccessResponse(batchResult) ? batchResult.error : undefined;
+              console.error(`❌ Batch label print failed:`, errorMessage);
+            } else {
+              console.log(`✅ Successfully printed ${allLabels.length} labels in batch`);
             }
           }
         } catch (labelError) {

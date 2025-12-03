@@ -7,6 +7,7 @@ electron_1.contextBridge.exposeInMainWorld('electronAPI', {
     // POS functionality
     printReceipt: (data) => electron_1.ipcRenderer.invoke('print-receipt', data),
     printLabel: (data) => electron_1.ipcRenderer.invoke('print-label', data),
+    printLabelsBatch: (data) => electron_1.ipcRenderer.invoke('print-labels-batch', data),
     openCashDrawer: () => electron_1.ipcRenderer.invoke('open-cash-drawer'),
     playSound: (soundType) => electron_1.ipcRenderer.invoke('play-sound', soundType),
     // System printers
@@ -107,6 +108,9 @@ electron_1.contextBridge.exposeInMainWorld('electronAPI', {
     // Transaction Items
     localDbUpsertTransactionItems: (rows) => electron_1.ipcRenderer.invoke('localdb-upsert-transaction-items', rows),
     localDbGetTransactionItems: (transactionId) => electron_1.ipcRenderer.invoke('localdb-get-transaction-items', transactionId),
+    localDbGetTransactionItemCustomizationsNormalized: (transactionId) => electron_1.ipcRenderer.invoke('localdb-get-transaction-item-customizations-normalized', transactionId),
+    localDbUpsertTransactionItemCustomizations: (rows) => electron_1.ipcRenderer.invoke('localdb-upsert-transaction-item-customizations', rows),
+    localDbUpsertTransactionItemCustomizationOptions: (rows) => electron_1.ipcRenderer.invoke('localdb-upsert-transaction-item-customization-options', rows),
     localDbGetTransactionRefunds: (transactionUuid) => electron_1.ipcRenderer.invoke('localdb-get-transaction-refunds', transactionUuid),
     localDbUpsertTransactionRefunds: (rows) => electron_1.ipcRenderer.invoke('localdb-upsert-transaction-refunds', rows),
     localDbApplyTransactionRefund: (payload) => electron_1.ipcRenderer.invoke('localdb-apply-transaction-refund', payload),
@@ -161,6 +165,7 @@ electron_1.contextBridge.exposeInMainWorld('electronAPI', {
     localDbGetShiftUsers: (businessId) => electron_1.ipcRenderer.invoke('localdb-get-shift-users', businessId),
     localDbGetUnsyncedShifts: (businessId) => electron_1.ipcRenderer.invoke('localdb-get-unsynced-shifts', businessId),
     localDbMarkShiftsSynced: (shiftIds) => electron_1.ipcRenderer.invoke('localdb-mark-shifts-synced', shiftIds),
+    localDbUpsertShifts: (rows) => electron_1.ipcRenderer.invoke('localdb-upsert-shifts', rows),
     localDbCheckTodayTransactions: (userId, shiftStart, businessId) => electron_1.ipcRenderer.invoke('localdb-check-today-transactions', userId, shiftStart, businessId),
     localDbUpdateShiftStart: (shiftId, newStartTime) => electron_1.ipcRenderer.invoke('localdb-update-shift-start', shiftId, newStartTime),
     localDbGetProductSales: (userId, shiftStart, shiftEnd, businessId) => electron_1.ipcRenderer.invoke('localdb-get-product-sales', userId, shiftStart, shiftEnd, businessId),

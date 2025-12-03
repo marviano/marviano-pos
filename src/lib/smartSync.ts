@@ -1,5 +1,6 @@
 import { conflictResolutionService } from './conflictResolution';
 import { getApiUrl } from '@/lib/api';
+import { getAutoSyncEnabled, onAutoSyncSettingChanged } from './autoSyncSettings';
 
 type UnknownRecord = Record<string, unknown>;
 
@@ -81,10 +82,14 @@ class SmartSyncService {
   private lastSyncTime: number = 0;
   private consecutiveFailures: number = 0;
   private serverLoadHistory: number[] = [];
+  private autoSyncEnabled: boolean = true;
+  private settingChangeUnsubscribe: (() => void) | null = null;
 
   constructor() {
     console.log('🚀 [SMART SYNC] Service initialized');
+    this.autoSyncEnabled = getAutoSyncEnabled();
     this.startMonitoring();
+    this.setupSettingListener();
   }
 
   /**
@@ -94,9 +99,13 @@ class SmartSyncService {
     // Monitor online status changes
     if (typeof window !== 'undefined') {
       window.addEventListener('online', () => {
-        console.log('🌐 [SMART SYNC] Online detected - starting smart sync');
+        console.log('🌐 [SMART SYNC] Online detected');
         this.isOnline = true;
-        this.startSmartSync();
+        if (this.autoSyncEnabled) {
+          this.startSmartSync();
+        } else {
+          console.log('⏸️ [SMART SYNC] Auto-sync is disabled - not starting');
+        }
       });
 
       window.addEventListener('offline', () => {
@@ -107,9 +116,31 @@ class SmartSyncService {
 
       // Initial check
       this.isOnline = navigator.onLine;
-      if (this.isOnline) {
+      if (this.isOnline && this.autoSyncEnabled) {
         this.startSmartSync();
+      } else if (this.isOnline && !this.autoSyncEnabled) {
+        console.log('⏸️ [SMART SYNC] Auto-sync is disabled - not starting');
       }
+    }
+  }
+
+  /**
+   * Setup listener for auto-sync setting changes
+   */
+  private setupSettingListener() {
+    if (typeof window !== 'undefined') {
+      this.settingChangeUnsubscribe = onAutoSyncSettingChanged((enabled) => {
+        console.log(`🔄 [SMART SYNC] Auto-sync setting changed: ${enabled ? 'ENABLED' : 'DISABLED'}`);
+        this.autoSyncEnabled = enabled;
+        
+        if (enabled && this.isOnline) {
+          // Setting enabled and we're online - start sync
+          this.startSmartSync();
+        } else {
+          // Setting disabled - stop sync
+          this.stopSmartSync();
+        }
+      });
     }
   }
 
@@ -117,6 +148,12 @@ class SmartSyncService {
    * Start smart sync with intelligent timing
    */
   private startSmartSync() {
+    // Check if auto-sync is enabled
+    if (!this.autoSyncEnabled) {
+      console.log('⏸️ [SMART SYNC] Auto-sync is disabled - not starting');
+      return;
+    }
+
     if (this.syncTimer) {
       clearInterval(this.syncTimer);
     }
@@ -130,7 +167,7 @@ class SmartSyncService {
 
     // Start regular sync interval
     this.syncTimer = setInterval(() => {
-      if (this.isOnline && !this.isSyncing) {
+      if (this.isOnline && !this.isSyncing && this.autoSyncEnabled) {
         this.syncPendingTransactions();
       }
     }, this.config.syncInterval);
@@ -185,6 +222,13 @@ class SmartSyncService {
         if (batches.length > 1) {
           await this.delay(2000); // 2 second delay between batches
         }
+      }
+
+      // Also sync shifts
+      try {
+        await this.syncPendingShifts();
+      } catch (error) {
+        console.warn('⚠️ [SMART SYNC] Shift sync failed:', error);
       }
 
       // Also sync printer audits
@@ -350,6 +394,58 @@ class SmartSyncService {
           object_stringified: typeof paymentMethodValue === 'object' ? JSON.stringify(paymentMethodValue) : 'N/A',
         });
         console.log(`🔍 [DEBUG] Full transaction data (first 500 chars):`, JSON.stringify(transactionData).substring(0, 500));
+        
+        // Fetch transaction items and normalized customizations from actual database tables
+        // This ensures we get the latest data with UUIDs and proper structure
+        const electronAPI = typeof window !== 'undefined' ? (window as { electronAPI?: UnknownRecord }).electronAPI : undefined;
+        if (electronAPI?.localDbGetTransactionItems && electronAPI?.localDbGetTransactionItemCustomizationsNormalized && transactionData.id) {
+          try {
+            // Fetch transaction items from transaction_items table (source of truth)
+            const rawItems = await (electronAPI.localDbGetTransactionItems as (transactionId: string) => Promise<Array<UnknownRecord>>)(String(transactionData.id));
+            
+            // Map items to upload format (with UUIDs)
+            if (Array.isArray(rawItems) && rawItems.length > 0) {
+              transactionData.items = rawItems.map(item => ({
+                id: item.id as string, // UUID
+                product_id: item.product_id as number,
+                quantity: item.quantity as number,
+                unit_price: item.unit_price as number,
+                total_price: item.total_price as number,
+                custom_note: item.custom_note as string | undefined,
+                bundle_selections_json: item.bundle_selections_json as unknown | undefined,
+              }));
+              console.log(`✅ [SMART SYNC] Fetched ${rawItems.length} items from transaction_items table for transaction ${transactionData.id}`);
+            }
+            
+            // Fetch normalized customizations
+            const normalizedCustomizations = await (electronAPI.localDbGetTransactionItemCustomizationsNormalized as (transactionId: string) => Promise<{
+              customizations: Array<{
+                id: number;
+                transaction_item_id: string;
+                customization_type_id: number;
+                bundle_product_id: number | null;
+                created_at: string;
+              }>;
+              options: Array<{
+                id: number;
+                transaction_item_customization_id: number;
+                customization_option_id: number;
+                option_name: string;
+                price_adjustment: number;
+                created_at: string;
+              }>;
+            }>)(String(transactionData.id));
+            
+            // Add normalized customization arrays to transaction data
+            transactionData.transaction_item_customizations = normalizedCustomizations.customizations;
+            transactionData.transaction_item_customization_options = normalizedCustomizations.options;
+            
+            console.log(`✅ [SMART SYNC] Added ${normalizedCustomizations.customizations.length} customizations and ${normalizedCustomizations.options.length} options to transaction ${transactionData.id}`);
+          } catch (error) {
+            console.warn(`⚠️ [SMART SYNC] Failed to fetch transaction items or normalized customizations for transaction ${transactionData.id}:`, error);
+            // Continue with items from JSON blob if fetch fails - backward compatibility
+          }
+        }
         
         // Send to server
         const startTime = Date.now();
@@ -518,6 +614,7 @@ class SmartSyncService {
       averageServerLoad: this.serverLoadHistory.length > 0 
         ? this.serverLoadHistory.reduce((a, b) => a + b, 0) / this.serverLoadHistory.length 
         : 0,
+      autoSyncEnabled: this.autoSyncEnabled,
     };
   }
 
@@ -538,15 +635,14 @@ class SmartSyncService {
       }
 
       const electronAPI = typeof window !== 'undefined' ? (window as { electronAPI?: UnknownRecord }).electronAPI : undefined;
-      if (!electronAPI?.localDbGetUnsyncedTransactions) {
+      // Use localDbGetPendingTransactions to get ALL pending transactions regardless of business_id
+      // This matches what the sync process uses and ensures we count all queued transactions
+      if (!electronAPI?.localDbGetPendingTransactions) {
         return 0;
       }
-      // Get unsynced transactions (where synced_at IS NULL)
-      // TODO: Make businessId dynamic - for now using default 14 for backward compatibility
-      // This service needs refactoring to accept businessId from the auth context
-      const transactions = await (electronAPI.localDbGetUnsyncedTransactions as (businessId: number) => Promise<unknown[]>)(14);
       
-      return Array.isArray(transactions) ? transactions.length : 0;
+      const pendingTransactions = await (electronAPI.localDbGetPendingTransactions as () => Promise<PendingTransaction[]>)();
+      return Array.isArray(pendingTransactions) ? pendingTransactions.length : 0;
     } catch (error) {
       console.warn('⚠️ [SMART SYNC] Failed to get pending transaction count:', error);
       return 0;
@@ -558,10 +654,75 @@ class SmartSyncService {
    */
   destroy() {
     this.stopSmartSync();
+    if (this.settingChangeUnsubscribe) {
+      this.settingChangeUnsubscribe();
+      this.settingChangeUnsubscribe = null;
+    }
   }
 
   /**
    * Sync pending refunds when online
+   */
+  /**
+   * Sync pending shifts to server
+   */
+  private async syncPendingShifts() {
+    if (!isElectron || !this.isOnline) {
+      return;
+    }
+
+    const electronAPI = typeof window !== 'undefined' ? (window as { electronAPI?: UnknownRecord }).electronAPI : undefined;
+    if (!electronAPI?.localDbGetUnsyncedShifts) {
+      return;
+    }
+
+    try {
+      // Get all unsynced shifts regardless of business_id
+      // Each shift already has its business_id in the data, so we sync all of them
+      const unsyncedShifts = await (electronAPI.localDbGetUnsyncedShifts as (businessId?: number) => Promise<unknown[]>)(undefined);
+      
+      if (!Array.isArray(unsyncedShifts) || unsyncedShifts.length === 0) {
+        return;
+      }
+
+      console.log(`🔄 [SMART SYNC] Found ${unsyncedShifts.length} unsynced shifts`);
+
+      const syncedShiftIds: number[] = [];
+
+      for (const shift of unsyncedShifts) {
+        try {
+          const response = await fetch(getApiUrl('/api/shifts/sync'), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(shift),
+          });
+
+          if (response.ok) {
+            const shiftId = (shift as UnknownRecord).id;
+            if (typeof shiftId === 'number') {
+              syncedShiftIds.push(shiftId);
+            }
+            console.log(`✅ [SMART SYNC] Shift ${shiftId} synced successfully`);
+          } else {
+            console.warn(`⚠️ [SMART SYNC] Failed to sync shift:`, response.status);
+          }
+        } catch (error) {
+          console.error('❌ [SMART SYNC] Failed to sync shift:', error);
+        }
+      }
+
+      // Mark shifts as synced
+      if (syncedShiftIds.length > 0 && electronAPI?.localDbMarkShiftsSynced) {
+        await (electronAPI.localDbMarkShiftsSynced as (shiftIds: number[]) => Promise<unknown>)(syncedShiftIds);
+        console.log(`✅ [SMART SYNC] Marked ${syncedShiftIds.length} shifts as synced`);
+      }
+    } catch (error) {
+      console.error('❌ [SMART SYNC] Shift sync error:', error);
+    }
+  }
+
+  /**
+   * Sync pending refunds to server
    */
   private async syncPendingRefunds() {
     if (!isElectron || !this.isOnline) {

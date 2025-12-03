@@ -381,3 +381,9 @@ Then **completely restart** the Electron POS app (not just refresh - fully close
 **The extensive logging will tell us exactly what's wrong!** 🔍
 
 
+
+
+
+
+
+

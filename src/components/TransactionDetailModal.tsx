@@ -1,6 +1,8 @@
 import React, { useState, useCallback, useEffect, useMemo } from 'react';
 import RefundModal from './RefundModal';
 import { useAuth } from '@/hooks/useAuth';
+import { hasPermission } from '@/lib/permissions';
+import { isSuperAdmin } from '@/lib/auth';
 
 export interface TransactionItem {
   id: string; // Changed to string for UUID
@@ -131,6 +133,17 @@ const TransactionDetailModal: React.FC<TransactionDetailModalProps> = ({
   const [receiptizeCounter, setReceiptizeCounter] = useState<number | null>(null);
   const [isReceiptize, setIsReceiptize] = useState(false);
   const [isRefundModalOpen, setIsRefundModalOpen] = useState(false);
+
+  // Calculate canRefund based on current user state to ensure it's always up-to-date
+  // This prevents the button from appearing/disappearing due to stale prop values
+  // We use the computed value as the source of truth, but keep the prop for backward compatibility
+  const canRefundComputed = useMemo(() => {
+    if (!user) return false;
+    return isSuperAdmin(user) || hasPermission(user, 'daftartransaksi.refund');
+  }, [user]);
+  
+  // Use computed value as source of truth (always based on current user state)
+  const canRefundFinal = canRefundComputed;
 
   const totalRefunded = useMemo(() => {
     if (!transaction) {
@@ -300,7 +313,8 @@ const TransactionDetailModal: React.FC<TransactionDetailModalProps> = ({
         const itemPrice = item.unit_price;
         
         // Format item name with customizations and custom note if any
-        let itemName = item.product_name;
+        // Use product_name with fallback to ensure it's never empty
+        let itemName = item.product_name || 'Unknown Product';
         if (item.customizations && item.customizations.length > 0) {
           const customizationText = item.customizations.map(c => 
             `${c.customization_name}: ${c.selected_options.map(opt => opt.option_name).join(', ')}`
@@ -351,7 +365,9 @@ const TransactionDetailModal: React.FC<TransactionDetailModalProps> = ({
                 customizationDetails.push(sp.customNote.trim());
               }
 
-              let subItemName = `  └ ${sp.product.nama}${selectionQty > 1 ? ` (×${selectionQty})` : ''}`;
+              // Use product name with fallback to ensure it's never empty
+              const bundleProductName = sp.product?.nama || 'Unknown Product';
+              let subItemName = `  └ ${bundleProductName}${selectionQty > 1 ? ` (×${selectionQty})` : ''}`;
               if (customizationDetails.length > 0) {
                 subItemName = `${subItemName} (${customizationDetails.join(', ')})`;
               }
@@ -743,7 +759,7 @@ const TransactionDetailModal: React.FC<TransactionDetailModalProps> = ({
                   </span>
                 </p>
               </div>
-              {canRefund && (
+              {canRefundFinal && (
                 <button
                   onClick={() => setIsRefundModalOpen(true)}
                   disabled={outstandingAmount <= 0}
@@ -835,7 +851,7 @@ const TransactionDetailModal: React.FC<TransactionDetailModalProps> = ({
                     <tr key={item.id} className={`border-b border-gray-100 ${index % 2 === 0 ? 'bg-gray-50' : 'bg-white'}`}>
                       <td className="py-3 px-3">
                         <div>
-                          <p className="font-medium text-gray-900">{item.product_name}</p>
+                          <p className="font-medium text-gray-900">{item.product_name || 'Unknown Product'}</p>
                           
                           {/* Customizations Display */}
                           {item.customizations && item.customizations.length > 0 && (() => {
@@ -1048,7 +1064,7 @@ const TransactionDetailModal: React.FC<TransactionDetailModalProps> = ({
         </div>
         ) : null}
 
-        {canRefund && transaction && (
+        {canRefundFinal && transaction && (
           <RefundModal
             isOpen={isRefundModalOpen}
             onClose={() => setIsRefundModalOpen(false)}

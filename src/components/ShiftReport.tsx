@@ -13,6 +13,7 @@ import {
   CreditCard,
   Filter
 } from 'lucide-react';
+import { useAuth } from '@/hooks/useAuth';
 
 // Types
 interface Shift {
@@ -128,8 +129,8 @@ const getElectronAPI = () => (typeof window !== 'undefined' ? window.electronAPI
 
 export default function ShiftReport() {
   // Get business ID from logged-in user (fallback to 14 for backward compatibility)
-  // TODO: Get from auth context when available
-  const businessId = 14; // For now, keep hardcoded as this component needs refactoring
+  const { user } = useAuth();
+  const businessId = user?.selectedBusinessId ?? 14;
   
   const [viewMode, setViewMode] = useState<'list' | 'detail'>('list');
   const [selectedShift, setSelectedShift] = useState<Shift | null>(null);
