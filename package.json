@@ -11,7 +11,7 @@
     "start": "next start",
     "lint": "eslint",
     "electron": "electron .",
-    "electron-dev": "cross-env PORT=3000 concurrently \"cross-env PORT=3000 npm run dev\" \"wait-on http://localhost:3000 && electron .\"",
+    "electron-dev": "cross-env PORT=3000 concurrently -n \"NEXT,ELECTRON\" -c \"blue,green\" \"cross-env PORT=3000 node scripts/dev-server-filter.js\" \"wait-on http://localhost:3000 && electron .\"",
     "electron-dev:3001": "cross-env PORT=3001 concurrently \"cross-env PORT=3001 npm run dev\" \"wait-on http://localhost:3001 && electron .\"",
     "electron-dev:3002": "cross-env PORT=3002 concurrently \"cross-env PORT=3002 npm run dev\" \"wait-on http://localhost:3002 && electron .\"",
     "electron-pack": "npm run build && electron-builder",
@@ -22,15 +22,17 @@
   },
   "dependencies": {
     "bcryptjs": "^3.0.2",
-    "better-sqlite3": "^12.4.1",
-    "lucide-react": "^0.545.0",
-    "mysql2": "^3.15.2",
-    "next": "15.5.4",
+    "better-sqlite3": "^12.5.0",
+    "dotenv": "^16.4.5",
+    "mysql2": "^3.15.3",
     "node-thermal-printer": "^4.4.5",
-    "react": "19.1.0",
-    "react-dom": "19.1.0"
+    "ws": "^8.18.3"
   },
   "devDependencies": {
+    "next": "15.5.4",
+    "react": "19.1.0",
+    "react-dom": "19.1.0",
+    "lucide-react": "^0.545.0",
     "@electron/rebuild": "^4.0.1",
     "@eslint/eslintrc": "^3",
     "@tailwindcss/postcss": "^4",
@@ -40,6 +42,7 @@
     "@types/node": "^20",
     "@types/react": "^19",
     "@types/react-dom": "^19",
+    "@types/ws": "^8.18.1",
     "concurrently": "^9.2.1",
     "cross-env": "^7.0.3",
     "electron": "^38.2.2",
@@ -62,7 +65,6 @@
       "out/**/*",
       "out/_next/**/*",
       "public/**/*",
-      "node_modules/**/*",
       "scripts/**/*"
     ],
     "win": {

@@ -64,9 +64,9 @@ function PrinterModal({ isOpen, onClose, printers, selectedPrinter, onSelect, ti
             ) : (
               printers.map((printer) => {
                 const isSelected = printer.name === selectedPrinter;
-                const statusColor = printer.status === 'idle' ? 'text-green-500' : 
-                                   printer.status === 'offline' ? 'text-red-500' : 'text-yellow-500';
-                
+                const statusColor = printer.status === 'idle' ? 'text-green-500' :
+                  printer.status === 'offline' ? 'text-red-500' : 'text-yellow-500';
+
                 return (
                   <button
                     key={printer.name}
@@ -74,11 +74,10 @@ function PrinterModal({ isOpen, onClose, printers, selectedPrinter, onSelect, ti
                       onSelect(printer.name);
                       onClose();
                     }}
-                    className={`w-full text-left p-3 rounded-lg border-2 transition-colors ${
-                      isSelected
-                        ? 'border-blue-500 bg-blue-50'
-                        : 'border-gray-200 hover:border-gray-300 hover:bg-gray-50'
-                    }`}
+                    className={`w-full text-left p-3 rounded-lg border-2 transition-colors ${isSelected
+                      ? 'border-blue-500 bg-blue-50'
+                      : 'border-gray-200 hover:border-gray-300 hover:bg-gray-50'
+                      }`}
                   >
                     <div className="flex items-center justify-between">
                       <div className="flex-1">
@@ -126,7 +125,7 @@ export default function GlobalSettings() {
   const [receiptizeOffset, setReceiptizeOffset] = useState<number>(0);
   const [labelOffset, setLabelOffset] = useState<number>(0);
   const [taxToggle, setTaxToggle] = useState<boolean>(false);
-  const [isScanning, setIsScanning] = useState(false);
+  // const [isScanning, setIsScanning] = useState(false);
   const [isTesting, setIsTesting] = useState<string | null>(null);
   const [isModalOpen, setIsModalOpen] = useState<{ type: 'receiptize' | 'label' | null }>({ type: null });
 
@@ -143,18 +142,18 @@ export default function GlobalSettings() {
       const configs = Array.isArray(configsRaw)
         ? configsRaw.filter(isPrinterConfigRow)
         : [];
-      
+
       if (configs.length > 0) {
         let receiptizePrinter = '';
         let labelPrinter = '';
         let receiptizeMargin = 0;
         let labelMargin = 0;
-        
+
         configs.forEach((config: PrinterConfigRow) => {
           if (!config || typeof config.system_printer_name !== 'string') {
             return;
           }
-          
+
           let marginAdjustMm = 0;
           if (config.extra_settings) {
             try {
@@ -175,7 +174,7 @@ export default function GlobalSettings() {
               console.error('Failed to parse extra_settings for printer config:', parseError);
             }
           }
-          
+
           switch (config.printer_type) {
             case 'receiptizePrinter':
               receiptizePrinter = config.system_printer_name;
@@ -187,14 +186,14 @@ export default function GlobalSettings() {
               break;
           }
         });
-        
+
         setSelectedReceiptizePrinter(receiptizePrinter);
         setSelectedLabelPrinter(labelPrinter);
         setReceiptizeOffset(receiptizeMargin);
         setLabelOffset(labelMargin);
         return;
       }
-      
+
       // Fallback to localStorage
       const saved = localStorage.getItem('printer-selections');
       if (saved) {
@@ -202,7 +201,7 @@ export default function GlobalSettings() {
         setSelectedReceiptizePrinter(selections.receiptizePrinter || '');
         setSelectedLabelPrinter(selections.labelPrinter || '');
       }
-      
+
       const savedMargins = localStorage.getItem('printer-margin-offsets');
       if (savedMargins) {
         try {
@@ -221,28 +220,28 @@ export default function GlobalSettings() {
   const saveSelections = async () => {
     try {
       const savePromises = [];
-      
+
       const buildExtraSettings = (printerType: 'receiptizePrinter' | 'labelPrinter') => {
         const marginAdjust = printerType === 'receiptizePrinter' ? receiptizeOffset : labelOffset;
         return {
           marginAdjustMm: typeof marginAdjust === 'number' && !Number.isNaN(marginAdjust) ? marginAdjust : 0,
         };
       };
-      
+
       if (selectedReceiptizePrinter) {
         savePromises.push(
           window.electronAPI?.localDbSavePrinterConfig?.('receiptizePrinter', selectedReceiptizePrinter, buildExtraSettings('receiptizePrinter'))
         );
       }
-      
+
       if (selectedLabelPrinter) {
         savePromises.push(
           window.electronAPI?.localDbSavePrinterConfig?.('labelPrinter', selectedLabelPrinter, buildExtraSettings('labelPrinter'))
         );
       }
-      
+
       await Promise.all(savePromises);
-      
+
       // Also save to localStorage as backup
       localStorage.setItem('printer-selections', JSON.stringify({
         receiptizePrinter: selectedReceiptizePrinter,
@@ -259,7 +258,7 @@ export default function GlobalSettings() {
   };
 
   const scanForPrinters = async () => {
-    setIsScanning(true);
+    // setIsScanning(true);
     try {
       if (!window.electronAPI?.listPrinters) {
         return;
@@ -286,20 +285,21 @@ export default function GlobalSettings() {
     } catch (error) {
       console.error('Error scanning for printers:', error);
     } finally {
-      setIsScanning(false);
+      // setIsScanning(false);
     }
   };
+
 
   const getPrinterStatus = (printerName: string): { status: string; color: string } => {
     if (!printerName) {
       return { status: 'Not Selected', color: 'text-gray-400' };
     }
-    
+
     const printer = systemPrinters.find(p => p.name === printerName);
     if (!printer) {
       return { status: 'Unknown', color: 'text-yellow-500' };
     }
-    
+
     if (printer.status === 'idle') {
       return { status: 'Online', color: 'text-teal-500' };
     } else if (printer.status === 'offline') {
@@ -318,14 +318,14 @@ export default function GlobalSettings() {
   const testPrinter = async (printerType: 'receiptizePrinter' | 'labelPrinter') => {
     const printerName = printerType === 'receiptizePrinter' ? selectedReceiptizePrinter : selectedLabelPrinter;
     const offset = printerType === 'receiptizePrinter' ? receiptizeOffset : labelOffset;
-    
+
     if (!printerName) {
       alert('Please select a printer first.');
       return;
     }
 
     setIsTesting(printerType);
-    
+
     try {
       const testData = {
         type: 'test',
@@ -334,14 +334,14 @@ export default function GlobalSettings() {
         marginAdjustMm: offset,
         content: `TEST PRINT - ${printerType.toUpperCase()}\n\nThis is a test print to verify your printer is working correctly.\n\nPrinter: ${printerName}\nTime: ${new Date().toLocaleString()}\n\nIf you can see this, your printer is configured correctly!`
       };
-      
+
       const rawResult = await window.electronAPI?.printReceipt?.(testData);
-      
+
       if (rawResult && typeof rawResult === 'object' && 'success' in rawResult && rawResult.success) {
         console.log(`✅ Test print sent successfully to ${printerName}`);
       } else {
-        const errorMsg = (rawResult && typeof rawResult === 'object' && 'error' in rawResult) 
-          ? String(rawResult.error) 
+        const errorMsg = (rawResult && typeof rawResult === 'object' && 'error' in rawResult)
+          ? String(rawResult.error)
           : 'Unknown error';
         alert(`❌ Test print failed to ${printerName}\n\nError: ${errorMsg}`);
       }
@@ -541,6 +541,7 @@ export default function GlobalSettings() {
           </div>
         </div>
       </div>
+
 
       {/* Printer Selection Modals */}
       <PrinterModal

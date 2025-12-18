@@ -4,7 +4,6 @@ import React, { useState, useCallback } from 'react';
 import { RefreshCw, Cloud, CloudOff, AlertCircle, Upload, Download } from 'lucide-react';
 import { offlineSyncService } from '@/lib/offlineSync';
 import { smartSyncService } from '@/lib/smartSync';
-import { restorePrinterStateFromCloud } from '@/lib/printerSyncUtils';
 import { getApiUrl } from '@/lib/api';
 import { useAuth } from '@/hooks/useAuth';
 
@@ -47,10 +46,10 @@ interface SyncButtonProps {
 
 export default function SyncButton({ className = '', showDetails = true }: SyncButtonProps) {
   const { user } = useAuth();
-  
+
   // Get business ID from logged-in user (fallback to 14 for backward compatibility)
   const businessId = user?.selectedBusinessId ?? 14;
-  
+
   const [syncStatus, setSyncStatus] = useState<SyncStatus>({
     isOnline: true,
     lastSync: null,
@@ -67,7 +66,7 @@ export default function SyncButton({ className = '', showDetails = true }: SyncB
     try {
       const connectionStatus = offlineSyncService.getDetailedStatus();
       const pendingCount = await smartSyncService.getPendingTransactionCount();
-      
+
       return {
         isOnline: connectionStatus.isOnline,
         lastSync: connectionStatus.lastSyncTime ?? null,
@@ -103,16 +102,16 @@ export default function SyncButton({ className = '', showDetails = true }: SyncB
 
     try {
       console.log('🔄 [SYNC] Starting full database sync from cloud...');
-      
+
       // Get all data from cloud
       const response = await fetch(getApiUrl('/api/sync'));
       if (!response.ok) {
         throw new Error(`HTTP ${response.status}: ${response.statusText}`);
       }
-      
+
       const jsonData = await response.json();
       const data = (jsonData.data || jsonData) as Record<string, unknown>;
-      const targetBusinessId = Number(jsonData.businessId ?? 14);
+      // const targetBusinessId = Number(jsonData.businessId ?? 14);
       const describeLength = (value: unknown) => (Array.isArray(value) ? value.length : 0);
       console.log('📥 [SYNC] Received data from cloud:', {
         products: describeLength(data.products),
@@ -132,19 +131,19 @@ export default function SyncButton({ className = '', showDetails = true }: SyncB
       if (!electronAPI) {
         throw new Error('Electron API not available');
       }
-      
+
       const products = toUnknownRecordArray(data.products);
       if (products.length > 0 && electronAPI.localDbUpsertProducts) {
         await electronAPI.localDbUpsertProducts(products);
         console.log(`✅ ${products.length} products synced to local database`);
       }
-      
+
       const bundleItems = toUnknownRecordArray(data.bundleItems);
       if (bundleItems.length > 0 && electronAPI.localDbUpsertBundleItems) {
         await electronAPI.localDbUpsertBundleItems(bundleItems);
         console.log(`✅ ${bundleItems.length} bundle items synced to local database`);
       }
-      
+
       const transactions = toTransactionRows(data.transactions);
       if (transactions.length > 0 && electronAPI.localDbUpsertTransactions) {
         // Mark downloaded transactions as already synced (they came from cloud)
@@ -155,65 +154,71 @@ export default function SyncButton({ className = '', showDetails = true }: SyncB
         await electronAPI.localDbUpsertTransactions(transactionsWithSyncStatus);
         console.log(`✅ ${transactions.length} transactions synced to local database`);
       }
-      
+
       const paymentMethods = toUnknownRecordArray(data.paymentMethods);
       if (paymentMethods.length > 0 && electronAPI.localDbUpsertPaymentMethods) {
         await electronAPI.localDbUpsertPaymentMethods(paymentMethods);
         console.log(`✅ ${paymentMethods.length} payment methods synced to local database`);
       }
-      
+
       const banks = toUnknownRecordArray(data.banks);
       if (banks.length > 0 && electronAPI.localDbUpsertBanks) {
         await electronAPI.localDbUpsertBanks(banks);
         console.log(`✅ ${banks.length} banks synced to local database`);
       }
-      
+
       const organizations = toUnknownRecordArray(data.organizations);
       if (organizations.length > 0 && electronAPI.localDbUpsertOrganizations) {
         await electronAPI.localDbUpsertOrganizations(organizations);
         console.log(`✅ ${organizations.length} organizations synced to local database`);
       }
-      
+
       const managementGroups = toUnknownRecordArray(data.managementGroups);
       if (managementGroups.length > 0 && electronAPI.localDbUpsertManagementGroups) {
         await electronAPI.localDbUpsertManagementGroups(managementGroups);
         console.log(`✅ ${managementGroups.length} management groups synced to local database`);
       }
-      
+
       const category1 = toUnknownRecordArray(data.category1);
       if (category1.length > 0 && electronAPI.localDbUpsertCategory1) {
         await electronAPI.localDbUpsertCategory1(category1);
         console.log(`✅ ${category1.length} category1 synced to local database`);
       }
-      
+
       const category2 = toUnknownRecordArray(data.category2);
       if (category2.length > 0 && electronAPI.localDbUpsertCategory2) {
-        await electronAPI.localDbUpsertCategory2(category2);
-        console.log(`✅ ${category2.length} category2 synced to local database`);
+        // Get junction table data (REQUIRED - junction table only, no business_id column)
+        const junctionTableData = (data.category2Businesses as Array<{ category2_id: number; business_id: number }> | undefined) || undefined;
+        if (!junctionTableData || junctionTableData.length === 0) {
+          console.warn(`⚠️ [SYNC] No junction table data provided for category2 - skipping sync`);
+        } else {
+          await (electronAPI.localDbUpsertCategory2 as (rows: unknown[], junctionData?: Array<{ category2_id: number; business_id: number }>) => Promise<{ success: boolean }>)(category2, junctionTableData);
+          console.log(`✅ ${category2.length} category2 synced to local database with ${junctionTableData.length} business relationships`);
+        }
       }
-      
+
       const clAccounts = toUnknownRecordArray(data.clAccounts);
       if (clAccounts.length > 0 && electronAPI.localDbUpsertClAccounts) {
         await electronAPI.localDbUpsertClAccounts(clAccounts);
         console.log(`✅ ${clAccounts.length} CL accounts synced to local database`);
       }
 
-      await restorePrinterStateFromCloud(data, electronAPI, targetBusinessId);
-      
+      // Printer audits/counters are local source of truth - not downloaded from server
+
       console.log('🎉 [SYNC] Full database sync completed successfully!');
-      
+
       // Update status
       await updateSyncStatus();
-      
+
       // Show success message
       alert('✅ Database berhasil disinkronkan dari cloud!\n\nSemua data terbaru telah diunduh ke database lokal.');
-      
+
     } catch (error) {
       console.error('❌ [SYNC] Full database sync failed:', error);
-      setSyncStatus(prev => ({ 
-        ...prev, 
-        syncInProgress: false, 
-        error: error instanceof Error ? error.message : 'Sync failed' 
+      setSyncStatus(prev => ({
+        ...prev,
+        syncInProgress: false,
+        error: error instanceof Error ? error.message : 'Sync failed'
       }));
       alert(`❌ Gagal menyinkronkan database: ${error instanceof Error ? error.message : 'Unknown error'}`);
     }
@@ -230,7 +235,7 @@ export default function SyncButton({ className = '', showDetails = true }: SyncB
 
     try {
       console.log('🔄 [SYNC] Starting upload of offline transactions to cloud...');
-      
+
       // Get pending transactions from local database
       const electronAPI = getElectronAPI();
       if (!electronAPI) {
@@ -280,7 +285,7 @@ export default function SyncButton({ className = '', showDetails = true }: SyncB
       }
 
       console.log('🎉 [SYNC] Offline transactions upload completed!');
-      
+
       // Also sync printer audit logs
       try {
         await offlineSyncService.syncPrinterAudits();
@@ -288,19 +293,19 @@ export default function SyncButton({ className = '', showDetails = true }: SyncB
       } catch (error) {
         console.warn('⚠️ [SYNC] Printer audit sync failed:', error);
       }
-      
+
       // Update status
       await updateSyncStatus();
-      
+
       // Show success message
       alert(`✅ ${transactionsToUpload.length} transaksi offline berhasil diunggah ke cloud!\n\nSemua transaksi lokal telah disinkronkan.`);
-      
+
     } catch (error) {
       console.error('❌ [SYNC] Upload to cloud failed:', error);
-      setSyncStatus(prev => ({ 
-        ...prev, 
-        syncInProgress: false, 
-        error: error instanceof Error ? error.message : 'Upload failed' 
+      setSyncStatus(prev => ({
+        ...prev,
+        syncInProgress: false,
+        error: error instanceof Error ? error.message : 'Upload failed'
       }));
       alert(`❌ Gagal mengunggah transaksi offline: ${error instanceof Error ? error.message : 'Unknown error'}`);
     }
@@ -317,27 +322,27 @@ export default function SyncButton({ className = '', showDetails = true }: SyncB
 
     try {
       console.log('🔄 [SYNC] Starting full bidirectional sync...');
-      
+
       // Step 1: Upload offline transactions to cloud
       await syncToCloud();
-      
+
       // Step 2: Download latest data from cloud
       await syncFromCloud();
-      
+
       console.log('🎉 [SYNC] Full bidirectional sync completed!');
-      
+
       // Update status
       await updateSyncStatus();
       setSyncStatus(prev => ({ ...prev, syncInProgress: false }));
-      
+
       alert('✅ Sinkronisasi lengkap berhasil!\n\n• Transaksi offline telah diunggah ke cloud\n• Data terbaru telah diunduh dari cloud');
-      
+
     } catch (error) {
       console.error('❌ [SYNC] Full sync failed:', error);
-      setSyncStatus(prev => ({ 
-        ...prev, 
-        syncInProgress: false, 
-        error: error instanceof Error ? error.message : 'Sync failed' 
+      setSyncStatus(prev => ({
+        ...prev,
+        syncInProgress: false,
+        error: error instanceof Error ? error.message : 'Sync failed'
       }));
       alert(`❌ Gagal melakukan sinkronisasi lengkap: ${error instanceof Error ? error.message : 'Unknown error'}`);
     }
@@ -369,8 +374,8 @@ export default function SyncButton({ className = '', showDetails = true }: SyncB
           disabled={syncStatus.syncInProgress}
           className={`
             flex items-center justify-center gap-2 px-4 py-2 rounded-lg font-medium transition-all
-            ${syncStatus.syncInProgress 
-              ? 'bg-gray-400 text-white cursor-not-allowed' 
+            ${syncStatus.syncInProgress
+              ? 'bg-gray-400 text-white cursor-not-allowed'
               : 'bg-blue-600 hover:bg-blue-700 text-white'
             }
           `}
@@ -398,7 +403,7 @@ export default function SyncButton({ className = '', showDetails = true }: SyncB
             <Download className="w-3 h-3" />
             <span>Download</span>
           </button>
-          
+
           <button
             onClick={syncToCloud}
             disabled={syncStatus.syncInProgress}
@@ -423,11 +428,11 @@ export default function SyncButton({ className = '', showDetails = true }: SyncB
               Status: {syncStatus.isOnline ? 'Online' : 'Offline'}
             </span>
           </div>
-          
+
           <div className="space-y-1 text-gray-600">
             <div>Terakhir sinkronisasi: {formatLastSync(syncStatus.lastSync)}</div>
             <div>Transaksi tertunda: {syncStatus.pendingTransactions}</div>
-            
+
             {syncStatus.error && (
               <div className="flex items-center gap-1 text-red-600">
                 <AlertCircle className="w-3 h-3" />

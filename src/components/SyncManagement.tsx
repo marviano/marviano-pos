@@ -1,29 +1,28 @@
 'use client';
 
 import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
-import { 
-  RefreshCw, 
-  Cloud, 
-  CloudOff, 
-  CheckCircle, 
-  AlertCircle, 
+import {
+  RefreshCw,
+  CheckCircle,
+  AlertCircle,
   Database,
-  Clock,
   Activity,
   Trash2,
   Archive,
   AlertTriangle,
-  X
+  X,
+  Copy,
+  Check
 } from 'lucide-react';
 import { offlineSyncService } from '@/lib/offlineSync';
 import { smartSyncService } from '@/lib/smartSync';
-import { restorePrinterStateFromCloud } from '@/lib/printerSyncUtils';
 import { getApiUrl } from '@/lib/api';
 import { useAuth } from '@/hooks/useAuth';
 import { getAutoSyncEnabled, setAutoSyncEnabled, onAutoSyncSettingChanged } from '@/lib/autoSyncSettings';
+import SystemPosDebugTool from './SystemPosDebugTool';
 
 type UnknownRecord = Record<string, unknown>;
-type SmartSyncStatus = ReturnType<typeof smartSyncService.getStatus>;
+// type SmartSyncStatus = ReturnType<typeof smartSyncService.getStatus>;
 
 const getElectronAPI = () => (typeof window !== 'undefined' ? window.electronAPI : undefined);
 
@@ -183,12 +182,34 @@ const normalizeDateInput = (value: string | null | undefined, isEnd: boolean): s
   return parsed.toISOString();
 };
 
+// Deep compare two objects
+const deepEqual = (obj1: unknown, obj2: unknown): boolean => {
+  if (obj1 === obj2) return true;
+  if (obj1 == null || obj2 == null) return false;
+  if (typeof obj1 !== 'object' || typeof obj2 !== 'object') return false;
+
+  const record1 = obj1 as UnknownRecord;
+  const record2 = obj2 as UnknownRecord;
+
+  const keys1 = Object.keys(record1);
+  const keys2 = Object.keys(record2);
+
+  if (keys1.length !== keys2.length) return false;
+
+  for (const key of keys1) {
+    if (!keys2.includes(key)) return false;
+    if (!deepEqual(record1[key], record2[key])) return false;
+  }
+
+  return true;
+};
+
 export default function SyncManagement() {
   const { user } = useAuth();
-  
+
   // Get business ID from logged-in user (fallback to 14 for backward compatibility)
   const businessId = user?.selectedBusinessId ?? 14;
-  
+
   const [syncStatus, setSyncStatus] = useState<SyncStatus>({
     isOnline: true,
     lastSync: null,
@@ -199,7 +220,7 @@ export default function SyncManagement() {
 
   const [syncLogs, setSyncLogs] = useState<SyncLog[]>([]);
   const [offlineTransactions, setOfflineTransactions] = useState<OfflineTransaction[]>([]);
-  const [offlineShifts, setOfflineShifts] = useState<OfflineShift[]>([]);
+  // const [offlineShifts, setOfflineShifts] = useState<OfflineShift[]>([]);
   const [isLoadingOfflineData, setIsLoadingOfflineData] = useState(false);
   const [isInitialized, setIsInitialized] = useState(false);
   const [copiedUuid, setCopiedUuid] = useState<string | null>(null);
@@ -207,51 +228,46 @@ export default function SyncManagement() {
   const [onlineTransactionCount, setOnlineTransactionCount] = useState<number>(0);
   const [syncProgress, setSyncProgress] = useState<number>(0);
   const [showArchiveModal, setShowArchiveModal] = useState(false);
+  const [checkingStatus, setCheckingStatus] = useState(false);
+  const [checkResults, setCheckResults] = useState<Map<string, { exists: boolean; checked: boolean; identical?: boolean }>>(new Map());
+  const [systemPosQueueStatus, setSystemPosQueueStatus] = useState<{
+    total: number;
+    pending: number;
+    synced: number;
+    failed: number;
+    lastCheck: Date | null;
+  } | null>(null);
+  const [isCheckingSystemPos, setIsCheckingSystemPos] = useState(false);
   const [showDeleteModal, setShowDeleteModal] = useState(false);
   const [showPasswordModal, setShowPasswordModal] = useState(false);
   const [passwordInput, setPasswordInput] = useState('');
   const [isArchiving, setIsArchiving] = useState(false);
   const [isDeleting, setIsDeleting] = useState(false);
+  const [isDeletingByEmail, setIsDeletingByEmail] = useState(false);
   const [activePasswordAction, setActivePasswordAction] = useState<'archive' | 'delete' | null>(null);
   const [showDangerZone, setShowDangerZone] = useState(false);
   const [showGatePasswordModal, setShowGatePasswordModal] = useState(false);
-  const [gatePasswordInput, setGatePasswordInput] = useState('');
   const [orphanedTransactions, setOrphanedTransactions] = useState<OfflineTransaction[]>([]);
   const [showOrphanedData, setShowOrphanedData] = useState(false);
+  const [showDebugTool, setShowDebugTool] = useState(false);
   const [dangerFrom, setDangerFrom] = useState<string>('');
   const [dangerTo, setDangerTo] = useState<string>('');
-  const [deleteByEmailPreview, setDeleteByEmailPreview] = useState<string>('');
-  const [isRestoring, setIsRestoring] = useState(false);
+  const [copiedSqlPreview, setCopiedSqlPreview] = useState<string | null>(null);
   const logsEndRef = useRef<HTMLDivElement>(null);
+  const gatePasswordInputRef = useRef<HTMLInputElement>(null);
+  // const activePasswordInputRef = useRef<HTMLInputElement>(null);
 
-  // Initialize preview with default email when danger zone opens
-  useEffect(() => {
-    if (showDangerZone) {
-      // Set initial preview with default email
-      const defaultEmail = 'marviano.austin@gmail.com';
-      setDeleteByEmailPreview(defaultEmail);
-      // Also set the input field value after a short delay to ensure DOM is ready
-      setTimeout(() => {
-        const emailInput = document.getElementById('deleteUserEmail') as HTMLInputElement;
-        if (emailInput && !emailInput.value) {
-          emailInput.value = defaultEmail;
-        }
-      }, 100);
-    }
-  }, [showDangerZone]);
-
-  const [smartSyncStatus, setSmartSyncStatus] = useState<SmartSyncStatus | null>(null);
   const [autoSyncEnabled, setAutoSyncEnabledState] = useState<boolean>(true);
 
   // Initialize auto-sync enabled state
   useEffect(() => {
     setAutoSyncEnabledState(getAutoSyncEnabled());
-    
+
     // Listen to setting changes
     const unsubscribe = onAutoSyncSettingChanged((enabled) => {
       setAutoSyncEnabledState(enabled);
     });
-    
+
     return unsubscribe;
   }, []);
 
@@ -264,14 +280,14 @@ export default function SyncManagement() {
   // Check if we're in Electron environment
   const isElectron = Boolean(getElectronAPI());
 
-  useEffect(() => {
-    const updateStatus = () => {
-      setSmartSyncStatus(smartSyncService.getStatus());
-    };
-    updateStatus();
-    const interval = setInterval(updateStatus, 5000);
-    return () => clearInterval(interval);
-  }, []);
+  // useEffect(() => {
+  //   const updateStatus = () => {
+  //     setSmartSyncStatus(smartSyncService.getStatus());
+  //   };
+  //   updateStatus();
+  //   const interval = setInterval(updateStatus, 5000);
+  //   return () => clearInterval(interval);
+  // }, []);
 
   useEffect(() => {
     const checkPendingTransactions = async () => {
@@ -303,7 +319,7 @@ export default function SyncManagement() {
       details
     };
     setSyncLogs(prev => [...prev, log]);
-    
+
     // Disabled auto-scroll to prevent main page from scrolling
     // Users can manually scroll the log container if needed
   }, []);
@@ -313,7 +329,7 @@ export default function SyncManagement() {
     try {
       const connectionStatus = offlineSyncService.getDetailedStatus();
       const pendingCount = await smartSyncService.getPendingTransactionCount();
-      
+
       return {
         isOnline: connectionStatus.isOnline,
         lastSync: connectionStatus.lastSyncTime ? (typeof connectionStatus.lastSyncTime === 'number' ? new Date(connectionStatus.lastSyncTime).toISOString() : String(connectionStatus.lastSyncTime)) : null,
@@ -378,26 +394,26 @@ export default function SyncManagement() {
   };
 
   // Load offline shifts
-  const loadOfflineShifts = useCallback(async () => {
-    const electronAPI = getElectronAPI();
-    if (!electronAPI?.localDbGetUnsyncedShifts) {
-      return;
-    }
+  // const loadOfflineShifts = useCallback(async () => {
+  //   const electronAPI = getElectronAPI();
+  //   if (!electronAPI?.localDbGetUnsyncedShifts) {
+  //     return;
+  //   }
 
-    try {
-      const shifts = await electronAPI.localDbGetUnsyncedShifts(businessId);
-      const normalized = normalizeOfflineShifts(shifts);
-      setOfflineShifts(normalized);
-      if (normalized.length > 0) {
-        addLog('info', `Found ${normalized.length} offline shifts pending upload`);
-      }
-    } catch (error) {
-      addLog(
-        'error',
-        `Failed to load offline shifts: ${error instanceof Error ? error.message : 'Unknown error'}`
-      );
-    }
-  }, [addLog]);
+  //   try {
+  //     const shifts = await electronAPI.localDbGetUnsyncedShifts(businessId);
+  //     const normalized = normalizeOfflineShifts(shifts);
+  //     setOfflineShifts(normalized);
+  //     if (normalized.length > 0) {
+  //       addLog('info', `Found ${normalized.length} offline shifts pending upload`);
+  //     }
+  //   } catch (error) {
+  //     addLog(
+  //       'error',
+  //       `Failed to load offline shifts: ${error instanceof Error ? error.message : 'Unknown error'}`
+  //     );
+  //   }
+  // }, [addLog, businessId]);
 
   // Load offline transactions
   const loadOfflineTransactions = useCallback(async () => {
@@ -421,7 +437,7 @@ export default function SyncManagement() {
     } finally {
       setIsLoadingOfflineData(false);
     }
-  }, [addLog]);
+  }, [addLog, businessId]);
 
   const fetchTransactionCounts = useCallback(async () => {
     try {
@@ -445,131 +461,512 @@ export default function SyncManagement() {
     } catch (error) {
       console.error('Failed to fetch transaction counts:', error);
     }
-  }, []);
+  }, [businessId]);
 
-  // Restore database from server (Emergency recovery)
-  const handleRestoreFromServer = useCallback(async () => {
+  // Delete unsynced transactions
+  const handleDeleteUnsyncedTransactions = useCallback(async () => {
+    if (offlineTransactions.length === 0) {
+      return;
+    }
+
+    const confirmMessage = `⚠️ HAPUS DATA OFFLINE YANG AKAN DIUNGGAH ⚠️\n\n` +
+      `Anda akan menghapus ${offlineTransactions.length} transaksi offline yang belum diunggah.\n\n` +
+      `⚠️ PERINGATAN:\n` +
+      `• Data yang dihapus TIDAK dapat dikembalikan\n` +
+      `• Transaksi ini akan hilang dari database lokal\n` +
+      `• Jika transaksi ini belum ada di server, data akan hilang selamanya\n\n` +
+      `Apakah Anda yakin ingin melanjutkan?`;
+
+    if (!window.confirm(confirmMessage)) {
+      addLog('info', 'Penghapusan data offline dibatalkan');
+      return;
+    }
+
+    // Second confirmation
+    const secondConfirm = window.confirm(
+      '⚠️ KONFIRMASI FINAL ⚠️\n\n' +
+      `Anda akan menghapus ${offlineTransactions.length} transaksi offline.\n\n` +
+      '⚠️ PERINGATAN: Tindakan ini TIDAK DAPAT DIBATALKAN!\n\n' +
+      'Apakah Anda BENAR-BENAR yakin ingin melanjutkan?'
+    );
+
+    if (!secondConfirm) {
+      addLog('warning', 'Penghapusan dibatalkan pada konfirmasi kedua');
+      return;
+    }
+
     const electronAPI = getElectronAPI();
-    if (!electronAPI?.restoreFromServer) {
-      addLog('error', 'Restore feature not available. Please update your app.');
+    console.log('[DELETE] electronAPI available:', !!electronAPI);
+    console.log('[DELETE] electronAPI keys:', electronAPI ? Object.keys(electronAPI) : 'N/A');
+    console.log('[DELETE] localDbDeleteUnsyncedTransactions available:', !!electronAPI?.localDbDeleteUnsyncedTransactions);
+
+    if (!electronAPI?.localDbDeleteUnsyncedTransactions) {
+      addLog('error', 'Fitur penghapusan tidak tersedia. Silakan restart aplikasi untuk memuat perubahan terbaru.');
+      alert('⚠️ Fitur penghapusan tidak tersedia.\n\nSilakan restart aplikasi Electron untuk memuat perubahan terbaru.');
       return;
     }
 
-    // First confirmation
-    const firstConfirm = window.confirm(
-      '🚨 DOWNLOAD TRANSACTION DATA FROM SERVER 🚨\n\n' +
-      '⚠️ WARNING: This will download and OVERWRITE transaction data from server!\n\n' +
-      '📥 What will be downloaded:\n' +
-      '• Master data (products, categories, prices)\n' +
-      '• Transaction data:\n' +
-      '  - ALL TRANSACTIONS from server\n' +
-      '  - ALL SHIFTS from server\n' +
-      '  - ALL REFUNDS from server\n' +
-      '  - ALL CUSTOMIZATIONS from server\n' +
-      '  - ALL PRINTER AUDIT LOGS from server\n\n' +
-      '❌ DANGER:\n' +
-      '• Your LOCAL transaction data will be OVERWRITTEN\n' +
-      '• Any local transactions not on server will be LOST\n' +
-      '• This cannot be undone!\n\n' +
-      '✅ When to use:\n' +
-      '• Setting up NEW device (needs transaction history)\n' +
-      '• Restoring old device data to new device\n' +
-      '• Complete disaster recovery\n\n' +
-      '⚠️ DO NOT USE for normal sync! Use "Sync Products & Prices" instead.\n\n' +
-      'Are you ABSOLUTELY SURE you want to continue?'
-    );
-
-    if (!firstConfirm) {
-      addLog('info', 'Download transaction data cancelled by user');
-      return;
-    }
-
-    // Second confirmation - require typing
-    const typedConfirmation = window.prompt(
-      '⚠️ FINAL CONFIRMATION ⚠️\n\n' +
-      'This will REPLACE all local transaction data with server data.\n\n' +
-      'Type exactly: DOWNLOAD TRANSACTIONS\n\n' +
-      'Type the text above to confirm:'
-    );
-
-    if (typedConfirmation !== 'DOWNLOAD TRANSACTIONS') {
-      addLog('warning', 'Download transaction data cancelled - confirmation text did not match');
-      alert('❌ Download cancelled. Confirmation text did not match.');
-      return;
-    }
-
-    setIsRestoring(true);
-    addLog('info', '🔄 Starting transaction data download from server...');
-    
     try {
-      const result = await electronAPI.restoreFromServer({
-        businessId: businessId,
-        apiUrl: getApiUrl(''),
-        includeTransactions: true
-      });
+      addLog('info', `Menghapus ${offlineTransactions.length} transaksi offline...`);
+      console.log('[DELETE] Calling localDbDeleteUnsyncedTransactions with businessId:', businessId);
+      const result = await electronAPI.localDbDeleteUnsyncedTransactions(businessId);
+      console.log('[DELETE] Result:', result);
 
-      if (result.success) {
-        addLog('success', `✅ Transaction data downloaded successfully!`);
-        
-        // Show detailed stats
-        const stats = result.stats;
-        if (stats.businesses) addLog('success', `✅ ${stats.businesses} businesses restored`);
-        if (stats.users) addLog('success', `✅ ${stats.users} users restored`);
-        if (stats.products) addLog('success', `✅ ${stats.products} products restored`);
-        if (stats.category1) addLog('success', `✅ ${stats.category1} category1 restored`);
-        if (stats.category2) addLog('success', `✅ ${stats.category2} category2 restored`);
-        if (stats.customizationTypes) addLog('success', `✅ ${stats.customizationTypes} customization types restored`);
-        if (stats.customizationOptions) addLog('success', `✅ ${stats.customizationOptions} customization options restored`);
-        if (stats.productCustomizations) addLog('success', `✅ ${stats.productCustomizations} product customizations restored`);
-        if (stats.bundleItems) addLog('success', `✅ ${stats.bundleItems} bundle items restored`);
-        if (stats.paymentMethods) addLog('success', `✅ ${stats.paymentMethods} payment methods restored`);
-        if (stats.banks) addLog('success', `✅ ${stats.banks} banks restored`);
-        if (stats.clAccounts) addLog('success', `✅ ${stats.clAccounts} CL accounts restored`);
-        
-        // Transaction data restored
-        if (stats.shifts) addLog('success', `✅ ${stats.shifts} shifts restored`);
-        if (stats.transactions) addLog('success', `✅ ${stats.transactions} transactions restored`);
-        if (stats.transactionItems) addLog('success', `✅ ${stats.transactionItems} transaction items restored`);
-        if (stats.transactionItemCustomizations) addLog('success', `✅ ${stats.transactionItemCustomizations} customizations restored`);
-        if (stats.transactionItemCustomizationOptions) addLog('success', `✅ ${stats.transactionItemCustomizationOptions} customization options restored`);
-        if (stats.transactionRefunds) addLog('success', `✅ ${stats.transactionRefunds} refunds restored`);
-        if (stats.printer1AuditLog) addLog('success', `✅ ${stats.printer1AuditLog} printer 1 audit logs restored`);
-        if (stats.printer2AuditLog) addLog('success', `✅ ${stats.printer2AuditLog} printer 2 audit logs restored`);
-        
-        // Reload offline data
+      if (result?.success) {
+        const deletedCount = result.deletedCount || 0;
+        addLog('success', `✅ Berhasil menghapus ${deletedCount} transaksi offline`);
+        // Reload the list
         await loadOfflineTransactions();
-        await loadOfflineShifts();
         await fetchTransactionCounts();
-        
-        alert(
-          `✅ Transaction Data Downloaded Successfully!\n\n` +
-          `📦 Master Data:\n` +
-          `• ${stats.products || 0} products\n` +
-          `• ${stats.category1 || 0} category1\n` +
-          `• ${stats.category2 || 0} category2\n\n` +
-          `📊 Transaction Data (Downloaded):\n` +
-          `• ${stats.shifts || 0} shifts\n` +
-          `• ${stats.transactions || 0} transactions\n` +
-          `• ${stats.transactionItems || 0} transaction items\n` +
-          `• ${stats.transactionItemCustomizations || 0} customizations\n` +
-          `• ${stats.transactionRefunds || 0} refunds\n` +
-          `• ${stats.printer1AuditLog || 0} receipt printer logs\n` +
-          `• ${stats.printer2AuditLog || 0} receiptize printer logs\n\n` +
-          `Check sync logs for full details.`
-        );
+        alert(`✅ Berhasil menghapus ${deletedCount} transaksi offline`);
       } else {
-        addLog('error', `❌ Restore failed: ${result.error}`);
-        alert(`❌ Restore Failed\n\n${result.error}`);
+        const errorMsg = result?.error || 'Unknown error';
+        addLog('error', `Gagal menghapus: ${errorMsg}`);
+        alert(`❌ Gagal menghapus: ${errorMsg}`);
       }
     } catch (error) {
-      console.error('Restore error:', error);
-      const message = error instanceof Error ? error.message : 'Unknown error';
-      addLog('error', `❌ Restore error: ${message}`);
-      alert(`❌ Restore Error\n\n${message}`);
-    } finally {
-      setIsRestoring(false);
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+      console.error('[DELETE] Error:', error);
+      addLog('error', `Error menghapus transaksi offline: ${errorMessage}`);
+      alert(`❌ Error: ${errorMessage}`);
     }
-  }, [businessId, addLog, loadOfflineTransactions, loadOfflineShifts, fetchTransactionCounts]);
+  }, [offlineTransactions.length, businessId, addLog, loadOfflineTransactions, fetchTransactionCounts]);
+
+  // Normalize transaction data for comparison (ignore timestamps and synced_at)
+  const normalizeTransactionForComparison = (tx: OfflineTransaction | UnknownRecord): UnknownRecord => {
+    const record = tx as UnknownRecord;
+    return {
+      id: record.uuid_id || record.id,
+      business_id: record.business_id,
+      user_id: record.user_id,
+      shift_uuid: record.shift_uuid || null,
+      payment_method: record.payment_method,
+      payment_method_id: record.payment_method_id || null,
+      pickup_method: record.pickup_method,
+      total_amount: Number(record.total_amount) || 0,
+      final_amount: Number(record.final_amount) || 0,
+      amount_received: Number(record.amount_received) || 0,
+      change_amount: Number(record.change_amount) || 0,
+      voucher_discount: Number(record.voucher_discount) || 0,
+      voucher_type: record.voucher_type || null,
+      voucher_value: record.voucher_value || null,
+      voucher_label: record.voucher_label || null,
+      status: record.status,
+      refund_status: record.refund_status || 'none',
+      refund_total: Number(record.refund_total) || 0,
+      customer_name: record.customer_name || null,
+      customer_unit: record.customer_unit || null,
+      note: record.note || null,
+      bank_name: record.bank_name || null,
+      card_number: record.card_number || null,
+      cl_account_id: record.cl_account_id || null,
+      cl_account_name: record.cl_account_name || null,
+      bank_id: record.bank_id || null,
+      receipt_number: record.receipt_number || null,
+      transaction_type: record.transaction_type || 'drinks',
+    };
+  };
+
+  // Normalize transaction items for comparison
+  const normalizeItemsForComparison = (items: UnknownRecord[]): UnknownRecord[] => {
+    if (!Array.isArray(items)) return [];
+    return items
+      .map(item => ({
+        product_id: Number(item.product_id) || 0,
+        quantity: Number(item.quantity) || 1,
+        unit_price: Number(item.unit_price) || 0,
+        total_price: Number(item.total_price) || 0,
+        custom_note: item.custom_note || null,
+        bundle_selections_json: item.bundle_selections_json || null,
+      }))
+      .sort((a, b) => (a.product_id as number) - (b.product_id as number)); // Sort for consistent comparison
+  };
+
+  // Deep compare moved outside component
+
+  // Check if transactions exist on server and compare data
+  const handleCheckTransactionStatus = useCallback(async () => {
+    if (offlineTransactions.length === 0) {
+      return;
+    }
+
+    setCheckingStatus(true);
+    addLog('info', `Memeriksa status ${Math.min(50, offlineTransactions.length)} transaksi pertama ke server...`);
+
+    const results = new Map<string, { exists: boolean; checked: boolean; identical: boolean }>();
+    const transactionsToCheck = offlineTransactions.slice(0, 50); // Check first 50 transactions
+    const transactionsToAutoUpdate: string[] = [];
+
+    try {
+      const electronAPI = getElectronAPI();
+      if (!electronAPI) {
+        throw new Error('Electron API not available');
+      }
+
+      // Fetch all transactions from server for this business
+      const response = await fetch(getApiUrl(`/api/transactions?business_id=${businessId}&limit=10000`));
+
+      if (!response.ok) {
+        throw new Error(`Failed to fetch transactions: ${response.status}`);
+      }
+
+      const data = await response.json() as { transactions?: UnknownRecord[] };
+      const serverTransactions = Array.isArray(data.transactions) ? data.transactions : [];
+      const serverTxMap = new Map(serverTransactions.map((tx: UnknownRecord) => [String(tx.uuid_id || tx.id), tx]));
+
+      // Check each offline transaction
+      let foundCount = 0;
+      let notFoundCount = 0;
+      let identicalCount = 0;
+
+      for (const offlineTx of transactionsToCheck) {
+        const txUuid = String(offlineTx.id);
+        const serverTx = serverTxMap.get(txUuid);
+        const exists = !!serverTx;
+
+        let identical = false;
+
+        if (exists && electronAPI.localDbGetTransactionItems && electronAPI.localDbGetTransactionItemCustomizationsNormalized) {
+          try {
+            // Fetch complete local transaction data
+            const localItems = await (electronAPI.localDbGetTransactionItems as (transactionId: string) => Promise<Array<UnknownRecord>>)(txUuid);
+            // const localCustomizations = await (electronAPI.localDbGetTransactionItemCustomizationsNormalized as (transactionId: string) => Promise<{
+            //   customizations: Array<UnknownRecord>;
+            //   options: Array<UnknownRecord>;
+            // }>)(txUuid);
+
+            // Fetch server transaction items
+            let serverItems: UnknownRecord[] = [];
+            try {
+              const itemsResponse = await fetch(getApiUrl(`/api/transaction-items?transaction_uuid=${txUuid}`));
+              if (itemsResponse.ok) {
+                const itemsData = await itemsResponse.json();
+                serverItems = Array.isArray(itemsData.items) ? itemsData.items : [];
+              }
+            } catch (itemsError) {
+              console.warn(`[CHECK STATUS] Could not fetch items for ${txUuid} from server:`, itemsError);
+            }
+
+            // Normalize local transaction
+            const normalizedLocal = normalizeTransactionForComparison(offlineTx);
+            const normalizedServer = normalizeTransactionForComparison(serverTx);
+
+            // Compare transaction data
+            const txIdentical = deepEqual(normalizedLocal, normalizedServer);
+
+            // Compare items
+            const normalizedLocalItems = normalizeItemsForComparison(localItems);
+            const normalizedServerItems = normalizeItemsForComparison(serverItems);
+            const itemsIdentical = deepEqual(normalizedLocalItems, normalizedServerItems);
+
+            // Transaction is identical only if both transaction data AND items are identical
+            if (txIdentical && itemsIdentical) {
+              identical = true;
+              identicalCount++;
+              transactionsToAutoUpdate.push(txUuid);
+            }
+          } catch (error) {
+            console.error(`[CHECK STATUS] Error comparing transaction ${txUuid}:`, error);
+          }
+        }
+
+        results.set(txUuid, { exists, checked: true, identical });
+
+        if (exists) {
+          foundCount++;
+        } else {
+          notFoundCount++;
+        }
+      }
+
+      setCheckResults(results);
+
+      // Auto-update transactions that are identical
+      if (transactionsToAutoUpdate.length > 0 && electronAPI.localDbMarkTransactionsSynced) {
+        try {
+          addLog('info', `🔄 Mengupdate ${transactionsToAutoUpdate.length} transaksi yang identik dengan server...`);
+          await electronAPI.localDbMarkTransactionsSynced(transactionsToAutoUpdate);
+          addLog('success', `✅ Otomatis mengupdate ${transactionsToAutoUpdate.length} transaksi yang identik`);
+
+          // Reload offline transactions
+          await loadOfflineTransactions();
+          await fetchTransactionCounts();
+        } catch (error) {
+          console.error('[CHECK STATUS] Error auto-updating:', error);
+          addLog('error', `Gagal auto-update: ${error instanceof Error ? error.message : 'Unknown error'}`);
+        }
+      }
+
+      addLog('success', `✅ Pemeriksaan selesai: ${foundCount} sudah ada di server (${identicalCount} identik), ${notFoundCount} belum ada`);
+
+      if (foundCount > identicalCount) {
+        const differentCount = foundCount - identicalCount;
+        addLog('warning', `⚠️ ${differentCount} transaksi sudah ada di server tetapi datanya berbeda.`);
+        addLog('info', `💡 Gunakan tombol "Update Status" untuk menandai transaksi yang sudah ada sebagai sudah di-sync.`);
+      }
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+      addLog('error', `Gagal memeriksa status: ${errorMessage}`);
+      console.error('[CHECK STATUS] Error:', error);
+    } finally {
+      setCheckingStatus(false);
+    }
+  }, [offlineTransactions, businessId, addLog, loadOfflineTransactions, fetchTransactionCounts]);
+
+  // Check System POS queue status
+  const handleCheckSystemPosStatus = useCallback(async () => {
+    setIsCheckingSystemPos(true);
+    addLog('info', 'Memeriksa status System POS queue...');
+
+    try {
+      const electronAPI = getElectronAPI();
+      if (!electronAPI?.getSystemPosQueue) {
+        addLog('error', 'System POS queue feature not available');
+        return;
+      }
+
+      const result = await electronAPI.getSystemPosQueue();
+
+      if (result.success && Array.isArray(result.queue)) {
+        const queue = result.queue as UnknownRecord[];
+        const pending = queue.filter((q: UnknownRecord) => !q.synced_at);
+        const synced = queue.filter((q: UnknownRecord) => q.synced_at);
+        const failed = queue.filter((q: UnknownRecord) => (typeof q.retry_count === 'number' && q.retry_count >= 5));
+
+        setSystemPosQueueStatus({
+          total: queue.length,
+          pending: pending.length,
+          synced: synced.length,
+          failed: failed.length,
+          lastCheck: new Date(),
+        });
+
+        addLog('success', `✅ System POS Queue: ${pending.length} pending, ${synced.length} synced, ${failed.length} failed`);
+
+        if (pending.length > 0) {
+          addLog('info', `📋 ${pending.length} transaksi menunggu sync ke System POS`);
+          // Show first few pending transactions
+          const firstPending = pending.slice(0, 5);
+          firstPending.forEach((q: UnknownRecord) => {
+            const transactionId = String(q.transaction_id || 'unknown');
+            const retryCount = typeof q.retry_count === 'number' ? q.retry_count : 0;
+            const lastError = typeof q.last_error === 'string' ? q.last_error.substring(0, 50) : '';
+            addLog('info', `  - Transaction ${transactionId}: ${retryCount} retries${lastError ? `, Error: ${lastError}` : ''}`);
+          });
+        }
+
+        if (failed.length > 0) {
+          addLog('warning', `⚠️ ${failed.length} transaksi gagal sync (max retries exceeded)`);
+        }
+      } else {
+        addLog('error', 'Failed to get System POS queue status');
+      }
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+      addLog('error', `Gagal memeriksa System POS status: ${errorMessage}`);
+      console.error('[SYSTEM POS CHECK] Error:', error);
+    } finally {
+      setIsCheckingSystemPos(false);
+    }
+  }, [addLog]);
+
+  // Reset retry count for failed System POS transactions
+  const handleResetSystemPosRetryCount = useCallback(async () => {
+    if (!window.confirm('Reset retry count untuk semua transaksi yang gagal? Transaksi akan dicoba sync lagi.')) {
+      return;
+    }
+
+    addLog('info', 'Mereset retry count...');
+
+    try {
+      const electronAPI = getElectronAPI();
+      if (!electronAPI?.resetSystemPosRetryCount) {
+        addLog('error', 'Reset retry count feature not available. Silakan restart aplikasi.');
+        return;
+      }
+
+      const result = await electronAPI.resetSystemPosRetryCount();
+
+      if (result.success) {
+        addLog('success', `✅ Berhasil reset retry count`);
+        // Refresh status
+        await handleCheckSystemPosStatus();
+      } else {
+        addLog('error', 'Gagal reset retry count');
+      }
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+      addLog('error', `Gagal reset retry count: ${errorMessage}`);
+      console.error('[RESET RETRY] Error:', error);
+    }
+  }, [addLog, handleCheckSystemPosStatus]);
+
+  // Update synced_at for transactions that exist on server
+  const handleUpdateSyncedStatus = useCallback(async () => {
+    if (checkResults.size === 0) {
+      addLog('warning', 'Silakan jalankan "Cek Status" terlebih dahulu');
+      return;
+    }
+
+    // Get all transaction UUIDs that exist on server
+    const transactionsToUpdate: string[] = [];
+    checkResults.forEach((result, uuid) => {
+      if (result.exists && result.checked) {
+        transactionsToUpdate.push(uuid);
+      }
+    });
+
+    if (transactionsToUpdate.length === 0) {
+      addLog('info', 'Tidak ada transaksi yang perlu di-update (semua belum ada di server)');
+      return;
+    }
+
+    const confirmMessage = `⚠️ UPDATE STATUS SYNC ⚠️\n\n` +
+      `Anda akan menandai ${transactionsToUpdate.length} transaksi sebagai sudah di-sync.\n\n` +
+      `Transaksi-transaksi ini sudah ada di server, jadi akan ditandai sebagai sudah di-sync\n` +
+      `dan tidak akan muncul lagi di "Data Offline yang Akan Diunggah".\n\n` +
+      `Apakah Anda yakin ingin melanjutkan?`;
+
+    if (!window.confirm(confirmMessage)) {
+      addLog('info', 'Update status dibatalkan');
+      return;
+    }
+
+    const electronAPI = getElectronAPI();
+    if (!electronAPI?.localDbMarkTransactionsSynced) {
+      addLog('error', 'Fitur update status tidak tersedia');
+      return;
+    }
+
+    try {
+      addLog('info', `Mengupdate status ${transactionsToUpdate.length} transaksi...`);
+      await electronAPI.localDbMarkTransactionsSynced(transactionsToUpdate);
+
+      addLog('success', `✅ Berhasil mengupdate status ${transactionsToUpdate.length} transaksi`);
+
+      // Clear check results and reload offline transactions
+      setCheckResults(new Map());
+      await loadOfflineTransactions();
+      await fetchTransactionCounts();
+
+      alert(`✅ Berhasil mengupdate status ${transactionsToUpdate.length} transaksi`);
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+      addLog('error', `Gagal mengupdate status: ${errorMessage}`);
+      console.error('[UPDATE STATUS] Error:', error);
+    }
+  }, [checkResults, addLog, loadOfflineTransactions, fetchTransactionCounts]);
+
+  // Handle force overwrite (upload local to server, replacing server data)
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  const _handleForceOverwrite = useCallback(async () => {
+    if (checkResults.size === 0) {
+      addLog('warning', 'Silakan jalankan "Cek Status" terlebih dahulu');
+      return;
+    }
+
+    const transactionsToOverwrite: string[] = [];
+    checkResults.forEach((result, uuid) => {
+      // Condition: Exists on server AND is different (!identical) AND checked
+      if (result.checked && result.exists && !result.identical) {
+        transactionsToOverwrite.push(uuid);
+      }
+    });
+
+    if (transactionsToOverwrite.length === 0) {
+      addLog('info', 'Tidak ada transaksi mismatch yang dipilih untuk overwrite.');
+      return;
+    }
+
+    if (!window.confirm(`⚠️ FORCE OVERWRITE SERVER ⚠️\n\nAnda akan meng-upload ulang ${transactionsToOverwrite.length} transaksi dari local ke server.\n\nData di server akan DITIMPA/DIGANTI dengan data local.\nPastikan data local adalah yang benar.\n\nLanjutkan?`)) {
+      return;
+    }
+
+    const electronAPI = getElectronAPI();
+    if (!electronAPI) return;
+
+    setSyncStatus(prev => ({ ...prev, syncInProgress: true, error: null }));
+    addLog('info', `🔄 Meng-overwrite ${transactionsToOverwrite.length} transaksi di server...`);
+
+    let successCount = 0;
+    let errorCount = 0;
+
+    for (const uuid of transactionsToOverwrite) {
+      try {
+        // 1. Fetch full local data
+        // Use type assertion for now to bypass strict checks on dynamic API methods
+        const transactions = await (electronAPI.localDbGetTransactions as (businessId?: number | undefined, limit?: number | undefined) => Promise<UnknownRecord[]>)();
+        const transaction = Array.isArray(transactions) ? transactions.find((t: UnknownRecord) =>
+          String(t.id) === uuid || String(t.uuid_id) === uuid
+        ) : undefined;
+
+        if (!transaction) {
+          addLog('error', `❌ Gagal mengambil data local untuk ${uuid}`);
+          errorCount++;
+          continue;
+        }
+
+        const items = await (electronAPI.localDbGetTransactionItems as (uuid: string) => Promise<UnknownRecord[]>)(uuid);
+        const { customizations, options } = await (electronAPI.localDbGetTransactionItemCustomizationsNormalized as (uuid: string) => Promise<{ customizations: UnknownRecord[]; options: UnknownRecord[] }>)(uuid);
+
+        // Items with customizations
+        const itemsWithCustomizations = items.map((item: UnknownRecord) => {
+          const itemCusts = customizations.filter((c: UnknownRecord) => c.transaction_item_id === item.id || c.uuid_transaction_item_id === item.uuid_id);
+          const formattedCusts = itemCusts.map((c: UnknownRecord) => ({
+            ...c,
+            selected_options: options.filter((o: UnknownRecord) => o.transaction_item_customization_id === c.id)
+          }));
+          return { ...item, customizations: formattedCusts };
+        });
+
+        // Refunds
+        const refunds = await (electronAPI.localDbGetTransactionRefunds as (uuid: string) => Promise<UnknownRecord[]>)(uuid);
+
+        // 2. Construct Payload
+        const payload = {
+          ...transaction,
+          id: uuid, // Ensure UUID is used as ID
+          items: itemsWithCustomizations,
+          transaction_item_customizations: customizations,
+          transaction_item_customization_options: options,
+          transaction_refunds: refunds
+        };
+
+        // 3. Upload (POST /api/transactions)
+        const response = await fetch(getApiUrl('/api/transactions'), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
+
+        if (!response.ok) {
+          throw new Error(`Server returned ${response.status}`);
+        }
+
+        // 4. Mark as synced locally
+        if (electronAPI.localDbMarkTransactionsSynced) {
+          await electronAPI.localDbMarkTransactionsSynced([uuid]);
+        }
+        successCount++;
+        addLog('success', `✅ Overwrite sukses: ${uuid}`);
+
+      } catch (error) {
+        console.error(`Error overwriting ${uuid}:`, error);
+        addLog('error', `❌ Gagal overwrite ${uuid}: ${error instanceof Error ? error.message : String(error)}`);
+        errorCount++;
+      }
+    }
+
+    addLog('info', `🏁 Selesai overwrite. Sukses: ${successCount}, Gagal: ${errorCount}`);
+    setSyncStatus(prev => ({ ...prev, syncInProgress: false }));
+
+    // Refresh lists
+    setCheckResults(new Map());
+    await loadOfflineTransactions();
+
+  }, [checkResults, addLog, loadOfflineTransactions]);
+
+  // Restore database from server (Emergency recovery)
 
   // Full database sync (Download from cloud)
   const syncFromCloud = useCallback(async () => {
@@ -588,12 +985,12 @@ export default function SyncManagement() {
       if (!response.ok) {
         throw new Error(`HTTP ${response.status}: ${response.statusText}`);
       }
-      
+
       const jsonData: UnknownRecord = await response.json();
       addLog('info', `Received data from cloud: ${JSON.stringify(jsonData.counts ?? {})}`);
 
       const data = (jsonData.data ?? {}) as UnknownRecord;
-      const targetBusinessId = Number(jsonData.businessId ?? 14);
+      // const targetBusinessId = Number(jsonData.businessId ?? 14);
 
       // 1. SYNC DEPENDENCIES FIRST (Categories, Types, Options)
       const category1 = toRecordArray(data.category1);
@@ -601,11 +998,21 @@ export default function SyncManagement() {
         await electronAPI.localDbUpsertCategory1(category1);
         addLog('success', `✅ ${category1.length} category1 synced to local database`);
       }
-      
+
       const category2 = toRecordArray(data.category2);
-      if (category2.length > 0 && electronAPI.localDbUpsertCategory2) {
-        await electronAPI.localDbUpsertCategory2(category2);
-        addLog('success', `✅ ${category2.length} category2 synced to local database`);
+      if (category2.length === 0) {
+        addLog('info', `ℹ️ No category2 data in sync response (this is normal if categories haven't changed)`);
+      } else if (!electronAPI.localDbUpsertCategory2) {
+        addLog('warning', `⚠️ category2 data received (${category2.length} records) but localDbUpsertCategory2 API not available`);
+      } else {
+        // Get junction table data (REQUIRED - junction table only, no business_id column)
+        const junctionTableData = (data.category2Businesses as Array<{ category2_id: number; business_id: number }> | undefined) || undefined;
+        if (!junctionTableData || junctionTableData.length === 0) {
+          addLog('warning', `⚠️ No junction table data provided for category2 (${category2.length} records) - skipping sync`);
+        } else {
+          await (electronAPI.localDbUpsertCategory2 as (rows: unknown[], junctionData?: Array<{ category2_id: number; business_id: number }>) => Promise<{ success: boolean }>)(category2, junctionTableData);
+          addLog('success', `✅ ${category2.length} category2 synced to local database with ${junctionTableData.length} business relationships`);
+        }
       }
 
       const customizationTypes = toRecordArray(data.customizationTypes);
@@ -641,7 +1048,7 @@ export default function SyncManagement() {
         await electronAPI.localDbUpsertBundleItems(bundleItems);
         addLog('success', `✅ ${bundleItems.length} bundle items synced`);
       }
-      
+
       // 4. SKIP TRANSACTION DATA DOWNLOAD
       // ⚠️ Transaction data is NOT downloaded from server (UPLOAD ONLY)
       // Reason: POS device is the source of truth for transaction data
@@ -655,58 +1062,142 @@ export default function SyncManagement() {
       //   - transaction_refunds
       //   - printer1_audit_log
       //   - printer2_audit_log
-      
+
       addLog('info', '⚠️ Skipping transaction data download (upload-only for safety)');
       addLog('info', '✅ Master data synced - transaction data protected from overwrite');
 
-      await restorePrinterStateFromCloud(data, electronAPI, targetBusinessId);
-      
+      // SKIP PRINTER AUDIT LOGS AND PRINTER DAILY COUNTERS
+      // Local database is source of truth for printer data
+      // Printer audits/counters are local source of truth - not downloaded from server
+      addLog('info', '⚠️ Skipping printer audit logs and printer daily counters (local is source of truth)');
+
       const paymentMethods = toRecordArray(data.paymentMethods);
       if (paymentMethods.length > 0 && electronAPI.localDbUpsertPaymentMethods) {
         await electronAPI.localDbUpsertPaymentMethods(paymentMethods);
         addLog('success', `✅ ${paymentMethods.length} payment methods synced to local database`);
       }
-      
+
       const banks = toRecordArray(data.banks);
       if (banks.length > 0 && electronAPI.localDbUpsertBanks) {
         await electronAPI.localDbUpsertBanks(banks);
         addLog('success', `✅ ${banks.length} banks synced to local database`);
       }
-      
+
       const organizations = toRecordArray(data.organizations);
       if (organizations.length > 0 && electronAPI.localDbUpsertOrganizations) {
         await electronAPI.localDbUpsertOrganizations(organizations);
         addLog('success', `✅ ${organizations.length} organizations synced to local database`);
       }
-      
+
       const managementGroups = toRecordArray(data.managementGroups);
       if (managementGroups.length > 0 && electronAPI.localDbUpsertManagementGroups) {
         await electronAPI.localDbUpsertManagementGroups(managementGroups);
         addLog('success', `✅ ${managementGroups.length} management groups synced to local database`);
       }
-      
+
       const clAccounts = toRecordArray(data.clAccounts);
       if (clAccounts.length > 0 && electronAPI.localDbUpsertClAccounts) {
         await electronAPI.localDbUpsertClAccounts(clAccounts);
         addLog('success', `✅ ${clAccounts.length} CL accounts synced to local database`);
       }
-      
+
       addLog('success', '🎉 Full database sync completed successfully!');
-      
+
       await updateSyncStatus(true);
       await fetchTransactionCounts();
     } catch (error) {
       addLog('error', `❌ Full database sync failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
-      setSyncStatus(prev => ({ 
-        ...prev, 
-        syncInProgress: false, 
-        error: error instanceof Error ? error.message : 'Sync failed' 
+      setSyncStatus(prev => ({
+        ...prev,
+        syncInProgress: false,
+        error: error instanceof Error ? error.message : 'Sync failed'
       }));
     }
   }, [addLog, fetchTransactionCounts, updateSyncStatus]);
 
+  // Upload products and prices from local to server (overwrite server)
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  const _uploadProductsToServer = useCallback(async (businessId: number) => {
+    const electronAPI = getElectronAPI();
+    if (!electronAPI?.localDbGetAllProducts) {
+      addLog('warning', '⚠️ Cannot upload products - localDbGetAllProducts not available');
+      return;
+    }
+
+    try {
+      addLog('info', '📤 Uploading products and prices to server (overwriting server data)...');
+      const localProducts = await electronAPI.localDbGetAllProducts();
+
+      if (!Array.isArray(localProducts) || localProducts.length === 0) {
+        addLog('info', 'ℹ️ No products to upload');
+        return;
+      }
+
+      // Format products for server import API
+      const productsToUpload = (localProducts as UnknownRecord[]).map((product) => {
+        // Map local fields to server import format
+        return {
+          menu_code: product.menu_code || '',
+          nama: product.nama || '',
+          satuan: product.satuan || '',
+          kategori: product.category1_name || '',
+          jenis: product.category2_name || product.jenis || '',
+          keterangan: product.keterangan || '',
+          harga_beli: product.harga_beli || 0,
+          ppn: product.ppn || 0,
+          harga_umum: product.harga_jual || 0,
+          harga_khusus: product.harga_khusus || 0,
+          harga_online: product.harga_online || 0,
+          fee_kerja: product.fee_kerja || 0,
+        };
+      });
+
+      // Get POS API key from environment (works in both Electron and browser)
+      // In Electron, env vars are available via process.env
+      // In browser, they're available via NEXT_PUBLIC_ prefix
+      const posApiKey = (typeof process !== 'undefined' && process.env?.NEXT_PUBLIC_POS_SYNC_API_KEY)
+        || (typeof window !== 'undefined' && (window as unknown as { process?: { env?: Record<string, string> } }).process?.env?.NEXT_PUBLIC_POS_SYNC_API_KEY)
+        || '';
+
+      console.log('[SYNC] Products sync - API key:', {
+        hasKey: !!posApiKey,
+        keyLength: posApiKey?.length || 0,
+        keyPreview: posApiKey ? `${posApiKey.substring(0, 4)}...` : 'MISSING',
+        envCheck: {
+          processExists: typeof process !== 'undefined',
+          windowExists: typeof window !== 'undefined',
+          processEnv: typeof process !== 'undefined' ? !!process.env : false,
+        }
+      });
+
+      const response = await fetch(getApiUrl('/api/products'), {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-POS-API-Key': posApiKey, // Send API key for authentication
+        },
+        body: JSON.stringify({
+          action: 'import',
+          data: productsToUpload,
+          businessId: businessId,
+        }),
+      });
+
+      if (response.ok) {
+        const result = await response.json();
+        addLog('success', `✅ ${result.successCount || productsToUpload.length} products uploaded to server (${result.errorCount || 0} errors)`);
+      } else {
+        const errorText = await response.text();
+        addLog('warning', `⚠️ Failed to upload products: ${response.status} - ${errorText}`);
+      }
+    } catch (error) {
+      addLog('error', `❌ Error uploading products: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    }
+  }, [addLog]);
+
   // Upload offline transactions to cloud
-  const syncToCloud = useCallback(async () => {
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  const _syncToCloud = useCallback(async (skipTransactions: boolean = false) => {
     const electronAPI = getElectronAPI();
     if (!electronAPI?.localDbGetUnsyncedTransactions || !electronAPI?.localDbGetUnsyncedShifts) {
       addLog('error', 'Offline database not available');
@@ -717,148 +1208,178 @@ export default function SyncManagement() {
     addLog('info', 'Starting upload of offline data to cloud...');
 
     try {
-      // 1. Upload Shifts First
-      // Get all unsynced shifts regardless of business_id (each shift has its business_id in the data)
-      const localShifts = await electronAPI.localDbGetUnsyncedShifts(undefined);
-      const shifts = normalizeOfflineShifts(localShifts);
-      
-      if (shifts.length > 0) {
-        addLog('info', `📤 Uploading ${shifts.length} shifts to cloud...`);
-        
-        const syncedShiftIds: number[] = [];
+      // NOTE: Products are NOT uploaded here - server is source of truth for master data
+      // Products should only be downloaded from server, not uploaded
 
-        for (const shift of shifts) {
+      // 1. Upload Shifts First (skip if transactions are skipped)
+      if (skipTransactions) {
+        addLog('info', '⏭️ Skipping shift upload (user requested - skipping all uploads)');
+      } else {
+        // Get all unsynced shifts regardless of business_id (each shift has its business_id in the data)
+        const localShifts = await electronAPI.localDbGetUnsyncedShifts(undefined);
+        const shifts = normalizeOfflineShifts(localShifts);
+
+        if (shifts.length > 0) {
+          addLog('info', `📤 Uploading ${shifts.length} shifts to cloud...`);
+
           try {
-            const response = await fetch(getApiUrl('/api/shifts/sync'), {
+            // Format shifts for server (server expects { shifts: [...] })
+            // Map local field names to server field names
+            const formattedShifts = shifts.map(shift => {
+              const shiftRecord = shift as unknown as UnknownRecord;
+              return {
+                id: shift.uuid_id || String(shift.id),
+                uuid: shift.uuid_id || String(shift.id),
+                business_id: shift.business_id,
+                user_id: shift.user_id,
+                shift_start: shift.shift_start,
+                shift_end: shift.shift_end || null,
+                starting_cash: shiftRecord.modal_awal || shiftRecord.starting_cash || 0,
+                ending_cash: shiftRecord.kas_akhir || shiftRecord.ending_cash || null,
+                cash_drawer_difference: shiftRecord.kas_selisih || shiftRecord.cash_drawer_difference || null,
+                status: shift.status || 'active',
+                closed_by: shiftRecord.closed_by || null,
+                closed_at: shiftRecord.closed_at || null,
+                created_at: shift.created_at || shift.shift_start,
+              };
+            });
+
+            const response = await fetch(getApiUrl('/api/shifts'), {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify(shift),
+              body: JSON.stringify({ shifts: formattedShifts }),
             });
 
             if (response.ok) {
-              syncedShiftIds.push(shift.id);
-              addLog('success', `✅ Shift ${shift.id} uploaded successfully`);
+              const result = await response.json();
+              const syncedShiftIds: number[] = shifts.map(s => s.id);
+
+              if (syncedShiftIds.length > 0 && electronAPI.localDbMarkShiftsSynced) {
+                await electronAPI.localDbMarkShiftsSynced(syncedShiftIds);
+              }
+
+              addLog('success', `✅ ${result.insertedCount || shifts.length} shifts uploaded successfully (${result.skippedCount || 0} skipped)`);
             } else {
-              addLog('warning', `⚠️ Failed to upload shift ${shift.id}: ${response.status}`);
+              const errorText = await response.text();
+              addLog('warning', `⚠️ Failed to upload shifts: ${response.status} - ${errorText}`);
             }
           } catch (error) {
-            addLog('error', `❌ Error uploading shift ${shift.id}: ${error instanceof Error ? error.message : 'Unknown error'}`);
+            addLog('error', `❌ Error uploading shifts: ${error instanceof Error ? error.message : 'Unknown error'}`);
           }
         }
+      }
 
-        if (syncedShiftIds.length > 0 && electronAPI.localDbMarkShiftsSynced) {
-          await electronAPI.localDbMarkShiftsSynced(syncedShiftIds);
-          addLog('info', `Marked ${syncedShiftIds.length} shifts as synced`);
+      // 2. Upload Transactions (if not skipped)
+      if (skipTransactions) {
+        addLog('info', '⏭️ Skipping transaction upload (user requested)');
+      } else {
+        const localTransactions = await electronAPI.localDbGetUnsyncedTransactions(14);
+        const transactions = normalizeOfflineTransactions(localTransactions);
+
+        if (transactions.length === 0) {
+          addLog('info', 'ℹ️ No transactions to upload - proceeding to download step');
+          setSyncProgress(50); // Skip to download step
+          await updateSyncStatus();
+          return;
         }
-      }
 
-      // 2. Upload Transactions
-      const localTransactions = await electronAPI.localDbGetUnsyncedTransactions(14);
-      const transactions = normalizeOfflineTransactions(localTransactions);
-      
-      if (transactions.length === 0 && shifts.length === 0) {
-        addLog('info', 'ℹ️ No data to upload - proceeding to download step');
-        setSyncProgress(50); // Skip to download step
-        await updateSyncStatus();
-        return;
-      }
+        if (transactions.length > 0) {
+          addLog('info', `📤 Uploading ${transactions.length} transactions to cloud...`);
+          setSyncProgress(0);
 
-      if (transactions.length > 0) {
-        addLog('info', `📤 Uploading ${transactions.length} transactions to cloud...`);
-      setSyncProgress(0);
+          let successCount = 0;
+          let errorCount = 0;
+          const syncedIds: Array<number | string> = [];
 
-      let successCount = 0;
-      let errorCount = 0;
-      const syncedIds: Array<number | string> = [];
+          for (let i = 0; i < transactions.length; i++) {
+            const transaction = transactions[i];
+            try {
+              const progress = Math.round((i / transactions.length) * 50); // Upload takes 50%
+              setSyncProgress(progress);
 
-      for (let i = 0; i < transactions.length; i++) {
-        const transaction = transactions[i];
-        try {
-          const progress = Math.round((i / transactions.length) * 50); // Upload takes 50%
-          setSyncProgress(progress);
+              const rawItems = electronAPI.localDbGetTransactionItems ? await electronAPI.localDbGetTransactionItems(transaction.id) : [];
+              const items = normalizeTransactionItems(rawItems).map(item => ({
+                id: (item as unknown as UnknownRecord).id as string,  // Include item UUID
+                product_id: item.product_id,
+                quantity: item.quantity,
+                unit_price: item.unit_price,
+                total_price: item.total_price,
+                custom_note: item.custom_note ?? undefined,
+                bundle_selections_json: (item as unknown as UnknownRecord).bundle_selections_json ?? undefined,
+              }));
 
-          const rawItems = electronAPI.localDbGetTransactionItems ? await electronAPI.localDbGetTransactionItems(transaction.id) : [];
-          const items = normalizeTransactionItems(rawItems).map(item => ({
-            id: (item as unknown as UnknownRecord).id as string,  // Include item UUID
-            product_id: item.product_id,
-            quantity: item.quantity,
-            unit_price: item.unit_price,
-            total_price: item.total_price,
-            custom_note: item.custom_note ?? undefined,
-            bundle_selections_json: (item as unknown as UnknownRecord).bundle_selections_json ?? undefined,
-          }));
+              // Get normalized customizations for this transaction
+              const normalizedCustomizations = electronAPI.localDbGetTransactionItemCustomizationsNormalized
+                ? await electronAPI.localDbGetTransactionItemCustomizationsNormalized(String(transaction.id))
+                : { customizations: [], options: [] };
 
-          // Get normalized customizations for this transaction
-          const normalizedCustomizations = electronAPI.localDbGetTransactionItemCustomizationsNormalized 
-            ? await electronAPI.localDbGetTransactionItemCustomizationsNormalized(String(transaction.id))
-            : { customizations: [], options: [] };
+              const uploadData: UnknownRecord = {
+                id: transaction.id,
+                business_id: transaction.business_id,
+                user_id: transaction.user_id,
+                shift_uuid: transaction.shift_uuid ?? null, // Include shift_uuid
+                payment_method: transaction.payment_method,
+                pickup_method: transaction.pickup_method,
+                total_amount: transaction.total_amount,
+                voucher_discount: (transaction as unknown as UnknownRecord).voucher_discount ?? 0,
+                voucher_type: (transaction as unknown as UnknownRecord).voucher_type ?? 'none',
+                voucher_value: (transaction as unknown as UnknownRecord).voucher_value ?? null,
+                voucher_label: (transaction as unknown as UnknownRecord).voucher_label ?? null,
+                final_amount: transaction.final_amount,
+                amount_received: (transaction as unknown as UnknownRecord).amount_received ?? transaction.final_amount,
+                change_amount: (transaction as unknown as UnknownRecord).change_amount ?? 0,
+                contact_id: (transaction as unknown as UnknownRecord).contact_id ?? null,
+                customer_name: transaction.customer_name,
+                customer_unit: transaction.customer_unit ?? null,
+                bank_id: (transaction as unknown as UnknownRecord).bank_id ?? null,
+                card_number: (transaction as unknown as UnknownRecord).card_number ?? null,
+                cl_account_id: (transaction as unknown as UnknownRecord).cl_account_id ?? null,
+                cl_account_name: (transaction as unknown as UnknownRecord).cl_account_name ?? null,
+                transaction_type: transaction.transaction_type,
+                created_at: transaction.created_at,
+                items,
+                // NEW: Send normalized customization data
+                transaction_item_customizations: normalizedCustomizations.customizations,
+                transaction_item_customization_options: normalizedCustomizations.options,
+              };
 
-          const uploadData: UnknownRecord = {
-            id: transaction.id,
-            business_id: transaction.business_id,
-            user_id: transaction.user_id,
-            shift_uuid: transaction.shift_uuid ?? null, // Include shift_uuid
-            payment_method: transaction.payment_method,
-            pickup_method: transaction.pickup_method,
-            total_amount: transaction.total_amount,
-            voucher_discount: (transaction as unknown as UnknownRecord).voucher_discount ?? 0,
-            voucher_type: (transaction as unknown as UnknownRecord).voucher_type ?? 'none',
-            voucher_value: (transaction as unknown as UnknownRecord).voucher_value ?? null,
-            voucher_label: (transaction as unknown as UnknownRecord).voucher_label ?? null,
-            final_amount: transaction.final_amount,
-            amount_received: (transaction as unknown as UnknownRecord).amount_received ?? transaction.final_amount,
-            change_amount: (transaction as unknown as UnknownRecord).change_amount ?? 0,
-            contact_id: (transaction as unknown as UnknownRecord).contact_id ?? null,
-            customer_name: transaction.customer_name,
-            customer_unit: transaction.customer_unit ?? null,
-            bank_id: (transaction as unknown as UnknownRecord).bank_id ?? null,
-            card_number: (transaction as unknown as UnknownRecord).card_number ?? null,
-            cl_account_id: (transaction as unknown as UnknownRecord).cl_account_id ?? null,
-            cl_account_name: (transaction as unknown as UnknownRecord).cl_account_name ?? null,
-            transaction_type: transaction.transaction_type,
-            created_at: transaction.created_at,
-            items,
-            // NEW: Send normalized customization data
-            transaction_item_customizations: normalizedCustomizations.customizations,
-            transaction_item_customization_options: normalizedCustomizations.options,
-          };
+              const response = await fetch(getApiUrl('/api/transactions'), {
+                method: 'POST',
+                headers: {
+                  'Content-Type': 'application/json',
+                },
+                body: JSON.stringify(uploadData),
+              });
 
-          const response = await fetch(getApiUrl('/api/transactions'), {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-            },
-            body: JSON.stringify(uploadData),
-          });
-
-          if (response.ok) {
-            successCount++;
-            syncedIds.push(transaction.id);
-            addLog('success', `✅ Transaction ${transaction.id} uploaded successfully`);
-          } else {
-            const errorText = await response.text();
-            errorCount++;
-            addLog('warning', `⚠️ Failed to upload transaction ${transaction.id}: ${response.status} - ${errorText}`);
+              if (response.ok) {
+                successCount++;
+                syncedIds.push(transaction.id);
+                addLog('success', `✅ Transaction ${transaction.id} uploaded successfully`);
+              } else {
+                const errorText = await response.text();
+                errorCount++;
+                addLog('warning', `⚠️ Failed to upload transaction ${transaction.id}: ${response.status} - ${errorText}`);
+              }
+            } catch (error) {
+              errorCount++;
+              addLog('error', `❌ Error uploading transaction ${transaction.id}: ${error instanceof Error ? error.message : 'Unknown error'}`);
+            }
           }
-        } catch (error) {
-          errorCount++;
-          addLog('error', `❌ Error uploading transaction ${transaction.id}: ${error instanceof Error ? error.message : 'Unknown error'}`);
+
+          if (syncedIds.length > 0 && electronAPI.localDbMarkTransactionsSynced) {
+            await electronAPI.localDbMarkTransactionsSynced(syncedIds.map(String));
+            addLog('info', `Marked ${syncedIds.length} transactions as synced`);
+          }
+
+          addLog('success', `🎉 Upload completed! Success: ${successCount}, Errors: ${errorCount}`);
+          setSyncProgress(50);
+
+          await updateSyncStatus(true);
+          await loadOfflineTransactions();
+          // await loadOfflineShifts();
         }
       }
 
-      if (syncedIds.length > 0 && electronAPI.localDbMarkTransactionsSynced) {
-        await electronAPI.localDbMarkTransactionsSynced(syncedIds.map(String));
-        addLog('info', `Marked ${syncedIds.length} transactions as synced`);
-      }
-
-      addLog('success', `🎉 Upload completed! Success: ${successCount}, Errors: ${errorCount}`);
-      setSyncProgress(50);
-      
-      await updateSyncStatus(true);
-      await loadOfflineTransactions();
-      await loadOfflineShifts();
-    }
-      
       // 3. Upload Printer Audit Logs
       addLog('info', '📤 Uploading printer audit logs...');
       try {
@@ -866,10 +1387,10 @@ export default function SyncManagement() {
           const unsyncedAudits = await electronAPI.localDbGetUnsyncedPrinterAudits();
           const printer1Audits = Array.isArray(unsyncedAudits?.p1) ? unsyncedAudits.p1 : [];
           const printer2Audits = Array.isArray(unsyncedAudits?.p2) ? unsyncedAudits.p2 : [];
-          
+
           if (printer1Audits.length > 0 || printer2Audits.length > 0) {
             addLog('info', `📦 Found ${printer1Audits.length} Printer 1 and ${printer2Audits.length} Printer 2 audit logs`);
-            
+
             const response = await fetch(getApiUrl('/api/printer-audits'), {
               method: 'POST',
               headers: {
@@ -880,10 +1401,10 @@ export default function SyncManagement() {
                 printer2: printer2Audits
               }),
             });
-            
+
             if (response.ok) {
               addLog('success', '✅ Printer audit logs uploaded successfully');
-              
+
               // Mark as synced
               if (electronAPI.localDbMarkPrinterAuditsSynced) {
                 const toIdArray = (audits: unknown[]): number[] => {
@@ -898,7 +1419,7 @@ export default function SyncManagement() {
                         .filter((id) => !isNaN(id))
                     );
                 };
-                
+
                 await electronAPI.localDbMarkPrinterAuditsSynced({
                   p1Ids: toIdArray(printer1Audits),
                   p2Ids: toIdArray(printer2Audits),
@@ -916,36 +1437,36 @@ export default function SyncManagement() {
         addLog('warning', `⚠️ Printer audit sync failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
         // Continue anyway - printer audits are important but not critical
       }
-      
+
       // 4. Upload Refunds
       addLog('info', '📤 Uploading refunds...');
       try {
         if (electronAPI?.localDbGetPendingRefunds) {
           const pendingRefunds = await electronAPI.localDbGetPendingRefunds();
-          
+
           if (Array.isArray(pendingRefunds) && pendingRefunds.length > 0) {
             addLog('info', `📦 Found ${pendingRefunds.length} pending refunds`);
-            
+
             let refundSuccessCount = 0;
             let refundErrorCount = 0;
-            
+
             for (const refund of pendingRefunds) {
               try {
                 const payload = typeof (refund as UnknownRecord).refund_data === 'string'
                   ? JSON.parse((refund as UnknownRecord).refund_data as string) as UnknownRecord
                   : ((refund as UnknownRecord).refund_data as UnknownRecord);
-                
+
                 if (!payload || typeof payload !== 'object') {
                   throw new Error('Invalid refund payload');
                 }
-                
+
                 const transactionUuid = String(
                   payload.transaction_uuid ??
                   payload.transactionId ??
                   payload.id ??
                   ''
                 );
-                
+
                 if (!transactionUuid) {
                   addLog('warning', `⚠️ Refund ${(refund as UnknownRecord).id} missing transaction UUID`);
                   if (electronAPI.localDbMarkRefundFailed) {
@@ -954,7 +1475,7 @@ export default function SyncManagement() {
                   refundErrorCount++;
                   continue;
                 }
-                
+
                 const response = await fetch(getApiUrl(`/api/transactions/${transactionUuid}/refund`), {
                   method: 'POST',
                   headers: {
@@ -962,37 +1483,28 @@ export default function SyncManagement() {
                   },
                   body: JSON.stringify(payload),
                 });
-                
+
                 if (response.ok) {
                   const result = await response.json();
-                  
-                  // Update local transaction with refund info
-                  if (result.transaction && electronAPI.localDbUpsertTransactions) {
-                    await electronAPI.localDbUpsertTransactions([result.transaction]);
-                  }
-                  
-                  // Apply refund locally
+
+                  // IMPORTANT: Do NOT download transaction data from server response
+                  // Local database is the source of truth for transactions
+                  // Refund was accepted by server (response.ok), that's all we need
+
+                  // Apply refund locally using LOCAL data only
                   if (result.refund && electronAPI.localDbApplyTransactionRefund) {
-                    const transaction = result.transaction as UnknownRecord | undefined;
+                    // Do NOT use server transaction data - pass undefined to avoid overwriting local transaction
                     await electronAPI.localDbApplyTransactionRefund({
                       refund: result.refund,
-                      transactionUpdate: transaction
-                        ? {
-                            id: String(transaction.uuid_id || transaction.id || transactionUuid),
-                            refund_status: transaction.refund_status,
-                            refund_total: transaction.refund_total,
-                            last_refunded_at: transaction.last_refunded_at,
-                            status: transaction.status,
-                          }
-                        : undefined,
+                      transactionUpdate: undefined, // Do NOT use server transaction data
                     });
                   }
-                  
+
                   // Mark as synced
                   if (electronAPI.localDbMarkRefundSynced) {
                     await electronAPI.localDbMarkRefundSynced((refund as UnknownRecord).id as number);
                   }
-                  
+
                   refundSuccessCount++;
                   addLog('success', `✅ Refund ${(refund as UnknownRecord).id} uploaded successfully`);
                 } else {
@@ -1010,7 +1522,7 @@ export default function SyncManagement() {
                 }
               }
             }
-            
+
             addLog('success', `🎉 Refund upload completed! Success: ${refundSuccessCount}, Errors: ${refundErrorCount}`);
           } else {
             addLog('info', '✅ No refunds to upload');
@@ -1020,51 +1532,59 @@ export default function SyncManagement() {
         addLog('warning', `⚠️ Refund sync failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
         // Continue anyway - refunds will be retried on next sync
       }
-      
+
     } catch (error) {
       addLog('error', `❌ Upload to cloud failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
       setSyncProgress(0);
-      setSyncStatus(prev => ({ 
-        ...prev, 
-        syncInProgress: false, 
-        error: error instanceof Error ? error.message : 'Upload failed' 
+      setSyncStatus(prev => ({
+        ...prev,
+        syncInProgress: false,
+        error: error instanceof Error ? error.message : 'Upload failed'
       }));
     }
-  }, [addLog, loadOfflineTransactions, loadOfflineShifts, updateSyncStatus]);
+  }, [addLog, loadOfflineTransactions, updateSyncStatus]);
 
-  // Full bidirectional sync
-  const fullSync = useCallback(async () => {
+  // Download master data from server
+  const handleFullSyncClick = useCallback(async () => {
     if (!isElectron) {
+      addLog('error', 'Offline database not available');
+      return;
+    }
+    // Directly download from server
+    const electronAPI = getElectronAPI();
+    if (!electronAPI) {
       addLog('error', 'Offline database not available');
       return;
     }
 
     setSyncStatus(prev => ({ ...prev, syncInProgress: true, error: null }));
-    addLog('info', '🔄 Starting full bidirectional sync...');
+    addLog('info', '🔄 Starting sync (downloading products/prices from server, overwriting local)...');
+    setSyncProgress(50);
 
     try {
-      await syncToCloud();
+      // Download master data from server (excludes transactions, shifts, refunds, printer audits)
       await syncFromCloud();
-      
-      addLog('success', '🎉 Full bidirectional sync completed!');
+
+      addLog('success', '🎉 Sync completed! Products/prices downloaded from server (local overwritten).');
       setSyncProgress(100);
-      
+
       await updateSyncStatus(true);
       await fetchTransactionCounts();
       await loadOfflineTransactions();
-      await loadOfflineShifts();
-      
+      // await loadOfflineShifts();
+
       setTimeout(() => setSyncProgress(0), 1500);
     } catch (error) {
-      addLog('error', `❌ Full sync failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      addLog('error', `❌ Sync failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
       setSyncProgress(0);
-      setSyncStatus(prev => ({ 
-        ...prev, 
-        syncInProgress: false, 
-        error: error instanceof Error ? error.message : 'Sync failed' 
+      setSyncStatus(prev => ({
+        ...prev,
+        syncInProgress: false,
+        error: error instanceof Error ? error.message : 'Sync failed'
       }));
     }
-  }, [addLog, fetchTransactionCounts, isElectron, loadOfflineTransactions, loadOfflineShifts, syncFromCloud, syncToCloud, updateSyncStatus]);
+  }, [addLog, fetchTransactionCounts, isElectron, loadOfflineTransactions, syncFromCloud, updateSyncStatus]);
+
 
   // Archive all transactions
   const archiveAllTransactions = async () => {
@@ -1076,7 +1596,7 @@ export default function SyncManagement() {
     setIsArchiving(true);
     const rangeSuffix = hasDangerRange ? ` (range: ${rangeDescription})` : '';
     addLog('info', `🚀 Starting archive process${rangeSuffix}...`);
-    
+
     try {
       const electronAPI = getElectronAPI();
       if (!electronAPI?.localDbArchiveTransactions || !electronAPI.localDbResetPrinterDailyCounters) {
@@ -1090,7 +1610,7 @@ export default function SyncManagement() {
         to: dangerRange.toIso
       });
       addLog('success', `✅ Archived ${archiveCount} offline transactions${rangeSuffix}`);
-      
+
       // Also archive online transactions
       try {
         const response = await fetch(getApiUrl('/api/transactions/archive'), {
@@ -1100,7 +1620,7 @@ export default function SyncManagement() {
           },
           body: JSON.stringify({ business_id: businessId, from: dangerRange.fromIso, to: dangerRange.toIso })
         });
-        
+
         if (response.ok) {
           const data = await response.json();
           addLog('success', `✅ Archived ${data.archived} online transactions${rangeSuffix}`);
@@ -1110,12 +1630,11 @@ export default function SyncManagement() {
       } catch (error) {
         addLog(
           'warning',
-          `⚠️ Could not archive online transactions${rangeSuffix ? ` ${rangeSuffix}` : ''}: ${
-            error instanceof Error ? error.message : 'Unknown error'
+          `⚠️ Could not archive online transactions${rangeSuffix ? ` ${rangeSuffix}` : ''}: ${error instanceof Error ? error.message : 'Unknown error'
           }`
         );
       }
-      
+
       const resetCounters = await electronAPI.localDbResetPrinterDailyCounters(businessId);
       if (resetCounters?.success) {
         addLog('info', '🧹 Reset offline printer daily counters');
@@ -1160,106 +1679,176 @@ export default function SyncManagement() {
     setShowPasswordModal(true);
   };
 
-  // Generate SQL preview for delete by email
-  const generateDeleteByEmailPreview = (email: string, type: 'offline' | 'online'): string => {
-    const queries = [
-      `-- Step 1: Get user ID from email`,
-      `SELECT id FROM users WHERE email = '${email}' LIMIT 1;`,
-      ``,
-      `-- Step 2: Delete printer1 audit logs`,
-      `DELETE FROM printer1_audit_log`,
-      `WHERE transaction_id IN (`,
-      `  SELECT id FROM transactions WHERE user_id = ?`,
-      `);`,
-      ``,
-      `-- Step 3: Delete printer2 audit logs`,
-      `DELETE FROM printer2_audit_log`,
-      `WHERE transaction_id IN (`,
-      `  SELECT id FROM transactions WHERE user_id = ?`,
-      `);`,
-      ``,
-      `-- Step 4: Delete transaction items (foreign key constraint)`,
-      `DELETE FROM transaction_items`,
-      `WHERE transaction_id IN (`,
-      `  SELECT id FROM transactions WHERE user_id = ?`,
-      `);`,
-      ``,
-      `-- Step 5: Delete transactions`,
-      `DELETE FROM transactions WHERE user_id = ?;`
-    ];
-    return queries.join('\n');
-  };
 
-  // Update preview when email changes
-  const updateDeleteByEmailPreview = (email: string) => {
-    if (email && email.trim()) {
-      setDeleteByEmailPreview(email.trim());
-    } else {
-      setDeleteByEmailPreview('');
+  // Copy SQL preview to clipboard
+  const copySqlToClipboard = async (text: string, previewId: string) => {
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopiedSqlPreview(previewId);
+      setTimeout(() => setCopiedSqlPreview(null), 2000);
+    } catch {
+      addLog('error', '❌ Failed to copy to clipboard');
     }
   };
 
-  // Delete transactions by user email
-  const deleteTransactionsByEmail = async (userEmail: string) => {
-    if (!userEmail || !userEmail.trim()) {
-      addLog('error', '❌ User email is required');
-      return;
-    }
-
+  // Cleanup test transactions (hardcoded: marviano.austin@gmail.com OR user_id IS NULL)
+  const cleanupTestTransactions = async () => {
     const confirmed = window.confirm(
-      `⚠️ WARNING: This will PERMANENTLY DELETE ALL transactions created by user "${userEmail}" from both offline and online databases.\n\n` +
+      `⚠️ WARNING: This will PERMANENTLY DELETE ALL transactions from all 3 databases:\n\n` +
+      `1. Offline SQLite (local POS)\n` +
+      `2. SalesPulse MySQL (online)\n` +
+      `3. System-POS MySQL (online)\n\n` +
+      `Target: marviano.austin@gmail.com OR user_id IS NULL\n\n` +
       `This action CANNOT be undone!\n\n` +
       `Are you absolutely sure you want to proceed?`
     );
 
     if (!confirmed) {
-      addLog('info', '❌ Deletion cancelled by user');
+      console.log('[CLEANUP] ❌ Cleanup cancelled by user');
+      addLog('info', '❌ Cleanup cancelled by user');
       return;
     }
 
-    addLog('info', `🗑️ Starting deletion of all transactions for user: ${userEmail}...`);
-    
+    setIsDeletingByEmail(true);
+    console.log(`[CLEANUP] 🗑️ Starting cleanup of test transactions (marviano.austin@gmail.com OR user_id IS NULL)...`);
+    addLog('info', `🗑️ Starting cleanup of test transactions (marviano.austin@gmail.com OR user_id IS NULL)...`);
+
     try {
       const electronAPI = getElectronAPI();
-      if (!electronAPI?.localDbDeleteTransactionsByEmail) {
+      if (!electronAPI?.localDbDeleteTransactionsByRole) {
+        console.error('[CLEANUP] ❌ Offline database API not available');
         addLog('error', '❌ Offline database API not available');
+        setIsDeletingByEmail(false);
         return;
       }
 
-      // Delete from offline database
-      const offlineResult = await electronAPI.localDbDeleteTransactionsByEmail({ userEmail });
-      
-      if (offlineResult.success) {
-        addLog('success', `✅ Deleted ${offlineResult.deleted} offline transactions and ${offlineResult.deletedItems || 0} transaction items for user: ${userEmail}`);
+      // ============================================
+      // DATABASE 1: OFFLINE SQLITE
+      // ============================================
+      console.log('[CLEANUP] 📦 [Database 1/3] Offline SQLite - Starting deletion...');
+      addLog('info', '📦 [Database 1/3] Offline SQLite - Starting deletion...');
+      const offlineResult = await electronAPI.localDbDeleteTransactionsByRole();
+      console.log('[CLEANUP] [Offline SQLite] Result:', offlineResult);
+
+      if (offlineResult.success && offlineResult.details) {
+        const d = offlineResult.details;
+        console.log(`[CLEANUP] [Offline SQLite] Target User IDs: ${d.targetUserIds?.join(', ') || 'NULL'}`);
+        console.log(`[CLEANUP] [Offline SQLite] printer1_audit_log: ${d.printer1_audit_log} rows`);
+        console.log(`[CLEANUP] [Offline SQLite] printer2_audit_log: ${d.printer2_audit_log} rows`);
+        console.log(`[CLEANUP] [Offline SQLite] transaction_items: ${d.transaction_items} rows`);
+        console.log(`[CLEANUP] [Offline SQLite] transactions: ${d.transactions} rows`);
+
+        addLog('success', `✅ [Offline SQLite] Target User IDs: ${d.targetUserIds?.join(', ') || 'NULL'}`);
+        addLog('info', `   └─ printer1_audit_log: ${d.printer1_audit_log} rows deleted`);
+        addLog('info', `   └─ printer2_audit_log: ${d.printer2_audit_log} rows deleted`);
+        addLog('info', `   └─ transaction_items: ${d.transaction_items} rows deleted`);
+        addLog('info', `   └─ transactions: ${d.transactions} rows deleted`);
+        addLog('success', `✅ [Offline SQLite] Completed: ${d.transactions} transactions, ${d.transaction_items} items`);
       } else {
-        addLog('error', `❌ Failed to delete offline transactions: ${offlineResult.error || 'Unknown error'}`);
+        const errorMsg = offlineResult.error || 'Unknown error';
+        console.error(`[CLEANUP] [Offline SQLite] ❌ Failed: ${errorMsg}`);
+        addLog('error', `❌ [Offline SQLite] Failed: ${errorMsg}`);
       }
 
-      // Delete from online database
+      // ============================================
+      // DATABASE 2 & 3: SALESPULSE & SYSTEM-POS MYSQL
+      // ============================================
+      console.log('[CLEANUP] 🌐 [Database 2-3/3] Online MySQL (SalesPulse + System-POS) - Starting deletion...');
+      addLog('info', '🌐 [Database 2-3/3] Online MySQL (SalesPulse + System-POS) - Starting deletion...');
       try {
-        const response = await fetch(getApiUrl('/api/transactions/delete-by-email'), {
-          method: 'POST',
+        const apiUrl = getApiUrl('/api/admin/transactions/cleanup');
+        const apiKey = process.env.NEXT_PUBLIC_POS_SYNC_API_KEY || '';
+        console.log('[CLEANUP] API URL:', apiUrl);
+        console.log('[CLEANUP] Using API Key:', apiKey ? `${apiKey.substring(0, 5)}...` : '(Empty/Undefined)');
+
+        const response = await fetch(apiUrl, {
+          method: 'DELETE',
           headers: {
             'Content-Type': 'application/json',
+            'X-POS-API-Key': process.env.NEXT_PUBLIC_POS_SYNC_API_KEY || '',
           },
-          body: JSON.stringify({ user_email: userEmail })
+          credentials: 'include',
         });
-        
+
+        console.log('[CLEANUP] Online response status:', response.status);
         if (response.ok) {
           const data = await response.json();
-          addLog('success', `✅ Deleted ${data.deleted || 0} online transactions for user: ${userEmail}`);
+          console.log('[CLEANUP] Online response data:', data);
+
+          // Check if new detailed format is available
+          if (data.details && data.details.salespulse && data.details.systemPos) {
+            // New format with detailed breakdown
+            // SalesPulse MySQL
+            const sp = data.details.salespulse;
+            console.log(`[CLEANUP] [SalesPulse MySQL] Target User IDs: ${sp.targetUserIds?.join(', ') || 'NULL'}`);
+            console.log(`[CLEANUP] [SalesPulse MySQL] printer1_audit_log: ${sp.printer1_audit_log} rows`);
+            console.log(`[CLEANUP] [SalesPulse MySQL] printer_audits: ${sp.printer_audits} rows`);
+            console.log(`[CLEANUP] [SalesPulse MySQL] printer2_audit_log: ${sp.printer2_audit_log} rows`);
+            console.log(`[CLEANUP] [SalesPulse MySQL] transaction_items: ${sp.transaction_items} rows`);
+            console.log(`[CLEANUP] [SalesPulse MySQL] transactions: ${sp.transactions} rows`);
+
+            if (sp.success) {
+              addLog('success', `✅ [SalesPulse MySQL] Target User IDs: ${sp.targetUserIds?.join(', ') || 'NULL'}`);
+              addLog('info', `   └─ printer1_audit_log: ${sp.printer1_audit_log} rows deleted`);
+              addLog('info', `   └─ printer_audits: ${sp.printer_audits} rows deleted`);
+              addLog('info', `   └─ printer2_audit_log: ${sp.printer2_audit_log} rows deleted`);
+              addLog('info', `   └─ transaction_items: ${sp.transaction_items} rows deleted`);
+              addLog('info', `   └─ transactions: ${sp.transactions} rows deleted`);
+              addLog('success', `✅ [SalesPulse MySQL] Completed: ${sp.transactions} transactions, ${sp.transaction_items} items`);
+            } else {
+              addLog('error', `❌ [SalesPulse MySQL] Failed: ${sp.error || 'Unknown error'}`);
+            }
+
+            // System-POS MySQL
+            const sys = data.details.systemPos;
+            console.log(`[CLEANUP] [System-POS MySQL] Target User IDs: ${sys.targetUserIds?.join(', ') || 'NULL'}`);
+            console.log(`[CLEANUP] [System-POS MySQL] printer1_audit_log: ${sys.printer1_audit_log} rows`);
+            console.log(`[CLEANUP] [System-POS MySQL] printer2_audit_log: ${sys.printer2_audit_log} rows`);
+            console.log(`[CLEANUP] [System-POS MySQL] transaction_items: ${sys.transaction_items} rows`);
+            console.log(`[CLEANUP] [System-POS MySQL] transactions: ${sys.transactions} rows`);
+
+            if (sys.success) {
+              addLog('success', `✅ [System-POS MySQL] Target User IDs: ${sys.targetUserIds?.join(', ') || 'NULL'}`);
+              addLog('info', `   └─ printer1_audit_log: ${sys.printer1_audit_log} rows deleted`);
+              addLog('info', `   └─ printer2_audit_log: ${sys.printer2_audit_log} rows deleted`);
+              addLog('info', `   └─ transaction_items: ${sys.transaction_items} rows deleted`);
+              addLog('info', `   └─ transactions: ${sys.transactions} rows deleted`);
+              addLog('success', `✅ [System-POS MySQL] Completed: ${sys.transactions} transactions, ${sys.transaction_items} items`);
+            } else {
+              addLog('error', `❌ [System-POS MySQL] Failed: ${sys.error || 'Unknown error'}`);
+            }
+          } else {
+            // Old format (backward compatibility) - API not yet updated
+            console.warn('[CLEANUP] ⚠️ Backend API returned old format. Detailed breakdown not available.');
+            console.log('[CLEANUP] Response format:', data);
+            addLog('warning', '⚠️ Backend API returned old format. Detailed breakdown not available.');
+            if (data.results) {
+              addLog('info', `   └─ SalesPulse: ${data.results.salespulse?.deleted || 0} transactions`);
+              addLog('info', `   └─ System-POS: ${data.results.systemPos?.deleted || 0} transactions`);
+            }
+            addLog('warning', '⚠️ Please redeploy backend API to get detailed per-database breakdown');
+          }
+
+          const totalDeleted = data.deleted || data.results?.total || 0;
+          const totalDeletedItems = data.deletedItems || 0;
+          addLog('success', `🎉 Overall: ${totalDeleted} transactions, ${totalDeletedItems} transaction items deleted across all databases`);
         } else {
           const errorData = await response.json().catch(() => ({ error: 'Unknown error' }));
-          addLog('warning', `⚠️ Could not delete online transactions: ${errorData.error || 'Unknown error'} (may be offline)`);
+          console.warn(`[CLEANUP] ⚠️ Could not delete online transactions: ${errorData.error || 'Unknown error'}`);
+          addLog('warning', `⚠️ Could not delete online transactions: ${errorData.error || 'Unknown error'} (may be offline or unauthorized)`);
         }
       } catch (error) {
+        console.error('[CLEANUP] ⚠️ Online deletion error:', error);
         addLog('warning', `⚠️ Could not delete online transactions: ${error instanceof Error ? error.message : 'Unknown error'}`);
       }
 
-      addLog('success', `🎉 Deletion process completed for user: ${userEmail}`);
+      console.log(`[CLEANUP] 🎉 Cleanup process completed`);
       await fetchTransactionCounts();
     } catch (error) {
-      addLog('error', `❌ Deletion failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      console.error('[CLEANUP] ❌ Cleanup failed:', error);
+      addLog('error', `❌ Cleanup failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    } finally {
+      setIsDeletingByEmail(false);
     }
   };
 
@@ -1273,7 +1862,7 @@ export default function SyncManagement() {
     setIsDeleting(true);
     const rangeSuffix = hasDangerRange ? ` (range: ${rangeDescription})` : '';
     addLog('info', `🗑️ Starting permanent deletion process${rangeSuffix}...`);
-    
+
     try {
       const electronAPI = getElectronAPI();
       if (
@@ -1292,7 +1881,7 @@ export default function SyncManagement() {
         to: dangerRange.toIso
       });
       addLog('success', `✅ Deleted ${deleteCount} offline transactions permanently${rangeSuffix}`);
-      
+
       // Delete transaction items
       const itemsResult = await electronAPI.localDbDeleteTransactionItems({
         businessId: businessId,
@@ -1301,7 +1890,7 @@ export default function SyncManagement() {
       });
       const deletedItems = itemsResult?.deleted ?? 0;
       addLog('success', `✅ Deleted ${deletedItems} offline transaction items`);
-      
+
       // Delete from online database
       try {
         const response = await fetch(getApiUrl('/api/transactions/delete'), {
@@ -1311,7 +1900,7 @@ export default function SyncManagement() {
           },
           body: JSON.stringify({ business_id: businessId, from: dangerRange.fromIso, to: dangerRange.toIso })
         });
-        
+
         if (response.ok) {
           const data = await response.json();
           addLog('success', `✅ Deleted ${data.deleted} online transactions permanently${rangeSuffix}`);
@@ -1321,12 +1910,11 @@ export default function SyncManagement() {
       } catch (error) {
         addLog(
           'warning',
-          `⚠️ Could not delete online transactions${rangeSuffix ? ` ${rangeSuffix}` : ''}: ${
-            error instanceof Error ? error.message : 'Unknown error'
+          `⚠️ Could not delete online transactions${rangeSuffix ? ` ${rangeSuffix}` : ''}: ${error instanceof Error ? error.message : 'Unknown error'
           }`
         );
       }
-      
+
       const resetCounters = await electronAPI.localDbResetPrinterDailyCounters(businessId);
       if (resetCounters?.success) {
         addLog('info', '🧹 Reset offline printer daily counters');
@@ -1344,13 +1932,16 @@ export default function SyncManagement() {
       setShowGatePasswordModal(false);
       setShowDangerZone(false);
       setPasswordInput('');
-      setGatePasswordInput('');
+      if (gatePasswordInputRef.current) {
+        gatePasswordInputRef.current.value = '';
+      }
     }
   };
 
   // Fetch transaction counts
   // Find orphaned transactions (exist offline but not online, even if marked as synced)
-  const findOrphanedTransactions = useCallback(async () => {
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  const _findOrphanedTransactions = useCallback(async () => {
     const electronAPI = getElectronAPI();
     if (!electronAPI?.localDbGetTransactions) {
       addLog('error', 'Offline database not available');
@@ -1358,11 +1949,11 @@ export default function SyncManagement() {
     }
 
     addLog('info', '🔍 Searching for orphaned transactions...');
-    
+
     try {
       const allOfflineTransactionsRaw = await electronAPI.localDbGetTransactions(14, 10000);
       const allOfflineTransactions = normalizeOfflineTransactions(allOfflineTransactionsRaw);
-      
+
       let onlineTransactionIds: string[] = [];
       try {
         const response = await fetch(getApiUrl(`/api/transactions?business_id=${businessId}&limit=10000`));
@@ -1382,7 +1973,7 @@ export default function SyncManagement() {
 
       setOrphanedTransactions(orphaned);
       setShowOrphanedData(true);
-      
+
       if (orphaned.length > 0) {
         addLog('warning', `⚠️ Found ${orphaned.length} orphaned transaction(s) that exist offline but not online`);
       } else {
@@ -1391,7 +1982,7 @@ export default function SyncManagement() {
     } catch (error) {
       addLog('error', `❌ Failed to find orphaned transactions: ${error instanceof Error ? error.message : 'Unknown error'}`);
     }
-  }, [addLog]);
+  }, [addLog, businessId]);
 
   // Reset synced_at for orphaned transactions so they can be re-uploaded
   const resetOrphanedTransactions = useCallback(async () => {
@@ -1403,15 +1994,15 @@ export default function SyncManagement() {
     }
 
     addLog('info', '🔄 Resetting synced_at for orphaned transactions...');
-    
+
     try {
       const orphanedIds = orphanedTransactions.map(t => t.id);
       for (const id of orphanedIds) {
         await electronAPI.localDbResetTransactionSync(id);
       }
-      
+
       addLog('success', `✅ Reset ${orphanedIds.length} transaction(s) - they will now appear in upload list`);
-      
+
       await loadOfflineTransactions();
       await fetchTransactionCounts();
       await updateSyncStatus(true);
@@ -1424,32 +2015,32 @@ export default function SyncManagement() {
   // Initialize on component mount
   useEffect(() => {
     if (isInitialized) return;
-    
+
     // Prevent duplicate initialization by checking if logs already exist
     if (syncLogs.length > 0) {
       setIsInitialized(true);
       return;
     }
-    
+
     updateSyncStatus(false);
     loadOfflineTransactions();
-    loadOfflineShifts();
+    // loadOfflineShifts();
     fetchTransactionCounts();
     addLog('info', 'Sync management initialized');
     setIsInitialized(true);
-  }, [addLog, fetchTransactionCounts, isInitialized, loadOfflineTransactions, loadOfflineShifts, updateSyncStatus, syncLogs.length]);
+  }, [addLog, fetchTransactionCounts, isInitialized, loadOfflineTransactions, updateSyncStatus, syncLogs.length]);
 
-  const formatLastSync = (lastSync: string | null) => {
-    if (!lastSync) return 'Belum pernah';
-    const date = new Date(lastSync);
-    return date.toLocaleString('id-ID', {
-      day: '2-digit',
-      month: '2-digit',
-      year: 'numeric',
-      hour: '2-digit',
-      minute: '2-digit'
-    });
-  };
+  // const formatLastSync = (lastSync: string | null) => {
+  //   if (!lastSync) return 'Belum pernah';
+  //   const date = new Date(lastSync);
+  //   return date.toLocaleString('id-ID', {
+  //     day: '2-digit',
+  //     month: '2-digit',
+  //     year: 'numeric',
+  //     hour: '2-digit',
+  //     minute: '2-digit'
+  //   });
+  // };
 
   const formatPrice = (price: number) => {
     return new Intl.NumberFormat('id-ID', {
@@ -1526,7 +2117,7 @@ export default function SyncManagement() {
       clauses.push(statusCondition);
     }
     return clauses.join('\n  AND ');
-  }, [dangerRange.fromIso, dangerRange.toIso]);
+  }, [dangerRange.fromIso, dangerRange.toIso, businessId]);
 
   const UPDATED_AT_PLACEHOLDER = '<current_epoch_ms>';
 
@@ -1608,7 +2199,7 @@ WHERE ${baseWhere};`;
   }, [buildSqlWherePreview]);
 
   return (
-    <div className="flex-1 flex flex-col bg-white h-full relative">
+    <div className="flex-1 flex flex-col bg-white h-full relative overflow-y-auto">
       {/* Floating Danger Zone Button - Bottom Right */}
       <button
         onClick={() => setShowGatePasswordModal(true)}
@@ -1618,7 +2209,7 @@ WHERE ${baseWhere};`;
         <AlertTriangle className="w-3.5 h-3.5" />
       </button>
 
-      <div className="flex-1 flex flex-col max-w-7xl mx-auto w-full px-6 py-6">
+      <div className="flex-1 flex flex-col max-w-7xl mx-auto w-full px-6 py-6 overflow-y-auto">
         {/* Header */}
         <div className="mb-6">
           <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
@@ -1627,7 +2218,7 @@ WHERE ${baseWhere};`;
                 <Database className="w-6 h-6" />
                 Sinkronisasi Database
               </h1>
-              
+
               {/* Transaction Count Display */}
               <div className="mt-3 flex items-center gap-4">
                 <div className="flex items-center gap-2 text-sm">
@@ -1643,16 +2234,39 @@ WHERE ${baseWhere};`;
                 </div>
               </div>
             </div>
-            
+
             {/* Sync Buttons */}
-            <div className="flex gap-3">
+            <div className="flex gap-3 items-center">
+              {/* Auto Sync Toggle */}
+              <div className="flex items-center gap-3 bg-white rounded-lg shadow-sm border border-gray-200 px-4 py-2">
+                <Activity className="w-5 h-5 text-blue-600" />
+                <div>
+                  <h3 className="text-sm font-semibold text-gray-900">Auto Sync (Smart Sync)</h3>
+                  <p className="text-xs text-gray-500 mt-0.5">
+                    Otomatis mengunggah transaksi ke server setiap 30 detik
+                  </p>
+                </div>
+                <label className="relative inline-flex items-center cursor-pointer ml-4">
+                  <input
+                    type="checkbox"
+                    checked={autoSyncEnabled}
+                    onChange={(e) => handleAutoSyncToggle(e.target.checked)}
+                    className="sr-only peer"
+                  />
+                  <div className="w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-blue-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-600"></div>
+                  <span className="ml-3 text-sm font-medium text-gray-700">
+                    {autoSyncEnabled ? 'Aktif' : 'Nonaktif'}
+                  </span>
+                </label>
+              </div>
+
               <button
-                onClick={fullSync}
+                onClick={handleFullSyncClick}
                 disabled={syncStatus.syncInProgress}
                 className={`
                   flex items-center justify-center gap-2 px-4 py-2 rounded-lg font-medium transition-all text-sm
-                  ${syncStatus.syncInProgress 
-                    ? 'bg-gray-400 text-white cursor-not-allowed' 
+                  ${syncStatus.syncInProgress
+                    ? 'bg-gray-400 text-white cursor-not-allowed'
                     : 'bg-blue-600 hover:bg-blue-700 text-white'
                   }
                 `}
@@ -1666,149 +2280,108 @@ WHERE ${baseWhere};`;
                   <>
                     <RefreshCw className="w-4 h-4" />
                     <div className="flex flex-col items-start">
-                      <span className="font-semibold">Sync Products & Prices</span>
-                      <span className="text-xs opacity-80">dan Upload Transaksi</span>
+                      <span className="font-semibold">Sinkronisasi Knowledge Base PoS</span>
+                      <span className="text-xs opacity-80">Download dari Server (Overwrite Local)</span>
                     </div>
                   </>
                 )}
               </button>
 
-              <button
-                onClick={handleRestoreFromServer}
-                disabled={isRestoring}
-                className={`
-                  flex items-center justify-center gap-2 px-4 py-2 rounded-lg font-medium transition-all text-sm
-                  ${isRestoring 
-                    ? 'bg-gray-400 text-white cursor-not-allowed' 
-                    : 'bg-red-600 hover:bg-red-700 text-white border-2 border-red-800'
-                  }
-                `}
-                title="⚠️ WARNING: Downloads transaction data from server (overwrites local transactions)"
-              >
-                {isRestoring ? (
-                  <>
-                    <Database className="w-4 h-4 animate-pulse" />
-                    <span>Downloading...</span>
-                  </>
-                ) : (
-                  <>
-                    <Database className="w-4 h-4" />
-                    <div className="flex flex-col items-start">
-                      <span className="font-semibold">Download Transaction Data</span>
-                      <span className="text-xs opacity-90">(Unduh Data Transaksi)</span>
-                    </div>
-                  </>
-                )}
-              </button>
             </div>
           </div>
         </div>
 
-        {/* Auto Sync Toggle */}
-        <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-4 mb-6">
-          <div className="flex items-center justify-between">
+        {/* System-POS Debug Tool - Prominent Location */}
+        <div className="bg-gradient-to-r from-blue-50 to-indigo-50 dark:from-blue-900/20 dark:to-indigo-900/20 rounded-lg shadow-md border-2 border-blue-300 dark:border-blue-700 mb-6">
+          <button
+            onClick={() => setShowDebugTool(!showDebugTool)}
+            className="w-full px-6 py-4 flex items-center justify-between hover:bg-blue-100/50 dark:hover:bg-blue-900/30 transition-colors rounded-t-lg"
+          >
             <div className="flex items-center gap-3">
-              <Activity className="w-5 h-5 text-blue-600" />
-              <div>
-                <h3 className="text-sm font-semibold text-gray-900">Auto Sync (Smart Sync)</h3>
-                <p className="text-xs text-gray-500 mt-0.5">
-                  Otomatis mengunggah transaksi ke server setiap 30 detik
+              <AlertCircle className="w-6 h-6 text-blue-600 dark:text-blue-400" />
+              <div className="flex flex-col items-start">
+                <h3 className="text-lg font-bold text-gray-900 dark:text-gray-100">
+                  🔍 System-POS Sync Debug Tool
+                </h3>
+                <p className="text-xs text-gray-600 dark:text-gray-400 mt-0.5">
+                  Debug missing transactions - Check why transactions aren&apos;t syncing to System-POS
                 </p>
               </div>
             </div>
-            <label className="relative inline-flex items-center cursor-pointer">
-              <input
-                type="checkbox"
-                checked={autoSyncEnabled}
-                onChange={(e) => handleAutoSyncToggle(e.target.checked)}
-                className="sr-only peer"
-              />
-              <div className="w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-blue-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-600"></div>
-              <span className="ml-3 text-sm font-medium text-gray-700">
-                {autoSyncEnabled ? 'Aktif' : 'Nonaktif'}
-              </span>
-            </label>
-          </div>
+            {showDebugTool ? (
+              <X className="w-5 h-5 text-gray-500" />
+            ) : (
+              <AlertCircle className="w-5 h-5 text-blue-400" />
+            )}
+          </button>
+          {showDebugTool && (
+            <div className="border-t-2 border-blue-300 dark:border-blue-700 p-6 bg-white dark:bg-gray-800 rounded-b-lg">
+              <SystemPosDebugTool />
+            </div>
+          )}
         </div>
 
-        {/* Connection Status */}
-        <div className="grid grid-cols-1 md:grid-cols-4 gap-3 mb-6">
-          <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-2.5">
-            <div className="flex items-center gap-1.5 mb-1.5">
-              {syncStatus.isOnline ? (
-                <Cloud className="w-3.5 h-3.5 text-green-600" />
-              ) : (
-                <CloudOff className="w-3.5 h-3.5 text-red-600" />
+        {/* System POS Status */}
+        <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-4 mb-6">
+          <div className="flex items-center justify-between">
+            <div>
+              <h3 className="text-sm font-semibold text-gray-800 flex items-center gap-2">
+                <Database className="w-4 h-4" />
+                System POS Queue Status
+              </h3>
+              <p className="text-xs text-gray-500 mt-1">
+                Status antrian transaksi untuk System POS (Printer 2 / Receiptize)
+              </p>
+            </div>
+            <button
+              onClick={handleCheckSystemPosStatus}
+              disabled={isCheckingSystemPos}
+              className="flex items-center gap-1 px-3 py-1.5 text-xs bg-blue-50 hover:bg-blue-100 text-blue-700 rounded transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              <RefreshCw className={`w-3 h-3 ${isCheckingSystemPos ? 'animate-spin' : ''}`} />
+              <span>{isCheckingSystemPos ? 'Mengecek...' : 'Cek Status'}</span>
+            </button>
+          </div>
+
+          {systemPosQueueStatus && (
+            <>
+              <div className="mt-4 grid grid-cols-4 gap-3">
+                <div className="bg-gray-50 rounded p-2">
+                  <div className="text-xs text-gray-500">Total</div>
+                  <div className="text-lg font-semibold text-gray-900">{systemPosQueueStatus.total}</div>
+                </div>
+                <div className="bg-yellow-50 rounded p-2">
+                  <div className="text-xs text-yellow-600">Pending</div>
+                  <div className="text-lg font-semibold text-yellow-900">{systemPosQueueStatus.pending}</div>
+                </div>
+                <div className="bg-green-50 rounded p-2">
+                  <div className="text-xs text-green-600">Synced</div>
+                  <div className="text-lg font-semibold text-green-900">{systemPosQueueStatus.synced}</div>
+                </div>
+                <div className="bg-red-50 rounded p-2">
+                  <div className="text-xs text-red-600">Failed</div>
+                  <div className="text-lg font-semibold text-red-900">{systemPosQueueStatus.failed}</div>
+                </div>
+              </div>
+              {systemPosQueueStatus.failed > 0 && (
+                <div className="mt-3">
+                  <button
+                    onClick={handleResetSystemPosRetryCount}
+                    className="flex items-center gap-1 px-3 py-1.5 text-xs bg-orange-50 hover:bg-orange-100 text-orange-700 rounded transition-colors"
+                  >
+                    <RefreshCw className="w-3 h-3" />
+                    <span>Reset Retry Count ({systemPosQueueStatus.failed} transaksi)</span>
+                  </button>
+                </div>
               )}
-              <h3 className="font-semibold text-gray-900 text-[11px]">Status Koneksi</h3>
-            </div>
-            <div className="text-[10px] text-gray-600">
-              <div>Status: <span className={syncStatus.isOnline ? 'text-green-600' : 'text-red-600'}>{syncStatus.isOnline ? 'Online' : 'Offline'}</span></div>
-              <div>Terakhir sinkronisasi: {formatLastSync(syncStatus.lastSync)}</div>
-            </div>
-          </div>
+            </>
+          )}
 
-          <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-2.5">
-            <div className="flex items-center gap-1.5 mb-1.5">
-              <Clock className="w-3.5 h-3.5 text-blue-600" />
-              <h3 className="font-semibold text-gray-900 text-[11px]">Transaksi Tertunda</h3>
+          {!systemPosQueueStatus && (
+            <div className="mt-4 text-xs text-gray-500 text-center py-2">
+              Klik &quot;Cek Status&quot; untuk melihat status System POS queue
             </div>
-            <div className="text-[10px] text-gray-600">
-              <div>Jumlah: <span className="font-medium">{syncStatus.pendingTransactions}</span></div>
-              <div>Status: {syncStatus.syncInProgress ? 'Sinkronisasi...' : 'Siap sinkronisasi'}</div>
-            </div>
-          </div>
-
-          <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-2.5">
-            <div className="flex items-center gap-1.5 mb-1.5">
-              <Activity className="w-3.5 h-3.5 text-purple-600" />
-              <h3 className="font-semibold text-gray-900 text-[11px]">Aktivitas Terakhir</h3>
-            </div>
-            <div className="text-[10px] text-gray-600">
-              <div>Log entries: <span className="font-medium">{syncLogs.length}</span></div>
-              <div>Offline transactions: <span className="font-medium">{offlineTransactions.length}</span></div>
-              <div>Offline shifts: <span className="font-medium">{offlineShifts.length}</span></div>
-            </div>
-          </div>
-
-          <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-2.5">
-            <div className="flex items-center gap-1.5 mb-1.5">
-              <Activity className="w-3.5 h-3.5 text-indigo-600" />
-              <h3 className="font-semibold text-gray-900 text-[11px]">Smart Sync</h3>
-            </div>
-            <div className="text-[10px] text-gray-600">
-              {smartSyncStatus ? (
-                <>
-                  <div>
-                    Status:{' '}
-                    <span className={smartSyncStatus.isSyncing ? 'text-blue-600' : 'text-green-600'}>
-                      {smartSyncStatus.isSyncing
-                        ? 'Syncing'
-                        : smartSyncStatus.consecutiveFailures > 0
-                          ? `${smartSyncStatus.consecutiveFailures} fails`
-                          : 'Ready'}
-                    </span>
-                  </div>
-                  <div>
-                    Avg load:{' '}
-                    <span
-                      className={
-                        smartSyncStatus.averageServerLoad > 1000
-                          ? 'text-red-600'
-                          : smartSyncStatus.averageServerLoad > 500
-                            ? 'text-yellow-600'
-                            : 'text-green-600'
-                      }
-                    >
-                      {Math.round(smartSyncStatus.averageServerLoad)} ms
-                    </span>
-                  </div>
-                </>
-              ) : (
-                <div className="text-gray-500">Belum ada data</div>
-              )}
-            </div>
-          </div>
+          )}
         </div>
 
         {/* Sync Progress Bar - Always visible */}
@@ -1823,7 +2396,7 @@ WHERE ${baseWhere};`;
               </span>
             </div>
             <div className="w-full bg-gray-200 rounded-full h-2">
-              <div 
+              <div
                 className={`h-2 rounded-full transition-all duration-300 ${syncStatus.syncInProgress ? 'bg-blue-600' : 'bg-gray-400'}`}
                 style={{ width: `${syncProgress}%` }}
               />
@@ -1881,10 +2454,48 @@ WHERE ${baseWhere};`;
 
           {/* Offline Transactions */}
           <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-6 flex flex-col h-[420px]">
-            <h2 className="text-sm font-semibold text-gray-800 flex items-center gap-2 mb-4 flex-shrink-0">
-              <Database className="w-4 h-4" />
-              Data Offline yang Akan Diunggah
-            </h2>
+            <div className="flex items-center justify-between mb-4 flex-shrink-0">
+              <h2 className="text-sm font-semibold text-gray-800 flex items-center gap-2">
+                <Database className="w-4 h-4" />
+                Data Offline yang Akan Diunggah
+                {offlineTransactions.length > 0 && (
+                  <span className="text-xs font-normal text-gray-500">
+                    ({offlineTransactions.length} transaksi)
+                  </span>
+                )}
+              </h2>
+              {offlineTransactions.length > 0 && (
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={handleCheckTransactionStatus}
+                    disabled={checkingStatus}
+                    className="flex items-center gap-1 px-2 py-1 text-xs bg-blue-50 hover:bg-blue-100 text-blue-700 rounded transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                    title="Cek apakah transaksi sudah ada di server"
+                  >
+                    <RefreshCw className={`w-3 h-3 ${checkingStatus ? 'animate-spin' : ''}`} />
+                    <span>{checkingStatus ? 'Mengecek...' : 'Cek Status'}</span>
+                  </button>
+                  {Array.from(checkResults.values()).some(r => r.exists && r.checked) && (
+                    <button
+                      onClick={handleUpdateSyncedStatus}
+                      className="flex items-center gap-1 px-2 py-1 text-xs bg-green-50 hover:bg-green-100 text-green-700 rounded transition-colors"
+                      title="Update synced_at untuk transaksi yang sudah ada di server"
+                    >
+                      <CheckCircle className="w-3 h-3" />
+                      <span>Update Status</span>
+                    </button>
+                  )}
+                  <button
+                    onClick={handleDeleteUnsyncedTransactions}
+                    className="flex items-center gap-1 px-2 py-1 text-xs bg-red-50 hover:bg-red-100 text-red-700 rounded transition-colors"
+                    title="Hapus semua data offline yang akan diunggah"
+                  >
+                    <Trash2 className="w-3 h-3" />
+                    <span>Hapus</span>
+                  </button>
+                </div>
+              )}
+            </div>
 
             <div className="flex-1 overflow-y-auto border border-gray-200 rounded-lg min-h-0">
               {isLoadingOfflineData ? (
@@ -1909,41 +2520,77 @@ WHERE ${baseWhere};`;
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-gray-200">
-                      {offlineTransactions.map((transaction) => (
-                        <tr key={transaction.id} className="hover:bg-gray-50">
-                          <td className="px-2 py-1 font-medium text-blue-600">
-                            #{transaction.receipt_number || 'N/A'}
-                          </td>
-                          <td className="px-2 py-1 text-center">
-                            <button
-                              onClick={() => {
-                                handleCopyUuid(String(transaction.id));
-                              }}
-                              className="p-0.5 hover:bg-gray-200 rounded transition-colors"
-                              title={`Copy UUID: ${String(transaction.id)}`}
-                            >
-                              <svg className="w-3 h-3 text-gray-500 hover:text-gray-700" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
-                              </svg>
-                            </button>
-                          </td>
-                          <td className="px-2 py-1 text-gray-600">
-                            {new Date(transaction.created_at).toLocaleString('id-ID')}
-                          </td>
-                          <td className="px-2 py-1 font-medium text-gray-900">
-                            {formatPrice(transaction.final_amount)}
-                          </td>
-                          <td className="px-2 py-1">
-                            <span className={`inline-flex px-1.5 py-0.5 text-[9px] font-semibold rounded-full ${
-                              transaction.status === 'completed' 
-                                ? 'bg-green-100 text-green-800' 
-                                : 'bg-yellow-100 text-yellow-800'
-                            }`}>
-                              {transaction.status}
-                            </span>
-                          </td>
-                        </tr>
-                      ))}
+                      {offlineTransactions.map((transaction) => {
+                        const txUuid = String(transaction.id);
+                        const checkResult = checkResults.get(txUuid);
+                        const isChecked = checkResult?.checked || false;
+                        const existsOnServer = checkResult?.exists || false;
+                        const isIdentical = checkResult?.identical || false;
+
+                        return (
+                          <tr
+                            key={transaction.id}
+                            className={`hover:bg-gray-50 ${isChecked && existsOnServer ? 'bg-yellow-50' : ''
+                              }`}
+                          >
+                            <td className="px-2 py-1 font-medium text-blue-600">
+                              #{transaction.receipt_number || 'N/A'}
+                            </td>
+                            <td className="px-2 py-1 text-center">
+                              <div className="flex items-center justify-center gap-1">
+                                <button
+                                  onClick={() => {
+                                    handleCopyUuid(txUuid);
+                                  }}
+                                  className="p-0.5 hover:bg-gray-200 rounded transition-colors"
+                                  title={`Copy UUID: ${txUuid}`}
+                                >
+                                  <svg className="w-3 h-3 text-gray-500 hover:text-gray-700" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
+                                  </svg>
+                                </button>
+                                {isChecked && (
+                                  <span
+                                    className={`w-2 h-2 rounded-full ${isIdentical ? 'bg-green-500' :
+                                      existsOnServer ? 'bg-yellow-500' : 'bg-blue-500'
+                                      }`}
+                                    title={
+                                      isIdentical ? 'Identik dengan server (sudah di-update)' :
+                                        existsOnServer ? 'Ada di server tapi berbeda' : 'Belum ada di server'
+                                    }
+                                  />
+                                )}
+                              </div>
+                            </td>
+                            <td className="px-2 py-1 text-gray-600">
+                              {new Date(transaction.created_at).toLocaleString('id-ID')}
+                            </td>
+                            <td className="px-2 py-1 font-medium text-gray-900">
+                              {formatPrice(transaction.final_amount)}
+                            </td>
+                            <td className="px-2 py-1">
+                              <div className="flex items-center gap-1">
+                                <span className={`inline-flex px-1.5 py-0.5 text-[9px] font-semibold rounded-full ${transaction.status === 'completed'
+                                  ? 'bg-green-100 text-green-800'
+                                  : 'bg-yellow-100 text-yellow-800'
+                                  }`}>
+                                  {transaction.status}
+                                </span>
+                                {isChecked && existsOnServer && !isIdentical && (
+                                  <span className="text-[8px] text-yellow-700" title="Sudah ada di server tapi berbeda">
+                                    ⚠️
+                                  </span>
+                                )}
+                                {isChecked && isIdentical && (
+                                  <span className="text-[8px] text-green-700" title="Identik dengan server">
+                                    ✅
+                                  </span>
+                                )}
+                              </div>
+                            </td>
+                          </tr>
+                        );
+                      })}
                     </tbody>
                   </table>
                 </div>
@@ -2036,11 +2683,10 @@ WHERE ${baseWhere};`;
                               {formatPrice(transaction.final_amount)}
                             </td>
                             <td className="px-3 py-2">
-                              <span className={`inline-flex px-2 py-1 text-xs font-semibold rounded-full ${
-                                transaction.status === 'completed' 
-                                  ? 'bg-green-100 text-green-800' 
-                                  : 'bg-yellow-100 text-yellow-800'
-                              }`}>
+                              <span className={`inline-flex px-2 py-1 text-xs font-semibold rounded-full ${transaction.status === 'completed'
+                                ? 'bg-green-100 text-green-800'
+                                : 'bg-yellow-100 text-yellow-800'
+                                }`}>
                                 {transaction.status}
                               </span>
                             </td>
@@ -2084,18 +2730,22 @@ WHERE ${baseWhere};`;
             <div className="mb-4">
               <label className="block text-sm font-medium text-gray-700 mb-2">Password</label>
               <input
+                ref={gatePasswordInputRef}
                 type="password"
-                value={gatePasswordInput}
-                onChange={(e) => setGatePasswordInput(e.target.value)}
                 onKeyDown={(e) => {
                   if (e.key === 'Enter') {
-                    if (gatePasswordInput === 'magnumopus2761') {
+                    const password = gatePasswordInputRef.current?.value || '';
+                    if (password === 'magnumopus2761') {
                       setShowGatePasswordModal(false);
-                      setGatePasswordInput('');
+                      if (gatePasswordInputRef.current) {
+                        gatePasswordInputRef.current.value = '';
+                      }
                       setShowDangerZone(true);
                     } else {
                       addLog('error', '❌ Incorrect password');
-                      setGatePasswordInput('');
+                      if (gatePasswordInputRef.current) {
+                        gatePasswordInputRef.current.value = '';
+                      }
                     }
                   }
                 }}
@@ -2108,7 +2758,9 @@ WHERE ${baseWhere};`;
               <button
                 onClick={() => {
                   setShowGatePasswordModal(false);
-                  setGatePasswordInput('');
+                  if (gatePasswordInputRef.current) {
+                    gatePasswordInputRef.current.value = '';
+                  }
                 }}
                 className="flex-1 px-4 py-2 border border-gray-300 rounded-lg text-gray-700 hover:bg-gray-50 transition-colors"
               >
@@ -2116,13 +2768,18 @@ WHERE ${baseWhere};`;
               </button>
               <button
                 onClick={() => {
-                  if (gatePasswordInput === 'magnumopus2761') {
+                  const password = gatePasswordInputRef.current?.value || '';
+                  if (password === 'magnumopus2761') {
                     setShowGatePasswordModal(false);
-                    setGatePasswordInput('');
+                    if (gatePasswordInputRef.current) {
+                      gatePasswordInputRef.current.value = '';
+                    }
                     setShowDangerZone(true);
                   } else {
                     addLog('error', '❌ Incorrect password');
-                    setGatePasswordInput('');
+                    if (gatePasswordInputRef.current) {
+                      gatePasswordInputRef.current.value = '';
+                    }
                   }
                 }}
                 className="flex-1 px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 transition-colors"
@@ -2142,7 +2799,7 @@ WHERE ${baseWhere};`;
               {activePasswordAction === 'delete' ? 'Delete All Transactions' : 'Archive All Transactions'}
             </h3>
             <p className="text-gray-600 mb-4">
-              {activePasswordAction === 'delete' 
+              {activePasswordAction === 'delete'
                 ? 'This will PERMANENTLY DELETE all transactions in both online and offline databases. This action CANNOT be undone.'
                 : 'This will archive all transactions in both online and offline databases. Archived data can be restored if needed.'}
             </p>
@@ -2254,7 +2911,7 @@ WHERE ${baseWhere};`;
                 <p className="text-sm text-gray-500">This action cannot be undone</p>
               </div>
             </div>
-              <div className="bg-red-50 border border-red-200 rounded-lg p-4 mb-4">
+            <div className="bg-red-50 border border-red-200 rounded-lg p-4 mb-4">
               <p className="text-sm text-red-800 font-medium mb-2">
                 <strong>WARNING: This will PERMANENTLY DELETE:</strong>
               </p>
@@ -2305,7 +2962,7 @@ WHERE ${baseWhere};`;
       {/* Danger Zone Modal - Floating Panel */}
       {showDangerZone && (
         <div className="fixed inset-0 bg-black/50 backdrop-blur-sm z-40 flex items-center justify-center p-4">
-          <div className="bg-white rounded-lg shadow-2xl max-w-2xl w-full max-h-[90vh] overflow-y-auto">
+          <div className="bg-white rounded-lg shadow-2xl max-w-4xl w-full max-h-[90vh] overflow-y-auto">
             <div className="p-6">
               {/* Header */}
               <div className="flex items-center justify-between mb-6">
@@ -2325,152 +2982,170 @@ WHERE ${baseWhere};`;
                 </button>
               </div>
 
-              {/* Range Filters */}
-              <div className="mb-6">
-                <h4 className="font-semibold text-gray-900 mb-3">Filter by Transaction Date</h4>
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                  <label className="flex flex-col text-sm text-gray-700">
-                    <span className="mb-1">From (created_at)</span>
-                    <input
-                      type="datetime-local"
-                      value={dangerFrom}
-                      onChange={(e) => setDangerFrom(e.target.value)}
-                      className="px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-red-500 focus:border-transparent text-black"
-                    />
-                  </label>
-                  <label className="flex flex-col text-sm text-gray-700">
-                    <span className="mb-1">To (created_at)</span>
-                    <input
-                      type="datetime-local"
-                      value={dangerTo}
-                      onChange={(e) => setDangerTo(e.target.value)}
-                      className="px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-red-500 focus:border-transparent text-black"
-                    />
-                  </label>
-                </div>
-                <div className="flex items-center gap-3 mt-3">
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                {/* Card 1: Cleanup Test Transactions */}
+                <div className="border-2 border-red-200 rounded-lg p-5 bg-gradient-to-br from-red-50 to-orange-50">
+                  <div className="flex items-center gap-2 mb-4">
+                    <Trash2 className="w-5 h-5 text-red-600" />
+                    <h4 className="font-semibold text-gray-900 text-lg">Cleanup Test Transactions</h4>
+                  </div>
+                  <p className="text-sm text-gray-700 mb-4">
+                    Permanently delete ALL test transactions from all 3 databases (Offline SQLite, SalesPulse MySQL, System-POS MySQL).
+                  </p>
+                  <div className="bg-red-100 border border-red-300 rounded-lg p-3 mb-4">
+                    <p className="text-xs text-red-800 font-medium mb-1">
+                      <strong>Target Criteria:</strong>
+                    </p>
+                    <ul className="text-xs text-red-700 list-disc list-inside space-y-0.5">
+                      <li><code className="bg-red-200 px-1 rounded">marviano.austin@gmail.com</code></li>
+                      <li><code className="bg-red-200 px-1 rounded">user_id IS NULL</code></li>
+                    </ul>
+                  </div>
                   <button
-                    onClick={() => {
-                      setDangerFrom('');
-                      setDangerTo('');
-                    }}
-                    className="px-3 py-1.5 text-sm border border-gray-300 rounded-lg text-gray-700 hover:bg-gray-100 transition-colors"
+                    onClick={cleanupTestTransactions}
+                    disabled={isDeletingByEmail}
+                    className="w-full px-4 py-2.5 bg-red-600 text-white rounded-lg hover:bg-red-700 transition-colors font-medium disabled:bg-gray-400 disabled:cursor-not-allowed flex items-center justify-center gap-2"
                   >
-                    Reset Range
+                    {isDeletingByEmail ? (
+                      <>
+                        <RefreshCw className="w-4 h-4 animate-spin" />
+                        Cleaning Up...
+                      </>
+                    ) : (
+                      <>
+                        <Trash2 className="w-4 h-4" />
+                        Cleanup Test Transactions
+                      </>
+                    )}
                   </button>
-                  <span className="text-xs text-gray-600">
-                    Leave both fields blank to target all dates. Range applies to transaction <code>created_at</code>.
-                  </span>
+                  <p className="text-xs text-red-700 mt-3">
+                    ⚠️ This action cannot be undone. All transactions, transaction items, and audit logs matching the criteria will be permanently deleted from all 3 databases.
+                  </p>
                 </div>
-                <div className="mt-2 text-xs text-gray-500">
-                  Target range: <span className="font-medium text-gray-700">{rangeDescription}</span>
-                </div>
-              </div>
 
-              {/* Delete by User Email Section */}
-              <div className="mb-6 border-t border-gray-200 pt-6">
-                <h4 className="font-semibold text-gray-900 mb-3">Delete Transactions by User Email</h4>
-                <p className="text-sm text-gray-600 mb-4">
-                  Permanently delete ALL transactions created by a specific user from both offline and online databases.
-                </p>
-                <div className="flex gap-3">
-                  <input
-                    type="email"
-                    id="deleteUserEmail"
-                    placeholder="marviano.austin@gmail.com"
-                    defaultValue="marviano.austin@gmail.com"
-                    onChange={(e) => {
-                      const email = e.target.value.trim();
-                      updateDeleteByEmailPreview(email);
-                    }}
-                    className="flex-1 px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-red-500 focus:border-transparent text-black"
-                  />
-                  <button
-                    onClick={() => {
-                      const emailInput = document.getElementById('deleteUserEmail') as HTMLInputElement;
-                      const email = emailInput?.value?.trim();
-                      if (email) {
-                        deleteTransactionsByEmail(email);
-                      } else {
-                        addLog('error', '❌ Please enter a user email');
-                      }
-                    }}
-                    className="px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 transition-colors font-medium"
-                  >
-                    Delete by Email
-                  </button>
-                </div>
-                <p className="text-xs text-red-600 mt-2">
-                  ⚠️ This action cannot be undone. All transactions, transaction items, and audit logs for this user will be permanently deleted.
-                </p>
-                
-                {/* SQL Query Preview */}
-                {deleteByEmailPreview && (
-                  <div className="mt-4 bg-gradient-to-r from-red-50 to-orange-50 rounded-lg p-4 border border-red-200">
-                    <h5 className="font-semibold text-gray-900 mb-3">SQL Queries to be Executed:</h5>
-                    <div className="bg-white p-3 rounded border border-red-300 font-mono text-xs overflow-x-auto">
-                      <div className="text-red-700 mb-2 font-semibold">-- Offline SQLite:</div>
-                      <pre className="text-red-900 whitespace-pre-wrap mb-4">{generateDeleteByEmailPreview(deleteByEmailPreview, 'offline')}</pre>
-                      <div className="text-red-700 mb-2 font-semibold border-t border-red-200 pt-2">-- Online MySQL:</div>
-                      <pre className="text-red-900 whitespace-pre-wrap">{generateDeleteByEmailPreview(deleteByEmailPreview, 'online')}</pre>
-                    </div>
+                {/* Card 2: Bulk Actions (Date-Range Based) */}
+                <div className="border-2 border-orange-200 rounded-lg p-5 bg-gradient-to-br from-orange-50 to-yellow-50">
+                  <div className="flex items-center gap-2 mb-4">
+                    <Archive className="w-5 h-5 text-orange-600" />
+                    <h4 className="font-semibold text-gray-900 text-lg">Bulk Actions</h4>
                   </div>
-                )}
-              </div>
 
-              {/* Information Box */}
-              <div className="bg-gradient-to-r from-red-50 to-orange-50 rounded-lg p-4 border border-red-200 mb-6">
-                <h4 className="font-semibold text-gray-900 mb-3">SQL Queries to be Executed:</h4>
-                <div className="space-y-4 text-xs">
-                  <div>
+                  {/* Date Range Filters */}
+                  <div className="mb-4">
+                    <h5 className="font-medium text-gray-900 mb-2 text-sm">Filter by Transaction Date</h5>
+                    <div className="grid grid-cols-1 gap-3 mb-3">
+                      <label className="flex flex-col text-sm text-gray-700">
+                        <span className="mb-1">From (created_at)</span>
+                        <input
+                          type="datetime-local"
+                          value={dangerFrom}
+                          onChange={(e) => setDangerFrom(e.target.value)}
+                          className="px-3 py-2 border border-orange-300 rounded-lg focus:ring-2 focus:ring-orange-500 focus:border-transparent text-black bg-white"
+                        />
+                      </label>
+                      <label className="flex flex-col text-sm text-gray-700">
+                        <span className="mb-1">To (created_at)</span>
+                        <input
+                          type="datetime-local"
+                          value={dangerTo}
+                          onChange={(e) => setDangerTo(e.target.value)}
+                          className="px-3 py-2 border border-orange-300 rounded-lg focus:ring-2 focus:ring-orange-500 focus:border-transparent text-black bg-white"
+                        />
+                      </label>
+                    </div>
                     <div className="flex items-center gap-2 mb-2">
-                      <CheckCircle className="w-4 h-4 text-orange-600" />
-                      <strong className="text-gray-900">Archive (Keeps Data):</strong>
+                      <button
+                        onClick={() => {
+                          setDangerFrom('');
+                          setDangerTo('');
+                        }}
+                        className="px-3 py-1.5 text-xs border border-orange-300 rounded-lg text-gray-700 hover:bg-orange-100 transition-colors bg-white"
+                      >
+                        Reset Range
+                      </button>
+                      <span className="text-xs text-gray-600 flex-1">
+                        Leave blank for all dates
+                      </span>
                     </div>
-                    <div className="bg-white p-2 rounded border border-orange-200 font-mono text-xs overflow-x-auto">
-                      <div className="text-orange-700">-- Offline SQLite:</div>
-                      <pre className="text-gray-800 whitespace-pre-wrap">{offlineArchivePreview}</pre>
-                      <div className="text-orange-700 mt-2">-- Online MySQL:</div>
-                      <pre className="text-gray-800 whitespace-pre-wrap">{onlineArchivePreview}</pre>
+                    <div className="text-xs text-gray-600 mb-4">
+                      Target: <span className="font-medium text-gray-700">{rangeDescription}</span>
                     </div>
                   </div>
-                  <div className="border-t border-red-200 pt-3">
-                    <div className="flex items-center gap-2 mb-2">
-                      <Trash2 className="w-4 h-4 text-red-600" />
-                      <strong className="text-red-900">Delete (Permanent):</strong>
+
+                  {/* Action Buttons */}
+                  <div className="space-y-2 mb-4">
+                    <button
+                      onClick={handleArchiveClick}
+                      className="w-full flex items-center justify-center gap-2 px-4 py-2.5 bg-orange-600 text-white rounded-lg hover:bg-orange-700 transition-colors font-medium text-sm"
+                    >
+                      <Archive className="w-4 h-4" />
+                      Archive Matching Transactions
+                    </button>
+
+                    <button
+                      onClick={handleDeleteClick}
+                      className="w-full flex items-center justify-center gap-2 px-4 py-2.5 bg-red-600 text-white rounded-lg hover:bg-red-700 transition-colors font-medium text-sm"
+                    >
+                      <Trash2 className="w-4 h-4" />
+                      Delete Matching Transactions
+                    </button>
+                  </div>
+
+                  {/* Unified SQL Preview */}
+                  <div className="bg-white rounded-lg p-3 border border-orange-300">
+                    <div className="flex items-center justify-between mb-2">
+                      <h5 className="font-semibold text-gray-900 text-sm">SQL Queries to be Executed (Preview)</h5>
+                      <button
+                        onClick={() => {
+                          const fullSql = `-- Archive (Keeps Data)\n-- Offline SQLite:\n${offlineArchivePreview}\n\n-- Online MySQL:\n${onlineArchivePreview}\n\n-- Delete (Permanent)\n-- Offline SQLite:\n${offlineDeletePreview}\n\n-- Online MySQL:\n${onlineDeletePreview}`;
+                          copySqlToClipboard(fullSql, 'bulkActions');
+                        }}
+                        className="flex items-center gap-1 px-2 py-1 text-xs bg-gray-100 hover:bg-gray-200 rounded transition-colors"
+                        title="Copy SQL"
+                      >
+                        {copiedSqlPreview === 'bulkActions' ? (
+                          <>
+                            <Check className="w-3 h-3 text-green-600" />
+                            <span className="text-green-600">Copied!</span>
+                          </>
+                        ) : (
+                          <>
+                            <Copy className="w-3 h-3" />
+                            <span>Copy</span>
+                          </>
+                        )}
+                      </button>
                     </div>
-                    <div className="bg-white p-2 rounded border border-red-300 font-mono text-xs overflow-x-auto">
-                      <div className="text-red-700">-- Offline SQLite:</div>
-                      <pre className="text-red-900 whitespace-pre-wrap">{offlineDeletePreview}</pre>
-                      <div className="text-red-700 mt-2">-- Online MySQL:</div>
-                      <pre className="text-red-900 whitespace-pre-wrap">{onlineDeletePreview}</pre>
+                    <div className="bg-gray-50 p-3 rounded border border-orange-200 font-mono text-xs max-h-40 overflow-y-auto">
+                      <div className="mb-3">
+                        <div className="flex items-center gap-2 mb-2">
+                          <CheckCircle className="w-3 h-3 text-orange-600" />
+                          <strong className="text-gray-900 text-xs">Archive (Keeps Data):</strong>
+                        </div>
+                        <div className="text-orange-700 text-xs mb-1">-- Offline SQLite:</div>
+                        <pre className="text-gray-800 whitespace-pre-wrap text-xs mb-2">{offlineArchivePreview}</pre>
+                        <div className="text-orange-700 text-xs mb-1">-- Online MySQL:</div>
+                        <pre className="text-gray-800 whitespace-pre-wrap text-xs">{onlineArchivePreview}</pre>
+                      </div>
+                      <div className="border-t border-orange-200 pt-3">
+                        <div className="flex items-center gap-2 mb-2">
+                          <Trash2 className="w-3 h-3 text-red-600" />
+                          <strong className="text-red-900 text-xs">Delete (Permanent):</strong>
+                        </div>
+                        <div className="text-red-700 text-xs mb-1">-- Offline SQLite:</div>
+                        <pre className="text-red-900 whitespace-pre-wrap text-xs mb-2">{offlineDeletePreview}</pre>
+                        <div className="text-red-700 text-xs mb-1">-- Online MySQL:</div>
+                        <pre className="text-red-900 whitespace-pre-wrap text-xs">{onlineDeletePreview}</pre>
+                      </div>
                     </div>
                   </div>
                 </div>
-              </div>
-
-              {/* Action Buttons */}
-              <div className="space-y-3">
-                <button
-                  onClick={handleArchiveClick}
-                  className="w-full flex items-center justify-center gap-2 px-6 py-3 bg-orange-600 text-white rounded-lg hover:bg-orange-700 transition-colors font-medium"
-                >
-                  <Archive className="w-5 h-5" />
-                  Archive Matching Transactions
-                </button>
-                
-                <button
-                  onClick={handleDeleteClick}
-                  className="w-full flex items-center justify-center gap-2 px-6 py-3 bg-red-600 text-white rounded-lg hover:bg-red-700 transition-colors font-medium"
-                >
-                  <Trash2 className="w-5 h-5" />
-                  Delete Matching Transactions (Permanent)
-                </button>
               </div>
             </div>
           </div>
         </div>
       )}
+
     </div>
   );
 }

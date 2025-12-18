@@ -1,8 +1,147 @@
 import { app, BrowserWindow, Menu, ipcMain, screen, protocol } from 'electron';
 import Database from 'better-sqlite3';
+import mysql from 'mysql2/promise';
 import * as path from 'path';
 import * as fs from 'fs';
+import * as os from 'os';
 import { PrinterManagementService } from './printerManagement';
+import { websocketServer } from './websocketServer';
+
+// Store original console functions early (before they might be suppressed)
+// These are used to bypass console suppression for critical error messages
+const originalConsoleLog = console.log.bind(console);
+const originalConsoleError = console.error.bind(console);
+const originalConsoleInfo = console.info.bind(console);
+const originalConsoleDebug = console.debug.bind(console);
+
+// Store the discovered database path globally (declared early so it can be used in initializeDatabasePath)
+let discoveredDbPath: string | null = null;
+
+// Initialize database path early - before app is ready
+// This ensures the path is set correctly for both dev and production
+function initializeDatabasePath(): void {
+  console.log('🔍 [EARLY INIT] Initializing database path...');
+  
+  // SMART PATH DISCOVERY: Check likely locations for existing DB
+  // In production, app.getPath('appData') should still work, but we need to handle it carefully
+  let appData: string;
+  try {
+    appData = app.getPath('appData');
+  } catch (error) {
+    // Fallback if app is not ready yet
+    appData = path.join(os.homedir(), 'AppData', 'Roaming');
+    console.log('⚠️ [EARLY INIT] App not ready, using fallback appData path:', appData);
+  }
+  
+  console.log(`📂 [EARLY INIT] AppData path: ${appData}`);
+  
+  // Diagnostic logging to file for debugging on other machines
+  const diagLogPath = path.join(os.homedir(), 'AppData', 'Roaming', 'marviano-pos', 'path-diagnostic.log');
+  const diagLog = (msg: string) => {
+    try {
+      const timestamp = new Date().toISOString();
+      const dir = path.dirname(diagLogPath);
+      if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+      fs.appendFileSync(diagLogPath, `${timestamp} ${msg}\n`);
+    } catch (e) { /* ignore */ }
+  };
+  
+  diagLog(`=== APP STARTUP ===`);
+  diagLog(`os.homedir() = ${os.homedir()}`);
+  diagLog(`appData = ${appData}`);
+  diagLog(`process.platform = ${process.platform}`);
+  diagLog(`app.getPath('userData') = ${(() => { try { return app.getPath('userData'); } catch(e) { return 'ERROR: ' + e; } })()}`);
+  diagLog(`app.getPath('appData') = ${(() => { try { return app.getPath('appData'); } catch(e) { return 'ERROR: ' + e; } })()}`);
+  
+  // Build list of possible paths, including explicit user path
+  const possiblePaths = [
+    // Explicit path from user (most reliable) - CHECK THIS FIRST
+    path.join(os.homedir(), 'AppData', 'Roaming', 'marviano-pos', 'pos-offline.db'),
+    // Standard appData paths
+    path.join(appData, 'marviano-pos', 'pos-offline.db')
+  ];
+  
+  // Remove duplicates
+  const uniquePaths = Array.from(new Set(possiblePaths));
+
+  diagLog(`Checking ${uniquePaths.length} possible database paths:`);
+  console.log(`🔍 [EARLY INIT] Checking possible database paths:`);
+  uniquePaths.forEach((p, i) => {
+    const exists = fs.existsSync(p);
+    diagLog(`  ${i + 1}. ${p} - ${exists ? 'EXISTS' : 'NOT FOUND'}`);
+    console.log(`  ${i + 1}. ${p} ${exists ? '✅ EXISTS' : '❌ NOT FOUND'}`);
+    if (exists) {
+      const stats = fs.statSync(p);
+      diagLog(`     File size: ${stats.size} bytes, modified: ${stats.mtime}`);
+      console.log(`     File size: ${stats.size} bytes, modified: ${stats.mtime}`);
+    }
+  });
+
+  let dbPath = uniquePaths[1] || uniquePaths[0]; // Default to appData/marviano-pos (skip explicit path as default)
+  let found = false;
+
+  for (const p of uniquePaths) {
+    if (fs.existsSync(p)) {
+      console.log(`✅ [EARLY INIT] Found existing database at: ${p}`);
+      diagLog(`✅ Found existing database at: ${p}`);
+      dbPath = p;
+      found = true;
+
+      // Store the discovered path globally
+      discoveredDbPath = p;
+      
+      // Align UserData path to where the DB is found
+      try {
+        const userDataDir = path.dirname(p);
+        app.setPath('userData', userDataDir);
+        console.log(`📂 [EARLY INIT] Set userData path to: ${userDataDir}`);
+        // Verify it was set correctly
+        const verifyUserData = app.getPath('userData');
+        if (userDataDir !== verifyUserData) {
+          console.warn(`⚠️ [EARLY INIT] WARNING: userData path mismatch! Requested: ${userDataDir}, Actual: ${verifyUserData}`);
+        }
+      } catch (error) {
+        console.warn('⚠️ [EARLY INIT] Could not set userData path (app may not be ready):', error);
+        // Even if setPath fails, we still have the discovered path stored
+      }
+      break;
+    }
+  }
+
+  if (!found) {
+    console.log(`⚠️ [EARLY INIT] No existing database found. Will create at: ${dbPath}`);
+    diagLog(`⚠️ No existing database found. Will create at: ${dbPath}`);
+    // Store the path we'll use
+    discoveredDbPath = dbPath;
+    
+    // Ensure directory exists
+    const dbDir = path.dirname(dbPath);
+    if (!fs.existsSync(dbDir)) {
+      try {
+        fs.mkdirSync(dbDir, { recursive: true });
+        console.log(`📂 [EARLY INIT] Created directory: ${dbDir}`);
+      } catch (error) {
+        console.error('❌ [EARLY INIT] Failed to create directory:', error);
+      }
+    }
+    // Set userData path to match where we'll create the database
+    try {
+      app.setPath('userData', dbDir);
+      console.log(`📂 [EARLY INIT] Set userData path to: ${dbDir}`);
+    } catch (error) {
+      console.warn('⚠️ [EARLY INIT] Could not set userData path (app may not be ready):', error);
+      // Even if setPath fails, we still have the discovered path stored
+    }
+  }
+
+  console.log('📂 [EARLY INIT] Final database path will be:', discoveredDbPath || dbPath);
+  console.log('📂 [EARLY INIT] Stored discoveredDbPath:', discoveredDbPath);
+}
+
+// Initialize database path as early as possible
+// This must happen before app.whenReady() to ensure path is set correctly
+// app.getPath() should work even before app.whenReady()
+initializeDatabasePath();
 
 // Register custom protocol before app is ready
 protocol.registerSchemesAsPrivileged([
@@ -212,7 +351,7 @@ const readCustomizationsFromNormalizedTables = (
           selected_options: []
         });
       }
-      
+
       const customization = grouped.get(row.customization_id)!;
       if (row.option_id && row.option_name !== null) {
         customization.selected_options = customization.selected_options || [];
@@ -263,7 +402,7 @@ const saveCustomizationsToNormalizedTables = (
       WHERE transaction_item_id = ? 
         AND (bundle_product_id IS NULL AND ? IS NULL OR bundle_product_id = ?)
     `);
-    
+
     deleteStmt.run(transactionItemId, bundleProductId || null, bundleProductId || null);
     deleteTicStmt.run(transactionItemId, bundleProductId || null, bundleProductId || null);
 
@@ -272,7 +411,7 @@ const saveCustomizationsToNormalizedTables = (
       INSERT INTO transaction_item_customizations (transaction_item_id, customization_type_id, bundle_product_id, created_at)
       VALUES (?, ?, ?, ?)
     `);
-    
+
     const insertTicoStmt = db.prepare(`
       INSERT INTO transaction_item_customization_options (
         transaction_item_customization_id, customization_option_id, option_name, price_adjustment, created_at
@@ -363,9 +502,9 @@ const isDev = process.env.NODE_ENV === 'development' || !app.isPackaged;
 const shouldLog = process.env.POS_DEBUG_LOGS === 'true';
 
 if (!shouldLog) {
-  console.log = () => {};
-  console.info = () => {};
-  console.debug = () => {};
+  console.log = () => { };
+  console.info = () => { };
+  console.debug = () => { };
 }
 
 // Global references to windows and services
@@ -376,29 +515,220 @@ let localDb: Database.Database | null = null;
 let printerService: PrinterManagementService | null = null;
 
 function getLocalDbPath(): string {
-  // Use userData directory for consistent database location across dev/prod
+  // ALWAYS use discoveredDbPath if available - never fall back to app.getPath('userData')
+  // because in packaged apps, app.getPath('userData') returns path based on productName
+  // which might be different from where the actual database is located
+  if (discoveredDbPath) {
+    return discoveredDbPath;
+  }
+  
+  // CRITICAL: If discoveredDbPath is not set, try to find the database again
+  // This should not happen if initializeDatabasePath() ran correctly, but handle it anyway
+  originalConsoleError('⚠️ [CRITICAL] getLocalDbPath() called but discoveredDbPath is null! Attempting emergency discovery...');
+  
+  // Emergency: Check the known location
+  const emergencyPath = path.join(os.homedir(), 'AppData', 'Roaming', 'marviano-pos', 'pos-offline.db');
+  if (fs.existsSync(emergencyPath)) {
+    originalConsoleLog(`✅ [EMERGENCY] Found database at: ${emergencyPath}`);
+    discoveredDbPath = emergencyPath;
+    return emergencyPath;
+  }
+  
+  // Last resort: Use userData directory (but log a warning)
   const userDataPath = app.getPath('userData');
-  return path.join(userDataPath, 'pos-offline.db');
+  const dbPath = path.join(userDataPath, 'pos-offline.db');
+  originalConsoleError(`❌ [CRITICAL] Using fallback path (database may not exist): ${dbPath}`);
+  originalConsoleError(`❌ [CRITICAL] Expected database at: ${emergencyPath}`);
+  return dbPath;
 }
 
+let windowsInitialized = false;
+let ipcHandlersRegistered = false;
+
 function createWindows(): void {
+  // Guard against double initialization
+  if (windowsInitialized) {
+    originalConsoleLog('⚠️ createWindows() already called, skipping re-initialization');
+    return;
+  }
+  windowsInitialized = true;
+
   // Initialize local SQLite (offline storage)
   try {
-    console.log('🔍 Initializing SQLite database for offline support...');
-    const dbPath = getLocalDbPath();
-    localDb = new Database(dbPath);
+    originalConsoleLog('🔍 Initializing SQLite database for offline support...');
+
+    // CRITICAL: Always use discoveredDbPath - it's the source of truth
+    // Don't rely on getLocalDbPath() which might return wrong path in packaged apps
+    if (!discoveredDbPath) {
+      originalConsoleError('❌ [CRITICAL] discoveredDbPath is null in createWindows()!');
+      // Emergency discovery
+      const emergencyPath = path.join(os.homedir(), 'AppData', 'Roaming', 'marviano-pos', 'pos-offline.db');
+      if (fs.existsSync(emergencyPath)) {
+        originalConsoleLog(`✅ [EMERGENCY] Found database at: ${emergencyPath}`);
+        discoveredDbPath = emergencyPath;
+      } else {
+        throw new Error('Database path not discovered and emergency discovery failed');
+      }
+    }
     
-    // Enable WAL mode for better concurrency
-    localDb.pragma('journal_mode = WAL');
-    localDb.pragma('synchronous = NORMAL');
-    localDb.pragma('cache_size = 10000');
-    localDb.pragma('temp_store = MEMORY');
+    const dbPath = discoveredDbPath; // Use discovered path as the primary path
+    originalConsoleLog('📂 [CREATE WINDOWS] Using database path:', dbPath);
+    originalConsoleLog('📂 [CREATE WINDOWS] Discovered path stored:', discoveredDbPath);
     
+    // Verify the path exists or can be created
+    const dbDir = path.dirname(dbPath);
+    if (!fs.existsSync(dbDir)) {
+      originalConsoleLog(`📂 [CREATE WINDOWS] Creating directory: ${dbDir}`);
+      fs.mkdirSync(dbDir, { recursive: true });
+    }
+    
+    // Double-check the database file exists (or will be created)
+    if (fs.existsSync(dbPath)) {
+      const stats = fs.statSync(dbPath);
+      originalConsoleLog(`✅ [CREATE WINDOWS] Database file exists: ${dbPath} (${stats.size} bytes)`);
+      
+      // Verify it's not empty (which would indicate a new database)
+      if (stats.size < 100) {
+        originalConsoleError(`⚠️ [CREATE WINDOWS] Database file is very small (${stats.size} bytes), might be empty or corrupted`);
+      }
+    } else {
+      originalConsoleError(`⚠️ [CREATE WINDOWS] Database file does not exist yet, will be created: ${dbPath}`);
+      originalConsoleError(`⚠️ [CREATE WINDOWS] WARNING: This will create a NEW database. Existing data will not be accessible!`);
+      originalConsoleError(`⚠️ [CREATE WINDOWS] Expected location: ${path.join(os.homedir(), 'AppData', 'Roaming', 'marviano-pos', 'pos-offline.db')}`);
+    }
+
+    // OPTIMIZATION: User requested to disable encryption to keep using legacy database
+    console.log('🔓 Opening database in legacy plaintext mode (Encryption disabled)');
+
+    try {
+      // CRITICAL: Always prefer discoveredDbPath - it's the actual location of the database
+      // Never use dbPath from getLocalDbPath() as fallback because it might point to wrong location in packaged apps
+      if (!discoveredDbPath) {
+        originalConsoleError('❌ [CRITICAL] discoveredDbPath is null when opening database!');
+        originalConsoleError(`❌ [CRITICAL] dbPath from getLocalDbPath(): ${dbPath}`);
+        // Emergency: Try to find it again
+        const emergencyPath = path.join(os.homedir(), 'AppData', 'Roaming', 'marviano-pos', 'pos-offline.db');
+        if (fs.existsSync(emergencyPath)) {
+          originalConsoleLog(`✅ [EMERGENCY] Found database at: ${emergencyPath}`);
+          discoveredDbPath = emergencyPath;
+        } else {
+          throw new Error(`Database path not discovered and emergency path not found: ${emergencyPath}`);
+        }
+      }
+      const actualDbPath = discoveredDbPath;
+      originalConsoleLog(`📂 [CREATE WINDOWS] Opening database at: ${actualDbPath}`);
+      
+      // Write to diagnostic log
+      const diagLogPath2 = path.join(os.homedir(), 'AppData', 'Roaming', 'marviano-pos', 'path-diagnostic.log');
+      try { fs.appendFileSync(diagLogPath2, `${new Date().toISOString()} [CREATE WINDOWS] Opening database at: ${actualDbPath}\n`); } catch(e) {}
+      
+      localDb = new Database(actualDbPath/*, { verbose: console.log } */); // Optional: enable verbose for queries
+      // Test access
+      const tableCount = localDb.prepare('SELECT count(*) as count FROM sqlite_master').get() as { count: number };
+      const txCount = localDb.prepare('SELECT count(*) as count FROM transactions').get() as { count: number };
+      originalConsoleLog('✅ Database opened successfully (Plaintext). Tables found:', tableCount.count);
+      try { 
+        const dbStats = fs.statSync(actualDbPath);
+        fs.appendFileSync(diagLogPath2, `${new Date().toISOString()} ✅ Database opened successfully. Tables: ${tableCount.count}, Transactions: ${txCount.count}, FileSize: ${dbStats.size} bytes\n`); 
+      } catch(e) {}
+      
+      // If we have very few tables, it might be a new/empty database
+      if (tableCount.count < 5) {
+        console.warn(`⚠️ [CREATE WINDOWS] Database has only ${tableCount.count} tables. This might be a new/empty database!`);
+        console.warn(`⚠️ [CREATE WINDOWS] Expected location: ${path.join(os.homedir(), 'AppData', 'Roaming', 'marviano-pos', 'pos-offline.db')}`);
+        console.warn(`⚠️ [CREATE WINDOWS] Actual location: ${actualDbPath}`);
+      }
+    } catch (dbErr) {
+      originalConsoleError('❌ Failed to open database:', dbErr);
+      originalConsoleError('❌ Database path attempted:', discoveredDbPath || dbPath);
+      localDb = null; // Only reset if database opening fails
+      throw dbErr;
+    }
+
+    // CRITICAL: Database is now open - don't reset localDb if errors occur after this point
+    // Enable WAL mode for better concurrency (must be done after keying)
+    try {
+      localDb.pragma('journal_mode = WAL');
+      localDb.pragma('synchronous = NORMAL');
+      localDb.pragma('cache_size = 10000');
+      localDb.pragma('temp_store = MEMORY');
+    } catch (pragmaErr) {
+      originalConsoleError('⚠️ Failed to set database pragmas (non-critical):', pragmaErr);
+      // Don't reset localDb - database is still usable
+    }
+
+    // Initialize MySQL Connection Pool for Shadow DB
+    console.log('🔍 Initializing MySQL Shadow DB connection...');
+
+    // Load environment variables from .env file (optional - don't crash if dotenv is not available)
+    // We try multiple paths because in production the path might differ
+    try {
+      const dotenv = require('dotenv');
+      const possibleEnvPaths = [
+        path.join(process.cwd(), '.env'),
+        path.join(app.getAppPath(), '.env'),
+        path.join(path.dirname(app.getPath('exe')), '.env')
+      ];
+
+      let envLoaded = false;
+      for (const envPath of possibleEnvPaths) {
+        if (fs.existsSync(envPath)) {
+          console.log(`Loading .env from: ${envPath}`);
+          dotenv.config({ path: envPath });
+          envLoaded = true;
+          break;
+        }
+      }
+
+      if (!envLoaded) {
+        console.warn('⚠️ No .env file found for MySQL credentials, falling back to defaults');
+      }
+    } catch (dotenvErr) {
+      console.warn('⚠️ dotenv module not available, using environment defaults. Error:', dotenvErr);
+    }
+
+    const mysqlPool = mysql.createPool({
+      host: process.env.DB_HOST || 'localhost',
+      user: process.env.DB_USER || 'root',
+      password: process.env.DB_PASSWORD || '',
+      database: process.env.DB_NAME || 'system_pos',
+      waitForConnections: true,
+      connectionLimit: 10,
+      queueLimit: 0
+    });
+
+    // Test MySQL Connection
+    mysqlPool.getConnection()
+      .then(conn => {
+        console.log('✅ MySQL Shadow DB connected successfully');
+        conn.release();
+        // Create printer2_audit_log if not exists
+        return mysqlPool.execute(`
+                CREATE TABLE IF NOT EXISTS printer2_audit_log (
+                    id INT AUTO_INCREMENT PRIMARY KEY,
+                    transaction_id VARCHAR(255) NOT NULL,
+                    printer2_receipt_number INT NOT NULL,
+                    print_mode ENUM('auto', 'manual') NOT NULL,
+                    cycle_number INT,
+                    global_counter INT,
+                    printed_at DATETIME NOT NULL,
+                    printed_at_epoch BIGINT NOT NULL,
+                    is_reprint TINYINT DEFAULT 0,
+                    reprint_count INT DEFAULT 0,
+                    completed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    INDEX idx_transaction (transaction_id),
+                    INDEX idx_printed_at (printed_at)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+            `);
+      })
+      .then(() => console.log('✅ MySQL Shadow DB schema verified'))
+      .catch(err => console.error('❌ MySQL Shadow DB connection failed:', err));
+
     // Schema migration: Add synced_at column if it doesn't exist
     try {
       const schemaCheck = localDb.prepare(`PRAGMA table_info(transactions)`).all() as TableInfoRow[];
       const hasSyncedAt = schemaCheck.some(col => col.name === 'synced_at');
-      
+
       if (!hasSyncedAt) {
         console.log('📋 Migrating database: Adding synced_at column...');
         localDb.prepare(`ALTER TABLE transactions ADD COLUMN synced_at INTEGER`).run();
@@ -480,24 +810,24 @@ function createWindows(): void {
       console.log('⚠️ Shift migration check failed:', shiftError);
     }
 
-      // Schema migration: Ensure platform price columns exist on products
-      try {
-        const productSchema = localDb.prepare(`PRAGMA table_info(products)`).all() as TableInfoRow[];
-        const hasHargaGofood = productSchema.some(col => col.name === 'harga_gofood');
-        const hasHargaGrabfood = productSchema.some(col => col.name === 'harga_grabfood');
-        const hasHargaShopeefood = productSchema.some(col => col.name === 'harga_shopeefood');
-        const hasHargaTiktok = productSchema.some(col => col.name === 'harga_tiktok');
-        const hasHargaQpon = productSchema.some(col => col.name === 'harga_qpon');
-        const hasCategory2Name = productSchema.some(col => col.name === 'category2_name');
-        const hasCategory2Id = productSchema.some(col => col.name === 'category2_id');
-        const hasIsBundle = productSchema.some(col => col.name === 'is_bundle');
+    // Schema migration: Ensure platform price columns exist on products
+    try {
+      const productSchema = localDb.prepare(`PRAGMA table_info(products)`).all() as TableInfoRow[];
+      const hasHargaGofood = productSchema.some(col => col.name === 'harga_gofood');
+      const hasHargaGrabfood = productSchema.some(col => col.name === 'harga_grabfood');
+      const hasHargaShopeefood = productSchema.some(col => col.name === 'harga_shopeefood');
+      const hasHargaTiktok = productSchema.some(col => col.name === 'harga_tiktok');
+      const hasHargaQpon = productSchema.some(col => col.name === 'harga_qpon');
+      const hasCategory2Name = productSchema.some(col => col.name === 'category2_name');
+      const hasCategory2Id = productSchema.some(col => col.name === 'category2_id');
+      const hasIsBundle = productSchema.some(col => col.name === 'is_bundle');
 
-        if (!hasCategory2Id) {
-          console.log('📋 Migrating database: Adding products.category2_id column...');
-          localDb.prepare('ALTER TABLE products ADD COLUMN category2_id INTEGER').run();
-          // Try to backfill category2_id from category2 table using category2_name
-          try {
-            localDb.prepare(`
+      if (!hasCategory2Id) {
+        console.log('📋 Migrating database: Adding products.category2_id column...');
+        localDb.prepare('ALTER TABLE products ADD COLUMN category2_id INTEGER').run();
+        // Try to backfill category2_id from category2 table using category2_name
+        try {
+          localDb.prepare(`
               UPDATE products 
               SET category2_id = (
                 SELECT c2.id 
@@ -507,60 +837,60 @@ function createWindows(): void {
               )
               WHERE category2_name IS NOT NULL AND category2_name != ''
             `).run();
-            console.log('✅ Backfilled category2_id from category2 table');
-          } catch (e) {
-            console.log('⚠️ Failed to backfill category2_id:', e);
-          }
+          console.log('✅ Backfilled category2_id from category2 table');
+        } catch (e) {
+          console.log('⚠️ Failed to backfill category2_id:', e);
         }
-        if (!hasHargaGofood) {
-          console.log('📋 Migrating database: Adding products.harga_gofood column...');
-          localDb.prepare('ALTER TABLE products ADD COLUMN harga_gofood REAL').run();
-        }
-        if (!hasHargaGrabfood) {
-          console.log('📋 Migrating database: Adding products.harga_grabfood column...');
-          localDb.prepare('ALTER TABLE products ADD COLUMN harga_grabfood REAL').run();
-        }
-        if (!hasHargaShopeefood) {
-          console.log('📋 Migrating database: Adding products.harga_shopeefood column...');
-          localDb.prepare('ALTER TABLE products ADD COLUMN harga_shopeefood REAL').run();
-        }
-        if (!hasHargaTiktok) {
-          console.log('📋 Migrating database: Adding products.harga_tiktok column...');
-          localDb.prepare('ALTER TABLE products ADD COLUMN harga_tiktok REAL').run();
-        }
-        if (!hasHargaQpon) {
-          console.log('📋 Migrating database: Adding products.harga_qpon column...');
-          localDb.prepare('ALTER TABLE products ADD COLUMN harga_qpon REAL').run();
-        }
-        if (!hasCategory2Name) {
-          console.log('📋 Migrating database: Adding products.category2_name column...');
-          localDb.prepare('ALTER TABLE products ADD COLUMN category2_name TEXT').run();
-          // Backfill from existing jenis if present
-          try {
-            localDb.prepare('UPDATE products SET category2_name = jenis WHERE category2_name IS NULL').run();
-            console.log('✅ Backfilled category2_name from jenis');
-          } catch (e) {
-            console.log('⚠️ Failed to backfill category2_name from jenis:', e);
-          }
-        }
-        if (!hasIsBundle) {
-          console.log('📋 Migrating database: Adding products.is_bundle column...');
-          localDb.prepare('ALTER TABLE products ADD COLUMN is_bundle INTEGER DEFAULT 0').run();
-        }
-      } catch (e) {
-        console.log('⚠️ Products table migration check failed:', e);
       }
+      if (!hasHargaGofood) {
+        console.log('📋 Migrating database: Adding products.harga_gofood column...');
+        localDb.prepare('ALTER TABLE products ADD COLUMN harga_gofood REAL').run();
+      }
+      if (!hasHargaGrabfood) {
+        console.log('📋 Migrating database: Adding products.harga_grabfood column...');
+        localDb.prepare('ALTER TABLE products ADD COLUMN harga_grabfood REAL').run();
+      }
+      if (!hasHargaShopeefood) {
+        console.log('📋 Migrating database: Adding products.harga_shopeefood column...');
+        localDb.prepare('ALTER TABLE products ADD COLUMN harga_shopeefood REAL').run();
+      }
+      if (!hasHargaTiktok) {
+        console.log('📋 Migrating database: Adding products.harga_tiktok column...');
+        localDb.prepare('ALTER TABLE products ADD COLUMN harga_tiktok REAL').run();
+      }
+      if (!hasHargaQpon) {
+        console.log('📋 Migrating database: Adding products.harga_qpon column...');
+        localDb.prepare('ALTER TABLE products ADD COLUMN harga_qpon REAL').run();
+      }
+      if (!hasCategory2Name) {
+        console.log('📋 Migrating database: Adding products.category2_name column...');
+        localDb.prepare('ALTER TABLE products ADD COLUMN category2_name TEXT').run();
+        // Backfill from existing jenis if present
+        try {
+          localDb.prepare('UPDATE products SET category2_name = jenis WHERE category2_name IS NULL').run();
+          console.log('✅ Backfilled category2_name from jenis');
+        } catch (e) {
+          console.log('⚠️ Failed to backfill category2_name from jenis:', e);
+        }
+      }
+      if (!hasIsBundle) {
+        console.log('📋 Migrating database: Adding products.is_bundle column...');
+        localDb.prepare('ALTER TABLE products ADD COLUMN is_bundle INTEGER DEFAULT 0').run();
+      }
+    } catch (e) {
+      console.log('⚠️ Products table migration check failed:', e);
+    }
 
-      // Schema migration: Bundle feature tables
-      try {
-        // Check if bundle_items table exists
-        const bundleItemsExists = localDb.prepare(`
+    // Schema migration: Bundle feature tables
+    try {
+      // Check if bundle_items table exists
+      const bundleItemsExists = localDb.prepare(`
           SELECT name FROM sqlite_master WHERE type='table' AND name='bundle_items'
         `).get();
-        
-        if (!bundleItemsExists) {
-          console.log('📋 Migrating database: Creating bundle_items table...');
-          localDb.prepare(`
+
+      if (!bundleItemsExists) {
+        console.log('📋 Migrating database: Creating bundle_items table...');
+        localDb.prepare(`
             CREATE TABLE bundle_items (
               id INTEGER PRIMARY KEY AUTOINCREMENT,
               bundle_product_id INTEGER NOT NULL,
@@ -573,37 +903,37 @@ function createWindows(): void {
               FOREIGN KEY (category2_id) REFERENCES category2(id) ON DELETE CASCADE
             )
           `).run();
-          console.log('✅ Created bundle_items table');
-        }
-
-        // Check if transaction_item_customizations has bundle_product_id column
-        try {
-          const ticSchema = localDb.prepare(`PRAGMA table_info(transaction_item_customizations)`).all() as TableInfoRow[];
-          const hasBundleProductId = ticSchema.some(col => col.name === 'bundle_product_id');
-          if (!hasBundleProductId) {
-            console.log('📋 Migrating database: Adding bundle_product_id to transaction_item_customizations...');
-            localDb.prepare('ALTER TABLE transaction_item_customizations ADD COLUMN bundle_product_id INTEGER DEFAULT NULL').run();
-            // Add index for the new column
-            localDb.prepare('CREATE INDEX IF NOT EXISTS idx_tic_bundle_product ON transaction_item_customizations(bundle_product_id)').run();
-            localDb.prepare('CREATE INDEX IF NOT EXISTS idx_tic_item_bundle ON transaction_item_customizations(transaction_item_id, bundle_product_id)').run();
-            console.log('✅ Added bundle_product_id column');
-          }
-        } catch (error) {
-          console.warn('⚠️ Error checking/adding bundle_product_id column:', error);
-        }
-
-        // Check if transaction_items has bundle_selections_json column
-        const transactionItemsSchema = localDb.prepare(`PRAGMA table_info(transaction_items)`).all() as TableInfoRow[];
-        const hasBundleSelections = transactionItemsSchema.some(col => col.name === 'bundle_selections_json');
-        
-        if (!hasBundleSelections) {
-          console.log('📋 Migrating database: Adding transaction_items.bundle_selections_json column...');
-          localDb.prepare('ALTER TABLE transaction_items ADD COLUMN bundle_selections_json TEXT').run();
-        }
-      } catch (e) {
-        console.log('⚠️ Bundle feature migration check failed:', e);
+        console.log('✅ Created bundle_items table');
       }
-    
+
+      // Check if transaction_item_customizations has bundle_product_id column
+      try {
+        const ticSchema = localDb.prepare(`PRAGMA table_info(transaction_item_customizations)`).all() as TableInfoRow[];
+        const hasBundleProductId = ticSchema.some(col => col.name === 'bundle_product_id');
+        if (!hasBundleProductId) {
+          console.log('📋 Migrating database: Adding bundle_product_id to transaction_item_customizations...');
+          localDb.prepare('ALTER TABLE transaction_item_customizations ADD COLUMN bundle_product_id INTEGER DEFAULT NULL').run();
+          // Add index for the new column
+          localDb.prepare('CREATE INDEX IF NOT EXISTS idx_tic_bundle_product ON transaction_item_customizations(bundle_product_id)').run();
+          localDb.prepare('CREATE INDEX IF NOT EXISTS idx_tic_item_bundle ON transaction_item_customizations(transaction_item_id, bundle_product_id)').run();
+          console.log('✅ Added bundle_product_id column');
+        }
+      } catch (error) {
+        console.warn('⚠️ Error checking/adding bundle_product_id column:', error);
+      }
+
+      // Check if transaction_items has bundle_selections_json column
+      const transactionItemsSchema = localDb.prepare(`PRAGMA table_info(transaction_items)`).all() as TableInfoRow[];
+      const hasBundleSelections = transactionItemsSchema.some(col => col.name === 'bundle_selections_json');
+
+      if (!hasBundleSelections) {
+        console.log('📋 Migrating database: Adding transaction_items.bundle_selections_json column...');
+        localDb.prepare('ALTER TABLE transaction_items ADD COLUMN bundle_selections_json TEXT').run();
+      }
+    } catch (e) {
+      console.log('⚠️ Bundle feature migration check failed:', e);
+    }
+
     try {
       // First block of SQL execution
       localDb.exec(`
@@ -747,37 +1077,6 @@ function createWindows(): void {
         team_id INTEGER
       );
       
-      CREATE TABLE IF NOT EXISTS deals (
-        id INTEGER PRIMARY KEY,
-        contact_id INTEGER NOT NULL,
-        user_id INTEGER NOT NULL,
-        business_id INTEGER NOT NULL,
-        activity_date TEXT NOT NULL,
-        product_type TEXT NOT NULL,
-        product_id INTEGER,
-        motorcycle_product_id INTEGER,
-        sales_pipeline_stage TEXT NOT NULL,
-        financing_company TEXT,
-        note TEXT,
-        notes TEXT,
-        created_at TEXT,
-        updated_at INTEGER,
-        team_id INTEGER,
-        followup_count INTEGER DEFAULT 0
-      );
-      
-      CREATE TABLE IF NOT EXISTS deal_products (
-        id INTEGER PRIMARY KEY,
-        deal_id INTEGER NOT NULL,
-        product_id INTEGER NOT NULL,
-        quantity INTEGER DEFAULT 1,
-        unit_price REAL,
-        total_price REAL,
-        notes TEXT,
-        created_at TEXT,
-        updated_at INTEGER
-      );
-      
       CREATE TABLE IF NOT EXISTS teams (
         id INTEGER PRIMARY KEY,
         name TEXT NOT NULL,
@@ -827,22 +1126,6 @@ function createWindows(): void {
       CREATE TABLE IF NOT EXISTS pekerjaan (
         id INTEGER PRIMARY KEY,
         nama_pekerjaan TEXT UNIQUE NOT NULL,
-        created_at TEXT,
-        updated_at INTEGER
-      );
-      
-      CREATE TABLE IF NOT EXISTS kartu_keluarga (
-        id INTEGER PRIMARY KEY,
-        no_kk TEXT UNIQUE NOT NULL,
-        created_at TEXT,
-        updated_at INTEGER
-      );
-      
-      CREATE TABLE IF NOT EXISTS leasing_companies (
-        id INTEGER PRIMARY KEY,
-        name TEXT NOT NULL,
-        description TEXT,
-        is_active INTEGER DEFAULT 1,
         created_at TEXT,
         updated_at INTEGER
       );
@@ -994,12 +1277,19 @@ function createWindows(): void {
       CREATE TABLE IF NOT EXISTS category2 (
         id INTEGER PRIMARY KEY,
         name TEXT UNIQUE NOT NULL,
-        business_id INTEGER,
         description TEXT,
         display_order INTEGER DEFAULT 0,
         is_active INTEGER DEFAULT 1,
         created_at TEXT,
-        updated_at INTEGER,
+        updated_at INTEGER
+      );
+      
+      -- Junction table for category2 to businesses (new multi-business support)
+      CREATE TABLE IF NOT EXISTS category2_businesses (
+        category2_id INTEGER NOT NULL,
+        business_id INTEGER NOT NULL,
+        PRIMARY KEY (category2_id, business_id),
+        FOREIGN KEY (category2_id) REFERENCES category2(id) ON DELETE CASCADE,
         FOREIGN KEY (business_id) REFERENCES businesses(id) ON DELETE CASCADE
       );
       
@@ -1111,7 +1401,7 @@ function createWindows(): void {
       try {
         const tableInfo = localDb.prepare("PRAGMA table_info(transactions)").all() as any[];
         const hasShiftUuid = tableInfo.some(col => col.name === 'shift_uuid');
-        
+
         if (!hasShiftUuid) {
           console.log('Adding shift_uuid column to transactions table...');
           localDb.prepare("ALTER TABLE transactions ADD COLUMN shift_uuid TEXT").run();
@@ -1149,10 +1439,6 @@ function createWindows(): void {
       CREATE INDEX IF NOT EXISTS idx_products_business ON products(business_id);
       CREATE INDEX IF NOT EXISTS idx_ingredients_business ON ingredients(business_id);
       CREATE INDEX IF NOT EXISTS idx_contacts_team ON contacts(team_id);
-      CREATE INDEX IF NOT EXISTS idx_deals_contact ON deals(contact_id);
-      CREATE INDEX IF NOT EXISTS idx_deals_user ON deals(user_id);
-      CREATE INDEX IF NOT EXISTS idx_deals_business ON deals(business_id);
-      CREATE INDEX IF NOT EXISTS idx_deal_products_deal ON deal_products(deal_id);
       CREATE INDEX IF NOT EXISTS idx_users_organization ON users(organization_id);
       CREATE INDEX IF NOT EXISTS idx_teams_organization ON teams(organization_id);
       
@@ -1213,7 +1499,10 @@ function createWindows(): void {
       
       CREATE INDEX IF NOT EXISTS idx_category2_active ON category2(is_active);
       CREATE INDEX IF NOT EXISTS idx_category2_display_order ON category2(display_order);
-      CREATE INDEX IF NOT EXISTS idx_category2_business_id ON category2(business_id);
+      
+      -- Indexes for category2_businesses junction table
+      CREATE INDEX IF NOT EXISTS idx_category2_businesses_category2 ON category2_businesses(category2_id);
+      CREATE INDEX IF NOT EXISTS idx_category2_businesses_business ON category2_businesses(business_id);
       
       CREATE INDEX IF NOT EXISTS idx_cl_accounts_code ON cl_accounts(account_code);
       CREATE INDEX IF NOT EXISTS idx_cl_accounts_active ON cl_accounts(is_active);
@@ -1246,130 +1535,156 @@ function createWindows(): void {
         last_sync_attempt INTEGER
       );
       
+      -- System POS queue for transactions printed to Printer 2 (receiptize)
+      CREATE TABLE IF NOT EXISTS system_pos_queue (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        transaction_id TEXT NOT NULL UNIQUE,
+        queued_at INTEGER NOT NULL,
+        synced_at INTEGER,
+        retry_count INTEGER DEFAULT 0,
+        last_error TEXT
+      );
+      
       -- Indexes for offline sync performance
       CREATE INDEX IF NOT EXISTS idx_offline_transactions_sync ON offline_transactions(sync_status);
       CREATE INDEX IF NOT EXISTS idx_offline_transactions_created ON offline_transactions(created_at);
+      CREATE INDEX IF NOT EXISTS idx_system_pos_queue_sync ON system_pos_queue(synced_at);
+      CREATE INDEX IF NOT EXISTS idx_system_pos_queue_transaction ON system_pos_queue(transaction_id);
     `);
-    
-    console.log('✅ SQLite database initialized successfully');
-    console.log('📊 Database file location:', dbPath);
-    
-    // Initialize printer management service
-    if (localDb) {
-      printerService = new PrinterManagementService(localDb);
-      console.log('✅ Printer Management Service initialized');
-    }
-    
-    // Migrate slideshow images from /public/ to userData on first run
-    try {
-      const slideshowPath = getSlideshowPath();
-      const publicSlideshowPath = path.join(process.cwd(), 'public', 'images', 'slideshow');
+
+      console.log('✅ SQLite database initialized successfully');
+      console.log('📊 Database file location:', dbPath);
       
-      if (fs.existsSync(publicSlideshowPath)) {
-        const existingFiles = fs.readdirSync(slideshowPath);
-        const imageExtensions = ['.jpg', '.jpeg', '.png', '.webp', '.gif'];
-        const existingImages = existingFiles.filter(file => {
-          const ext = path.extname(file).toLowerCase();
-          return imageExtensions.includes(ext);
-        });
-        
-        if (existingImages.length === 0) {
-          const publicFiles = fs.readdirSync(publicSlideshowPath);
-          const imagesToMigrate = publicFiles.filter(file => {
+      // Initialize printer management service
+      if (localDb) {
+        try {
+          printerService = new PrinterManagementService(localDb, mysqlPool);
+          console.log('✅ Printer Management Service initialized with Shadow DB support');
+        } catch (printerServiceError) {
+          console.error('❌ Failed to initialize Printer Management Service:', printerServiceError);
+        }
+      } else {
+        console.error('❌ localDb is null, cannot initialize Printer Management Service');
+      }
+
+      // Migrate slideshow images from /public/ to userData on first run
+      try {
+        const slideshowPath = getSlideshowPath();
+        const publicSlideshowPath = path.join(process.cwd(), 'public', 'images', 'slideshow');
+
+        if (fs.existsSync(publicSlideshowPath)) {
+          const existingFiles = fs.readdirSync(slideshowPath);
+          const imageExtensions = ['.jpg', '.jpeg', '.png', '.webp', '.gif'];
+          const existingImages = existingFiles.filter((file: string) => {
             const ext = path.extname(file).toLowerCase();
             return imageExtensions.includes(ext);
           });
-          
-          if (imagesToMigrate.length > 0) {
-            console.log(`📸 Migrating ${imagesToMigrate.length} slideshow images from /public/ to userData...`);
-            let migratedCount = 0;
-            
-            for (const file of imagesToMigrate) {
-              try {
-                const sourcePath = path.join(publicSlideshowPath, file);
-                const destPath = path.join(slideshowPath, file);
-                fs.copyFileSync(sourcePath, destPath);
-                migratedCount++;
-              } catch (error) {
-                console.error('❌ Failed to migrate:', file, error);
+
+          if (existingImages.length === 0) {
+            const publicFiles = fs.readdirSync(publicSlideshowPath);
+            const imagesToMigrate = publicFiles.filter((file: string) => {
+              const ext = path.extname(file).toLowerCase();
+              return imageExtensions.includes(ext);
+            });
+
+            if (imagesToMigrate.length > 0) {
+              console.log(`📸 Migrating ${imagesToMigrate.length} slideshow images from /public/ to userData...`);
+              let migratedCount = 0;
+
+              for (const file of imagesToMigrate) {
+                try {
+                  const sourcePath = path.join(publicSlideshowPath, file);
+                  const destPath = path.join(slideshowPath, file);
+                  fs.copyFileSync(sourcePath, destPath);
+                  migratedCount++;
+                } catch (error) {
+                  console.error('❌ Failed to migrate:', file, error);
+                }
               }
-            }
-            
-            if (migratedCount > 0) {
-              console.log(`✅ Migrated ${migratedCount} slideshow images to userData`);
+
+              if (migratedCount > 0) {
+                console.log(`✅ Migrated ${migratedCount} slideshow images to userData`);
+              }
             }
           }
         }
+      } catch (error) {
+        console.error('❌ Error during slideshow migration:', error);
       }
-    } catch (error) {
-      console.error('❌ Error during slideshow migration:', error);
-    }
-    
-    console.log('🔍 Testing database connection...');
-    
-    // Test the database connection
-    try {
-      const testResult = localDb.prepare('SELECT 1 as test').get();
-      console.log('✅ Database test query successful:', testResult);
-    } catch (testError) {
-      console.error('❌ Database test query failed:', testError);
-    }
-    
-    // Schema migration: Add missing columns to existing tables
-    try {
-      console.log('🔍 Running schema migrations...');
-      
-      // Ensure printer_configs.extra_settings column exists for per-printer settings
-      const printerConfigSchema = localDb.prepare(`PRAGMA table_info(printer_configs)`).all() as TableInfoRow[];
-      const hasExtraSettingsColumn = printerConfigSchema.some(col => col.name === 'extra_settings');
-      if (!hasExtraSettingsColumn) {
-        console.log('📝 Adding extra_settings column to printer_configs...');
-        localDb.prepare('ALTER TABLE printer_configs ADD COLUMN extra_settings TEXT').run();
+
+      console.log('🔍 Testing database connection...');
+
+      // Test the database connection
+      try {
+        const testResult = localDb.prepare('SELECT 1 as test').get();
+        console.log('✅ Database test query successful:', testResult);
+      } catch (testError) {
+        console.error('❌ Database test query failed:', testError);
       }
-      
-      // Check if display_order column exists in product_customization_types
-      const columnsResult = localDb.prepare(`
+
+      // Schema migration: Add missing columns to existing tables
+      try {
+        console.log('🔍 Running schema migrations...');
+
+        // Ensure printer_configs.extra_settings column exists for per-printer settings
+        const printerConfigSchema = localDb.prepare(`PRAGMA table_info(printer_configs)`).all() as TableInfoRow[];
+        const hasExtraSettingsColumn = printerConfigSchema.some(col => col.name === 'extra_settings');
+        if (!hasExtraSettingsColumn) {
+          console.log('📝 Adding extra_settings column to printer_configs...');
+          localDb.prepare('ALTER TABLE printer_configs ADD COLUMN extra_settings TEXT').run();
+        }
+
+        // Check if display_order column exists in product_customization_types
+        const columnsResult = localDb.prepare(`
         SELECT sql FROM sqlite_master WHERE type='table' AND name='product_customization_types'
       `).get() as { sql?: string } | undefined;
-      
-      if (columnsResult && columnsResult.sql && !columnsResult.sql.includes('display_order')) {
-        console.log('📝 Adding display_order to product_customization_types...');
-        localDb.prepare('ALTER TABLE product_customization_types ADD COLUMN display_order INTEGER DEFAULT 0').run();
-      }
-      
-      // Check if display_order and status columns exist in product_customization_options
-      const optionsColumnsResult = localDb.prepare(`
+
+        if (columnsResult && columnsResult.sql && !columnsResult.sql.includes('display_order')) {
+          console.log('📝 Adding display_order to product_customization_types...');
+          localDb.prepare('ALTER TABLE product_customization_types ADD COLUMN display_order INTEGER DEFAULT 0').run();
+        }
+
+        // Check if display_order and status columns exist in product_customization_options
+        const optionsColumnsResult = localDb.prepare(`
         SELECT sql FROM sqlite_master WHERE type='table' AND name='product_customization_options'
       `).get() as { sql?: string } | undefined;
-      
-      if (optionsColumnsResult && optionsColumnsResult.sql && !optionsColumnsResult.sql.includes('display_order')) {
-        console.log('📝 Adding display_order to product_customization_options...');
-        localDb.prepare('ALTER TABLE product_customization_options ADD COLUMN display_order INTEGER DEFAULT 0').run();
+
+        if (optionsColumnsResult && optionsColumnsResult.sql && !optionsColumnsResult.sql.includes('display_order')) {
+          console.log('📝 Adding display_order to product_customization_options...');
+          localDb.prepare('ALTER TABLE product_customization_options ADD COLUMN display_order INTEGER DEFAULT 0').run();
+        }
+
+        if (optionsColumnsResult && optionsColumnsResult.sql && !optionsColumnsResult.sql.includes('status')) {
+          console.log('📝 Adding status to product_customization_options...');
+          localDb.prepare('ALTER TABLE product_customization_options ADD COLUMN status TEXT DEFAULT \'active\' CHECK (status IN (\'active\', \'inactive\'))').run();
+        }
+
+        console.log('✅ Schema migrations completed');
+      } catch (migrationError) {
+        console.error('⚠️ Schema migration error (this is OK for first run):', migrationError);
       }
-      
-      if (optionsColumnsResult && optionsColumnsResult.sql && !optionsColumnsResult.sql.includes('status')) {
-        console.log('📝 Adding status to product_customization_options...');
-        localDb.prepare('ALTER TABLE product_customization_options ADD COLUMN status TEXT DEFAULT \'active\' CHECK (status IN (\'active\', \'inactive\'))').run();
-      }
-      
-      console.log('✅ Schema migrations completed');
-    } catch (migrationError) {
-      console.error('⚠️ Schema migration error (this is OK for first run):', migrationError);
+    } catch (dbExecError) {
+      console.error('❌ Database execution error:', dbExecError);
+      throw dbExecError;
     }
-  } catch (dbExecError) {
-    console.error('❌ Database execution error:', dbExecError);
-    throw dbExecError;
-  }
   } catch (error) {
-    console.error('❌ Failed to initialize SQLite:', error);
-    localDb = null;
+    originalConsoleError('❌ Failed to initialize SQLite:', error);
+    // Only reset localDb if it wasn't successfully opened
+    // If database was opened but later operations failed, keep it available
+    if (!localDb) {
+      originalConsoleError('❌ Database was never opened, localDb is null');
+    } else {
+      originalConsoleError('⚠️ Database was opened but later initialization failed - keeping database available');
+      originalConsoleError('⚠️ Error details:', error);
+    }
+    // Don't reset localDb here - let it remain if it was successfully opened
   }
-  
+
   // Get all displays
   const displays = screen.getAllDisplays();
   const primaryDisplay = screen.getPrimaryDisplay();
   const secondaryDisplay = displays.find(display => display.id !== primaryDisplay.id);
-  
+
   console.log('🔍 Detected displays:', displays.length);
   console.log('🔍 All displays:', displays.map(d => ({ id: d.id, bounds: d.bounds, workArea: d.workArea })));
   console.log('🔍 Primary display:', primaryDisplay.bounds);
@@ -1456,7 +1771,7 @@ function createWindows(): void {
           ...fallbackPorts
         ].filter((port, index, arr) => arr.indexOf(port) === index);
         let loaded = false;
-        
+
         for (const port of ports) {
           if (await tryLoadCustomerURL(port)) {
             loaded = true;
@@ -1479,7 +1794,7 @@ function createWindows(): void {
   mainWindow.webContents.on('did-navigate', (event, url) => {
     const currentURL = new URL(url);
     console.log('🔍 Navigation detected:', currentURL.pathname);
-    
+
     const isLogin = currentURL.pathname === '/login' || currentURL.pathname.endsWith('login.html');
 
     if (isLogin) {
@@ -1501,7 +1816,7 @@ function createWindows(): void {
   mainWindow.webContents.on('did-navigate-in-page', (event, url) => {
     const currentURL = new URL(url);
     console.log('🔍 In-page navigation detected:', currentURL.pathname);
-    
+
     const isLogin = currentURL.pathname === '/login' || currentURL.pathname.endsWith('login.html');
 
     if (isLogin) {
@@ -1543,7 +1858,7 @@ function createWindows(): void {
     console.log('🔍 [ELECTRON] Main window isDestroyed:', mainWindow?.isDestroyed());
     console.log('🔍 [ELECTRON] Main window isVisible:', mainWindow?.isVisible());
     console.log('🔍 [ELECTRON] Main window isFullScreen:', mainWindow?.isFullScreen());
-    
+
     if (mainWindow && !mainWindow.isDestroyed()) {
       console.log('🔍 [ELECTRON] Setting fullscreen in 300ms...');
       setTimeout(() => {
@@ -1595,9 +1910,9 @@ function createWindows(): void {
   });
   ipcMain.handle('localdb-upsert-products', async (event, rows: RowArray) => {
     if (!localDb) return { success: false };
-    
+
     console.log(`🔄 [PRODUCTS UPSERT] Received ${rows.length} products to upsert`);
-    
+
     const tx = localDb.transaction((data: RowArray) => {
       const stmt = localDb!.prepare(`INSERT INTO products (
         id, business_id, menu_code, nama, satuan, kategori, jenis, category2_id, category2_name, keterangan,
@@ -1627,17 +1942,36 @@ function createWindows(): void {
         status=excluded.status,
         is_bundle=excluded.is_bundle,
         updated_at=excluded.updated_at`);
-        
+
       let successCount = 0;
       let errorCount = 0;
-      
+
       for (const r of data) {
         try {
+          // Check if product has any platform prices (for online tabs)
+          const hasPlatformPrice =
+            (r.harga_shopeefood != null && r.harga_shopeefood !== undefined) ||
+            (r.harga_gofood != null && r.harga_gofood !== undefined) ||
+            (r.harga_grabfood != null && r.harga_grabfood !== undefined) ||
+            (r.harga_tiktok != null && r.harga_tiktok !== undefined) ||
+            (r.harga_qpon != null && r.harga_qpon !== undefined) ||
+            (r.harga_online != null && r.harga_online !== undefined);
+
+          // Skip products with NULL harga_jual ONLY if they also have no platform prices
+          // If they have platform prices, we'll use harga_jual = 0 as fallback so they show in online tabs
+          if ((r.harga_jual == null || r.harga_jual === undefined) && !hasPlatformPrice) {
+            console.log(`⏭️ [PRODUCTS UPSERT] Skipping product ${r.id} (${r.nama}) - harga_jual is NULL and no platform prices`);
+            continue;
+          }
+
+          // Use 0 as fallback for harga_jual if NULL but product has platform prices
+          const hargaJual = (r.harga_jual != null && r.harga_jual !== undefined) ? r.harga_jual : 0;
+
           // Map MySQL columns to SQLite columns
           const kategori = r.kategori || r.category1_name || '';
           let category2Id = r.category2_id ? Number(r.category2_id) : null;
           const category2Name = r.category2_name || r.jenis || '';
-          
+
           // If category2_id is missing but category2_name exists, try to look it up from category2 table
           if (!category2Id && category2Name && localDb) {
             try {
@@ -1651,12 +1985,12 @@ function createWindows(): void {
               console.warn(`⚠️ [PRODUCTS UPSERT] Failed to lookup category2_id for "${category2Name}":`, lookupError);
             }
           }
-          
+
           const isBundle = r.is_bundle === 1 || r.is_bundle === true ? 1 : 0;
-          
+
           stmt.run(
             r.id, r.business_id, r.menu_code, r.nama, r.satuan || '', kategori, null, category2Id, category2Name, r.keterangan || null,
-            r.harga_beli || null, r.ppn || null, r.harga_jual, r.harga_khusus || null, 
+            r.harga_beli || null, r.ppn || null, hargaJual, r.harga_khusus || null,
             r.harga_online || null, r.harga_qpon || null, r.harga_gofood || null, r.harga_grabfood || null, r.harga_shopeefood || null, r.harga_tiktok || null,
             r.fee_kerja || null, r.status, isBundle, Date.now()
           );
@@ -1668,7 +2002,7 @@ function createWindows(): void {
       }
       console.log(`✅ [PRODUCTS UPSERT] Completed: ${successCount} success, ${errorCount} errors`);
     });
-    
+
     try {
       tx(rows);
       return { success: true };
@@ -1685,7 +2019,7 @@ function createWindows(): void {
       FROM products WHERE category2_name = ? AND status = 'active' ORDER BY nama ASC`);
     return stmt.all(jenis);
   });
-  
+
   // Add the missing method for category2 filtering
   ipcMain.handle('localdb-get-products-by-category2', async (event, category2Name: string) => {
     if (!localDb) return [];
@@ -1698,17 +2032,17 @@ function createWindows(): void {
   ipcMain.handle('localdb-get-all-products', async () => {
     if (!localDb) return [];
     try {
-          const stmt = localDb.prepare(`SELECT 
+      const stmt = localDb.prepare(`SELECT 
         id, business_id, menu_code, nama, satuan, kategori, category2_name, keterangan,
         harga_beli, ppn, harga_jual, harga_khusus, harga_online, harga_qpon, harga_gofood, harga_grabfood, harga_shopeefood, harga_tiktok, fee_kerja, status, is_bundle
         FROM products WHERE status = 'active' ORDER BY nama ASC`);
-    return stmt.all();
+      return stmt.all();
     } catch (error) {
       console.error('Error getting all products:', error);
       return [];
     }
   });
-  
+
   // Customization handlers
   ipcMain.handle('localdb-upsert-customization-types', async (event, rows: RowArray) => {
     if (!localDb) return { success: false };
@@ -1726,7 +2060,7 @@ function createWindows(): void {
     tx(rows);
     return { success: true };
   });
-  
+
   ipcMain.handle('localdb-upsert-customization-options', async (event, rows: RowArray) => {
     if (!localDb) return { success: false };
     const tx = localDb.transaction((data: RowArray) => {
@@ -1743,7 +2077,7 @@ function createWindows(): void {
     tx(rows);
     return { success: true };
   });
-  
+
   ipcMain.handle('localdb-upsert-product-customizations', async (event, rows: RowArray) => {
     if (!localDb) return { success: false };
     const tx = localDb.transaction((data: RowArray) => {
@@ -1764,7 +2098,7 @@ function createWindows(): void {
     tx(rows);
     return { success: true };
   });
-  
+
   // Bundle items handlers
   ipcMain.handle('localdb-get-bundle-items', async (event, productId: number | string) => {
     if (!localDb) {
@@ -1778,13 +2112,13 @@ function createWindows(): void {
         console.error(`❌ [BUNDLE ITEMS] Invalid product ID: ${productId}`);
         return [];
       }
-      
+
       console.log(`🔍 [BUNDLE ITEMS] Fetching bundle items for product ID: ${productIdNum} (type: ${typeof productId}, converted from: ${productId})`);
-      
+
       // First, check if any bundle items exist at all
       const allBundleItems = localDb.prepare('SELECT bundle_product_id, COUNT(*) as count FROM bundle_items GROUP BY bundle_product_id').all() as Array<{ bundle_product_id: number; count: number }>;
       console.log(`📊 [BUNDLE ITEMS] Bundle items by product:`, allBundleItems);
-      
+
       const bundleItems = localDb.prepare(`
         SELECT 
           bi.id,
@@ -1798,7 +2132,7 @@ function createWindows(): void {
         WHERE bi.bundle_product_id = ?
         ORDER BY bi.display_order ASC
       `).all(productIdNum) as BundleItemRow[];
-      
+
       console.log(`✅ [BUNDLE ITEMS] Found ${bundleItems.length} bundle items for product ${productIdNum}`);
       if (bundleItems.length > 0) {
         console.log(`📦 [BUNDLE ITEMS] First item:`, JSON.stringify(bundleItems[0], null, 2));
@@ -1807,7 +2141,7 @@ function createWindows(): void {
         const productCheck = localDb.prepare('SELECT id, nama, is_bundle FROM products WHERE id = ?').get(productIdNum);
         console.log(`🔍 [BUNDLE ITEMS] Product check result:`, productCheck);
       }
-      
+
       return bundleItems.map(item => ({
         id: item.id,
         bundle_product_id: item.bundle_product_id,
@@ -1835,12 +2169,12 @@ function createWindows(): void {
         console.error(`❌ [BUNDLE ITEMS UPSERT] Invalid data: rows is not an array, got ${typeof rows}`);
         return { success: false };
       }
-      
+
       console.log(`🔄 [BUNDLE ITEMS UPSERT] Upserting ${rows.length} bundle items`);
       if (rows.length > 0) {
         console.log(`📦 [BUNDLE ITEMS UPSERT] First item sample:`, JSON.stringify(rows[0], null, 2));
       }
-      
+
       const tx = localDb.transaction((data: RowArray) => {
         const stmt = localDb!.prepare(`
           INSERT INTO bundle_items (
@@ -1882,11 +2216,11 @@ function createWindows(): void {
       });
       tx(rows);
       console.log(`✅ [BUNDLE ITEMS UPSERT] Successfully upserted bundle items`);
-      
+
       // Verify the data was saved
       const verifyCount = localDb.prepare('SELECT COUNT(*) as count FROM bundle_items').get() as { count: number };
       console.log(`✅ [BUNDLE ITEMS UPSERT] Total bundle items in database: ${verifyCount.count}`);
-      
+
       return { success: true };
     } catch (error: unknown) {
       const errorMessage = (error && typeof error === 'object' && 'message' in error)
@@ -1913,12 +2247,12 @@ function createWindows(): void {
         LEFT JOIN category2 c2 ON bi.category2_id = c2.id
         ORDER BY bi.bundle_product_id, bi.display_order ASC
       `).all() as BundleItemRow[];
-      
+
       console.log(`🔍 [DEBUG] Total bundle items in database: ${allItems.length}`);
       if (allItems.length > 0) {
         console.log(`📦 [DEBUG] All bundle items:`, JSON.stringify(allItems, null, 2));
       }
-      
+
       return { success: true, items: allItems };
     } catch (error: unknown) {
       const errorMessage = (error && typeof error === 'object' && 'message' in error)
@@ -1933,7 +2267,7 @@ function createWindows(): void {
     if (!localDb) return [];
     try {
       console.log(`🔍 [OFFLINE] Fetching customizations for product ${productId}`);
-      
+
       // Get customization types for this product
       const typesStmt = localDb.prepare(`
         SELECT DISTINCT ct.id, ct.name, ct.selection_mode, ct.display_order
@@ -1944,7 +2278,7 @@ function createWindows(): void {
       `);
       const types = typesStmt.all(productId) as CustomizationTypeRow[];
       console.log(`📋 [OFFLINE] Found ${types.length} customization types for product ${productId}`, types);
-      
+
       // For each type, get all available options (not just for this product)
       const customizations = types.map((type) => {
         const optionsStmt = localDb!.prepare(`
@@ -1955,7 +2289,7 @@ function createWindows(): void {
         `);
         const options = optionsStmt.all(type.id) as CustomizationOptionRow[];
         console.log(`📋 [OFFLINE] Type "${type.name}": found ${options.length} options`, options);
-        
+
         return {
           id: type.id,
           name: type.name,
@@ -1969,7 +2303,7 @@ function createWindows(): void {
           }))
         };
       });
-      
+
       console.log(`✅ [OFFLINE] Returning ${customizations.length} customizations:`, customizations);
       return customizations;
     } catch (error) {
@@ -1977,7 +2311,7 @@ function createWindows(): void {
       return [];
     }
   });
-  
+
   ipcMain.handle('localdb-update-sync-status', async (event, key: string, status: string) => {
     if (!localDb) return { success: false };
     const stmt = localDb.prepare('INSERT INTO sync_status (key, last_sync, status) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET last_sync=excluded.last_sync, status=excluded.status');
@@ -2009,7 +2343,7 @@ function createWindows(): void {
     tx(rows);
     return { success: true };
   });
-  
+
   ipcMain.handle('localdb-get-users', async () => {
     if (!localDb) return [];
     const stmt = localDb.prepare('SELECT * FROM users ORDER BY name ASC');
@@ -2056,7 +2390,7 @@ function createWindows(): void {
         business_id=excluded.business_id, created_at=excluded.created_at, updated_at=excluded.updated_at`);
       for (const r of data) {
         stmt.run(r.id, r.ingredient_code, r.nama, r.kategori, r.satuan_beli, r.isi_satuan_beli, r.satuan_keluar,
-                r.harga_beli, r.stok_min, r.status, r.business_id, r.created_at, Date.now());
+          r.harga_beli, r.stok_min, r.status, r.business_id, r.created_at, Date.now());
       }
     });
     tx(rows);
@@ -2116,8 +2450,8 @@ function createWindows(): void {
         alamat=excluded.alamat, team_id=excluded.team_id`);
       for (const r of data) {
         stmt.run(r.id, r.no_ktp, r.nama, r.phone_number, r.tgl_lahir, r.no_kk, r.created_at, Date.now(),
-                r.is_active, r.jenis_kelamin, r.kota, r.kecamatan, r.source_id, r.pekerjaan_id,
-                r.source_lainnya, r.alamat, r.team_id);
+          r.is_active, r.jenis_kelamin, r.kota, r.kecamatan, r.source_id, r.pekerjaan_id,
+          r.source_lainnya, r.alamat, r.team_id);
       }
     });
     tx(rows);
@@ -2148,7 +2482,7 @@ function createWindows(): void {
         is_active=excluded.is_active, created_at=excluded.created_at, updated_at=excluded.updated_at`);
       for (const r of data) {
         stmt.run(r.id, r.name, r.description, r.organization_id, r.team_lead_id, r.business_id,
-                r.color, r.is_active, r.created_at, Date.now());
+          r.color, r.is_active, r.created_at, Date.now());
       }
     });
     tx(rows);
@@ -2344,7 +2678,7 @@ function createWindows(): void {
   });
 
   // New table handlers for enhanced offline support
-  
+
   // Transactions
   ipcMain.handle('localdb-upsert-transactions', async (event, rows: RowArray) => {
     if (!localDb) return { success: false };
@@ -2418,7 +2752,7 @@ function createWindows(): void {
           transaction_type: r.transaction_type,
           payment_method_id: r.payment_method_id
         });
-        
+
         const params = [
           r.id,
           r.business_id,
@@ -2440,7 +2774,7 @@ function createWindows(): void {
           r.synced_at ?? null, // Keep existing synced_at or NULL for new unsynced transactions
           r.contact_id ?? null,
           r.customer_name ?? null,
-        typeof r.customer_unit === 'number' ? r.customer_unit : (r.customer_unit ? Number(r.customer_unit) : null),
+          typeof r.customer_unit === 'number' ? r.customer_unit : (r.customer_unit ? Number(r.customer_unit) : null),
           r.note ?? null,
           r.bank_name ?? null,
           r.card_number ?? null,
@@ -2451,10 +2785,10 @@ function createWindows(): void {
           r.transaction_type ?? 'drinks',
           Number(r.payment_method_id)
         ];
-        
+
         console.log('📝 [SQLITE] Calling stmt.run with params:', params);
         console.log('📊 [SQLITE] Params count:', params.length);
-        
+
         // Debug: Get column names from the prepared statement
         try {
           const info = stmt.run(...params);
@@ -2476,6 +2810,17 @@ function createWindows(): void {
   });
 
   ipcMain.handle('localdb-get-transactions', async (event, businessId?: number, limit?: number) => {
+    // Diagnostic logging
+    const diagLogPathTx = path.join(os.homedir(), 'AppData', 'Roaming', 'marviano-pos', 'path-diagnostic.log');
+    try { 
+      const txCount = localDb ? (localDb.prepare('SELECT COUNT(*) as cnt FROM transactions').get() as { cnt: number }).cnt : 'DB NULL';
+      const dbFilePath = path.join(os.homedir(), 'AppData', 'Roaming', 'marviano-pos', 'pos-offline.db');
+      const dbStats = fs.existsSync(dbFilePath) ? fs.statSync(dbFilePath) : null;
+      fs.appendFileSync(diagLogPathTx, `${new Date().toISOString()} [GET-TX] businessId=${businessId}, limit=${limit}, totalTxInDb=${txCount}, dbFileSize=${dbStats?.size || 'N/A'}\n`); 
+    } catch(e) { 
+      try { fs.appendFileSync(diagLogPathTx, `${new Date().toISOString()} [GET-TX] ERROR: ${e}\n`); } catch(e2) {} 
+    }
+    
     if (!localDb) return [];
     let query = `
       SELECT 
@@ -2492,28 +2837,33 @@ function createWindows(): void {
     `;
     const params: QueryParams = [];
     const conditions: string[] = [];
-    
+
     // Exclude archived transactions
     conditions.push('t.status != \'archived\'');
-    
+
     if (businessId) {
       conditions.push('t.business_id = ?');
       params.push(businessId);
     }
-    
+
     if (conditions.length > 0) {
       query += ' WHERE ' + conditions.join(' AND ');
     }
-    
+
     query += ' ORDER BY t.created_at DESC';
-    
+
     if (limit) {
       query += ' LIMIT ?';
       params.push(limit);
     }
-    
+
     const stmt = localDb.prepare(query);
-    return stmt.all(...params);
+    const results = stmt.all(...params);
+    
+    // Diagnostic logging
+    try { fs.appendFileSync(diagLogPathTx, `${new Date().toISOString()} [GET-TX] Returned ${results.length} transactions\n`); } catch(e) {}
+    
+    return results;
   });
 
   const ensureIsoString = (value?: string | null): string | null => {
@@ -2563,7 +2913,7 @@ function createWindows(): void {
         SET status = 'archived', updated_at = ?
         WHERE ${baseClause} AND status != 'archived'
       `);
-      
+
       const result = updateStmt.run(timestamp, ...params);
       console.log(`✅ [ARCHIVE] Archived ${result.changes} transactions`);
       // Also clear related printer audits for archived transactions
@@ -2602,7 +2952,7 @@ function createWindows(): void {
 
     const startIso = ensureIsoString(payload.from);
     const endIso = ensureIsoString(payload.to);
-    
+
     try {
       const { clause: baseClause, params } = buildTransactionFilter(businessId, startIso, endIso);
       // Delete printer audits first
@@ -2625,7 +2975,7 @@ function createWindows(): void {
         DELETE FROM transactions 
         WHERE ${baseClause}
       `);
-      
+
       const result = stmt.run(...params);
       console.log(`🗑️ [DELETE] Deleted ${result.changes} transactions`);
       return result.changes;
@@ -2636,64 +2986,6 @@ function createWindows(): void {
   });
 
   // Delete transactions by user email (both offline and online)
-  ipcMain.handle('localdb-delete-transactions-by-email', async (event, payload: { userEmail: string }) => {
-    if (!localDb) return { success: false, deleted: 0, error: 'Database not available' };
-
-    const userEmail = payload?.userEmail;
-    if (!userEmail) return { success: false, deleted: 0, error: 'User email is required' };
-
-    try {
-      // First, get user ID from email
-      const userStmt = localDb.prepare('SELECT id FROM users WHERE email = ? LIMIT 1');
-      const user = userStmt.get(userEmail) as { id: number } | undefined;
-      
-      if (!user) {
-        return { success: false, deleted: 0, error: `User with email ${userEmail} not found` };
-      }
-
-      const userId = user.id;
-      console.log(`🗑️ [DELETE BY EMAIL] Found user ID ${userId} for email ${userEmail}`);
-
-      // Delete printer audit logs first
-      const delP1 = localDb.prepare(`
-        DELETE FROM printer1_audit_log 
-        WHERE transaction_id IN (
-          SELECT id FROM transactions WHERE user_id = ?
-        )
-      `);
-      const p1Result = delP1.run(userId);
-      console.log(`🗑️ [DELETE BY EMAIL] Deleted ${p1Result.changes} printer1 audit log entries`);
-
-      const delP2 = localDb.prepare(`
-        DELETE FROM printer2_audit_log 
-        WHERE transaction_id IN (
-          SELECT id FROM transactions WHERE user_id = ?
-        )
-      `);
-      const p2Result = delP2.run(userId);
-      console.log(`🗑️ [DELETE BY EMAIL] Deleted ${p2Result.changes} printer2 audit log entries`);
-
-      // Delete transaction items first (foreign key constraint)
-      const delItemsStmt = localDb.prepare(`
-        DELETE FROM transaction_items 
-        WHERE transaction_id IN (
-          SELECT id FROM transactions WHERE user_id = ?
-        )
-      `);
-      const itemsResult = delItemsStmt.run(userId);
-      console.log(`🗑️ [DELETE BY EMAIL] Deleted ${itemsResult.changes} transaction items`);
-
-      // Delete transactions
-      const delTxStmt = localDb.prepare('DELETE FROM transactions WHERE user_id = ?');
-      const txResult = delTxStmt.run(userId);
-      console.log(`🗑️ [DELETE BY EMAIL] Deleted ${txResult.changes} transactions for user ${userEmail} (ID: ${userId})`);
-
-      return { success: true, deleted: txResult.changes, deletedItems: itemsResult.changes };
-    } catch (error) {
-      console.error('❌ [DELETE BY EMAIL] Failed to delete transactions:', error);
-      return { success: false, deleted: 0, error: error instanceof Error ? error.message : 'Unknown error' };
-    }
-  });
 
   // Delete transaction items permanently
   ipcMain.handle('localdb-delete-transaction-items', async (event, payload: { businessId: number; from?: string | null; to?: string | null }) => {
@@ -2704,7 +2996,7 @@ function createWindows(): void {
 
     const startIso = ensureIsoString(payload.from);
     const endIso = ensureIsoString(payload.to);
-    
+
     try {
       const { clause: baseClause, params } = buildTransactionFilter(businessId, startIso, endIso);
       const stmt = localDb.prepare(`
@@ -2713,7 +3005,7 @@ function createWindows(): void {
           SELECT id FROM transactions WHERE ${baseClause}
         )
       `);
-      
+
       const result = stmt.run(...params);
       console.log(`🗑️ [DELETE] Deleted ${result.changes} transaction items`);
       return { success: true, deleted: result.changes };
@@ -2722,11 +3014,11 @@ function createWindows(): void {
       throw error;
     }
   });
-  
+
   // Get transactions that are not yet synced to cloud
   ipcMain.handle('localdb-get-unsynced-transactions', async (event, businessId?: number) => {
     if (!localDb) return [];
-    
+
     // For now, return all transactions where receipt_number is null or synced_at is null
     // This indicates they haven't been synced to cloud yet
     let query = `
@@ -2744,28 +3036,129 @@ function createWindows(): void {
       WHERE t.synced_at IS NULL
     `;
     const params: QueryParams = [];
-    
+
     if (businessId) {
       query += ' AND t.business_id = ?';
       params.push(businessId);
     }
-    
+
     query += ' ORDER BY t.created_at DESC';
-    
+
     const stmt = localDb.prepare(query);
     const transactions = stmt.all(...params);
-    
+
     // ✅ NEW: Fetch transaction items for each transaction
     if (Array.isArray(transactions) && transactions.length > 0) {
       const itemsStmt = localDb.prepare('SELECT * FROM transaction_items WHERE transaction_id = ?');
-      
+
       for (const transaction of transactions as any[]) {
         const items = itemsStmt.all(transaction.id);
         transaction.items = items || [];
       }
     }
-    
+
     return transactions;
+  });
+
+  // Delete unsynced transactions (data offline yang akan diunggah)
+  ipcMain.handle('localdb-delete-unsynced-transactions', async (event, businessId?: number) => {
+    if (!localDb) {
+      console.error('❌ [SYNC] Local database not available');
+      return { success: false, error: 'Local database not available' };
+    }
+
+    try {
+      console.log(`🗑️ [SYNC] Deleting unsynced transactions, businessId: ${businessId || 'all'}`);
+
+      // Temporarily disable foreign key constraints for deletion
+      localDb.pragma('foreign_keys = OFF');
+
+      // Build WHERE clause for filtering
+      let whereClause = 'synced_at IS NULL';
+      const params: QueryParams = [];
+      if (businessId) {
+        whereClause += ' AND business_id = ?';
+        params.push(businessId);
+      }
+
+      // Step 1: Delete transaction_item_customization_options (depends on customizations)
+      const deleteOptionsQuery = `
+        DELETE FROM transaction_item_customization_options
+        WHERE transaction_item_customization_id IN (
+          SELECT tic.id FROM transaction_item_customizations tic
+          INNER JOIN transaction_items ti ON tic.transaction_item_id = ti.id
+          INNER JOIN transactions t ON ti.transaction_id = t.id
+          WHERE ${whereClause}
+        )
+      `;
+      const optionsStmt = localDb.prepare(deleteOptionsQuery);
+      const optionsResult = optionsStmt.run(...params);
+      console.log(`🗑️ [SYNC] Deleted ${optionsResult.changes} transaction_item_customization_options`);
+
+      // Step 2: Delete transaction_item_customizations (depends on transaction_items)
+      const deleteCustomizationsQuery = `
+        DELETE FROM transaction_item_customizations
+        WHERE transaction_item_id IN (
+          SELECT id FROM transaction_items
+          WHERE transaction_id IN (
+            SELECT id FROM transactions WHERE ${whereClause}
+          )
+        )
+      `;
+      const customizationsStmt = localDb.prepare(deleteCustomizationsQuery);
+      const customizationsResult = customizationsStmt.run(...params);
+      console.log(`🗑️ [SYNC] Deleted ${customizationsResult.changes} transaction_item_customizations`);
+
+      // Step 3: Delete transaction_items (depends on transactions)
+      const deleteItemsQuery = `
+        DELETE FROM transaction_items 
+        WHERE transaction_id IN (
+          SELECT id FROM transactions WHERE ${whereClause}
+        )
+      `;
+      const itemsStmt = localDb.prepare(deleteItemsQuery);
+      const itemsResult = itemsStmt.run(...params);
+      console.log(`🗑️ [SYNC] Deleted ${itemsResult.changes} transaction_items`);
+
+      // Step 4: Delete transaction_refunds (uses transaction_uuid, not foreign key but should be deleted)
+      const deleteRefundsQuery = `
+        DELETE FROM transaction_refunds
+        WHERE transaction_uuid IN (
+          SELECT id FROM transactions WHERE ${whereClause}
+        )
+      `;
+      const refundsStmt = localDb.prepare(deleteRefundsQuery);
+      const refundsResult = refundsStmt.run(...params);
+      console.log(`🗑️ [SYNC] Deleted ${refundsResult.changes} transaction_refunds`);
+
+      // Step 5: Finally delete transactions
+      const deleteTransactionsQuery = `DELETE FROM transactions WHERE ${whereClause}`;
+      const transactionsStmt = localDb.prepare(deleteTransactionsQuery);
+      const transactionsResult = transactionsStmt.run(...params);
+
+      console.log(`✅ [SYNC] Deleted ${transactionsResult.changes} unsynced transactions`);
+
+      // Re-enable foreign key constraints
+      localDb.pragma('foreign_keys = ON');
+
+      return {
+        success: true,
+        deletedCount: transactionsResult.changes
+      };
+    } catch (error) {
+      // Re-enable foreign key constraints even on error
+      try {
+        localDb.pragma('foreign_keys = ON');
+      } catch (pragmaError) {
+        console.error('❌ [SYNC] Error re-enabling foreign keys:', pragmaError);
+      }
+
+      console.error('❌ [SYNC] Error deleting unsynced transactions:', error);
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : String(error)
+      };
+    }
   });
 
   // Transaction Items
@@ -2789,7 +3182,7 @@ function createWindows(): void {
           product_id: r.product_id,
           custom_note: r.custom_note
         });
-        
+
         // Handle bundle selections (still JSON for structure, but extract customizations to normalized tables)
         let bundleSelectionsJson = null;
         let bundleSelectionsData: RawBundleSelection[] | null = null;
@@ -2797,7 +3190,7 @@ function createWindows(): void {
           bundleSelectionsJson = typeof r.bundle_selections_json === 'string'
             ? r.bundle_selections_json
             : JSON.stringify(r.bundle_selections_json);
-          
+
           // Parse to extract bundle product customizations
           try {
             bundleSelectionsData = parseJsonArray<RawBundleSelection>(bundleSelectionsJson, 'bundle_selections_json');
@@ -2805,12 +3198,12 @@ function createWindows(): void {
             console.warn('⚠️ Failed to parse bundle_selections_json:', error);
           }
         }
-        
+
         console.log('📝 [SQLITE] Custom note:', r.custom_note);
-        
+
         stmt.run(r.id, r.transaction_id, r.product_id, r.quantity || 1, r.unit_price, r.total_price,
-                bundleSelectionsJson, r.custom_note, r.created_at);
-        
+          bundleSelectionsJson, r.custom_note, r.created_at);
+
         // Save main product customizations directly to normalized tables (NO JSON)
         if (r.customizations && Array.isArray(r.customizations)) {
           try {
@@ -2827,21 +3220,21 @@ function createWindows(): void {
             console.error('❌ Error saving main product customizations to normalized tables:', error);
           }
         }
-        
+
         // Extract and save bundle product customizations to normalized tables (NO JSON)
         if (bundleSelectionsData && bundleSelectionsData.length > 0) {
           try {
             const transactionItemId = r.id as string;
             const createdAt = r.created_at as string || new Date().toISOString();
-            
+
             for (const bundleSelection of bundleSelectionsData) {
               if (!Array.isArray(bundleSelection.selectedProducts)) continue;
-              
+
               for (const selectedProduct of bundleSelection.selectedProducts) {
                 // Each bundle product can have customizations
                 if (selectedProduct.customizations && Array.isArray(selectedProduct.customizations) && selectedProduct.customizations.length > 0) {
                   const bundleProductCustomizations = selectedProduct.customizations as RawCustomization[];
-                  
+
                   // Save bundle product customizations to normalized tables
                   // Link them to the bundle product ID so we can reconstruct them later
                   const bundleProductId = selectedProduct.product?.id || null;
@@ -2868,7 +3261,7 @@ function createWindows(): void {
 
   ipcMain.handle('localdb-get-transaction-items', async (event, transactionId?: number | string) => {
     if (!localDb) return [];
-    
+
     // Get transaction items with product name from LEFT JOIN (includes inactive products)
     let items: Array<Record<string, unknown>> = [];
     if (transactionId) {
@@ -2889,14 +3282,14 @@ function createWindows(): void {
       `);
       items = stmt.all() as Array<Record<string, unknown>>;
     }
-    
+
     // For each item, load customizations from normalized tables
     const itemsWithCustomizations = items.map(item => {
       const itemId = item.id as string;
-      
+
       // Read main product customizations from normalized tables (bundle_product_id IS NULL)
       const customizations = readCustomizationsFromNormalizedTables(localDb!, itemId, null);
-      
+
       // If item has bundle_selections_json, reconstruct it with customizations from normalized tables
       let bundleSelections = null;
       if (item.bundle_selections_json) {
@@ -2904,27 +3297,27 @@ function createWindows(): void {
           const bundleSelectionsJson = typeof item.bundle_selections_json === 'string'
             ? item.bundle_selections_json
             : JSON.stringify(item.bundle_selections_json);
-          
+
           bundleSelections = parseJsonArray<RawBundleSelection>(bundleSelectionsJson, 'bundle_selections_json');
-          
+
           // For each bundle selection, load customizations for each product from normalized tables
           if (bundleSelections && bundleSelections.length > 0) {
             bundleSelections = bundleSelections.map(bundleSel => {
               if (!Array.isArray(bundleSel.selectedProducts)) return bundleSel;
-              
+
               return {
                 ...bundleSel,
                 selectedProducts: bundleSel.selectedProducts.map(selectedProduct => {
                   const bundleProductId = selectedProduct.product?.id;
                   if (!bundleProductId) return selectedProduct;
-                  
+
                   // Read customizations for this specific bundle product from normalized tables
                   const productCustomizations = readCustomizationsFromNormalizedTables(
                     localDb!,
                     itemId,
                     bundleProductId
                   );
-                  
+
                   return {
                     ...selectedProduct,
                     customizations: productCustomizations || undefined
@@ -2937,32 +3330,32 @@ function createWindows(): void {
           console.warn('⚠️ Error reconstructing bundle selections:', error);
         }
       }
-      
+
       return {
         ...item,
         customizations: customizations || [],  // Main product customizations
         bundleSelections: bundleSelections || null  // Bundle selections with customizations from normalized tables
       };
     });
-    
+
     return itemsWithCustomizations;
   });
 
   // NEW: Get normalized customizations for transaction items (for sync upload)
   ipcMain.handle('localdb-get-transaction-item-customizations-normalized', async (event, transactionId: string) => {
     if (!localDb) return { customizations: [], options: [] };
-    
+
     try {
       // Get all transaction items for this transaction
       const itemsStmt = localDb.prepare('SELECT id FROM transaction_items WHERE transaction_id = ?');
       const items = itemsStmt.all(transactionId) as Array<{ id: string }>;
-      
+
       const allCustomizations: Array<Record<string, unknown>> = [];
       const allOptions: Array<Record<string, unknown>> = [];
-      
+
       for (const item of items) {
         const itemId = item.id;
-        
+
         // Get customizations for this item
         const customizationsStmt = localDb.prepare(`
           SELECT 
@@ -2975,10 +3368,10 @@ function createWindows(): void {
           WHERE transaction_item_id = ?
         `);
         const customizations = customizationsStmt.all(itemId) as Array<Record<string, unknown>>;
-        
+
         for (const customization of customizations) {
           allCustomizations.push(customization);
-          
+
           // Get options for this customization
           const optionsStmt = localDb.prepare(`
             SELECT 
@@ -2995,7 +3388,7 @@ function createWindows(): void {
           allOptions.push(...options);
         }
       }
-      
+
       return {
         customizations: allCustomizations,
         options: allOptions
@@ -3275,7 +3668,7 @@ function createWindows(): void {
   // Mark transactions as synced
   ipcMain.handle('localdb-mark-transactions-synced', async (event, transactionIds: string[]) => {
     if (!localDb || transactionIds.length === 0) return { success: true };
-    
+
     try {
       const stmt = localDb.prepare('UPDATE transactions SET synced_at = ? WHERE id IN (' + transactionIds.map(() => '?').join(',') + ')');
       stmt.run(Date.now(), ...transactionIds);
@@ -3289,7 +3682,7 @@ function createWindows(): void {
   // Reset transaction sync status (set synced_at to NULL)
   ipcMain.handle('localdb-reset-transaction-sync', async (event, transactionId: string) => {
     if (!localDb) return { success: false };
-    
+
     try {
       const stmt = localDb.prepare('UPDATE transactions SET synced_at = NULL WHERE id = ?');
       stmt.run(transactionId);
@@ -3302,7 +3695,7 @@ function createWindows(): void {
   });
 
   // ========== SHIFTS IPC HANDLERS ==========
-  
+
   // Get active shift for a business (with ownership flag)
   ipcMain.handle('localdb-get-active-shift', async (event, userId: number, businessId: number = 14) => {
     if (!localDb) {
@@ -3341,7 +3734,7 @@ function createWindows(): void {
     offset?: number;
   }) => {
     if (!localDb) return { shifts: [], total: 0 };
-    
+
     try {
       const { userId, startDate, endDate, businessId = 14, limit = 20, offset = 0 } = params;
       const conditions: string[] = ['business_id = ?'];
@@ -3363,7 +3756,7 @@ function createWindows(): void {
       }
 
       const whereClause = conditions.join(' AND ');
-      
+
       const countStmt = localDb.prepare(`SELECT COUNT(*) as count FROM shifts WHERE ${whereClause}`);
       const total = (countStmt.get(...queryParams) as { count: number }).count;
 
@@ -3373,7 +3766,7 @@ function createWindows(): void {
         ORDER BY shift_start DESC
         LIMIT ? OFFSET ?
       `;
-      
+
       const stmt = localDb.prepare(query);
       const shifts = stmt.all(...queryParams, limit, offset);
 
@@ -3388,16 +3781,16 @@ function createWindows(): void {
   ipcMain.handle('localdb-get-shift-users', async (event, businessId: number = 14) => {
     if (!localDb) return [];
     try {
-        const stmt = localDb.prepare(`
+      const stmt = localDb.prepare(`
             SELECT DISTINCT user_id, user_name 
             FROM shifts 
             WHERE business_id = ? 
             ORDER BY user_name
         `);
-        return stmt.all(businessId);
+      return stmt.all(businessId);
     } catch (error) {
-        console.error('Error getting shift users:', error);
-        return [];
+      console.error('Error getting shift users:', error);
+      return [];
     }
   });
 
@@ -3416,9 +3809,9 @@ function createWindows(): void {
       const business = businessStmt.get(shiftData.business_id) as { id: number } | undefined;
       if (!business) {
         console.error(`❌ [SHIFTS] Business ID ${shiftData.business_id} not found in local database`);
-        return { 
-          success: false, 
-          error: `Business ID ${shiftData.business_id} tidak ditemukan di database lokal. Silakan sinkronkan data dari server terlebih dahulu.` 
+        return {
+          success: false,
+          error: `Business ID ${shiftData.business_id} tidak ditemukan di database lokal. Silakan sinkronkan data dari server terlebih dahulu.`
         };
       }
 
@@ -3427,9 +3820,9 @@ function createWindows(): void {
       const user = userStmt.get(shiftData.user_id) as { id: number } | undefined;
       if (!user) {
         console.error(`❌ [SHIFTS] User ID ${shiftData.user_id} not found in local database`);
-        return { 
-          success: false, 
-          error: `User ID ${shiftData.user_id} tidak ditemukan di database lokal. Silakan sinkronkan data dari server terlebih dahulu.` 
+        return {
+          success: false,
+          error: `User ID ${shiftData.user_id} tidak ditemukan di database lokal. Silakan sinkronkan data dari server terlebih dahulu.`
         };
       }
 
@@ -3454,7 +3847,7 @@ function createWindows(): void {
           modal_awal, status, created_at, updated_at, synced_at
         ) VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?, NULL)
       `);
-      
+
       stmt.run(
         shiftData.uuid_id,
         shiftData.business_id,
@@ -3465,7 +3858,7 @@ function createWindows(): void {
         now,
         Date.now()
       );
-      
+
       console.log(`✅ [SHIFTS] Created shift ${shiftData.uuid_id} for user ${shiftData.user_id}`);
       return { success: true };
     } catch (error) {
@@ -3473,9 +3866,9 @@ function createWindows(): void {
       const errorMessage = String(error);
       // Provide more helpful error message for foreign key constraint failures
       if (errorMessage.includes('FOREIGN KEY constraint failed')) {
-        return { 
-          success: false, 
-          error: 'Data business atau user tidak ditemukan di database lokal. Silakan sinkronkan data dari server terlebih dahulu sebelum memulai shift.' 
+        return {
+          success: false,
+          error: 'Data business atau user tidak ditemukan di database lokal. Silakan sinkronkan data dari server terlebih dahulu sebelum memulai shift.'
         };
       }
       return { success: false, error: errorMessage };
@@ -3594,13 +3987,13 @@ function createWindows(): void {
         cashRefundTotal,
         shiftId
       );
-      
+
       if (result.changes === 0) {
         return { success: false, error: 'Shift not found or already ended' };
       }
-      
+
       console.log(`✅ [SHIFTS] Ended shift ${shiftId}`);
-      return { 
+      return {
         success: true,
         cashSummary: {
           kas_mulai: shiftRow.modal_awal || 0,
@@ -3626,7 +4019,7 @@ function createWindows(): void {
       total_discount: 0,
       voucher_count: 0
     };
-    
+
     try {
       // Combined statistics query including voucher metrics
       let statsQuery = `
@@ -3641,12 +4034,12 @@ function createWindows(): void {
         AND status = 'completed'
       `;
       const statsParams: QueryParams = [userId, businessId, shiftStart];
-      
+
       if (shiftEnd) {
         statsQuery += ' AND datetime(created_at) <= datetime(?)';
         statsParams.push(shiftEnd);
       }
-      
+
       const statsStmt = localDb.prepare(statsQuery);
       const statsResult = statsStmt.get(...statsParams) as {
         order_count: number;
@@ -3654,7 +4047,7 @@ function createWindows(): void {
         total_discount: number;
         voucher_count: number;
       } | undefined;
-      
+
       return {
         order_count: statsResult?.order_count || 0,
         total_amount: statsResult?.total_amount || 0,
@@ -3675,7 +4068,7 @@ function createWindows(): void {
   // Get payment method breakdown
   ipcMain.handle('localdb-get-payment-breakdown', async (event, userId: number, shiftStart: string, shiftEnd: string | null, businessId: number = 14) => {
     if (!localDb) return [];
-    
+
     try {
       let query = `
         SELECT 
@@ -3690,16 +4083,18 @@ function createWindows(): void {
         AND t.status = 'completed'
       `;
       const params: QueryParams = [userId, businessId, shiftStart];
-      
+
       if (shiftEnd) {
         query += ' AND datetime(t.created_at) <= datetime(?)';
         params.push(shiftEnd);
       }
-      
+
       query += ' GROUP BY pm.id, pm.name, pm.code ORDER BY transaction_count DESC';
-      
+
       const stmt = localDb.prepare(query);
-      return stmt.all(...params);
+      const results = stmt.all(...params);
+
+      return results;
     } catch (error) {
       console.error('Error getting payment breakdown:', error);
       return [];
@@ -3709,7 +4104,7 @@ function createWindows(): void {
   // Get Category II breakdown
   ipcMain.handle('localdb-get-category2-breakdown', async (event, userId: number, shiftStart: string, shiftEnd: string | null, businessId: number = 14) => {
     if (!localDb) return [];
-    
+
     try {
       let query = `
         SELECT 
@@ -3721,21 +4116,23 @@ function createWindows(): void {
         INNER JOIN transactions t ON ti.transaction_id = t.id
         INNER JOIN products p ON ti.product_id = p.id
         LEFT JOIN category2 c2_by_id ON p.category2_id = c2_by_id.id
+        LEFT JOIN category2_businesses cb_by_id ON c2_by_id.id = cb_by_id.category2_id AND cb_by_id.business_id = ?
         LEFT JOIN category2 c2_by_name ON p.category2_name = c2_by_name.name AND (p.category2_id IS NULL OR p.category2_id = 0)
+        LEFT JOIN category2_businesses cb_by_name ON c2_by_name.id = cb_by_name.category2_id AND cb_by_name.business_id = ?
         WHERE t.user_id = ? AND t.business_id = ?
         AND datetime(t.created_at) >= datetime(?)
         AND t.status = 'completed'
         AND (p.category2_id IS NOT NULL OR (p.category2_name IS NOT NULL AND p.category2_name != ''))
       `;
-      const params: QueryParams = [userId, businessId, shiftStart];
-      
+      const params: QueryParams = [businessId, businessId, userId, businessId, shiftStart];
+
       if (shiftEnd) {
         query += ' AND datetime(t.created_at) <= datetime(?)';
         params.push(shiftEnd);
       }
-      
+
       query += ' GROUP BY category2_name ORDER BY total_amount DESC';
-      
+
       const stmt = localDb.prepare(query);
       const results = stmt.all(...params);
       console.log(`[CATEGORY2 BREAKDOWN] Found ${results.length} Category II entries for user ${userId}, shift ${shiftStart} to ${shiftEnd || 'now'}`);
@@ -3755,16 +4152,16 @@ function createWindows(): void {
       cash_shift: 0,
       cash_whole_day: 0
     };
-    
+
     try {
       // Get cash payment method ID
       const cashMethodStmt = localDb.prepare('SELECT id FROM payment_methods WHERE code = ? LIMIT 1');
       const cashMethod = cashMethodStmt.get('cash') as { id: number } | undefined;
-      
+
       if (!cashMethod) {
         return { cash_shift: 0, cash_whole_day: 0 };
       }
-      
+
       // Cash received during shift
       let shiftQuery = `
         SELECT COALESCE(SUM(final_amount), 0) as cash_total
@@ -3775,35 +4172,35 @@ function createWindows(): void {
         AND t.status = 'completed'
       `;
       const shiftParams: QueryParams = [userId, businessId, shiftStart, cashMethod.id];
-      
+
       if (shiftEnd) {
         shiftQuery += ' AND datetime(t.created_at) <= datetime(?)';
         shiftParams.push(shiftEnd);
       }
-      
+
       const shiftStmt = localDb.prepare(shiftQuery);
       const shiftResult = shiftStmt.get(...shiftParams) as { cash_total: number };
-      
+
       // Cash received whole day (GMT+7 - extract date from shift_start)
       // shiftStart is in UTC (ISO format)
       // We need to find the GMT+7 day boundaries
       const shiftDate = new Date(shiftStart);
       const gmt7Offset = 7 * 60 * 60 * 1000; // +7 hours in milliseconds
-      
+
       // Convert to GMT+7 time
       const gmt7Time = new Date(shiftDate.getTime() + gmt7Offset);
       const year = gmt7Time.getUTCFullYear();
       const month = gmt7Time.getUTCMonth();
       const day = gmt7Time.getUTCDate();
-      
+
       // Create day boundaries in GMT+7 (00:00:00 and 23:59:59.999)
       const dayStartGMT7 = new Date(Date.UTC(year, month, day, 0, 0, 0, 0));
       const dayEndGMT7 = new Date(Date.UTC(year, month, day, 23, 59, 59, 999));
-      
+
       // Convert back to UTC for SQLite queries (subtract GMT+7 offset)
       const dayStart = new Date(dayStartGMT7.getTime() - gmt7Offset);
       const dayEnd = new Date(dayEndGMT7.getTime() - gmt7Offset);
-      
+
       const wholeDayStmt = localDb.prepare(`
         SELECT COALESCE(SUM(final_amount), 0) as cash_total
         FROM transactions t
@@ -3813,7 +4210,7 @@ function createWindows(): void {
         AND t.payment_method_id = ?
         AND t.status = 'completed'
       `);
-      
+
       const wholeDayResult = wholeDayStmt.get(
         businessId,
         dayStart.toISOString(),
@@ -3854,7 +4251,7 @@ function createWindows(): void {
       const shiftRefunds = refundShiftResult?.refund_total || 0;
       const daySales = wholeDayResult.cash_total || 0;
       const dayRefunds = dayRefundResult?.refund_total || 0;
-      
+
       return {
         cash_shift: shiftSales - shiftRefunds,
         cash_shift_sales: shiftSales,
@@ -3886,14 +4283,14 @@ function createWindows(): void {
     try {
       let query = 'SELECT * FROM shifts WHERE synced_at IS NULL';
       const params: QueryParams = [];
-      
+
       if (businessId) {
         query += ' AND business_id = ?';
         params.push(businessId);
       }
-      
+
       query += ' ORDER BY created_at ASC';
-      
+
       const stmt = localDb.prepare(query);
       return stmt.all(...params);
     } catch (error) {
@@ -3984,7 +4381,7 @@ function createWindows(): void {
   // Check for transactions before shift start (today)
   ipcMain.handle('localdb-check-today-transactions', async (event, userId: number, shiftStart: string, businessId: number = 14) => {
     if (!localDb) return { hasTransactions: false, count: 0, earliestTime: null };
-    
+
     try {
       // Get start of day in GMT+7
       const shiftDate = new Date(shiftStart);
@@ -3993,10 +4390,10 @@ function createWindows(): void {
       const year = localTime.getUTCFullYear();
       const month = localTime.getUTCMonth();
       const day = localTime.getUTCDate();
-      
+
       const dayStartUTC = new Date(Date.UTC(year, month, day, 0, 0, 0, 0));
       const dayStart = new Date(dayStartUTC.getTime() - gmt7Offset);
-      
+
       // Check for transactions before shift_start but on the same day
       // AND ensure they are not already linked to another shift
       const checkStmt = localDb.prepare(`
@@ -4009,9 +4406,9 @@ function createWindows(): void {
         AND status = 'completed'
         AND (shift_uuid IS NULL OR shift_uuid = '')
       `);
-      
+
       const result = checkStmt.get(userId, businessId, dayStart.toISOString(), shiftStart) as { count: number; earliest_time: string | null };
-      
+
       return {
         hasTransactions: (result.count || 0) > 0,
         count: result.count || 0,
@@ -4026,7 +4423,7 @@ function createWindows(): void {
   // Update shift start time to include earlier transactions
   ipcMain.handle('localdb-update-shift-start', async (event, shiftId: number, newStartTime: string) => {
     if (!localDb) return { success: false, error: 'Database not available' };
-    
+
     try {
       // 1. Get shift details first to have the UUID and User ID
       const getShiftStmt = localDb.prepare('SELECT uuid_id, user_id FROM shifts WHERE id = ?');
@@ -4042,9 +4439,9 @@ function createWindows(): void {
         SET shift_start = ?, updated_at = ?
         WHERE id = ? AND status = 'active'
       `);
-      
+
       const result = stmt.run(newStartTime, Date.now(), shiftId);
-      
+
       if (result.changes === 0) {
         return { success: false, error: 'Shift not found or not active' };
       }
@@ -4059,10 +4456,10 @@ function createWindows(): void {
       `);
 
       const linkResult = linkStmt.run(shift.uuid_id, shift.user_id, newStartTime);
-      
+
       console.log(`✅ [SHIFTS] Updated shift ${shiftId} start time to ${newStartTime}`);
       console.log(`🔗 [SHIFTS] Linked ${linkResult.changes} transactions to shift ${shift.uuid_id}`);
-      
+
       return { success: true };
     } catch (error) {
       console.error('Error updating shift start time:', error);
@@ -4073,7 +4470,7 @@ function createWindows(): void {
   // Get product sales breakdown for shift
   ipcMain.handle('localdb-get-product-sales', async (event, userId: number, shiftStart: string, shiftEnd: string | null, businessId: number = 14) => {
     if (!localDb) return { products: [], customizations: [] };
-    
+
     try {
       let query = `
         SELECT 
@@ -4104,12 +4501,12 @@ function createWindows(): void {
         AND t.status = 'completed'
       `;
       const params: QueryParams = [userId, businessId, shiftStart];
-      
+
       if (shiftEnd) {
         query += ' AND datetime(t.created_at) <= datetime(?)';
         params.push(shiftEnd);
       }
-      
+
       const stmt = localDb.prepare(query);
       const rows = stmt.all(...params) as TransactionItemRow[];
 
@@ -4123,6 +4520,7 @@ function createWindows(): void {
         total_subtotal: number;
         customization_subtotal: number;
         base_subtotal: number;
+        unit_price: number; // Store the unit price to split by price differences
       };
 
       type CustomizationAccumulator = {
@@ -4207,6 +4605,7 @@ function createWindows(): void {
                     total_subtotal: 0,
                     customization_subtotal: 0,
                     base_subtotal: 0,
+                    unit_price: 0, // Bundle items don't have individual prices
                   });
                 }
               }
@@ -4252,11 +4651,11 @@ function createWindows(): void {
       // Helper function to determine platform from unit price
       const determinePlatform = (row: TransactionItemRow): string => {
         const unitPrice = Number(row.unit_price || 0);
-        
+
         // Compare unit price with platform-specific prices
         // Allow small tolerance for floating point comparison (0.01)
         const tolerance = 0.01;
-        
+
         if (row.harga_gofood && Math.abs(unitPrice - Number(row.harga_gofood)) < tolerance) {
           return 'gofood';
         }
@@ -4272,7 +4671,7 @@ function createWindows(): void {
         if (row.harga_tiktok && Math.abs(unitPrice - Number(row.harga_tiktok)) < tolerance) {
           return 'tiktok';
         }
-        
+
         // Default to offline
         return 'offline';
       };
@@ -4280,6 +4679,7 @@ function createWindows(): void {
       for (const row of rows) {
         const quantity = Number(row.quantity || 0);
         const totalPrice = Number(row.total_price || 0);
+        const unitPrice = Number(row.unit_price || 0);
         const customizationSubtotal = sumCustomizationForRow(row, quantity);
         let baseSubtotal = totalPrice - customizationSubtotal;
 
@@ -4290,7 +4690,8 @@ function createWindows(): void {
         // Determine platform based on product price, not payment method
         const platformCode = determinePlatform(row);
         const transactionType = row.transaction_type || 'drinks';
-        const key = `${row.product_id}-${platformCode}-${transactionType}`;
+        // Include unit_price in the key to split products with different prices into separate rows
+        const key = `${row.product_id}-${platformCode}-${transactionType}-${unitPrice}`;
 
         const existing = aggregate.get(key);
 
@@ -4310,6 +4711,7 @@ function createWindows(): void {
             total_subtotal: totalPrice,
             customization_subtotal: customizationSubtotal,
             base_subtotal: baseSubtotal,
+            unit_price: unitPrice,
           });
         }
       }
@@ -4317,7 +4719,9 @@ function createWindows(): void {
       const regularProducts = Array.from(aggregate.values()).map(product => {
         const quantity = product.total_quantity || 0;
         const baseSubtotal = product.base_subtotal || 0;
-        const baseUnitPrice = quantity > 0 ? baseSubtotal / quantity : 0;
+        // Use the stored unit_price instead of calculating average
+        // This ensures products with different prices are split into separate rows
+        const baseUnitPrice = product.unit_price || (quantity > 0 ? baseSubtotal / quantity : 0);
         return {
           ...product,
           base_unit_price: baseUnitPrice,
@@ -4365,7 +4769,7 @@ function createWindows(): void {
       return { products: [], customizations: [] };
     }
   });
-  
+
   // Payment Methods
   ipcMain.handle('localdb-upsert-payment-methods', async (event, rows: RowArray) => {
     if (!localDb) return { success: false };
@@ -4428,8 +4832,8 @@ function createWindows(): void {
         subscription_status=excluded.subscription_status, subscription_plan=excluded.subscription_plan,
         trial_ends_at=excluded.trial_ends_at, created_at=excluded.created_at, updated_at=excluded.updated_at`);
       for (const r of data) {
-        stmt.run(r.id, r.name, r.slug, r.owner_user_id, r.subscription_status || 'trial', 
-                r.subscription_plan || 'basic', r.trial_ends_at, r.created_at, Date.now());
+        stmt.run(r.id, r.name, r.slug, r.owner_user_id, r.subscription_status || 'trial',
+          r.subscription_plan || 'basic', r.trial_ends_at, r.created_at, Date.now());
       }
     });
     tx(rows);
@@ -4503,28 +4907,52 @@ function createWindows(): void {
   });
 
   // Category2
-  ipcMain.handle('localdb-upsert-category2', async (event, rows: RowArray) => {
+  ipcMain.handle('localdb-upsert-category2', async (event, rows: RowArray, junctionTableData?: Array<{ category2_id: number; business_id: number }>) => {
     if (!localDb) return { success: false };
-    const tx = localDb.transaction((data: RowArray) => {
-      const stmt = localDb!.prepare(`INSERT INTO category2 (
-        id, name, business_id, description, display_order, is_active, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    const db = localDb; // Capture in const for TypeScript
+    const tx = db.transaction((data: RowArray, junctionData?: Array<{ category2_id: number; business_id: number }>) => {
+      // Upsert category2 records (business_id column removed - using junction table only)
+      const stmt = db.prepare(`INSERT INTO category2 (
+        id, name, description, display_order, is_active, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET
-        name=excluded.name, business_id=excluded.business_id, description=excluded.description,
+        name=excluded.name, description=excluded.description,
         display_order=excluded.display_order, is_active=excluded.is_active,
         created_at=excluded.created_at, updated_at=excluded.updated_at`);
       for (const r of data) {
-        stmt.run(r.id, r.name, r.business_id, r.description, r.display_order || 0, r.is_active || 1, r.created_at, Date.now());
+        stmt.run(r.id, r.name, r.description, r.display_order || 0, r.is_active || 1, r.created_at, Date.now());
+      }
+
+      // Upsert junction table relationships (REQUIRED - no fallback)
+      if (junctionData && junctionData.length > 0) {
+        const junctionStmt = db.prepare(`
+          INSERT OR REPLACE INTO category2_businesses (category2_id, business_id)
+          VALUES (?, ?)
+        `);
+        for (const rel of junctionData) {
+          junctionStmt.run(rel.category2_id, rel.business_id);
+        }
+        console.log(`✅ [CATEGORY2 UPSERT] Stored ${junctionData.length} category2-business relationships`);
+      } else {
+        console.warn(`⚠️ [CATEGORY2 UPSERT] No junction table data provided - category2 records will not be associated with any business`);
       }
     });
-    tx(rows);
+    tx(rows, junctionTableData);
     return { success: true };
   });
 
   ipcMain.handle('localdb-get-category2', async (event, businessId?: number) => {
     if (!localDb) return [];
     if (businessId) {
-      const stmt = localDb.prepare('SELECT * FROM category2 WHERE business_id = ? AND is_active = 1 ORDER BY display_order ASC, name ASC');
+      // Use junction table for multi-business support (junction table only - no fallback)
+      const stmt = localDb.prepare(`
+        SELECT DISTINCT c2.*
+        FROM category2 c2
+        INNER JOIN category2_businesses cb ON c2.id = cb.category2_id
+        WHERE c2.is_active = 1 
+          AND cb.business_id = ?
+        ORDER BY c2.display_order ASC, c2.name ASC
+      `);
       return stmt.all(businessId);
     } else {
       const stmt = localDb.prepare('SELECT * FROM category2 WHERE is_active = 1 ORDER BY display_order ASC, name ASC');
@@ -4545,8 +4973,8 @@ function createWindows(): void {
         credit_limit=excluded.credit_limit, current_balance=excluded.current_balance,
         is_active=excluded.is_active, created_at=excluded.created_at, updated_at=excluded.updated_at`);
       for (const r of data) {
-        stmt.run(r.id, r.account_code, r.account_name, r.contact_info, r.credit_limit || 0.0, 
-                r.current_balance || 0.0, r.is_active || 1, r.created_at, Date.now());
+        stmt.run(r.id, r.account_code, r.account_name, r.contact_info, r.credit_limit || 0.0,
+          r.current_balance || 0.0, r.is_active || 1, r.created_at, Date.now());
       }
     });
     tx(rows);
@@ -4561,7 +4989,7 @@ function createWindows(): void {
 
 
   // Printer configuration handlers
-ipcMain.handle('localdb-save-printer-config', async (event, printerType: string, systemPrinterName: string, extraSettings?: UnknownRecord | string | null) => {
+  ipcMain.handle('localdb-save-printer-config', async (event, printerType: string, systemPrinterName: string, extraSettings?: UnknownRecord | string | null) => {
     if (!localDb) return { success: false };
     try {
       let extraSettingsJson: string | null = null;
@@ -4577,7 +5005,7 @@ ipcMain.handle('localdb-save-printer-config', async (event, printerType: string,
           }
         }
       }
-      
+
       const stmt = localDb.prepare(`INSERT INTO printer_configs (id, printer_type, system_printer_name, extra_settings, created_at, updated_at) 
         VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET 
         system_printer_name=excluded.system_printer_name,
@@ -4604,7 +5032,7 @@ ipcMain.handle('localdb-save-printer-config', async (event, printerType: string,
   });
 
   // ==================== PRINTER MANAGEMENT IPC HANDLERS ====================
-  
+
   // Generate 19-digit numeric UUID
   ipcMain.handle('generate-numeric-uuid', async (event, businessId: number) => {
     if (!printerService) return { success: false, error: 'Printer service not available' };
@@ -4615,64 +5043,74 @@ ipcMain.handle('localdb-save-printer-config', async (event, printerType: string,
       return { success: false, error: String(error) };
     }
   });
-  
+
   // Get or increment printer counter
   ipcMain.handle('get-printer-counter', async (event, printerType: string, businessId: number, increment: boolean = false) => {
-    if (!printerService) return { success: false, counter: 0 };
+    if (!printerService) {
+      console.error(`❌ [IPC] Printer service not available for getPrinterCounter (${printerType}, businessId: ${businessId}, increment: ${increment})`);
+      return { success: false, counter: 0 };
+    }
     try {
       const counter = printerService.getPrinterCounter(printerType, businessId, increment);
+      console.log(`📊 [IPC] getPrinterCounter returned: ${counter} (${printerType}, businessId: ${businessId}, increment: ${increment})`);
       return { success: true, counter };
     } catch (error) {
+      console.error(`❌ [IPC] Error in getPrinterCounter (${printerType}, businessId: ${businessId}, increment: ${increment}):`, error);
       return { success: false, counter: 0, error: String(error) };
     }
   });
-  
+
   // Get Printer 2 mode
   ipcMain.handle('get-printer2-mode', async () => {
-  if (!printerService) return { success: true, mode: 'manual' as const };
+    if (!printerService) return { success: true, mode: 'manual' as const };
     const mode = printerService.getPrinter2Mode();
     return { success: true, mode };
   });
-  
+
   // Set Printer 2 mode
   ipcMain.handle('set-printer2-mode', async (event, mode: 'auto' | 'manual') => {
     if (!printerService) return { success: false };
     const result = printerService.setPrinter2Mode(mode);
     return { success: result };
   });
-  
+
   // Get Printer 2 automation selections
   ipcMain.handle('get-printer2-automation-selections', async (event, businessId: number) => {
     if (!printerService) return { success: false, cycleNumber: 0, selections: [] };
     const result = printerService.getPrinter2AutomationSelections(businessId);
     return { success: true, ...result };
   });
-  
+
   // Save Printer 2 automation selections
   ipcMain.handle('save-printer2-automation-selections', async (event, businessId: number, cycleNumber: number, selections: number[]) => {
     if (!printerService) return { success: false };
     const result = printerService.savePrinter2AutomationSelections(businessId, cycleNumber, selections);
     return { success: result };
   });
-  
+
   // Generate random selections
   ipcMain.handle('generate-random-selections', async (event, cycleNumber: number) => {
     if (!printerService) return { success: false, selections: [] };
     const selections = printerService.generateRandomSelections(cycleNumber);
     return { success: true, selections };
   });
-  
+
   // Log Printer 2 print
   ipcMain.handle('log-printer2-print', async (event, transactionId: string, printer2ReceiptNumber: number, mode: 'auto' | 'manual', cycleNumber?: number, globalCounter?: number, isReprint?: boolean, reprintCount?: number) => {
     if (!printerService) return { success: false };
     const result = printerService.logPrinter2Print(transactionId, printer2ReceiptNumber, mode, cycleNumber, globalCounter, isReprint, reprintCount);
     return { success: result };
   });
-  
+
   // Get Printer 2 audit log
   ipcMain.handle('get-printer2-audit-log', async (event, fromDate?: string, toDate?: string, limit?: number) => {
-    if (!printerService) return { success: false, entries: [] };
+    console.log(`📋 [IPC] get-printer2-audit-log called: fromDate=${fromDate}, toDate=${toDate}, limit=${limit}, printerService=${!!printerService}`);
+    if (!printerService) {
+      console.log('❌ [IPC] printerService is null!');
+      return { success: false, entries: [] };
+    }
     const entries = printerService.getPrinter2AuditLog(fromDate, toDate, limit || 100);
+    console.log(`📋 [IPC] get-printer2-audit-log returning ${entries.length} entries`);
     return { success: true, entries };
   });
 
@@ -4683,10 +5121,225 @@ ipcMain.handle('localdb-save-printer-config', async (event, printerType: string,
     return { success: result };
   });
 
+  // Queue transaction for System POS sync (when printed to Printer 2)
+  ipcMain.handle('queue-transaction-for-system-pos', async (event, transactionId: string) => {
+    if (!localDb) {
+      console.error('❌ [SYSTEM POS] Local database not available');
+      return { success: false, error: 'Local database not available' };
+    }
+
+    try {
+      // Check if already queued or synced
+      const existing = localDb.prepare('SELECT id, synced_at FROM system_pos_queue WHERE transaction_id = ?').get(transactionId) as { id: number; synced_at: number | null } | undefined;
+
+      if (existing) {
+        if (existing.synced_at) {
+          console.log(`✅ [SYSTEM POS] Transaction ${transactionId} already synced`);
+          return { success: true, alreadySynced: true };
+        } else {
+          console.log(`⚠️ [SYSTEM POS] Transaction ${transactionId} already queued`);
+          return { success: true, alreadyQueued: true };
+        }
+      }
+
+      // Insert into queue
+      const now = Date.now();
+      localDb.prepare('INSERT INTO system_pos_queue (transaction_id, queued_at) VALUES (?, ?)').run(transactionId, now);
+      console.log(`✅ [SYSTEM POS] Queued transaction ${transactionId} for System POS sync`);
+      return { success: true };
+    } catch (error) {
+      console.error('❌ [SYSTEM POS] Error queueing transaction:', error);
+      return { success: false, error: String(error) };
+    }
+  });
+
+  // Get queued transactions for System POS sync
+  ipcMain.handle('get-system-pos-queue', async () => {
+    if (!localDb) {
+      return { success: false, queue: [] };
+    }
+
+    try {
+      // Get ALL queue entries (not just pending) for status checking
+      const allQueue = localDb.prepare('SELECT id, transaction_id, queued_at, synced_at, retry_count, last_error FROM system_pos_queue ORDER BY queued_at DESC').all() as Array<{
+        id: number;
+        transaction_id: string;
+        queued_at: number;
+        synced_at: number | null;
+        retry_count: number;
+        last_error: string | null;
+      }>;
+      return { success: true, queue: allQueue };
+    } catch (error) {
+      console.error('❌ [SYSTEM POS] Error getting queue:', error);
+      return { success: false, queue: [] };
+    }
+  });
+
+  // Mark transaction as synced in System POS queue
+  ipcMain.handle('mark-system-pos-synced', async (event, transactionId: string) => {
+    if (!localDb) {
+      return { success: false };
+    }
+
+    try {
+      const now = Date.now();
+      localDb.prepare('UPDATE system_pos_queue SET synced_at = ? WHERE transaction_id = ?').run(now, transactionId);
+      console.log(`✅ [SYSTEM POS] Marked transaction ${transactionId} as synced`);
+      return { success: true };
+    } catch (error) {
+      console.error('❌ [SYSTEM POS] Error marking as synced:', error);
+      return { success: false };
+    }
+  });
+
+  // Mark transaction sync failed (increment retry count)
+  ipcMain.handle('mark-system-pos-failed', async (event, transactionId: string, error: string) => {
+    if (!localDb) {
+      return { success: false };
+    }
+
+    try {
+      localDb.prepare('UPDATE system_pos_queue SET retry_count = retry_count + 1, last_error = ? WHERE transaction_id = ?').run(error.substring(0, 500), transactionId);
+      console.log(`⚠️ [SYSTEM POS] Marked transaction ${transactionId} sync as failed (retry count incremented)`);
+      return { success: true };
+    } catch (error) {
+      console.error('❌ [SYSTEM POS] Error marking as failed:', error);
+      return { success: false };
+    }
+  });
+
+  // Reset retry count for system-pos transactions (for retrying failed transactions)
+  ipcMain.handle('reset-system-pos-retry-count', async (event, transactionIds?: string[]) => {
+    if (!localDb) {
+      return { success: false };
+    }
+
+    try {
+      if (transactionIds && transactionIds.length > 0) {
+        // Reset specific transactions
+        const placeholders = transactionIds.map(() => '?').join(',');
+        const result = localDb.prepare(`UPDATE system_pos_queue SET retry_count = 0, last_error = NULL WHERE transaction_id IN (${placeholders})`).run(...transactionIds);
+        console.log(`🔄 [SYSTEM POS] Reset retry count for ${result.changes} transaction(s)`);
+        return { success: true, count: result.changes };
+      } else {
+        // Reset all failed transactions (retry_count >= 5)
+        const result = localDb.prepare('UPDATE system_pos_queue SET retry_count = 0, last_error = NULL WHERE retry_count >= 5').run();
+        console.log(`🔄 [SYSTEM POS] Reset retry count for ${result.changes} failed transaction(s)`);
+        return { success: true, count: result.changes };
+      }
+    } catch (error) {
+      console.error('❌ [SYSTEM POS] Error resetting retry count:', error);
+      return { success: false };
+    }
+  });
+
+  // Debug: Check transaction sync status for System POS
+  ipcMain.handle('debug-system-pos-transaction', async (event, transactionId: string) => {
+    if (!localDb) {
+      return { success: false, error: 'Local database not available' };
+    }
+
+    try {
+      // Check if transaction exists in local DB
+      const transaction = localDb.prepare('SELECT id, business_id, user_id, created_at, synced_at FROM transactions WHERE id = ?').get(transactionId) as {
+        id: string;
+        business_id: number;
+        user_id: number;
+        created_at: string;
+        synced_at: number | null;
+      } | undefined;
+
+      // Check queue status
+      const queueEntry = localDb.prepare('SELECT id, transaction_id, queued_at, synced_at, retry_count, last_error FROM system_pos_queue WHERE transaction_id = ?').get(transactionId) as {
+        id: number;
+        transaction_id: string;
+        queued_at: number;
+        synced_at: number | null;
+        retry_count: number;
+        last_error: string | null;
+      } | undefined;
+
+      return {
+        success: true,
+        transaction: transaction || null,
+        queue: queueEntry || null,
+        existsInLocalDb: !!transaction,
+        isQueued: !!queueEntry,
+        isSynced: queueEntry?.synced_at !== null,
+        retryCount: queueEntry?.retry_count || 0,
+        lastError: queueEntry?.last_error || null,
+      };
+    } catch (error) {
+      console.error('❌ [SYSTEM POS DEBUG] Error checking transaction:', error);
+      return { success: false, error: String(error) };
+    }
+  });
+
+  // Repopulate System POS queue (Force Resync)
+  ipcMain.handle('repopulate-system-pos-queue', async (event, options: { days?: number } = {}) => {
+    if (!localDb) {
+      return { success: false, error: 'Local database not available' };
+    }
+
+    try {
+      const { days } = options;
+      console.log(`🔄 [SYSTEM POS] Repopulating queue (days: ${days || 'ALL'})...`);
+
+      let query = 'SELECT id, created_at FROM transactions';
+      const params: any[] = [];
+
+      if (days && days > 0) {
+        const cutoffDate = new Date();
+        cutoffDate.setDate(cutoffDate.getDate() - days);
+        query += ' WHERE created_at >= ?';
+        params.push(cutoffDate.toISOString()); // Assuming ISO string storage
+      }
+
+      const transactions = localDb.prepare(query).all(...params) as Array<{ id: string; created_at: string }>;
+
+      if (transactions.length === 0) {
+        return { success: true, count: 0, message: 'No transactions found in the specified period' };
+      }
+
+      console.log(`🔄 [SYSTEM POS] Found ${transactions.length} transactions to process`);
+
+      const now = Date.now();
+      let queuedCount = 0;
+
+      const insertStmt = localDb.prepare('INSERT OR IGNORE INTO system_pos_queue (transaction_id, queued_at) VALUES (?, ?)');
+      // If it exists, we want to reset it so it syncs again.
+      // We'll update regardless of whether it was inserted or not, to be safe and ensure sync.
+      const updateStmt = localDb.prepare('UPDATE system_pos_queue SET synced_at = NULL, retry_count = 0, last_error = NULL WHERE transaction_id = ?');
+
+      const queueTransaction = localDb.transaction((txs: Array<{ id: string }>) => {
+        for (const tx of txs) {
+          insertStmt.run(tx.id, now);
+          // Always reset status to ensure partial syncs are fixed
+          updateStmt.run(tx.id);
+          queuedCount++;
+        }
+      });
+
+      queueTransaction(transactions);
+
+      console.log(`✅ [SYSTEM POS] Successfully queued/reset ${queuedCount} transactions`);
+      return { success: true, count: queuedCount };
+    } catch (error) {
+      console.error('❌ [SYSTEM POS] Error repopulating queue:', error);
+      return { success: false, error: String(error) };
+    }
+  });
+
   // Get Printer 1 audit log
   ipcMain.handle('get-printer1-audit-log', async (event, fromDate?: string, toDate?: string, limit?: number) => {
-    if (!printerService) return { success: false, entries: [] };
+    console.log(`📋 [IPC] get-printer1-audit-log called: fromDate=${fromDate}, toDate=${toDate}, limit=${limit}, printerService=${!!printerService}`);
+    if (!printerService) {
+      console.log('❌ [IPC] printerService is null!');
+      return { success: false, entries: [] };
+    }
     const entries = printerService.getPrinter1AuditLog(fromDate, toDate, limit || 100);
+    console.log(`📋 [IPC] get-printer1-audit-log returning ${entries.length} entries`);
     return { success: true, entries };
   });
 
@@ -4702,6 +5355,10 @@ ipcMain.handle('localdb-save-printer-config', async (event, printerType: string,
       return { p1: [], p2: [] };
     }
   });
+
+
+
+
 
   // Mark printer audits as synced
   ipcMain.handle('localdb-mark-printer-audits-synced', async (event, ids: { p1Ids: number[]; p2Ids: number[] }) => {
@@ -4810,7 +5467,21 @@ ipcMain.handle('localdb-save-printer-config', async (event, printerType: string,
     }
   });
 
+  // Get all printer daily counters
+  ipcMain.handle('localdb-get-all-printer-daily-counters', async () => {
+    if (!localDb) return [];
+    try {
+      const stmt = localDb.prepare('SELECT printer_type, business_id, date, counter FROM printer_daily_counters ORDER BY business_id, printer_type, date');
+      return stmt.all() as Array<{ printer_type: string; business_id: number; date: string; counter: number }>;
+    } catch (error) {
+      console.error('Error getting printer daily counters:', error);
+      return [];
+    }
+  });
+
   // Upsert printer daily counters downloaded from cloud
+
+
   ipcMain.handle('localdb-upsert-printer-daily-counters', async (event, counters: Array<{ printer_type: string; business_id: number; date: string; counter: number }>) => {
     if (!localDb) return { success: false };
     if (!Array.isArray(counters) || counters.length === 0) {
@@ -4889,7 +5560,7 @@ ipcMain.handle('localdb-save-printer-config', async (event, printerType: string,
         VALUES (?, ?, 'pending')
       `);
       const result = stmt.run(JSON.stringify(transactionData), Date.now());
-      
+
       // Queue transaction items
       const items = Array.isArray(transactionData.items) ? transactionData.items : [];
       if (items.length > 0) {
@@ -4901,7 +5572,7 @@ ipcMain.handle('localdb-save-printer-config', async (event, printerType: string,
           itemStmt.run(result.lastInsertRowid, JSON.stringify(item));
         }
       }
-      
+
       console.log(`✅ Queued offline transaction ${result.lastInsertRowid}`);
       return { success: true, offlineTransactionId: result.lastInsertRowid };
     } catch (error) {
@@ -4927,18 +5598,18 @@ ipcMain.handle('localdb-save-printer-config', async (event, printerType: string,
         sync_attempts: number;
         last_sync_attempt?: number;
       }>;
-      
+
       // Fetch items for each transaction and include them
       const transactionsWithItems = transactions.map(transaction => {
         try {
           const transactionData = JSON.parse(transaction.transaction_data);
-          
+
           // Fetch items for this transaction
           if (!localDb) {
             // If localDb becomes null, return transaction without items
             return transaction;
           }
-          
+
           const itemsStmt = localDb.prepare(`
             SELECT item_data
             FROM offline_transaction_items
@@ -4946,10 +5617,10 @@ ipcMain.handle('localdb-save-printer-config', async (event, printerType: string,
             ORDER BY id ASC
           `);
           const items = itemsStmt.all(transaction.id) as Array<{ item_data: string }>;
-          
+
           // Parse and include items in transaction data
           transactionData.items = items.map(item => JSON.parse(item.item_data));
-          
+
           return {
             ...transaction,
             transaction_data: JSON.stringify(transactionData)
@@ -4960,7 +5631,7 @@ ipcMain.handle('localdb-save-printer-config', async (event, printerType: string,
           return transaction;
         }
       });
-      
+
       return transactionsWithItems;
     } catch (error) {
       console.error('Error getting pending transactions:', error);
@@ -5083,14 +5754,14 @@ ipcMain.handle('localdb-save-printer-config', async (event, printerType: string,
         }
       };
 
-        const preferredPort = Number(process.env.PORT ?? '');
-        const fallbackPorts = [3000, 3001, 3002];
-        const ports = [
-          ...(Number.isFinite(preferredPort) ? [preferredPort] : []),
-          ...fallbackPorts
-        ].filter((port, index, arr) => arr.indexOf(port) === index);
+      const preferredPort = Number(process.env.PORT ?? '');
+      const fallbackPorts = [3000, 3001, 3002];
+      const ports = [
+        ...(Number.isFinite(preferredPort) ? [preferredPort] : []),
+        ...fallbackPorts
+      ].filter((port, index, arr) => arr.indexOf(port) === index);
       let loaded = false;
-      
+
       for (const port of ports) {
         if (await tryLoadURL(port)) {
           loaded = true;
@@ -5112,7 +5783,7 @@ ipcMain.handle('localdb-save-printer-config', async (event, printerType: string,
   // Show windows when ready
   mainWindow!.once('ready-to-show', () => {
     mainWindow!.show();
-    
+
     // Always focus on the window (fixes Windows 11 frameless window focus issues)
     mainWindow!.focus();
   });
@@ -5199,17 +5870,17 @@ app.whenReady().then(() => {
       const url = request.url.replace('slideshow-file://', '');
       const slideshowPath = getSlideshowPath();
       const filePath = path.join(slideshowPath, url);
-      
+
       // Security check: ensure file is within slideshow directory
       const normalizedPath = path.normalize(filePath);
       const normalizedSlideshowPath = path.normalize(slideshowPath);
-      
+
       if (!normalizedPath.startsWith(normalizedSlideshowPath)) {
         console.error('❌ Security: Attempted to access file outside slideshow directory');
         callback({ error: -10 }); // ACCESS_DENIED
         return;
       }
-      
+
       if (fs.existsSync(filePath)) {
         callback({ path: filePath });
       } else {
@@ -5221,8 +5892,16 @@ app.whenReady().then(() => {
       callback({ error: -2 }); // FAILED
     }
   });
-  
+
   createWindows();
+
+  // Start WebSocket server (default port 19967)
+  const wsResult = websocketServer.start(19967);
+  if (wsResult.success) {
+    console.log(`✅ WebSocket server started on port ${wsResult.port}`);
+  } else {
+    console.error(`❌ Failed to start WebSocket server: ${wsResult.error}`);
+  }
 
   app.on('activate', () => {
     // On macOS, re-create windows when the dock icon is clicked
@@ -5234,34 +5913,42 @@ app.whenReady().then(() => {
 
 // Quit when all windows are closed
 app.on('window-all-closed', () => {
+  // Stop WebSocket server before quitting
+  websocketServer.stop();
   // On macOS, keep the app running even when all windows are closed
   if (process.platform !== 'darwin') {
     app.quit();
   }
 });
 
+// Stop WebSocket server on app quit
+app.on('before-quit', () => {
+  websocketServer.stop();
+});
+
 // IPC handlers for POS-specific functionality
 ipcMain.handle('print-receipt', async (event, data: ReceiptPrintData) => {
   try {
     console.log('📄 Printing receipt - Full data received:', JSON.stringify(data, null, 2));
-    
+    console.log(`🔍 [PRINT-RECEIPT] Counter values: printer1Counter=${data.printer1Counter}, printer2Counter=${data.printer2Counter}, globalCounter=${data.globalCounter}, printerType=${data.printerType}`);
+
     let printerName = data.printerName;
     let marginAdjustMm: number | undefined =
       typeof data.marginAdjustMm === 'number' && !Number.isNaN(data.marginAdjustMm)
         ? data.marginAdjustMm
         : undefined;
     let printerConfig: PrinterConfigRow | null = null;
-    
+
     if (data.printerType && localDb) {
       console.log('🔍 Resolving printer configuration for type:', data.printerType);
       try {
         const allConfigs = localDb.prepare('SELECT * FROM printer_configs').all() as PrinterConfigRow[];
         console.log('📋 All printer configs in database:', allConfigs);
-        
+
         printerConfig = (localDb.prepare('SELECT * FROM printer_configs WHERE printer_type = ?')
           .get(data.printerType) as PrinterConfigRow | undefined) ?? null;
         console.log('📋 Printer config query result for type', data.printerType, ':', printerConfig);
-        
+
         if (!printerName && printerConfig && printerConfig.system_printer_name) {
           const configPrinterName = String(printerConfig.system_printer_name).trim();
           if (configPrinterName) {
@@ -5271,7 +5958,7 @@ ipcMain.handle('print-receipt', async (event, data: ReceiptPrintData) => {
             console.warn('⚠️ Printer config exists but system_printer_name is empty');
           }
         }
-        
+
         if (marginAdjustMm === undefined && printerConfig && printerConfig.extra_settings) {
           try {
             const extra =
@@ -5286,13 +5973,13 @@ ipcMain.handle('print-receipt', async (event, data: ReceiptPrintData) => {
             console.warn('⚠️ Failed to parse extra_settings for printer config:', parseError);
           }
         }
-        
+
         if (!printerName) {
           console.log('⚠️ No system printer configured for type:', data.printerType);
           console.log('💡 Available printer configs:', allConfigs.map(c => ({ type: c.printer_type, name: c.system_printer_name })));
           return { success: false, error: `No printer configured for ${data.printerType}. Please set up a printer in Settings → Printer Selector.` };
         }
-        
+
         // Validate printer name is not empty after trim
         if (printerName && typeof printerName === 'string' && !printerName.trim()) {
           console.error('❌ Printer name is empty after trim');
@@ -5308,26 +5995,26 @@ ipcMain.handle('print-receipt', async (event, data: ReceiptPrintData) => {
     } else if (printerName) {
       console.log('✅ Using provided printer name:', printerName);
     }
-    
+
     // Validate printerName is a valid string (not printerType identifier)
     if (!printerName || (typeof printerName === 'string' && !printerName.trim())) {
       console.error('❌ No valid printer name found. printerName:', printerName, 'printerType:', data.printerType);
       return { success: false, error: `No printer configured. Please set up a printer in Settings → Printer Selector for ${data.printerType || 'the selected printer type'}.` };
     }
-    
+
     // Ensure printerName is a string and trimmed
     printerName = String(printerName).trim();
-    
+
     if (!printerName) {
       console.error('❌ Printer name is empty after validation');
       return { success: false, error: 'No printer specified. Please set up a printer in Settings first.' };
     }
-    
+
     // Use HTML printing with character-based formatting
     if (printWindow) {
       printWindow.close();
     }
-    
+
     printWindow = new BrowserWindow({
       width: 400,
       height: 600,
@@ -5337,7 +6024,7 @@ ipcMain.handle('print-receipt', async (event, data: ReceiptPrintData) => {
         contextIsolation: true,
       }
     });
-    
+
     // Fetch business name from database if business_id is provided
     let businessName = 'MARVIANO MADIUN 1'; // Default fallback
     if (data.business_id && localDb) {
@@ -5353,16 +6040,16 @@ ipcMain.handle('print-receipt', async (event, data: ReceiptPrintData) => {
         console.error('❌ Error fetching business name:', error);
       }
     }
-    
+
     const clampedMarginAdjustMm =
       typeof marginAdjustMm === 'number' && !Number.isNaN(marginAdjustMm)
         ? Math.max(-5, Math.min(5, marginAdjustMm))
         : 0;
     const receiptFormattingOptions = { marginAdjustMm: clampedMarginAdjustMm };
-    
+
     // Generate receipt HTML with character-based width
     let htmlContent = '';
-    
+
     if (data.type === 'test') {
       // Check if this is for a label printer
       if (data.printerType === 'labelPrinter') {
@@ -5373,15 +6060,15 @@ ipcMain.handle('print-receipt', async (event, data: ReceiptPrintData) => {
     } else {
       htmlContent = generateReceiptHTML(data, businessName, receiptFormattingOptions);
     }
-    
+
     await printWindow.loadURL(`data:text/html,${encodeURIComponent(htmlContent)}`);
-    
+
     const printOptions = {
       silent: true,
       printBackground: false,
       deviceName: printerName,
     };
-    
+
     return new Promise((resolve) => {
       const currentWindow = printWindow;
       setTimeout(() => {
@@ -5431,23 +6118,23 @@ ipcMain.handle('print-receipt', async (event, data: ReceiptPrintData) => {
 ipcMain.handle('print-label', async (event, data: LabelPrintData) => {
   try {
     console.log('🏷️ Printing label - Full data received:', JSON.stringify(data, null, 2));
-    
+
     let printerName = data.printerName;
-    
+
     // If printer name is not specified, try to get it from saved config
     if (!printerName) {
       if (!data.printerType) {
         console.error('❌ No printer type provided!');
         return { success: false, error: 'No printer specified.' };
       }
-      
+
       if (!localDb) {
         console.error('❌ Local database not available!');
         return { success: false, error: 'Database not available.' };
       }
-      
+
       console.log('🔍 No printer name specified, fetching from saved config for printer type:', data.printerType);
-      
+
       // First, list all available configs for debugging
       try {
         const allConfigs = localDb.prepare('SELECT * FROM printer_configs').all() as PrinterConfigRow[];
@@ -5455,21 +6142,21 @@ ipcMain.handle('print-label', async (event, data: LabelPrintData) => {
       } catch (e) {
         console.error('Failed to list all configs:', e);
       }
-      
+
       try {
         const config = localDb.prepare('SELECT * FROM printer_configs WHERE printer_type = ?').get(data.printerType) as PrinterConfigRow | undefined;
         console.log('📋 Printer config query result for type', data.printerType, ':', JSON.stringify(config, null, 2));
-        
+
         if (!config) {
           console.log('⚠️ No saved printer config found for type:', data.printerType);
           return { success: false, error: 'Label printer not configured. Please set up a valid printer in Settings.' };
         }
-        
+
         if (!config.system_printer_name || config.system_printer_name.trim() === '') {
           console.log('⚠️ Printer config found but system_printer_name is empty:', config);
           return { success: false, error: 'Label printer not configured. Please set up a valid printer in Settings.' };
         }
-        
+
         printerName = config.system_printer_name;
         console.log('✅ Found saved printer:', printerName);
       } catch (error) {
@@ -5477,17 +6164,17 @@ ipcMain.handle('print-label', async (event, data: LabelPrintData) => {
         return { success: false, error: 'Error loading printer configuration.' };
       }
     }
-    
+
     if (!printerName) {
       console.error('❌ No printer name provided!');
       return { success: false, error: 'No printer specified.' };
     }
-    
+
     // Close existing print window if any
     if (printWindow) {
       printWindow.close();
     }
-    
+
     // Create new print window
     printWindow = new BrowserWindow({
       width: 400,
@@ -5498,18 +6185,18 @@ ipcMain.handle('print-label', async (event, data: LabelPrintData) => {
         contextIsolation: true,
       }
     });
-    
+
     // Generate label HTML
     const htmlContent = generateLabelHTML(data);
-    
+
     await printWindow.loadURL(`data:text/html,${encodeURIComponent(htmlContent)}`);
-    
+
     const printOptions = {
       silent: true,
       printBackground: false,
       deviceName: printerName,
     };
-    
+
     return new Promise((resolve) => {
       const currentWindow = printWindow;
       setTimeout(() => {
@@ -5561,42 +6248,42 @@ ipcMain.handle('print-label', async (event, data: LabelPrintData) => {
 ipcMain.handle('print-labels-batch', async (event, data: { labels: LabelPrintData[]; printerName?: string; printerType?: string }) => {
   try {
     console.log('🏷️ Printing labels batch - Count:', data.labels?.length || 0);
-    
+
     if (!data.labels || !Array.isArray(data.labels) || data.labels.length === 0) {
       console.error('❌ No labels provided for batch printing');
       return { success: false, error: 'No labels provided for batch printing.' };
     }
-    
+
     let printerName = data.printerName;
-    
+
     // If printer name is not specified, try to get it from saved config
     if (!printerName) {
       if (!data.printerType) {
         console.error('❌ No printer type provided!');
         return { success: false, error: 'No printer specified.' };
       }
-      
+
       if (!localDb) {
         console.error('❌ Local database not available!');
         return { success: false, error: 'Database not available.' };
       }
-      
+
       console.log('🔍 No printer name specified, fetching from saved config for printer type:', data.printerType);
-      
+
       try {
         const config = localDb.prepare('SELECT * FROM printer_configs WHERE printer_type = ?').get(data.printerType) as PrinterConfigRow | undefined;
         console.log('📋 Printer config query result for type', data.printerType, ':', JSON.stringify(config, null, 2));
-        
+
         if (!config) {
           console.log('⚠️ No saved printer config found for type:', data.printerType);
           return { success: false, error: 'Label printer not configured. Please set up a valid printer in Settings.' };
         }
-        
+
         if (!config.system_printer_name || config.system_printer_name.trim() === '') {
           console.log('⚠️ Printer config found but system_printer_name is empty:', config);
           return { success: false, error: 'Label printer not configured. Please set up a valid printer in Settings.' };
         }
-        
+
         printerName = config.system_printer_name;
         console.log('✅ Found saved printer:', printerName);
       } catch (error) {
@@ -5604,17 +6291,17 @@ ipcMain.handle('print-labels-batch', async (event, data: { labels: LabelPrintDat
         return { success: false, error: 'Error loading printer configuration.' };
       }
     }
-    
+
     if (!printerName) {
       console.error('❌ No printer name provided!');
       return { success: false, error: 'No printer specified.' };
     }
-    
+
     // Close existing print window if any
     if (printWindow) {
       printWindow.close();
     }
-    
+
     // Create new print window
     printWindow = new BrowserWindow({
       width: 400,
@@ -5625,18 +6312,18 @@ ipcMain.handle('print-labels-batch', async (event, data: { labels: LabelPrintDat
         contextIsolation: true,
       }
     });
-    
+
     // Generate batch label HTML
     const htmlContent = generateMultipleLabelsHTML(data.labels);
-    
+
     await printWindow.loadURL(`data:text/html,${encodeURIComponent(htmlContent)}`);
-    
+
     const printOptions = {
       silent: true,
       printBackground: false,
       deviceName: printerName,
     };
-    
+
     return new Promise((resolve) => {
       const currentWindow = printWindow;
       setTimeout(() => {
@@ -5694,9 +6381,9 @@ function getLogoBase64(): string {
       path.join(__dirname, '../../public/logo/Momoyo.png'),
       path.join(__dirname, '../../public/images/Momoyo.png'),
     ];
-    
+
     console.log('🔍 Looking for logo in paths:', possiblePaths);
-    
+
     for (const logoPath of possiblePaths) {
       if (fs.existsSync(logoPath)) {
         console.log('✅ Found logo at:', logoPath);
@@ -5705,7 +6392,7 @@ function getLogoBase64(): string {
         return `data:image/png;base64,${base64Image}`;
       }
     }
-    
+
     console.warn('⚠️ Logo not found in any of the checked paths');
     return '';
   } catch (error) {
@@ -5725,7 +6412,7 @@ function generateTestReceiptHTML(printerName: string, businessName: string, opti
   const baseRightPadding = 7;
   const leftPadding = Math.max(0, baseLeftPadding - marginAdjust);
   const rightPadding = Math.max(0, baseRightPadding + marginAdjust);
-  
+
   // Format date as YYYY-MM-DD HH:MM:SS
   const formatDateTime = (date: Date): string => {
     const year = date.getFullYear();
@@ -5736,12 +6423,12 @@ function generateTestReceiptHTML(printerName: string, businessName: string, opti
     const seconds = String(date.getSeconds()).padStart(2, '0');
     return `${year}-${month}-${day} ${hours}:${minutes}:${seconds}`;
   };
-  
+
   // Use the full receipt format for test print with sample data
   const orderTime = formatDateTime(new Date());
   const printTime = formatDateTime(new Date());
   const logoDataUri = getLogoBase64();
-  
+
   return `
 <!DOCTYPE html>
 <html>
@@ -5953,7 +6640,7 @@ function generateLabelHTML(data: LabelPrintData): string {
     const seconds = String(date.getSeconds()).padStart(2, '0');
     return `${year}-${month}-${day} ${hours}:${minutes}:${seconds}`;
   };
-  
+
   const counter = data.counter || 0;
   const itemNumber = data.itemNumber || 0;
   const totalItems = data.totalItems || 0;
@@ -5962,9 +6649,9 @@ function generateLabelHTML(data: LabelPrintData): string {
   const customizations = data.customizations || '';
   const labelContinuation = data.labelContinuation || '';
   const orderTime = data.orderTime ? formatDateTime(new Date(data.orderTime)) : formatDateTime(new Date());
-  
+
   const pickupLabel = pickupMethod === 'dine-in' ? 'DINE IN' : 'TAKE AWAY';
-  
+
   return `
 <!DOCTYPE html>
 <html>
@@ -6091,9 +6778,9 @@ function generateMultipleLabelsHTML(labels: LabelPrintData[]): string {
     const customizations = data.customizations || '';
     const labelContinuation = data.labelContinuation || '';
     const orderTime = data.orderTime ? formatDateTime(new Date(data.orderTime)) : formatDateTime(new Date());
-    
+
     const pickupLabel = pickupMethod === 'dine-in' ? 'DINE IN' : 'TAKE AWAY';
-    
+
     return `
     <div class="label-page">
       <div class="content">
@@ -6218,16 +6905,16 @@ function generateReceiptHTML(data: ReceiptPrintData, businessName: string, optio
   const baseRightPadding = 7;
   const leftPadding = Math.max(0, baseLeftPadding - marginAdjust);
   const rightPadding = Math.max(0, baseRightPadding + marginAdjust);
-  
+
   const items = data.items || [];
   const total = data.total || data.final_amount || 0;
   const paymentMethod = data.paymentMethod || 'Cash';
   const amountReceived = data.amountReceived || 0;
   const change = data.change || 0;
-  
+
   // Calculate total items for summary
   const totalItems = items.reduce((sum: number, item: ReceiptLineItem) => sum + (item.quantity || 1), 0);
-  
+
   // Generate items HTML
   const itemsHTML = items.map((item: ReceiptLineItem) => {
     // Handle both new format (name, quantity, price, total_price) and old format (product.nama, etc.)
@@ -6235,7 +6922,7 @@ function generateReceiptHTML(data: ReceiptPrintData, businessName: string, optio
     const qty = item.quantity || 1;
     const price = item.price || item.unit_price || 0;
     const subtotal = item.total_price || (price * qty);
-    
+
     return `
       <tr>
         <td colspan="4" style="text-align: left; padding-bottom: 0.5mm;">${name}</td>
@@ -6248,7 +6935,7 @@ function generateReceiptHTML(data: ReceiptPrintData, businessName: string, optio
       </tr>
     `;
   }).join('');
-  
+
   // Format date as YYYY-MM-DD HH:MM:SS
   const formatDateTime = (date: Date): string => {
     const year = date.getFullYear();
@@ -6259,17 +6946,17 @@ function generateReceiptHTML(data: ReceiptPrintData, businessName: string, optio
     const seconds = String(date.getSeconds()).padStart(2, '0');
     return `${year}-${month}-${day} ${hours}:${minutes}:${seconds}`;
   };
-  
+
   const currentDate = new Date(data.date || Date.now());
   const orderTime = formatDateTime(currentDate);
   const printTime = formatDateTime(new Date());
-  
+
   // Determine transaction type display (DINE IN / TAKE AWAY)
   const pickupMethod = data.pickupMethod || 'dine-in';
   const isDineIn = pickupMethod === 'dine-in';
   const transactionDisplay = isDineIn ? 'DINE IN' : 'TAKE AWAY';
   const logoDataUri = getLogoBase64();
-  
+
   return `
 <!DOCTYPE html>
 <html>
@@ -6319,17 +7006,41 @@ function generateReceiptHTML(data: ReceiptPrintData, businessName: string, optio
   <div class="address">Jl. Kalimantan no. 21, Kartoharjo<br>Kec. Kartoharjo, Kota Madiun</div>
   
   ${(() => {
-        // Choose per-printer display number: Each printer type uses its own daily counter
-    // Printer 1 (receiptPrinter) uses printer1Counter from receiptPrinter counter
-    // Printer 2 (receiptizePrinter) uses printer2Counter from receiptizePrinter counter
-    // Fall back to globalCounter, then tableNumber, then '01'
-    const isReceiptize = data.printerType === 'receiptizePrinter';
-    // Prioritize per-printer counter over globalCounter to ensure each printer has its own counter
-    const perPrinterCounter = isReceiptize ? data.printer2Counter : data.printer1Counter;
-    const displayCounter = perPrinterCounter ?? data.globalCounter ?? data.tableNumber ?? '01';
-    const numStr = String(displayCounter).padStart(2, '0');
-    return `<div class="transaction-type">${transactionDisplay} ${numStr}</div>`;
-  })()}
+      // Choose per-printer display number: Each printer type uses its own daily counter
+      // Printer 1 (receiptPrinter) uses printer1Counter from receiptPrinter counter
+      // Printer 2 (receiptizePrinter) uses printer2Counter from receiptizePrinter counter
+      // Fall back to globalCounter, then tableNumber, then '01'
+      const isReceiptize = data.printerType === 'receiptizePrinter';
+      // Prioritize per-printer counter over globalCounter to ensure each printer has its own counter
+      const perPrinterCounter = isReceiptize ? data.printer2Counter : data.printer1Counter;
+      
+      // Debug: Log all available counter values
+      console.log(`📄 [RECEIPT] Counter selection - printerType: ${data.printerType}, isReceiptize: ${isReceiptize}`);
+      console.log(`📄 [RECEIPT] Available counters - printer1Counter: ${data.printer1Counter} (type: ${typeof data.printer1Counter}), printer2Counter: ${data.printer2Counter} (type: ${typeof data.printer2Counter}), globalCounter: ${data.globalCounter}, tableNumber: ${data.tableNumber}`);
+      console.log(`📄 [RECEIPT] Selected perPrinterCounter: ${perPrinterCounter} (type: ${typeof perPrinterCounter})`);
+      
+      // Use per-printer counter if it's a valid number > 0, otherwise fall back
+      let displayCounter: string | number;
+      if (typeof perPrinterCounter === 'number' && perPrinterCounter > 0) {
+        displayCounter = perPrinterCounter;
+        console.log(`✅ [RECEIPT] Using per-printer counter: ${displayCounter}`);
+      } else if (typeof data.globalCounter === 'number' && data.globalCounter > 0) {
+        displayCounter = data.globalCounter;
+        console.log(`⚠️ [RECEIPT] Per-printer counter invalid, using globalCounter: ${displayCounter}`);
+      } else if (data.tableNumber) {
+        displayCounter = data.tableNumber;
+        console.log(`⚠️ [RECEIPT] Using tableNumber as fallback: ${displayCounter}`);
+      } else {
+        displayCounter = '01';
+        console.log(`❌ [RECEIPT] All counters invalid, using default '01'`);
+      }
+      
+      const numStr = String(displayCounter).padStart(2, '0');
+      
+      console.log(`📄 [RECEIPT] Final counter display - displayCounter: ${displayCounter}, numStr: ${numStr}, will show: ${transactionDisplay} ${numStr}`);
+      
+      return `<div class="transaction-type">${transactionDisplay} ${numStr}</div>`;
+    })()}
   
   <div class="dashed-line"></div>
   
@@ -6491,14 +7202,14 @@ function generateShiftBreakdownHTML(
         const platformLabel = formatPlatformLabel(product.platform);
         const transactionLabel = formatTransactionLabel(product.transaction_type);
         const isBundleItem = Boolean(product.is_bundle_item);
-        
+
         // Validate numeric values
         if (isNaN(quantity) || isNaN(baseSubtotal) || isNaN(unitPrice)) {
           console.error(`❌ [HTML GEN] Invalid numbers in product: ${product.product_name}`, {
             quantity, baseSubtotal, unitPrice
           });
         }
-        
+
         if (isBundleItem) {
           console.log(`[SHIFT PRINT] Displaying bundle item: ${product.product_name}, is_bundle_item: ${product.is_bundle_item}`);
         }
@@ -6530,13 +7241,13 @@ function generateShiftBreakdownHTML(
       try {
         const quantity = item.total_quantity || 0;
         const revenue = item.total_revenue || 0;
-        
+
         if (isNaN(quantity) || isNaN(revenue)) {
           console.error(`❌ [HTML GEN] Invalid numbers in customization: ${item.option_name}`, {
             quantity, revenue
           });
         }
-        
+
         return `
       <tr>
         <td style="text-align: left; padding: 0.3mm 0;">
@@ -7020,12 +7731,12 @@ ipcMain.handle('print-shift-breakdown', async (event, data: PrintableShiftReport
     console.log('   - Payments:', data.paymentBreakdown?.length || 0);
     console.log('   - Orders:', data.statistics?.order_count || 0);
     console.log('   - Printer Type:', data.printerType);
-    
+
     let printerName: string | null = null;
     const printerType = data.printerType || 'receiptPrinter';
-    
+
     console.log('🔍 [SHIFT PRINT] Looking up printer config for type:', printerType);
-    
+
     // Get printer name from config
     if (localDb) {
       try {
@@ -7035,29 +7746,29 @@ ipcMain.handle('print-shift-breakdown', async (event, data: PrintableShiftReport
         allConfigs.forEach((cfg: PrinterConfigRow) => {
           console.log(`   - Type: ${cfg.printer_type}, Name: "${cfg.system_printer_name}"`);
         });
-        
+
         const config = localDb.prepare('SELECT * FROM printer_configs WHERE printer_type = ?').get(printerType) as PrinterConfigRow | undefined;
         console.log('📋 [SHIFT PRINT] Printer config query result:', config ? JSON.stringify(config) : 'null');
-        
+
         if (config && config.system_printer_name) {
           printerName = config.system_printer_name.trim();
           console.log('✅ [SHIFT PRINT] Found printer config:', printerName);
-          
+
           // Validate printer name is not empty after trim
           if (!printerName || printerName.length === 0) {
             console.error('❌ [SHIFT PRINT] Printer name is empty after trim');
-            return { 
-              success: false, 
-              error: 'Printer name is empty. Please reconfigure your printer in Settings → Printer Selector.' 
+            return {
+              success: false,
+              error: 'Printer name is empty. Please reconfigure your printer in Settings → Printer Selector.'
             };
           }
         } else {
           console.error('❌ [SHIFT PRINT] No printer config found or system_printer_name is null');
           console.log('   - Config exists:', !!config);
           console.log('   - system_printer_name:', config?.system_printer_name);
-          return { 
-            success: false, 
-            error: `Receipt Printer not configured. Please configure it in Settings → Printer Selector.` 
+          return {
+            success: false,
+            error: `Receipt Printer not configured. Please configure it in Settings → Printer Selector.`
           };
         }
       } catch (error) {
@@ -7068,39 +7779,39 @@ ipcMain.handle('print-shift-breakdown', async (event, data: PrintableShiftReport
       console.error('❌ [SHIFT PRINT] Local database not available');
       return { success: false, error: 'Database not available' };
     }
-    
+
     // Double-check printer name is valid before proceeding
     if (!printerName || typeof printerName !== 'string' || printerName.trim().length === 0) {
       console.error('❌ [SHIFT PRINT] Invalid printer name:', printerName);
-      return { 
-        success: false, 
-        error: 'Invalid printer name. Please reconfigure your printer in Settings → Printer Selector.' 
+      return {
+        success: false,
+        error: 'Invalid printer name. Please reconfigure your printer in Settings → Printer Selector.'
       };
     }
-    
+
     console.log('🖨️ [SHIFT PRINT] Final deviceName to be used:', printerName);
-    
+
     // Verify printer exists in system
     try {
       const printers = await mainWindow?.webContents.getPrintersAsync() || [];
       console.log('🖨️ [SHIFT PRINT] Available system printers:', printers.map(p => p.name));
-      
+
       const printerExists = printers.some(p => p.name === printerName);
       if (!printerExists) {
         console.error('❌ [SHIFT PRINT] Printer not found in system!');
         console.error(`   - Looking for: "${printerName}"`);
         console.error(`   - Available: ${printers.map(p => `"${p.name}"`).join(', ')}`);
-        
-        const suggestion = printers.length > 0 
+
+        const suggestion = printers.length > 0
           ? `\n\nAvailable printers:\n${printers.map(p => `  - ${p.name}`).join('\n')}\n\nPlease select one of these in Settings → Printer Selector.`
           : '\n\nNo printers detected in Windows. Please check Windows printer settings.';
-        
+
         return {
           success: false,
           error: `Printer "${printerName}" not found.${suggestion}`
         };
       }
-      
+
       console.log('✅ [SHIFT PRINT] Printer verified in system');
     } catch (printerCheckError) {
       console.warn('⚠️ [SHIFT PRINT] Could not verify printer list:', printerCheckError);
@@ -7128,19 +7839,19 @@ ipcMain.handle('print-shift-breakdown', async (event, data: PrintableShiftReport
       console.log('   - customizationSales count:', data.customizationSales?.length || 0);
       console.log('   - paymentBreakdown count:', data.paymentBreakdown?.length || 0);
       console.log('   - cashSummary:', JSON.stringify(data.cashSummary));
-      
+
       // Check for problematic data
       if (data.productSales) {
-        const invalidProducts = data.productSales.filter((p: any) => 
-          !p.product_name || 
-          typeof p.total_quantity !== 'number' || 
+        const invalidProducts = data.productSales.filter((p: any) =>
+          !p.product_name ||
+          typeof p.total_quantity !== 'number' ||
           isNaN(p.total_quantity)
         );
         if (invalidProducts.length > 0) {
           console.error('❌ [SHIFT PRINT] Found invalid products:', invalidProducts);
         }
       }
-      
+
       if (data.customizationSales) {
         const invalidCustomizations = data.customizationSales.filter((c: any) =>
           !c.option_name ||
@@ -7151,7 +7862,7 @@ ipcMain.handle('print-shift-breakdown', async (event, data: PrintableShiftReport
           console.error('❌ [SHIFT PRINT] Found invalid customizations:', invalidCustomizations);
         }
       }
-      
+
       // Check cash summary for NaN values
       if (data.cashSummary) {
         const cashKeys = Object.keys(data.cashSummary);
@@ -7162,12 +7873,12 @@ ipcMain.handle('print-shift-breakdown', async (event, data: PrintableShiftReport
           }
         }
       }
-      
+
       console.log('✅ [SHIFT PRINT] Data validation passed');
     } catch (validationError) {
       console.error('❌ [SHIFT PRINT] Data validation error:', validationError);
     }
-    
+
     // Generate HTML with error handling
     let htmlContent: string;
     try {
@@ -7186,15 +7897,15 @@ ipcMain.handle('print-shift-breakdown', async (event, data: PrintableShiftReport
     } catch (htmlError) {
       console.error('❌ [SHIFT PRINT] HTML generation failed:', htmlError);
       console.error('   Error stack:', (htmlError as Error).stack);
-      return { 
-        success: false, 
-        error: `HTML generation failed: ${String(htmlError)}` 
+      return {
+        success: false,
+        error: `HTML generation failed: ${String(htmlError)}`
       };
     }
-    
+
     const htmlSizeKB = (htmlContent.length / 1024).toFixed(2);
     console.log(`📄 [SHIFT PRINT] Generated HTML size: ${htmlSizeKB} KB (${htmlContent.length} chars)`);
-    
+
     if (htmlContent.length > 500000) {  // > 500KB
       console.warn(`⚠️ [SHIFT PRINT] Large print job detected! This may cause printing issues.`);
     }
@@ -7240,7 +7951,7 @@ ipcMain.handle('print-shift-breakdown', async (event, data: PrintableShiftReport
       printBackground: false,
       deviceName: printerName,
     };
-    
+
     console.log('🖨️ [SHIFT PRINT] Print options:', JSON.stringify(printOptions, null, 2));
     console.log('   - deviceName type:', typeof printerName);
     console.log('   - deviceName length:', printerName?.length || 0);
@@ -7264,19 +7975,19 @@ ipcMain.handle('print-shift-breakdown', async (event, data: PrintableShiftReport
             } else {
               console.error('❌ [SHIFT PRINT] Print failed:', errorType);
               console.error('   - deviceName used:', printerName);
-              
+
               let userFriendlyError = errorType || 'Print failed';
-              
+
               // Provide helpful error messages
               if (errorType && errorType.toLowerCase().includes('devicename')) {
                 userFriendlyError = `Invalid printer: "${printerName}". Please:\n1. Go to Settings → Printer Selector\n2. Click "Scan Printers"\n3. Select your printer again\n4. Click "Save"\n5. Try printing again`;
               } else if (errorType && errorType.toLowerCase().includes('offline')) {
                 userFriendlyError = `Printer "${printerName}" is offline. Please check:\n1. Printer is powered on\n2. Printer is connected\n3. Printer shows "Ready" in Windows settings`;
               }
-              
+
               resolve({ success: false, error: userFriendlyError });
             }
-            
+
             // Close window after print completes (success or failure)
             setTimeout(() => {
               if (currentWindow && !currentWindow.isDestroyed()) {
@@ -7325,6 +8036,51 @@ ipcMain.handle('open-cash-drawer', async () => {
   console.log('Opening cash drawer');
   // Implement actual cash drawer logic here
   return { success: true };
+});
+
+// Open production display (kitchen/barista) in fullscreen window
+ipcMain.handle('open-production-display', async (event, displayType: 'kitchen' | 'barista') => {
+  try {
+    console.log(`🖥️ Opening ${displayType} display in fullscreen...`);
+    
+    const { screen } = require('electron');
+    const primaryDisplay = screen.getPrimaryDisplay();
+    const { width, height } = primaryDisplay.workAreaSize;
+    
+    const displayWindow = new BrowserWindow({
+      width: width,
+      height: height,
+      x: 0,
+      y: 0,
+      fullscreen: true,
+      title: `Marviano POS - ${displayType === 'kitchen' ? 'Dapur' : 'Barista'} Display`,
+      webPreferences: {
+        nodeIntegration: false,
+        contextIsolation: true,
+        preload: path.join(__dirname, 'preload.js')
+      }
+    });
+
+    // Load the display page
+    const displayUrl = isDev
+      ? `http://localhost:3000/${displayType}`
+      : `file://${path.join(__dirname, '../out', displayType, 'index.html')}`;
+    
+    console.log(`📺 Loading ${displayType} display from: ${displayUrl}`);
+    displayWindow.loadURL(displayUrl);
+
+    // Allow exiting fullscreen with Escape
+    displayWindow.webContents.on('before-input-event', (event, input) => {
+      if (input.key === 'Escape') {
+        displayWindow.close();
+      }
+    });
+
+    return { success: true, displayType };
+  } catch (error) {
+    console.error(`❌ Failed to open ${displayType} display:`, error);
+    return { success: false, error: String(error) };
+  }
 });
 
 ipcMain.handle('play-sound', async (event, soundType) => {
@@ -7388,7 +8144,7 @@ ipcMain.handle('update-customer-slideshow', async (event, data) => {
 });
 
 ipcMain.handle('get-customer-display-status', async () => {
-  return { 
+  return {
     hasCustomerDisplay: customerWindow !== null,
     isCustomerDisplayVisible: customerWindow ? !customerWindow.isDestroyed() : false
   };
@@ -7447,7 +8203,7 @@ ipcMain.handle('create-customer-display', async () => {
 
     const ports = [3000, 3001, 3002];
     let loaded = false;
-    
+
     for (const port of ports) {
       if (await tryLoadCustomerURL(port)) {
         loaded = true;
@@ -7473,13 +8229,13 @@ ipcMain.handle('create-customer-display', async () => {
 function getSlideshowPath(): string {
   const userDataPath = app.getPath('userData');
   const slideshowPath = path.join(userDataPath, 'slideshow');
-  
+
   // Create directory if it doesn't exist
   if (!fs.existsSync(slideshowPath)) {
     fs.mkdirSync(slideshowPath, { recursive: true });
     console.log('📁 Created slideshow directory:', slideshowPath);
   }
-  
+
   return slideshowPath;
 }
 
@@ -7488,22 +8244,22 @@ ipcMain.handle('get-slideshow-images', async () => {
   try {
     const slideshowPath = getSlideshowPath();
     const files = fs.readdirSync(slideshowPath);
-    
+
     // Filter for image files only
     const imageExtensions = ['.jpg', '.jpeg', '.png', '.webp', '.gif'];
     const imageFiles = files.filter(file => {
       const ext = path.extname(file).toLowerCase();
       return imageExtensions.includes(ext);
     });
-    
+
     // Sort files alphabetically
     imageFiles.sort();
-    
+
     // Create image objects with metadata
     const images = imageFiles.map((file, index) => {
       const filePath = path.join(slideshowPath, file);
       const stats = fs.statSync(filePath);
-      
+
       return {
         id: `slide-${index + 1}`,
         filename: file,
@@ -7516,16 +8272,16 @@ ipcMain.handle('get-slideshow-images', async () => {
         createdAt: stats.birthtime.toISOString()
       };
     });
-    
+
     console.log(`📸 Found ${images.length} slideshow images in userData`);
-    
+
     return {
       success: true,
       images,
       count: images.length,
       path: slideshowPath
     };
-    
+
   } catch (error) {
     console.error('❌ Error reading slideshow images:', error);
     return {
@@ -7542,7 +8298,7 @@ ipcMain.handle('save-slideshow-image', async (event, imageData: { filename: stri
   try {
     const slideshowPath = getSlideshowPath();
     const filePath = path.join(slideshowPath, imageData.filename);
-    
+
     // Check if file already exists
     if (fs.existsSync(filePath)) {
       return {
@@ -7550,17 +8306,17 @@ ipcMain.handle('save-slideshow-image', async (event, imageData: { filename: stri
         error: 'File already exists. Please rename or delete the existing file first.'
       };
     }
-    
+
     // Write the file
     fs.writeFileSync(filePath, imageData.buffer);
     console.log('✅ Saved slideshow image:', imageData.filename);
-    
+
     return {
       success: true,
       message: 'Image saved successfully',
       filename: imageData.filename
     };
-    
+
   } catch (error) {
     console.error('❌ Error saving slideshow image:', error);
     return {
@@ -7575,22 +8331,22 @@ ipcMain.handle('delete-slideshow-image', async (event, filename: string) => {
   try {
     const slideshowPath = getSlideshowPath();
     const filePath = path.join(slideshowPath, filename);
-    
+
     if (!fs.existsSync(filePath)) {
       return {
         success: false,
         error: 'File not found'
       };
     }
-    
+
     fs.unlinkSync(filePath);
     console.log('🗑️ Deleted slideshow image:', filename);
-    
+
     return {
       success: true,
       message: 'Image deleted successfully'
     };
-    
+
   } catch (error) {
     console.error('❌ Error deleting slideshow image:', error);
     return {
@@ -7600,19 +8356,219 @@ ipcMain.handle('delete-slideshow-image', async (event, filename: string) => {
   }
 });
 
+// Get Shift by UUID
+ipcMain.handle('localDbGetShiftByUuid', async (event, shiftUuid: string) => {
+  if (!localDb) return null;
+  try {
+    const shift = localDb.prepare('SELECT * FROM shifts WHERE uuid_id = ?').get(shiftUuid);
+    return shift || null;
+  } catch (error) {
+    console.error('❌ Error fetching shift by UUID:', error);
+    return null;
+  }
+});
+
+// Get Printer Audits by Transaction ID
+ipcMain.handle('localDbGetPrinterAuditsByTransactionId', async (event, transactionId: string) => {
+  if (!localDb) {
+    return { printer1: [], printer2: [] };
+  }
+  try {
+    const printer1 = localDb.prepare('SELECT * FROM printer1_audit_log WHERE transaction_id = ?').all(transactionId);
+    const printer2 = localDb.prepare('SELECT * FROM printer2_audit_log WHERE transaction_id = ?').all(transactionId);
+    return { printer1, printer2 };
+  } catch (error) {
+    console.error('❌ Error fetching printer audits:', error);
+    return { printer1: [], printer2: [] };
+  }
+});
+
+
+// ============================================================================
+// ADMIN: DELETE TRANSACTIONS BY USER EMAIL OR NULL
+// ============================================================================
+
+/**
+ * Delete all transactions made by marviano.austin@gmail.com or where user_id is NULL
+ * Manually deletes from all related tables due to SQLite foreign key constraints
+ */
+ipcMain.handle('localdb-delete-transactions-by-role', async () => {
+  if (!localDb) {
+    return {
+      success: false,
+      error: 'Local database not available'
+    };
+  }
+
+  const details = {
+    database: 'Offline SQLite',
+    targetUserIds: [] as number[],
+    printer1_audit_log: 0,
+    printer2_audit_log: 0,
+    transaction_items: 0,
+    transactions: 0,
+    success: false,
+    error: null as string | null
+  };
+
+  try {
+    console.log('[CLEANUP] [Offline SQLite] Starting transaction cleanup for marviano.austin@gmail.com and NULL user_id');
+
+    // Find user ID for marviano.austin@gmail.com
+    const targetUsers = localDb.prepare(
+      'SELECT id FROM users WHERE email = ?'
+    ).all('marviano.austin@gmail.com') as Array<{ id: number }>;
+
+    const targetUserIds = targetUsers.map(u => u.id);
+    details.targetUserIds = targetUserIds;
+    console.log(`[CLEANUP] [Offline SQLite] Target user IDs: ${targetUserIds.join(', ')}`);
+
+    // Build WHERE clause for transactions
+    let whereClause = 'WHERE user_id IS NULL';
+    const params: any[] = [];
+
+    if (targetUserIds.length > 0) {
+      whereClause += ` OR user_id IN (${targetUserIds.map(() => '?').join(',')})`;
+      params.push(...targetUserIds);
+    }
+
+    // Get transaction IDs to delete
+    const transactionsToDelete = localDb.prepare(
+      `SELECT id FROM transactions ${whereClause}`
+    ).all(...params) as Array<{ id: string }>;
+
+    const transactionIds = transactionsToDelete.map(t => t.id);
+    console.log(`[CLEANUP] [Offline SQLite] Found ${transactionIds.length} transactions to delete`);
+
+    if (transactionIds.length === 0) {
+      details.success = true;
+      console.log(`✅ [CLEANUP] [Offline SQLite] No transactions to delete`);
+      return {
+        success: true,
+        message: 'No transactions found to delete',
+        deleted: 0,
+        deletedItems: 0,
+        details
+      };
+    }
+
+    // Begin transaction for atomic deletion
+    localDb.prepare('BEGIN TRANSACTION').run();
+
+    try {
+      // Manual deletion in correct order (child to parent)
+      const placeholders = transactionIds.map(() => '?').join(',');
+
+      // 1. Delete transaction_item_customization_options
+      // First get customization IDs
+      const customizationIds = localDb.prepare(`
+        SELECT DISTINCT tic.id 
+        FROM transaction_item_customizations tic
+        JOIN transaction_items ti ON tic.transaction_item_id = ti.id
+        WHERE ti.transaction_id IN (${placeholders})
+      `).all(...transactionIds) as Array<{ id: number }>;
+
+      if (customizationIds.length > 0) {
+        const customizationPlaceholders = customizationIds.map(() => '?').join(',');
+        const customizationIdValues = customizationIds.map(c => c.id);
+
+        const optionsResult = localDb.prepare(`
+          DELETE FROM transaction_item_customization_options 
+          WHERE transaction_item_customization_id IN (${customizationPlaceholders})
+        `).run(...customizationIdValues);
+        console.log(`[CLEANUP] [Offline SQLite] Deleted ${optionsResult.changes} customization options`);
+      }
+
+      // 2. Delete transaction_item_customizations
+      const customizationsResult = localDb.prepare(`
+        DELETE FROM transaction_item_customizations 
+        WHERE transaction_item_id IN (
+          SELECT id FROM transaction_items WHERE transaction_id IN (${placeholders})
+        )
+      `).run(...transactionIds);
+      console.log(`[CLEANUP] [Offline SQLite] Deleted ${customizationsResult.changes} customizations`);
+
+      // 3. Delete transaction_items
+      const itemsResult = localDb.prepare(`
+        DELETE FROM transaction_items WHERE transaction_id IN (${placeholders})
+      `).run(...transactionIds);
+      details.transaction_items = itemsResult.changes;
+      console.log(`[CLEANUP] [Offline SQLite] Deleted ${details.transaction_items} rows from transaction_items`);
+
+      // 4. Delete transaction_refunds
+      const refundsResult = localDb.prepare(`
+        DELETE FROM transaction_refunds WHERE transaction_uuid IN (${placeholders})
+      `).run(...transactionIds);
+      console.log(`[CLEANUP] [Offline SQLite] Deleted ${refundsResult.changes} refunds`);
+
+      // 5. Delete printer1_audit_log
+      const printer1Result = localDb.prepare(`
+        DELETE FROM printer1_audit_log WHERE transaction_id IN (${placeholders})
+      `).run(...transactionIds);
+      details.printer1_audit_log = printer1Result.changes;
+      console.log(`[CLEANUP] [Offline SQLite] Deleted ${details.printer1_audit_log} rows from printer1_audit_log`);
+
+      // 6. Delete printer2_audit_log
+      const printer2Result = localDb.prepare(`
+        DELETE FROM printer2_audit_log WHERE transaction_id IN (${placeholders})
+      `).run(...transactionIds);
+      details.printer2_audit_log = printer2Result.changes;
+      console.log(`[CLEANUP] [Offline SQLite] Deleted ${details.printer2_audit_log} rows from printer2_audit_log`);
+
+      // 7. Finally delete transactions
+      const transactionsResult = localDb.prepare(`
+        DELETE FROM transactions ${whereClause}
+      `).run(...params);
+      details.transactions = transactionsResult.changes;
+      console.log(`[CLEANUP] [Offline SQLite] Deleted ${details.transactions} rows from transactions`);
+
+      // Commit transaction
+      localDb.prepare('COMMIT').run();
+
+      details.success = true;
+      console.log(`✅ [CLEANUP] [Offline SQLite] Completed successfully`);
+
+      return {
+        success: true,
+        message: 'Transactions deleted successfully',
+        deleted: transactionsResult.changes,
+        deletedItems: itemsResult.changes,
+        details
+      };
+
+    } catch (error) {
+      // Rollback on error
+      localDb.prepare('ROLLBACK').run();
+      throw error;
+    }
+
+  } catch (error: any) {
+    details.error = error.message || 'Failed to cleanup transactions';
+    console.error(`❌ [CLEANUP] [Offline SQLite] Failed:`, error);
+    return {
+      success: false,
+      deleted: 0,
+      deletedItems: 0,
+      error: details.error,
+      details
+    };
+  }
+});
+
+
 // Open slideshow folder in file explorer
 ipcMain.handle('open-slideshow-folder', async () => {
   try {
     const slideshowPath = getSlideshowPath();
     const { shell } = require('electron');
     await shell.openPath(slideshowPath);
-    
+
     return {
       success: true,
       message: 'Opened slideshow folder',
       path: slideshowPath
     };
-    
+
   } catch (error) {
     console.error('❌ Error opening slideshow folder:', error);
     return {
@@ -7627,30 +8583,30 @@ ipcMain.handle('read-slideshow-image', async (event, filename: string) => {
   try {
     const slideshowPath = getSlideshowPath();
     const filePath = path.join(slideshowPath, filename);
-    
+
     if (!fs.existsSync(filePath)) {
       return {
         success: false,
         error: 'File not found'
       };
     }
-    
+
     const buffer = fs.readFileSync(filePath);
     const ext = path.extname(filename).toLowerCase();
-    
+
     // Determine MIME type
     let mimeType = 'image/jpeg';
     if (ext === '.png') mimeType = 'image/png';
     else if (ext === '.webp') mimeType = 'image/webp';
     else if (ext === '.gif') mimeType = 'image/gif';
-    
+
     return {
       success: true,
       buffer: buffer,
       mimeType: mimeType,
       filename: filename
     };
-    
+
   } catch (error) {
     console.error('❌ Error reading slideshow image:', error);
     return {
@@ -7665,7 +8621,7 @@ ipcMain.handle('migrate-slideshow-images', async () => {
   try {
     const slideshowPath = getSlideshowPath();
     const publicSlideshowPath = path.join(process.cwd(), 'public', 'images', 'slideshow');
-    
+
     // Check if public folder exists
     if (!fs.existsSync(publicSlideshowPath)) {
       return {
@@ -7674,7 +8630,7 @@ ipcMain.handle('migrate-slideshow-images', async () => {
         migrated: 0
       };
     }
-    
+
     // Check if userData folder already has images (skip migration if already done)
     const existingFiles = fs.readdirSync(slideshowPath);
     const imageExtensions = ['.jpg', '.jpeg', '.png', '.webp', '.gif'];
@@ -7682,7 +8638,7 @@ ipcMain.handle('migrate-slideshow-images', async () => {
       const ext = path.extname(file).toLowerCase();
       return imageExtensions.includes(ext);
     });
-    
+
     if (existingImages.length > 0) {
       console.log('📸 Slideshow images already exist in userData, skipping migration');
       return {
@@ -7692,14 +8648,14 @@ ipcMain.handle('migrate-slideshow-images', async () => {
         existing: existingImages.length
       };
     }
-    
+
     // Read files from public folder
     const publicFiles = fs.readdirSync(publicSlideshowPath);
     const imagesToMigrate = publicFiles.filter(file => {
       const ext = path.extname(file).toLowerCase();
       return imageExtensions.includes(ext);
     });
-    
+
     if (imagesToMigrate.length === 0) {
       return {
         success: true,
@@ -7707,14 +8663,14 @@ ipcMain.handle('migrate-slideshow-images', async () => {
         migrated: 0
       };
     }
-    
+
     // Copy images to userData
     let migratedCount = 0;
     for (const file of imagesToMigrate) {
       try {
         const sourcePath = path.join(publicSlideshowPath, file);
         const destPath = path.join(slideshowPath, file);
-        
+
         fs.copyFileSync(sourcePath, destPath);
         migratedCount++;
         console.log('📸 Migrated:', file);
@@ -7722,15 +8678,15 @@ ipcMain.handle('migrate-slideshow-images', async () => {
         console.error('❌ Failed to migrate:', file, error);
       }
     }
-    
+
     console.log(`✅ Successfully migrated ${migratedCount} images to userData`);
-    
+
     return {
       success: true,
       message: `Migrated ${migratedCount} images to userData`,
       migrated: migratedCount
     };
-    
+
   } catch (error) {
     console.error('❌ Error migrating slideshow images:', error);
     return {
@@ -7773,7 +8729,7 @@ ipcMain.handle('restore-from-server', async (event, options: {
     console.log('📥 [RESTORE] Step 1: Downloading master data...');
     const syncUrl = `${apiUrl}/api/sync?business_id=${businessId}`;
     const syncResponse = await fetch(syncUrl);
-    
+
     if (!syncResponse.ok) {
       throw new Error(`Failed to download master data: ${syncResponse.status} ${syncResponse.statusText}`);
     }
@@ -7852,20 +8808,33 @@ ipcMain.handle('restore-from-server', async (event, options: {
 
     if (Array.isArray(data.category2) && data.category2.length > 0) {
       const stmt = localDb.prepare(`
-        INSERT OR REPLACE INTO category2 (id, name, business_id, description, display_order, is_active, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT OR REPLACE INTO category2 (id, name, description, display_order, is_active, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
       `);
       for (const cat of data.category2) {
         stmt.run(
           cat.id,
           cat.name,
-          cat.business_id || businessId,
           cat.description || null,
           cat.display_order || 0,
           cat.is_active !== undefined ? cat.is_active : 1,
           cat.created_at || new Date().toISOString(),
           Date.now()
         );
+      }
+
+      // Store junction table relationships (REQUIRED - no fallback)
+      if (Array.isArray(data.category2Businesses) && data.category2Businesses.length > 0) {
+        const junctionStmt = localDb!.prepare(`
+          INSERT OR REPLACE INTO category2_businesses (category2_id, business_id)
+          VALUES (?, ?)
+        `);
+        for (const rel of data.category2Businesses) {
+          junctionStmt.run(rel.category2_id, rel.business_id);
+        }
+        console.log(`✅ [RESTORE] ${data.category2Businesses.length} category2-business relationships restored`);
+      } else {
+        console.warn(`⚠️ [RESTORE] No junction table data provided for category2 - records will not be associated with any business`);
       }
       stats.category2 = data.category2.length;
       console.log(`✅ [RESTORE] ${data.category2.length} category2 restored`);
@@ -8059,7 +9028,7 @@ ipcMain.handle('restore-from-server', async (event, options: {
       console.log('📥 [RESTORE] Step 3: Downloading transactions...');
       const transactionsUrl = `${apiUrl}/api/transactions?business_id=${businessId}&limit=10000`;
       const txResponse = await fetch(transactionsUrl);
-      
+
       if (!txResponse.ok) {
         console.warn(`⚠️ [RESTORE] Failed to download transactions: ${txResponse.status}`);
       } else {
@@ -8073,11 +9042,13 @@ ipcMain.handle('restore-from-server', async (event, options: {
               id, business_id, user_id, payment_method, payment_method_id,
               pickup_method, total_amount, final_amount, amount_received, change_amount,
               customer_name, status, created_at, updated_at, voucher_discount,
-              voucher_type, voucher_value, transaction_type, receipt_number, shift_uuid
+              voucher_type, voucher_value, transaction_type, receipt_number, shift_uuid,
+              synced_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
           `);
 
+          const now = Date.now();
           for (const tx of transactions) {
             const txId = tx.uuid_id || tx.id;
             txStmt.run(
@@ -8100,7 +9071,8 @@ ipcMain.handle('restore-from-server', async (event, options: {
               tx.voucher_value || null,
               tx.transaction_type || 'drinks',
               tx.receipt_number || null,
-              tx.shift_uuid || null
+              tx.shift_uuid || null,
+              now // Set synced_at to mark as already synced (downloaded from server)
             );
           }
 
@@ -8108,16 +9080,16 @@ ipcMain.handle('restore-from-server', async (event, options: {
           console.log(`✅ [RESTORE] ${transactions.length} transactions restored`);
         }
       }
-      
+
       // Step 4: Download and Restore Transaction Items
       console.log('📥 [RESTORE] Step 4: Downloading transaction items...');
       const itemsUrl = `${apiUrl}/api/transaction-items?business_id=${businessId}&limit=50000`;
       console.log('📥 [RESTORE] URL:', itemsUrl);
-      
+
       try {
         const itemsResponse = await fetch(itemsUrl);
         console.log('📥 [RESTORE] Response status:', itemsResponse.status);
-        
+
         if (!itemsResponse.ok) {
           const errorText = await itemsResponse.text();
           console.warn(`⚠️ [RESTORE] Failed to download transaction items: ${itemsResponse.status}`, errorText);
@@ -8127,8 +9099,8 @@ ipcMain.handle('restore-from-server', async (event, options: {
           console.log('📥 [RESTORE] Received', items.length, 'transaction items');
 
           if (items.length > 0) {
-          console.log(`💾 [RESTORE] Restoring ${items.length} transaction items...`);
-          const itemStmt = localDb.prepare(`
+            console.log(`💾 [RESTORE] Restoring ${items.length} transaction items...`);
+            const itemStmt = localDb.prepare(`
             INSERT OR REPLACE INTO transaction_items (
               id, transaction_id, product_id, quantity, unit_price, total_price,
               custom_note, bundle_selections_json, created_at
@@ -8136,30 +9108,30 @@ ipcMain.handle('restore-from-server', async (event, options: {
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
           `);
 
-          for (const item of items) {
-            const itemId = item.uuid_id || item.id;
-            const transactionId = item.uuid_transaction_id || item.transaction_id;
-            
-            // Convert bundle_selections_json to string if it's an object
-            let bundleSelectionsStr = null;
-            if (item.bundle_selections_json) {
-              bundleSelectionsStr = typeof item.bundle_selections_json === 'string' 
-                ? item.bundle_selections_json 
-                : JSON.stringify(item.bundle_selections_json);
+            for (const item of items) {
+              const itemId = item.uuid_id || item.id;
+              const transactionId = item.uuid_transaction_id || item.transaction_id;
+
+              // Convert bundle_selections_json to string if it's an object
+              let bundleSelectionsStr = null;
+              if (item.bundle_selections_json) {
+                bundleSelectionsStr = typeof item.bundle_selections_json === 'string'
+                  ? item.bundle_selections_json
+                  : JSON.stringify(item.bundle_selections_json);
+              }
+
+              itemStmt.run(
+                itemId,
+                transactionId,
+                item.product_id,
+                item.quantity || 1,
+                item.unit_price || 0,
+                item.total_price || 0,
+                item.custom_note || null,
+                bundleSelectionsStr,
+                item.created_at || new Date().toISOString()
+              );
             }
-            
-            itemStmt.run(
-              itemId,
-              transactionId,
-              item.product_id,
-              item.quantity || 1,
-              item.unit_price || 0,
-              item.total_price || 0,
-              item.custom_note || null,
-              bundleSelectionsStr,
-              item.created_at || new Date().toISOString()
-            );
-          }
 
             stats.transactionItems = items.length;
             console.log(`✅ [RESTORE] ${items.length} transaction items restored`);
@@ -8170,7 +9142,7 @@ ipcMain.handle('restore-from-server', async (event, options: {
       } catch (itemsError) {
         console.error('❌ [RESTORE] Error downloading transaction items:', itemsError);
       }
-      
+
       // Step 5: Restore Transaction Item Customizations (from /api/sync)
       console.log('💾 [RESTORE] Step 5: Restoring transaction item customizations...');
       if (Array.isArray(data.transactionItemCustomizations) && data.transactionItemCustomizations.length > 0) {
@@ -8359,3 +9331,70 @@ ipcMain.handle('restore-from-server', async (event, options: {
   }
 });
 
+// IPC handlers for WebSocket server management
+ipcMain.handle('websocket-server-start', async (event, port: number = 8080) => {
+  try {
+    const result = websocketServer.start(port);
+    return result;
+  } catch (error) {
+    console.error('[IPC] Error starting WebSocket server:', error);
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : 'Unknown error'
+    };
+  }
+});
+
+ipcMain.handle('websocket-server-stop', async () => {
+  try {
+    const result = websocketServer.stop();
+    return result;
+  } catch (error) {
+    console.error('[IPC] Error stopping WebSocket server:', error);
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : 'Unknown error'
+    };
+  }
+});
+
+ipcMain.handle('websocket-server-status', async () => {
+  try {
+    return websocketServer.getStatus();
+  } catch (error) {
+    console.error('[IPC] Error getting WebSocket server status:', error);
+    return {
+      isRunning: false,
+      port: 19967,
+      clientCount: 0,
+      clients: []
+    };
+  }
+});
+
+ipcMain.handle('websocket-broadcast-order', async (event, order: any) => {
+  try {
+    const result = websocketServer.broadcastOrder(order);
+    return result;
+  } catch (error) {
+    console.error('[IPC] Error broadcasting order:', error);
+    return {
+      success: false,
+      sentTo: []
+    };
+  }
+});
+
+
+ipcMain.handle('websocket-broadcast-status', async (event, update: any) => {
+  try {
+    const result = websocketServer.broadcastStatusUpdate(update);
+    return result;
+  } catch (error) {
+    console.error('[IPC] Error broadcasting status update:', error);
+    return {
+      success: false,
+      sentTo: []
+    };
+  }
+});

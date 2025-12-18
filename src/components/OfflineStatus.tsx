@@ -3,7 +3,8 @@
 import { useState, useEffect } from 'react';
 import { useOfflineSync } from '@/hooks/useOfflineSync';
 import { smartSyncService } from '@/lib/smartSync';
-import { RefreshCw, Clock, AlertTriangle, CheckCircle } from 'lucide-react';
+import { getAutoSyncEnabled, onAutoSyncSettingChanged } from '@/lib/autoSyncSettings';
+import { RefreshCw, Clock, AlertTriangle, CheckCircle, Pause } from 'lucide-react';
 
 interface OfflineStatusProps {
   className?: string;
@@ -15,6 +16,7 @@ interface SmartSyncStatus {
   lastSyncTime: number;
   consecutiveFailures: number;
   averageServerLoad: number;
+  autoSyncEnabled?: boolean;
 }
 
 const getElectronAPI = () => (typeof window !== 'undefined' ? window.electronAPI : undefined);
@@ -27,6 +29,21 @@ export default function OfflineStatus({ className = '' }: OfflineStatusProps) {
   
   const [smartSyncStatus, setSmartSyncStatus] = useState<SmartSyncStatus | null>(null);
   const [pendingCount, setPendingCount] = useState(0);
+  const [autoSyncEnabled, setAutoSyncEnabled] = useState<boolean>(true);
+
+  useEffect(() => {
+    // Initialize auto sync status
+    setAutoSyncEnabled(getAutoSyncEnabled());
+    
+    // Listen for auto sync setting changes
+    const unsubscribe = onAutoSyncSettingChanged((enabled) => {
+      setAutoSyncEnabled(enabled);
+    });
+
+    return () => {
+      unsubscribe();
+    };
+  }, []);
 
   useEffect(() => {
     const updateStatus = () => {
@@ -89,8 +106,16 @@ export default function OfflineStatus({ className = '' }: OfflineStatusProps) {
         </div>
       )}
 
+      {/* Auto Sync Disabled Warning */}
+      {!autoSyncEnabled && (
+        <div className="flex items-center space-x-[3.2px] px-[6.4px] py-[3.2px] bg-orange-200 text-orange-800 text-[9.6px] border border-orange-400">
+          <Pause className="w-[9.6px] h-[9.6px]" />
+          <span>Auto Sync Off</span>
+        </div>
+      )}
+
       {/* Smart Sync Status */}
-      {smartSyncStatus && (
+      {smartSyncStatus && autoSyncEnabled && (
         <div className="flex items-center space-x-[3.2px] text-[9.6px] text-gray-500">
           {smartSyncStatus.isSyncing ? (
             <RefreshCw className="w-[9.6px] h-[9.6px] animate-spin text-blue-500" />

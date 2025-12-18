@@ -18,6 +18,7 @@ electron_1.contextBridge.exposeInMainWorld('electronAPI', {
     maximizeWindow: () => electron_1.ipcRenderer.invoke('maximize-window'),
     navigateTo: (path) => electron_1.ipcRenderer.invoke('navigate-to', path),
     focusWindow: () => electron_1.ipcRenderer.invoke('focus-window'),
+    openProductionDisplay: (displayType) => electron_1.ipcRenderer.invoke('open-production-display', displayType),
     // Authentication events
     notifyLoginSuccess: () => electron_1.ipcRenderer.invoke('login-success'),
     notifyLogout: () => electron_1.ipcRenderer.invoke('logout'),
@@ -100,9 +101,9 @@ electron_1.contextBridge.exposeInMainWorld('electronAPI', {
     localDbGetTransactions: (businessId, limit) => electron_1.ipcRenderer.invoke('localdb-get-transactions', businessId, limit),
     localDbArchiveTransactions: (payload) => electron_1.ipcRenderer.invoke('localdb-archive-transactions', payload),
     localDbDeleteTransactions: (payload) => electron_1.ipcRenderer.invoke('localdb-delete-transactions', payload),
-    localDbDeleteTransactionsByEmail: (payload) => electron_1.ipcRenderer.invoke('localdb-delete-transactions-by-email', payload),
     localDbDeleteTransactionItems: (payload) => electron_1.ipcRenderer.invoke('localdb-delete-transaction-items', payload),
     localDbGetUnsyncedTransactions: (businessId) => electron_1.ipcRenderer.invoke('localdb-get-unsynced-transactions', businessId),
+    localDbDeleteUnsyncedTransactions: (businessId) => electron_1.ipcRenderer.invoke('localdb-delete-unsynced-transactions', businessId),
     localDbMarkTransactionsSynced: (transactionIds) => electron_1.ipcRenderer.invoke('localdb-mark-transactions-synced', transactionIds),
     localDbResetTransactionSync: (transactionId) => electron_1.ipcRenderer.invoke('localdb-reset-transaction-sync', transactionId),
     // Transaction Items
@@ -130,7 +131,7 @@ electron_1.contextBridge.exposeInMainWorld('electronAPI', {
     localDbUpsertCategory1: (rows) => electron_1.ipcRenderer.invoke('localdb-upsert-category1', rows),
     localDbGetCategory1: () => electron_1.ipcRenderer.invoke('localdb-get-category1'),
     // Category2
-    localDbUpsertCategory2: (rows) => electron_1.ipcRenderer.invoke('localdb-upsert-category2', rows),
+    localDbUpsertCategory2: (rows, junctionData) => electron_1.ipcRenderer.invoke('localdb-upsert-category2', rows, junctionData),
     localDbGetCategory2: (businessId) => electron_1.ipcRenderer.invoke('localdb-get-category2', businessId),
     // CL Accounts
     localDbUpsertClAccounts: (rows) => electron_1.ipcRenderer.invoke('localdb-upsert-cl-accounts', rows),
@@ -145,13 +146,22 @@ electron_1.contextBridge.exposeInMainWorld('electronAPI', {
     generateRandomSelections: (cycleNumber) => electron_1.ipcRenderer.invoke('generate-random-selections', cycleNumber),
     logPrinter2Print: (transactionId, printer2ReceiptNumber, mode, cycleNumber, globalCounter, isReprint, reprintCount) => electron_1.ipcRenderer.invoke('log-printer2-print', transactionId, printer2ReceiptNumber, mode, cycleNumber, globalCounter, isReprint, reprintCount),
     getPrinter2AuditLog: (fromDate, toDate, limit) => electron_1.ipcRenderer.invoke('get-printer2-audit-log', fromDate, toDate, limit),
+    queueTransactionForSystemPos: (transactionId) => electron_1.ipcRenderer.invoke('queue-transaction-for-system-pos', transactionId),
+    getSystemPosQueue: () => electron_1.ipcRenderer.invoke('get-system-pos-queue'),
+    markSystemPosSynced: (transactionId) => electron_1.ipcRenderer.invoke('mark-system-pos-synced', transactionId),
+    markSystemPosFailed: (transactionId, error) => electron_1.ipcRenderer.invoke('mark-system-pos-failed', transactionId, error),
+    resetSystemPosRetryCount: (transactionIds) => electron_1.ipcRenderer.invoke('reset-system-pos-retry-count', transactionIds),
+    debugSystemPosTransaction: (transactionId) => electron_1.ipcRenderer.invoke('debug-system-pos-transaction', transactionId),
+    repopulateSystemPosQueue: (options) => electron_1.ipcRenderer.invoke('repopulate-system-pos-queue', options),
     logPrinter1Print: (transactionId, printer1ReceiptNumber, globalCounter, isReprint, reprintCount) => electron_1.ipcRenderer.invoke('log-printer1-print', transactionId, printer1ReceiptNumber, globalCounter, isReprint, reprintCount),
     getPrinter1AuditLog: (fromDate, toDate, limit) => electron_1.ipcRenderer.invoke('get-printer1-audit-log', fromDate, toDate, limit),
     // Printer audit sync helpers
     localDbUpsertPrinterAudits: (printerType, rows) => electron_1.ipcRenderer.invoke('localdb-upsert-printer-audits', { printerType, rows }),
     localDbUpsertPrinterDailyCounters: (rows) => electron_1.ipcRenderer.invoke('localdb-upsert-printer-daily-counters', rows),
+    localDbGetAllPrinterDailyCounters: () => electron_1.ipcRenderer.invoke('localdb-get-all-printer-daily-counters'),
     localDbResetPrinterDailyCounters: (businessId) => electron_1.ipcRenderer.invoke('localdb-reset-printer-daily-counters', businessId),
     localDbGetUnsyncedPrinterAudits: () => electron_1.ipcRenderer.invoke('localdb-get-unsynced-printer-audits'),
+    localDbGetPrinterAuditsByTransactionId: (transactionId) => electron_1.ipcRenderer.invoke('localDbGetPrinterAuditsByTransactionId', transactionId),
     localDbMarkPrinterAuditsSynced: (ids) => electron_1.ipcRenderer.invoke('localdb-mark-printer-audits-synced', ids),
     // Shifts
     localDbGetActiveShift: (userId, businessId) => electron_1.ipcRenderer.invoke('localdb-get-active-shift', userId, businessId),
@@ -184,6 +194,14 @@ electron_1.contextBridge.exposeInMainWorld('electronAPI', {
     openSlideshowFolder: () => electron_1.ipcRenderer.invoke('open-slideshow-folder'),
     readSlideshowImage: (filename) => electron_1.ipcRenderer.invoke('read-slideshow-image', filename),
     migrateSlideshowImages: () => electron_1.ipcRenderer.invoke('migrate-slideshow-images'),
+    // Admin: Delete transactions by user email or NULL
+    localDbDeleteTransactionsByRole: () => electron_1.ipcRenderer.invoke('localdb-delete-transactions-by-role'),
     // Database Restore
     restoreFromServer: (options) => electron_1.ipcRenderer.invoke('restore-from-server', options),
+    // WebSocket Server Management
+    websocketServerStart: (port) => electron_1.ipcRenderer.invoke('websocket-server-start', port),
+    websocketServerStop: () => electron_1.ipcRenderer.invoke('websocket-server-stop'),
+    websocketServerStatus: () => electron_1.ipcRenderer.invoke('websocket-server-status'),
+    websocketBroadcastOrder: (order) => electron_1.ipcRenderer.invoke('websocket-broadcast-order', order),
+    websocketBroadcastStatus: (update) => electron_1.ipcRenderer.invoke('websocket-broadcast-status', update),
 });

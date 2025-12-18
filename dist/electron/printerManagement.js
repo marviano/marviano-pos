@@ -6,8 +6,9 @@ exports.PrinterManagementService = void 0;
  * Handles multi-printer system with separate counters and automation
  */
 class PrinterManagementService {
-    constructor(database) {
+    constructor(database, mysqlPool) {
         this.db = database;
+        this.mysqlPool = mysqlPool;
         this.ensureGlobalCounterColumns();
     }
     ensureGlobalCounterColumns() {
@@ -117,24 +118,31 @@ class PrinterManagementService {
             if (existing && typeof existing.counter === 'number') {
                 if (increment) {
                     const newCounter = existing.counter + 1;
-                    this.db.prepare('UPDATE printer_daily_counters SET counter = ?, last_reset_at = ? WHERE printer_type = ? AND business_id = ? AND date = ?')
-                        .run(newCounter, Date.now(), printerType, businessId, today);
-                    console.log(`✅ Incremented ${printerType} counter to ${newCounter}`);
+                    const updateStmt = this.db.prepare('UPDATE printer_daily_counters SET counter = ?, last_reset_at = ? WHERE printer_type = ? AND business_id = ? AND date = ?');
+                    const updateResult = updateStmt.run(newCounter, Date.now(), printerType, businessId, today);
+                    console.log(`✅ Incremented ${printerType} counter from ${existing.counter} to ${newCounter} (date: ${today}, businessId: ${businessId}, rows updated: ${updateResult.changes})`);
+                    // Verify the update actually happened
+                    const verify = this.db.prepare('SELECT counter FROM printer_daily_counters WHERE printer_type = ? AND business_id = ? AND date = ?')
+                        .get(printerType, businessId, today);
+                    if (verify && verify.counter !== newCounter) {
+                        console.error(`❌ Counter update verification failed! Expected ${newCounter}, got ${verify.counter}`);
+                    }
                     return newCounter;
                 }
+                console.log(`📊 Retrieved ${printerType} counter: ${existing.counter} (date: ${today}, businessId: ${businessId}, increment: ${increment})`);
                 return existing.counter;
             }
             else {
                 // First transaction today - start at 1
                 const counter = increment ? 1 : 0;
-                this.db.prepare('INSERT INTO printer_daily_counters (printer_type, business_id, date, counter, last_reset_at) VALUES (?, ?, ?, ?, ?)')
-                    .run(printerType, businessId, today, counter, Date.now());
-                console.log(`✅ Created new ${printerType} counter starting at ${counter}`);
+                const insertStmt = this.db.prepare('INSERT INTO printer_daily_counters (printer_type, business_id, date, counter, last_reset_at) VALUES (?, ?, ?, ?, ?)');
+                const insertResult = insertStmt.run(printerType, businessId, today, counter, Date.now());
+                console.log(`✅ Created new ${printerType} counter starting at ${counter} (date: ${today}, businessId: ${businessId}, increment: ${increment}, rows inserted: ${insertResult.changes})`);
                 return increment ? 1 : 0;
             }
         }
         catch (error) {
-            console.error('Error managing printer counter:', error);
+            console.error(`❌ Error managing printer counter (${printerType}, businessId: ${businessId}, date: ${today}, increment: ${increment}):`, error);
             return 0;
         }
     }
@@ -227,11 +235,32 @@ class PrinterManagementService {
      */
     logPrinter2Print(transactionId, printer2ReceiptNumber, mode, cycleNumber, globalCounter, isReprint = false, reprintCount = 0) {
         try {
-            const now = new Date().toISOString();
+            // Convert to UTC+7 and format as MySQL datetime
+            const utc7Date = new Date(Date.now() + 7 * 60 * 60 * 1000);
+            const now = utc7Date.toISOString().slice(0, 19).replace('T', ' ');
+            const printedAtEpoch = Date.now();
             this.db.prepare('INSERT INTO printer2_audit_log (transaction_id, printer2_receipt_number, print_mode, cycle_number, global_counter, printed_at, printed_at_epoch, is_reprint, reprint_count) ' +
                 'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)')
-                .run(transactionId, printer2ReceiptNumber, mode, cycleNumber || null, typeof globalCounter === 'number' ? globalCounter : null, now, Date.now(), isReprint ? 1 : 0, reprintCount);
+                .run(transactionId, printer2ReceiptNumber, mode, cycleNumber || null, typeof globalCounter === 'number' ? globalCounter : null, now, printedAtEpoch, isReprint ? 1 : 0, reprintCount);
             console.log(`✅ Logged Printer 2 print: Transaction ${transactionId}, Receipt #${printer2ReceiptNumber}, Mode: ${mode}${isReprint ? ` (REPRINT ke-${reprintCount})` : ''}`);
+            // Shadow DB (MySQL) Write - Fire and Forget
+            this.mysqlPool.execute(`INSERT INTO printer2_audit_log 
+         (transaction_id, printer2_receipt_number, print_mode, cycle_number, global_counter, printed_at, printed_at_epoch, is_reprint, reprint_count) 
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`, [
+                transactionId,
+                printer2ReceiptNumber,
+                mode,
+                cycleNumber || null,
+                typeof globalCounter === 'number' ? globalCounter : null,
+                now, // Use the same timestamp string
+                printedAtEpoch,
+                isReprint ? 1 : 0,
+                reprintCount
+            ]).then(() => {
+                console.log(`✅ [SHADOW-DB] Logged Printer 2 print to MySQL for Trans ${transactionId}`);
+            }).catch(err => {
+                console.error(`❌ [SHADOW-DB] Failed to log to MySQL:`, err);
+            });
             return true;
         }
         catch (error) {
@@ -244,7 +273,9 @@ class PrinterManagementService {
      */
     logPrinter1Print(transactionId, printer1ReceiptNumber, globalCounter, isReprint = false, reprintCount = 0) {
         try {
-            const now = new Date().toISOString();
+            // Convert to UTC+7 and format as MySQL datetime
+            const utc7Date = new Date(Date.now() + 7 * 60 * 60 * 1000);
+            const now = utc7Date.toISOString().slice(0, 19).replace('T', ' ');
             this.db.prepare('INSERT INTO printer1_audit_log (transaction_id, printer1_receipt_number, global_counter, printed_at, printed_at_epoch, is_reprint, reprint_count) ' +
                 'VALUES (?, ?, ?, ?, ?, ?, ?)')
                 .run(transactionId, printer1ReceiptNumber, typeof globalCounter === 'number' ? globalCounter : null, now, Date.now(), isReprint ? 1 : 0, reprintCount);
@@ -263,15 +294,21 @@ class PrinterManagementService {
         try {
             let query = 'SELECT * FROM printer1_audit_log';
             const params = [];
+            let fromEpoch;
+            let toEpoch;
             if (fromDate || toDate) {
                 const conditions = [];
                 if (fromDate) {
-                    const fromEpoch = new Date(fromDate).getTime();
+                    // Parse date as local time (start of day in local timezone)
+                    const [year, month, day] = fromDate.split('-').map(Number);
+                    fromEpoch = new Date(year, month - 1, day, 0, 0, 0, 0).getTime();
                     conditions.push('printed_at_epoch >= ?');
                     params.push(fromEpoch);
                 }
                 if (toDate) {
-                    const toEpoch = new Date(toDate + 'T23:59:59').getTime();
+                    // Parse date as local time (end of day in local timezone)
+                    const [year, month, day] = toDate.split('-').map(Number);
+                    toEpoch = new Date(year, month - 1, day, 23, 59, 59, 999).getTime();
                     conditions.push('printed_at_epoch <= ?');
                     params.push(toEpoch);
                 }
@@ -281,8 +318,24 @@ class PrinterManagementService {
             }
             query += ' ORDER BY printed_at_epoch DESC LIMIT ?';
             params.push(limit);
+            console.log(`🔍 [Printer1AuditLog] Query params: fromDate=${fromDate}, toDate=${toDate}, fromEpoch=${fromEpoch}, toEpoch=${toEpoch}, limit=${limit}`);
             const results = this.db.prepare(query).all(...params);
             console.log(`✅ Retrieved ${results.length} printer1 audit log entries`);
+            // Debug: show sample entries if any
+            if (results.length > 0) {
+                console.log(`🔍 [Printer1AuditLog] Sample entry: printed_at_epoch=${results[0].printed_at_epoch}, transaction_id=${results[0].transaction_id}`);
+            }
+            else {
+                // Check total count without filters
+                const totalCount = this.db.prepare('SELECT COUNT(*) as count FROM printer1_audit_log').get();
+                console.log(`⚠️ [Printer1AuditLog] No results. Total entries in table: ${totalCount.count}`);
+                if (totalCount.count > 0) {
+                    const sampleRow = this.db.prepare('SELECT printed_at_epoch FROM printer1_audit_log ORDER BY printed_at_epoch DESC LIMIT 1').get();
+                    if (sampleRow) {
+                        console.log(`⚠️ [Printer1AuditLog] Latest entry epoch: ${sampleRow.printed_at_epoch} (${new Date(sampleRow.printed_at_epoch).toISOString()})`);
+                    }
+                }
+            }
             return results;
         }
         catch (error) {
@@ -297,15 +350,21 @@ class PrinterManagementService {
         try {
             let query = 'SELECT * FROM printer2_audit_log';
             const params = [];
+            let fromEpoch;
+            let toEpoch;
             if (fromDate || toDate) {
                 const conditions = [];
                 if (fromDate) {
-                    const fromEpoch = new Date(fromDate).getTime();
+                    // Parse date as local time (start of day in local timezone)
+                    const [year, month, day] = fromDate.split('-').map(Number);
+                    fromEpoch = new Date(year, month - 1, day, 0, 0, 0, 0).getTime();
                     conditions.push('printed_at_epoch >= ?');
                     params.push(fromEpoch);
                 }
                 if (toDate) {
-                    const toEpoch = new Date(toDate + 'T23:59:59').getTime();
+                    // Parse date as local time (end of day in local timezone)
+                    const [year, month, day] = toDate.split('-').map(Number);
+                    toEpoch = new Date(year, month - 1, day, 23, 59, 59, 999).getTime();
                     conditions.push('printed_at_epoch <= ?');
                     params.push(toEpoch);
                 }
@@ -315,8 +374,24 @@ class PrinterManagementService {
             }
             query += ' ORDER BY printed_at_epoch DESC LIMIT ?';
             params.push(limit);
+            console.log(`🔍 [Printer2AuditLog] Query params: fromDate=${fromDate}, toDate=${toDate}, fromEpoch=${fromEpoch}, toEpoch=${toEpoch}, limit=${limit}`);
             const results = this.db.prepare(query).all(...params);
-            console.log(`✅ Retrieved ${results.length} audit log entries`);
+            console.log(`✅ Retrieved ${results.length} printer2 audit log entries`);
+            // Debug: show sample entries if any
+            if (results.length > 0) {
+                console.log(`🔍 [Printer2AuditLog] Sample entry: printed_at_epoch=${results[0].printed_at_epoch}, transaction_id=${results[0].transaction_id}`);
+            }
+            else {
+                // Check total count without filters
+                const totalCount = this.db.prepare('SELECT COUNT(*) as count FROM printer2_audit_log').get();
+                console.log(`⚠️ [Printer2AuditLog] No results. Total entries in table: ${totalCount.count}`);
+                if (totalCount.count > 0) {
+                    const sampleRow = this.db.prepare('SELECT printed_at_epoch FROM printer2_audit_log ORDER BY printed_at_epoch DESC LIMIT 1').get();
+                    if (sampleRow) {
+                        console.log(`⚠️ [Printer2AuditLog] Latest entry epoch: ${sampleRow.printed_at_epoch} (${new Date(sampleRow.printed_at_epoch).toISOString()})`);
+                    }
+                }
+            }
             return results;
         }
         catch (error) {

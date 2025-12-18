@@ -38,9 +38,146 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
 Object.defineProperty(exports, "__esModule", { value: true });
 const electron_1 = require("electron");
 const better_sqlite3_1 = __importDefault(require("better-sqlite3"));
+const promise_1 = __importDefault(require("mysql2/promise"));
 const path = __importStar(require("path"));
 const fs = __importStar(require("fs"));
+const os = __importStar(require("os"));
 const printerManagement_1 = require("./printerManagement");
+const websocketServer_1 = require("./websocketServer");
+// Store original console functions early (before they might be suppressed)
+// These are used to bypass console suppression for critical error messages
+const originalConsoleLog = console.log.bind(console);
+const originalConsoleError = console.error.bind(console);
+const originalConsoleInfo = console.info.bind(console);
+const originalConsoleDebug = console.debug.bind(console);
+// Store the discovered database path globally (declared early so it can be used in initializeDatabasePath)
+let discoveredDbPath = null;
+// Initialize database path early - before app is ready
+// This ensures the path is set correctly for both dev and production
+function initializeDatabasePath() {
+    console.log('🔍 [EARLY INIT] Initializing database path...');
+    // SMART PATH DISCOVERY: Check likely locations for existing DB
+    // In production, app.getPath('appData') should still work, but we need to handle it carefully
+    let appData;
+    try {
+        appData = electron_1.app.getPath('appData');
+    }
+    catch (error) {
+        // Fallback if app is not ready yet
+        appData = path.join(os.homedir(), 'AppData', 'Roaming');
+        console.log('⚠️ [EARLY INIT] App not ready, using fallback appData path:', appData);
+    }
+    console.log(`📂 [EARLY INIT] AppData path: ${appData}`);
+    // Diagnostic logging to file for debugging on other machines
+    const diagLogPath = path.join(os.homedir(), 'AppData', 'Roaming', 'marviano-pos', 'path-diagnostic.log');
+    const diagLog = (msg) => {
+        try {
+            const timestamp = new Date().toISOString();
+            const dir = path.dirname(diagLogPath);
+            if (!fs.existsSync(dir))
+                fs.mkdirSync(dir, { recursive: true });
+            fs.appendFileSync(diagLogPath, `${timestamp} ${msg}\n`);
+        }
+        catch (e) { /* ignore */ }
+    };
+    diagLog(`=== APP STARTUP ===`);
+    diagLog(`os.homedir() = ${os.homedir()}`);
+    diagLog(`appData = ${appData}`);
+    diagLog(`process.platform = ${process.platform}`);
+    diagLog(`app.getPath('userData') = ${(() => { try {
+        return electron_1.app.getPath('userData');
+    }
+    catch (e) {
+        return 'ERROR: ' + e;
+    } })()}`);
+    diagLog(`app.getPath('appData') = ${(() => { try {
+        return electron_1.app.getPath('appData');
+    }
+    catch (e) {
+        return 'ERROR: ' + e;
+    } })()}`);
+    // Build list of possible paths, including explicit user path
+    const possiblePaths = [
+        // Explicit path from user (most reliable) - CHECK THIS FIRST
+        path.join(os.homedir(), 'AppData', 'Roaming', 'marviano-pos', 'pos-offline.db'),
+        // Standard appData paths
+        path.join(appData, 'marviano-pos', 'pos-offline.db')
+    ];
+    // Remove duplicates
+    const uniquePaths = Array.from(new Set(possiblePaths));
+    diagLog(`Checking ${uniquePaths.length} possible database paths:`);
+    console.log(`🔍 [EARLY INIT] Checking possible database paths:`);
+    uniquePaths.forEach((p, i) => {
+        const exists = fs.existsSync(p);
+        diagLog(`  ${i + 1}. ${p} - ${exists ? 'EXISTS' : 'NOT FOUND'}`);
+        console.log(`  ${i + 1}. ${p} ${exists ? '✅ EXISTS' : '❌ NOT FOUND'}`);
+        if (exists) {
+            const stats = fs.statSync(p);
+            diagLog(`     File size: ${stats.size} bytes, modified: ${stats.mtime}`);
+            console.log(`     File size: ${stats.size} bytes, modified: ${stats.mtime}`);
+        }
+    });
+    let dbPath = uniquePaths[1] || uniquePaths[0]; // Default to appData/marviano-pos (skip explicit path as default)
+    let found = false;
+    for (const p of uniquePaths) {
+        if (fs.existsSync(p)) {
+            console.log(`✅ [EARLY INIT] Found existing database at: ${p}`);
+            diagLog(`✅ Found existing database at: ${p}`);
+            dbPath = p;
+            found = true;
+            // Store the discovered path globally
+            discoveredDbPath = p;
+            // Align UserData path to where the DB is found
+            try {
+                const userDataDir = path.dirname(p);
+                electron_1.app.setPath('userData', userDataDir);
+                console.log(`📂 [EARLY INIT] Set userData path to: ${userDataDir}`);
+                // Verify it was set correctly
+                const verifyUserData = electron_1.app.getPath('userData');
+                if (userDataDir !== verifyUserData) {
+                    console.warn(`⚠️ [EARLY INIT] WARNING: userData path mismatch! Requested: ${userDataDir}, Actual: ${verifyUserData}`);
+                }
+            }
+            catch (error) {
+                console.warn('⚠️ [EARLY INIT] Could not set userData path (app may not be ready):', error);
+                // Even if setPath fails, we still have the discovered path stored
+            }
+            break;
+        }
+    }
+    if (!found) {
+        console.log(`⚠️ [EARLY INIT] No existing database found. Will create at: ${dbPath}`);
+        diagLog(`⚠️ No existing database found. Will create at: ${dbPath}`);
+        // Store the path we'll use
+        discoveredDbPath = dbPath;
+        // Ensure directory exists
+        const dbDir = path.dirname(dbPath);
+        if (!fs.existsSync(dbDir)) {
+            try {
+                fs.mkdirSync(dbDir, { recursive: true });
+                console.log(`📂 [EARLY INIT] Created directory: ${dbDir}`);
+            }
+            catch (error) {
+                console.error('❌ [EARLY INIT] Failed to create directory:', error);
+            }
+        }
+        // Set userData path to match where we'll create the database
+        try {
+            electron_1.app.setPath('userData', dbDir);
+            console.log(`📂 [EARLY INIT] Set userData path to: ${dbDir}`);
+        }
+        catch (error) {
+            console.warn('⚠️ [EARLY INIT] Could not set userData path (app may not be ready):', error);
+            // Even if setPath fails, we still have the discovered path stored
+        }
+    }
+    console.log('📂 [EARLY INIT] Final database path will be:', discoveredDbPath || dbPath);
+    console.log('📂 [EARLY INIT] Stored discoveredDbPath:', discoveredDbPath);
+}
+// Initialize database path as early as possible
+// This must happen before app.whenReady() to ensure path is set correctly
+// app.getPath() should work even before app.whenReady()
+initializeDatabasePath();
 // Register custom protocol before app is ready
 electron_1.protocol.registerSchemesAsPrivileged([
     {
@@ -207,21 +344,201 @@ let printWindow = null;
 let localDb = null;
 let printerService = null;
 function getLocalDbPath() {
-    // Use userData directory for consistent database location across dev/prod
+    // ALWAYS use discoveredDbPath if available - never fall back to app.getPath('userData')
+    // because in packaged apps, app.getPath('userData') returns path based on productName
+    // which might be different from where the actual database is located
+    if (discoveredDbPath) {
+        return discoveredDbPath;
+    }
+    // CRITICAL: If discoveredDbPath is not set, try to find the database again
+    // This should not happen if initializeDatabasePath() ran correctly, but handle it anyway
+    originalConsoleError('⚠️ [CRITICAL] getLocalDbPath() called but discoveredDbPath is null! Attempting emergency discovery...');
+    // Emergency: Check the known location
+    const emergencyPath = path.join(os.homedir(), 'AppData', 'Roaming', 'marviano-pos', 'pos-offline.db');
+    if (fs.existsSync(emergencyPath)) {
+        originalConsoleLog(`✅ [EMERGENCY] Found database at: ${emergencyPath}`);
+        discoveredDbPath = emergencyPath;
+        return emergencyPath;
+    }
+    // Last resort: Use userData directory (but log a warning)
     const userDataPath = electron_1.app.getPath('userData');
-    return path.join(userDataPath, 'pos-offline.db');
+    const dbPath = path.join(userDataPath, 'pos-offline.db');
+    originalConsoleError(`❌ [CRITICAL] Using fallback path (database may not exist): ${dbPath}`);
+    originalConsoleError(`❌ [CRITICAL] Expected database at: ${emergencyPath}`);
+    return dbPath;
 }
+let windowsInitialized = false;
+let ipcHandlersRegistered = false;
 function createWindows() {
+    // Guard against double initialization
+    if (windowsInitialized) {
+        originalConsoleLog('⚠️ createWindows() already called, skipping re-initialization');
+        return;
+    }
+    windowsInitialized = true;
     // Initialize local SQLite (offline storage)
     try {
-        console.log('🔍 Initializing SQLite database for offline support...');
-        const dbPath = getLocalDbPath();
-        localDb = new better_sqlite3_1.default(dbPath);
-        // Enable WAL mode for better concurrency
-        localDb.pragma('journal_mode = WAL');
-        localDb.pragma('synchronous = NORMAL');
-        localDb.pragma('cache_size = 10000');
-        localDb.pragma('temp_store = MEMORY');
+        originalConsoleLog('🔍 Initializing SQLite database for offline support...');
+        // CRITICAL: Always use discoveredDbPath - it's the source of truth
+        // Don't rely on getLocalDbPath() which might return wrong path in packaged apps
+        if (!discoveredDbPath) {
+            originalConsoleError('❌ [CRITICAL] discoveredDbPath is null in createWindows()!');
+            // Emergency discovery
+            const emergencyPath = path.join(os.homedir(), 'AppData', 'Roaming', 'marviano-pos', 'pos-offline.db');
+            if (fs.existsSync(emergencyPath)) {
+                originalConsoleLog(`✅ [EMERGENCY] Found database at: ${emergencyPath}`);
+                discoveredDbPath = emergencyPath;
+            }
+            else {
+                throw new Error('Database path not discovered and emergency discovery failed');
+            }
+        }
+        const dbPath = discoveredDbPath; // Use discovered path as the primary path
+        originalConsoleLog('📂 [CREATE WINDOWS] Using database path:', dbPath);
+        originalConsoleLog('📂 [CREATE WINDOWS] Discovered path stored:', discoveredDbPath);
+        // Verify the path exists or can be created
+        const dbDir = path.dirname(dbPath);
+        if (!fs.existsSync(dbDir)) {
+            originalConsoleLog(`📂 [CREATE WINDOWS] Creating directory: ${dbDir}`);
+            fs.mkdirSync(dbDir, { recursive: true });
+        }
+        // Double-check the database file exists (or will be created)
+        if (fs.existsSync(dbPath)) {
+            const stats = fs.statSync(dbPath);
+            originalConsoleLog(`✅ [CREATE WINDOWS] Database file exists: ${dbPath} (${stats.size} bytes)`);
+            // Verify it's not empty (which would indicate a new database)
+            if (stats.size < 100) {
+                originalConsoleError(`⚠️ [CREATE WINDOWS] Database file is very small (${stats.size} bytes), might be empty or corrupted`);
+            }
+        }
+        else {
+            originalConsoleError(`⚠️ [CREATE WINDOWS] Database file does not exist yet, will be created: ${dbPath}`);
+            originalConsoleError(`⚠️ [CREATE WINDOWS] WARNING: This will create a NEW database. Existing data will not be accessible!`);
+            originalConsoleError(`⚠️ [CREATE WINDOWS] Expected location: ${path.join(os.homedir(), 'AppData', 'Roaming', 'marviano-pos', 'pos-offline.db')}`);
+        }
+        // OPTIMIZATION: User requested to disable encryption to keep using legacy database
+        console.log('🔓 Opening database in legacy plaintext mode (Encryption disabled)');
+        try {
+            // CRITICAL: Always prefer discoveredDbPath - it's the actual location of the database
+            // Never use dbPath from getLocalDbPath() as fallback because it might point to wrong location in packaged apps
+            if (!discoveredDbPath) {
+                originalConsoleError('❌ [CRITICAL] discoveredDbPath is null when opening database!');
+                originalConsoleError(`❌ [CRITICAL] dbPath from getLocalDbPath(): ${dbPath}`);
+                // Emergency: Try to find it again
+                const emergencyPath = path.join(os.homedir(), 'AppData', 'Roaming', 'marviano-pos', 'pos-offline.db');
+                if (fs.existsSync(emergencyPath)) {
+                    originalConsoleLog(`✅ [EMERGENCY] Found database at: ${emergencyPath}`);
+                    discoveredDbPath = emergencyPath;
+                }
+                else {
+                    throw new Error(`Database path not discovered and emergency path not found: ${emergencyPath}`);
+                }
+            }
+            const actualDbPath = discoveredDbPath;
+            originalConsoleLog(`📂 [CREATE WINDOWS] Opening database at: ${actualDbPath}`);
+            // Write to diagnostic log
+            const diagLogPath2 = path.join(os.homedir(), 'AppData', 'Roaming', 'marviano-pos', 'path-diagnostic.log');
+            try {
+                fs.appendFileSync(diagLogPath2, `${new Date().toISOString()} [CREATE WINDOWS] Opening database at: ${actualDbPath}\n`);
+            }
+            catch (e) { }
+            localDb = new better_sqlite3_1.default(actualDbPath /*, { verbose: console.log } */); // Optional: enable verbose for queries
+            // Test access
+            const tableCount = localDb.prepare('SELECT count(*) as count FROM sqlite_master').get();
+            const txCount = localDb.prepare('SELECT count(*) as count FROM transactions').get();
+            originalConsoleLog('✅ Database opened successfully (Plaintext). Tables found:', tableCount.count);
+            try {
+                const dbStats = fs.statSync(actualDbPath);
+                fs.appendFileSync(diagLogPath2, `${new Date().toISOString()} ✅ Database opened successfully. Tables: ${tableCount.count}, Transactions: ${txCount.count}, FileSize: ${dbStats.size} bytes\n`);
+            }
+            catch (e) { }
+            // If we have very few tables, it might be a new/empty database
+            if (tableCount.count < 5) {
+                console.warn(`⚠️ [CREATE WINDOWS] Database has only ${tableCount.count} tables. This might be a new/empty database!`);
+                console.warn(`⚠️ [CREATE WINDOWS] Expected location: ${path.join(os.homedir(), 'AppData', 'Roaming', 'marviano-pos', 'pos-offline.db')}`);
+                console.warn(`⚠️ [CREATE WINDOWS] Actual location: ${actualDbPath}`);
+            }
+        }
+        catch (dbErr) {
+            originalConsoleError('❌ Failed to open database:', dbErr);
+            originalConsoleError('❌ Database path attempted:', discoveredDbPath || dbPath);
+            localDb = null; // Only reset if database opening fails
+            throw dbErr;
+        }
+        // CRITICAL: Database is now open - don't reset localDb if errors occur after this point
+        // Enable WAL mode for better concurrency (must be done after keying)
+        try {
+            localDb.pragma('journal_mode = WAL');
+            localDb.pragma('synchronous = NORMAL');
+            localDb.pragma('cache_size = 10000');
+            localDb.pragma('temp_store = MEMORY');
+        }
+        catch (pragmaErr) {
+            originalConsoleError('⚠️ Failed to set database pragmas (non-critical):', pragmaErr);
+            // Don't reset localDb - database is still usable
+        }
+        // Initialize MySQL Connection Pool for Shadow DB
+        console.log('🔍 Initializing MySQL Shadow DB connection...');
+        // Load environment variables from .env file (optional - don't crash if dotenv is not available)
+        // We try multiple paths because in production the path might differ
+        try {
+            const dotenv = require('dotenv');
+            const possibleEnvPaths = [
+                path.join(process.cwd(), '.env'),
+                path.join(electron_1.app.getAppPath(), '.env'),
+                path.join(path.dirname(electron_1.app.getPath('exe')), '.env')
+            ];
+            let envLoaded = false;
+            for (const envPath of possibleEnvPaths) {
+                if (fs.existsSync(envPath)) {
+                    console.log(`Loading .env from: ${envPath}`);
+                    dotenv.config({ path: envPath });
+                    envLoaded = true;
+                    break;
+                }
+            }
+            if (!envLoaded) {
+                console.warn('⚠️ No .env file found for MySQL credentials, falling back to defaults');
+            }
+        }
+        catch (dotenvErr) {
+            console.warn('⚠️ dotenv module not available, using environment defaults. Error:', dotenvErr);
+        }
+        const mysqlPool = promise_1.default.createPool({
+            host: process.env.DB_HOST || 'localhost',
+            user: process.env.DB_USER || 'root',
+            password: process.env.DB_PASSWORD || '',
+            database: process.env.DB_NAME || 'system_pos',
+            waitForConnections: true,
+            connectionLimit: 10,
+            queueLimit: 0
+        });
+        // Test MySQL Connection
+        mysqlPool.getConnection()
+            .then(conn => {
+            console.log('✅ MySQL Shadow DB connected successfully');
+            conn.release();
+            // Create printer2_audit_log if not exists
+            return mysqlPool.execute(`
+                CREATE TABLE IF NOT EXISTS printer2_audit_log (
+                    id INT AUTO_INCREMENT PRIMARY KEY,
+                    transaction_id VARCHAR(255) NOT NULL,
+                    printer2_receipt_number INT NOT NULL,
+                    print_mode ENUM('auto', 'manual') NOT NULL,
+                    cycle_number INT,
+                    global_counter INT,
+                    printed_at DATETIME NOT NULL,
+                    printed_at_epoch BIGINT NOT NULL,
+                    is_reprint TINYINT DEFAULT 0,
+                    reprint_count INT DEFAULT 0,
+                    completed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    INDEX idx_transaction (transaction_id),
+                    INDEX idx_printed_at (printed_at)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+            `);
+        })
+            .then(() => console.log('✅ MySQL Shadow DB schema verified'))
+            .catch(err => console.error('❌ MySQL Shadow DB connection failed:', err));
         // Schema migration: Add synced_at column if it doesn't exist
         try {
             const schemaCheck = localDb.prepare(`PRAGMA table_info(transactions)`).all();
@@ -572,37 +889,6 @@ function createWindows() {
         team_id INTEGER
       );
       
-      CREATE TABLE IF NOT EXISTS deals (
-        id INTEGER PRIMARY KEY,
-        contact_id INTEGER NOT NULL,
-        user_id INTEGER NOT NULL,
-        business_id INTEGER NOT NULL,
-        activity_date TEXT NOT NULL,
-        product_type TEXT NOT NULL,
-        product_id INTEGER,
-        motorcycle_product_id INTEGER,
-        sales_pipeline_stage TEXT NOT NULL,
-        financing_company TEXT,
-        note TEXT,
-        notes TEXT,
-        created_at TEXT,
-        updated_at INTEGER,
-        team_id INTEGER,
-        followup_count INTEGER DEFAULT 0
-      );
-      
-      CREATE TABLE IF NOT EXISTS deal_products (
-        id INTEGER PRIMARY KEY,
-        deal_id INTEGER NOT NULL,
-        product_id INTEGER NOT NULL,
-        quantity INTEGER DEFAULT 1,
-        unit_price REAL,
-        total_price REAL,
-        notes TEXT,
-        created_at TEXT,
-        updated_at INTEGER
-      );
-      
       CREATE TABLE IF NOT EXISTS teams (
         id INTEGER PRIMARY KEY,
         name TEXT NOT NULL,
@@ -652,22 +938,6 @@ function createWindows() {
       CREATE TABLE IF NOT EXISTS pekerjaan (
         id INTEGER PRIMARY KEY,
         nama_pekerjaan TEXT UNIQUE NOT NULL,
-        created_at TEXT,
-        updated_at INTEGER
-      );
-      
-      CREATE TABLE IF NOT EXISTS kartu_keluarga (
-        id INTEGER PRIMARY KEY,
-        no_kk TEXT UNIQUE NOT NULL,
-        created_at TEXT,
-        updated_at INTEGER
-      );
-      
-      CREATE TABLE IF NOT EXISTS leasing_companies (
-        id INTEGER PRIMARY KEY,
-        name TEXT NOT NULL,
-        description TEXT,
-        is_active INTEGER DEFAULT 1,
         created_at TEXT,
         updated_at INTEGER
       );
@@ -819,12 +1089,19 @@ function createWindows() {
       CREATE TABLE IF NOT EXISTS category2 (
         id INTEGER PRIMARY KEY,
         name TEXT UNIQUE NOT NULL,
-        business_id INTEGER,
         description TEXT,
         display_order INTEGER DEFAULT 0,
         is_active INTEGER DEFAULT 1,
         created_at TEXT,
-        updated_at INTEGER,
+        updated_at INTEGER
+      );
+      
+      -- Junction table for category2 to businesses (new multi-business support)
+      CREATE TABLE IF NOT EXISTS category2_businesses (
+        category2_id INTEGER NOT NULL,
+        business_id INTEGER NOT NULL,
+        PRIMARY KEY (category2_id, business_id),
+        FOREIGN KEY (category2_id) REFERENCES category2(id) ON DELETE CASCADE,
         FOREIGN KEY (business_id) REFERENCES businesses(id) ON DELETE CASCADE
       );
       
@@ -972,10 +1249,6 @@ function createWindows() {
       CREATE INDEX IF NOT EXISTS idx_products_business ON products(business_id);
       CREATE INDEX IF NOT EXISTS idx_ingredients_business ON ingredients(business_id);
       CREATE INDEX IF NOT EXISTS idx_contacts_team ON contacts(team_id);
-      CREATE INDEX IF NOT EXISTS idx_deals_contact ON deals(contact_id);
-      CREATE INDEX IF NOT EXISTS idx_deals_user ON deals(user_id);
-      CREATE INDEX IF NOT EXISTS idx_deals_business ON deals(business_id);
-      CREATE INDEX IF NOT EXISTS idx_deal_products_deal ON deal_products(deal_id);
       CREATE INDEX IF NOT EXISTS idx_users_organization ON users(organization_id);
       CREATE INDEX IF NOT EXISTS idx_teams_organization ON teams(organization_id);
       
@@ -1036,7 +1309,10 @@ function createWindows() {
       
       CREATE INDEX IF NOT EXISTS idx_category2_active ON category2(is_active);
       CREATE INDEX IF NOT EXISTS idx_category2_display_order ON category2(display_order);
-      CREATE INDEX IF NOT EXISTS idx_category2_business_id ON category2(business_id);
+      
+      -- Indexes for category2_businesses junction table
+      CREATE INDEX IF NOT EXISTS idx_category2_businesses_category2 ON category2_businesses(category2_id);
+      CREATE INDEX IF NOT EXISTS idx_category2_businesses_business ON category2_businesses(business_id);
       
       CREATE INDEX IF NOT EXISTS idx_cl_accounts_code ON cl_accounts(account_code);
       CREATE INDEX IF NOT EXISTS idx_cl_accounts_active ON cl_accounts(is_active);
@@ -1069,16 +1345,36 @@ function createWindows() {
         last_sync_attempt INTEGER
       );
       
+      -- System POS queue for transactions printed to Printer 2 (receiptize)
+      CREATE TABLE IF NOT EXISTS system_pos_queue (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        transaction_id TEXT NOT NULL UNIQUE,
+        queued_at INTEGER NOT NULL,
+        synced_at INTEGER,
+        retry_count INTEGER DEFAULT 0,
+        last_error TEXT
+      );
+      
       -- Indexes for offline sync performance
       CREATE INDEX IF NOT EXISTS idx_offline_transactions_sync ON offline_transactions(sync_status);
       CREATE INDEX IF NOT EXISTS idx_offline_transactions_created ON offline_transactions(created_at);
+      CREATE INDEX IF NOT EXISTS idx_system_pos_queue_sync ON system_pos_queue(synced_at);
+      CREATE INDEX IF NOT EXISTS idx_system_pos_queue_transaction ON system_pos_queue(transaction_id);
     `);
             console.log('✅ SQLite database initialized successfully');
             console.log('📊 Database file location:', dbPath);
             // Initialize printer management service
             if (localDb) {
-                printerService = new printerManagement_1.PrinterManagementService(localDb);
-                console.log('✅ Printer Management Service initialized');
+                try {
+                    printerService = new printerManagement_1.PrinterManagementService(localDb, mysqlPool);
+                    console.log('✅ Printer Management Service initialized with Shadow DB support');
+                }
+                catch (printerServiceError) {
+                    console.error('❌ Failed to initialize Printer Management Service:', printerServiceError);
+                }
+            }
+            else {
+                console.error('❌ localDb is null, cannot initialize Printer Management Service');
             }
             // Migrate slideshow images from /public/ to userData on first run
             try {
@@ -1087,13 +1383,13 @@ function createWindows() {
                 if (fs.existsSync(publicSlideshowPath)) {
                     const existingFiles = fs.readdirSync(slideshowPath);
                     const imageExtensions = ['.jpg', '.jpeg', '.png', '.webp', '.gif'];
-                    const existingImages = existingFiles.filter(file => {
+                    const existingImages = existingFiles.filter((file) => {
                         const ext = path.extname(file).toLowerCase();
                         return imageExtensions.includes(ext);
                     });
                     if (existingImages.length === 0) {
                         const publicFiles = fs.readdirSync(publicSlideshowPath);
-                        const imagesToMigrate = publicFiles.filter(file => {
+                        const imagesToMigrate = publicFiles.filter((file) => {
                             const ext = path.extname(file).toLowerCase();
                             return imageExtensions.includes(ext);
                         });
@@ -1172,8 +1468,17 @@ function createWindows() {
         }
     }
     catch (error) {
-        console.error('❌ Failed to initialize SQLite:', error);
-        localDb = null;
+        originalConsoleError('❌ Failed to initialize SQLite:', error);
+        // Only reset localDb if it wasn't successfully opened
+        // If database was opened but later operations failed, keep it available
+        if (!localDb) {
+            originalConsoleError('❌ Database was never opened, localDb is null');
+        }
+        else {
+            originalConsoleError('⚠️ Database was opened but later initialization failed - keeping database available');
+            originalConsoleError('⚠️ Error details:', error);
+        }
+        // Don't reset localDb here - let it remain if it was successfully opened
     }
     // Get all displays
     const displays = electron_1.screen.getAllDisplays();
@@ -1430,6 +1735,21 @@ function createWindows() {
             let errorCount = 0;
             for (const r of data) {
                 try {
+                    // Check if product has any platform prices (for online tabs)
+                    const hasPlatformPrice = (r.harga_shopeefood != null && r.harga_shopeefood !== undefined) ||
+                        (r.harga_gofood != null && r.harga_gofood !== undefined) ||
+                        (r.harga_grabfood != null && r.harga_grabfood !== undefined) ||
+                        (r.harga_tiktok != null && r.harga_tiktok !== undefined) ||
+                        (r.harga_qpon != null && r.harga_qpon !== undefined) ||
+                        (r.harga_online != null && r.harga_online !== undefined);
+                    // Skip products with NULL harga_jual ONLY if they also have no platform prices
+                    // If they have platform prices, we'll use harga_jual = 0 as fallback so they show in online tabs
+                    if ((r.harga_jual == null || r.harga_jual === undefined) && !hasPlatformPrice) {
+                        console.log(`⏭️ [PRODUCTS UPSERT] Skipping product ${r.id} (${r.nama}) - harga_jual is NULL and no platform prices`);
+                        continue;
+                    }
+                    // Use 0 as fallback for harga_jual if NULL but product has platform prices
+                    const hargaJual = (r.harga_jual != null && r.harga_jual !== undefined) ? r.harga_jual : 0;
                     // Map MySQL columns to SQLite columns
                     const kategori = r.kategori || r.category1_name || '';
                     let category2Id = r.category2_id ? Number(r.category2_id) : null;
@@ -1449,7 +1769,7 @@ function createWindows() {
                         }
                     }
                     const isBundle = r.is_bundle === 1 || r.is_bundle === true ? 1 : 0;
-                    stmt.run(r.id, r.business_id, r.menu_code, r.nama, r.satuan || '', kategori, null, category2Id, category2Name, r.keterangan || null, r.harga_beli || null, r.ppn || null, r.harga_jual, r.harga_khusus || null, r.harga_online || null, r.harga_qpon || null, r.harga_gofood || null, r.harga_grabfood || null, r.harga_shopeefood || null, r.harga_tiktok || null, r.fee_kerja || null, r.status, isBundle, Date.now());
+                    stmt.run(r.id, r.business_id, r.menu_code, r.nama, r.satuan || '', kategori, null, category2Id, category2Name, r.keterangan || null, r.harga_beli || null, r.ppn || null, hargaJual, r.harga_khusus || null, r.harga_online || null, r.harga_qpon || null, r.harga_gofood || null, r.harga_grabfood || null, r.harga_shopeefood || null, r.harga_tiktok || null, r.fee_kerja || null, r.status, isBundle, Date.now());
                     successCount++;
                 }
                 catch (error) {
@@ -2225,6 +2545,20 @@ function createWindows() {
         return { success: true };
     });
     electron_1.ipcMain.handle('localdb-get-transactions', async (event, businessId, limit) => {
+        // Diagnostic logging
+        const diagLogPathTx = path.join(os.homedir(), 'AppData', 'Roaming', 'marviano-pos', 'path-diagnostic.log');
+        try {
+            const txCount = localDb ? localDb.prepare('SELECT COUNT(*) as cnt FROM transactions').get().cnt : 'DB NULL';
+            const dbFilePath = path.join(os.homedir(), 'AppData', 'Roaming', 'marviano-pos', 'pos-offline.db');
+            const dbStats = fs.existsSync(dbFilePath) ? fs.statSync(dbFilePath) : null;
+            fs.appendFileSync(diagLogPathTx, `${new Date().toISOString()} [GET-TX] businessId=${businessId}, limit=${limit}, totalTxInDb=${txCount}, dbFileSize=${dbStats?.size || 'N/A'}\n`);
+        }
+        catch (e) {
+            try {
+                fs.appendFileSync(diagLogPathTx, `${new Date().toISOString()} [GET-TX] ERROR: ${e}\n`);
+            }
+            catch (e2) { }
+        }
         if (!localDb)
             return [];
         let query = `
@@ -2257,7 +2591,13 @@ function createWindows() {
             params.push(limit);
         }
         const stmt = localDb.prepare(query);
-        return stmt.all(...params);
+        const results = stmt.all(...params);
+        // Diagnostic logging
+        try {
+            fs.appendFileSync(diagLogPathTx, `${new Date().toISOString()} [GET-TX] Returned ${results.length} transactions\n`);
+        }
+        catch (e) { }
+        return results;
     });
     const ensureIsoString = (value) => {
         if (!value)
@@ -2368,58 +2708,6 @@ function createWindows() {
         }
     });
     // Delete transactions by user email (both offline and online)
-    electron_1.ipcMain.handle('localdb-delete-transactions-by-email', async (event, payload) => {
-        if (!localDb)
-            return { success: false, deleted: 0, error: 'Database not available' };
-        const userEmail = payload?.userEmail;
-        if (!userEmail)
-            return { success: false, deleted: 0, error: 'User email is required' };
-        try {
-            // First, get user ID from email
-            const userStmt = localDb.prepare('SELECT id FROM users WHERE email = ? LIMIT 1');
-            const user = userStmt.get(userEmail);
-            if (!user) {
-                return { success: false, deleted: 0, error: `User with email ${userEmail} not found` };
-            }
-            const userId = user.id;
-            console.log(`🗑️ [DELETE BY EMAIL] Found user ID ${userId} for email ${userEmail}`);
-            // Delete printer audit logs first
-            const delP1 = localDb.prepare(`
-        DELETE FROM printer1_audit_log 
-        WHERE transaction_id IN (
-          SELECT id FROM transactions WHERE user_id = ?
-        )
-      `);
-            const p1Result = delP1.run(userId);
-            console.log(`🗑️ [DELETE BY EMAIL] Deleted ${p1Result.changes} printer1 audit log entries`);
-            const delP2 = localDb.prepare(`
-        DELETE FROM printer2_audit_log 
-        WHERE transaction_id IN (
-          SELECT id FROM transactions WHERE user_id = ?
-        )
-      `);
-            const p2Result = delP2.run(userId);
-            console.log(`🗑️ [DELETE BY EMAIL] Deleted ${p2Result.changes} printer2 audit log entries`);
-            // Delete transaction items first (foreign key constraint)
-            const delItemsStmt = localDb.prepare(`
-        DELETE FROM transaction_items 
-        WHERE transaction_id IN (
-          SELECT id FROM transactions WHERE user_id = ?
-        )
-      `);
-            const itemsResult = delItemsStmt.run(userId);
-            console.log(`🗑️ [DELETE BY EMAIL] Deleted ${itemsResult.changes} transaction items`);
-            // Delete transactions
-            const delTxStmt = localDb.prepare('DELETE FROM transactions WHERE user_id = ?');
-            const txResult = delTxStmt.run(userId);
-            console.log(`🗑️ [DELETE BY EMAIL] Deleted ${txResult.changes} transactions for user ${userEmail} (ID: ${userId})`);
-            return { success: true, deleted: txResult.changes, deletedItems: itemsResult.changes };
-        }
-        catch (error) {
-            console.error('❌ [DELETE BY EMAIL] Failed to delete transactions:', error);
-            return { success: false, deleted: 0, error: error instanceof Error ? error.message : 'Unknown error' };
-        }
-    });
     // Delete transaction items permanently
     electron_1.ipcMain.handle('localdb-delete-transaction-items', async (event, payload) => {
         if (!localDb)
@@ -2483,6 +2771,96 @@ function createWindows() {
             }
         }
         return transactions;
+    });
+    // Delete unsynced transactions (data offline yang akan diunggah)
+    electron_1.ipcMain.handle('localdb-delete-unsynced-transactions', async (event, businessId) => {
+        if (!localDb) {
+            console.error('❌ [SYNC] Local database not available');
+            return { success: false, error: 'Local database not available' };
+        }
+        try {
+            console.log(`🗑️ [SYNC] Deleting unsynced transactions, businessId: ${businessId || 'all'}`);
+            // Temporarily disable foreign key constraints for deletion
+            localDb.pragma('foreign_keys = OFF');
+            // Build WHERE clause for filtering
+            let whereClause = 'synced_at IS NULL';
+            const params = [];
+            if (businessId) {
+                whereClause += ' AND business_id = ?';
+                params.push(businessId);
+            }
+            // Step 1: Delete transaction_item_customization_options (depends on customizations)
+            const deleteOptionsQuery = `
+        DELETE FROM transaction_item_customization_options
+        WHERE transaction_item_customization_id IN (
+          SELECT tic.id FROM transaction_item_customizations tic
+          INNER JOIN transaction_items ti ON tic.transaction_item_id = ti.id
+          INNER JOIN transactions t ON ti.transaction_id = t.id
+          WHERE ${whereClause}
+        )
+      `;
+            const optionsStmt = localDb.prepare(deleteOptionsQuery);
+            const optionsResult = optionsStmt.run(...params);
+            console.log(`🗑️ [SYNC] Deleted ${optionsResult.changes} transaction_item_customization_options`);
+            // Step 2: Delete transaction_item_customizations (depends on transaction_items)
+            const deleteCustomizationsQuery = `
+        DELETE FROM transaction_item_customizations
+        WHERE transaction_item_id IN (
+          SELECT id FROM transaction_items
+          WHERE transaction_id IN (
+            SELECT id FROM transactions WHERE ${whereClause}
+          )
+        )
+      `;
+            const customizationsStmt = localDb.prepare(deleteCustomizationsQuery);
+            const customizationsResult = customizationsStmt.run(...params);
+            console.log(`🗑️ [SYNC] Deleted ${customizationsResult.changes} transaction_item_customizations`);
+            // Step 3: Delete transaction_items (depends on transactions)
+            const deleteItemsQuery = `
+        DELETE FROM transaction_items 
+        WHERE transaction_id IN (
+          SELECT id FROM transactions WHERE ${whereClause}
+        )
+      `;
+            const itemsStmt = localDb.prepare(deleteItemsQuery);
+            const itemsResult = itemsStmt.run(...params);
+            console.log(`🗑️ [SYNC] Deleted ${itemsResult.changes} transaction_items`);
+            // Step 4: Delete transaction_refunds (uses transaction_uuid, not foreign key but should be deleted)
+            const deleteRefundsQuery = `
+        DELETE FROM transaction_refunds
+        WHERE transaction_uuid IN (
+          SELECT id FROM transactions WHERE ${whereClause}
+        )
+      `;
+            const refundsStmt = localDb.prepare(deleteRefundsQuery);
+            const refundsResult = refundsStmt.run(...params);
+            console.log(`🗑️ [SYNC] Deleted ${refundsResult.changes} transaction_refunds`);
+            // Step 5: Finally delete transactions
+            const deleteTransactionsQuery = `DELETE FROM transactions WHERE ${whereClause}`;
+            const transactionsStmt = localDb.prepare(deleteTransactionsQuery);
+            const transactionsResult = transactionsStmt.run(...params);
+            console.log(`✅ [SYNC] Deleted ${transactionsResult.changes} unsynced transactions`);
+            // Re-enable foreign key constraints
+            localDb.pragma('foreign_keys = ON');
+            return {
+                success: true,
+                deletedCount: transactionsResult.changes
+            };
+        }
+        catch (error) {
+            // Re-enable foreign key constraints even on error
+            try {
+                localDb.pragma('foreign_keys = ON');
+            }
+            catch (pragmaError) {
+                console.error('❌ [SYNC] Error re-enabling foreign keys:', pragmaError);
+            }
+            console.error('❌ [SYNC] Error deleting unsynced transactions:', error);
+            return {
+                success: false,
+                error: error instanceof Error ? error.message : String(error)
+            };
+        }
     });
     // Transaction Items
     electron_1.ipcMain.handle('localdb-upsert-transaction-items', async (event, rows) => {
@@ -3227,7 +3605,8 @@ function createWindows() {
             }
             query += ' GROUP BY pm.id, pm.name, pm.code ORDER BY transaction_count DESC';
             const stmt = localDb.prepare(query);
-            return stmt.all(...params);
+            const results = stmt.all(...params);
+            return results;
         }
         catch (error) {
             console.error('Error getting payment breakdown:', error);
@@ -3249,13 +3628,15 @@ function createWindows() {
         INNER JOIN transactions t ON ti.transaction_id = t.id
         INNER JOIN products p ON ti.product_id = p.id
         LEFT JOIN category2 c2_by_id ON p.category2_id = c2_by_id.id
+        LEFT JOIN category2_businesses cb_by_id ON c2_by_id.id = cb_by_id.category2_id AND cb_by_id.business_id = ?
         LEFT JOIN category2 c2_by_name ON p.category2_name = c2_by_name.name AND (p.category2_id IS NULL OR p.category2_id = 0)
+        LEFT JOIN category2_businesses cb_by_name ON c2_by_name.id = cb_by_name.category2_id AND cb_by_name.business_id = ?
         WHERE t.user_id = ? AND t.business_id = ?
         AND datetime(t.created_at) >= datetime(?)
         AND t.status = 'completed'
         AND (p.category2_id IS NOT NULL OR (p.category2_name IS NOT NULL AND p.category2_name != ''))
       `;
-            const params = [userId, businessId, shiftStart];
+            const params = [businessId, businessId, userId, businessId, shiftStart];
             if (shiftEnd) {
                 query += ' AND datetime(t.created_at) <= datetime(?)';
                 params.push(shiftEnd);
@@ -3647,6 +4028,7 @@ function createWindows() {
                                         total_subtotal: 0,
                                         customization_subtotal: 0,
                                         base_subtotal: 0,
+                                        unit_price: 0, // Bundle items don't have individual prices
                                     });
                                 }
                             }
@@ -3712,6 +4094,7 @@ function createWindows() {
             for (const row of rows) {
                 const quantity = Number(row.quantity || 0);
                 const totalPrice = Number(row.total_price || 0);
+                const unitPrice = Number(row.unit_price || 0);
                 const customizationSubtotal = sumCustomizationForRow(row, quantity);
                 let baseSubtotal = totalPrice - customizationSubtotal;
                 if (baseSubtotal < 0) {
@@ -3720,7 +4103,8 @@ function createWindows() {
                 // Determine platform based on product price, not payment method
                 const platformCode = determinePlatform(row);
                 const transactionType = row.transaction_type || 'drinks';
-                const key = `${row.product_id}-${platformCode}-${transactionType}`;
+                // Include unit_price in the key to split products with different prices into separate rows
+                const key = `${row.product_id}-${platformCode}-${transactionType}-${unitPrice}`;
                 const existing = aggregate.get(key);
                 if (existing) {
                     existing.total_quantity += quantity;
@@ -3739,13 +4123,16 @@ function createWindows() {
                         total_subtotal: totalPrice,
                         customization_subtotal: customizationSubtotal,
                         base_subtotal: baseSubtotal,
+                        unit_price: unitPrice,
                     });
                 }
             }
             const regularProducts = Array.from(aggregate.values()).map(product => {
                 const quantity = product.total_quantity || 0;
                 const baseSubtotal = product.base_subtotal || 0;
-                const baseUnitPrice = quantity > 0 ? baseSubtotal / quantity : 0;
+                // Use the stored unit_price instead of calculating average
+                // This ensures products with different prices are split into separate rows
+                const baseUnitPrice = product.unit_price || (quantity > 0 ? baseSubtotal / quantity : 0);
                 return {
                     ...product,
                     base_unit_price: baseUnitPrice,
@@ -3923,29 +4310,53 @@ function createWindows() {
         return stmt.all();
     });
     // Category2
-    electron_1.ipcMain.handle('localdb-upsert-category2', async (event, rows) => {
+    electron_1.ipcMain.handle('localdb-upsert-category2', async (event, rows, junctionTableData) => {
         if (!localDb)
             return { success: false };
-        const tx = localDb.transaction((data) => {
-            const stmt = localDb.prepare(`INSERT INTO category2 (
-        id, name, business_id, description, display_order, is_active, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        const db = localDb; // Capture in const for TypeScript
+        const tx = db.transaction((data, junctionData) => {
+            // Upsert category2 records (business_id column removed - using junction table only)
+            const stmt = db.prepare(`INSERT INTO category2 (
+        id, name, description, display_order, is_active, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET
-        name=excluded.name, business_id=excluded.business_id, description=excluded.description,
+        name=excluded.name, description=excluded.description,
         display_order=excluded.display_order, is_active=excluded.is_active,
         created_at=excluded.created_at, updated_at=excluded.updated_at`);
             for (const r of data) {
-                stmt.run(r.id, r.name, r.business_id, r.description, r.display_order || 0, r.is_active || 1, r.created_at, Date.now());
+                stmt.run(r.id, r.name, r.description, r.display_order || 0, r.is_active || 1, r.created_at, Date.now());
+            }
+            // Upsert junction table relationships (REQUIRED - no fallback)
+            if (junctionData && junctionData.length > 0) {
+                const junctionStmt = db.prepare(`
+          INSERT OR REPLACE INTO category2_businesses (category2_id, business_id)
+          VALUES (?, ?)
+        `);
+                for (const rel of junctionData) {
+                    junctionStmt.run(rel.category2_id, rel.business_id);
+                }
+                console.log(`✅ [CATEGORY2 UPSERT] Stored ${junctionData.length} category2-business relationships`);
+            }
+            else {
+                console.warn(`⚠️ [CATEGORY2 UPSERT] No junction table data provided - category2 records will not be associated with any business`);
             }
         });
-        tx(rows);
+        tx(rows, junctionTableData);
         return { success: true };
     });
     electron_1.ipcMain.handle('localdb-get-category2', async (event, businessId) => {
         if (!localDb)
             return [];
         if (businessId) {
-            const stmt = localDb.prepare('SELECT * FROM category2 WHERE business_id = ? AND is_active = 1 ORDER BY display_order ASC, name ASC');
+            // Use junction table for multi-business support (junction table only - no fallback)
+            const stmt = localDb.prepare(`
+        SELECT DISTINCT c2.*
+        FROM category2 c2
+        INNER JOIN category2_businesses cb ON c2.id = cb.category2_id
+        WHERE c2.is_active = 1 
+          AND cb.business_id = ?
+        ORDER BY c2.display_order ASC, c2.name ASC
+      `);
             return stmt.all(businessId);
         }
         else {
@@ -4040,13 +4451,17 @@ function createWindows() {
     });
     // Get or increment printer counter
     electron_1.ipcMain.handle('get-printer-counter', async (event, printerType, businessId, increment = false) => {
-        if (!printerService)
+        if (!printerService) {
+            console.error(`❌ [IPC] Printer service not available for getPrinterCounter (${printerType}, businessId: ${businessId}, increment: ${increment})`);
             return { success: false, counter: 0 };
+        }
         try {
             const counter = printerService.getPrinterCounter(printerType, businessId, increment);
+            console.log(`📊 [IPC] getPrinterCounter returned: ${counter} (${printerType}, businessId: ${businessId}, increment: ${increment})`);
             return { success: true, counter };
         }
         catch (error) {
+            console.error(`❌ [IPC] Error in getPrinterCounter (${printerType}, businessId: ${businessId}, increment: ${increment}):`, error);
             return { success: false, counter: 0, error: String(error) };
         }
     });
@@ -4094,9 +4509,13 @@ function createWindows() {
     });
     // Get Printer 2 audit log
     electron_1.ipcMain.handle('get-printer2-audit-log', async (event, fromDate, toDate, limit) => {
-        if (!printerService)
+        console.log(`📋 [IPC] get-printer2-audit-log called: fromDate=${fromDate}, toDate=${toDate}, limit=${limit}, printerService=${!!printerService}`);
+        if (!printerService) {
+            console.log('❌ [IPC] printerService is null!');
             return { success: false, entries: [] };
+        }
         const entries = printerService.getPrinter2AuditLog(fromDate, toDate, limit || 100);
+        console.log(`📋 [IPC] get-printer2-audit-log returning ${entries.length} entries`);
         return { success: true, entries };
     });
     // Log Printer 1 print
@@ -4106,11 +4525,186 @@ function createWindows() {
         const result = printerService.logPrinter1Print(transactionId, printer1ReceiptNumber, globalCounter, isReprint, reprintCount);
         return { success: result };
     });
+    // Queue transaction for System POS sync (when printed to Printer 2)
+    electron_1.ipcMain.handle('queue-transaction-for-system-pos', async (event, transactionId) => {
+        if (!localDb) {
+            console.error('❌ [SYSTEM POS] Local database not available');
+            return { success: false, error: 'Local database not available' };
+        }
+        try {
+            // Check if already queued or synced
+            const existing = localDb.prepare('SELECT id, synced_at FROM system_pos_queue WHERE transaction_id = ?').get(transactionId);
+            if (existing) {
+                if (existing.synced_at) {
+                    console.log(`✅ [SYSTEM POS] Transaction ${transactionId} already synced`);
+                    return { success: true, alreadySynced: true };
+                }
+                else {
+                    console.log(`⚠️ [SYSTEM POS] Transaction ${transactionId} already queued`);
+                    return { success: true, alreadyQueued: true };
+                }
+            }
+            // Insert into queue
+            const now = Date.now();
+            localDb.prepare('INSERT INTO system_pos_queue (transaction_id, queued_at) VALUES (?, ?)').run(transactionId, now);
+            console.log(`✅ [SYSTEM POS] Queued transaction ${transactionId} for System POS sync`);
+            return { success: true };
+        }
+        catch (error) {
+            console.error('❌ [SYSTEM POS] Error queueing transaction:', error);
+            return { success: false, error: String(error) };
+        }
+    });
+    // Get queued transactions for System POS sync
+    electron_1.ipcMain.handle('get-system-pos-queue', async () => {
+        if (!localDb) {
+            return { success: false, queue: [] };
+        }
+        try {
+            // Get ALL queue entries (not just pending) for status checking
+            const allQueue = localDb.prepare('SELECT id, transaction_id, queued_at, synced_at, retry_count, last_error FROM system_pos_queue ORDER BY queued_at DESC').all();
+            return { success: true, queue: allQueue };
+        }
+        catch (error) {
+            console.error('❌ [SYSTEM POS] Error getting queue:', error);
+            return { success: false, queue: [] };
+        }
+    });
+    // Mark transaction as synced in System POS queue
+    electron_1.ipcMain.handle('mark-system-pos-synced', async (event, transactionId) => {
+        if (!localDb) {
+            return { success: false };
+        }
+        try {
+            const now = Date.now();
+            localDb.prepare('UPDATE system_pos_queue SET synced_at = ? WHERE transaction_id = ?').run(now, transactionId);
+            console.log(`✅ [SYSTEM POS] Marked transaction ${transactionId} as synced`);
+            return { success: true };
+        }
+        catch (error) {
+            console.error('❌ [SYSTEM POS] Error marking as synced:', error);
+            return { success: false };
+        }
+    });
+    // Mark transaction sync failed (increment retry count)
+    electron_1.ipcMain.handle('mark-system-pos-failed', async (event, transactionId, error) => {
+        if (!localDb) {
+            return { success: false };
+        }
+        try {
+            localDb.prepare('UPDATE system_pos_queue SET retry_count = retry_count + 1, last_error = ? WHERE transaction_id = ?').run(error.substring(0, 500), transactionId);
+            console.log(`⚠️ [SYSTEM POS] Marked transaction ${transactionId} sync as failed (retry count incremented)`);
+            return { success: true };
+        }
+        catch (error) {
+            console.error('❌ [SYSTEM POS] Error marking as failed:', error);
+            return { success: false };
+        }
+    });
+    // Reset retry count for system-pos transactions (for retrying failed transactions)
+    electron_1.ipcMain.handle('reset-system-pos-retry-count', async (event, transactionIds) => {
+        if (!localDb) {
+            return { success: false };
+        }
+        try {
+            if (transactionIds && transactionIds.length > 0) {
+                // Reset specific transactions
+                const placeholders = transactionIds.map(() => '?').join(',');
+                const result = localDb.prepare(`UPDATE system_pos_queue SET retry_count = 0, last_error = NULL WHERE transaction_id IN (${placeholders})`).run(...transactionIds);
+                console.log(`🔄 [SYSTEM POS] Reset retry count for ${result.changes} transaction(s)`);
+                return { success: true, count: result.changes };
+            }
+            else {
+                // Reset all failed transactions (retry_count >= 5)
+                const result = localDb.prepare('UPDATE system_pos_queue SET retry_count = 0, last_error = NULL WHERE retry_count >= 5').run();
+                console.log(`🔄 [SYSTEM POS] Reset retry count for ${result.changes} failed transaction(s)`);
+                return { success: true, count: result.changes };
+            }
+        }
+        catch (error) {
+            console.error('❌ [SYSTEM POS] Error resetting retry count:', error);
+            return { success: false };
+        }
+    });
+    // Debug: Check transaction sync status for System POS
+    electron_1.ipcMain.handle('debug-system-pos-transaction', async (event, transactionId) => {
+        if (!localDb) {
+            return { success: false, error: 'Local database not available' };
+        }
+        try {
+            // Check if transaction exists in local DB
+            const transaction = localDb.prepare('SELECT id, business_id, user_id, created_at, synced_at FROM transactions WHERE id = ?').get(transactionId);
+            // Check queue status
+            const queueEntry = localDb.prepare('SELECT id, transaction_id, queued_at, synced_at, retry_count, last_error FROM system_pos_queue WHERE transaction_id = ?').get(transactionId);
+            return {
+                success: true,
+                transaction: transaction || null,
+                queue: queueEntry || null,
+                existsInLocalDb: !!transaction,
+                isQueued: !!queueEntry,
+                isSynced: queueEntry?.synced_at !== null,
+                retryCount: queueEntry?.retry_count || 0,
+                lastError: queueEntry?.last_error || null,
+            };
+        }
+        catch (error) {
+            console.error('❌ [SYSTEM POS DEBUG] Error checking transaction:', error);
+            return { success: false, error: String(error) };
+        }
+    });
+    // Repopulate System POS queue (Force Resync)
+    electron_1.ipcMain.handle('repopulate-system-pos-queue', async (event, options = {}) => {
+        if (!localDb) {
+            return { success: false, error: 'Local database not available' };
+        }
+        try {
+            const { days } = options;
+            console.log(`🔄 [SYSTEM POS] Repopulating queue (days: ${days || 'ALL'})...`);
+            let query = 'SELECT id, created_at FROM transactions';
+            const params = [];
+            if (days && days > 0) {
+                const cutoffDate = new Date();
+                cutoffDate.setDate(cutoffDate.getDate() - days);
+                query += ' WHERE created_at >= ?';
+                params.push(cutoffDate.toISOString()); // Assuming ISO string storage
+            }
+            const transactions = localDb.prepare(query).all(...params);
+            if (transactions.length === 0) {
+                return { success: true, count: 0, message: 'No transactions found in the specified period' };
+            }
+            console.log(`🔄 [SYSTEM POS] Found ${transactions.length} transactions to process`);
+            const now = Date.now();
+            let queuedCount = 0;
+            const insertStmt = localDb.prepare('INSERT OR IGNORE INTO system_pos_queue (transaction_id, queued_at) VALUES (?, ?)');
+            // If it exists, we want to reset it so it syncs again.
+            // We'll update regardless of whether it was inserted or not, to be safe and ensure sync.
+            const updateStmt = localDb.prepare('UPDATE system_pos_queue SET synced_at = NULL, retry_count = 0, last_error = NULL WHERE transaction_id = ?');
+            const queueTransaction = localDb.transaction((txs) => {
+                for (const tx of txs) {
+                    insertStmt.run(tx.id, now);
+                    // Always reset status to ensure partial syncs are fixed
+                    updateStmt.run(tx.id);
+                    queuedCount++;
+                }
+            });
+            queueTransaction(transactions);
+            console.log(`✅ [SYSTEM POS] Successfully queued/reset ${queuedCount} transactions`);
+            return { success: true, count: queuedCount };
+        }
+        catch (error) {
+            console.error('❌ [SYSTEM POS] Error repopulating queue:', error);
+            return { success: false, error: String(error) };
+        }
+    });
     // Get Printer 1 audit log
     electron_1.ipcMain.handle('get-printer1-audit-log', async (event, fromDate, toDate, limit) => {
-        if (!printerService)
+        console.log(`📋 [IPC] get-printer1-audit-log called: fromDate=${fromDate}, toDate=${toDate}, limit=${limit}, printerService=${!!printerService}`);
+        if (!printerService) {
+            console.log('❌ [IPC] printerService is null!');
             return { success: false, entries: [] };
+        }
         const entries = printerService.getPrinter1AuditLog(fromDate, toDate, limit || 100);
+        console.log(`📋 [IPC] get-printer1-audit-log returning ${entries.length} entries`);
         return { success: true, entries };
     });
     // Get unsynced printer audits (both tables)
@@ -4217,6 +4811,19 @@ function createWindows() {
         catch (error) {
             console.error('Error upserting printer audits:', error);
             return { success: false, error: String(error) };
+        }
+    });
+    // Get all printer daily counters
+    electron_1.ipcMain.handle('localdb-get-all-printer-daily-counters', async () => {
+        if (!localDb)
+            return [];
+        try {
+            const stmt = localDb.prepare('SELECT printer_type, business_id, date, counter FROM printer_daily_counters ORDER BY business_id, printer_type, date');
+            return stmt.all();
+        }
+        catch (error) {
+            console.error('Error getting printer daily counters:', error);
+            return [];
         }
     });
     // Upsert printer daily counters downloaded from cloud
@@ -4617,6 +5224,14 @@ electron_1.app.whenReady().then(() => {
         }
     });
     createWindows();
+    // Start WebSocket server (default port 19967)
+    const wsResult = websocketServer_1.websocketServer.start(19967);
+    if (wsResult.success) {
+        console.log(`✅ WebSocket server started on port ${wsResult.port}`);
+    }
+    else {
+        console.error(`❌ Failed to start WebSocket server: ${wsResult.error}`);
+    }
     electron_1.app.on('activate', () => {
         // On macOS, re-create windows when the dock icon is clicked
         if (electron_1.BrowserWindow.getAllWindows().length === 0) {
@@ -4626,15 +5241,22 @@ electron_1.app.whenReady().then(() => {
 });
 // Quit when all windows are closed
 electron_1.app.on('window-all-closed', () => {
+    // Stop WebSocket server before quitting
+    websocketServer_1.websocketServer.stop();
     // On macOS, keep the app running even when all windows are closed
     if (process.platform !== 'darwin') {
         electron_1.app.quit();
     }
 });
+// Stop WebSocket server on app quit
+electron_1.app.on('before-quit', () => {
+    websocketServer_1.websocketServer.stop();
+});
 // IPC handlers for POS-specific functionality
 electron_1.ipcMain.handle('print-receipt', async (event, data) => {
     try {
         console.log('📄 Printing receipt - Full data received:', JSON.stringify(data, null, 2));
+        console.log(`🔍 [PRINT-RECEIPT] Counter values: printer1Counter=${data.printer1Counter}, printer2Counter=${data.printer2Counter}, globalCounter=${data.globalCounter}, printerType=${data.printerType}`);
         let printerName = data.printerName;
         let marginAdjustMm = typeof data.marginAdjustMm === 'number' && !Number.isNaN(data.marginAdjustMm)
             ? data.marginAdjustMm
@@ -5649,8 +6271,30 @@ function generateReceiptHTML(data, businessName, options) {
         const isReceiptize = data.printerType === 'receiptizePrinter';
         // Prioritize per-printer counter over globalCounter to ensure each printer has its own counter
         const perPrinterCounter = isReceiptize ? data.printer2Counter : data.printer1Counter;
-        const displayCounter = perPrinterCounter ?? data.globalCounter ?? data.tableNumber ?? '01';
+        // Debug: Log all available counter values
+        console.log(`📄 [RECEIPT] Counter selection - printerType: ${data.printerType}, isReceiptize: ${isReceiptize}`);
+        console.log(`📄 [RECEIPT] Available counters - printer1Counter: ${data.printer1Counter} (type: ${typeof data.printer1Counter}), printer2Counter: ${data.printer2Counter} (type: ${typeof data.printer2Counter}), globalCounter: ${data.globalCounter}, tableNumber: ${data.tableNumber}`);
+        console.log(`📄 [RECEIPT] Selected perPrinterCounter: ${perPrinterCounter} (type: ${typeof perPrinterCounter})`);
+        // Use per-printer counter if it's a valid number > 0, otherwise fall back
+        let displayCounter;
+        if (typeof perPrinterCounter === 'number' && perPrinterCounter > 0) {
+            displayCounter = perPrinterCounter;
+            console.log(`✅ [RECEIPT] Using per-printer counter: ${displayCounter}`);
+        }
+        else if (typeof data.globalCounter === 'number' && data.globalCounter > 0) {
+            displayCounter = data.globalCounter;
+            console.log(`⚠️ [RECEIPT] Per-printer counter invalid, using globalCounter: ${displayCounter}`);
+        }
+        else if (data.tableNumber) {
+            displayCounter = data.tableNumber;
+            console.log(`⚠️ [RECEIPT] Using tableNumber as fallback: ${displayCounter}`);
+        }
+        else {
+            displayCounter = '01';
+            console.log(`❌ [RECEIPT] All counters invalid, using default '01'`);
+        }
         const numStr = String(displayCounter).padStart(2, '0');
+        console.log(`📄 [RECEIPT] Final counter display - displayCounter: ${displayCounter}, numStr: ${numStr}, will show: ${transactionDisplay} ${numStr}`);
         return `<div class="transaction-type">${transactionDisplay} ${numStr}</div>`;
     })()}
   
@@ -6547,6 +7191,45 @@ electron_1.ipcMain.handle('open-cash-drawer', async () => {
     // Implement actual cash drawer logic here
     return { success: true };
 });
+// Open production display (kitchen/barista) in fullscreen window
+electron_1.ipcMain.handle('open-production-display', async (event, displayType) => {
+    try {
+        console.log(`🖥️ Opening ${displayType} display in fullscreen...`);
+        const { screen } = require('electron');
+        const primaryDisplay = screen.getPrimaryDisplay();
+        const { width, height } = primaryDisplay.workAreaSize;
+        const displayWindow = new electron_1.BrowserWindow({
+            width: width,
+            height: height,
+            x: 0,
+            y: 0,
+            fullscreen: true,
+            title: `Marviano POS - ${displayType === 'kitchen' ? 'Dapur' : 'Barista'} Display`,
+            webPreferences: {
+                nodeIntegration: false,
+                contextIsolation: true,
+                preload: path.join(__dirname, 'preload.js')
+            }
+        });
+        // Load the display page
+        const displayUrl = isDev
+            ? `http://localhost:3000/${displayType}`
+            : `file://${path.join(__dirname, '../out', displayType, 'index.html')}`;
+        console.log(`📺 Loading ${displayType} display from: ${displayUrl}`);
+        displayWindow.loadURL(displayUrl);
+        // Allow exiting fullscreen with Escape
+        displayWindow.webContents.on('before-input-event', (event, input) => {
+            if (input.key === 'Escape') {
+                displayWindow.close();
+            }
+        });
+        return { success: true, displayType };
+    }
+    catch (error) {
+        console.error(`❌ Failed to open ${displayType} display:`, error);
+        return { success: false, error: String(error) };
+    }
+});
 electron_1.ipcMain.handle('play-sound', async (event, soundType) => {
     // Handle POS sounds
     console.log('Playing sound:', soundType);
@@ -6786,6 +7469,176 @@ electron_1.ipcMain.handle('delete-slideshow-image', async (event, filename) => {
         };
     }
 });
+// Get Shift by UUID
+electron_1.ipcMain.handle('localDbGetShiftByUuid', async (event, shiftUuid) => {
+    if (!localDb)
+        return null;
+    try {
+        const shift = localDb.prepare('SELECT * FROM shifts WHERE uuid_id = ?').get(shiftUuid);
+        return shift || null;
+    }
+    catch (error) {
+        console.error('❌ Error fetching shift by UUID:', error);
+        return null;
+    }
+});
+// Get Printer Audits by Transaction ID
+electron_1.ipcMain.handle('localDbGetPrinterAuditsByTransactionId', async (event, transactionId) => {
+    if (!localDb) {
+        return { printer1: [], printer2: [] };
+    }
+    try {
+        const printer1 = localDb.prepare('SELECT * FROM printer1_audit_log WHERE transaction_id = ?').all(transactionId);
+        const printer2 = localDb.prepare('SELECT * FROM printer2_audit_log WHERE transaction_id = ?').all(transactionId);
+        return { printer1, printer2 };
+    }
+    catch (error) {
+        console.error('❌ Error fetching printer audits:', error);
+        return { printer1: [], printer2: [] };
+    }
+});
+// ============================================================================
+// ADMIN: DELETE TRANSACTIONS BY USER EMAIL OR NULL
+// ============================================================================
+/**
+ * Delete all transactions made by marviano.austin@gmail.com or where user_id is NULL
+ * Manually deletes from all related tables due to SQLite foreign key constraints
+ */
+electron_1.ipcMain.handle('localdb-delete-transactions-by-role', async () => {
+    if (!localDb) {
+        return {
+            success: false,
+            error: 'Local database not available'
+        };
+    }
+    const details = {
+        database: 'Offline SQLite',
+        targetUserIds: [],
+        printer1_audit_log: 0,
+        printer2_audit_log: 0,
+        transaction_items: 0,
+        transactions: 0,
+        success: false,
+        error: null
+    };
+    try {
+        console.log('[CLEANUP] [Offline SQLite] Starting transaction cleanup for marviano.austin@gmail.com and NULL user_id');
+        // Find user ID for marviano.austin@gmail.com
+        const targetUsers = localDb.prepare('SELECT id FROM users WHERE email = ?').all('marviano.austin@gmail.com');
+        const targetUserIds = targetUsers.map(u => u.id);
+        details.targetUserIds = targetUserIds;
+        console.log(`[CLEANUP] [Offline SQLite] Target user IDs: ${targetUserIds.join(', ')}`);
+        // Build WHERE clause for transactions
+        let whereClause = 'WHERE user_id IS NULL';
+        const params = [];
+        if (targetUserIds.length > 0) {
+            whereClause += ` OR user_id IN (${targetUserIds.map(() => '?').join(',')})`;
+            params.push(...targetUserIds);
+        }
+        // Get transaction IDs to delete
+        const transactionsToDelete = localDb.prepare(`SELECT id FROM transactions ${whereClause}`).all(...params);
+        const transactionIds = transactionsToDelete.map(t => t.id);
+        console.log(`[CLEANUP] [Offline SQLite] Found ${transactionIds.length} transactions to delete`);
+        if (transactionIds.length === 0) {
+            details.success = true;
+            console.log(`✅ [CLEANUP] [Offline SQLite] No transactions to delete`);
+            return {
+                success: true,
+                message: 'No transactions found to delete',
+                deleted: 0,
+                deletedItems: 0,
+                details
+            };
+        }
+        // Begin transaction for atomic deletion
+        localDb.prepare('BEGIN TRANSACTION').run();
+        try {
+            // Manual deletion in correct order (child to parent)
+            const placeholders = transactionIds.map(() => '?').join(',');
+            // 1. Delete transaction_item_customization_options
+            // First get customization IDs
+            const customizationIds = localDb.prepare(`
+        SELECT DISTINCT tic.id 
+        FROM transaction_item_customizations tic
+        JOIN transaction_items ti ON tic.transaction_item_id = ti.id
+        WHERE ti.transaction_id IN (${placeholders})
+      `).all(...transactionIds);
+            if (customizationIds.length > 0) {
+                const customizationPlaceholders = customizationIds.map(() => '?').join(',');
+                const customizationIdValues = customizationIds.map(c => c.id);
+                const optionsResult = localDb.prepare(`
+          DELETE FROM transaction_item_customization_options 
+          WHERE transaction_item_customization_id IN (${customizationPlaceholders})
+        `).run(...customizationIdValues);
+                console.log(`[CLEANUP] [Offline SQLite] Deleted ${optionsResult.changes} customization options`);
+            }
+            // 2. Delete transaction_item_customizations
+            const customizationsResult = localDb.prepare(`
+        DELETE FROM transaction_item_customizations 
+        WHERE transaction_item_id IN (
+          SELECT id FROM transaction_items WHERE transaction_id IN (${placeholders})
+        )
+      `).run(...transactionIds);
+            console.log(`[CLEANUP] [Offline SQLite] Deleted ${customizationsResult.changes} customizations`);
+            // 3. Delete transaction_items
+            const itemsResult = localDb.prepare(`
+        DELETE FROM transaction_items WHERE transaction_id IN (${placeholders})
+      `).run(...transactionIds);
+            details.transaction_items = itemsResult.changes;
+            console.log(`[CLEANUP] [Offline SQLite] Deleted ${details.transaction_items} rows from transaction_items`);
+            // 4. Delete transaction_refunds
+            const refundsResult = localDb.prepare(`
+        DELETE FROM transaction_refunds WHERE transaction_uuid IN (${placeholders})
+      `).run(...transactionIds);
+            console.log(`[CLEANUP] [Offline SQLite] Deleted ${refundsResult.changes} refunds`);
+            // 5. Delete printer1_audit_log
+            const printer1Result = localDb.prepare(`
+        DELETE FROM printer1_audit_log WHERE transaction_id IN (${placeholders})
+      `).run(...transactionIds);
+            details.printer1_audit_log = printer1Result.changes;
+            console.log(`[CLEANUP] [Offline SQLite] Deleted ${details.printer1_audit_log} rows from printer1_audit_log`);
+            // 6. Delete printer2_audit_log
+            const printer2Result = localDb.prepare(`
+        DELETE FROM printer2_audit_log WHERE transaction_id IN (${placeholders})
+      `).run(...transactionIds);
+            details.printer2_audit_log = printer2Result.changes;
+            console.log(`[CLEANUP] [Offline SQLite] Deleted ${details.printer2_audit_log} rows from printer2_audit_log`);
+            // 7. Finally delete transactions
+            const transactionsResult = localDb.prepare(`
+        DELETE FROM transactions ${whereClause}
+      `).run(...params);
+            details.transactions = transactionsResult.changes;
+            console.log(`[CLEANUP] [Offline SQLite] Deleted ${details.transactions} rows from transactions`);
+            // Commit transaction
+            localDb.prepare('COMMIT').run();
+            details.success = true;
+            console.log(`✅ [CLEANUP] [Offline SQLite] Completed successfully`);
+            return {
+                success: true,
+                message: 'Transactions deleted successfully',
+                deleted: transactionsResult.changes,
+                deletedItems: itemsResult.changes,
+                details
+            };
+        }
+        catch (error) {
+            // Rollback on error
+            localDb.prepare('ROLLBACK').run();
+            throw error;
+        }
+    }
+    catch (error) {
+        details.error = error.message || 'Failed to cleanup transactions';
+        console.error(`❌ [CLEANUP] [Offline SQLite] Failed:`, error);
+        return {
+            success: false,
+            deleted: 0,
+            deletedItems: 0,
+            error: details.error,
+            details
+        };
+    }
+});
 // Open slideshow folder in file explorer
 electron_1.ipcMain.handle('open-slideshow-folder', async () => {
     try {
@@ -6983,11 +7836,25 @@ electron_1.ipcMain.handle('restore-from-server', async (event, options) => {
         }
         if (Array.isArray(data.category2) && data.category2.length > 0) {
             const stmt = localDb.prepare(`
-        INSERT OR REPLACE INTO category2 (id, name, business_id, description, display_order, is_active, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT OR REPLACE INTO category2 (id, name, description, display_order, is_active, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
       `);
             for (const cat of data.category2) {
-                stmt.run(cat.id, cat.name, cat.business_id || businessId, cat.description || null, cat.display_order || 0, cat.is_active !== undefined ? cat.is_active : 1, cat.created_at || new Date().toISOString(), Date.now());
+                stmt.run(cat.id, cat.name, cat.description || null, cat.display_order || 0, cat.is_active !== undefined ? cat.is_active : 1, cat.created_at || new Date().toISOString(), Date.now());
+            }
+            // Store junction table relationships (REQUIRED - no fallback)
+            if (Array.isArray(data.category2Businesses) && data.category2Businesses.length > 0) {
+                const junctionStmt = localDb.prepare(`
+          INSERT OR REPLACE INTO category2_businesses (category2_id, business_id)
+          VALUES (?, ?)
+        `);
+                for (const rel of data.category2Businesses) {
+                    junctionStmt.run(rel.category2_id, rel.business_id);
+                }
+                console.log(`✅ [RESTORE] ${data.category2Businesses.length} category2-business relationships restored`);
+            }
+            else {
+                console.warn(`⚠️ [RESTORE] No junction table data provided for category2 - records will not be associated with any business`);
             }
             stats.category2 = data.category2.length;
             console.log(`✅ [RESTORE] ${data.category2.length} category2 restored`);
@@ -7112,13 +7979,16 @@ electron_1.ipcMain.handle('restore-from-server', async (event, options) => {
               id, business_id, user_id, payment_method, payment_method_id,
               pickup_method, total_amount, final_amount, amount_received, change_amount,
               customer_name, status, created_at, updated_at, voucher_discount,
-              voucher_type, voucher_value, transaction_type, receipt_number, shift_uuid
+              voucher_type, voucher_value, transaction_type, receipt_number, shift_uuid,
+              synced_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
           `);
+                    const now = Date.now();
                     for (const tx of transactions) {
                         const txId = tx.uuid_id || tx.id;
-                        txStmt.run(txId, tx.business_id || businessId, tx.user_id, tx.payment_method, tx.payment_method_id || null, tx.pickup_method, tx.total_amount || 0, tx.final_amount || 0, tx.amount_received || 0, tx.change_amount || 0, tx.customer_name || null, tx.status || 'completed', tx.created_at || new Date().toISOString(), Date.now(), tx.voucher_discount || 0, tx.voucher_type || null, tx.voucher_value || null, tx.transaction_type || 'drinks', tx.receipt_number || null, tx.shift_uuid || null);
+                        txStmt.run(txId, tx.business_id || businessId, tx.user_id, tx.payment_method, tx.payment_method_id || null, tx.pickup_method, tx.total_amount || 0, tx.final_amount || 0, tx.amount_received || 0, tx.change_amount || 0, tx.customer_name || null, tx.status || 'completed', tx.created_at || new Date().toISOString(), Date.now(), tx.voucher_discount || 0, tx.voucher_type || null, tx.voucher_value || null, tx.transaction_type || 'drinks', tx.receipt_number || null, tx.shift_uuid || null, now // Set synced_at to mark as already synced (downloaded from server)
+                        );
                     }
                     stats.transactions = transactions.length;
                     console.log(`✅ [RESTORE] ${transactions.length} transactions restored`);
@@ -7276,6 +8146,73 @@ electron_1.ipcMain.handle('restore-from-server', async (event, options) => {
             success: false,
             error: error instanceof Error ? error.message : 'Unknown error during restore',
             stats
+        };
+    }
+});
+// IPC handlers for WebSocket server management
+electron_1.ipcMain.handle('websocket-server-start', async (event, port = 8080) => {
+    try {
+        const result = websocketServer_1.websocketServer.start(port);
+        return result;
+    }
+    catch (error) {
+        console.error('[IPC] Error starting WebSocket server:', error);
+        return {
+            success: false,
+            error: error instanceof Error ? error.message : 'Unknown error'
+        };
+    }
+});
+electron_1.ipcMain.handle('websocket-server-stop', async () => {
+    try {
+        const result = websocketServer_1.websocketServer.stop();
+        return result;
+    }
+    catch (error) {
+        console.error('[IPC] Error stopping WebSocket server:', error);
+        return {
+            success: false,
+            error: error instanceof Error ? error.message : 'Unknown error'
+        };
+    }
+});
+electron_1.ipcMain.handle('websocket-server-status', async () => {
+    try {
+        return websocketServer_1.websocketServer.getStatus();
+    }
+    catch (error) {
+        console.error('[IPC] Error getting WebSocket server status:', error);
+        return {
+            isRunning: false,
+            port: 19967,
+            clientCount: 0,
+            clients: []
+        };
+    }
+});
+electron_1.ipcMain.handle('websocket-broadcast-order', async (event, order) => {
+    try {
+        const result = websocketServer_1.websocketServer.broadcastOrder(order);
+        return result;
+    }
+    catch (error) {
+        console.error('[IPC] Error broadcasting order:', error);
+        return {
+            success: false,
+            sentTo: []
+        };
+    }
+});
+electron_1.ipcMain.handle('websocket-broadcast-status', async (event, update) => {
+    try {
+        const result = websocketServer_1.websocketServer.broadcastStatusUpdate(update);
+        return result;
+    }
+    catch (error) {
+        console.error('[IPC] Error broadcasting status update:', error);
+        return {
+            success: false,
+            sentTo: []
         };
     }
 });

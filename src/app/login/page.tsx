@@ -43,11 +43,11 @@ export default function Login() {
   // Redirect to main page if already authenticated
   useEffect(() => {
     if (isClient && isAuthenticated) {
-      console.log('🔍 Already authenticated, redirecting to POS');
-      
+      // console.log('🔍 Already authenticated, redirecting to POS');
+
       if (process.env.NODE_ENV === 'development') {
         // In development, use Next.js router
-      router.replace('/');
+        router.replace('/');
       } else {
         // In production (Electron file://), use window.location
         window.location.href = 'index.html';
@@ -181,12 +181,12 @@ export default function Login() {
 
     try {
       const loginResult = await login(email, password);
-      
+
       // Check if we need business selection
       const loginResultTyped = loginResult as unknown as LoginResult;
       const businesses = loginResultTyped?._businesses || [];
       const isSuperAdmin = loginResultTyped?._isSuperAdmin || false;
-      
+
       if (businesses.length > 1) {
         // Show business selection UI
         setPendingLogin({

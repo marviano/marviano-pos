@@ -10,11 +10,13 @@ import {
   Grid3X3,
   Wifi,
   Minimize2,
-  Receipt
+  Receipt,
+  ChefHat,
+  Coffee
 } from 'lucide-react';
 import { useAuth } from '@/hooks/useAuth';
 import { isSuperAdmin } from '@/lib/auth';
-import { useEffect, useMemo } from 'react';
+import { useEffect, useMemo, useState, useRef } from 'react';
 
 interface MenuItem {
   id: number;
@@ -33,6 +35,8 @@ export default function LeftSidebar({ menuItems, activeMenuItem, onMenuItemClick
   const { user } = useAuth();
   const permissions = useMemo(() => user?.permissions ?? [], [user?.permissions]);
   const isAdmin = isSuperAdmin(user);
+  const [showProduksiMenu, setShowProduksiMenu] = useState(false);
+  const produksiRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     if (user) {
@@ -47,6 +51,26 @@ export default function LeftSidebar({ menuItems, activeMenuItem, onMenuItemClick
     }
   }, [user, isAdmin, permissions]);
 
+  // Close produksi menu when clicking outside
+  useEffect(() => {
+    const handleClickOutside = (event: MouseEvent) => {
+      if (produksiRef.current && !produksiRef.current.contains(event.target as Node)) {
+        setShowProduksiMenu(false);
+      }
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, []);
+
+  const openProductionDisplay = (type: 'kitchen' | 'barista') => {
+    setShowProduksiMenu(false);
+    if (window.electronAPI?.openProductionDisplay) {
+      window.electronAPI.openProductionDisplay(type);
+    } else {
+      window.open(`/${type}`, '_blank');
+    }
+  };
+
   const getIcon = (name: string) => {
     switch (name) {
       case 'Kasir':
@@ -55,8 +79,8 @@ export default function LeftSidebar({ menuItems, activeMenuItem, onMenuItemClick
         return <Receipt className="w-5 h-5" />;
       case 'Pesanan':
         return <Clock className="w-5 h-5" />;
-      case 'Pesan Antar':
-        return <Mail className="w-5 h-5" />;
+      case 'Produksi':
+        return <Grid3X3 className="w-5 h-5" />;
       case 'Ganti Shift':
         return <Heart className="w-5 h-5" />;
       case 'Laporan':
@@ -106,6 +130,53 @@ export default function LeftSidebar({ menuItems, activeMenuItem, onMenuItemClick
           }
           // Setelan Global - always accessible, but display as "Setelan"
           const displayName = item.name === 'Setelan Global' ? 'Setelan' : item.name;
+          
+          // Special handling for Produksi menu - show balloon popup
+          if (item.name === 'Produksi') {
+            return (
+              <div key={item.id} className="relative" ref={produksiRef}>
+                <button
+                  onClick={() => setShowProduksiMenu(!showProduksiMenu)}
+                  className={`w-full flex flex-col items-center justify-center space-y-1 px-2 py-3 rounded-lg mb-2 transition-colors ${
+                    showProduksiMenu
+                      ? 'bg-green-500 text-white'
+                      : 'text-white hover:bg-blue-900'
+                  }`}
+                >
+                  {getIcon(item.name)}
+                  <span className="text-xs font-medium text-center">{displayName}</span>
+                </button>
+                
+                {/* Balloon Popup Menu */}
+                {showProduksiMenu && (
+                  <div className="absolute left-full top-0 ml-2 z-50">
+                    {/* Arrow */}
+                    <div className="absolute left-0 top-4 -ml-2 w-0 h-0 border-t-8 border-b-8 border-r-8 border-transparent border-r-white" />
+                    
+                    {/* Menu Content */}
+                    <div className="bg-white rounded-lg shadow-2xl ring-1 ring-black/10 overflow-hidden min-w-[140px]" style={{ boxShadow: '0 10px 40px rgba(0,0,0,0.3), 0 4px 12px rgba(0,0,0,0.2)' }}>
+                      <button
+                        onClick={() => openProductionDisplay('kitchen')}
+                        className="w-full flex items-center gap-3 px-4 py-3 hover:bg-gray-100 transition-colors text-gray-800"
+                      >
+                        <span className="text-xl">🍳</span>
+                        <span className="font-semibold">Dapur</span>
+                      </button>
+                      <div className="border-t border-gray-100" />
+                      <button
+                        onClick={() => openProductionDisplay('barista')}
+                        className="w-full flex items-center gap-3 px-4 py-3 hover:bg-gray-100 transition-colors text-gray-800"
+                      >
+                        <span className="text-xl">☕</span>
+                        <span className="font-semibold">Barista</span>
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            );
+          }
+          
           return (
             <button
               key={item.id}

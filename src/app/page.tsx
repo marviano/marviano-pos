@@ -6,10 +6,10 @@ import { useAuth } from '@/hooks/useAuth';
 import { isSuperAdmin } from '@/lib/auth';
 import POSLayout from '@/components/POSLayout';
 import OfflineStatus from '@/components/OfflineStatus';
-import StartShiftModal from '@/components/StartShiftModal';
 import { LogOut, Minimize2, X } from 'lucide-react';
 import { databaseHealthService } from '@/lib/databaseHealth';
 import { smartSyncService } from '@/lib/smartSync';
+import { systemPosSyncService } from '@/lib/systemPosSync';
 
 export default function Home() {
   const router = useRouter();
@@ -18,14 +18,12 @@ export default function Home() {
   const [databaseStatus, setDatabaseStatus] = useState<string>('Checking...');
   const [isSyncing, setIsSyncing] = useState(false);
   const [showUserDebug, setShowUserDebug] = useState(false);
-  const [showStartShiftModal, setShowStartShiftModal] = useState(false);
-  const [hasCheckedShift, setHasCheckedShift] = useState(false);
   const userDebugButtonRef = useRef<HTMLButtonElement | null>(null);
   const userDebugPanelRef = useRef<HTMLDivElement | null>(null);
 
   // Get business ID from logged-in user (fallback to 14 for backward compatibility)
-  const businessId = user?.selectedBusinessId ?? 14;
-  const getElectronAPI = () => (typeof window !== 'undefined' ? window.electronAPI : undefined);
+  // const businessId = user?.selectedBusinessId ?? 14;
+  // const getElectronAPI = () => (typeof window !== 'undefined' ? window.electronAPI : undefined);
 
   const appPermissions = useMemo(() => {
     if (!user?.permissions || user.permissions.length === 0) {
@@ -58,6 +56,24 @@ export default function Home() {
   // Ensure we're on the client side to prevent hydration mismatch
   useEffect(() => {
     setIsClient(true);
+
+    // Explicitly initialize System POS Sync Service
+    // This ensures the service starts even if the module is lazy-loaded
+    if (typeof window !== 'undefined') {
+      // Service is already initialized when imported, but we can trigger it explicitly
+      // Just accessing it ensures the module is loaded
+      // console.log('🔍 [PAGE] System POS Sync Service:', systemPosSyncService);
+
+      // Trigger initial sync check
+      if (systemPosSyncService) {
+        // Service should auto-start, but we can manually trigger if needed
+        setTimeout(() => {
+          systemPosSyncService.triggerSync().catch(err => {
+            console.error('❌ [PAGE] Failed to trigger System POS sync:', err);
+          });
+        }, 2000); // Wait 2 seconds after page load
+      }
+    }
   }, []);
 
   // Check database health on mount
@@ -76,38 +92,15 @@ export default function Home() {
     }
   }, [isClient, isAuthenticated]);
 
-  // Check for active shift on first login
-  useEffect(() => {
-    if (isClient && isAuthenticated && user?.id && !hasCheckedShift) {
-      const checkActiveShift = async () => {
-        try {
-          const electronAPI = getElectronAPI();
-          if (electronAPI?.localDbGetActiveShift) {
-            const userId = typeof user.id === 'string' ? parseInt(user.id, 10) : user.id;
-            const response = await electronAPI.localDbGetActiveShift(userId, businessId);
-            if (!response.shift) {
-              // No active shift, show modal
-              setShowStartShiftModal(true);
-            }
-          }
-        } catch (error) {
-          console.error('❌ Error checking active shift:', error);
-        } finally {
-          setHasCheckedShift(true);
-        }
-      };
-      checkActiveShift();
-    }
-  }, [isClient, isAuthenticated, user?.id, hasCheckedShift]);
 
   // Redirect to login if not authenticated
   useEffect(() => {
     if (isClient && !isAuthenticated) {
       console.log('🔍 Not authenticated, redirecting to login');
-      
+
       if (process.env.NODE_ENV === 'development') {
         // In development, use Next.js router for reliable navigation
-      router.replace('/login');
+        router.replace('/login');
       } else {
         // In production (Electron file://), use window.location
         window.location.href = 'login.html';
@@ -190,15 +183,15 @@ export default function Home() {
                   console.log('🔄 [SYNC] Starting upload sync...');
                   await smartSyncService.forceSync();
                   console.log('✅ [SYNC] Upload sync completed');
-                  
+
                   // Then: Download fresh data from cloud
                   console.log('🔄 [SYNC] Starting download sync...');
                   await databaseHealthService.forceSync();
                   console.log('✅ [SYNC] Download sync completed');
-                  
+
                   const newStatus = await databaseHealthService.getStatusMessage();
                   setDatabaseStatus(newStatus);
-                  
+
                   // Trigger data refresh event for POSLayout
                   window.dispatchEvent(new CustomEvent('dataSynced'));
                 } catch (error) {
@@ -348,22 +341,9 @@ export default function Home() {
           </div>
         )}
       </div>
-      
+
       {/* POS Interface */}
       <POSLayout />
-
-      {/* Start Shift Modal */}
-      {user && (
-        <StartShiftModal
-          isOpen={showStartShiftModal}
-          userId={typeof user.id === 'string' ? parseInt(user.id, 10) : user.id}
-          userName={user.name || 'Cashier'}
-          businessId={businessId}
-          onShiftStarted={() => {
-            setShowStartShiftModal(false);
-          }}
-        />
-      )}
     </div>
   );
 }

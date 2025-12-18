@@ -1,6 +1,6 @@
 'use client';
 
-import { ShoppingCart, Grid3x3, LayoutGrid, Search, X } from 'lucide-react';
+import { ShoppingCart, LayoutGrid, Search, X } from 'lucide-react';
 import { useState, useEffect, useMemo } from 'react';
 import Image from 'next/image';
 import ProductCustomizationModal from './ProductCustomizationModal';
@@ -148,7 +148,7 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
   const [loadingProductId, setLoadingProductId] = useState<number | null>(null);
   const [showPaymentModal, setShowPaymentModal] = useState(false);
   const [bundleItems, setBundleItems] = useState<BundleItem[]>([]);
-  
+
   // Column count state - load from localStorage, default to 5
   const [columnCount, setColumnCount] = useState<number>(() => {
     if (typeof window !== 'undefined') {
@@ -213,7 +213,7 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
   // Send cart updates to customer display
   const sendCartUpdate = (cartItems: CartItem[]) => {
     if (window.electronAPI && window.electronAPI.updateCustomerDisplay) {
-      window.electronAPI.updateCustomerDisplay({ 
+      window.electronAPI.updateCustomerDisplay({
         cartItems: cartItems,
         tabInfo: {
           activeTab: transactionType + (isOnline ? ' (Online)' : ''),
@@ -252,7 +252,7 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
     }, 0);
   };
 
-    const checkProductCustomizations = async (product: Product) => {
+  const checkProductCustomizations = async (product: Product) => {
     try {
       // Always try offline first for UI responsiveness
       const electronAPI = typeof window !== 'undefined' ? window.electronAPI : undefined;
@@ -277,7 +277,7 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
           console.warn('Online check failed, ignoring:', e);
         }
       }
-      
+
       return false;
     } catch (error) {
       console.error('Error checking customizations:', error);
@@ -320,20 +320,20 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
       }
     }
     setLoadingProductId(product.id);
-    
+
     try {
       // Check if product is a bundle
       const isBundle = product.is_bundle === 1 || product.is_bundle === true;
-      
+
       if (isBundle) {
         // Fetch bundle items
         try {
           console.log(`🔍 [BUNDLE] Fetching bundle items for product ${product.id} (${product.nama})`);
-          
+
           // Always try offline first
           let finalItems: BundleItem[] = [];
           let foundLocally = false;
-          
+
           const electronAPI = typeof window !== 'undefined' ? window.electronAPI : undefined;
           if (electronAPI?.localDbGetBundleItems) {
             try {
@@ -351,7 +351,7 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
 
           // Only try online if local failed/empty and we are online
           if (!foundLocally && offlineSyncService.getStatus().isOnline) {
-             try {
+            try {
               console.log(`🌐 [BUNDLE] Attempting online fetch for product ${product.id}`);
               const response = await fetch(getApiUrl(`/api/products/${product.id}/bundle-items`), {
                 signal: AbortSignal.timeout(5000)
@@ -360,11 +360,11 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
                 const data = await response.json();
                 finalItems = data.bundleItems || [];
               }
-             } catch (e) {
-                console.warn('Online bundle fetch failed:', e);
-             }
+            } catch (e) {
+              console.warn('Online bundle fetch failed:', e);
+            }
           }
-          
+
           console.log(`📋 [BUNDLE] Final bundle items data:`, finalItems);
           console.log(`✅ [BUNDLE] Setting ${finalItems.length} bundle items and opening modal`);
           if (finalItems.length > 0) {
@@ -382,7 +382,7 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
       } else {
         // Regular product flow
         const hasCustomizations = await checkProductCustomizations(product);
-        
+
         if (hasCustomizations) {
           setSelectedProduct(product);
           setShowCustomizationModal(true);
@@ -402,52 +402,52 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
     const hasCustomizations = customizations && customizations.length > 0;
     const hasCustomNote = customNote && customNote.trim() !== '';
     const isBundle = bundleSelections && bundleSelections.length > 0;
-    
+
     let existingItem: CartItem | undefined;
-    
+
     // For bundles, always create new cart item (each bundle selection is unique)
     if (isBundle) {
       existingItem = undefined;
     } else if (!hasCustomizations && !hasCustomNote) {
       // For basic products (no customizations, no notes), find any existing item of the same product
       // regardless of customizations or notes, as long as it's also a basic product
-      existingItem = cartItems.find(item => 
-        item.product.id === product.id && 
+      existingItem = cartItems.find(item =>
+        item.product.id === product.id &&
         (!item.customizations || item.customizations.length === 0) &&
         (!item.customNote || item.customNote.trim() === '') &&
         (!item.bundleSelections || item.bundleSelections.length === 0)
       );
     } else {
       // For products with customizations or notes, match exactly
-      existingItem = cartItems.find(item => 
-        item.product.id === product.id && 
+      existingItem = cartItems.find(item =>
+        item.product.id === product.id &&
         JSON.stringify(item.customizations) === JSON.stringify(customizations) &&
         item.customNote === customNote &&
         (!item.bundleSelections || item.bundleSelections.length === 0)
       );
     }
-    
+
     let newCartItems: CartItem[];
-    
+
     if (existingItem && !isBundle) {
-      newCartItems = cartItems.map(item => 
+      newCartItems = cartItems.map(item =>
         item.id === existingItem!.id
           ? { ...item, quantity: item.quantity + quantity }
           : item
       );
     } else {
-      newCartItems = [...cartItems, { 
-        id: Date.now(), 
-        product, 
-        quantity, 
+      newCartItems = [...cartItems, {
+        id: Date.now(),
+        product,
+        quantity,
         customizations: customizations || [],
         customNote: customNote || undefined,
         bundleSelections: bundleSelections || undefined
       }];
     }
-    
+
     setCartItems(newCartItems);
-    
+
     // Send cart update to customer display
     sendCartUpdate(newCartItems);
   };
@@ -478,7 +478,7 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
   };
 
   const handleUpdateItem = (updatedItem: CartItem) => {
-    const newCartItems = cartItems.map(item => 
+    const newCartItems = cartItems.map(item =>
       item.id === updatedItem.id ? updatedItem : item
     );
     setCartItems(newCartItems);
@@ -487,7 +487,7 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
 
   const handlePaymentComplete = () => {
     if (cartItems.length === 0) return;
-    
+
     // Clear cart immediately after payment completion (receipt printed)
     setCartItems([]);
     sendCartUpdate([]);
@@ -500,7 +500,7 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
   const totalItems = cartItems.reduce((sum, item) => sum + item.quantity, 0);
   const totalPrice = cartItems.reduce((sum, item) => {
     let itemPrice = effectiveProductPrice(item.product);
-    
+
     // Add customization prices
     if (item.customizations) {
       item.customizations.forEach(customization => {
@@ -514,7 +514,7 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
     if (item.bundleSelections) {
       itemPrice += calculateBundleCustomizationCharge(item.bundleSelections);
     }
-    
+
     return sum + (itemPrice * item.quantity);
   }, 0);
 
@@ -532,7 +532,7 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
               <span className="line-through">Mendaftar</span>
             </button>
           </div>
-          <button 
+          <button
             onClick={() => {
               if (cartItems.length > 0) {
                 if (confirm('Are you sure you want to clear all items from the cart?')) {
@@ -561,13 +561,13 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
               <p className="text-gray-400 text-base">Keranjang belanja kosong</p>
             </div>
           )}
-          
+
           {/* Cart Items List */}
           {cartItems.length > 0 && (
             <div className="space-y-2">
               {cartItems.map((item) => (
-                <div 
-                  key={item.id} 
+                <div
+                  key={item.id}
                   onClick={() => handleEditItem(item)}
                   className="bg-white rounded-lg border border-gray-200 p-3 cursor-pointer hover:border-blue-300 hover:shadow-sm transition-all duration-200"
                   title="Click to edit item"
@@ -578,7 +578,7 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
                       <p className="text-gray-600 text-xs">
                         {formatPrice(effectiveProductPrice(item.product))} each
                       </p>
-                      
+
                       {/* Customizations */}
                       {item.customizations && item.customizations.length > 0 && (
                         <div className="mt-1 space-y-1">
@@ -590,9 +590,8 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
                                   <div key={option.option_id} className="flex items-center justify-between">
                                     <span className="text-gray-600">• {option.option_name}</span>
                                     {option.price_adjustment !== 0 && (
-                                      <span className={`text-xs ${
-                                        option.price_adjustment > 0 ? 'text-green-600' : 'text-red-600'
-                                      }`}>
+                                      <span className={`text-xs ${option.price_adjustment > 0 ? 'text-green-600' : 'text-red-600'
+                                        }`}>
                                         {option.price_adjustment > 0 ? '+' : ''}{formatPrice(option.price_adjustment)}
                                       </span>
                                     )}
@@ -603,7 +602,7 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
                           ))}
                         </div>
                       )}
-                      
+
                       {/* Custom Note */}
                       {item.customNote && (
                         <div className="mt-1">
@@ -613,7 +612,7 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
                           </div>
                         </div>
                       )}
-                      
+
                       {/* Bundle Selections */}
                       {item.bundleSelections && item.bundleSelections.length > 0 && (
                         <div className="mt-2 space-y-2">
@@ -748,13 +747,13 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
               </div>
             </div>
           </div>
-          
+
           {/* Action Buttons */}
           <div className="flex space-x-2 mt-3">
             <button disabled className="flex-1 bg-gray-300 text-gray-500 py-1.5 px-3 rounded-lg cursor-not-allowed opacity-50 text-sm">
               <span className="line-through">Pesanan Tertunda</span>
             </button>
-            <button 
+            <button
               onClick={() => setShowPaymentModal(true)}
               disabled={cartItems.length === 0}
               className="flex-1 bg-green-500 hover:bg-green-600 disabled:bg-gray-400 disabled:cursor-not-allowed text-white py-1.5 px-3 rounded-lg transition-colors text-sm"
@@ -777,11 +776,10 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
                 <button
                   key={cols}
                   onClick={() => setColumnCount(cols)}
-                  className={`px-2 py-1 text-xs rounded transition-colors ${
-                    columnCount === cols
+                  className={`px-2 py-1 text-xs rounded transition-colors ${columnCount === cols
                       ? 'bg-blue-600 text-white'
                       : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
-                  }`}
+                    }`}
                   title={`${cols} columns`}
                 >
                   {cols}
@@ -789,7 +787,7 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
               ))}
             </div>
           </div>
-          
+
           {/* Search Bar */}
           {setSearchQuery && (
             <div className="relative flex-1 max-w-xs">
@@ -822,7 +820,7 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
             </div>
           </div>
         )}
-        
+
         {/* Product Grid - Scrollable with Fixed Height */}
         <div className="overflow-y-auto mb-4" style={{ height: 'calc(97vh)' }}>
           <div className={`grid ${gridStyles.gridCols} gap-2`}>
@@ -844,7 +842,7 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
                 filteredProducts = filteredProducts.filter((product) => {
                   // Check product name match (case-insensitive)
                   const nameMatch = product.nama.toLowerCase().includes(query);
-                  
+
                   // Check price match if query contains numbers
                   let priceMatch = false;
                   if (isNumericQuery) {
@@ -853,7 +851,7 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
                     const priceString = productPrice.toString();
                     priceMatch = priceString.includes(numericQuery);
                   }
-                  
+
                   return nameMatch || priceMatch;
                 });
               }
@@ -864,8 +862,8 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
                     <p className="text-gray-500">
                       {searchQuery.trim()
                         ? 'No products found matching your search'
-                        : isOnline && selectedOnlinePlatform 
-                          ? `No products available for ${PLATFORM_LABELS[selectedOnlinePlatform]}` 
+                        : isOnline && selectedOnlinePlatform
+                          ? `No products available for ${PLATFORM_LABELS[selectedOnlinePlatform]}`
                           : 'No products available'}
                     </p>
                   </div>
@@ -876,59 +874,58 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
                 const isDisabledOnline = false;
                 const isBundle = product.is_bundle === 1 || product.is_bundle === true;
                 return (
-              <button
-                key={product.id}
-                  onClick={() => handleProductClick(product)}
-                  disabled={loadingProductId === product.id || isDisabledOnline}
-                  className={`bg-white rounded-lg border border-gray-200 ${gridStyles.cardPadding} hover:shadow-md transition-shadow w-full text-left relative ${
-                    loadingProductId === product.id || isDisabledOnline ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'
-                  }`}
-              >
-                {/* Loading Overlay */}
-                {loadingProductId === product.id && (
-                  <div className="absolute inset-0 bg-white/80 rounded-lg flex items-center justify-center z-10">
-                    <div className="animate-spin rounded-full h-6 w-6 border-b-2 border-blue-600"></div>
-                  </div>
-                )}
-                
-                {/* Bundle Badge */}
-                {isBundle && (
-                  <div className={`absolute top-1 right-1 bg-purple-500 text-white ${gridStyles.bundleBadgePadding} rounded-full ${gridStyles.bundleBadgeSize} font-semibold z-10`}>
-                    Bundle
-                  </div>
-                )}
-                
-                {/* Product Image - 1st Row */}
-                <div className="relative w-full aspect-square bg-gray-50 rounded-lg mb-2 flex items-center justify-center overflow-hidden">
-                  <ProductCardImage
-                    imageUrl={product.image_url}
-                    productName={product.nama}
-                    categoryName={product.category2_name}
-                    emojiSize={gridStyles.emojiSize}
-                  />
-                </div>
-                
-                {/* Product Info - 2nd Row */}
-                <div className="space-y-1">
-                  {/* Product Name */}
-                    <h3 className={`font-medium text-gray-800 ${gridStyles.productNameSize} leading-tight line-clamp-2`}>{product.nama}</h3>
-                  {/* Price */}
-                  <div className="flex items-baseline">
-                    <span className={`text-gray-600 ${gridStyles.priceLabelSize}`}>RP</span>
-                    <span className={`text-green-600 font-bold ${gridStyles.priceValueSize} ml-0.5`}>
-                      {effectiveProductPrice(product).toLocaleString('id-ID')}
-                    </span>
-                  </div>
-                </div>
-              </button>
-              );
+                  <button
+                    key={product.id}
+                    onClick={() => handleProductClick(product)}
+                    disabled={loadingProductId === product.id || isDisabledOnline}
+                    className={`bg-white rounded-lg border border-gray-200 ${gridStyles.cardPadding} hover:shadow-md transition-shadow w-full text-left relative ${loadingProductId === product.id || isDisabledOnline ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'
+                      }`}
+                  >
+                    {/* Loading Overlay */}
+                    {loadingProductId === product.id && (
+                      <div className="absolute inset-0 bg-white/80 rounded-lg flex items-center justify-center z-10">
+                        <div className="animate-spin rounded-full h-6 w-6 border-b-2 border-blue-600"></div>
+                      </div>
+                    )}
+
+                    {/* Bundle Badge */}
+                    {isBundle && (
+                      <div className={`absolute top-1 right-1 bg-purple-500 text-white ${gridStyles.bundleBadgePadding} rounded-full ${gridStyles.bundleBadgeSize} font-semibold z-10`}>
+                        Bundle
+                      </div>
+                    )}
+
+                    {/* Product Image - 1st Row */}
+                    <div className="relative w-full aspect-square bg-gray-50 rounded-lg mb-2 flex items-center justify-center overflow-hidden">
+                      <ProductCardImage
+                        imageUrl={product.image_url}
+                        productName={product.nama}
+                        categoryName={product.category2_name}
+                        emojiSize={gridStyles.emojiSize}
+                      />
+                    </div>
+
+                    {/* Product Info - 2nd Row */}
+                    <div className="space-y-1">
+                      {/* Product Name */}
+                      <h3 className={`font-medium text-gray-800 ${gridStyles.productNameSize} leading-tight line-clamp-2`}>{product.nama}</h3>
+                      {/* Price */}
+                      <div className="flex items-baseline">
+                        <span className={`text-gray-600 ${gridStyles.priceLabelSize}`}>RP</span>
+                        <span className={`text-green-600 font-bold ${gridStyles.priceValueSize} ml-0.5`}>
+                          {effectiveProductPrice(product).toLocaleString('id-ID')}
+                        </span>
+                      </div>
+                    </div>
+                  </button>
+                );
               });
             })()}
           </div>
         </div>
 
-         {/* Action Buttons - Fixed Footer */}
-         <div className="py-2 mb-6 flex-shrink-0">
+        {/* Action Buttons - Fixed Footer */}
+        <div className="py-2 mb-6 flex-shrink-0">
           <div className="flex justify-between items-center space-x-2">
             <button disabled className="flex-1 bg-gray-300 border border-gray-300 rounded px-2 py-2 text-gray-400 cursor-not-allowed opacity-50 flex items-center justify-center space-x-1">
               <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -936,21 +933,21 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
               </svg>
               <span className="text-xs line-through">Ambil Pesanan</span>
             </button>
-            
+
             <button disabled className="flex-1 bg-gray-300 border border-gray-300 rounded px-2 py-2 text-gray-400 cursor-not-allowed opacity-50 flex items-center justify-center space-x-1">
               <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 7h.01M7 3h5c.512 0 1.024.195 1.414.586l7 7a2 2 0 010 2.828l-7 7a2 2 0 01-2.828 0l-7-7A1.994 1.994 0 013 12V7a4 4 0 014-4z" />
               </svg>
               <span className="text-xs line-through">Kupon</span>
             </button>
-            
+
             <button disabled className="flex-1 bg-gray-300 border border-gray-300 rounded px-2 py-2 text-gray-400 cursor-not-allowed opacity-50 flex items-center justify-center space-x-1">
               <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
               </svg>
               <span className="text-xs line-through">Aktivitas</span>
             </button>
-            
+
             <button disabled className="flex-1 bg-gray-300 border border-gray-300 rounded px-2 py-2 text-gray-400 cursor-not-allowed opacity-50 flex items-center justify-center space-x-1">
               <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8c-1.657 0-3 .895-3 2s1.343 2 3 2 3 .895 3 2-1.343 2-3 2m0-8c1.11 0 2.08.402 2.599 1M12 8V7m0 1v8m0 0v1m0-1c-1.11 0-2.08-.402-2.599-1" />

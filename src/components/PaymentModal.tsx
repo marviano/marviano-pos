@@ -8,6 +8,7 @@ import { smartSyncService } from '@/lib/smartSync';
 import { generateTransactionId, generateTransactionItemId } from '@/lib/uuid';
 import { useAuth } from '@/hooks/useAuth';
 import { getApiUrl } from '@/lib/api';
+import type { OrderData, OrderItem } from '@/lib/networkClient';
 
 interface BundleSelection {
   category2_id: number;
@@ -117,7 +118,7 @@ export default function PaymentModal({
   selectedOnlinePlatform = null
 }: PaymentModalProps) {
   const { user } = useAuth();
-  
+
   // Get business ID from logged-in user (fallback to 14 for backward compatibility)
   const businessId = user?.selectedBusinessId ?? 14;
   const [selectedPaymentMethod, setSelectedPaymentMethod] = useState<PaymentMethod>('cash');
@@ -130,14 +131,14 @@ export default function PaymentModal({
   const [activeInput, setActiveInput] = useState<'amount' | 'voucher' | 'customer' | 'customerUnit'>('amount');
   const [bankId, setBankId] = useState<string>('');
   const [cardNumber, setCardNumber] = useState<string>('');
-  const [banks, setBanks] = useState<Array<{id: number, bank_code: string, bank_name: string, is_popular: boolean}>>([]);
+  const [banks, setBanks] = useState<Array<{ id: number, bank_code: string, bank_name: string, is_popular: boolean }>>([]);
   const [bankSearchTerm, setBankSearchTerm] = useState<string>('');
   const [showBankDropdown, setShowBankDropdown] = useState<boolean>(false);
   const [isProcessing, setIsProcessing] = useState(false);
   const [showConfirmation, setShowConfirmation] = useState(false);
   const [showDebitModal, setShowDebitModal] = useState(false);
   const [bankError, setBankError] = useState<string>('');
-  
+
   // Check if current payment method is an online platform
   const [cardNumberError, setCardNumberError] = useState<string>('');
   const cardNumberRef = useRef<HTMLInputElement>(null);
@@ -175,7 +176,7 @@ export default function PaymentModal({
       setSelectedPaymentMethod('cash');
     }
   }, [isOnline, selectedOnlinePlatform]);
-  
+
   // Initialize payment method when modal opens for online orders
   useEffect(() => {
     if (isOpen && isOnline && selectedOnlinePlatform) {
@@ -248,11 +249,11 @@ export default function PaymentModal({
   const calculateOrderTotal = () => {
     return cartItems.reduce((sum, item) => {
       let itemPrice = effectiveProductPrice(item.product);
-      
+
       // Add customization prices
       itemPrice += sumCustomizationPrice(item.customizations);
       itemPrice += calculateBundleCustomizationCharge(item.bundleSelections);
-      
+
       return sum + (itemPrice * item.quantity);
     }, 0);
   };
@@ -389,7 +390,7 @@ export default function PaymentModal({
     // Only allow numbers and limit to 16 digits
     const cleanValue = value.replace(/\D/g, '').slice(0, 16);
     setCardNumber(cleanValue);
-    
+
     // Clear error when user starts typing
     if (cardNumberError) {
       setCardNumberError('');
@@ -553,14 +554,16 @@ export default function PaymentModal({
 
   const handleFinalConfirm = async (target: 'receipt' | 'receiptize') => {
     setIsProcessing(true);
-    
+
     try {
+      // Calculate received value
+      const receivedVal = parseFloat(amountReceived.replace(/\./g, '').replace(',', '.')) || 0;
+      const changeVal = Math.max(0, receivedVal - finalTotal);
+
       // Prepare transaction data
-      const clAccountId = null;
-      const clAccountName = selectedPaymentMethod === 'cl' ? (trimmedCustomerName || null) : null;
       // For online orders, force pickup_method to 'take-away'
       const finalPickupMethod = isOnline ? 'take-away' : selectedPickupMethod;
-      
+
       const voucherTypeForPayload = promotionType;
       const voucherValueForPayload =
         promotionType === 'percent'
@@ -571,7 +574,7 @@ export default function PaymentModal({
               ? 100
               : null;
       const voucherLabelForPayload = promotionLabel || null;
-      
+
       // Generate 19-digit numeric UUID instead of random UUID
       let transactionId = '';
       if (window.electronAPI?.generateNumericUuid) {
@@ -587,7 +590,7 @@ export default function PaymentModal({
         transactionId = generateTransactionId();
         console.warn('⚠️ Numeric UUID generation not available, using fallback');
       }
-      
+
       const transactionData = {
         id: transactionId,
         business_id: businessId,
@@ -600,157 +603,173 @@ export default function PaymentModal({
         voucher_value: voucherValueForPayload,
         voucher_label: voucherLabelForPayload,
         final_amount: finalTotal,
-        amount_received: receivedAmount,
-        change_amount: receivedAmount - finalTotal,
+        amount_received: receivedVal,
+        change_amount: changeVal,
         status: 'completed',
         created_at: new Date().toISOString(),
+        note: null, // Add fields to match full schema
+        bank_name: selectedPaymentMethod === 'debit' ? (banks.find(b => b.id.toString() === bankId)?.bank_name || null) : null,
         contact_id: null, // Will be used when contact book is integrated
         customer_name: trimmedCustomerName || null,
-        customer_unit: customerUnitNumber,
+        customer_unit: customerUnit ? parseInt(customerUnit) : (customerUnitNumber || null),
         bank_id: selectedPaymentMethod === 'debit' && bankId ? parseInt(bankId) : null,
-        card_number: selectedPaymentMethod === 'debit' ? cardNumber : null,
-        cl_account_id: clAccountId,
-        cl_account_name: clAccountName,
+        card_number: cardNumber || null,
+        cl_account_id: null,
+        cl_account_name: selectedPaymentMethod === 'cl' ? (trimmedCustomerName || null) : null,
         transaction_type: transactionType,
-        items: cartItems.map(item => {
-          // For online orders, use platform-specific price, otherwise use harga_jual
-          let basePrice = item.product.harga_jual;
-          
-          if (isOnline && selectedOnlinePlatform) {
-            switch (selectedOnlinePlatform) {
-              case 'qpon':
-                basePrice = item.product.harga_qpon || item.product.harga_jual;
-                break;
-              case 'gofood':
-                basePrice = item.product.harga_gofood || item.product.harga_jual;
-                break;
-              case 'grabfood':
-                basePrice = item.product.harga_grabfood || item.product.harga_jual;
-                break;
-              case 'shopeefood':
-                basePrice = item.product.harga_shopeefood || item.product.harga_jual;
-                break;
-              case 'tiktok':
-                basePrice = item.product.harga_tiktok || item.product.harga_jual;
-                break;
+        payment_method_id: 1 // Will be updated from DB lookup
+      };
+
+      // 2. SAVE & QUEUE TO LOCAL DATABASE (SOURCE OF TRUTH)
+      const electronAPI = getElectronAPI();
+
+      if (electronAPI) {
+        // Get payment method ID from local database
+        try {
+          const paymentMethods = await electronAPI.localDbGetPaymentMethods?.();
+          if (Array.isArray(paymentMethods)) {
+            const paymentMethod = (paymentMethods as PaymentMethodRow[]).find((pm) => pm.code === selectedPaymentMethod);
+            if (paymentMethod) {
+              transactionData.payment_method_id = paymentMethod.id;
+            } else {
+              console.warn('⚠️ Payment method not found in local DB, defaulting to cash (ID: 1)');
             }
           }
-          
-          let itemPrice = basePrice;
-          
-          // Add customization prices
-          if (item.customizations) {
-            item.customizations.forEach(customization => {
-              customization.selected_options.forEach(option => {
-                itemPrice += option.price_adjustment;
-              });
-            });
+        } catch (error) {
+          console.error('❌ Failed to get payment methods from local DB:', error);
+        }
+
+        // Map transaction data for SQLite
+        const sqliteTransactionData = {
+          ...transactionData,
+          receipt_number: null // Initial local save has no receipt number yet
+        };
+
+        const transactionItems = cartItems.map(item => {
+          // Determine base price depending on platform when online
+          let basePrice = item.product.harga_jual;
+          if (isOnline && selectedOnlinePlatform) {
+            switch (selectedOnlinePlatform) {
+              case 'qpon': basePrice = item.product.harga_qpon || basePrice; break;
+              case 'gofood': basePrice = item.product.harga_gofood || basePrice; break;
+              case 'grabfood': basePrice = item.product.harga_grabfood || basePrice; break;
+              case 'shopeefood': basePrice = item.product.harga_shopeefood || basePrice; break;
+              case 'tiktok': basePrice = item.product.harga_tiktok || basePrice; break;
+            }
           }
-          
+
+          let itemPrice = basePrice;
+          itemPrice += sumCustomizationPrice(item.customizations);
+          itemPrice += calculateBundleCustomizationCharge(item.bundleSelections);
+
           return {
+            id: generateTransactionItemId(),
+            transaction_id: transactionData.id,
             product_id: item.product.id,
             quantity: item.quantity,
             unit_price: itemPrice,
             total_price: itemPrice * item.quantity,
-            customizations: item.customizations,
-            customNote: item.customNote || undefined,
-            bundleSelections: item.bundleSelections || undefined
+            customizations: item.customizations || null,
+            custom_note: item.customNote || null,
+            bundle_selections_json: item.bundleSelections ? JSON.stringify(item.bundleSelections) : null,
+            created_at: transactionData.created_at
           };
-        })
-      };
+        });
 
-      // Save transaction - when online, save to BOTH databases
-      try {
-        const isOnline = offlineSyncService.getStatus().isOnline;
-        
-        let onlineResult = null;
-        
-        // Step 1: Save to online database if connected
-        if (isOnline) {
-          try {
-            const controller = new AbortController();
-            const timeoutId = setTimeout(() => controller.abort(), 5000); // 5 second timeout
-            
-            const response = await fetch(getApiUrl('/api/transactions'), {
-              method: 'POST',
-              headers: {
-                'Content-Type': 'application/json',
-              },
-              body: JSON.stringify(transactionData),
-              signal: controller.signal
-            });
+        // Save transaction and items to local database (Blocking but fast)
+        await electronAPI.localDbUpsertTransactions?.([sqliteTransactionData]);
+        await electronAPI.localDbUpsertTransactionItems?.(transactionItems);
 
-            clearTimeout(timeoutId);
+        // Queue for background sync
+        await smartSyncService.queueTransaction(transactionData);
 
-            if (!response.ok) {
-              throw new Error('Failed to save transaction online');
-            }
+        // Broadcast order (Fire and forget, but keep promise for error logging)
+        const orderData = {
+          transactionId: transactionData.id,
+          receiptNumber: 0,
+          businessId: businessId,
+          items: transactionItems.map(item => ({
+            itemId: item.id,
+            productId: item.product_id,
+            productName: cartItems.find(p => p.product.id === item.product_id)?.product.nama || 'Unknown Product',
+            category1_id: cartItems.find(p => p.product.id === item.product_id)?.product.kategori === 'Kitchen' ? 1 : 2,
+            quantity: item.quantity,
+            unitPrice: item.unit_price,
+            totalPrice: item.total_price,
+            customNote: item.custom_note || undefined,
+            bundleSelections: item.bundle_selections_json ? JSON.parse(item.bundle_selections_json) : undefined,
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            customizations: item.customizations as unknown as any, // Cast to any to bypass strict type mismatch in IPC
+            status: 'pending' as const
+          })),
+          createdAt: transactionData.created_at,
+          customerName: transactionData.customer_name || undefined,
+          customerUnit: transactionData.customer_unit || undefined,
+          pickupMethod: transactionData.pickup_method as 'dine-in' | 'take-away'
+        };
+        electronAPI.websocketBroadcastOrder?.(orderData).catch(console.error);
 
-            onlineResult = await response.json();
-          } catch (error) {
-            console.error('❌ Failed to save to online database:', error);
-            // Continue to offline save even if online save fails
+        // 3. OPTIMISTIC UI UPDATE - CLOSE MODAL IMMEDIATELY
+        setIsProcessing(false);
+        onPaymentComplete();
+        onClose();
+        setShowConfirmation(false);
+
+        // 4. TRIGGER BACKGROUND SYNC (FIRE AND FORGET)
+        setTimeout(() => {
+          const isOnline = offlineSyncService.getStatus().isOnline;
+          if (isOnline) {
+            smartSyncService.forceSync().catch(err => console.warn('Background sync trigger failed:', err));
           }
-        }
-        
-        // Step 2: Save to offline database (always, for redundancy and offline capability)
-        const electronAPI = getElectronAPI();
-        if (electronAPI) {
-          // Get payment method ID from local database
-          let paymentMethodId = 1; // Default to cash
-          try {
-            const paymentMethods = await electronAPI.localDbGetPaymentMethods?.();
-            if (Array.isArray(paymentMethods)) {
-              const paymentMethod = (paymentMethods as PaymentMethodRow[]).find((pm) => pm.code === selectedPaymentMethod);
-            if (paymentMethod) {
-              paymentMethodId = paymentMethod.id;
-            } else {
-              console.warn('⚠️ Payment method not found in local DB, defaulting to cash (ID: 1)');
+        }, 100);
+
+        // 5. PRINTING LOGIC (Run after UI close)
+        // Note: Using a timeout to ensure it runs out-of-band of the render cycle
+        setTimeout(async () => {
+          // Determine user-selected print targets
+          const shouldPrintReceipt = target === 'receipt';
+          const shouldPrintReceiptize = target === 'receiptize';
+
+          // Fetch global display counter (used to hide multiple printers)
+          let globalCounter = 1;
+          if (window.electronAPI?.getPrinterCounter) {
+            try {
+              const globalCounterResult = await window.electronAPI.getPrinterCounter('globalPrinter', businessId, true);
+              if (isCounterResponse(globalCounterResult) && globalCounterResult.success === true && typeof globalCounterResult.counter === 'number' && globalCounterResult.counter > 0) {
+                globalCounter = globalCounterResult.counter;
+                console.log(`✅ Global printer counter retrieved: ${globalCounter}`);
+              } else {
+                console.warn('⚠️ Failed to retrieve global printer counter:', globalCounterResult);
               }
+            } catch (counterError) {
+              console.warn('⚠️ Failed to increment global printer counter:', counterError);
             }
-          } catch (error) {
-            console.error('❌ Failed to get payment methods from local DB:', error);
           }
-          
-          // Map transaction data for SQLite (include all fields needed by local DB)
-          const sqliteTransactionData = {
-            id: transactionData.id,
-            business_id: transactionData.business_id,
-            user_id: transactionData.user_id,
-            payment_method: transactionData.payment_method,
-            pickup_method: transactionData.pickup_method,
-            total_amount: transactionData.total_amount,
-            voucher_discount: transactionData.voucher_discount,
-            voucher_type: transactionData.voucher_type,
-            voucher_value: transactionData.voucher_value,
-            voucher_label: transactionData.voucher_label,
-            final_amount: transactionData.final_amount,
-            amount_received: transactionData.amount_received,
-            change_amount: transactionData.change_amount,
-            status: transactionData.status,
-            created_at: transactionData.created_at,
-            note: null,
-            bank_name: selectedPaymentMethod === 'debit' ? (banks.find(b => b.id.toString() === bankId)?.bank_name || null) : null,
-            contact_id: transactionData.contact_id,
-            customer_name: transactionData.customer_name,
-            customer_unit: transactionData.customer_unit,
-            bank_id: transactionData.bank_id,
-            card_number: transactionData.card_number,
-            cl_account_id: transactionData.cl_account_id,
-            cl_account_name: transactionData.cl_account_name,
-            receipt_number: onlineResult?.receipt_number || null, // Use receipt number from online save if available
-            transaction_type: transactionData.transaction_type,
-            payment_method_id: paymentMethodId // Use the looked-up payment method ID from local database
+
+          // Prepare receipt data for printing
+          const receiptNumber = transactionData.id; // Use transaction ID as receipt number
+          const getTableNumber = () => {
+            // Extract table number from receipt number
+            if (typeof receiptNumber === 'string') {
+              // Assuming transactionId might contain a table number or can be mapped
+              // For now, just use a default or part of the ID
+              return receiptNumber.slice(-2); // Last two digits as a placeholder
+            }
+            return '01';
           };
-          
-          const transactionItems = cartItems.map(item => {
-            // Determine base price depending on platform when online
+
+          // Transform cart items to receipt format - use platform price for online orders
+          const receiptItems: ReceiptItem[] = [];
+
+          cartItems.forEach(item => {
+            // For online orders, use platform-specific price, otherwise use harga_jual
             let basePrice = item.product.harga_jual;
+
             if (isOnline && selectedOnlinePlatform) {
               switch (selectedOnlinePlatform) {
-              case 'qpon':
-                basePrice = item.product.harga_qpon || item.product.harga_jual;
-                break;
+                case 'qpon':
+                  basePrice = item.product.harga_qpon || item.product.harga_jual;
+                  break;
                 case 'gofood':
                   basePrice = item.product.harga_gofood || item.product.harga_jual;
                   break;
@@ -768,614 +787,668 @@ export default function PaymentModal({
 
             let itemPrice = basePrice;
 
-            // Add customization prices
+            // Add customization prices for main item only
             itemPrice += sumCustomizationPrice(item.customizations);
-            itemPrice += calculateBundleCustomizationCharge(item.bundleSelections);
-            
-            return {
-              id: generateTransactionItemId(), // Generate UUID for transaction item
-              transaction_id: transactionData.id,
-              product_id: item.product.id,
-              quantity: item.quantity,
-              unit_price: itemPrice,
-              total_price: itemPrice * item.quantity,
-              customizations: item.customizations || null,
-              custom_note: item.customNote || null,
-              bundle_selections_json: item.bundleSelections ? JSON.stringify(item.bundleSelections) : null,
-              created_at: transactionData.created_at
-            };
-          });
-          
-          // Save transaction and items to local database
-          await electronAPI.localDbUpsertTransactions?.([sqliteTransactionData]);
-          await electronAPI.localDbUpsertTransactionItems?.(transactionItems);
 
-          // ALWAYS queue transaction for safety - even if online save appeared to succeed
-          // This prevents data loss if online save partially failed or network issues occurred
-          console.log('🔄 Queuing transaction for background sync (safety measure)...');
-          const queueResult = await smartSyncService.queueTransaction(transactionData);
-          
-          // If online save succeeded, immediately mark as synced to prevent duplicate uploads
-          if (onlineResult && queueResult.success && queueResult.offlineTransactionId) {
-            console.log('✅ Online save succeeded - marking queued transaction as synced');
-            await electronAPI.localDbMarkTransactionSynced?.(queueResult.offlineTransactionId);
-          } else if (!onlineResult) {
-            console.log('⚠️ Online save failed - transaction will be synced by SmartSync');
-          }
-          
-        } else {
-          throw new Error('Offline database not available');
-        }
-        
-        // Close confirmation dialog first
-        setShowConfirmation(false);
-        
-        // Determine user-selected print targets
-        const shouldPrintReceipt = target === 'receipt';
-        const shouldPrintReceiptize = target === 'receiptize';
-
-        // Fetch global display counter (used to hide multiple printers)
-        let globalCounter = 1;
-        if (window.electronAPI?.getPrinterCounter) {
-          try {
-            const globalCounterResult = await window.electronAPI.getPrinterCounter('globalPrinter', businessId, true);
-            if (isCounterResponse(globalCounterResult) && typeof globalCounterResult.counter === 'number') {
-              globalCounter = globalCounterResult.counter;
+            // Format item name with customizations and custom note if any
+            let itemName = item.product.nama;
+            if (item.customizations && item.customizations.length > 0) {
+              const customizationText = item.customizations.map(c =>
+                `${c.customization_name}: ${c.selected_options.map(opt => opt.option_name).join(', ')}`
+              ).join(', ');
+              itemName = `${itemName} (${customizationText})`;
             }
-          } catch (counterError) {
-            console.warn('⚠️ Failed to increment global printer counter:', counterError);
-          }
-        }
-
-        // Prepare receipt data for printing
-        const receiptNumber = onlineResult?.receipt_number || 'N/A';
-        const getTableNumber = () => {
-          // Extract table number from receipt number
-          if (typeof receiptNumber === 'number') {
-            return receiptNumber.toString().padStart(2, '0');
-          }
-          return '01';
-        };
-        
-        // Transform cart items to receipt format - use platform price for online orders
-        const receiptItems: ReceiptItem[] = [];
-        
-        cartItems.forEach(item => {
-          // For online orders, use platform-specific price, otherwise use harga_jual
-          let basePrice = item.product.harga_jual;
-          
-          if (isOnline && selectedOnlinePlatform) {
-            switch (selectedOnlinePlatform) {
-              case 'qpon':
-                basePrice = item.product.harga_qpon || item.product.harga_jual;
-                break;
-              case 'gofood':
-                basePrice = item.product.harga_gofood || item.product.harga_jual;
-                break;
-              case 'grabfood':
-                basePrice = item.product.harga_grabfood || item.product.harga_jual;
-                break;
-              case 'shopeefood':
-                basePrice = item.product.harga_shopeefood || item.product.harga_jual;
-                break;
-              case 'tiktok':
-                basePrice = item.product.harga_tiktok || item.product.harga_jual;
-                break;
-            }
-          }
-          
-          let itemPrice = basePrice;
-          
-          // Add customization prices for main item only
-          itemPrice += sumCustomizationPrice(item.customizations);
-          
-          // Format item name with customizations and custom note if any
-          let itemName = item.product.nama;
-          if (item.customizations && item.customizations.length > 0) {
-            const customizationText = item.customizations.map(c => 
-              `${c.customization_name}: ${c.selected_options.map(opt => opt.option_name).join(', ')}`
-            ).join(', ');
-            itemName = `${itemName} (${customizationText})`;
-          }
-          // Add custom note if exists
-          if (item.customNote) {
-            if (itemName.includes('(')) {
-              itemName = `${itemName}, ${item.customNote})`;
-            } else {
-              itemName = `${itemName} (${item.customNote})`;
-            }
-          }
-          
-          // Add main bundle item
-          receiptItems.push({
-            name: itemName,
-            quantity: item.quantity,
-            price: itemPrice,
-            total_price: itemPrice * item.quantity
-          });
-          
-          // Add bundle selections as sub-items
-          if (item.bundleSelections && item.bundleSelections.length > 0) {
-            item.bundleSelections.forEach(bundleSel => {
-              bundleSel.selectedProducts.forEach(sp => {
-                // Multiply by bundle quantity and selected product quantity
-                const selectionQty =
-                  typeof sp.quantity === 'number' && !Number.isNaN(sp.quantity) ? sp.quantity : 1;
-                const totalQty = item.quantity * selectionQty;
-                const customizationDetails: string[] = [];
-
-                if (sp.customizations && sp.customizations.length > 0) {
-                  sp.customizations.forEach(customization => {
-                    const optionNames = customization.selected_options.map(opt => opt.option_name).join(', ');
-                    if (optionNames) {
-                      customizationDetails.push(
-                        customization.customization_name
-                          ? `${customization.customization_name}: ${optionNames}`
-                          : optionNames
-                      );
-                    }
-                  });
-                }
-
-                if (sp.customNote && sp.customNote.trim() !== '') {
-                  customizationDetails.push(sp.customNote.trim());
-                }
-
-                let subItemName = `  └ ${sp.product.nama}${selectionQty > 1 ? ` (×${selectionQty})` : ''}`;
-                if (customizationDetails.length > 0) {
-                  subItemName = `${subItemName} (${customizationDetails.join(', ')})`;
-                }
-
-                const perUnitAdjustment = sumCustomizationPrice(sp.customizations);
-                const perUnitTotal = perUnitAdjustment;
-
-                receiptItems.push({
-                  name: subItemName,
-                  quantity: totalQty,
-                  price: perUnitTotal,
-                  total_price: perUnitTotal * totalQty
-                });
-              });
-            });
-          }
-        });
-
-        // Append voucher discount as a negative line on the receipt when applied
-        if (voucherDiscount > 0) {
-          receiptItems.push({
-            name: promotionLabel ? `Diskon Voucher (${promotionLabel})` : 'Diskon Voucher',
-            quantity: 1,
-            price: -voucherDiscount,
-            total_price: -voucherDiscount
-          });
-        }
-        
-        // Get user info from auth
-        const cashierName = user?.name || 'Kasir';
-        
-        // Prepare receipt print data
-        const printData = {
-          type: 'transaction',
-          printerType: 'receiptPrinter',
-          printerName: '', // Will be auto-determined from saved printer config
-          business_id: transactionData.business_id, // Include business_id for fetching business name
-          items: receiptItems,
-          total: finalTotal,
-          paymentMethod: selectedPaymentMethod === 'cash' ? 'Cash' : 
-                        selectedPaymentMethod === 'debit' ? 'Debit Card' :
-                        selectedPaymentMethod === 'qr' ? 'QR Code' :
-                        selectedPaymentMethod === 'ewallet' ? 'E-Wallet' :
-                        selectedPaymentMethod === 'cl' ? 'City Ledger' :
-                        selectedPaymentMethod === 'qpon' ? 'Qpon' :
-                        selectedPaymentMethod === 'gofood' ? 'GoFood' :
-                        selectedPaymentMethod === 'grabfood' ? 'GrabFood' :
-                        selectedPaymentMethod === 'shopeefood' ? 'ShopeeFood' :
-                        selectedPaymentMethod === 'tiktok' ? 'TikTok' :
-                        selectedPaymentMethod,
-          amountReceived: receivedAmount,
-          change: Math.max(0, receivedAmount - finalTotal),
-          date: transactionData.created_at,
-          receiptNumber: transactionData.id, // Use 19-digit transaction UUID as nomor pesanan
-          tableNumber: getTableNumber(),
-          cashier: cashierName,
-          transactionType: transactionType,
-          pickupMethod: finalPickupMethod,
-          globalCounter
-        };
-        
-        // Variables to store printer counters for label printing
-        let printer1Counter: number | undefined = undefined;
-        let printer2Counter: number | undefined = undefined;
-        
-        // Get printer configs to read copies setting
-        let printer1Copies = 1;
-        let printer2Copies = 1;
-        try {
-          const configsRaw = await window.electronAPI?.localDbGetPrinterConfigs?.();
-          if (Array.isArray(configsRaw)) {
-            type PrinterConfig = { printer_type?: string; extra_settings?: string | Record<string, unknown> | null };
-            (configsRaw as PrinterConfig[]).forEach((config) => {
-              if (config?.printer_type === 'receiptPrinter' && config?.extra_settings) {
-                try {
-                  const extra = typeof config.extra_settings === 'string'
-                    ? JSON.parse(config.extra_settings)
-                    : config.extra_settings;
-                  if (extra && typeof extra === 'object' && typeof extra.copies === 'number' && extra.copies > 0) {
-                    printer1Copies = extra.copies;
-                  }
-                } catch (parseError) {
-                  console.warn('⚠️ Failed to parse Printer 1 extra_settings:', parseError);
-                }
-              }
-              if (config?.printer_type === 'receiptizePrinter' && config?.extra_settings) {
-                try {
-                  const extra = typeof config.extra_settings === 'string'
-                    ? JSON.parse(config.extra_settings)
-                    : config.extra_settings;
-                  if (extra && typeof extra === 'object' && typeof extra.copies === 'number' && extra.copies > 0) {
-                    printer2Copies = extra.copies;
-                  }
-                } catch (parseError) {
-                  console.warn('⚠️ Failed to parse Printer 2 extra_settings:', parseError);
-                }
-              }
-            });
-          }
-        } catch (configError) {
-          console.warn('⚠️ Failed to load printer configs for copies setting:', configError);
-        }
-        
-        // Print to Printer 1 if selected
-        if (shouldPrintReceipt) {
-          try {
-            // Get Printer 1 counter and increment
-            printer1Counter = 1;
-            if (window.electronAPI?.getPrinterCounter) {
-              const counterResult = await window.electronAPI.getPrinterCounter('receiptPrinter', businessId, true); // true = increment
-              if (isCounterResponse(counterResult) && typeof counterResult.counter === 'number') {
-                printer1Counter = counterResult.counter;
-              }
-            }
-            
-            // Create printer1Data with receiptPrinter counter
-            const printer1Data = { 
-              ...printData, 
-              printerType: 'receiptPrinter', 
-              receiptNumber: transactionData.id, 
-              printer1Counter // Receipt printer daily counter (only for receiptPrinter)
-            };
-            
-            // Log to audit BEFORE printing (so reprint is possible even if print fails)
-            try {
-              const logResult = await window.electronAPI?.logPrinter1Print?.(transactionData.id, printer1Counter, globalCounter);
-              if (isSuccessResponse(logResult) && !logResult.success) {
-                console.error('❌ Failed to log Printer 1 audit:', logResult?.error);
-                console.warn('⚠️ Transaction saved but audit log failed - receipt badge may not appear correctly');
-              } else if (!isSuccessResponse(logResult)) {
-                console.warn('⚠️ Failed to log Printer 1 audit: Invalid response', logResult);
-              }
-            } catch (logError) {
-              console.error('❌ Error logging Printer 1 audit:', logError);
-              console.warn('⚠️ Transaction saved but audit log failed - receipt badge may not appear correctly');
-            }
-            
-            // Print after logging - loop for copies
-            await new Promise(r => setTimeout(r, 500));
-            for (let copy = 1; copy <= printer1Copies; copy++) {
-              if (copy > 1) {
-                // Small delay between copies
-                await new Promise(r => setTimeout(r, 300));
-              }
-              const printResult = await window.electronAPI?.printReceipt?.(printer1Data);
-              if (isSuccessResponse(printResult) && !printResult.success) {
-                console.error(`❌ Printer 1 failed (copy ${copy}/${printer1Copies}):`, printResult?.error);
-              } else if (copy === 1) {
-                console.log(`✅ Printer 1 print successful (${printer1Copies} copy/copies)`);
-              }
-            }
-          } catch (printError) {
-            console.error('❌ Error printing to Printer 1:', printError);
-          }
-        }
-        
-        // Printer 2 manual print if selected via confirmation dialog
-        if (shouldPrintReceiptize) {
-          try {
-            // Get Printer 2 counter and increment
-            printer2Counter = 1;
-            if (window.electronAPI?.getPrinterCounter) {
-              const counterResult = await window.electronAPI.getPrinterCounter('receiptizePrinter', businessId, true); // true = increment
-              if (isCounterResponse(counterResult) && typeof counterResult.counter === 'number') {
-                printer2Counter = counterResult.counter;
-              }
-            }
-            
-            // Create printer2Data with receiptizePrinter counter
-            const printer2Data = { 
-              ...printData, 
-              printerType: 'receiptizePrinter', 
-              receiptNumber: transactionData.id, 
-              printer2Counter // Receiptize printer daily counter (only for receiptizePrinter)
-            };
-            
-            // Log to audit BEFORE printing (so reprint is possible even if print fails)
-            try {
-              const logResult = await window.electronAPI?.logPrinter2Print?.(transactionData.id, printer2Counter, 'manual', undefined, globalCounter);
-              if (isSuccessResponse(logResult) && !logResult.success) {
-                console.error('❌ Failed to log Printer 2 audit:', logResult?.error);
-                console.warn('⚠️ Transaction saved but audit log failed - receiptize badge may not appear correctly');
-              } else if (!isSuccessResponse(logResult)) {
-                console.warn('⚠️ Failed to log Printer 2 audit: Invalid response', logResult);
-              }
-            } catch (logError) {
-              console.error('❌ Error logging Printer 2 audit:', logError);
-              console.warn('⚠️ Transaction saved but audit log failed - receiptize badge may not appear correctly');
-            }
-            
-            // Print after logging - loop for copies
-            await new Promise(r => setTimeout(r, 500));
-            for (let copy = 1; copy <= printer2Copies; copy++) {
-              if (copy > 1) {
-                // Small delay between copies
-                await new Promise(r => setTimeout(r, 300));
-              }
-              const printResult = await window.electronAPI?.printReceipt?.(printer2Data);
-              if (isSuccessResponse(printResult) && !printResult.success) {
-                console.error(`❌ Printer 2 failed (copy ${copy}/${printer2Copies}):`, printResult?.error);
-              } else if (copy === 1) {
-                console.log(`✅ Printer 2 print successful (${printer2Copies} copy/copies)`);
-              }
-            }
-          } catch (printError) {
-            console.error('❌ Error printing to Printer 2:', printError);
-          }
-        }
-        
-        // Print labels for each order item
-        try {
-          // Get the counter to use (from the selected printer)
-          let labelCounter: number = 1;
-          if (shouldPrintReceipt && typeof printer1Counter === 'number') {
-            labelCounter = printer1Counter;
-          } else if (shouldPrintReceiptize && typeof printer2Counter === 'number') {
-            labelCounter = printer2Counter;
-          } else if (!shouldPrintReceipt && shouldPrintReceiptize && window.electronAPI?.getPrinterCounter) {
-            const counterResult = await window.electronAPI.getPrinterCounter('receiptizePrinter', businessId, false); // Don't increment
-            if (isCounterResponse(counterResult) && typeof counterResult.counter === 'number') {
-              labelCounter = counterResult.counter;
-            }
-          }
-          
-          // Calculate total items for numbering
-          // For bundles: count each selected product × quantity
-          // For regular products: count the item quantity
-          const totalItems = cartItems.reduce((sum, item) => {
-            if (item.bundleSelections && item.bundleSelections.length > 0) {
-              // For bundles, count all selected products (each entry represents one unit unless quantity provided)
-              let bundleItemCount = 0;
-              for (const bundleSel of item.bundleSelections) {
-                for (const selectedProduct of bundleSel.selectedProducts) {
-                  const selectionQty = typeof selectedProduct.quantity === 'number' && !Number.isNaN(selectedProduct.quantity)
-                    ? selectedProduct.quantity
-                    : 1;
-                  bundleItemCount += selectionQty;
-                }
-              }
-              return sum + (bundleItemCount * item.quantity);
-            } else {
-              // For regular products
-              return sum + item.quantity;
-            }
-          }, 0);
-          
-          // Track current item number across all items
-          let currentItemNumber = 0;
-          
-          // Helper function to split customizations into chunks that fit on a label
-          // Each label can roughly fit 60-80 characters of customizations
-          const MAX_CUSTOMIZATION_LENGTH_PER_LABEL = 70;
-          
-          const splitCustomizations = (customizationText: string): string[] => {
-            if (!customizationText || customizationText.length <= MAX_CUSTOMIZATION_LENGTH_PER_LABEL) {
-              return [customizationText];
-            }
-            
-            // Split by '/' to preserve individual options
-            const parts = customizationText.split('/');
-            const chunks: string[] = [];
-            let currentChunk = '';
-            
-            for (const part of parts) {
-              // If adding this part would exceed limit, start new chunk
-              const wouldExceed = currentChunk 
-                ? (currentChunk + '/' + part).length > MAX_CUSTOMIZATION_LENGTH_PER_LABEL
-                : part.length > MAX_CUSTOMIZATION_LENGTH_PER_LABEL;
-              
-              if (wouldExceed && currentChunk) {
-                chunks.push(currentChunk);
-                currentChunk = part;
-              } else if (wouldExceed && !currentChunk) {
-                // Single part is too long, split it further (by word or character)
-                const words = part.split(' ');
-                let wordChunk = '';
-                for (const word of words) {
-                  if ((wordChunk + ' ' + word).length > MAX_CUSTOMIZATION_LENGTH_PER_LABEL && wordChunk) {
-                    chunks.push(wordChunk.trim());
-                    wordChunk = word;
-                  } else {
-                    wordChunk = wordChunk ? wordChunk + ' ' + word : word;
-                  }
-                }
-                if (wordChunk) {
-                  currentChunk = wordChunk;
-                }
+            // Add custom note if exists
+            if (item.customNote) {
+              if (itemName.includes('(')) {
+                itemName = `${itemName}, ${item.customNote})`;
               } else {
-                currentChunk = currentChunk ? currentChunk + '/' + part : part;
+                itemName = `${itemName} (${item.customNote})`;
               }
             }
-            
-            if (currentChunk) {
-              chunks.push(currentChunk);
-            }
-            
-            return chunks.length > 0 ? chunks : [customizationText];
-          };
-          
-          // Collect all labels first, then print in batch
-          const allLabels: Array<{
-            printerType: string;
-            counter: number;
-            itemNumber: number;
-            totalItems: number;
-            pickupMethod: string;
-            productName: string;
-            customizations: string;
-            customNote: string;
-            orderTime: string;
-            labelContinuation?: string;
-          }> = [];
-          
-          for (const item of cartItems) {
-            // Check if this is a bundle product
-            const isBundle = item.bundleSelections && item.bundleSelections.length > 0;
-            
-            if (isBundle) {
-              // For bundle products, collect labels for each selected product
-              for (const bundleSel of item.bundleSelections!) {
-                for (const selectedProduct of bundleSel.selectedProducts) {
-                  // Calculate total quantity (bundle quantity × selected product quantity)
-                  const selectionQty = typeof selectedProduct.quantity === 'number' && !Number.isNaN(selectedProduct.quantity)
-                    ? selectedProduct.quantity
-                    : 1;
-                  const totalQty = item.quantity * selectionQty;
 
-                  // Build customization text for bundle selected product
-                  const allOptions: string[] = [];
-                  if (selectedProduct.customizations && selectedProduct.customizations.length > 0) {
-                    selectedProduct.customizations.forEach(c => {
-                      c.selected_options.forEach(opt => {
-                        allOptions.push(opt.option_name);
-                      });
+            // Add main bundle item
+            receiptItems.push({
+              name: itemName,
+              quantity: item.quantity,
+              price: itemPrice,
+              total_price: itemPrice * item.quantity
+            });
+
+            // Add bundle selections as sub-items
+            if (item.bundleSelections && item.bundleSelections.length > 0) {
+              item.bundleSelections.forEach(bundleSel => {
+                bundleSel.selectedProducts.forEach(sp => {
+                  // Multiply by bundle quantity and selected product quantity
+                  const selectionQty =
+                    typeof sp.quantity === 'number' && !Number.isNaN(sp.quantity) ? sp.quantity : 1;
+                  const totalQty = item.quantity * selectionQty;
+                  const customizationDetails: string[] = [];
+
+                  if (sp.customizations && sp.customizations.length > 0) {
+                    sp.customizations.forEach(customization => {
+                      const optionNames = customization.selected_options.map(opt => opt.option_name).join(', ');
+                      if (optionNames) {
+                        customizationDetails.push(
+                          customization.customization_name
+                            ? `${customization.customization_name}: ${optionNames}`
+                            : optionNames
+                        );
+                      }
                     });
                   }
 
-                  if (selectedProduct.customNote && selectedProduct.customNote.trim() !== '') {
-                    allOptions.push(selectedProduct.customNote.trim());
+                  if (sp.customNote && sp.customNote.trim() !== '') {
+                    customizationDetails.push(sp.customNote.trim());
                   }
 
-                  const customizationText = allOptions.join('/');
-                  const customizationChunks = splitCustomizations(customizationText);
-                  
-                  // Collect one label per unit of each selected product
-                  for (let qty = 0; qty < totalQty; qty++) {
-                    currentItemNumber++;
-                    
-                    for (let chunkIndex = 0; chunkIndex < customizationChunks.length; chunkIndex++) {
-                      const isMultiLabel = customizationChunks.length > 1;
-                      const labelNumber = chunkIndex + 1;
-                      const totalLabels = customizationChunks.length;
+                  let subItemName = `  └ ${sp.product.nama}${selectionQty > 1 ? ` (×${selectionQty})` : ''}`;
+                  if (customizationDetails.length > 0) {
+                    subItemName = `${subItemName} (${customizationDetails.join(', ')})`;
+                  }
 
-                      // Prepare label data for bundle selected product
-                      allLabels.push({
-                        printerType: 'labelPrinter',
-                        counter: labelCounter,
-                        itemNumber: currentItemNumber,
-                        totalItems: totalItems,
-                        pickupMethod: finalPickupMethod,
-                        productName: selectedProduct.product.nama,
-                        customizations: customizationChunks[chunkIndex],
-                        customNote: '',
-                        orderTime: transactionData.created_at,
-                        labelContinuation: isMultiLabel ? `${labelNumber}/${totalLabels}` : undefined
+                  const perUnitAdjustment = sumCustomizationPrice(sp.customizations);
+                  const perUnitTotal = perUnitAdjustment;
+
+                  receiptItems.push({
+                    name: subItemName,
+                    quantity: totalQty,
+                    price: perUnitTotal,
+                    total_price: perUnitTotal * totalQty
+                  });
+                });
+              });
+            }
+          });
+
+          // Append voucher discount as a negative line on the receipt when applied
+          if (voucherDiscount > 0) {
+            receiptItems.push({
+              name: promotionLabel ? `Diskon Voucher (${promotionLabel})` : 'Diskon Voucher',
+              quantity: 1,
+              price: -voucherDiscount,
+              total_price: -voucherDiscount
+            });
+          }
+
+          // Get user info from auth
+          const cashierName = user?.name || 'Kasir';
+
+          // Prepare receipt print data
+          const printData = {
+            type: 'transaction',
+            printerType: 'receiptPrinter',
+            printerName: '', // Will be auto-determined from saved printer config
+            business_id: transactionData.business_id, // Include business_id for fetching business name
+            items: receiptItems,
+            total: finalTotal,
+            paymentMethod: selectedPaymentMethod === 'cash' ? 'Cash' :
+              selectedPaymentMethod === 'debit' ? 'Debit Card' :
+                selectedPaymentMethod === 'qr' ? 'QR Code' :
+                  selectedPaymentMethod === 'ewallet' ? 'E-Wallet' :
+                    selectedPaymentMethod === 'cl' ? 'City Ledger' :
+                      selectedPaymentMethod === 'qpon' ? 'Qpon' :
+                        selectedPaymentMethod === 'gofood' ? 'GoFood' :
+                          selectedPaymentMethod === 'grabfood' ? 'GrabFood' :
+                            selectedPaymentMethod === 'shopeefood' ? 'ShopeeFood' :
+                              selectedPaymentMethod === 'tiktok' ? 'TikTok' :
+                                selectedPaymentMethod,
+            amountReceived: receivedAmount,
+            change: Math.max(0, receivedVal - finalTotal),
+            date: transactionData.created_at,
+            receiptNumber: transactionData.id, // Use 19-digit transaction UUID as nomor pesanan
+            tableNumber: getTableNumber(),
+            cashier: cashierName,
+            transactionType: transactionType,
+            pickupMethod: finalPickupMethod,
+            globalCounter
+          };
+
+          // Variables to store printer counters for label printing
+          let printer1Counter: number | undefined = undefined;
+          let printer2Counter: number | undefined = undefined;
+
+          // Get printer configs to read copies setting
+          let printer1Copies = 1;
+          let printer2Copies = 1;
+          try {
+            const configsRaw = await window.electronAPI?.localDbGetPrinterConfigs?.();
+            if (Array.isArray(configsRaw)) {
+              type PrinterConfig = { printer_type?: string; extra_settings?: string | Record<string, unknown> | null };
+              (configsRaw as PrinterConfig[]).forEach((config) => {
+                if (config?.printer_type === 'receiptPrinter' && config?.extra_settings) {
+                  try {
+                    const extra = typeof config.extra_settings === 'string'
+                      ? JSON.parse(config.extra_settings)
+                      : config.extra_settings;
+                    if (extra && typeof extra === 'object' && typeof extra.copies === 'number' && extra.copies > 0) {
+                      printer1Copies = extra.copies;
+                    }
+                  } catch (parseError) {
+                    console.warn('⚠️ Failed to parse Printer 1 extra_settings:', parseError);
+                  }
+                }
+                if (config?.printer_type === 'receiptizePrinter' && config?.extra_settings) {
+                  try {
+                    const extra = typeof config.extra_settings === 'string'
+                      ? JSON.parse(config.extra_settings)
+                      : config.extra_settings;
+                    if (extra && typeof extra === 'object' && typeof extra.copies === 'number' && extra.copies > 0) {
+                      printer2Copies = extra.copies;
+                    }
+                  } catch (parseError) {
+                    console.warn('⚠️ Failed to parse Printer 2 extra_settings:', parseError);
+                  }
+                }
+              });
+            }
+          } catch (configError) {
+            console.warn('⚠️ Failed to load printer configs for copies setting:', configError);
+          }
+
+          // Print to Printer 1 if selected
+          if (shouldPrintReceipt) {
+            try {
+              // Get Printer 1 counter and increment
+              printer1Counter = 1;
+              if (window.electronAPI?.getPrinterCounter) {
+                try {
+                  const counterResult = await window.electronAPI.getPrinterCounter('receiptPrinter', businessId, true); // true = increment
+                  if (isCounterResponse(counterResult) && counterResult.success === true && typeof counterResult.counter === 'number' && counterResult.counter > 0) {
+                    printer1Counter = counterResult.counter;
+                    console.log(`✅ Printer 1 (receiptPrinter) counter retrieved: ${printer1Counter}`);
+                  } else {
+                    console.warn('⚠️ Failed to retrieve Printer 1 counter, using default (1):', counterResult);
+                    // Keep default value of 1 if retrieval fails
+                  }
+                } catch (counterError) {
+                  console.error('❌ Error retrieving Printer 1 counter:', counterError);
+                  // Keep default value of 1 if error occurs
+                }
+              }
+
+              // Create printer1Data with receiptPrinter counter
+              const printer1Data = {
+                ...printData,
+                printerType: 'receiptPrinter',
+                receiptNumber: transactionData.id,
+                printer1Counter: printer1Counter, // Receipt printer daily counter (only for receiptPrinter)
+                printer2Counter: undefined // Explicitly clear printer2Counter for Printer 1
+              };
+              console.log(`📋 [PRINT] Printer 1 data prepared with counter: ${printer1Counter} (transaction: ${transactionData.id})`);
+              
+              // Verify counter is actually set before printing
+              if (typeof printer1Data.printer1Counter !== 'number' || printer1Data.printer1Counter <= 0) {
+                console.error(`❌ [PRINT] ERROR: printer1Counter is invalid! Value: ${printer1Data.printer1Counter}, Type: ${typeof printer1Data.printer1Counter}`);
+              }
+
+              // Log to audit BEFORE printing (so reprint is possible even if print fails)
+              try {
+                const logResult = await window.electronAPI?.logPrinter1Print?.(transactionData.id, printer1Counter, globalCounter);
+                if (isSuccessResponse(logResult) && !logResult.success) {
+                  console.error('❌ Failed to log Printer 1 audit:', logResult?.error);
+                  console.warn('⚠️ Transaction saved but audit log failed - receipt badge may not appear correctly');
+                } else if (!isSuccessResponse(logResult)) {
+                  console.warn('⚠️ Failed to log Printer 1 audit: Invalid response', logResult);
+                }
+              } catch (logError) {
+                console.error('❌ Error logging Printer 1 audit:', logError);
+                console.warn('⚠️ Transaction saved but audit log failed - receipt badge may not appear correctly');
+              }
+
+              // Print after logging - loop for copies
+              await new Promise(r => setTimeout(r, 500));
+              for (let copy = 1; copy <= printer1Copies; copy++) {
+                if (copy > 1) {
+                  // Small delay between copies
+                  await new Promise(r => setTimeout(r, 300));
+                }
+                const printResult = await window.electronAPI?.printReceipt?.(printer1Data);
+                if (isSuccessResponse(printResult) && !printResult.success) {
+                  console.error(`❌ Printer 1 failed (copy ${copy}/${printer1Copies}):`, printResult?.error);
+                } else if (copy === 1) {
+                  console.log(`✅ Printer 1 print successful (${printer1Copies} copy/copies)`);
+                }
+              }
+            } catch (printError) {
+              console.error('❌ Error printing to Printer 1:', printError);
+            }
+          }
+
+          // Printer 2 manual print if selected via confirmation dialog
+          if (shouldPrintReceiptize) {
+            try {
+              // Get Printer 2 counter and increment
+              printer2Counter = 1;
+              if (window.electronAPI?.getPrinterCounter) {
+                try {
+                  const counterResult = await window.electronAPI.getPrinterCounter('receiptizePrinter', businessId, true); // true = increment
+                  if (isCounterResponse(counterResult) && counterResult.success === true && typeof counterResult.counter === 'number' && counterResult.counter > 0) {
+                    printer2Counter = counterResult.counter;
+                    console.log(`✅ Printer 2 (receiptizePrinter) counter retrieved: ${printer2Counter}`);
+                  } else {
+                    console.warn('⚠️ Failed to retrieve Printer 2 counter, using default (1):', counterResult);
+                    // Keep default value of 1 if retrieval fails
+                  }
+                } catch (counterError) {
+                  console.error('❌ Error retrieving Printer 2 counter:', counterError);
+                  // Keep default value of 1 if error occurs
+                }
+              }
+
+              // Create printer2Data with receiptizePrinter counter
+              const printer2Data = {
+                ...printData,
+                printerType: 'receiptizePrinter',
+                receiptNumber: transactionData.id,
+                printer2Counter: printer2Counter, // Receiptize printer daily counter (only for receiptizePrinter)
+                printer1Counter: undefined // Explicitly clear printer1Counter for Printer 2
+              };
+              console.log(`📋 [PRINT] Printer 2 data prepared with counter: ${printer2Counter} (transaction: ${transactionData.id})`);
+              console.log(`🔍 [DEBUG] printer2Data object:`, JSON.stringify({
+                printerType: printer2Data.printerType,
+                printer2Counter: printer2Data.printer2Counter,
+                printer1Counter: printer2Data.printer1Counter,
+                globalCounter: printer2Data.globalCounter,
+                tableNumber: printer2Data.tableNumber
+              }, null, 2));
+              
+              // Verify counter is actually set before printing
+              if (typeof printer2Data.printer2Counter !== 'number' || printer2Data.printer2Counter <= 0) {
+                console.error(`❌ [PRINT] ERROR: printer2Counter is invalid! Value: ${printer2Data.printer2Counter}, Type: ${typeof printer2Data.printer2Counter}`);
+              }
+
+              // Log to audit FIRST (before queueing) - System POS sync requires printer audit to exist
+              // This ensures the audit is in SQLite before the transaction is queued
+              try {
+                const logResult = await window.electronAPI?.logPrinter2Print?.(transactionData.id, printer2Counter, 'manual', undefined, globalCounter);
+                if (isSuccessResponse(logResult) && !logResult.success) {
+                  console.error('❌ Failed to log Printer 2 audit:', logResult?.error);
+                  console.warn('⚠️ Transaction saved but audit log failed - receiptize badge may not appear correctly');
+                } else if (!isSuccessResponse(logResult)) {
+                  console.warn('⚠️ Failed to log Printer 2 audit: Invalid response', logResult);
+                } else {
+                  // Small delay to ensure SQLite commit is complete before queueing
+                  await new Promise(resolve => setTimeout(resolve, 100));
+                }
+              } catch (logError) {
+                console.error('❌ Error logging Printer 2 audit:', logError);
+                console.warn('⚠️ Transaction saved but audit log failed - receiptize badge may not appear correctly');
+              }
+
+              // Queue transaction for System POS sync AFTER audit is saved and committed
+              // This ensures the printer audit exists in SQLite when system-pos sync queries for it
+              try {
+                const queueResult = await window.electronAPI?.queueTransactionForSystemPos?.(transactionData.id);
+                if (queueResult?.success) {
+                  // console.log(`✅ [SYSTEM POS] Queued transaction ${transactionData.id} for System POS sync`);
+                } else if (queueResult?.alreadySynced) {
+                  console.log(`✅ [SYSTEM POS] Transaction ${transactionData.id} already synced to System POS`);
+                } else if (queueResult?.alreadyQueued) {
+                  console.log(`⚠️ [SYSTEM POS] Transaction ${transactionData.id} already queued`);
+                } else {
+                  console.warn(`⚠️ [SYSTEM POS] Failed to queue transaction ${transactionData.id}:`, queueResult?.error);
+                }
+              } catch (queueError) {
+                console.error('❌ [SYSTEM POS] Error queueing transaction for System POS:', queueError);
+                // Don't fail the transaction if System POS queue fails
+              }
+
+              // Print after logging - loop for copies
+              await new Promise(r => setTimeout(r, 500));
+              for (let copy = 1; copy <= printer2Copies; copy++) {
+                if (copy > 1) {
+                  // Small delay between copies
+                  await new Promise(r => setTimeout(r, 300));
+                }
+                const printResult = await window.electronAPI?.printReceipt?.(printer2Data);
+                if (isSuccessResponse(printResult) && !printResult.success) {
+                  console.error(`❌ Printer 2 failed (copy ${copy}/${printer2Copies}):`, printResult?.error);
+                } else if (copy === 1) {
+                  console.log(`✅ Printer 2 print successful (${printer2Copies} copy/copies)`);
+                }
+              }
+            } catch (printError) {
+              console.error('❌ Error printing to Printer 2:', printError);
+            }
+          }
+
+          // Print labels for each order item
+          try {
+            // Get the counter to use (from the selected printer)
+            let labelCounter: number = 1;
+            if (shouldPrintReceipt && typeof printer1Counter === 'number') {
+              labelCounter = printer1Counter;
+            } else if (shouldPrintReceiptize && typeof printer2Counter === 'number') {
+              labelCounter = printer2Counter;
+            } else if (!shouldPrintReceipt && shouldPrintReceiptize && window.electronAPI?.getPrinterCounter) {
+              try {
+                const counterResult = await window.electronAPI.getPrinterCounter('receiptizePrinter', businessId, false); // Don't increment
+                if (isCounterResponse(counterResult) && counterResult.success === true && typeof counterResult.counter === 'number' && counterResult.counter > 0) {
+                  labelCounter = counterResult.counter;
+                } else {
+                  console.warn('⚠️ Failed to retrieve receiptizePrinter counter for labels, using default (1):', counterResult);
+                }
+              } catch (counterError) {
+                console.error('❌ Error retrieving receiptizePrinter counter for labels:', counterError);
+              }
+            }
+
+            // Calculate total items for numbering
+            // For bundles: count each selected product × quantity
+            // For regular products: count the item quantity
+            const totalItems = cartItems.reduce((sum, item) => {
+              if (item.bundleSelections && item.bundleSelections.length > 0) {
+                // For bundles, count all selected products (each entry represents one unit unless quantity provided)
+                let bundleItemCount = 0;
+                for (const bundleSel of item.bundleSelections) {
+                  for (const selectedProduct of bundleSel.selectedProducts) {
+                    const selectionQty = typeof selectedProduct.quantity === 'number' && !Number.isNaN(selectedProduct.quantity)
+                      ? selectedProduct.quantity
+                      : 1;
+                    bundleItemCount += selectionQty;
+                  }
+                }
+                return sum + (bundleItemCount * item.quantity);
+              } else {
+                // For regular products
+                return sum + item.quantity;
+              }
+            }, 0);
+
+            // Track current item number across all items
+            let currentItemNumber = 0;
+
+            // Helper function to split customizations into chunks that fit on a label
+            // Each label can roughly fit 60-80 characters of customizations
+            const MAX_CUSTOMIZATION_LENGTH_PER_LABEL = 70;
+
+            const splitCustomizations = (customizationText: string): string[] => {
+              if (!customizationText || customizationText.length <= MAX_CUSTOMIZATION_LENGTH_PER_LABEL) {
+                return [customizationText];
+              }
+
+              // Split by '/' to preserve individual options
+              const parts = customizationText.split('/');
+              const chunks: string[] = [];
+              let currentChunk = '';
+
+              for (const part of parts) {
+                // If adding this part would exceed limit, start new chunk
+                const wouldExceed = currentChunk
+                  ? (currentChunk + '/' + part).length > MAX_CUSTOMIZATION_LENGTH_PER_LABEL
+                  : part.length > MAX_CUSTOMIZATION_LENGTH_PER_LABEL;
+
+                if (wouldExceed && currentChunk) {
+                  chunks.push(currentChunk);
+                  currentChunk = part;
+                } else if (wouldExceed && !currentChunk) {
+                  // Single part is too long, split it further (by word or character)
+                  const words = part.split(' ');
+                  let wordChunk = '';
+                  for (const word of words) {
+                    if ((wordChunk + ' ' + word).length > MAX_CUSTOMIZATION_LENGTH_PER_LABEL && wordChunk) {
+                      chunks.push(wordChunk.trim());
+                      wordChunk = word;
+                    } else {
+                      wordChunk = wordChunk ? wordChunk + ' ' + word : word;
+                    }
+                  }
+                  if (wordChunk) {
+                    currentChunk = wordChunk;
+                  }
+                } else {
+                  currentChunk = currentChunk ? currentChunk + '/' + part : part;
+                }
+              }
+
+              if (currentChunk) {
+                chunks.push(currentChunk);
+              }
+
+              return chunks.length > 0 ? chunks : [customizationText];
+            };
+
+            // Collect all labels first, then print in batch
+            const allLabels: Array<{
+              printerType: string;
+              counter: number;
+              itemNumber: number;
+              totalItems: number;
+              pickupMethod: string;
+              productName: string;
+              customizations: string;
+              customNote: string;
+              orderTime: string;
+              labelContinuation?: string;
+            }> = [];
+
+            for (const item of cartItems) {
+              // Check if this is a bundle product
+              const isBundle = item.bundleSelections && item.bundleSelections.length > 0;
+
+              if (isBundle) {
+                // For bundle products, collect labels for each selected product
+                for (const bundleSel of item.bundleSelections!) {
+                  for (const selectedProduct of bundleSel.selectedProducts) {
+                    // Calculate total quantity (bundle quantity × selected product quantity)
+                    const selectionQty = typeof selectedProduct.quantity === 'number' && !Number.isNaN(selectedProduct.quantity)
+                      ? selectedProduct.quantity
+                      : 1;
+                    const totalQty = item.quantity * selectionQty;
+
+                    // Build customization text for bundle selected product
+                    const allOptions: string[] = [];
+                    if (selectedProduct.customizations && selectedProduct.customizations.length > 0) {
+                      selectedProduct.customizations.forEach(c => {
+                        c.selected_options.forEach(opt => {
+                          allOptions.push(opt.option_name);
+                        });
                       });
+                    }
+
+                    if (selectedProduct.customNote && selectedProduct.customNote.trim() !== '') {
+                      allOptions.push(selectedProduct.customNote.trim());
+                    }
+
+                    const customizationText = allOptions.join('/');
+                    const customizationChunks = splitCustomizations(customizationText);
+
+                    // Collect one label per unit of each selected product
+                    for (let qty = 0; qty < totalQty; qty++) {
+                      currentItemNumber++;
+
+                      for (let chunkIndex = 0; chunkIndex < customizationChunks.length; chunkIndex++) {
+                        const isMultiLabel = customizationChunks.length > 1;
+                        const labelNumber = chunkIndex + 1;
+                        const totalLabels = customizationChunks.length;
+
+                        // Prepare label data for bundle selected product
+                        allLabels.push({
+                          printerType: 'labelPrinter',
+                          counter: labelCounter,
+                          itemNumber: currentItemNumber,
+                          totalItems: totalItems,
+                          pickupMethod: finalPickupMethod,
+                          productName: selectedProduct.product.nama,
+                          customizations: customizationChunks[chunkIndex],
+                          customNote: '',
+                          orderTime: transactionData.created_at,
+                          labelContinuation: isMultiLabel ? `${labelNumber}/${totalLabels}` : undefined
+                        });
+                      }
                     }
                   }
                 }
-              }
-            } else {
-              // For regular products (non-bundle), use existing logic
-              // Build customization text - format as xxx/xxx/xxx
-              const allOptions: string[] = [];
-              if (item.customizations && item.customizations.length > 0) {
-                item.customizations.forEach(c => {
-                  c.selected_options.forEach(opt => {
-                    allOptions.push(opt.option_name);
+              } else {
+                // For regular products (non-bundle), use existing logic
+                // Build customization text - format as xxx/xxx/xxx
+                const allOptions: string[] = [];
+                if (item.customizations && item.customizations.length > 0) {
+                  item.customizations.forEach(c => {
+                    c.selected_options.forEach(opt => {
+                      allOptions.push(opt.option_name);
+                    });
                   });
-                });
-              }
-              
-              // Add custom note if exists
-              if (item.customNote) {
-                allOptions.push(item.customNote);
-              }
-              
-              const customizationText = allOptions.join('/');
-              
-              // Split customizations into chunks if too long
-              const customizationChunks = splitCustomizations(customizationText);
-              
-              // Collect one label per quantity, and if customizations are split, multiple labels per unit
-              for (let qty = 0; qty < item.quantity; qty++) {
-                currentItemNumber++;
-                
-                // Collect each chunk as a separate label
-                for (let chunkIndex = 0; chunkIndex < customizationChunks.length; chunkIndex++) {
-                  const isMultiLabel = customizationChunks.length > 1;
-                  const labelNumber = chunkIndex + 1;
-                  const totalLabels = customizationChunks.length;
-                  
-                  // Prepare label data
-                  allLabels.push({
-                    printerType: 'labelPrinter',
-                    counter: labelCounter,
-                    itemNumber: currentItemNumber,
-                    totalItems: totalItems,
-                    pickupMethod: finalPickupMethod,
-                    productName: item.product.nama,
-                    customizations: customizationChunks[chunkIndex],
-                    customNote: '', // No longer used separately
-                    orderTime: transactionData.created_at,
-                    labelContinuation: isMultiLabel ? `${labelNumber}/${totalLabels}` : undefined
-                  });
+                }
+
+                // Add custom note if exists
+                if (item.customNote) {
+                  allOptions.push(item.customNote);
+                }
+
+                const customizationText = allOptions.join('/');
+
+                // Split customizations into chunks if too long
+                const customizationChunks = splitCustomizations(customizationText);
+
+                // Collect one label per quantity, and if customizations are split, multiple labels per unit
+                for (let qty = 0; qty < item.quantity; qty++) {
+                  currentItemNumber++;
+
+                  // Collect each chunk as a separate label
+                  for (let chunkIndex = 0; chunkIndex < customizationChunks.length; chunkIndex++) {
+                    const isMultiLabel = customizationChunks.length > 1;
+                    const labelNumber = chunkIndex + 1;
+                    const totalLabels = customizationChunks.length;
+
+                    // Prepare label data
+                    allLabels.push({
+                      printerType: 'labelPrinter',
+                      counter: labelCounter,
+                      itemNumber: currentItemNumber,
+                      totalItems: totalItems,
+                      pickupMethod: finalPickupMethod,
+                      productName: item.product.nama,
+                      customizations: customizationChunks[chunkIndex],
+                      customNote: '', // No longer used separately
+                      orderTime: transactionData.created_at,
+                      labelContinuation: isMultiLabel ? `${labelNumber}/${totalLabels}` : undefined
+                    });
+                  }
                 }
               }
             }
-          }
-          
-          // Print all labels in a single batch
-          if (allLabels.length > 0) {
-            console.log(`🏷️ Printing ${allLabels.length} labels in batch...`);
-            const batchResult = await window.electronAPI?.printLabelsBatch?.({
-              labels: allLabels,
-              printerType: 'labelPrinter'
-            });
-            
-            if (!isSuccessResponse(batchResult) || !batchResult.success) {
-              const errorMessage = isSuccessResponse(batchResult) ? batchResult.error : undefined;
-              console.error(`❌ Batch label print failed:`, errorMessage);
-            } else {
-              console.log(`✅ Successfully printed ${allLabels.length} labels in batch`);
+
+            // Print all labels in a single batch
+            if (allLabels.length > 0) {
+              // console.log(`🏷️ Printing ${allLabels.length} labels in batch...`);
+              const batchResult = await window.electronAPI?.printLabelsBatch?.({
+                labels: allLabels,
+                printerType: 'labelPrinter'
+              });
+
+              if (!isSuccessResponse(batchResult) || !batchResult.success) {
+                const errorMessage = isSuccessResponse(batchResult) ? batchResult.error : undefined;
+                console.error(`❌ Batch label print failed:`, errorMessage);
+              } else {
+                // console.log(`✅ Successfully printed ${allLabels.length} labels in batch`);
+              }
             }
+          } catch (labelError) {
+            console.error('❌ Error printing labels:', labelError);
+            // Don't fail the transaction if label printing fails
           }
-        } catch (labelError) {
-          console.error('❌ Error printing labels:', labelError);
-          // Don't fail the transaction if label printing fails
-        }
-        
-        // Clear cart and close modal after successful database operation
-        onPaymentComplete();
-        onClose();
-        
-      } catch (error) {
-        console.error('❌ Failed to save transaction:', error);
-        
-        // Show error message
-        alert(`Gagal menyimpan transaksi: ${error instanceof Error ? error.message : 'Unknown error'}`);
-          
-        // Close confirmation dialog
-        setShowConfirmation(false);
+
+          // Broadcast order to kitchen/barista displays
+          try {
+            const electronAPI = getElectronAPI();
+            if (electronAPI?.websocketBroadcastOrder) {
+              // Get all products to retrieve category1_id
+              const allProducts = await electronAPI.localDbGetAllProducts?.();
+              const productsMap = new Map<number, { id: number; category1_id?: number | null;[key: string]: unknown }>();
+              if (Array.isArray(allProducts)) {
+                allProducts.forEach((p: unknown) => {
+                  if (p && typeof p === 'object' && 'id' in p && typeof (p as { id: unknown }).id === 'number') {
+                    const product = p as { id: number; category1_id?: number | null;[key: string]: unknown };
+                    productsMap.set(product.id, product);
+                  }
+                });
+              }
+
+              // Build order items with category1_id
+              const orderItems: OrderItem[] = cartItems.map((item) => {
+                const product = productsMap.get(item.product.id);
+                const category1_id = product?.category1_id ?? null;
+
+                // Calculate item price (same logic as transaction items)
+                let basePrice = item.product.harga_jual;
+                if (isOnline && selectedOnlinePlatform) {
+                  switch (selectedOnlinePlatform) {
+                    case 'qpon':
+                      basePrice = item.product.harga_qpon || item.product.harga_jual;
+                      break;
+                    case 'gofood':
+                      basePrice = item.product.harga_gofood || item.product.harga_jual;
+                      break;
+                    case 'grabfood':
+                      basePrice = item.product.harga_grabfood || item.product.harga_jual;
+                      break;
+                    case 'shopeefood':
+                      basePrice = item.product.harga_shopeefood || item.product.harga_jual;
+                      break;
+                    case 'tiktok':
+                      basePrice = item.product.harga_tiktok || item.product.harga_jual;
+                      break;
+                  }
+                }
+
+                let itemPrice = basePrice;
+                // Add customization prices
+                if (item.customizations) {
+                  item.customizations.forEach(customization => {
+                    customization.selected_options.forEach(option => {
+                      itemPrice += option.price_adjustment;
+                    });
+                  });
+                }
+
+                return {
+                  itemId: generateTransactionItemId(),
+                  productId: item.product.id,
+                  productName: item.product.nama,
+                  category1_id: category1_id ?? 0, // Default to 0 if null (will be skipped in routing)
+                  quantity: item.quantity,
+                  unitPrice: itemPrice,
+                  totalPrice: itemPrice * item.quantity,
+                  customNote: item.customNote,
+                  bundleSelections: item.bundleSelections,
+                  customizations: item.customizations,
+                  status: 'pending' as const
+                };
+              });
+
+              // Build order data
+              const orderData: OrderData = {
+                transactionId: transactionData.id,
+                receiptNumber: 0, // No onlineResult, so 0
+                businessId: transactionData.business_id,
+                items: orderItems,
+                createdAt: transactionData.created_at,
+                customerName: transactionData.customer_name || undefined,
+                customerUnit: transactionData.customer_unit || undefined,
+                pickupMethod: transactionData.pickup_method
+              };
+
+              // Broadcast order via Electron IPC
+              const broadcastResult = await electronAPI.websocketBroadcastOrder(orderData);
+              if (broadcastResult?.success) {
+                console.log(`✅ Order broadcasted to ${broadcastResult.sentTo.length} display(s)`);
+              } else {
+                console.warn('⚠️ Failed to broadcast order to displays');
+              }
+            }
+          } catch (broadcastError) {
+            console.error('❌ Error broadcasting order:', broadcastError);
+            // Don't fail the transaction if broadcasting fails
+          }
+        }, 10); // Small delay to ensure UI updates first
+      } else {
+        alert('Electron API not available');
+        setIsProcessing(false);
+        return;
       }
-      
+
     } catch (error) {
       console.error('Payment processing error:', error);
       alert('Terjadi kesalahan saat memproses pembayaran');
@@ -1393,17 +1466,17 @@ export default function PaymentModal({
           async () => {
             const controller = new AbortController();
             const timeoutId = setTimeout(() => controller.abort(), 5000); // 5 second timeout
-            
+
             try {
               const response = await fetch(getApiUrl('/api/banks'), {
                 signal: controller.signal
               });
               clearTimeout(timeoutId);
-              
+
               if (!response.ok) {
                 throw new Error('Failed to fetch banks online');
               }
-          const data = await response.json();
+              const data = await response.json();
               return data.banks || [];
             } catch (error) {
               clearTimeout(timeoutId);
@@ -1415,12 +1488,12 @@ export default function PaymentModal({
             const electronAPI = getElectronAPI();
             if (!electronAPI?.localDbGetBanks) {
               throw new Error('Offline database not available');
-        }
+            }
             const banks = await electronAPI.localDbGetBanks();
             return Array.isArray(banks) ? banks : [];
           }
         );
-        
+
         setBanks(Array.isArray(banksData) ? banksData : []);
       } catch (error) {
         console.error('Failed to fetch banks:', error);
@@ -1436,7 +1509,7 @@ export default function PaymentModal({
       const target = event.target as HTMLElement;
       const bankDropdown = target.closest('.bank-dropdown');
       const customerInput = document.getElementById('customer-name-input');
-      
+
       // Only close bank dropdown if clicking outside of it and not on customer input
       if (!bankDropdown && target !== customerInput && !customerInput?.contains(target) && showBankDropdown) {
         setShowBankDropdown(false);
@@ -1494,7 +1567,7 @@ export default function PaymentModal({
       setBankId('');
       setCardNumber('');
       setBankSearchTerm('');
-    setShowBankDropdown(false);
+      setShowBankDropdown(false);
       // Don't reset payment method if it's an online order with a selected platform
       if (!isOnline || !selectedOnlinePlatform) {
         setSelectedPaymentMethod('cash');
@@ -1515,653 +1588,634 @@ export default function PaymentModal({
   return (
     <>
       <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-50 p-2">
-      <div className="bg-white rounded-2xl w-[98vw] max-w-[1350px] h-[92vh] max-h-[700px] overflow-y-auto shadow-xl">
-        {/* Header */}
-        <div className="flex items-center justify-between p-6 pb-4">
-          <h2 className="text-xl font-bold text-gray-900">Payment</h2>
-          <button
-            onClick={onClose}
-            className="w-10 h-10 bg-gray-100 hover:bg-gray-200 rounded-full flex items-center justify-center transition-colors"
-          >
-            <X size={20} className="text-gray-600" />
-          </button>
-        </div>
+        <div className="bg-white rounded-2xl w-[98vw] max-w-[1350px] h-[92vh] max-h-[700px] overflow-y-auto shadow-xl">
+          {/* Header */}
+          <div className="flex items-center justify-between p-6 pb-4">
+            <h2 className="text-xl font-bold text-gray-900">Payment</h2>
+            <button
+              onClick={onClose}
+              className="w-10 h-10 bg-gray-100 hover:bg-gray-200 rounded-full flex items-center justify-center transition-colors"
+            >
+              <X size={20} className="text-gray-600" />
+            </button>
+          </div>
 
-        <div className="px-6 pb-6 h-full">
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-8 h-full">
-            {/* Left Side - Bill Details and Pickup Method */}
-            <div className="space-y-2">
-              {/* Customer Name and Pickup Method */}
-              <div className="bg-white rounded-xl p-4 border border-gray-200 shadow-sm">
-                <div className="flex gap-4 items-center">
-                  <div className="w-1/2 relative z-10">
-                    <input
-                      id="customer-name-input"
-                      type="text"
-                      value={customerName}
-                      onChange={(e) => {
-                        setCustomerName(e.target.value);
-                      }}
-                      onFocus={() => {
-                        setActiveInput('customer');
-                      }}
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        setActiveInput('customer');
-                        // Ensure the input is focused
-                        setTimeout(() => {
-                          const input = document.getElementById('customer-name-input') as HTMLInputElement;
-                          input?.focus();
-                        }, 10);
-                      }}
-                      onKeyDown={(e) => {
-                        // Prevent numpad from interfering
-                        e.stopPropagation();
-                      }}
-                      className={`w-full p-3 pr-10 text-base font-semibold border-2 rounded-lg text-gray-800 transition-all duration-300 cursor-text ${
-                        isCustomerNameMissing
+          <div className="px-6 pb-6 h-full">
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-8 h-full">
+              {/* Left Side - Bill Details and Pickup Method */}
+              <div className="space-y-2">
+                {/* Customer Name and Pickup Method */}
+                <div className="bg-white rounded-xl p-4 border border-gray-200 shadow-sm">
+                  <div className="flex gap-4 items-center">
+                    <div className="w-1/2 relative z-10">
+                      <input
+                        id="customer-name-input"
+                        type="text"
+                        value={customerName}
+                        onChange={(e) => {
+                          setCustomerName(e.target.value);
+                        }}
+                        onFocus={() => {
+                          setActiveInput('customer');
+                        }}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setActiveInput('customer');
+                          // Ensure the input is focused
+                          setTimeout(() => {
+                            const input = document.getElementById('customer-name-input') as HTMLInputElement;
+                            input?.focus();
+                          }, 10);
+                        }}
+                        onKeyDown={(e) => {
+                          // Prevent numpad from interfering
+                          e.stopPropagation();
+                        }}
+                        className={`w-full p-3 pr-10 text-base font-semibold border-2 rounded-lg text-gray-800 transition-all duration-300 cursor-text ${isCustomerNameMissing
                           ? 'border-red-400 bg-red-50 shadow-lg shadow-red-100 animate-pulse'
-                          : activeInput === 'customer' 
-                            ? 'border-purple-400 bg-purple-50 shadow-lg shadow-purple-200' 
+                          : activeInput === 'customer'
+                            ? 'border-purple-400 bg-purple-50 shadow-lg shadow-purple-200'
                             : 'border-gray-200 bg-gray-50 hover:bg-gray-100'
-                      }`}
-                      placeholder="Nama Pelanggan"
-                      autoComplete="off"
-                    />
-                  {isCustomerNameMissing && (
-                    <p className="mt-1 text-xs font-semibold text-red-600">
-                      Nama pelanggan wajib diisi untuk City Ledger.
-                    </p>
-                  )}
-                    <button
-                      disabled
-                      className="absolute right-2 top-1/2 transform -translate-y-1/2 px-2 py-1 bg-gray-200 rounded cursor-not-allowed opacity-50"
-                      title="Contact Book (Coming Soon)"
-                    >
-                      <span className="text-xs font-medium text-black">👥</span>
-                    </button>
-                  </div>
-                  
-                  {/* Pickup Method Toggle or Display */}
-                  {isOnline ? (
-                    <div className="w-1/2 bg-green-50 border-2 border-green-300 rounded-lg p-3">
-                      <div className="flex items-center justify-between">
-                        <span className="text-xs font-semibold text-green-800">Pickup:</span>
-                        <span className="text-xs font-bold text-green-900 uppercase">TAKE AWAY</span>
+                          }`}
+                        placeholder="Nama Pelanggan"
+                        autoComplete="off"
+                      />
+                      {isCustomerNameMissing && (
+                        <p className="mt-1 text-xs font-semibold text-red-600">
+                          Nama pelanggan wajib diisi untuk City Ledger.
+                        </p>
+                      )}
+                      <button
+                        disabled
+                        className="absolute right-2 top-1/2 transform -translate-y-1/2 px-2 py-1 bg-gray-200 rounded cursor-not-allowed opacity-50"
+                        title="Contact Book (Coming Soon)"
+                      >
+                        <span className="text-xs font-medium text-black">👥</span>
+                      </button>
+                    </div>
+
+                    {/* Pickup Method Toggle or Display */}
+                    {isOnline ? (
+                      <div className="w-1/2 bg-green-50 border-2 border-green-300 rounded-lg p-3">
+                        <div className="flex items-center justify-between">
+                          <span className="text-xs font-semibold text-green-800">Pickup:</span>
+                          <span className="text-xs font-bold text-green-900 uppercase">TAKE AWAY</span>
+                        </div>
                       </div>
-                    </div>
-                  ) : (
-                    <div className="w-1/2 relative bg-gray-200 rounded-lg p-0.5 flex h-[52px]">
-                      {/* Sliding Background */}
-                      <div
-                        className={`absolute top-0.5 bottom-0.5 left-0.5 w-[calc(50%-0.125rem)] bg-green-100 rounded-lg shadow-sm transition-transform duration-300 ease-in-out ${
-                          selectedPickupMethod === 'dine-in' ? 'translate-x-0' : 'translate-x-full'
-                        }`}
-                      ></div>
-                      
-                      <button
-                        onClick={() => setSelectedPickupMethod('dine-in')}
-                        className={`relative z-10 flex-1 py-1 px-3 rounded-md font-medium text-xs transition-colors duration-300 ${
-                          selectedPickupMethod === 'dine-in'
+                    ) : (
+                      <div className="w-1/2 relative bg-gray-200 rounded-lg p-0.5 flex h-[52px]">
+                        {/* Sliding Background */}
+                        <div
+                          className={`absolute top-0.5 bottom-0.5 left-0.5 w-[calc(50%-0.125rem)] bg-green-100 rounded-lg shadow-sm transition-transform duration-300 ease-in-out ${selectedPickupMethod === 'dine-in' ? 'translate-x-0' : 'translate-x-full'
+                            }`}
+                        ></div>
+
+                        <button
+                          onClick={() => setSelectedPickupMethod('dine-in')}
+                          className={`relative z-10 flex-1 py-1 px-3 rounded-md font-medium text-xs transition-colors duration-300 ${selectedPickupMethod === 'dine-in'
                             ? 'text-teal-600'
                             : 'text-gray-600 hover:text-gray-800'
-                        }`}
-                      >
-                        DINE IN
-                      </button>
-                      
-                      <button
-                        onClick={() => setSelectedPickupMethod('take-away')}
-                        className={`relative z-10 flex-1 py-1 px-3 rounded-md font-medium text-xs transition-colors duration-300 ${
-                          selectedPickupMethod === 'take-away'
+                            }`}
+                        >
+                          DINE IN
+                        </button>
+
+                        <button
+                          onClick={() => setSelectedPickupMethod('take-away')}
+                          className={`relative z-10 flex-1 py-1 px-3 rounded-md font-medium text-xs transition-colors duration-300 ${selectedPickupMethod === 'take-away'
                             ? 'text-teal-600'
                             : 'text-gray-600 hover:text-gray-800'
-                        }`}
-                      >
-                        TAKE AWAY
-                      </button>
-                    </div>
-                  )}
-                </div>
-                <div className="mt-4">
-                  <label className="block text-xs font-medium text-gray-500 mb-2 uppercase tracking-wide">
-                    Customer Unit
-                  </label>
-                  <div className="flex items-center gap-2">
-                    <button
-                      type="button"
-                      onClick={() => adjustCustomerUnit(-1)}
-                      disabled={customerUnitNumber <= 1}
-                      className={`w-10 h-10 rounded-lg border text-lg font-bold transition-colors ${
-                        customerUnitNumber <= 1
+                            }`}
+                        >
+                          TAKE AWAY
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                  <div className="mt-4">
+                    <label className="block text-xs font-medium text-gray-500 mb-2 uppercase tracking-wide">
+                      Customer Unit
+                    </label>
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => adjustCustomerUnit(-1)}
+                        disabled={customerUnitNumber <= 1}
+                        className={`w-10 h-10 rounded-lg border text-lg font-bold transition-colors ${customerUnitNumber <= 1
                           ? 'border-gray-200 bg-gray-100 text-gray-400 cursor-not-allowed'
                           : 'border-gray-300 bg-white text-gray-700 hover:bg-gray-100'
-                      }`}
-                    >
-                      −
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setActiveInput('customerUnit')}
-                      className={`flex-1 px-4 py-2 rounded-lg border-2 text-base font-semibold transition-all duration-300 ${
-                        activeInput === 'customerUnit'
+                          }`}
+                      >
+                        −
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setActiveInput('customerUnit')}
+                        className={`flex-1 px-4 py-2 rounded-lg border-2 text-base font-semibold transition-all duration-300 ${activeInput === 'customerUnit'
                           ? 'border-blue-400 bg-blue-50 text-blue-800 shadow-lg shadow-blue-100 animate-pulse'
                           : 'border-gray-200 bg-white text-gray-800 hover:border-blue-300'
-                      }`}
-                    >
-                      {`${customerUnitNumber} Orang`}
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => adjustCustomerUnit(1)}
-                      className="w-10 h-10 rounded-lg border border-gray-300 bg-white text-lg font-bold text-gray-700 hover:bg-gray-100 transition-colors"
-                    >
-                      +
-                    </button>
-                  </div>
-                  <div className="grid grid-cols-5 gap-2 mt-3">
-                    {customerUnitQuickOptions.map((value) => (
+                          }`}
+                      >
+                        {`${customerUnitNumber} Orang`}
+                      </button>
                       <button
-                        key={value}
                         type="button"
-                        onClick={() => handleCustomerUnitQuickSelect(value)}
-                        className={`w-full px-3 py-1 rounded-full border text-xs font-medium transition-colors ${
-                          customerUnitNumber === value
+                        onClick={() => adjustCustomerUnit(1)}
+                        className="w-10 h-10 rounded-lg border border-gray-300 bg-white text-lg font-bold text-gray-700 hover:bg-gray-100 transition-colors"
+                      >
+                        +
+                      </button>
+                    </div>
+                    <div className="grid grid-cols-5 gap-2 mt-3">
+                      {customerUnitQuickOptions.map((value) => (
+                        <button
+                          key={value}
+                          type="button"
+                          onClick={() => handleCustomerUnitQuickSelect(value)}
+                          className={`w-full px-3 py-1 rounded-full border text-xs font-medium transition-colors ${customerUnitNumber === value
                             ? 'bg-blue-100 border-blue-400 text-blue-800'
                             : 'bg-white border-gray-200 text-gray-700 hover:bg-gray-100'
-                        }`}
-                      >
-                        {value}
-                      </button>
-                    ))}
+                            }`}
+                        >
+                          {value}
+                        </button>
+                      ))}
+                    </div>
                   </div>
                 </div>
-              </div>
-              {/* Bill Details */}
-              <div className="bg-gray-50 rounded-xl p-6">
-                <div className="flex items-center justify-between mb-4">
-                  <h3 className="text-lg font-semibold text-gray-800">Rincian Tagihan</h3>
-                  {selectedPaymentMethod === 'debit' && (
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setBankError('');
-                        setCardNumberError('');
-                        setShowDebitModal(true);
-                      }}
-                      className="px-3 py-1.5 rounded-lg border border-blue-200 bg-blue-50 text-xs font-semibold text-blue-700 hover:bg-blue-100 transition-colors"
-                    >
-                      Isi / Ubah Debit
-                    </button>
-                  )}
-                </div>
-                <div className="space-y-3">
-                  <div className="flex justify-between">
-                    <span className="text-sm text-gray-600">Harga produk asli</span>
-                    <span className="text-sm font-medium text-gray-600">{formatPrice(originalPrice)}</span>
-                  </div>
-                  {selectedPaymentMethod === 'debit' && (
-                    <div className="rounded-lg border border-blue-100 bg-blue-50 p-3 space-y-2">
-                      <div className="flex justify-between items-center">
-                        <span className="text-xs text-blue-700 font-semibold uppercase tracking-wide">
-                          Bank
-                        </span>
-                        <span className={`text-sm font-semibold ${selectedBank ? 'text-blue-900' : 'text-red-600'}`}>
-                          {selectedBank?.bank_name || 'Belum dipilih'}
-                        </span>
-                      </div>
-                      <div className="flex justify-between items-center">
-                        <span className="text-xs text-blue-700 font-semibold uppercase tracking-wide">
-                          Nomor Kartu
-                        </span>
-                        <span className={`text-sm font-semibold ${cardNumber ? 'text-blue-900' : 'text-red-600'}`}>
-                          {cardNumber || 'Belum diisi'}
-                        </span>
-                      </div>
-                    </div>
-                  )}
-                  {voucherDiscount > 0 && (
-                    <div className="flex justify-between items-start">
-                      <div className="flex flex-col">
-                        <span className="text-green-600">Diskon Voucher</span>
-                        {promotionLabel && (
-                          <span className="text-[11px] text-green-500 font-medium">{promotionLabel}</span>
-                        )}
-                      </div>
-                      <span className="font-medium text-green-600">-{formatPrice(voucherDiscount)}</span>
-                    </div>
-                  )}
-                  <div className="flex justify-between border-t pt-3">
-                    <span className="text-sm text-gray-800 font-semibold">Jumlah pesanan</span>
-                    <span className="text-sm font-bold text-gray-800">{formatPrice(finalTotal)}</span>
-                  </div>
-                  {receivedAmount > finalTotal && (
-                    <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-3">
-                      <div className="flex justify-between">
-                        <span className="text-yellow-800 font-medium">Kembalian</span>
-                        <span className="font-bold text-yellow-900">{formatPrice(receivedAmount - finalTotal)}</span>
-                      </div>
-                    </div>
-                  )}
-                </div>
-              </div>
-
-
-
-
-              {/* Payment Method Specific Inputs */}
-              {selectedPaymentMethod === 'cl' && (
-                <div className={`rounded-xl p-4 ${isClInfoIncomplete ? 'bg-red-50 border-2 border-red-300 animate-pulse' : 'bg-gray-50 border border-gray-200'}`}>
-                  <h3 className={`text-lg font-semibold mb-4 ${isClInfoIncomplete ? 'text-red-800' : 'text-gray-800'}`}>
-                    Informasi City Ledger
-                  </h3>
-                  <div className="space-y-3">
-                    <p className="text-sm text-gray-700">
-                      Nama pelanggan yang kamu isi akan disimpan sebagai referensi City Ledger.
-                    </p>
-                    <div
-                      className={`rounded-lg border border-dashed ${
-                        trimmedCustomerName ? 'border-purple-300 bg-purple-50/60' : 'border-red-300 bg-red-50/70'
-                      } p-3 text-xs`}
-                    >
-                      <p className="font-semibold text-gray-700">Nama pelanggan saat ini:</p>
-                      <p
-                        className={`mt-1 text-base font-bold ${
-                          trimmedCustomerName ? 'text-purple-800' : 'text-red-600'
-                        }`}
-                      >
-                        {trimmedCustomerName || 'Belum diisi'}
-                      </p>
-                    </div>
-                    <p className="text-xs text-gray-600">
-                      Pastikan pelanggan memahami bahwa transaksi ini dicatat sebagai hutang (City Ledger).
-                    </p>
-                    {isCustomerNameMissing && (
-                      <p className="text-xs font-semibold text-red-600">
-                        Silakan isi nama pelanggan untuk melanjutkan pembayaran City Ledger.
-                      </p>
-                    )}
-                  </div>
-                </div>
-              )}
-            </div>
-
-            {/* Right Side - Keypad */}
-            <div className="space-y-4">
-              {/* Customer Name Input and Pickup Toggle */}
-              {/* Payment Method Selection */}
-              <div>
-                <h3 className="text-sm font-semibold text-gray-800 mb-2">Pilih Metode Pembayaran</h3>
-                <div className="space-y-2">
-                  {/* Show locked platform payment method for online orders */}
-                  {isOnline && selectedOnlinePlatform && (
-                    <div className="p-3 bg-blue-50 border-2 border-blue-300 rounded-lg">
-                      <div className="flex items-center justify-between">
-                        <span className="text-sm font-semibold text-blue-800">Platform:</span>
-                        <span className="text-sm font-bold text-blue-900 uppercase">
-                          {selectedOnlinePlatform === 'qpon' ? 'Qpon' : 
-                           selectedOnlinePlatform === 'gofood' ? 'GoFood' : 
-                           selectedOnlinePlatform === 'grabfood' ? 'GrabFood' : 
-                           selectedOnlinePlatform === 'shopeefood' ? 'ShopeeFood' : 
-                           selectedOnlinePlatform === 'tiktok' ? 'TikTok' : selectedOnlinePlatform}
-                        </span>
-                      </div>
-                    </div>
-                  )}
-                  <div className="flex gap-1">
-                    {!isOnline && (
-                      <>
-                    <button
-                      onClick={() => setSelectedPaymentMethod('cash')}
-                      className={`flex-1 py-2 rounded border transition-all duration-200 ${
-                        selectedPaymentMethod === 'cash'
-                          ? 'bg-teal-100 border-teal-400 text-teal-800'
-                          : 'bg-gray-50 border-gray-200 text-gray-700 hover:bg-gray-100'
-                      }`}
-                    >
-                        <span className="font-medium text-xs">Cash</span>
-                    </button>
-                    
-                    <button
-                      onClick={() => setSelectedPaymentMethod('debit')}
-                      className={`flex-1 py-2 rounded border transition-all duration-200 ${
-                        selectedPaymentMethod === 'debit'
-                          ? 'bg-teal-100 border-teal-400 text-teal-800'
-                          : 'bg-gray-50 border-gray-200 text-gray-700 hover:bg-gray-100'
-                      }`}
-                    >
-                        <span className="font-medium text-xs">Debit</span>
-                    </button>
-                    
-                    <button
-                      onClick={() => setSelectedPaymentMethod('qr')}
-                      className={`flex-1 py-2 rounded border transition-all duration-200 ${
-                        selectedPaymentMethod === 'qr'
-                          ? 'bg-teal-100 border-teal-400 text-teal-800'
-                          : 'bg-gray-50 border-gray-200 text-gray-700 hover:bg-gray-100'
-                      }`}
-                    >
-                        <span className="font-medium text-xs">QR</span>
-                    </button>
-                    
-                    <button
-                      onClick={() => setSelectedPaymentMethod('ewallet')}
-                      className={`flex-1 py-2 rounded border transition-all duration-200 ${
-                        selectedPaymentMethod === 'ewallet'
-                          ? 'bg-teal-100 border-teal-400 text-teal-800'
-                          : 'bg-gray-50 border-gray-200 text-gray-700 hover:bg-gray-100'
-                      }`}
-                    >
-                        <span className="font-medium text-xs">E-Wallet</span>
-                    </button>
-                    
-                    <button
-                      onClick={() => {
-                        setSelectedPaymentMethod('cl');
-                        // Clear and reset amount input for CL
-                        setAmountReceived('');
-                        // Pindahkan fokus ke input nama pelanggan karena wajib diisi
-                        setActiveInput('customer');
-                        // Clear promotion when CL is selected
-                        if (promotionSelection !== 'none') {
-                          setPromotionSelection('none');
-                          setCustomVoucherAmount('');
-                        }
-                      }}
-                      className={`flex-1 py-2 rounded border transition-all duration-200 ${
-                        selectedPaymentMethod === 'cl'
-                          ? 'bg-purple-100 border-purple-400 text-purple-800'
-                          : 'bg-gray-50 border-gray-200 text-gray-700 hover:bg-gray-100'
-                      }`}
-                    >
-                      <span className="font-medium text-xs">CL</span>
-                    </button>
-                    </>
-                    )}
-                  </div>
-
-                </div>
-              </div>
-              {!isOnline && (
-                <div className={`space-y-2 ${promotionsDisabled ? 'opacity-60' : ''}`}>
-                  <div className="flex flex-wrap gap-2 mt-3">
-                    {promotionOptions.map(option => (
+                {/* Bill Details */}
+                <div className="bg-gray-50 rounded-xl p-6">
+                  <div className="flex items-center justify-between mb-4">
+                    <h3 className="text-lg font-semibold text-gray-800">Rincian Tagihan</h3>
+                    {selectedPaymentMethod === 'debit' && (
                       <button
-                        key={option.id}
-                        onClick={() => !promotionsDisabled && handlePromotionSelect(option.id)}
-                        disabled={promotionsDisabled}
-                        className={`px-3 py-2 rounded-lg border text-xs font-medium transition-colors ${
-                          promotionSelection === option.id && !promotionsDisabled
+                        type="button"
+                        onClick={() => {
+                          setBankError('');
+                          setCardNumberError('');
+                          setShowDebitModal(true);
+                        }}
+                        className="px-3 py-1.5 rounded-lg border border-blue-200 bg-blue-50 text-xs font-semibold text-blue-700 hover:bg-blue-100 transition-colors"
+                      >
+                        Isi / Ubah Debit
+                      </button>
+                    )}
+                  </div>
+                  <div className="space-y-3">
+                    <div className="flex justify-between">
+                      <span className="text-sm text-gray-600">Harga produk asli</span>
+                      <span className="text-sm font-medium text-gray-600">{formatPrice(originalPrice)}</span>
+                    </div>
+                    {selectedPaymentMethod === 'debit' && (
+                      <div className="rounded-lg border border-blue-100 bg-blue-50 p-3 space-y-2">
+                        <div className="flex justify-between items-center">
+                          <span className="text-xs text-blue-700 font-semibold uppercase tracking-wide">
+                            Bank
+                          </span>
+                          <span className={`text-sm font-semibold ${selectedBank ? 'text-blue-900' : 'text-red-600'}`}>
+                            {selectedBank?.bank_name || 'Belum dipilih'}
+                          </span>
+                        </div>
+                        <div className="flex justify-between items-center">
+                          <span className="text-xs text-blue-700 font-semibold uppercase tracking-wide">
+                            Nomor Kartu
+                          </span>
+                          <span className={`text-sm font-semibold ${cardNumber ? 'text-blue-900' : 'text-red-600'}`}>
+                            {cardNumber || 'Belum diisi'}
+                          </span>
+                        </div>
+                      </div>
+                    )}
+                    {voucherDiscount > 0 && (
+                      <div className="flex justify-between items-start">
+                        <div className="flex flex-col">
+                          <span className="text-green-600">Diskon Voucher</span>
+                          {promotionLabel && (
+                            <span className="text-[11px] text-green-500 font-medium">{promotionLabel}</span>
+                          )}
+                        </div>
+                        <span className="font-medium text-green-600">-{formatPrice(voucherDiscount)}</span>
+                      </div>
+                    )}
+                    <div className="flex justify-between border-t pt-3">
+                      <span className="text-sm text-gray-800 font-semibold">Jumlah pesanan</span>
+                      <span className="text-sm font-bold text-gray-800">{formatPrice(finalTotal)}</span>
+                    </div>
+                    {receivedAmount > finalTotal && (
+                      <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-3">
+                        <div className="flex justify-between">
+                          <span className="text-yellow-800 font-medium">Kembalian</span>
+                          <span className="font-bold text-yellow-900">{formatPrice(receivedAmount - finalTotal)}</span>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+
+
+
+                {/* Payment Method Specific Inputs */}
+                {selectedPaymentMethod === 'cl' && (
+                  <div className={`rounded-xl p-4 ${isClInfoIncomplete ? 'bg-red-50 border-2 border-red-300 animate-pulse' : 'bg-gray-50 border border-gray-200'}`}>
+                    <h3 className={`text-lg font-semibold mb-4 ${isClInfoIncomplete ? 'text-red-800' : 'text-gray-800'}`}>
+                      Informasi City Ledger
+                    </h3>
+                    <div className="space-y-3">
+                      <p className="text-sm text-gray-700">
+                        Nama pelanggan yang kamu isi akan disimpan sebagai referensi City Ledger.
+                      </p>
+                      <div
+                        className={`rounded-lg border border-dashed ${trimmedCustomerName ? 'border-purple-300 bg-purple-50/60' : 'border-red-300 bg-red-50/70'
+                          } p-3 text-xs`}
+                      >
+                        <p className="font-semibold text-gray-700">Nama pelanggan saat ini:</p>
+                        <p
+                          className={`mt-1 text-base font-bold ${trimmedCustomerName ? 'text-purple-800' : 'text-red-600'
+                            }`}
+                        >
+                          {trimmedCustomerName || 'Belum diisi'}
+                        </p>
+                      </div>
+                      <p className="text-xs text-gray-600">
+                        Pastikan pelanggan memahami bahwa transaksi ini dicatat sebagai hutang (City Ledger).
+                      </p>
+                      {isCustomerNameMissing && (
+                        <p className="text-xs font-semibold text-red-600">
+                          Silakan isi nama pelanggan untuk melanjutkan pembayaran City Ledger.
+                        </p>
+                      )}
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              {/* Right Side - Keypad */}
+              <div className="space-y-4">
+                {/* Customer Name Input and Pickup Toggle */}
+                {/* Payment Method Selection */}
+                <div>
+                  <h3 className="text-sm font-semibold text-gray-800 mb-2">Pilih Metode Pembayaran</h3>
+                  <div className="space-y-2">
+                    {/* Show locked platform payment method for online orders */}
+                    {isOnline && selectedOnlinePlatform && (
+                      <div className="p-3 bg-blue-50 border-2 border-blue-300 rounded-lg">
+                        <div className="flex items-center justify-between">
+                          <span className="text-sm font-semibold text-blue-800">Platform:</span>
+                          <span className="text-sm font-bold text-blue-900 uppercase">
+                            {selectedOnlinePlatform === 'qpon' ? 'Qpon' :
+                              selectedOnlinePlatform === 'gofood' ? 'GoFood' :
+                                selectedOnlinePlatform === 'grabfood' ? 'GrabFood' :
+                                  selectedOnlinePlatform === 'shopeefood' ? 'ShopeeFood' :
+                                    selectedOnlinePlatform === 'tiktok' ? 'TikTok' : selectedOnlinePlatform}
+                          </span>
+                        </div>
+                      </div>
+                    )}
+                    <div className="flex gap-1">
+                      {!isOnline && (
+                        <>
+                          <button
+                            onClick={() => setSelectedPaymentMethod('cash')}
+                            className={`flex-1 py-2 rounded border transition-all duration-200 ${selectedPaymentMethod === 'cash'
+                              ? 'bg-teal-100 border-teal-400 text-teal-800'
+                              : 'bg-gray-50 border-gray-200 text-gray-700 hover:bg-gray-100'
+                              }`}
+                          >
+                            <span className="font-medium text-xs">Cash</span>
+                          </button>
+
+                          <button
+                            onClick={() => setSelectedPaymentMethod('debit')}
+                            className={`flex-1 py-2 rounded border transition-all duration-200 ${selectedPaymentMethod === 'debit'
+                              ? 'bg-teal-100 border-teal-400 text-teal-800'
+                              : 'bg-gray-50 border-gray-200 text-gray-700 hover:bg-gray-100'
+                              }`}
+                          >
+                            <span className="font-medium text-xs">Debit</span>
+                          </button>
+
+                          <button
+                            onClick={() => setSelectedPaymentMethod('qr')}
+                            className={`flex-1 py-2 rounded border transition-all duration-200 ${selectedPaymentMethod === 'qr'
+                              ? 'bg-teal-100 border-teal-400 text-teal-800'
+                              : 'bg-gray-50 border-gray-200 text-gray-700 hover:bg-gray-100'
+                              }`}
+                          >
+                            <span className="font-medium text-xs">QR</span>
+                          </button>
+
+                          <button
+                            onClick={() => setSelectedPaymentMethod('ewallet')}
+                            className={`flex-1 py-2 rounded border transition-all duration-200 ${selectedPaymentMethod === 'ewallet'
+                              ? 'bg-teal-100 border-teal-400 text-teal-800'
+                              : 'bg-gray-50 border-gray-200 text-gray-700 hover:bg-gray-100'
+                              }`}
+                          >
+                            <span className="font-medium text-xs">E-Wallet</span>
+                          </button>
+
+                          <button
+                            onClick={() => {
+                              setSelectedPaymentMethod('cl');
+                              // Clear and reset amount input for CL
+                              setAmountReceived('');
+                              // Pindahkan fokus ke input nama pelanggan karena wajib diisi
+                              setActiveInput('customer');
+                              // Clear promotion when CL is selected
+                              if (promotionSelection !== 'none') {
+                                setPromotionSelection('none');
+                                setCustomVoucherAmount('');
+                              }
+                            }}
+                            className={`flex-1 py-2 rounded border transition-all duration-200 ${selectedPaymentMethod === 'cl'
+                              ? 'bg-purple-100 border-purple-400 text-purple-800'
+                              : 'bg-gray-50 border-gray-200 text-gray-700 hover:bg-gray-100'
+                              }`}
+                          >
+                            <span className="font-medium text-xs">CL</span>
+                          </button>
+                        </>
+                      )}
+                    </div>
+
+                  </div>
+                </div>
+                {!isOnline && (
+                  <div className={`space-y-2 ${promotionsDisabled ? 'opacity-60' : ''}`}>
+                    <div className="flex flex-wrap gap-2 mt-3">
+                      {promotionOptions.map(option => (
+                        <button
+                          key={option.id}
+                          onClick={() => !promotionsDisabled && handlePromotionSelect(option.id)}
+                          disabled={promotionsDisabled}
+                          className={`px-3 py-2 rounded-lg border text-xs font-medium transition-colors ${promotionSelection === option.id && !promotionsDisabled
                             ? 'bg-green-100 border-green-400 text-green-800 shadow-sm'
                             : promotionsDisabled
                               ? 'bg-gray-100 border-gray-200 text-gray-400 cursor-not-allowed'
                               : 'bg-white border-gray-300 text-gray-700 hover:bg-gray-100'
-                        }`}
-                      >
-                        {option.label}
-                      </button>
-                    ))}
-                    {promotionSelection !== 'none' && (
-                      <button
-                        onClick={() => !promotionsDisabled && handlePromotionSelect('none')}
-                        disabled={promotionsDisabled}
-                        className={`px-3 py-2 rounded-lg border text-xs font-medium ${
-                          promotionsDisabled
+                            }`}
+                        >
+                          {option.label}
+                        </button>
+                      ))}
+                      {promotionSelection !== 'none' && (
+                        <button
+                          onClick={() => !promotionsDisabled && handlePromotionSelect('none')}
+                          disabled={promotionsDisabled}
+                          className={`px-3 py-2 rounded-lg border text-xs font-medium ${promotionsDisabled
                             ? 'bg-gray-100 border-gray-200 text-gray-400 cursor-not-allowed'
                             : 'bg-white border-gray-200 text-gray-500 hover:bg-gray-100'
-                        }`}
-                      >
-                        Hapus Promo
-                      </button>
-                    )}
-                  </div>
-                  {promotionSelection === 'custom' && (
-                    <div className="max-w-xs">
-                      <label className="block text-xs font-medium text-gray-600 mb-1">
-                        Nominal Voucher Custom
-                      </label>
-                      <input
-                        type="text"
-                        value={
-                          promotionValue && promotionValue > 0
-                            ? `Rp ${promotionValue.toLocaleString('id-ID')}`
-                            : ''
-                        }
-                        readOnly
-                        onClick={() => setActiveInput('voucher')}
-                        className={`w-full px-3 py-2 text-sm font-semibold border-2 rounded-lg transition-all duration-300 ${
-                          activeInput === 'voucher'
+                            }`}
+                        >
+                          Hapus Promo
+                        </button>
+                      )}
+                    </div>
+                    {promotionSelection === 'custom' && (
+                      <div className="max-w-xs">
+                        <label className="block text-xs font-medium text-gray-600 mb-1">
+                          Nominal Voucher Custom
+                        </label>
+                        <input
+                          type="text"
+                          value={
+                            promotionValue && promotionValue > 0
+                              ? `Rp ${promotionValue.toLocaleString('id-ID')}`
+                              : ''
+                          }
+                          readOnly
+                          onClick={() => setActiveInput('voucher')}
+                          className={`w-full px-3 py-2 text-sm font-semibold border-2 rounded-lg transition-all duration-300 ${activeInput === 'voucher'
                             ? 'border-green-400 bg-green-50 shadow-lg shadow-green-200 animate-pulse text-gray-800 cursor-pointer'
                             : 'border-gray-200 bg-white hover:bg-gray-50 text-gray-800 cursor-pointer'
-                        }`}
-                        placeholder="Rp 0"
-                      />
-                      <p className="text-[11px] text-gray-500 mt-1">
-                        Gunakan keypad di kanan untuk memasukkan nominal voucher.
+                            }`}
+                          placeholder="Rp 0"
+                        />
+                        <p className="text-[11px] text-gray-500 mt-1">
+                          Gunakan keypad di kanan untuk memasukkan nominal voucher.
+                        </p>
+                      </div>
+                    )}
+                    {!promotionsDisabled && isPromotionApplied && promotionLabel && (
+                      <p className="text-xs text-green-700 font-medium">
+                        Promo terpilih: {promotionLabel}
                       </p>
-                    </div>
-                  )}
-                  {!promotionsDisabled && isPromotionApplied && promotionLabel && (
-                    <p className="text-xs text-green-700 font-medium">
-                      Promo terpilih: {promotionLabel}
-                    </p>
-                  )}
-                </div>
-              )}
-
-              {/* Amount Input and Shortage */}
-              <div>
-                {/* Amount Received Input - Show for all payment methods including CL */}
-                <div className="mb-2">
-                  <div className="flex items-center justify-between mb-2">
-                    <label className="text-sm font-medium text-gray-700">
-                      Jumlah yang Diterima
-                    </label>
-                    {shortage > 0 && (
-                      <span className="text-red-600 text-sm font-medium">
-                        Kurang: {formatPrice(shortage)}
-                      </span>
                     )}
                   </div>
-                  <div className="relative">
-                    <input
-                      type="text"
-                      value={amountReceived ? `Rp ${parseFloat(amountReceived).toLocaleString('id-ID')}` : ''}
-                      readOnly
-                      disabled={selectedPaymentMethod === 'cl'}
-                      onClick={() => selectedPaymentMethod !== 'cl' && setActiveInput('amount')}
-                      className={`w-full p-3 pr-12 text-base font-semibold border-2 rounded-lg transition-all duration-300 ${
-                        selectedPaymentMethod === 'cl'
-                          ? 'border-gray-300 bg-gray-100 text-gray-500 cursor-not-allowed opacity-50'
-                          : activeInput === 'amount' 
-                          ? 'border-blue-400 bg-blue-50 shadow-lg shadow-blue-200 animate-pulse text-gray-800 cursor-pointer' 
-                          : 'border-gray-200 bg-gray-50 hover:bg-gray-100 text-gray-800 cursor-pointer'
-                      }`}
-                      placeholder="Rp 0"
-                    />
-                    {amountReceived && selectedPaymentMethod !== 'cl' && (
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setAmountReceived('');
-                          setActiveInput('amount');
-                        }}
-                        className="absolute inset-y-0 right-0 px-3 flex items-center text-xs font-semibold text-gray-500 hover:text-red-600 transition-colors"
-                      >
-                        Clear
-                      </button>
-                    )}
-                  </div>
-                  </div>
-
-                {/* Quick Amount Buttons - Show for all except CL */}
-                {selectedPaymentMethod !== 'cl' && (
-                <div className="mb-4">
-                  <div className="grid grid-cols-3 gap-2">
-                    <button
-                      onClick={() => {
-                        setAmountReceived(Math.ceil(finalTotal).toString());
-                        setActiveInput('amount');
-                      }}
-                      className="p-2 bg-green-500 hover:bg-green-600 text-white rounded-md text-xs font-semibold transition-colors shadow-md"
-                    >
-                      💰 Uang Pas
-                    </button>
-                    <button
-                      onClick={() => applyQuickIncrement(10000)}
-                      className="p-2 bg-blue-100 hover:bg-blue-200 text-blue-800 rounded-md text-xs font-medium transition-colors"
-                    >
-                      +Rp 10.000
-                    </button>
-                    <button
-                      onClick={() => applyQuickIncrement(50000)}
-                      className="p-2 bg-blue-100 hover:bg-blue-200 text-blue-800 rounded-md text-xs font-medium transition-colors"
-                    >
-                      +Rp 50.000
-                    </button>
-                    <button
-                      onClick={() => applyQuickIncrement(5000)}
-                      className="p-2 bg-blue-100 hover:bg-blue-200 text-blue-800 rounded-md text-xs font-medium transition-colors"
-                    >
-                      +Rp 5.000
-                    </button>
-                    <button
-                      onClick={() => applyQuickIncrement(20000)}
-                      className="p-2 bg-blue-100 hover:bg-blue-200 text-blue-800 rounded-md text-xs font-medium transition-colors"
-                    >
-                      +Rp 20.000
-                    </button>
-                    <button
-                      onClick={() => applyQuickIncrement(100000)}
-                      className="p-2 bg-blue-100 hover:bg-blue-200 text-blue-800 rounded-md text-xs font-medium transition-colors"
-                    >
-                      +Rp 100.000
-                    </button>
-                  </div>
-                </div>
                 )}
 
+                {/* Amount Input and Shortage */}
+                <div>
+                  {/* Amount Received Input - Show for all payment methods including CL */}
+                  <div className="mb-2">
+                    <div className="flex items-center justify-between mb-2">
+                      <label className="text-sm font-medium text-gray-700">
+                        Jumlah yang Diterima
+                      </label>
+                      {shortage > 0 && (
+                        <span className="text-red-600 text-sm font-medium">
+                          Kurang: {formatPrice(shortage)}
+                        </span>
+                      )}
+                    </div>
+                    <div className="relative">
+                      <input
+                        type="text"
+                        value={amountReceived ? `Rp ${parseFloat(amountReceived).toLocaleString('id-ID')}` : ''}
+                        readOnly
+                        disabled={selectedPaymentMethod === 'cl'}
+                        onClick={() => selectedPaymentMethod !== 'cl' && setActiveInput('amount')}
+                        className={`w-full p-3 pr-12 text-base font-semibold border-2 rounded-lg transition-all duration-300 ${selectedPaymentMethod === 'cl'
+                          ? 'border-gray-300 bg-gray-100 text-gray-500 cursor-not-allowed opacity-50'
+                          : activeInput === 'amount'
+                            ? 'border-blue-400 bg-blue-50 shadow-lg shadow-blue-200 animate-pulse text-gray-800 cursor-pointer'
+                            : 'border-gray-200 bg-gray-50 hover:bg-gray-100 text-gray-800 cursor-pointer'
+                          }`}
+                        placeholder="Rp 0"
+                      />
+                      {amountReceived && selectedPaymentMethod !== 'cl' && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setAmountReceived('');
+                            setActiveInput('amount');
+                          }}
+                          className="absolute inset-y-0 right-0 px-3 flex items-center text-xs font-semibold text-gray-500 hover:text-red-600 transition-colors"
+                        >
+                          Clear
+                        </button>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Quick Amount Buttons - Show for all except CL */}
+                  {selectedPaymentMethod !== 'cl' && (
+                    <div className="mb-4">
+                      <div className="grid grid-cols-3 gap-2">
+                        <button
+                          onClick={() => {
+                            setAmountReceived(Math.ceil(finalTotal).toString());
+                            setActiveInput('amount');
+                          }}
+                          className="p-2 bg-green-500 hover:bg-green-600 text-white rounded-md text-xs font-semibold transition-colors shadow-md"
+                        >
+                          💰 Uang Pas
+                        </button>
+                        <button
+                          onClick={() => applyQuickIncrement(10000)}
+                          className="p-2 bg-blue-100 hover:bg-blue-200 text-blue-800 rounded-md text-xs font-medium transition-colors"
+                        >
+                          +Rp 10.000
+                        </button>
+                        <button
+                          onClick={() => applyQuickIncrement(50000)}
+                          className="p-2 bg-blue-100 hover:bg-blue-200 text-blue-800 rounded-md text-xs font-medium transition-colors"
+                        >
+                          +Rp 50.000
+                        </button>
+                        <button
+                          onClick={() => applyQuickIncrement(5000)}
+                          className="p-2 bg-blue-100 hover:bg-blue-200 text-blue-800 rounded-md text-xs font-medium transition-colors"
+                        >
+                          +Rp 5.000
+                        </button>
+                        <button
+                          onClick={() => applyQuickIncrement(20000)}
+                          className="p-2 bg-blue-100 hover:bg-blue-200 text-blue-800 rounded-md text-xs font-medium transition-colors"
+                        >
+                          +Rp 20.000
+                        </button>
+                        <button
+                          onClick={() => applyQuickIncrement(100000)}
+                          className="p-2 bg-blue-100 hover:bg-blue-200 text-blue-800 rounded-md text-xs font-medium transition-colors"
+                        >
+                          +Rp 100.000
+                        </button>
+                      </div>
+                    </div>
+                  )}
 
 
-                {/* Numeric Keypad */}
-                <div className="grid grid-cols-4 gap-2">
-                  {/* Row 1: 7, 8, 9, backspace */}
-                  <button
-                    onClick={() => handleKeypadInput('7')}
-                    className="p-3 bg-white border-2 border-gray-200 rounded-lg text-base font-semibold text-gray-800 hover:bg-gray-50 transition-colors"
-                  >
-                    7
-                  </button>
-                  <button
-                    onClick={() => handleKeypadInput('8')}
-                    className="p-3 bg-white border-2 border-gray-200 rounded-lg text-base font-semibold text-gray-800 hover:bg-gray-50 transition-colors"
-                  >
-                    8
-                  </button>
-                  <button
-                    onClick={() => handleKeypadInput('9')}
-                    className="p-3 bg-white border-2 border-gray-200 rounded-lg text-base font-semibold text-gray-800 hover:bg-gray-50 transition-colors"
-                  >
-                    9
-                  </button>
-                  <button
-                    onClick={() => handleKeypadInput('backspace')}
-                    className="p-3 bg-green-500 hover:bg-green-600 text-white rounded-lg text-xs font-medium transition-colors flex items-center justify-center"
-                  >
-                    <Delete size={16} />
-                  </button>
-                  
-                  {/* Row 2: 4, 5, 6, Hapus Semua */}
-                  <button
-                    onClick={() => handleKeypadInput('4')}
-                    className="p-3 bg-white border-2 border-gray-200 rounded-lg text-base font-semibold text-gray-800 hover:bg-gray-50 transition-colors"
-                  >
-                    4
-                  </button>
-                  <button
-                    onClick={() => handleKeypadInput('5')}
-                    className="p-3 bg-white border-2 border-gray-200 rounded-lg text-base font-semibold text-gray-800 hover:bg-gray-50 transition-colors"
-                  >
-                    5
-                  </button>
-                  <button
-                    onClick={() => handleKeypadInput('6')}
-                    className="p-3 bg-white border-2 border-gray-200 rounded-lg text-base font-semibold text-gray-800 hover:bg-gray-50 transition-colors"
-                  >
-                    6
-                  </button>
-                  <button
-                    onClick={() => handleKeypadInput('clear')}
-                    className="p-3 bg-green-500 hover:bg-green-600 text-white rounded-lg text-xs font-medium transition-colors"
-                  >
-                    Hapus Semua
-                  </button>
-                  
-                  {/* Row 3: 1, 2, 3, Konfirmasi (spans 2 rows) */}
-                  <button
-                    onClick={() => handleKeypadInput('1')}
-                    className="p-3 bg-white border-2 border-gray-200 rounded-lg text-base font-semibold text-gray-800 hover:bg-gray-50 transition-colors"
-                  >
-                    1
-                  </button>
-                  <button
-                    onClick={() => handleKeypadInput('2')}
-                    className="p-3 bg-white border-2 border-gray-200 rounded-lg text-base font-semibold text-gray-800 hover:bg-gray-50 transition-colors"
-                  >
-                    2
-                  </button>
-                  <button
-                    onClick={() => handleKeypadInput('3')}
-                    className="p-3 bg-white border-2 border-gray-200 rounded-lg text-base font-semibold text-gray-800 hover:bg-gray-50 transition-colors"
-                  >
-                    3
-                  </button>
-                  <button
-                    onClick={handleConfirmPayment}
-                    disabled={isConfirmDisabled}
-                    className={`row-span-2 p-2 rounded-lg font-medium text-xs transition-all duration-200 ${
-                      isConfirmDisabled
+
+                  {/* Numeric Keypad */}
+                  <div className="grid grid-cols-4 gap-2">
+                    {/* Row 1: 7, 8, 9, backspace */}
+                    <button
+                      onClick={() => handleKeypadInput('7')}
+                      className="p-3 bg-white border-2 border-gray-200 rounded-lg text-base font-semibold text-gray-800 hover:bg-gray-50 transition-colors"
+                    >
+                      7
+                    </button>
+                    <button
+                      onClick={() => handleKeypadInput('8')}
+                      className="p-3 bg-white border-2 border-gray-200 rounded-lg text-base font-semibold text-gray-800 hover:bg-gray-50 transition-colors"
+                    >
+                      8
+                    </button>
+                    <button
+                      onClick={() => handleKeypadInput('9')}
+                      className="p-3 bg-white border-2 border-gray-200 rounded-lg text-base font-semibold text-gray-800 hover:bg-gray-50 transition-colors"
+                    >
+                      9
+                    </button>
+                    <button
+                      onClick={() => handleKeypadInput('backspace')}
+                      className="p-3 bg-green-500 hover:bg-green-600 text-white rounded-lg text-xs font-medium transition-colors flex items-center justify-center"
+                    >
+                      <Delete size={16} />
+                    </button>
+
+                    {/* Row 2: 4, 5, 6, Hapus Semua */}
+                    <button
+                      onClick={() => handleKeypadInput('4')}
+                      className="p-3 bg-white border-2 border-gray-200 rounded-lg text-base font-semibold text-gray-800 hover:bg-gray-50 transition-colors"
+                    >
+                      4
+                    </button>
+                    <button
+                      onClick={() => handleKeypadInput('5')}
+                      className="p-3 bg-white border-2 border-gray-200 rounded-lg text-base font-semibold text-gray-800 hover:bg-gray-50 transition-colors"
+                    >
+                      5
+                    </button>
+                    <button
+                      onClick={() => handleKeypadInput('6')}
+                      className="p-3 bg-white border-2 border-gray-200 rounded-lg text-base font-semibold text-gray-800 hover:bg-gray-50 transition-colors"
+                    >
+                      6
+                    </button>
+                    <button
+                      onClick={() => handleKeypadInput('clear')}
+                      className="p-3 bg-green-500 hover:bg-green-600 text-white rounded-lg text-xs font-medium transition-colors"
+                    >
+                      Hapus Semua
+                    </button>
+
+                    {/* Row 3: 1, 2, 3, Konfirmasi (spans 2 rows) */}
+                    <button
+                      onClick={() => handleKeypadInput('1')}
+                      className="p-3 bg-white border-2 border-gray-200 rounded-lg text-base font-semibold text-gray-800 hover:bg-gray-50 transition-colors"
+                    >
+                      1
+                    </button>
+                    <button
+                      onClick={() => handleKeypadInput('2')}
+                      className="p-3 bg-white border-2 border-gray-200 rounded-lg text-base font-semibold text-gray-800 hover:bg-gray-50 transition-colors"
+                    >
+                      2
+                    </button>
+                    <button
+                      onClick={() => handleKeypadInput('3')}
+                      className="p-3 bg-white border-2 border-gray-200 rounded-lg text-base font-semibold text-gray-800 hover:bg-gray-50 transition-colors"
+                    >
+                      3
+                    </button>
+                    <button
+                      onClick={handleConfirmPayment}
+                      disabled={isConfirmDisabled}
+                      className={`row-span-2 p-2 rounded-lg font-medium text-xs transition-all duration-200 ${isConfirmDisabled
                         ? 'bg-gray-400 cursor-not-allowed'
                         : 'bg-green-500 hover:bg-green-600 text-white'
-                    }`}
-                  >
-                    {isProcessing ? (
-                      <div className="flex flex-col items-center justify-center">
-                        <div className="animate-spin rounded-full h-3 w-3 border-b-2 border-white mb-1"></div>
-                        <span className="text-xs">Memproses...</span>
-                      </div>
-                    ) : (
-                      <span className="text-center">Konfirmasi</span>
-                    )}
-                  </button>
-                  
-                  {/* Row 4: 0, 00, 000 (Konfirmasi button spans from row 3) */}
-                  <button
-                    onClick={() => handleKeypadInput('0')}
-                    className="p-3 bg-white border-2 border-gray-200 rounded-lg text-base font-semibold text-gray-800 hover:bg-gray-50 transition-colors"
-                  >
-                    0
-                  </button>
-                  <button
-                    onClick={() => handleKeypadInput('00')}
-                    className="p-3 bg-white border-2 border-gray-200 rounded-lg text-base font-semibold text-gray-800 hover:bg-gray-50 transition-colors"
-                  >
-                    00
-                  </button>
-                  <button
-                    onClick={() => handleKeypadInput('000')}
-                    className="p-3 bg-white border-2 border-gray-200 rounded-lg text-base font-semibold text-gray-800 hover:bg-gray-50 transition-colors"
-                  >
-                    000
-                  </button>
+                        }`}
+                    >
+                      {isProcessing ? (
+                        <div className="flex flex-col items-center justify-center">
+                          <div className="animate-spin rounded-full h-3 w-3 border-b-2 border-white mb-1"></div>
+                          <span className="text-xs">Memproses...</span>
+                        </div>
+                      ) : (
+                        <span className="text-center">Konfirmasi</span>
+                      )}
+                    </button>
+
+                    {/* Row 4: 0, 00, 000 (Konfirmasi button spans from row 3) */}
+                    <button
+                      onClick={() => handleKeypadInput('0')}
+                      className="p-3 bg-white border-2 border-gray-200 rounded-lg text-base font-semibold text-gray-800 hover:bg-gray-50 transition-colors"
+                    >
+                      0
+                    </button>
+                    <button
+                      onClick={() => handleKeypadInput('00')}
+                      className="p-3 bg-white border-2 border-gray-200 rounded-lg text-base font-semibold text-gray-800 hover:bg-gray-50 transition-colors"
+                    >
+                      00
+                    </button>
+                    <button
+                      onClick={() => handleKeypadInput('000')}
+                      className="p-3 bg-white border-2 border-gray-200 rounded-lg text-base font-semibold text-gray-800 hover:bg-gray-50 transition-colors"
+                    >
+                      000
+                    </button>
+                  </div>
                 </div>
               </div>
             </div>
           </div>
         </div>
       </div>
-    </div>
-      
+
       {showDebitModal && (
         <div
           className="fixed inset-0 z-[60] flex items-center justify-center bg-black/50 backdrop-blur-sm px-4"
@@ -2204,9 +2258,8 @@ export default function PaymentModal({
                     onBlur={() => {
                       setTimeout(() => setShowBankDropdown(false), 200);
                     }}
-                    className={`w-full p-2 text-sm font-medium border rounded-md text-gray-800 bg-white focus:border-blue-400 focus:ring-1 focus:ring-blue-100 ${
-                      bankError ? 'border-red-400' : 'border-gray-300'
-                    }`}
+                    className={`w-full p-2 text-sm font-medium border rounded-md text-gray-800 bg-white focus:border-blue-400 focus:ring-1 focus:ring-blue-100 ${bankError ? 'border-red-400' : 'border-gray-300'
+                      }`}
                     placeholder="Cari bank... (BCA, BRI, Mandiri)"
                   />
 
@@ -2215,7 +2268,7 @@ export default function PaymentModal({
                       {banks.filter(bank =>
                         bank.is_popular &&
                         (bank.bank_name.toLowerCase().includes(bankSearchTerm.toLowerCase()) ||
-                         bank.bank_code.toLowerCase().includes(bankSearchTerm.toLowerCase()))
+                          bank.bank_code.toLowerCase().includes(bankSearchTerm.toLowerCase()))
                       ).map(bank => (
                         <div
                           key={bank.id}
@@ -2242,7 +2295,7 @@ export default function PaymentModal({
                       {banks.filter(bank =>
                         !bank.is_popular &&
                         (bank.bank_name.toLowerCase().includes(bankSearchTerm.toLowerCase()) ||
-                         bank.bank_code.toLowerCase().includes(bankSearchTerm.toLowerCase()))
+                          bank.bank_code.toLowerCase().includes(bankSearchTerm.toLowerCase()))
                       ).map(bank => (
                         <div
                           key={bank.id}
@@ -2284,9 +2337,8 @@ export default function PaymentModal({
                   onFocus={() => {
                     setActiveInput('amount');
                   }}
-                  className={`w-full p-2 text-sm border rounded-md bg-white focus:border-blue-400 focus:ring-1 focus:ring-blue-100 placeholder:text-gray-400 placeholder:opacity-70 ${
-                    cardNumberError ? 'border-red-500 bg-red-50 text-red-800' : 'border-gray-300 text-gray-900'
-                  }`}
+                  className={`w-full p-2 text-sm border rounded-md bg-white focus:border-blue-400 focus:ring-1 focus:ring-blue-100 placeholder:text-gray-400 placeholder:opacity-70 ${cardNumberError ? 'border-red-500 bg-red-50 text-red-800' : 'border-gray-300 text-gray-900'
+                    }`}
                   placeholder="1234567890123456"
                   maxLength={16}
                 />

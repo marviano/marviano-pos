@@ -63,20 +63,20 @@ export default function ProductCustomizationModal({
 
   const fetchCustomizations = useCallback(async () => {
     if (!product) return;
-    
+
     try {
       setLoading(true);
-      
+
       // Always try offline first for UI responsiveness
       let fetchedCustomizations: Customization[] = [];
       let foundLocally = false;
-      
+
       const electronAPI = typeof window !== 'undefined' ? window.electronAPI : undefined;
       if (electronAPI?.localDbGetProductCustomizations) {
         try {
-          console.log('💾 Attempting offline fetch first...');
+          // console.log('💾 Attempting offline fetch first...');
           const localCustomizations = await electronAPI.localDbGetProductCustomizations(product.id);
-          console.log('💾 Retrieved customizations:', Array.isArray(localCustomizations) ? localCustomizations.length : 0);
+          // console.log('💾 Retrieved customizations:', Array.isArray(localCustomizations) ? localCustomizations.length : 0);
           if (Array.isArray(localCustomizations) && localCustomizations.length > 0) {
             fetchedCustomizations = localCustomizations as Customization[];
             foundLocally = true;
@@ -92,12 +92,12 @@ export default function ProductCustomizationModal({
           console.log('🌐 Local empty, attempting online fetch...');
           const controller = new AbortController();
           const timeoutId = setTimeout(() => controller.abort(), 2000);
-          
+
           const response = await fetch(getApiUrl(`/api/products/${product.id}/customizations`), {
             signal: controller.signal
           });
           clearTimeout(timeoutId);
-          
+
           if (response.ok) {
             const data = await response.json();
             fetchedCustomizations = data.customizations || [];
@@ -106,16 +106,16 @@ export default function ProductCustomizationModal({
           console.log('🌐 Online fetch error:', error);
         }
       }
-      
+
       setCustomizations(fetchedCustomizations);
-        
+
       const initialSelections = fetchedCustomizations.map((customization: Customization) => ({
         customization_id: customization.id,
         customization_name: customization.name,
         selected_options: []
       }));
       setSelectedCustomizations(initialSelections);
-      
+
     } catch (error) {
       console.error('Error fetching customizations:', error);
     } finally {
@@ -140,10 +140,10 @@ export default function ProductCustomizationModal({
             // Single selection - replace current selection
             return {
               ...selection,
-              selected_options: [{ 
-                option_id: option.id, 
-                option_name: option.name, 
-                price_adjustment: option.price_adjustment 
+              selected_options: [{
+                option_id: option.id,
+                option_name: option.name,
+                price_adjustment: option.price_adjustment
               }]
             };
           } else {
@@ -151,7 +151,7 @@ export default function ProductCustomizationModal({
             const existingIndex = selection.selected_options.findIndex(
               opt => opt.option_id === option.id
             );
-            
+
             if (existingIndex >= 0) {
               // Remove option
               return {
@@ -185,10 +185,10 @@ export default function ProductCustomizationModal({
 
   const calculateTotalPrice = () => {
     if (!product) return 0;
-    
+
     const basePrice = effectivePrice !== undefined ? Number(effectivePrice) : Number(product.harga_jual);
     let customizationPrice = 0;
-    
+
     selectedCustomizations.forEach(selection => {
       selection.selected_options.forEach(option => {
         const adjustment = Number(option.price_adjustment);
@@ -197,33 +197,33 @@ export default function ProductCustomizationModal({
         }
       });
     });
-    
+
     const total = (basePrice + customizationPrice) * quantity;
-    console.log('Price calculation:', { 
+    /* console.log('Price calculation:', { 
       basePrice, 
       customizationPrice, 
       quantity, 
       total,
       productPrice: product.harga_jual,
       productPriceType: typeof product.harga_jual
-    });
+    }); */
     return isNaN(total) ? 0 : total;
   };
 
   const handleAddToCart = () => {
     if (!product) return;
-    
+
     // Filter out customizations with no selections
     const validCustomizations = selectedCustomizations.filter(
       selection => selection.selected_options.length > 0
     );
-    
+
     onAddToCart(product, validCustomizations, quantity, customNote);
-    
+
     // Reset quantity and customNote after adding to cart
     setQuantity(1);
     setCustomNote('');
-    
+
     onClose();
   };
 
@@ -234,7 +234,7 @@ export default function ProductCustomizationModal({
   if (!isOpen || !product) return null;
 
   return (
-    <div 
+    <div
       className="fixed inset-0 bg-blue-200/30 backdrop-blur-sm flex items-center justify-center z-50 p-4"
       onMouseDown={(e) => {
         // Don't let backdrop steal focus from textarea
@@ -249,7 +249,7 @@ export default function ProductCustomizationModal({
         }
       }}
     >
-      <div 
+      <div
         className="bg-white rounded-2xl max-w-4xl w-full max-h-[85vh] overflow-y-auto shadow-xl"
         onMouseDown={(e) => e.stopPropagation()}
       >
@@ -281,7 +281,7 @@ export default function ProductCustomizationModal({
                   <h3 className="font-semibold text-gray-800 text-sm">
                     {customization.name}
                   </h3>
-                  
+
                   {/* Single selection - horizontal buttons */}
                   {customization.selection_mode === 'single' && (
                     <div className="flex gap-2">
@@ -289,18 +289,17 @@ export default function ProductCustomizationModal({
                         <button
                           key={option.id}
                           onClick={() => handleOptionToggle(customization.id, option)}
-                          className={`px-3 py-2 rounded-lg text-sm font-medium transition-all duration-200 border-2 ${
-                            isOptionSelected(customization.id, option.id)
+                          className={`px-3 py-2 rounded-lg text-sm font-medium transition-all duration-200 border-2 ${isOptionSelected(customization.id, option.id)
                               ? 'bg-teal-100 border-teal-400 text-teal-800 shadow-sm'
                               : 'bg-gray-50 border-gray-200 text-gray-700 hover:bg-gray-100 hover:border-gray-300'
-                          }`}
+                            }`}
                         >
                           {option.name}
                         </button>
                       ))}
                     </div>
                   )}
-                  
+
                   {/* Multiple selection - grid layout */}
                   {customization.selection_mode === 'multiple' && (
                     <div className="grid grid-cols-3 gap-2">
@@ -308,11 +307,10 @@ export default function ProductCustomizationModal({
                         <button
                           key={option.id}
                           onClick={() => handleOptionToggle(customization.id, option)}
-                          className={`px-2 py-2 rounded-lg text-xs font-medium transition-all duration-200 border-2 ${
-                            isOptionSelected(customization.id, option.id)
+                          className={`px-2 py-2 rounded-lg text-xs font-medium transition-all duration-200 border-2 ${isOptionSelected(customization.id, option.id)
                               ? 'bg-teal-100 border-teal-400 text-teal-800 shadow-sm'
                               : 'bg-gray-50 border-gray-200 text-gray-700 hover:bg-gray-100 hover:border-gray-300'
-                          }`}
+                            }`}
                         >
                           <div className="text-center">
                             <div className="font-medium">
@@ -376,14 +374,14 @@ export default function ProductCustomizationModal({
               <Plus size={16} />
             </button>
           </div>
-          
+
           {/* Total Price */}
           <div className="text-right flex-1">
             <span className="text-lg font-bold text-gray-900">
               {formatPrice(calculateTotalPrice())}
             </span>
           </div>
-          
+
           {/* Action Buttons */}
           <div className="flex gap-3">
             <button

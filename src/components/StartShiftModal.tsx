@@ -35,6 +35,7 @@ export default function StartShiftModal({ isOpen, userId, userName, onShiftStart
   const [modalAwal, setModalAwal] = useState<string>('');
   const [isStartingShift, setIsStartingShift] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [sidebarWidth, setSidebarWidth] = useState<number>(96); // Default to 96px (w-24)
   const inputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -44,6 +45,48 @@ export default function StartShiftModal({ isOpen, userId, userName, onShiftStart
         inputRef.current?.focus();
       }, 100);
     }
+  }, [isOpen]);
+
+  // Dynamically calculate sidebar width
+  useEffect(() => {
+    if (!isOpen) return;
+
+    const updateSidebarWidth = () => {
+      // Find the left sidebar element by looking for the blue sidebar (bg-blue-800)
+      // It should be the first child of the flex container
+      const sidebar = document.querySelector('.bg-blue-800') as HTMLElement;
+      if (sidebar) {
+        const rect = sidebar.getBoundingClientRect();
+        setSidebarWidth(rect.width);
+      } else {
+        // Fallback to default width if sidebar not found
+        setSidebarWidth(96);
+      }
+    };
+
+    // Update immediately
+    updateSidebarWidth();
+
+    // Update on window resize
+    window.addEventListener('resize', updateSidebarWidth);
+
+    // Use ResizeObserver to watch for sidebar size changes
+    const sidebar = document.querySelector('.bg-blue-800') as HTMLElement;
+    let resizeObserver: ResizeObserver | null = null;
+    
+    if (sidebar) {
+      resizeObserver = new ResizeObserver(() => {
+        updateSidebarWidth();
+      });
+      resizeObserver.observe(sidebar);
+    }
+
+    return () => {
+      window.removeEventListener('resize', updateSidebarWidth);
+      if (resizeObserver) {
+        resizeObserver.disconnect();
+      }
+    };
   }, [isOpen]);
 
   const handleStartShift = async () => {
@@ -130,7 +173,8 @@ export default function StartShiftModal({ isOpen, userId, userName, onShiftStart
 
   return (
     <div 
-      className="fixed top-[25.6px] left-40 right-0 bottom-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-50 p-4"
+      className="fixed top-[25.6px] right-0 bottom-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-50 p-4"
+      style={{ left: `${sidebarWidth}px` }}
       onClick={(e) => {
         // Prevent closing on backdrop click - user must start shift
         e.stopPropagation();

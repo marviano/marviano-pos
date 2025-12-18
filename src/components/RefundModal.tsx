@@ -3,7 +3,7 @@ import { useAuth } from '@/hooks/useAuth';
 import { offlineSyncService } from '@/lib/offlineSync';
 import { smartSyncService } from '@/lib/smartSync';
 import { getApiUrl } from '@/lib/api';
-import { TransactionDetail, TransactionItem, TransactionRefund } from './TransactionDetailModal';
+import { TransactionDetail, TransactionRefund } from './TransactionDetailModal';
 
 interface RefundModalProps {
   isOpen: boolean;
@@ -151,18 +151,20 @@ const RefundModal: React.FC<RefundModalProps> = ({
         }
 
         const result = await response.json();
+
+        // IMPORTANT: Do NOT download transaction data from server response
+        // Local database is the source of truth for transactions
+        // Use local transaction data, not server response
         const mergedTransaction: TransactionDetail = {
           ...transaction,
-          ...(result.transaction || {}),
-          items: (result.transaction?.items ?? transaction.items) as TransactionItem[],
+          // Only merge refunds from server response, not transaction data
           refunds: (result.refunds ?? result.transaction?.refunds ?? transaction.refunds) as TransactionRefund[] | undefined
         };
 
         updatedTransaction = mergedTransaction;
 
-        if (electronAPI?.localDbUpsertTransactions && result.transaction) {
-          await (electronAPI.localDbUpsertTransactions as (rows: unknown[]) => Promise<unknown>)([result.transaction]);
-        }
+        // Do NOT upsert transaction from server - local DB is source of truth
+        // Refund was accepted by server (response.ok), that's all we need
 
         if (result.refund) {
           await applyLocalRefund(result.refund as TransactionRefund, mergedTransaction);

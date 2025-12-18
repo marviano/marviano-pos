@@ -1,12 +1,12 @@
 'use client';
 
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { 
-  Wallet, 
-  Package, 
-  DollarSign, 
-  CreditCard, 
-  RefreshCw, 
+import {
+  Wallet,
+  Package,
+  DollarSign,
+  CreditCard,
+  RefreshCw,
   StopCircle,
   AlertCircle,
   CheckCircle,
@@ -207,10 +207,10 @@ const formatTime = (dateString: string): string => {
 
 export default function GantiShift() {
   const { user } = useAuth();
-  
+
   // Get business ID from logged-in user (fallback to 14 for backward compatibility)
   const businessId = user?.selectedBusinessId ?? 14;
-  
+
   const [activeShift, setActiveShift] = useState<Shift | null>(null);
   const [modalAwal, setModalAwal] = useState<string>('');
   const [isStartingShift, setIsStartingShift] = useState(false);
@@ -232,14 +232,14 @@ export default function GantiShift() {
   } | null>(null);
   const [isMigrating, setIsMigrating] = useState(false);
   const [shiftSequenceInfo, setShiftSequenceInfo] = useState<ShiftSequenceInfo | null>(null);
-  
+
   const [statistics, setStatistics] = useState<ShiftStatistics>({
     order_count: 0,
     total_amount: 0,
     total_discount: 0,
     voucher_count: 0
   });
-  
+
   const [paymentBreakdown, setPaymentBreakdown] = useState<PaymentBreakdown[]>([]);
   const [category2Breakdown, setCategory2Breakdown] = useState<Category2Breakdown[]>([]);
   const [cashSummary, setCashSummary] = useState<CashSummary>({
@@ -252,28 +252,28 @@ export default function GantiShift() {
   });
   const [productSales, setProductSales] = useState<ProductSale[]>([]);
   const [customizationSales, setCustomizationSales] = useState<CustomizationSale[]>([]);
-  
+
   // Date-time picker states for custom date range printing
   const [showDatePicker, setShowDatePicker] = useState(false);
   const [startDateTime, setStartDateTime] = useState<string>('');
   const [endDateTime, setEndDateTime] = useState<string>('');
   const [isPrintingCustomRange, setIsPrintingCustomRange] = useState(false);
-  
+
   // Print selection modal states
   const [showPrintSelectionModal, setShowPrintSelectionModal] = useState(false);
   const [printSelections, setPrintSelections] = useState<ShiftPrintSelection[]>([]);
   const [printWholeDaySelected, setPrintWholeDaySelected] = useState(false);
   const [isPrintingSelected, setIsPrintingSelected] = useState(false);
-  
+
   // Tab view states
   const [activeTab, setActiveTab] = useState<TabView>('all-day');
   // const [tabData, setTabData] = useState<Record<string, ReportDataPayload>>({});
-  
+
   // Historical date viewing states
   const [viewMode, setViewMode] = useState<'current' | 'historical'>('current');
   const [selectedDate, setSelectedDate] = useState<string>(''); // Format: YYYY-MM-DD in GMT+7
   // const [historicalShifts, setHistoricalShifts] = useState<Shift[]>([]);
-  
+
   const modalInputRef = useRef<HTMLInputElement>(null);
   const autoRefreshIntervalRef = useRef<NodeJS.Timeout | null>(null);
   const permissions = user?.permissions ?? [];
@@ -330,7 +330,7 @@ export default function GantiShift() {
     } catch (error) {
       console.error('Error checking today transactions:', error);
     }
-  }, [activeShift]);
+  }, [activeShift, businessId]);
 
   // Load statistics when shift changes
   useEffect(() => {
@@ -364,13 +364,13 @@ export default function GantiShift() {
       if (autoRefreshIntervalRef.current) {
         clearInterval(autoRefreshIntervalRef.current);
       }
-      
+
       // Set up auto-refresh
       autoRefreshIntervalRef.current = setInterval(() => {
         loadStatistics();
       }, AUTO_REFRESH_INTERVAL);
     }
-    
+
     // Cleanup on unmount or when shift/user changes
     return () => {
       if (autoRefreshIntervalRef.current) {
@@ -439,7 +439,7 @@ export default function GantiShift() {
             dayEndUtc: bounds.dayEndUtc,
             shifts: sortedShifts
           });
-          
+
           // Initialize print selections
           const selections: ShiftPrintSelection[] = sortedShifts.map((shift, idx) => ({
             shiftId: shift.id,
@@ -467,7 +467,7 @@ export default function GantiShift() {
     return () => {
       isCancelled = true;
     };
-  }, [activeShift]);
+  }, [activeShift, businessId]);
 
   const loadActiveShift = useCallback(async () => {
     if (!currentUserId) {
@@ -499,7 +499,7 @@ export default function GantiShift() {
       console.error('Error loading active shift:', error);
       setError('Gagal memuat shift aktif. Silakan refresh halaman.');
     }
-  }, [currentUserId]);
+  }, [currentUserId, businessId]);
 
   const loadStatistics = useCallback(async () => {
     const electronAPI = getElectronAPI();
@@ -514,7 +514,7 @@ export default function GantiShift() {
         setIsRefreshing(false);
         return;
       }
-      
+
       const defaultStats: ShiftStatistics = { order_count: 0, total_amount: 0, total_discount: 0, voucher_count: 0 };
       const defaultCash: CashSummary = { cash_shift: 0, cash_whole_day: 0 };
 
@@ -565,7 +565,7 @@ export default function GantiShift() {
       setCashSummary(cash);
       setProductSales(productSalesData.products || []);
       setCustomizationSales(productSalesData.customizations || []);
-      
+
       // Only show error if all requests failed
       if (
         statsResult.status === 'rejected' &&
@@ -580,7 +580,7 @@ export default function GantiShift() {
     } finally {
       setIsRefreshing(false);
     }
-  }, [activeShift]);
+  }, [activeShift, businessId]);
 
   const fetchReportPayload = useCallback(
     async ({ start, end, userId, businessId: reportBusinessId = businessId }: { start: string; end: string | null; userId: number; businessId?: number; }): Promise<ReportDataPayload> => {
@@ -659,7 +659,7 @@ export default function GantiShift() {
         throw error;
       }
     },
-    []
+    [businessId]
   );
 
   const handleStartShift = async () => {
@@ -692,7 +692,7 @@ export default function GantiShift() {
 
     const cleanValue = formatNumberInput(modalAwal);
     const amount = parseFloat(cleanValue);
-    
+
     if (!cleanValue || isNaN(amount) || amount < 0) {
       setError('Modal awal harus berupa angka >= 0');
       return;
@@ -911,28 +911,28 @@ export default function GantiShift() {
     try {
       setIsRefreshing(true);
       setError(null);
-      
+
       // Parse the date string (YYYY-MM-DD) and get day bounds in GMT+7
       const [year, month, day] = dateStr.split('-').map(Number);
       const gmt7Offset = 7 * 60 * 60 * 1000;
-      
+
       // Create start and end of day in GMT+7
       const dayStartGmt7 = new Date(Date.UTC(year, month - 1, day, 0, 0, 0, 0));
       const dayEndGmt7 = new Date(Date.UTC(year, month - 1, day, 23, 59, 59, 999));
-      
+
       // Convert to UTC for database query
       const dayStartUtc = new Date(dayStartGmt7.getTime() - gmt7Offset).toISOString();
       const dayEndUtc = new Date(dayEndGmt7.getTime() - gmt7Offset).toISOString();
-      
+
       const result = await electronAPI.localDbGetShifts({
         businessId: businessId,
         startDate: dayStartUtc,
         endDate: dayEndUtc
       });
-      
+
       const shifts = result?.shifts || [];
       // setHistoricalShifts(shifts as Shift[]);
-      
+
       if (shifts && shifts.length > 0) {
         // Create shift sequence info for historical view
         const shiftSeqInfo: ShiftSequenceInfo = {
@@ -943,7 +943,7 @@ export default function GantiShift() {
           shifts: shifts as Shift[]
         };
         setShiftSequenceInfo(shiftSeqInfo);
-        
+
         // Load statistics for the first shift by default
         if (shifts[0]) {
           setActiveShift(shifts[0] as Shift);
@@ -984,72 +984,84 @@ export default function GantiShift() {
       return;
     }
 
+    if (!shiftSequenceInfo) {
+      setError('Data shift belum tersedia. Silakan refresh halaman.');
+      return;
+    }
+
     // Show print selection modal
     setShowPrintSelectionModal(true);
   };
-  
+
   const handlePrintSelected = async () => {
     const electronAPI = getElectronAPI();
     if (!activeShift || !electronAPI?.printShiftBreakdown || !shiftSequenceInfo) {
       setError('Fitur print belum tersedia. Silakan restart aplikasi.');
       return;
     }
-    
+
+    // Validate that at least one item is selected
+    const selectedShifts = printSelections.filter(s => s.selected);
+    if (!printWholeDaySelected && selectedShifts.length === 0) {
+      setError('Silakan pilih setidaknya satu laporan untuk dicetak.');
+      return;
+    }
+
     // Check if any printer is configured
     const printerConfigs = await electronAPI.localDbGetPrinterConfigs?.();
     const hasReceiptPrinter = Array.isArray(printerConfigs) && printerConfigs.some((config) => {
       const cfg = config as { printer_type?: string; system_printer_name?: string };
       return cfg.printer_type === 'receiptPrinter' && cfg.system_printer_name;
     });
-    
+
     if (!hasReceiptPrinter) {
       setError('⚠️ Receipt Printer belum dikonfigurasi! Silakan konfigurasi printer di menu Settings → Printer Selector terlebih dahulu.');
       return;
     }
-    
+
     setIsPrintingSelected(true);
     setError(null);
     setShowPrintSelectionModal(false);
-    
+
     try {
       const shiftOwnerId = Number(activeShift.user_id ?? 0);
       if (!shiftOwnerId) {
         throw new Error('User ID tidak valid');
       }
-      
+
       console.log('🖨️ Starting print job for selected shifts...');
-      
+
       // Print whole day if selected
       if (printWholeDaySelected) {
         try {
           console.log('📊 [PRINT WHOLE DAY] Starting...');
           console.log('   Day range:', shiftSequenceInfo.dayStartUtc, 'to', shiftSequenceInfo.dayEndUtc);
-          
+
           const dayReportData = await fetchReportPayload({
             start: shiftSequenceInfo.dayStartUtc, // START FROM DAY START - INCLUDES SHIFT 1
             end: shiftSequenceInfo.dayEndUtc,
             userId: shiftOwnerId
           });
-          
+
           console.log('📊 [PRINT WHOLE DAY] Data fetched:', {
             orders: dayReportData.statistics.order_count,
             total: dayReportData.statistics.total_amount,
             products: dayReportData.productSales.length
           });
-          
+
           const dayCash = dayReportData.cashSummary;
           const dayCashSales = dayCash.cash_shift_sales ?? dayCash.cash_shift ?? 0;
           const dayCashRefunds = dayCash.cash_shift_refunds ?? 0;
           // const dailyKasExpected = (dayCash.cash_whole_day ?? dayCash.cash_shift ?? 0) || dayCashSales - dayCashRefunds;
-          
+
           // Get modal awal from first shift
           let modalAwalWholeDay = 0;
           if (shiftSequenceInfo.shifts.length > 0) {
             modalAwalWholeDay = shiftSequenceInfo.shifts[0].modal_awal || 0;
           }
-          
+
           console.log('🖨️ [PRINT WHOLE DAY] Sending to printer...');
-          
+
           const result = await electronAPI.printShiftBreakdown({
             user_name: 'Semua Shift',
             shift_start: shiftSequenceInfo.dayStartUtc,
@@ -1074,23 +1086,23 @@ export default function GantiShift() {
               total_cash_in_cashier: modalAwalWholeDay + dayCashSales - dayCashRefunds,
               kas_mulai: modalAwalWholeDay,
               kas_expected: modalAwalWholeDay + dayCashSales - dayCashRefunds,
-            kas_akhir: null,
-            kas_selisih: null,
-            kas_selisih_label: null
-          },
-          business_id: businessId,
-          printerType: 'receiptPrinter'
-        });
-        
-        console.log('📄 [PRINT WHOLE DAY] Result:', result);
-        
-        if (!result.success) {
-          console.error('❌ [PRINT WHOLE DAY] Failed:', result.error);
-          throw new Error(result.error || 'Gagal mencetak laporan harian');
-        }
-        
-        console.log('✅ [PRINT WHOLE DAY] Success!');
-          
+              kas_akhir: null,
+              kas_selisih: null,
+              kas_selisih_label: null
+            },
+            business_id: businessId,
+            printerType: 'receiptPrinter'
+          });
+
+          console.log('📄 [PRINT WHOLE DAY] Result:', result);
+
+          if (!result.success) {
+            console.error('❌ [PRINT WHOLE DAY] Failed:', result.error);
+            throw new Error(result.error || 'Gagal mencetak laporan harian');
+          }
+
+          console.log('✅ [PRINT WHOLE DAY] Success!');
+
           // Small delay between prints
           await new Promise(r => setTimeout(r, 500));
         } catch (error) {
@@ -1098,37 +1110,36 @@ export default function GantiShift() {
           throw error;
         }
       }
-      
+
       // Print selected individual shifts
-      const selectedShifts = printSelections.filter(s => s.selected);
       console.log(`📋 [PRINT SHIFTS] Printing ${selectedShifts.length} individual shift(s)...`);
-      
+
       for (const selection of selectedShifts) {
         const shift = shiftSequenceInfo.shifts.find(s => s.id === selection.shiftId);
         if (!shift) continue;
-        
+
         try {
           console.log(`🖨️ [PRINT SHIFT ${selection.shiftIndex}] Starting - ${shift.user_name}`);
-          
+
           const shiftUserId = Number(shift.user_id ?? 0);
           const shiftReportData = await fetchReportPayload({
             start: shift.shift_start,
             end: shift.shift_end,
             userId: shiftUserId
           });
-          
+
           console.log(`📊 [PRINT SHIFT ${selection.shiftIndex}] Data:`, {
             orders: shiftReportData.statistics.order_count,
             total: shiftReportData.statistics.total_amount
           });
-          
+
           const shiftCash = shiftReportData.cashSummary;
           const shiftCashSales = shiftCash.cash_shift_sales ?? shiftCash.cash_shift ?? 0;
           const shiftCashRefunds = shiftCash.cash_shift_refunds ?? 0;
           const shiftKasExpected = shift.modal_awal + shiftCashSales - shiftCashRefunds;
-          
+
           console.log(`🖨️ [PRINT SHIFT ${selection.shiftIndex}] Sending to printer...`);
-          
+
           const result = await electronAPI.printShiftBreakdown({
             user_name: shift.user_name,
             shift_start: shift.shift_start,
@@ -1153,23 +1164,23 @@ export default function GantiShift() {
               total_cash_in_cashier: shiftKasExpected,
               kas_mulai: shift.modal_awal,
               kas_expected: shiftKasExpected,
-            kas_akhir: shift.kas_akhir ?? null,
-            kas_selisih: shift.kas_selisih ?? null,
-            kas_selisih_label: shift.kas_selisih_label ?? null
-          },
-          business_id: businessId,
-          printerType: 'receiptPrinter'
-        });
-        
-        console.log(`📄 [PRINT SHIFT ${selection.shiftIndex}] Result:`, result);
-        
-        if (!result.success) {
-          console.error(`❌ [PRINT SHIFT ${selection.shiftIndex}] Failed:`, result.error);
-          throw new Error(result.error || `Gagal mencetak laporan Shift ${selection.shiftIndex}`);
-        }
-        
-        console.log(`✅ [PRINT SHIFT ${selection.shiftIndex}] Success!`);
-          
+              kas_akhir: shift.kas_akhir ?? null,
+              kas_selisih: shift.kas_selisih ?? null,
+              kas_selisih_label: shift.kas_selisih_label ?? null
+            },
+            business_id: businessId,
+            printerType: 'receiptPrinter'
+          });
+
+          console.log(`📄 [PRINT SHIFT ${selection.shiftIndex}] Result:`, result);
+
+          if (!result.success) {
+            console.error(`❌ [PRINT SHIFT ${selection.shiftIndex}] Failed:`, result.error);
+            throw new Error(result.error || `Gagal mencetak laporan Shift ${selection.shiftIndex}`);
+          }
+
+          console.log(`✅ [PRINT SHIFT ${selection.shiftIndex}] Success!`);
+
           // Small delay between prints
           await new Promise(r => setTimeout(r, 500));
         } catch (error) {
@@ -1177,7 +1188,7 @@ export default function GantiShift() {
           throw error;
         }
       }
-      
+
       const printCount = (printWholeDaySelected ? 1 : 0) + selectedShifts.length;
       setSuccessMessage(`${printCount} laporan berhasil dicetak!`);
     } catch (error) {
@@ -1295,22 +1306,22 @@ export default function GantiShift() {
   // Load data for a specific tab
   const loadTabData = useCallback(async (tabView: TabView) => {
     if (!shiftSequenceInfo) return;
-    
+
     const electronAPI = getElectronAPI();
     if (!electronAPI) return;
-    
+
     try {
       if (tabView === 'all-day') {
         // Load whole day data
         const shiftOwnerId = Number(activeShift?.user_id ?? 0);
         if (!shiftOwnerId) return;
-        
+
         const dayData = await fetchReportPayload({
           start: shiftSequenceInfo.dayStartUtc,
           end: shiftSequenceInfo.dayEndUtc,
           userId: shiftOwnerId
         });
-        
+
         // setTabData(prev => ({ ...prev, 'all-day': dayData }));
         setStatistics(dayData.statistics);
         setPaymentBreakdown(dayData.paymentBreakdown);
@@ -1322,16 +1333,16 @@ export default function GantiShift() {
         // Load specific shift data
         const shift = shiftSequenceInfo.shifts.find(s => s.id === tabView);
         if (!shift) return;
-        
+
         const shiftUserId = Number(shift.user_id ?? 0);
         if (!shiftUserId) return;
-        
+
         const shiftData = await fetchReportPayload({
           start: shift.shift_start,
           end: shift.shift_end,
           userId: shiftUserId
         });
-        
+
         // setTabData(prev => ({ ...prev, [tabView]: shiftData }));
         setStatistics(shiftData.statistics);
         setPaymentBreakdown(shiftData.paymentBreakdown);
@@ -1344,14 +1355,14 @@ export default function GantiShift() {
       console.error(`Error loading tab data for ${tabView}:`, error);
     }
   }, [shiftSequenceInfo, activeShift, fetchReportPayload]);
-  
+
   // Load tab data when active tab changes
   useEffect(() => {
     if (activeShift && shiftSequenceInfo) {
       loadTabData(activeTab);
     }
   }, [activeTab, activeShift, shiftSequenceInfo, loadTabData]);
-  
+
   const handleTabChange = (tab: TabView) => {
     setActiveTab(tab);
   };
@@ -1411,13 +1422,13 @@ export default function GantiShift() {
   const cashWholeDayRefunds = cashSummary.cash_whole_day_refunds ?? 0;
   const cashNetShift = cashShiftSales - cashShiftRefunds;
   const cashNetWholeDay = cashWholeDaySales - cashWholeDayRefunds;
-  
+
   // Get the correct modal awal based on active tab
   let kasMulaiActive = 0;
   let kasAkhirActive: number | null = null;
   let kasSelisihValue: number | null = null;
   let kasSelisihLabelValue: 'balanced' | 'plus' | 'minus' | null = null;
-  
+
   if (activeTab === 'all-day') {
     // For all-day view, use the first shift's modal awal
     kasMulaiActive = shiftSequenceInfo?.shifts[0]?.modal_awal ?? 0;
@@ -1426,7 +1437,7 @@ export default function GantiShift() {
     const displayShift = shiftSequenceInfo?.shifts.find(s => s.id === activeTab) || activeShift;
     kasMulaiActive = displayShift?.modal_awal ?? 0;
     kasAkhirActive = displayShift?.kas_akhir ?? null;
-    
+
     if (kasAkhirActive !== null) {
       const kasExpectedForShift = kasMulaiActive + cashShiftSales - cashShiftRefunds;
       const delta = Number((kasAkhirActive - kasExpectedForShift).toFixed(2));
@@ -1442,7 +1453,7 @@ export default function GantiShift() {
       kasSelisihLabelValue = displayShift.kas_selisih_label ?? null;
     }
   }
-  
+
   const kasExpectedActive = kasMulaiActive + cashShiftSales - cashShiftRefunds;
   const kasExpectedDisplay = activeShift ? kasExpectedActive : 0;
   const totalCashInCashier = activeShift ? kasExpectedActive : 0;
@@ -1458,7 +1469,7 @@ export default function GantiShift() {
       {/* Header */}
       <div className="bg-white border-b border-gray-200 px-6 py-4 flex items-center gap-4 flex-wrap">
         <h1 className="text-2xl font-bold text-gray-800">Ganti Shift</h1>
-        
+
         {/* Date Picker for Historical View */}
         <div className="flex items-center gap-2">
           {!selectedDate && viewMode === 'current' ? (
@@ -1480,7 +1491,7 @@ export default function GantiShift() {
             </button>
           )}
         </div>
-        
+
         {activeShift && (
           <>
             <button
@@ -1596,671 +1607,667 @@ export default function GantiShift() {
       )}
 
       {!isLoadingInitial && (
-      <div className="flex-1 px-6 py-6 space-y-6">
-        {/* STATE 1: No Active Shift (Only show in current mode) */}
-        {!activeShift && viewMode === 'current' && (
-          <>
-            {/* Modal Awal Input */}
-            <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-6">
-              <div className="flex items-center space-x-3 mb-4">
-                <Wallet className="w-6 h-6 text-blue-600" />
-                <h2 className="text-xl font-semibold text-gray-800">Modal Awal (Starting Cash)</h2>
-              </div>
-              <p className="text-gray-600 mb-4">
-                Mulai shift dengan memasukkan modal awal
-              </p>
-              <div className="flex items-center space-x-4">
-                <div className="flex-1 relative">
-                  <span className="absolute left-4 top-1/2 -translate-y-1/2 text-gray-500 font-medium">Rp</span>
-                  <input
-                    ref={modalInputRef}
-                    type="text"
-                    value={formatNumberDisplay(modalAwal)}
-                    onChange={(e) => {
-                      const value = formatNumberInput(e.target.value);
-                      setModalAwal(value);
-                      setError(null); // Clear error on input change
-                    }}
-                    onKeyDown={(e) => {
-                      if (e.key === 'Enter' && !isStartingShift && modalAwal) {
-                        e.preventDefault();
-                        handleStartShift();
-                      }
-                      // Allow Escape to clear
-                      if (e.key === 'Escape') {
-                        setModalAwal('');
-                        setError(null);
-                      }
-                    }}
-                    placeholder="Masukkan modal awal (contoh: 500000)"
-                    className="w-full pl-12 pr-4 py-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 text-lg font-medium text-black placeholder-gray-400"
-                    disabled={isStartingShift}
-                    inputMode="numeric"
-                    autoComplete="off"
-                    aria-label="Modal awal (starting cash)"
-                  />
+        <div className="flex-1 px-6 py-6 space-y-6">
+          {/* STATE 1: No Active Shift (Only show in current mode) */}
+          {!activeShift && viewMode === 'current' && (
+            <>
+              {/* Modal Awal Input */}
+              <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-6">
+                <div className="flex items-center space-x-3 mb-4">
+                  <Wallet className="w-6 h-6 text-blue-600" />
+                  <h2 className="text-xl font-semibold text-gray-800">Modal Awal (Starting Cash)</h2>
                 </div>
-                <button
-                  onClick={handleStartShift}
-                  disabled={isStartingShift || !modalAwal}
-                  className="px-6 py-3 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed font-medium transition-colors"
-                >
-                  {isStartingShift ? 'Memulai...' : 'Mulai Shift'}
-                </button>
-              </div>
-              <p className="text-sm text-gray-500 mt-2">
-                Shift akan otomatis dimulai setelah input modal awal
-              </p>
-            </div>
-
-            {/* Empty Statistics */}
-            <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-6">
-              <h2 className="text-xl font-semibold text-gray-800 mb-4">Shift Summary</h2>
-              <div className="space-y-3">
-                <div className="flex items-center space-x-3">
-                  <Package className="w-5 h-5 text-gray-400" />
-                  <span className="text-gray-600">Jumlah Pesanan: <strong>0 transaksi</strong></span>
-                </div>
-                <div className="flex items-center space-x-3">
-                  <DollarSign className="w-5 h-5 text-gray-400" />
-                  <span className="text-gray-600">Total Transaksi: <strong>Rp 0</strong></span>
-                </div>
-                <div className="flex items-center space-x-3">
-                  <Ticket className="w-5 h-5 text-gray-400" />
-                  <span className="text-gray-600">Voucher Dipakai: <strong>0 transaksi</strong></span>
-                </div>
-                <div className="flex items-center space-x-3">
-                  <Ticket className="w-5 h-5 text-gray-400" />
-                  <span className="text-gray-600">Total Diskon Voucher: <strong>Rp 0</strong></span>
-                </div>
-              </div>
-            </div>
-
-            {/* Disabled End Shift Button */}
-            <button
-              disabled
-              className="w-full px-6 py-4 bg-gray-300 text-gray-500 rounded-lg cursor-not-allowed font-medium"
-            >
-              End Shift
-            </button>
-          </>
-        )}
-
-        {/* STATE 2: Active Shift */}
-        {activeShift && (
-          <>
-            {/* Migration Banner - only show in current mode */}
-            {viewMode === 'current' && todayTransactionsInfo?.hasTransactions && (
-              <div className="bg-yellow-50 border-l-4 border-yellow-400 p-4 rounded-lg">
-                <div className="flex items-start">
-                  <AlertCircle className="w-5 h-5 text-yellow-600 mt-0.5 mr-3 flex-shrink-0" />
-                  <div className="flex-1">
-                    <h3 className="text-sm font-semibold text-yellow-800 mb-1">
-                      Transaksi Sebelum Shift Ditemukan
-                    </h3>
-                    <p className="text-sm text-yellow-700 mb-3">
-                      Terdapat <strong>{todayTransactionsInfo.count} transaksi</strong> yang dibuat sebelum shift ini dimulai ({formatTime(todayTransactionsInfo.earliestTime || '')}).
-                      Transaksi tersebut belum termasuk dalam statistik shift saat ini.
-                    </p>
-                    <button
-                      onClick={handleMigrateTodayTransactions}
-                      disabled={isMigrating || !canManageActiveShift}
-                      className="px-4 py-2 bg-yellow-600 text-white text-sm font-medium rounded-lg hover:bg-yellow-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-                      title={!canManageActiveShift ? 'Anda tidak memiliki izin untuk memigrasikan transaksi ke shift ini.' : undefined}
-                    >
-                      {isMigrating ? 'Memproses...' : 'Sertakan Transaksi Hari Ini ke Shift'}
-                    </button>
+                <p className="text-gray-600 mb-4">
+                  Mulai shift dengan memasukkan modal awal
+                </p>
+                <div className="flex items-center space-x-4">
+                  <div className="flex-1 relative">
+                    <span className="absolute left-4 top-1/2 -translate-y-1/2 text-gray-500 font-medium">Rp</span>
+                    <input
+                      ref={modalInputRef}
+                      type="text"
+                      value={formatNumberDisplay(modalAwal)}
+                      onChange={(e) => {
+                        const value = formatNumberInput(e.target.value);
+                        setModalAwal(value);
+                        setError(null); // Clear error on input change
+                      }}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter' && !isStartingShift && modalAwal) {
+                          e.preventDefault();
+                          handleStartShift();
+                        }
+                        // Allow Escape to clear
+                        if (e.key === 'Escape') {
+                          setModalAwal('');
+                          setError(null);
+                        }
+                      }}
+                      placeholder="Masukkan modal awal (contoh: 500000)"
+                      className="w-full pl-12 pr-4 py-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 text-lg font-medium text-black placeholder-gray-400"
+                      disabled={isStartingShift}
+                      inputMode="numeric"
+                      autoComplete="off"
+                      aria-label="Modal awal (starting cash)"
+                    />
                   </div>
                   <button
-                    onClick={() => setTodayTransactionsInfo(null)}
-                    className="ml-2 text-yellow-600 hover:text-yellow-800"
-                    aria-label="Tutup"
+                    onClick={handleStartShift}
+                    disabled={isStartingShift || !modalAwal}
+                    className="px-6 py-3 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed font-medium transition-colors"
                   >
-                    ✕
+                    {isStartingShift ? 'Memulai...' : 'Mulai Shift'}
                   </button>
                 </div>
+                <p className="text-sm text-gray-500 mt-2">
+                  Shift akan otomatis dimulai setelah input modal awal
+                </p>
               </div>
-            )}
 
-            {/* Tabs for different shift views */}
-            {shiftSequenceInfo && shiftSequenceInfo.shifts.length > 0 && (
-              <div className="bg-white rounded-lg shadow-sm border border-gray-200 overflow-hidden">
-                {/* Tab buttons */}
-                <div className="flex items-center border-b border-gray-200 overflow-x-auto">
-                  {/* All Day Tab */}
-                  <button
-                    onClick={() => handleTabChange('all-day')}
-                    className={`px-6 py-3 font-medium transition-all whitespace-nowrap relative ${
-                      activeTab === 'all-day'
+              {/* Empty Statistics */}
+              <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-6">
+                <h2 className="text-xl font-semibold text-gray-800 mb-4">Shift Summary</h2>
+                <div className="space-y-3">
+                  <div className="flex items-center space-x-3">
+                    <Package className="w-5 h-5 text-gray-400" />
+                    <span className="text-gray-600">Jumlah Pesanan: <strong>0 transaksi</strong></span>
+                  </div>
+                  <div className="flex items-center space-x-3">
+                    <DollarSign className="w-5 h-5 text-gray-400" />
+                    <span className="text-gray-600">Total Transaksi: <strong>Rp 0</strong></span>
+                  </div>
+                  <div className="flex items-center space-x-3">
+                    <Ticket className="w-5 h-5 text-gray-400" />
+                    <span className="text-gray-600">Voucher Dipakai: <strong>0 transaksi</strong></span>
+                  </div>
+                  <div className="flex items-center space-x-3">
+                    <Ticket className="w-5 h-5 text-gray-400" />
+                    <span className="text-gray-600">Total Diskon Voucher: <strong>Rp 0</strong></span>
+                  </div>
+                </div>
+              </div>
+
+              {/* Disabled End Shift Button */}
+              <button
+                disabled
+                className="w-full px-6 py-4 bg-gray-300 text-gray-500 rounded-lg cursor-not-allowed font-medium"
+              >
+                End Shift
+              </button>
+            </>
+          )}
+
+          {/* STATE 2: Active Shift */}
+          {activeShift && (
+            <>
+              {/* Migration Banner - only show in current mode */}
+              {viewMode === 'current' && todayTransactionsInfo?.hasTransactions && (
+                <div className="bg-yellow-50 border-l-4 border-yellow-400 p-4 rounded-lg">
+                  <div className="flex items-start">
+                    <AlertCircle className="w-5 h-5 text-yellow-600 mt-0.5 mr-3 flex-shrink-0" />
+                    <div className="flex-1">
+                      <h3 className="text-sm font-semibold text-yellow-800 mb-1">
+                        Transaksi Sebelum Shift Ditemukan
+                      </h3>
+                      <p className="text-sm text-yellow-700 mb-3">
+                        Terdapat <strong>{todayTransactionsInfo.count} transaksi</strong> yang dibuat sebelum shift ini dimulai ({formatTime(todayTransactionsInfo.earliestTime || '')}).
+                        Transaksi tersebut belum termasuk dalam statistik shift saat ini.
+                      </p>
+                      <button
+                        onClick={handleMigrateTodayTransactions}
+                        disabled={isMigrating || !canManageActiveShift}
+                        className="px-4 py-2 bg-yellow-600 text-white text-sm font-medium rounded-lg hover:bg-yellow-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                        title={!canManageActiveShift ? 'Anda tidak memiliki izin untuk memigrasikan transaksi ke shift ini.' : undefined}
+                      >
+                        {isMigrating ? 'Memproses...' : 'Sertakan Transaksi Hari Ini ke Shift'}
+                      </button>
+                    </div>
+                    <button
+                      onClick={() => setTodayTransactionsInfo(null)}
+                      className="ml-2 text-yellow-600 hover:text-yellow-800"
+                      aria-label="Tutup"
+                    >
+                      ✕
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {/* Tabs for different shift views */}
+              {shiftSequenceInfo && shiftSequenceInfo.shifts.length > 0 && (
+                <div className="bg-white rounded-lg shadow-sm border border-gray-200 overflow-hidden">
+                  {/* Tab buttons */}
+                  <div className="flex items-center border-b border-gray-200 overflow-x-auto">
+                    {/* All Day Tab */}
+                    <button
+                      onClick={() => handleTabChange('all-day')}
+                      className={`px-6 py-3 font-medium transition-all whitespace-nowrap relative ${activeTab === 'all-day'
                         ? 'text-blue-600 bg-blue-50 border-b-2 border-blue-600'
                         : 'text-gray-600 hover:text-gray-900 hover:bg-gray-50'
-                    }`}
-                  >
-                    All Day
-                  </button>
-                  
-                  {/* Individual Shift Tabs */}
-                  {shiftSequenceInfo.shifts.map((shift, idx) => (
-                    <button
-                      key={shift.id}
-                      onClick={() => handleTabChange(shift.id)}
-                      className={`px-6 py-3 font-medium transition-all whitespace-nowrap relative ${
-                        activeTab === shift.id
+                        }`}
+                    >
+                      All Day
+                    </button>
+
+                    {/* Individual Shift Tabs */}
+                    {shiftSequenceInfo.shifts.map((shift, idx) => (
+                      <button
+                        key={shift.id}
+                        onClick={() => handleTabChange(shift.id)}
+                        className={`px-6 py-3 font-medium transition-all whitespace-nowrap relative ${activeTab === shift.id
                           ? 'text-green-600 bg-green-50 border-b-2 border-green-600'
                           : 'text-gray-600 hover:text-gray-900 hover:bg-gray-50'
-                      }`}
-                    >
-                      Shift {idx + 1}
-                      {shift.status === 'active' && (
-                        <span className="ml-2 inline-flex items-center">
-                          <span className="w-2 h-2 bg-green-500 rounded-full animate-pulse"></span>
-                        </span>
-                      )}
-                    </button>
-                  ))}
-                </div>
-                
-                {/* Shift Info and Modal Awal row below tabs */}
-                <div className="flex items-center gap-6 px-6 py-3 bg-gray-50">
-                  {/* Shift Info */}
-                  {activeTab === 'all-day' ? (
-                    <>
-                      <div className="flex items-center gap-2">
-                        <span className="text-xs text-gray-600">Period:</span>
-                        <span className="text-sm font-medium text-black">All Day</span>
-                      </div>
-                      <div className="flex items-center gap-2">
-                        <span className="text-xs text-gray-600">Shifts:</span>
-                        <span className="text-sm font-medium text-black">{shiftSequenceInfo?.total || 0} shift(s)</span>
-                      </div>
-                    </>
-                  ) : (
-                    (() => {
-                      const displayShift = shiftSequenceInfo?.shifts.find(s => s.id === activeTab) || activeShift;
-                      return (
-                        <>
-                          <div className="flex items-center gap-2">
-                            <span className="text-xs text-gray-600">Cashier:</span>
-                            <span className="text-sm font-medium text-black">{displayShift.user_name}</span>
-                          </div>
-                          <div className="flex items-center gap-2">
-                            <span className="text-xs text-gray-600">Started:</span>
-                            <span className="text-sm font-medium text-black">{formatTime(displayShift.shift_start)}</span>
-                          </div>
-                          <div className="flex items-center gap-2">
-                            <span className="text-xs text-gray-600">Ended:</span>
-                            <span className="text-sm font-medium text-black">
-                              {displayShift.shift_end ? formatTime(displayShift.shift_end) : (
-                                <span className="inline-flex items-center text-green-600 text-xs">
-                                  <span className="w-1.5 h-1.5 bg-green-500 rounded-full mr-1 animate-pulse"></span>
-                                  Active
-                                </span>
-                              )}
-                            </span>
-                          </div>
-                        </>
-                      );
-                    })()
-                  )}
-                  
-                  {/* Modal Awal */}
-                  <div className="flex items-center gap-2">
-                    <span className="text-xs text-gray-600">Modal Awal:</span>
-                    <span className="text-sm font-medium text-black">
-                      {activeTab === 'all-day'
-                        ? formatRupiah(shiftSequenceInfo?.shifts[0]?.modal_awal || 0)
-                        : formatRupiah((shiftSequenceInfo?.shifts.find(s => s.id === activeTab) || activeShift).modal_awal)}
-                    </span>
+                          }`}
+                      >
+                        Shift {idx + 1}
+                        {shift.status === 'active' && (
+                          <span className="ml-2 inline-flex items-center">
+                            <span className="w-2 h-2 bg-green-500 rounded-full animate-pulse"></span>
+                          </span>
+                        )}
+                      </button>
+                    ))}
                   </div>
-                </div>
-              </div>
-            )}
 
-            {/* Shift Summary and Cash Summary - 2 columns */}
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              {/* Shift Summary */}
-              <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-3">
-                <h2 className="text-sm font-semibold text-gray-800 mb-2">Shift Summary</h2>
-                <div className="space-y-1">
-                  <div className="flex items-center justify-between">
-                    <div className="flex items-center space-x-1.5">
-                      <Package className="w-3 h-3 text-blue-600" />
-                      <span className="text-xs text-gray-600">Pesanan:</span>
-                    </div>
-                    <span className="text-xs font-semibold text-black">{statistics.order_count} transaksi</span>
-                  </div>
-                  <div className="flex items-center justify-between">
-                    <span className="text-xs text-gray-600">Total Transaksi:</span>
-                    <span className="text-xs font-semibold text-black">{formatRupiah(statistics.total_amount)}</span>
-                  </div>
-                  <div className="flex items-center justify-between">
-                    <div className="flex items-center space-x-1.5">
-                      <Ticket className="w-3 h-3 text-orange-600" />
-                      <span className="text-xs text-gray-600">Voucher Dipakai:</span>
-                    </div>
-                    <span className="text-xs font-semibold text-black">{statistics.voucher_count} transaksi</span>
-                  </div>
-                  <div className="flex items-center justify-between">
-                    <div className="flex items-center space-x-1.5">
-                      <Ticket className="w-3 h-3 text-green-600" />
-                      <span className="text-xs text-gray-600">Total Diskon Voucher:</span>
-                    </div>
-                    <span className="text-xs font-semibold text-green-600">
-                      {statistics.total_discount > 0 ? formatRupiah(-statistics.total_discount) : formatRupiah(0)}
-                    </span>
-                  </div>
-                </div>
-              </div>
-
-              {/* Cash Summary */}
-              <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-3">
-                <h2 className="text-sm font-semibold text-gray-800 mb-2">Cash Summary</h2>
-                <div className="space-y-1">
-                <div className="flex items-center justify-between">
-                  <span className="text-xs text-gray-600">Kas Mulai:</span>
-                  <span className="text-xs font-semibold text-black">
-                    {formatRupiah(activeShift?.modal_awal || 0)}
-                  </span>
-                </div>
-                  <div className="flex items-center justify-between">
-                    <div className="flex items-center space-x-1.5">
-                      <Wallet className="w-3 h-3 text-green-600" />
-                      <span className="text-xs text-gray-600">Cash (Shift):</span>
-                    </div>
-                    <span className="text-xs font-semibold text-black">{formatRupiah(cashSummary.cash_shift)}</span>
-                  </div>
-                <div className="flex items-center justify-between">
-                  <span className="text-xs text-gray-600">Cash Refund:</span>
-                  <span className="text-xs font-semibold text-black">
-                    {formatRupiah(cashSummary.cash_shift_refunds || 0)}
-                  </span>
-                </div>
-                  <div className="flex items-center justify-between">
-                    <div className="flex items-center space-x-1.5">
-                      <Wallet className="w-3 h-3 text-blue-600" />
-                      <span className="text-xs text-gray-600">Cash (Hari):</span>
-                    </div>
-                    <span className="text-xs font-semibold text-black">{formatRupiah(cashSummary.cash_whole_day)}</span>
-                  </div>
-                <div className="flex items-center justify-between">
-                  <span className="text-xs text-gray-600">Kas Diharapkan:</span>
-                  <span className="text-xs font-semibold text-black">
-                    {formatRupiah(kasExpectedDisplay)}
-                  </span>
-                </div>
-                <div className="flex items-center justify-between pt-1 border-t border-gray-200">
-                    <div className="flex items-center space-x-1.5">
-                      <CreditCard className="w-3 h-3 text-purple-600" />
-                      <span className="text-xs font-medium text-gray-800">Cash in Cashier:</span>
-                    </div>
-                    <span className="text-xs font-bold text-purple-600">{formatRupiah(totalCashInCashier)}</span>
-                  </div>
-                </div>
-              </div>
-            </div>
-
-            {/* RINGKASAN (Final Summary) */}
-            <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-6">
-              <h2 className="text-xl font-semibold text-gray-800 mb-3 text-center">RINGKASAN</h2>
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                {/* Left Column - Transaction Summary */}
-                <div className="space-y-0">
-                  <h3 className="text-xs font-semibold text-gray-700 mb-2 pb-1 border-b border-gray-300">Transaksi</h3>
-                  <div className="flex justify-between py-0.5">
-                    <span className="text-xs text-gray-700">Total Pesanan:</span>
-                    <span className="text-xs font-semibold text-gray-900">{statistics.order_count} transaksi</span>
-                  </div>
-                  <div className="flex justify-between py-0.5">
-                    <span className="text-xs text-gray-700">Total Transaksi:</span>
-                    <span className="text-xs font-semibold text-gray-900">{formatRupiah(statistics.total_amount)}</span>
-                  </div>
-                  <div className="flex justify-between py-0.5">
-                    <span className="text-xs text-gray-700">Topping Units:</span>
-                    <span className="text-xs font-semibold text-gray-900">
-                      {customizationSales.reduce((sum, c) => sum + c.total_quantity, 0)}
-                    </span>
-                  </div>
-                  <div className="flex justify-between py-0.5">
-                    <span className="text-xs text-gray-700">Total Topping:</span>
-                    <span className="text-xs font-semibold text-gray-900">
-                      {formatRupiah(customizationSales.reduce((sum, c) => sum + c.total_revenue, 0))}
-                    </span>
-                  </div>
-                  <div className="flex justify-between py-0.5">
-                    <span className="text-xs text-gray-700">Voucher Dipakai:</span>
-                    <span className="text-xs font-semibold text-gray-900">{statistics.voucher_count} transaksi</span>
-                  </div>
-                  <div className="flex justify-between py-0.5">
-                    <span className="text-xs text-gray-700">Total Diskon Voucher:</span>
-                    <span className="text-xs font-semibold text-green-600">
-                      {statistics.total_discount > 0 ? formatRupiah(-statistics.total_discount) : formatRupiah(0)}
-                    </span>
-                  </div>
-                </div>
-
-                {/* Right Column - Cash Summary */}
-                <div className="space-y-0">
-                  <h3 className="text-xs font-semibold text-gray-700 mb-2 pb-1 border-b border-gray-300">Kas</h3>
-                  <div className="flex justify-between py-0.5">
-                    <span className="text-xs text-gray-700">Kas Mulai:</span>
-                    <span className="text-xs font-semibold text-gray-900">{formatRupiah(kasMulaiActive)}</span>
-                  </div>
-                  <div className="flex justify-between py-0.5">
-                    <span className="text-xs text-gray-700">Cash Sales (Shift):</span>
-                    <span className="text-xs font-semibold text-gray-900">{formatRupiah(cashShiftSales)}</span>
-                  </div>
-                  <div className="flex justify-between py-0.5">
-                    <span className="text-xs text-gray-700">Cash Refunds (Shift):</span>
-                    <span className="text-xs font-semibold text-red-600">-{formatRupiah(cashShiftRefunds)}</span>
-                  </div>
-                  <div className="flex justify-between py-0.5">
-                    <span className="text-xs text-gray-700">Net Cash (Shift):</span>
-                    <span className="text-xs font-semibold text-gray-900">{formatRupiah(cashNetShift)}</span>
-                  </div>
-                  <div className="flex justify-between py-0.5 border-t border-gray-200 mt-1 pt-1">
-                    <span className="text-xs font-semibold text-gray-800">Kas Diharapkan:</span>
-                    <span className="text-xs font-bold text-purple-700">{formatRupiah(kasExpectedActive)}</span>
-                  </div>
-                  {kasAkhirActive !== null && (
-                    <>
-                      <div className="flex justify-between py-0.5">
-                        <span className="text-xs text-gray-700">Kas Akhir:</span>
-                        <span className="text-xs font-semibold text-gray-900">{formatRupiah(kasAkhirActive)}</span>
-                      </div>
-                      <div className="flex justify-between py-0.5">
-                        <span className="text-xs text-gray-700">Selisih Kas:</span>
-                        <span className={`text-xs font-semibold ${
-                          kasSelisihLabelValue === 'balanced' ? 'text-green-600' :
-                          kasSelisihLabelValue === 'plus' ? 'text-blue-600' : 'text-red-600'
-                        }`}>
-                          {kasSelisihValue !== null ? (
-                            kasSelisihValue > 0 ? `+${formatRupiah(kasSelisihValue)}` : formatRupiah(kasSelisihValue)
-                          ) : '-'}
-                          {kasSelisihLabelValue && ` (${
-                            kasSelisihLabelValue === 'balanced' ? 'Balanced' :
-                            kasSelisihLabelValue === 'plus' ? 'Plus' : 'Minus'
-                          })`}
-                        </span>
-                      </div>
-                    </>
-                  )}
-                  <div className="border-t border-gray-200 mt-1 pt-1">
-                    <div className="flex justify-between py-0.5">
-                      <span className="text-xs text-gray-700">Cash Sales (Whole Day):</span>
-                      <span className="text-xs font-semibold text-gray-900">{formatRupiah(cashWholeDaySales)}</span>
-                    </div>
-                    <div className="flex justify-between py-0.5">
-                      <span className="text-xs text-gray-700">Cash Refunds (Whole Day):</span>
-                      <span className="text-xs font-semibold text-red-600">-{formatRupiah(cashWholeDayRefunds)}</span>
-                    </div>
-                    <div className="flex justify-between py-0.5">
-                      <span className="text-xs text-gray-700">Net Cash (Whole Day):</span>
-                      <span className="text-xs font-semibold text-gray-900">{formatRupiah(cashNetWholeDay)}</span>
-                    </div>
-                  </div>
-                </div>
-              </div>
-            </div>
-
-            {/* BARANG TERJUAL */}
-            <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-4">
-              <h2 className="text-base font-semibold text-gray-800 mb-2 text-center">BARANG TERJUAL</h2>
-              <div className="overflow-x-auto">
-                <table className="w-full text-xs">
-                  <thead>
-                    <tr className="border-b-2 border-gray-300">
-                      <th className="text-left py-1 px-2 font-semibold text-gray-700">Product</th>
-                      <th className="text-right py-1 px-2 font-semibold text-gray-700">Qty</th>
-                      <th className="text-right py-1 px-2 font-semibold text-gray-700">Unit Price</th>
-                      <th className="text-right py-1 px-2 font-semibold text-gray-700">Subtotal</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {productSales.length > 0 ? (
+                  {/* Shift Info and Modal Awal row below tabs */}
+                  <div className="flex items-center gap-6 px-6 py-3 bg-gray-50">
+                    {/* Shift Info */}
+                    {activeTab === 'all-day' ? (
                       <>
-                        {productSales.map((product, idx) => (
-                          <tr key={`${product.product_id}-${product.platform}-${product.transaction_type}-${idx}`} className="border-b border-gray-200 hover:bg-gray-50">
-                            <td className="py-1 px-2 font-medium">
-                              <div className="text-gray-900">
-                                {product.is_bundle_item && <span className="text-[10px] font-semibold text-purple-600">[Bundle] </span>}
-                                {product.product_name}
-                              </div>
-                              <div className="text-[10px] text-gray-600">
-                                {product.transaction_type === 'drinks' ? 'Drinks' : 'Bakery'}
-                                {' · '}
-                                {formatPlatformLabel(product.platform)}
-                              </div>
-                            </td>
-                            <td className="py-1 px-2 text-right font-medium text-gray-900">{product.total_quantity}</td>
-                            <td className="py-1 px-2 text-right font-medium">
-                              {product.is_bundle_item ? (
-                                <span className="text-gray-700">-</span>
-                              ) : (
-                                <span className="text-gray-900">
-                                  {formatRupiah(
-                                    product.base_unit_price ??
-                                      (product.total_quantity > 0 ? product.base_subtotal / product.total_quantity : 0)
-                                  )}
-                                </span>
-                              )}
-                            </td>
-                            <td className="py-1 px-2 text-right font-semibold">
-                              {product.is_bundle_item ? (
-                                <span className="text-gray-700">-</span>
-                              ) : (
-                                <span className="text-gray-900">
-                                  {formatRupiah(product.base_subtotal)}
-                                </span>
-                              )}
-                            </td>
-                          </tr>
-                        ))}
-                        <tr className="border-t-2 border-gray-300 bg-gray-100">
-                          <td className="py-1 px-2 font-bold text-gray-900">TOTAL</td>
-                          <td className="py-1 px-2 text-right font-bold text-gray-900">
-                            {productSales.reduce((sum, p) => sum + p.total_quantity, 0)}
-                          </td>
-                          <td className="py-1 px-2 text-right font-bold">
-                          {(() => {
-                            const regularProducts = productSales.filter(p => !p.is_bundle_item);
-                            const totalsByKey = regularProducts.reduce((acc, product) => {
-                              const key = `${product.transaction_type}-${product.platform}`;
-                              if (!acc.has(key)) {
-                                acc.set(key, { quantity: 0, base: 0 });
-                              }
-                              const current = acc.get(key)!;
-                              current.quantity += product.total_quantity;
-                              current.base += product.base_subtotal;
-                              return acc;
-                            }, new Map<string, { quantity: number; base: number }>());
-
-                            const rows = Array.from(totalsByKey.entries()).map(([key, value]) => {
-                              const [transactionType, platform] = key.split('-');
-                              const label = `${transactionType === 'drinks' ? 'Drinks' : 'Bakery'} · ${formatPlatformLabel(platform)}`;
-                              const unitPrice = value.quantity > 0 ? value.base / value.quantity : 0;
-                              return (
-                                <div key={key} className="flex justify-between text-sm text-gray-800">
-                                  <span>{label}</span>
-                                  <span>{formatRupiah(unitPrice)}</span>
-                                </div>
-                              );
-                            });
-                            return rows;
-                          })()}
-                          </td>
-                          <td className="py-1 px-2 text-right font-bold text-gray-900">
-                            {formatRupiah(productSales.filter(p => !p.is_bundle_item).reduce((sum, p) => sum + p.base_subtotal, 0))}
-                          </td>
-                        </tr>
+                        <div className="flex items-center gap-2">
+                          <span className="text-xs text-gray-600">Period:</span>
+                          <span className="text-sm font-medium text-black">All Day</span>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <span className="text-xs text-gray-600">Shifts:</span>
+                          <span className="text-sm font-medium text-black">{shiftSequenceInfo?.total || 0} shift(s)</span>
+                        </div>
                       </>
                     ) : (
-                      <tr>
-                        <td colSpan={4} className="py-4 text-center text-gray-500 text-xs">
-                          Belum ada produk yang terjual
-                        </td>
-                      </tr>
+                      (() => {
+                        const displayShift = shiftSequenceInfo?.shifts.find(s => s.id === activeTab) || activeShift;
+                        return (
+                          <>
+                            <div className="flex items-center gap-2">
+                              <span className="text-xs text-gray-600">Cashier:</span>
+                              <span className="text-sm font-medium text-black">{displayShift.user_name}</span>
+                            </div>
+                            <div className="flex items-center gap-2">
+                              <span className="text-xs text-gray-600">Started:</span>
+                              <span className="text-sm font-medium text-black">{formatTime(displayShift.shift_start)}</span>
+                            </div>
+                            <div className="flex items-center gap-2">
+                              <span className="text-xs text-gray-600">Ended:</span>
+                              <span className="text-sm font-medium text-black">
+                                {displayShift.shift_end ? formatTime(displayShift.shift_end) : (
+                                  <span className="inline-flex items-center text-green-600 text-xs">
+                                    <span className="w-1.5 h-1.5 bg-green-500 rounded-full mr-1 animate-pulse"></span>
+                                    Active
+                                  </span>
+                                )}
+                              </span>
+                            </div>
+                          </>
+                        );
+                      })()
                     )}
-                  </tbody>
-                </table>
-              </div>
-            </div>
 
-            {/* Payment Method Breakdown */}
-            <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-4">
-              <h2 className="text-base font-semibold text-gray-800 mb-2 text-center">PAYMENT METHOD</h2>
-              <div className="overflow-x-auto">
-                <table className="w-full text-xs">
-                  <thead>
-                    <tr className="border-b-2 border-gray-300">
-                      <th className="text-left py-1 px-2 font-semibold text-gray-700">Payment Method</th>
-                      <th className="text-right py-1 px-2 font-semibold text-gray-700">Count</th>
-                      <th className="text-right py-1 px-2 font-semibold text-gray-700">Total</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {paymentBreakdown.length > 0 ? (
-                      <>
-                        {paymentBreakdown.map((item, idx) => (
-                          <tr key={idx} className="border-b border-gray-100 hover:bg-gray-50">
-                            <td className="py-1 px-2 text-gray-900 font-medium">{item.payment_method_name || item.payment_method_code}</td>
-                            <td className="py-1 px-2 text-right font-medium text-gray-900">{item.transaction_count}</td>
-                            <td className="py-1 px-2 text-right font-semibold text-gray-900">{formatRupiah(item.total_amount)}</td>
-                          </tr>
-                        ))}
-                        <tr className="border-t-2 border-gray-300 bg-gray-100">
-                          <td className="py-1 px-2 font-bold text-gray-900">TOTAL</td>
-                          <td className="py-1 px-2 text-right font-bold text-gray-900">{totalPaymentCount}</td>
-                          <td className="py-1 px-2 text-right font-bold text-gray-900">
-                            {formatRupiah(paymentBreakdown.reduce((sum, item) => sum + item.total_amount, 0))}
-                          </td>
-                        </tr>
-                      </>
-                    ) : (
-                      <tr>
-                        <td colSpan={3} className="py-4 text-center text-gray-500 text-xs">
-                          Belum ada transaksi
-                        </td>
-                      </tr>
-                    )}
-                  </tbody>
-                </table>
-              </div>
-            </div>
+                    {/* Modal Awal */}
+                    <div className="flex items-center gap-2">
+                      <span className="text-xs text-gray-600">Modal Awal:</span>
+                      <span className="text-sm font-medium text-black">
+                        {activeTab === 'all-day'
+                          ? formatRupiah(shiftSequenceInfo?.shifts[0]?.modal_awal || 0)
+                          : formatRupiah((shiftSequenceInfo?.shifts.find(s => s.id === activeTab) || activeShift).modal_awal)}
+                      </span>
+                    </div>
+                  </div>
+                </div>
+              )}
 
-            {/* CATEGORY II */}
-            <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-4">
-              <h2 className="text-base font-semibold text-gray-800 mb-2 text-center">CATEGORY II</h2>
-              <div className="overflow-x-auto">
-                <table className="w-full text-xs">
-                  <thead>
-                    <tr className="border-b-2 border-gray-300">
-                      <th className="text-left py-1 px-2 font-semibold text-gray-700">Category II</th>
-                      <th className="text-right py-1 px-2 font-semibold text-gray-700">Quantity</th>
-                      <th className="text-right py-1 px-2 font-semibold text-gray-700">Total</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {category2Breakdown.length > 0 ? (
-                      <>
-                        {category2Breakdown.map((item, idx) => (
-                          <tr key={idx} className="border-b border-gray-100 hover:bg-gray-50">
-                            <td className="py-1 px-2 text-gray-900 font-medium">{item.category2_name}</td>
-                            <td className="py-1 px-2 text-right font-medium text-gray-900">{item.total_quantity}</td>
-                            <td className="py-1 px-2 text-right font-semibold text-gray-900">{formatRupiah(item.total_amount)}</td>
-                          </tr>
-                        ))}
-                        <tr className="border-t-2 border-gray-300 bg-gray-100">
-                          <td className="py-1 px-2 font-bold text-gray-900">TOTAL</td>
-                          <td className="py-1 px-2 text-right font-bold text-gray-900">
-                            {category2Breakdown.reduce((sum, item) => sum + item.total_quantity, 0)}
-                          </td>
-                          <td className="py-1 px-2 text-right font-bold text-gray-900">
-                            {formatRupiah(category2Breakdown.reduce((sum, item) => sum + item.total_amount, 0))}
-                          </td>
-                        </tr>
-                      </>
-                    ) : (
-                      <tr>
-                        <td colSpan={3} className="py-4 text-center text-gray-500">
-                          Tidak ada Category II
-                        </td>
-                      </tr>
-                    )}
-                  </tbody>
-                </table>
-              </div>
-            </div>
-
-            {/* TOPPING SALES BREAKDOWN */}
-            <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-4">
-              <h2 className="text-base font-semibold text-gray-800 mb-2 text-center">TOPPING SALES BREAKDOWN</h2>
-              <div className="overflow-x-auto">
-                <table className="w-full text-xs">
-                  <thead>
-                    <tr className="border-b-2 border-gray-300">
-                      <th className="text-left py-1 px-2 font-semibold text-gray-700">Customization</th>
-                      <th className="text-right py-1 px-2 font-semibold text-gray-700">Qty</th>
-                      <th className="text-right py-1 px-2 font-semibold text-gray-700">Revenue</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {customizationSales.length > 0 ? (
-                      <>
-                        {customizationSales.map((item, idx) => (
-                          <tr key={idx} className="border-b border-gray-200 hover:bg-gray-50">
-                            <td className="py-1 px-2">
-                              <div className="font-medium text-gray-900">{item.option_name}</div>
-                              <div className="text-[10px] text-gray-600">{item.customization_name}</div>
-                            </td>
-                            <td className="py-1 px-2 text-right font-medium text-gray-900">{item.total_quantity}</td>
-                            <td className="py-1 px-2 text-right font-semibold text-gray-900">{formatRupiah(item.total_revenue)}</td>
-                          </tr>
-                        ))}
-                        <tr className="border-t-2 border-gray-300 bg-gray-100">
-                          <td className="py-1 px-2 font-bold text-gray-900">TOTAL</td>
-                          <td className="py-1 px-2 text-right font-bold text-gray-900">
-                            {customizationSales.reduce((sum, item) => sum + item.total_quantity, 0)}
-                          </td>
-                          <td className="py-1 px-2 text-right font-bold text-gray-900">
-                            {formatRupiah(customizationSales.reduce((sum, item) => sum + item.total_revenue, 0))}
-                          </td>
-                        </tr>
-                      </>
-                    ) : (
-                      <tr>
-                        <td colSpan={3} className="py-4 text-center text-gray-500">
-                          Belum ada kustomisasi terjual
-                        </td>
-                      </tr>
-                    )}
-                  </tbody>
-                </table>
-              </div>
-            </div>
-
-            {/* DISKON & VOUCHER */}
-            <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-4">
-              <h2 className="text-base font-semibold text-gray-800 mb-2 text-center">DISKON & VOUCHER</h2>
-              <div className="overflow-x-auto">
-                <table className="w-full text-xs">
-                  <tbody>
-                    <tr className="border-b border-gray-200 hover:bg-gray-50">
-                      <td className="py-1 px-2 text-gray-900 font-medium">Voucher Digunakan</td>
-                      <td className="py-1 px-2 text-right font-semibold text-gray-900">{statistics.voucher_count} transaksi</td>
-                    </tr>
-                    <tr className="border-b border-gray-200 hover:bg-gray-50">
-                      <td className="py-1 px-2 text-gray-900 font-medium">Total Diskon Voucher</td>
-                      <td className="py-1 px-2 text-right font-semibold text-green-600">
+              {/* Shift Summary and Cash Summary - 2 columns */}
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                {/* Shift Summary */}
+                <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-3">
+                  <h2 className="text-sm font-semibold text-gray-800 mb-2">Shift Summary</h2>
+                  <div className="space-y-1">
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center space-x-1.5">
+                        <Package className="w-3 h-3 text-blue-600" />
+                        <span className="text-xs text-gray-600">Pesanan:</span>
+                      </div>
+                      <span className="text-xs font-semibold text-black">{statistics.order_count} transaksi</span>
+                    </div>
+                    <div className="flex items-center justify-between">
+                      <span className="text-xs text-gray-600">Total Transaksi:</span>
+                      <span className="text-xs font-semibold text-black">{formatRupiah(statistics.total_amount)}</span>
+                    </div>
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center space-x-1.5">
+                        <Ticket className="w-3 h-3 text-orange-600" />
+                        <span className="text-xs text-gray-600">Voucher Dipakai:</span>
+                      </div>
+                      <span className="text-xs font-semibold text-black">{statistics.voucher_count} transaksi</span>
+                    </div>
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center space-x-1.5">
+                        <Ticket className="w-3 h-3 text-green-600" />
+                        <span className="text-xs text-gray-600">Total Diskon Voucher:</span>
+                      </div>
+                      <span className="text-xs font-semibold text-green-600">
                         {statistics.total_discount > 0 ? formatRupiah(-statistics.total_discount) : formatRupiah(0)}
-                      </td>
-                    </tr>
-                  </tbody>
-                </table>
+                      </span>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Cash Summary */}
+                <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-3">
+                  <h2 className="text-sm font-semibold text-gray-800 mb-2">Cash Summary</h2>
+                  <div className="space-y-1">
+                    <div className="flex items-center justify-between">
+                      <span className="text-xs text-gray-600">Kas Mulai:</span>
+                      <span className="text-xs font-semibold text-black">
+                        {formatRupiah(activeShift?.modal_awal || 0)}
+                      </span>
+                    </div>
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center space-x-1.5">
+                        <Wallet className="w-3 h-3 text-green-600" />
+                        <span className="text-xs text-gray-600">Cash (Shift):</span>
+                      </div>
+                      <span className="text-xs font-semibold text-black">{formatRupiah(cashSummary.cash_shift)}</span>
+                    </div>
+                    <div className="flex items-center justify-between">
+                      <span className="text-xs text-gray-600">Cash Refund:</span>
+                      <span className="text-xs font-semibold text-black">
+                        {formatRupiah(cashSummary.cash_shift_refunds || 0)}
+                      </span>
+                    </div>
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center space-x-1.5">
+                        <Wallet className="w-3 h-3 text-blue-600" />
+                        <span className="text-xs text-gray-600">Cash (Hari):</span>
+                      </div>
+                      <span className="text-xs font-semibold text-black">{formatRupiah(cashSummary.cash_whole_day)}</span>
+                    </div>
+                    <div className="flex items-center justify-between">
+                      <span className="text-xs text-gray-600">Kas Diharapkan:</span>
+                      <span className="text-xs font-semibold text-black">
+                        {formatRupiah(kasExpectedDisplay)}
+                      </span>
+                    </div>
+                    <div className="flex items-center justify-between pt-1 border-t border-gray-200">
+                      <div className="flex items-center space-x-1.5">
+                        <CreditCard className="w-3 h-3 text-purple-600" />
+                        <span className="text-xs font-medium text-gray-800">Cash in Cashier:</span>
+                      </div>
+                      <span className="text-xs font-bold text-purple-600">{formatRupiah(totalCashInCashier)}</span>
+                    </div>
+                  </div>
+                </div>
               </div>
-            </div>
-          </>
-        )}
-      </div>
+
+              {/* RINGKASAN (Final Summary) */}
+              <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-6">
+                <h2 className="text-xl font-semibold text-gray-800 mb-3 text-center">RINGKASAN</h2>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                  {/* Left Column - Transaction Summary */}
+                  <div className="space-y-0">
+                    <h3 className="text-xs font-semibold text-gray-700 mb-2 pb-1 border-b border-gray-300">Transaksi</h3>
+                    <div className="flex justify-between py-0.5">
+                      <span className="text-xs text-gray-700">Total Pesanan:</span>
+                      <span className="text-xs font-semibold text-gray-900">{statistics.order_count} transaksi</span>
+                    </div>
+                    <div className="flex justify-between py-0.5">
+                      <span className="text-xs text-gray-700">Total Transaksi:</span>
+                      <span className="text-xs font-semibold text-gray-900">{formatRupiah(statistics.total_amount)}</span>
+                    </div>
+                    <div className="flex justify-between py-0.5">
+                      <span className="text-xs text-gray-700">Topping Units:</span>
+                      <span className="text-xs font-semibold text-gray-900">
+                        {customizationSales.reduce((sum, c) => sum + c.total_quantity, 0)}
+                      </span>
+                    </div>
+                    <div className="flex justify-between py-0.5">
+                      <span className="text-xs text-gray-700">Total Topping:</span>
+                      <span className="text-xs font-semibold text-gray-900">
+                        {formatRupiah(customizationSales.reduce((sum, c) => sum + c.total_revenue, 0))}
+                      </span>
+                    </div>
+                    <div className="flex justify-between py-0.5">
+                      <span className="text-xs text-gray-700">Voucher Dipakai:</span>
+                      <span className="text-xs font-semibold text-gray-900">{statistics.voucher_count} transaksi</span>
+                    </div>
+                    <div className="flex justify-between py-0.5">
+                      <span className="text-xs text-gray-700">Total Diskon Voucher:</span>
+                      <span className="text-xs font-semibold text-green-600">
+                        {statistics.total_discount > 0 ? formatRupiah(-statistics.total_discount) : formatRupiah(0)}
+                      </span>
+                    </div>
+                  </div>
+
+                  {/* Right Column - Cash Summary */}
+                  <div className="space-y-0">
+                    <h3 className="text-xs font-semibold text-gray-700 mb-2 pb-1 border-b border-gray-300">Kas</h3>
+                    <div className="flex justify-between py-0.5">
+                      <span className="text-xs text-gray-700">Kas Mulai:</span>
+                      <span className="text-xs font-semibold text-gray-900">{formatRupiah(kasMulaiActive)}</span>
+                    </div>
+                    <div className="flex justify-between py-0.5">
+                      <span className="text-xs text-gray-700">Cash Sales (Shift):</span>
+                      <span className="text-xs font-semibold text-gray-900">{formatRupiah(cashShiftSales)}</span>
+                    </div>
+                    <div className="flex justify-between py-0.5">
+                      <span className="text-xs text-gray-700">Cash Refunds (Shift):</span>
+                      <span className="text-xs font-semibold text-red-600">-{formatRupiah(cashShiftRefunds)}</span>
+                    </div>
+                    <div className="flex justify-between py-0.5">
+                      <span className="text-xs text-gray-700">Net Cash (Shift):</span>
+                      <span className="text-xs font-semibold text-gray-900">{formatRupiah(cashNetShift)}</span>
+                    </div>
+                    <div className="flex justify-between py-0.5 border-t border-gray-200 mt-1 pt-1">
+                      <span className="text-xs font-semibold text-gray-800">Kas Diharapkan:</span>
+                      <span className="text-xs font-bold text-purple-700">{formatRupiah(kasExpectedActive)}</span>
+                    </div>
+                    {kasAkhirActive !== null && (
+                      <>
+                        <div className="flex justify-between py-0.5">
+                          <span className="text-xs text-gray-700">Kas Akhir:</span>
+                          <span className="text-xs font-semibold text-gray-900">{formatRupiah(kasAkhirActive)}</span>
+                        </div>
+                        <div className="flex justify-between py-0.5">
+                          <span className="text-xs text-gray-700">Selisih Kas:</span>
+                          <span className={`text-xs font-semibold ${kasSelisihLabelValue === 'balanced' ? 'text-green-600' :
+                            kasSelisihLabelValue === 'plus' ? 'text-blue-600' : 'text-red-600'
+                            }`}>
+                            {kasSelisihValue !== null ? (
+                              kasSelisihValue > 0 ? `+${formatRupiah(kasSelisihValue)}` : formatRupiah(kasSelisihValue)
+                            ) : '-'}
+                            {kasSelisihLabelValue && ` (${kasSelisihLabelValue === 'balanced' ? 'Balanced' :
+                              kasSelisihLabelValue === 'plus' ? 'Plus' : 'Minus'
+                              })`}
+                          </span>
+                        </div>
+                      </>
+                    )}
+                    <div className="border-t border-gray-200 mt-1 pt-1">
+                      <div className="flex justify-between py-0.5">
+                        <span className="text-xs text-gray-700">Cash Sales (Whole Day):</span>
+                        <span className="text-xs font-semibold text-gray-900">{formatRupiah(cashWholeDaySales)}</span>
+                      </div>
+                      <div className="flex justify-between py-0.5">
+                        <span className="text-xs text-gray-700">Cash Refunds (Whole Day):</span>
+                        <span className="text-xs font-semibold text-red-600">-{formatRupiah(cashWholeDayRefunds)}</span>
+                      </div>
+                      <div className="flex justify-between py-0.5">
+                        <span className="text-xs text-gray-700">Net Cash (Whole Day):</span>
+                        <span className="text-xs font-semibold text-gray-900">{formatRupiah(cashNetWholeDay)}</span>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {/* BARANG TERJUAL */}
+              <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-4">
+                <h2 className="text-base font-semibold text-gray-800 mb-2 text-center">BARANG TERJUAL</h2>
+                <div className="overflow-x-auto">
+                  <table className="w-full text-xs">
+                    <thead>
+                      <tr className="border-b-2 border-gray-300">
+                        <th className="text-left py-1 px-2 font-semibold text-gray-700">Product</th>
+                        <th className="text-right py-1 px-2 font-semibold text-gray-700">Qty</th>
+                        <th className="text-right py-1 px-2 font-semibold text-gray-700">Unit Price</th>
+                        <th className="text-right py-1 px-2 font-semibold text-gray-700">Subtotal</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {productSales.length > 0 ? (
+                        <>
+                          {productSales.map((product, idx) => (
+                            <tr key={`${product.product_id}-${product.platform}-${product.transaction_type}-${idx}`} className="border-b border-gray-200 hover:bg-gray-50">
+                              <td className="py-1 px-2 font-medium">
+                                <div className="text-gray-900">
+                                  {product.is_bundle_item && <span className="text-[10px] font-semibold text-purple-600">[Bundle] </span>}
+                                  {product.product_name}
+                                </div>
+                                <div className="text-[10px] text-gray-600">
+                                  {product.transaction_type === 'drinks' ? 'Drinks' : 'Bakery'}
+                                  {' · '}
+                                  {formatPlatformLabel(product.platform)}
+                                </div>
+                              </td>
+                              <td className="py-1 px-2 text-right font-medium text-gray-900">{product.total_quantity}</td>
+                              <td className="py-1 px-2 text-right font-medium">
+                                {product.is_bundle_item ? (
+                                  <span className="text-gray-700">-</span>
+                                ) : (
+                                  <span className="text-gray-900">
+                                    {formatRupiah(
+                                      product.base_unit_price ??
+                                      (product.total_quantity > 0 ? product.base_subtotal / product.total_quantity : 0)
+                                    )}
+                                  </span>
+                                )}
+                              </td>
+                              <td className="py-1 px-2 text-right font-semibold">
+                                {product.is_bundle_item ? (
+                                  <span className="text-gray-700">-</span>
+                                ) : (
+                                  <span className="text-gray-900">
+                                    {formatRupiah(product.base_subtotal)}
+                                  </span>
+                                )}
+                              </td>
+                            </tr>
+                          ))}
+                          <tr className="border-t-2 border-gray-300 bg-gray-100">
+                            <td className="py-1 px-2 font-bold text-gray-900">TOTAL</td>
+                            <td className="py-1 px-2 text-right font-bold text-gray-900">
+                              {productSales.reduce((sum, p) => sum + p.total_quantity, 0)}
+                            </td>
+                            <td className="py-1 px-2 text-right font-bold">
+                              {(() => {
+                                const regularProducts = productSales.filter(p => !p.is_bundle_item);
+                                const totalsByKey = regularProducts.reduce((acc, product) => {
+                                  const key = `${product.transaction_type}-${product.platform}`;
+                                  if (!acc.has(key)) {
+                                    acc.set(key, { quantity: 0, base: 0 });
+                                  }
+                                  const current = acc.get(key)!;
+                                  current.quantity += product.total_quantity;
+                                  current.base += product.base_subtotal;
+                                  return acc;
+                                }, new Map<string, { quantity: number; base: number }>());
+
+                                const rows = Array.from(totalsByKey.entries()).map(([key, value]) => {
+                                  const [transactionType, platform] = key.split('-');
+                                  const label = `${transactionType === 'drinks' ? 'Drinks' : 'Bakery'} · ${formatPlatformLabel(platform)}`;
+                                  const unitPrice = value.quantity > 0 ? value.base / value.quantity : 0;
+                                  return (
+                                    <div key={key} className="flex justify-between text-sm text-gray-800">
+                                      <span>{label}</span>
+                                      <span>{formatRupiah(unitPrice)}</span>
+                                    </div>
+                                  );
+                                });
+                                return rows;
+                              })()}
+                            </td>
+                            <td className="py-1 px-2 text-right font-bold text-gray-900">
+                              {formatRupiah(productSales.filter(p => !p.is_bundle_item).reduce((sum, p) => sum + p.base_subtotal, 0))}
+                            </td>
+                          </tr>
+                        </>
+                      ) : (
+                        <tr>
+                          <td colSpan={4} className="py-4 text-center text-gray-500 text-xs">
+                            Belum ada produk yang terjual
+                          </td>
+                        </tr>
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+
+              {/* Payment Method Breakdown */}
+              <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-4">
+                <h2 className="text-base font-semibold text-gray-800 mb-2 text-center">PAYMENT METHOD</h2>
+                <div className="overflow-x-auto">
+                  <table className="w-full text-xs">
+                    <thead>
+                      <tr className="border-b-2 border-gray-300">
+                        <th className="text-left py-1 px-2 font-semibold text-gray-700">Payment Method</th>
+                        <th className="text-right py-1 px-2 font-semibold text-gray-700">Count</th>
+                        <th className="text-right py-1 px-2 font-semibold text-gray-700">Total</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {paymentBreakdown.length > 0 ? (
+                        <>
+                          {paymentBreakdown.map((item, idx) => (
+                            <tr key={idx} className="border-b border-gray-100 hover:bg-gray-50">
+                              <td className="py-1 px-2 text-gray-900 font-medium">{item.payment_method_name || item.payment_method_code}</td>
+                              <td className="py-1 px-2 text-right font-medium text-gray-900">{item.transaction_count}</td>
+                              <td className="py-1 px-2 text-right font-semibold text-gray-900">{formatRupiah(item.total_amount)}</td>
+                            </tr>
+                          ))}
+                          <tr className="border-t-2 border-gray-300 bg-gray-100">
+                            <td className="py-1 px-2 font-bold text-gray-900">TOTAL</td>
+                            <td className="py-1 px-2 text-right font-bold text-gray-900">{totalPaymentCount}</td>
+                            <td className="py-1 px-2 text-right font-bold text-gray-900">
+                              {formatRupiah(paymentBreakdown.reduce((sum, item) => sum + item.total_amount, 0))}
+                            </td>
+                          </tr>
+                        </>
+                      ) : (
+                        <tr>
+                          <td colSpan={3} className="py-4 text-center text-gray-500 text-xs">
+                            Belum ada transaksi
+                          </td>
+                        </tr>
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+
+              {/* CATEGORY II */}
+              <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-4">
+                <h2 className="text-base font-semibold text-gray-800 mb-2 text-center">CATEGORY II</h2>
+                <div className="overflow-x-auto">
+                  <table className="w-full text-xs">
+                    <thead>
+                      <tr className="border-b-2 border-gray-300">
+                        <th className="text-left py-1 px-2 font-semibold text-gray-700">Category II</th>
+                        <th className="text-right py-1 px-2 font-semibold text-gray-700">Quantity</th>
+                        <th className="text-right py-1 px-2 font-semibold text-gray-700">Total</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {category2Breakdown.length > 0 ? (
+                        <>
+                          {category2Breakdown.map((item, idx) => (
+                            <tr key={idx} className="border-b border-gray-100 hover:bg-gray-50">
+                              <td className="py-1 px-2 text-gray-900 font-medium">{item.category2_name}</td>
+                              <td className="py-1 px-2 text-right font-medium text-gray-900">{item.total_quantity}</td>
+                              <td className="py-1 px-2 text-right font-semibold text-gray-900">{formatRupiah(item.total_amount)}</td>
+                            </tr>
+                          ))}
+                          <tr className="border-t-2 border-gray-300 bg-gray-100">
+                            <td className="py-1 px-2 font-bold text-gray-900">TOTAL</td>
+                            <td className="py-1 px-2 text-right font-bold text-gray-900">
+                              {category2Breakdown.reduce((sum, item) => sum + item.total_quantity, 0)}
+                            </td>
+                            <td className="py-1 px-2 text-right font-bold text-gray-900">
+                              {formatRupiah(category2Breakdown.reduce((sum, item) => sum + item.total_amount, 0))}
+                            </td>
+                          </tr>
+                        </>
+                      ) : (
+                        <tr>
+                          <td colSpan={3} className="py-4 text-center text-gray-500">
+                            Tidak ada Category II
+                          </td>
+                        </tr>
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+
+              {/* TOPPING SALES BREAKDOWN */}
+              <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-4">
+                <h2 className="text-base font-semibold text-gray-800 mb-2 text-center">TOPPING SALES BREAKDOWN</h2>
+                <div className="overflow-x-auto">
+                  <table className="w-full text-xs">
+                    <thead>
+                      <tr className="border-b-2 border-gray-300">
+                        <th className="text-left py-1 px-2 font-semibold text-gray-700">Customization</th>
+                        <th className="text-right py-1 px-2 font-semibold text-gray-700">Qty</th>
+                        <th className="text-right py-1 px-2 font-semibold text-gray-700">Revenue</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {customizationSales.length > 0 ? (
+                        <>
+                          {customizationSales.map((item, idx) => (
+                            <tr key={idx} className="border-b border-gray-200 hover:bg-gray-50">
+                              <td className="py-1 px-2">
+                                <div className="font-medium text-gray-900">{item.option_name}</div>
+                                <div className="text-[10px] text-gray-600">{item.customization_name}</div>
+                              </td>
+                              <td className="py-1 px-2 text-right font-medium text-gray-900">{item.total_quantity}</td>
+                              <td className="py-1 px-2 text-right font-semibold text-gray-900">{formatRupiah(item.total_revenue)}</td>
+                            </tr>
+                          ))}
+                          <tr className="border-t-2 border-gray-300 bg-gray-100">
+                            <td className="py-1 px-2 font-bold text-gray-900">TOTAL</td>
+                            <td className="py-1 px-2 text-right font-bold text-gray-900">
+                              {customizationSales.reduce((sum, item) => sum + item.total_quantity, 0)}
+                            </td>
+                            <td className="py-1 px-2 text-right font-bold text-gray-900">
+                              {formatRupiah(customizationSales.reduce((sum, item) => sum + item.total_revenue, 0))}
+                            </td>
+                          </tr>
+                        </>
+                      ) : (
+                        <tr>
+                          <td colSpan={3} className="py-4 text-center text-gray-500">
+                            Belum ada kustomisasi terjual
+                          </td>
+                        </tr>
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+
+              {/* DISKON & VOUCHER */}
+              <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-4">
+                <h2 className="text-base font-semibold text-gray-800 mb-2 text-center">DISKON & VOUCHER</h2>
+                <div className="overflow-x-auto">
+                  <table className="w-full text-xs">
+                    <tbody>
+                      <tr className="border-b border-gray-200 hover:bg-gray-50">
+                        <td className="py-1 px-2 text-gray-900 font-medium">Voucher Digunakan</td>
+                        <td className="py-1 px-2 text-right font-semibold text-gray-900">{statistics.voucher_count} transaksi</td>
+                      </tr>
+                      <tr className="border-b border-gray-200 hover:bg-gray-50">
+                        <td className="py-1 px-2 text-gray-900 font-medium">Total Diskon Voucher</td>
+                        <td className="py-1 px-2 text-right font-semibold text-green-600">
+                          {statistics.total_discount > 0 ? formatRupiah(-statistics.total_discount) : formatRupiah(0)}
+                        </td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </>
+          )}
+        </div>
       )}
 
       {/* Print Selection Modal */}
@@ -2268,7 +2275,7 @@ export default function GantiShift() {
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
           <div className="bg-white rounded-lg shadow-xl max-w-md w-full p-6 animate-in zoom-in">
             <h3 className="text-xl font-bold text-gray-800 mb-4">Pilih Laporan untuk Print</h3>
-            
+
             <div className="space-y-3 mb-6 max-h-96 overflow-y-auto">
               {/* Whole Day Option */}
               <label className="flex items-center space-x-3 cursor-pointer p-3 rounded-lg hover:bg-gray-50 border border-gray-200">
@@ -2285,14 +2292,14 @@ export default function GantiShift() {
                   </p>
                 </div>
               </label>
-              
+
               <div className="border-t border-gray-300 my-3"></div>
-              
+
               {/* Individual Shift Options */}
               {printSelections.map((selection) => {
                 const shift = shiftSequenceInfo.shifts.find(s => s.id === selection.shiftId);
                 if (!shift) return null;
-                
+
                 return (
                   <label
                     key={selection.shiftId}
@@ -2326,13 +2333,13 @@ export default function GantiShift() {
                 );
               })}
             </div>
-            
+
             <div className="bg-blue-50 border border-blue-200 rounded-lg p-3 mb-4">
               <p className="text-sm text-blue-800">
                 💡 Anda dapat memilih lebih dari satu laporan untuk dicetak sekaligus.
               </p>
             </div>
-            
+
             <div className="flex space-x-3">
               <button
                 onClick={() => {
@@ -2372,7 +2379,7 @@ export default function GantiShift() {
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
           <div className="bg-white rounded-lg shadow-xl max-w-md w-full p-6 animate-in zoom-in">
             <h3 className="text-xl font-bold text-gray-800 mb-4">Pilih Periode untuk Print</h3>
-            
+
             <div className="space-y-4 mb-6">
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-2">
@@ -2386,7 +2393,7 @@ export default function GantiShift() {
                   required
                 />
               </div>
-              
+
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-2">
                   Tanggal & Waktu Selesai
@@ -2400,7 +2407,7 @@ export default function GantiShift() {
                 />
               </div>
             </div>
-            
+
             <div className="flex space-x-3">
               <button
                 onClick={() => {

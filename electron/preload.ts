@@ -13,29 +13,30 @@ contextBridge.exposeInMainWorld('electronAPI', {
   playSound: (soundType: string) => ipcRenderer.invoke('play-sound', soundType),
   // System printers
   listPrinters: () => ipcRenderer.invoke('list-printers'),
-  
+
   // Window controls
   closeWindow: () => ipcRenderer.invoke('close-window'),
   minimizeWindow: () => ipcRenderer.invoke('minimize-window'),
   maximizeWindow: () => ipcRenderer.invoke('maximize-window'),
   navigateTo: (path: string) => ipcRenderer.invoke('navigate-to', path),
   focusWindow: () => ipcRenderer.invoke('focus-window'),
-  
+  openProductionDisplay: (displayType: 'kitchen' | 'barista') => ipcRenderer.invoke('open-production-display', displayType),
+
   // Authentication events
   notifyLoginSuccess: () => ipcRenderer.invoke('login-success'),
   notifyLogout: () => ipcRenderer.invoke('logout'),
-  
+
   // Menu events
   onMenuNewOrder: (callback: () => void) => {
     ipcRenderer.on('menu-new-order', callback);
   },
-  
+
   // Dual-display communication
   updateCustomerDisplay: (data: UnknownRecord) => ipcRenderer.invoke('update-customer-display', data),
   updateCustomerSlideshow: (data: UnknownRecord) => ipcRenderer.invoke('update-customer-slideshow', data),
   getCustomerDisplayStatus: () => ipcRenderer.invoke('get-customer-display-status'),
   createCustomerDisplay: () => ipcRenderer.invoke('create-customer-display'),
-  
+
   // Offline/local DB primitives
   localDbUpsertCategories: (rows: { jenis: string; updated_at?: number }[]) => ipcRenderer.invoke('localdb-upsert-categories', rows),
   localDbGetCategories: () => ipcRenderer.invoke('localdb-get-categories'),
@@ -44,32 +45,32 @@ contextBridge.exposeInMainWorld('electronAPI', {
   localDbGetAllProducts: () => ipcRenderer.invoke('localdb-get-all-products'),
   localDbUpdateSyncStatus: (key: string, status: string) => ipcRenderer.invoke('localdb-update-sync-status', key, status),
   localDbGetSyncStatus: (key: string) => ipcRenderer.invoke('localdb-get-sync-status', key),
-  
+
   // Comprehensive POS table operations
   // Users
   localDbUpsertUsers: (rows: UnknownRecord[]) => ipcRenderer.invoke('localdb-upsert-users', rows),
   localDbGetUsers: () => ipcRenderer.invoke('localdb-get-users'),
-  
+
   // Businesses
   localDbUpsertBusinesses: (rows: UnknownRecord[]) => ipcRenderer.invoke('localdb-upsert-businesses', rows),
   localDbGetBusinesses: () => ipcRenderer.invoke('localdb-get-businesses'),
-  
+
   // Ingredients
   localDbUpsertIngredients: (rows: UnknownRecord[]) => ipcRenderer.invoke('localdb-upsert-ingredients', rows),
   localDbGetIngredients: (businessId?: number) => ipcRenderer.invoke('localdb-get-ingredients', businessId),
-  
+
   // COGS
   localDbUpsertCogs: (rows: UnknownRecord[]) => ipcRenderer.invoke('localdb-upsert-cogs', rows),
   localDbGetCogs: () => ipcRenderer.invoke('localdb-get-cogs'),
-  
+
   // Contacts
   localDbUpsertContacts: (rows: UnknownRecord[]) => ipcRenderer.invoke('localdb-upsert-contacts', rows),
   localDbGetContacts: (teamId?: number) => ipcRenderer.invoke('localdb-get-contacts', teamId),
-  
+
   // Teams
   localDbUpsertTeams: (rows: UnknownRecord[]) => ipcRenderer.invoke('localdb-upsert-teams', rows),
   localDbGetTeams: () => ipcRenderer.invoke('localdb-get-teams'),
-  
+
   // Roles & Permissions
   localDbUpsertRoles: (rows: UnknownRecord[]) => ipcRenderer.invoke('localdb-upsert-roles', rows),
   localDbGetRoles: () => ipcRenderer.invoke('localdb-get-roles'),
@@ -79,18 +80,18 @@ contextBridge.exposeInMainWorld('electronAPI', {
   localDbGetRolePermissions: (roleId: number) => ipcRenderer.invoke('localdb-get-role-permissions', roleId),
   localDbGetUserAuth: (email: string) => ipcRenderer.invoke('localdb-get-user-auth', email),
   checkOfflineDbExists: () => ipcRenderer.invoke('localdb-check-exists'),
-  
+
   // Supporting tables
   localDbUpsertSource: (rows: UnknownRecord[]) => ipcRenderer.invoke('localdb-upsert-source', rows),
   localDbGetSource: () => ipcRenderer.invoke('localdb-get-source'),
   localDbUpsertPekerjaan: (rows: UnknownRecord[]) => ipcRenderer.invoke('localdb-upsert-pekerjaan', rows),
   localDbGetPekerjaan: () => ipcRenderer.invoke('localdb-get-pekerjaan'),
-  
+
   // Printer configurations
-  localDbSavePrinterConfig: (printerType: string, systemPrinterName: string, extraSettings?: UnknownRecord) => 
+  localDbSavePrinterConfig: (printerType: string, systemPrinterName: string, extraSettings?: UnknownRecord) =>
     ipcRenderer.invoke('localdb-save-printer-config', printerType, systemPrinterName, extraSettings),
   localDbGetPrinterConfigs: () => ipcRenderer.invoke('localdb-get-printer-configs'),
-  
+
   // Offline transaction queue
   localDbQueueOfflineTransaction: (transactionData: UnknownRecord) => ipcRenderer.invoke('localdb-queue-offline-transaction', transactionData),
   localDbGetPendingTransactions: () => ipcRenderer.invoke('localdb-get-pending-transactions'),
@@ -100,21 +101,21 @@ contextBridge.exposeInMainWorld('electronAPI', {
   localDbGetPendingRefunds: () => ipcRenderer.invoke('localdb-get-pending-refunds'),
   localDbMarkRefundSynced: (offlineRefundId: number) => ipcRenderer.invoke('localdb-mark-refund-synced', offlineRefundId),
   localDbMarkRefundFailed: (offlineRefundId: number) => ipcRenderer.invoke('localdb-mark-refund-failed', offlineRefundId),
-  
+
   // Add missing method
   localDbGetProductsByCategory2: (category2Name: string) => ipcRenderer.invoke('localdb-get-products-by-category2', category2Name),
-  
+
   // Customization handlers
   localDbUpsertCustomizationTypes: (rows: UnknownRecord[]) => ipcRenderer.invoke('localdb-upsert-customization-types', rows),
   localDbUpsertCustomizationOptions: (rows: UnknownRecord[]) => ipcRenderer.invoke('localdb-upsert-customization-options', rows),
   localDbUpsertProductCustomizations: (rows: UnknownRecord[]) => ipcRenderer.invoke('localdb-upsert-product-customizations', rows),
   localDbGetProductCustomizations: (productId: number) => ipcRenderer.invoke('localdb-get-product-customizations', productId),
-  
+
   // Bundle handlers
   localDbGetBundleItems: (productId: number) => ipcRenderer.invoke('localdb-get-bundle-items', productId),
   localDbUpsertBundleItems: (rows: UnknownRecord[]) => ipcRenderer.invoke('localdb-upsert-bundle-items', rows),
   localDbDebugBundleItems: () => ipcRenderer.invoke('localdb-debug-bundle-items'),
-  
+
   // New enhanced offline support tables
   // Transactions
   localDbUpsertTransactions: (rows: UnknownRecord[]) => ipcRenderer.invoke('localdb-upsert-transactions', rows),
@@ -123,14 +124,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.invoke('localdb-archive-transactions', payload),
   localDbDeleteTransactions: (payload: { businessId: number; from?: string | null; to?: string | null }) =>
     ipcRenderer.invoke('localdb-delete-transactions', payload),
-  localDbDeleteTransactionsByEmail: (payload: { userEmail: string }) =>
-    ipcRenderer.invoke('localdb-delete-transactions-by-email', payload),
   localDbDeleteTransactionItems: (payload: { businessId: number; from?: string | null; to?: string | null }) =>
     ipcRenderer.invoke('localdb-delete-transaction-items', payload),
   localDbGetUnsyncedTransactions: (businessId?: number) => ipcRenderer.invoke('localdb-get-unsynced-transactions', businessId),
+  localDbDeleteUnsyncedTransactions: (businessId?: number) => ipcRenderer.invoke('localdb-delete-unsynced-transactions', businessId),
   localDbMarkTransactionsSynced: (transactionIds: string[]) => ipcRenderer.invoke('localdb-mark-transactions-synced', transactionIds),
   localDbResetTransactionSync: (transactionId: string) => ipcRenderer.invoke('localdb-reset-transaction-sync', transactionId),
-  
+
   // Transaction Items
   localDbUpsertTransactionItems: (rows: UnknownRecord[]) => ipcRenderer.invoke('localdb-upsert-transaction-items', rows),
   localDbGetTransactionItems: (transactionId?: number | string) => ipcRenderer.invoke('localdb-get-transaction-items', transactionId),
@@ -140,36 +140,36 @@ contextBridge.exposeInMainWorld('electronAPI', {
   localDbGetTransactionRefunds: (transactionUuid: string) => ipcRenderer.invoke('localdb-get-transaction-refunds', transactionUuid),
   localDbUpsertTransactionRefunds: (rows: UnknownRecord[]) => ipcRenderer.invoke('localdb-upsert-transaction-refunds', rows),
   localDbApplyTransactionRefund: (payload: UnknownRecord) => ipcRenderer.invoke('localdb-apply-transaction-refund', payload),
-  
+
   // Payment Methods
   localDbUpsertPaymentMethods: (rows: UnknownRecord[]) => ipcRenderer.invoke('localdb-upsert-payment-methods', rows),
   localDbGetPaymentMethods: () => ipcRenderer.invoke('localdb-get-payment-methods'),
-  
+
   // Banks
   localDbUpsertBanks: (rows: UnknownRecord[]) => ipcRenderer.invoke('localdb-upsert-banks', rows),
   localDbGetBanks: () => ipcRenderer.invoke('localdb-get-banks'),
-  
+
   // Organizations
   localDbUpsertOrganizations: (rows: UnknownRecord[]) => ipcRenderer.invoke('localdb-upsert-organizations', rows),
   localDbGetOrganizations: () => ipcRenderer.invoke('localdb-get-organizations'),
-  
+
   // Management Groups
   localDbUpsertManagementGroups: (rows: UnknownRecord[]) => ipcRenderer.invoke('localdb-upsert-management-groups', rows),
   localDbGetManagementGroups: () => ipcRenderer.invoke('localdb-get-management-groups'),
-  
+
   // Category1
   localDbUpsertCategory1: (rows: UnknownRecord[]) => ipcRenderer.invoke('localdb-upsert-category1', rows),
   localDbGetCategory1: () => ipcRenderer.invoke('localdb-get-category1'),
-  
+
   // Category2
-  localDbUpsertCategory2: (rows: UnknownRecord[]) => ipcRenderer.invoke('localdb-upsert-category2', rows),
+  localDbUpsertCategory2: (rows: UnknownRecord[], junctionData?: Array<{ category2_id: number; business_id: number }>) => ipcRenderer.invoke('localdb-upsert-category2', rows, junctionData),
   localDbGetCategory2: (businessId?: number) => ipcRenderer.invoke('localdb-get-category2', businessId),
-  
+
   // CL Accounts
   localDbUpsertClAccounts: (rows: UnknownRecord[]) => ipcRenderer.invoke('localdb-upsert-cl-accounts', rows),
   localDbGetClAccounts: () => ipcRenderer.invoke('localdb-get-cl-accounts'),
-  
-  
+
+
   // Printer Management (multi-printer system)
   generateNumericUuid: (businessId: number) => ipcRenderer.invoke('generate-numeric-uuid', businessId),
   getPrinterCounter: (printerType: string, businessId: number, increment: boolean) => ipcRenderer.invoke('get-printer-counter', printerType, businessId, increment),
@@ -181,6 +181,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
   logPrinter2Print: (transactionId: string, printer2ReceiptNumber: number, mode: 'auto' | 'manual', cycleNumber?: number, globalCounter?: number, isReprint?: boolean, reprintCount?: number) =>
     ipcRenderer.invoke('log-printer2-print', transactionId, printer2ReceiptNumber, mode, cycleNumber, globalCounter, isReprint, reprintCount),
   getPrinter2AuditLog: (fromDate?: string, toDate?: string, limit?: number) => ipcRenderer.invoke('get-printer2-audit-log', fromDate, toDate, limit),
+  queueTransactionForSystemPos: (transactionId: string) => ipcRenderer.invoke('queue-transaction-for-system-pos', transactionId),
+  getSystemPosQueue: () => ipcRenderer.invoke('get-system-pos-queue'),
+  markSystemPosSynced: (transactionId: string) => ipcRenderer.invoke('mark-system-pos-synced', transactionId),
+  markSystemPosFailed: (transactionId: string, error: string) => ipcRenderer.invoke('mark-system-pos-failed', transactionId, error),
+  resetSystemPosRetryCount: (transactionIds?: string[]) => ipcRenderer.invoke('reset-system-pos-retry-count', transactionIds),
+  debugSystemPosTransaction: (transactionId: string) => ipcRenderer.invoke('debug-system-pos-transaction', transactionId),
+  repopulateSystemPosQueue: (options?: { days?: number }) => ipcRenderer.invoke('repopulate-system-pos-queue', options),
   logPrinter1Print: (transactionId: string, printer1ReceiptNumber: number, globalCounter?: number, isReprint?: boolean, reprintCount?: number) =>
     ipcRenderer.invoke('log-printer1-print', transactionId, printer1ReceiptNumber, globalCounter, isReprint, reprintCount),
   getPrinter1AuditLog: (fromDate?: string, toDate?: string, limit?: number) => ipcRenderer.invoke('get-printer1-audit-log', fromDate, toDate, limit),
@@ -189,10 +196,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
   localDbUpsertPrinterAudits: (printerType: 'receipt' | 'receiptize', rows: UnknownRecord[]) => ipcRenderer.invoke('localdb-upsert-printer-audits', { printerType, rows }),
   localDbUpsertPrinterDailyCounters: (rows: Array<{ printer_type: string; business_id: number; date: string; counter: number }>) =>
     ipcRenderer.invoke('localdb-upsert-printer-daily-counters', rows),
+  localDbGetAllPrinterDailyCounters: () => ipcRenderer.invoke('localdb-get-all-printer-daily-counters'),
   localDbResetPrinterDailyCounters: (businessId: number) => ipcRenderer.invoke('localdb-reset-printer-daily-counters', businessId),
   localDbGetUnsyncedPrinterAudits: () => ipcRenderer.invoke('localdb-get-unsynced-printer-audits'),
+  localDbGetPrinterAuditsByTransactionId: (transactionId: string) => ipcRenderer.invoke('localDbGetPrinterAuditsByTransactionId', transactionId),
   localDbMarkPrinterAuditsSynced: (ids: { p1Ids: number[]; p2Ids: number[] }) => ipcRenderer.invoke('localdb-mark-printer-audits-synced', ids),
-  
+
   // Shifts
   localDbGetActiveShift: (userId: number, businessId?: number) => ipcRenderer.invoke('localdb-get-active-shift', userId, businessId),
   localDbCreateShift: (shiftData: {
@@ -242,7 +251,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     business_id?: number;
     printerType?: string;
   }) => ipcRenderer.invoke('print-shift-breakdown', data),
-  
+
   // Customer display event listeners
   onOrderUpdate: (callback: (data: UnknownRecord) => void) => {
     ipcRenderer.on('order-update', (event, data) => callback(data));
@@ -250,7 +259,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   onSlideshowUpdate: (callback: (data: UnknownRecord) => void) => {
     ipcRenderer.on('slideshow-update', (event, data) => callback(data));
   },
-  
+
   // Slideshow image management (userData storage)
   getSlideshowImages: () => ipcRenderer.invoke('get-slideshow-images'),
   saveSlideshowImage: (imageData: { filename: string; buffer: Buffer }) => ipcRenderer.invoke('save-slideshow-image', imageData),
@@ -258,12 +267,22 @@ contextBridge.exposeInMainWorld('electronAPI', {
   openSlideshowFolder: () => ipcRenderer.invoke('open-slideshow-folder'),
   readSlideshowImage: (filename: string) => ipcRenderer.invoke('read-slideshow-image', filename),
   migrateSlideshowImages: () => ipcRenderer.invoke('migrate-slideshow-images'),
-  
+
+  // Admin: Delete transactions by user email or NULL
+  localDbDeleteTransactionsByRole: () => ipcRenderer.invoke('localdb-delete-transactions-by-role'),
+
   // Database Restore
   restoreFromServer: (options: {
     businessId: number;
     apiUrl: string;
     includeTransactions?: boolean;
   }) => ipcRenderer.invoke('restore-from-server', options),
+
+  // WebSocket Server Management
+  websocketServerStart: (port?: number) => ipcRenderer.invoke('websocket-server-start', port),
+  websocketServerStop: () => ipcRenderer.invoke('websocket-server-stop'),
+  websocketServerStatus: () => ipcRenderer.invoke('websocket-server-status'),
+  websocketBroadcastOrder: (order: UnknownRecord) => ipcRenderer.invoke('websocket-broadcast-order', order),
+  websocketBroadcastStatus: (update: UnknownRecord) => ipcRenderer.invoke('websocket-broadcast-status', update),
 });
 

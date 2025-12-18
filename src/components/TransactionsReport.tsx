@@ -8,15 +8,14 @@
  */
 
 import { useState, useEffect, useCallback } from 'react';
-import { 
-  Calendar, 
-  User, 
+import {
+  Calendar,
+  User,
   ChevronRight,
   ChevronDown,
   Filter,
   Download,
   RefreshCw,
-  DollarSign,
   CreditCard,
   Search,
   X,
@@ -88,7 +87,7 @@ const formatDateTime = (dateString: string): string => {
   const date = new Date(dateString);
   // Adjust for GMT+7 (7 hours * 60 minutes * 60 seconds * 1000 milliseconds)
   const gmt7Date = new Date(date.getTime() + (7 * 60 * 60 * 1000));
-  
+
   return gmt7Date.toLocaleString('id-ID', {
     day: '2-digit',
     month: '2-digit',
@@ -103,7 +102,7 @@ const formatDate = (dateString: string): string => {
   const date = new Date(dateString);
   // Adjust for GMT+7
   const gmt7Date = new Date(date.getTime() + (7 * 60 * 60 * 1000));
-  
+
   return gmt7Date.toLocaleDateString('id-ID', {
     day: '2-digit',
     month: 'short',
@@ -116,7 +115,7 @@ const formatTime = (dateString: string): string => {
   const date = new Date(dateString);
   // Adjust for GMT+7
   const gmt7Date = new Date(date.getTime() + (7 * 60 * 60 * 1000));
-  
+
   return gmt7Date.toLocaleTimeString('id-ID', {
     hour: '2-digit',
     minute: '2-digit',
@@ -127,22 +126,22 @@ const formatTime = (dateString: string): string => {
 // Get GMT+7 day boundaries for date filtering
 const getGmt7DayBounds = (dateString: string): { dayStartUtc: Date; dayEndUtc: Date } => {
   const date = new Date(dateString + 'T00:00:00Z'); // Treat input as UTC
-  
+
   // Calculate the start and end of the day in GMT+7
   const gmt7Offset = 7 * 60 * 60 * 1000; // 7 hours in milliseconds
-  
+
   // Start of day in GMT+7 (00:00:00 GMT+7)
   const dayStartGmt7 = new Date(date.getTime());
   dayStartGmt7.setUTCHours(0, 0, 0, 0);
-  
+
   // End of day in GMT+7 (23:59:59.999 GMT+7)
   const dayEndGmt7 = new Date(date.getTime());
   dayEndGmt7.setUTCHours(23, 59, 59, 999);
-  
+
   // Convert to UTC by subtracting the GMT+7 offset
   const dayStartUtc = new Date(dayStartGmt7.getTime() - gmt7Offset);
   const dayEndUtc = new Date(dayEndGmt7.getTime() - gmt7Offset);
-  
+
   return { dayStartUtc, dayEndUtc };
 };
 
@@ -183,11 +182,11 @@ const getElectronAPI = () => (typeof window !== 'undefined' ? window.electronAPI
 export default function TransactionsReport() {
   const { user } = useAuth();
   const businessId = user?.selectedBusinessId ?? 14;
-  
+
   const [viewMode, setViewMode] = useState<'list' | 'detail'>('list');
   const [selectedTransaction, setSelectedTransaction] = useState<Transaction | null>(null);
   const [selectedTransactionItems, setSelectedTransactionItems] = useState<TransactionItem[]>([]);
-  
+
   // Filters
   const [transactions, setTransactions] = useState<Transaction[]>([]);
   const [filteredTransactions, setFilteredTransactions] = useState<Transaction[]>([]);
@@ -199,7 +198,7 @@ export default function TransactionsReport() {
   const [selectedPaymentMethod, setSelectedPaymentMethod] = useState<string>('all');
   const [selectedStatus, setSelectedStatus] = useState<string>('all');
   const [selectedSyncStatus, setSelectedSyncStatus] = useState<string>('all');
-  
+
   const [isLoading, setIsLoading] = useState(false);
   const [showFilters, setShowFilters] = useState(true);
 
@@ -223,16 +222,16 @@ export default function TransactionsReport() {
       }
     };
     loadUsers();
-    
+
     // Set default date range (Last 30 days) in GMT+7
     const gmt7Offset = 7 * 60 * 60 * 1000;
     const now = new Date();
     const nowGmt7 = new Date(now.getTime() + gmt7Offset);
-    
+
     const end = new Date(nowGmt7);
     const start = new Date(nowGmt7);
     start.setUTCDate(start.getUTCDate() - 30);
-    
+
     // Format as YYYY-MM-DD for date inputs
     const formatDateInput = (date: Date) => {
       const year = date.getUTCFullYear();
@@ -240,7 +239,7 @@ export default function TransactionsReport() {
       const day = String(date.getUTCDate()).padStart(2, '0');
       return `${year}-${month}-${day}`;
     };
-    
+
     setEndDate(formatDateInput(end));
     setStartDate(formatDateInput(start));
   }, []);
@@ -257,7 +256,7 @@ export default function TransactionsReport() {
 
       // Get all transactions (no limit for comprehensive report)
       const allTransactions = await electronAPI.localDbGetTransactions(businessId, 50000);
-      
+
       if (Array.isArray(allTransactions)) {
         setTransactions(allTransactions as Transaction[]);
       } else {
@@ -317,7 +316,7 @@ export default function TransactionsReport() {
     // Search filter (receipt number, customer name, UUID)
     if (searchQuery.trim()) {
       const query = searchQuery.toLowerCase().trim();
-      filtered = filtered.filter(tx => 
+      filtered = filtered.filter(tx =>
         tx.receipt_number?.toString().includes(query) ||
         tx.customer_name?.toLowerCase().includes(query) ||
         tx.id.toLowerCase().includes(query)
@@ -416,13 +415,13 @@ export default function TransactionsReport() {
 
   if (viewMode === 'detail' && selectedTransaction) {
     const transaction = selectedTransaction;
-    
+
     return (
       <div className="flex-1 flex flex-col bg-gray-50 overflow-hidden">
         {/* Detail Header */}
         <div className="bg-white border-b border-gray-200 px-6 py-4 flex items-center justify-between shadow-sm">
           <div className="flex items-center space-x-4">
-            <button 
+            <button
               onClick={() => setViewMode('list')}
               className="p-2 hover:bg-gray-100 rounded-full transition-colors"
             >
@@ -489,11 +488,10 @@ export default function TransactionsReport() {
             <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-4">
               <div className="text-sm font-medium text-gray-600 mb-1">Status</div>
               <div className="flex flex-col gap-2">
-                <span className={`inline-flex items-center px-2 py-1 rounded-full text-xs font-medium ${
-                  transaction.status === 'completed' 
-                    ? 'bg-green-100 text-green-800' 
+                <span className={`inline-flex items-center px-2 py-1 rounded-full text-xs font-medium ${transaction.status === 'completed'
+                    ? 'bg-green-100 text-green-800'
                     : 'bg-yellow-100 text-yellow-800'
-                }`}>
+                  }`}>
                   {transaction.status}
                 </span>
                 {transaction.refund_status && (
@@ -784,23 +782,23 @@ export default function TransactionsReport() {
                   setSelectedPaymentMethod('all');
                   setSelectedStatus('all');
                   setSelectedSyncStatus('all');
-                  
+
                   // Reset to last 30 days in GMT+7
                   const gmt7Offset = 7 * 60 * 60 * 1000;
                   const now = new Date();
                   const nowGmt7 = new Date(now.getTime() + gmt7Offset);
-                  
+
                   const end = new Date(nowGmt7);
                   const start = new Date(nowGmt7);
                   start.setUTCDate(start.getUTCDate() - 30);
-                  
+
                   const formatDateInput = (date: Date) => {
                     const year = date.getUTCFullYear();
                     const month = String(date.getUTCMonth() + 1).padStart(2, '0');
                     const day = String(date.getUTCDate()).padStart(2, '0');
                     return `${year}-${month}-${day}`;
                   };
-                  
+
                   setEndDate(formatDateInput(end));
                   setStartDate(formatDateInput(start));
                 }}
@@ -841,8 +839,8 @@ export default function TransactionsReport() {
                 </tr>
               ) : filteredTransactions.length > 0 ? (
                 filteredTransactions.map((transaction) => (
-                  <tr 
-                    key={transaction.id} 
+                  <tr
+                    key={transaction.id}
                     onClick={() => loadTransactionDetails(transaction)}
                     className="hover:bg-blue-50 cursor-pointer transition-colors group"
                   >
@@ -876,13 +874,12 @@ export default function TransactionsReport() {
                       )}
                     </td>
                     <td className="px-4 py-3 text-center">
-                      <span className={`inline-flex items-center px-2 py-1 rounded-full text-xs font-medium ${
-                        transaction.status === 'completed' 
-                          ? 'bg-green-100 text-green-800' 
+                      <span className={`inline-flex items-center px-2 py-1 rounded-full text-xs font-medium ${transaction.status === 'completed'
+                          ? 'bg-green-100 text-green-800'
                           : transaction.status === 'cancelled'
-                          ? 'bg-red-100 text-red-800'
-                          : 'bg-yellow-100 text-yellow-800'
-                      }`}>
+                            ? 'bg-red-100 text-red-800'
+                            : 'bg-yellow-100 text-yellow-800'
+                        }`}>
                         {transaction.status}
                       </span>
                     </td>

@@ -168,7 +168,7 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
   const [voucherClickCount, setVoucherClickCount] = useState(0);
   const [showPrintingLogs, setShowPrintingLogs] = useState(false);
-  
+
   // Get today's date in UTC+7 timezone
   // Import from shared utility for consistency
   const getTodayUTC7 = () => {
@@ -176,7 +176,7 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
     const utc7Time = new Date(now.getTime() + (7 * 60 * 60 * 1000));
     return utc7Time.toISOString().split('T')[0];
   };
-  
+
   const [fromDate, setFromDate] = useState<string>(getTodayUTC7());
   const [toDate, setToDate] = useState<string>(getTodayUTC7());
   const [selectedTransaction, setSelectedTransaction] = useState<TransactionDetail | null>(null);
@@ -204,20 +204,20 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
       const response = await offlineSyncService.fetchWithFallback<TransactionDetail>(
         // Online fetch
         async () => {
-      const response = await fetch(getApiUrl(`/api/transactions/${transactionId}`));
-      if (!response.ok) {
-        throw new Error('Failed to fetch transaction details');
-      }
-      const data = await response.json();
-      if (data.success) {
+          const response = await fetch(getApiUrl(`/api/transactions/${transactionId}`));
+          if (!response.ok) {
+            throw new Error('Failed to fetch transaction details');
+          }
+          const data = await response.json();
+          if (data.success) {
             const transaction = data.transaction;
             // Ensure all items have product_name - fetch products if needed for fallback
             if (transaction && transaction.items && Array.isArray(transaction.items)) {
               // If any item is missing product_name, try to get it from local DB as fallback
-              const needsProductName = transaction.items.some((item: { product_name?: string; product_id?: number }) => 
+              const needsProductName = transaction.items.some((item: { product_name?: string; product_id?: number }) =>
                 !item.product_name && item.product_id
               );
-              
+
               if (needsProductName && typeof window !== 'undefined' && (window as { electronAPI?: ElectronAPI }).electronAPI) {
                 try {
                   const products: ElectronProduct[] = await (window as { electronAPI: ElectronAPI }).electronAPI.localDbGetAllProducts();
@@ -248,38 +248,38 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
               }
             }
             return transaction;
-      } else {
-        throw new Error(data.message || 'Failed to fetch transaction details');
-      }
+          } else {
+            throw new Error(data.message || 'Failed to fetch transaction details');
+          }
         },
         // Offline fetch
         async () => {
           if (typeof window === 'undefined' || !(window as { electronAPI?: ElectronAPI }).electronAPI) {
             throw new Error('Offline database not available');
           }
-          
+
           // Get transaction from local database
           const transactions: ElectronTransaction[] = await (window as { electronAPI: ElectronAPI }).electronAPI.localDbGetTransactions(businessId, 1000);
           const transaction = transactions.find((tx) => tx.id === transactionId);
-          
+
           if (!transaction) {
             throw new Error('Transaction not found in offline database');
           }
-          
+
           // Get transaction items (now includes product_name from JOIN with products table)
           const items: ElectronTransactionItem[] = await (window as { electronAPI: ElectronAPI }).electronAPI.localDbGetTransactionItems(transactionId);
-          
+
           // Products fetch as fallback in case product_name wasn't in JOIN result
           const products: ElectronProduct[] = await (window as { electronAPI: ElectronAPI }).electronAPI.localDbGetAllProducts();
-          
+
           // Get users and businesses to show actual names
           const users: ElectronUser[] = await (window as { electronAPI: ElectronAPI }).electronAPI.localDbGetUsers();
           const businesses: ElectronBusiness[] = await (window as { electronAPI: ElectronAPI }).electronAPI.localDbGetBusinesses();
           const refunds: TransactionRefund[] = await (window as { electronAPI: ElectronAPI }).electronAPI.localDbGetTransactionRefunds(transactionId);
-          
+
           const user = users.find((u) => u.id === transaction.user_id);
           const business = businesses.find((b) => b.id === transaction.business_id);
-          
+
           // Removed normalizeJsonField - no longer using JSON for customizations
 
           const refundTotalValue = transaction.refund_total ?? refunds.reduce((sum, refund) => sum + (refund.refund_amount ?? 0), 0);
@@ -301,10 +301,10 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
               const productId = typeof item.product_id === 'number' ? item.product_id : Number(item.product_id);
               const product = products.find((p) => p.id === productId);
               // Check if product_name is null, undefined, or empty string
-              const productName = (item.product_name && String(item.product_name).trim()) 
-                ? String(item.product_name).trim() 
-                : (product?.nama && String(product.nama).trim()) 
-                  ? String(product.nama).trim() 
+              const productName = (item.product_name && String(item.product_name).trim())
+                ? String(item.product_name).trim()
+                : (product?.nama && String(product.nama).trim())
+                  ? String(product.nama).trim()
                   : 'Unknown Product';
               return {
                 id: item.id,
@@ -325,7 +325,7 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
           } as TransactionDetail;
         }
       );
-      
+
       setSelectedTransaction(response);
       setIsDetailModalOpen(true);
     } catch (error: unknown) {
@@ -351,10 +351,10 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
       prev.map((tx) =>
         tx.id === updatedTransaction.id
           ? {
-              ...tx,
-              refund_status: updatedTransaction.refund_status ?? tx.refund_status,
-              refund_total: updatedTransaction.refund_total ?? tx.refund_total
-            }
+            ...tx,
+            refund_status: updatedTransaction.refund_status ?? tx.refund_status,
+            refund_total: updatedTransaction.refund_total ?? tx.refund_total
+          }
           : tx
       )
     );
@@ -375,7 +375,7 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
         event.preventDefault();
         event.stopPropagation();
       }
-      
+
       // Use fallback method that works better in Electron
       const textArea = document.createElement('textarea');
       textArea.value = uuid;
@@ -385,12 +385,12 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
       textArea.style.opacity = '0';
       textArea.setAttribute('readonly', '');
       document.body.appendChild(textArea);
-      
+
       // Focus and select
       textArea.focus();
       textArea.select();
       textArea.setSelectionRange(0, uuid.length);
-      
+
       // Try clipboard API first (with focus fix)
       try {
         if (window.isSecureContext && navigator.clipboard && navigator.clipboard.writeText) {
@@ -409,10 +409,10 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
           throw new Error('All copy methods failed');
         }
       }
-      
+
       // Clean up
       document.body.removeChild(textArea);
-      
+
       setCopiedUuid(uuid);
       // Auto-hide after 2 seconds
       setTimeout(() => {
@@ -448,14 +448,14 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
       // Try with date range first
       let response = await electronAPI.getPrinter2AuditLog(fromDate, toDate, 2000);
       let entries = Array.isArray(response?.entries) ? response.entries : [];
-      
+
       // If no results with date filter, try without date filter (fallback)
       if (entries.length === 0) {
         console.log('⚠️ [TransactionList] No receiptize entries with date filter, trying without date filter');
         response = await electronAPI.getPrinter2AuditLog(undefined, undefined, 2000);
         entries = Array.isArray(response?.entries) ? response.entries : [];
       }
-      
+
       const ids = new Set<string>();
       const originalCounters: Record<string, number> = {};
 
@@ -500,14 +500,14 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
       // Try with date range first
       let response = await electronAPI.getPrinter1AuditLog(fromDate, toDate, 2000);
       let entries = Array.isArray(response?.entries) ? response.entries : [];
-      
+
       // If no results with date filter, try without date filter (fallback)
       if (entries.length === 0) {
         console.log('⚠️ [TransactionList] No receipt entries with date filter, trying without date filter');
         response = await electronAPI.getPrinter1AuditLog(undefined, undefined, 2000);
         entries = Array.isArray(response?.entries) ? response.entries : [];
       }
-      
+
       const originalCounters: Record<string, number> = {};
 
       for (const entry of entries) {
@@ -540,15 +540,15 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
 
   // Fetch transactions function
   const fetchTransactions = useCallback(async (): Promise<boolean> => {
-    console.log('🔄 [TransactionList] fetchTransactions called - isOnlineMode:', isOnlineMode);
+    // console.log('🔄 [TransactionList] fetchTransactions called - isOnlineMode:', isOnlineMode);
     setIsLoading(true);
     setError(null);
-    
+
     try {
       let transactionsData: Transaction[];
-      
+
       if (isOnlineMode) {
-        console.log('🌐 [TransactionList] Fetching from online API');
+        // console.log('🌐 [TransactionList] Fetching from online API');
         // Fetch from online API only
         // Using 10000 limit to ensure we get all transactions in the date range
         const response = await fetch(getApiUrl(`/api/transactions?business_id=${businessId}&from_date=${fromDate}&to_date=${toDate}&limit=10000`));
@@ -565,43 +565,43 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
           customer_unit: tx.customer_unit !== undefined && tx.customer_unit !== null ? Number(tx.customer_unit) : null
         }));
       } else {
-        console.log('💾 [TransactionList] Fetching from offline database');
+        // console.log('💾 [TransactionList] Fetching from offline database');
         // Fetch from offline database only
         if (typeof window === 'undefined' || !(window as { electronAPI?: ElectronAPI }).electronAPI) {
           console.warn('⚠️ [TransactionList] Offline database not available, showing empty list');
           setTransactions([]);
           return true;
         }
-        
+
         // Fetch a large number of transactions to ensure we get all transactions in the date range
         // Using 50000 limit to match printing page (offline-first, need all transactions)
         // This ensures we capture all transactions even for busy days with many transactions
         const offlineTransactions: ElectronTransaction[] = await (window as { electronAPI: ElectronAPI }).electronAPI.localDbGetTransactions(businessId, 50000);
-        console.log('💾 [TransactionList] Raw offline transactions count:', offlineTransactions.length);
-        
+        // console.log('💾 [TransactionList] Raw offline transactions count:', offlineTransactions.length);
+
         // Get users and businesses to show actual names (fetch once for all transactions)
         const users: ElectronUser[] = await (window as { electronAPI: ElectronAPI }).electronAPI.localDbGetUsers();
         const businesses: ElectronBusiness[] = await (window as { electronAPI: ElectronAPI }).electronAPI.localDbGetBusinesses();
-        
-        
+
+
         // Filter by date range - need to convert to local date for accurate filtering
         // This ensures we only show transactions within the selected date range
         const filteredTransactions = offlineTransactions.filter((tx) => {
           // Convert UTC to local date for accurate filtering
           const localDate = new Date(tx.created_at);
-          const localDateString = localDate.getFullYear() + '-' + 
-            String(localDate.getMonth() + 1).padStart(2, '0') + '-' + 
+          const localDateString = localDate.getFullYear() + '-' +
+            String(localDate.getMonth() + 1).padStart(2, '0') + '-' +
             String(localDate.getDate()).padStart(2, '0');
           const isInRange = localDateString >= fromDate && localDateString <= toDate;
           return isInRange;
         });
-        
-        console.log('💾 [TransactionList] Filtered transactions (date range):', filteredTransactions.length, 'from', fromDate, 'to', toDate);
-        
+
+        // console.log('💾 [TransactionList] Filtered transactions (date range):', filteredTransactions.length, 'from', fromDate, 'to', toDate);
+
         transactionsData = filteredTransactions.map((tx) => {
           const user = users.find((u) => u.id === tx.user_id);
           const business = businesses.find((b) => b.id === tx.business_id);
-          
+
           return {
             id: tx.id,
             business_id: tx.business_id,
@@ -629,34 +629,34 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
             business_name: business?.name || 'Unknown Business'
           };
         });
-        
-        console.log('💾 [TransactionList] Processed transactions for display:', transactionsData.length);
-        
+
+        // console.log('💾 [TransactionList] Processed transactions for display:', transactionsData.length);
+
       }
-      
+
       // Apply permission-based filtering
       let filteredTransactions = transactionsData;
-      
+
       // Filter by user permissions (Super Admin sees all data)
       if (!isSuperAdmin(user) && canViewUserDataOnly && !canViewAllData && user) {
         filteredTransactions = filteredTransactions.filter(tx => tx.user_id === parseInt(user.id));
       }
-      
+
       // Filter by date permissions (if user doesn't have viewpastdata permission, only show today's data)
       // Super Admin bypasses date restrictions
       if (!isSuperAdmin(user) && !canViewPastData) {
         const today = getTodayUTC7();
         filteredTransactions = filteredTransactions.filter(tx => {
           const txDate = new Date(tx.created_at);
-          const txDateString = txDate.getFullYear() + '-' + 
-            String(txDate.getMonth() + 1).padStart(2, '0') + '-' + 
+          const txDateString = txDate.getFullYear() + '-' +
+            String(txDate.getMonth() + 1).padStart(2, '0') + '-' +
             String(txDate.getDate()).padStart(2, '0');
           return txDateString === today;
         });
       }
-      
+
       setTransactions(filteredTransactions);
-      
+
       // Debug logging for offline mode revenue calculation (offline-first priority)
       if (!isOnlineMode) {
         const totalRevenueDebug = filteredTransactions.reduce((sum, t) => {
@@ -727,7 +727,7 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
 
   // Fetch transactions on mount and when dependencies change
   useEffect(() => {
-    console.log('🔍 [TransactionList] useEffect triggered - starting fetch immediately');
+    // console.log('🔍 [TransactionList] useEffect triggered - starting fetch immediately');
     const initialLoad = async () => {
       await fetchTransactions();
       // Do NOT set showAllTransactions to true on initial load
@@ -746,9 +746,9 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
   // State for refresh click counter
   const [refreshClickCount, setRefreshClickCount] = useState(0);
   const [lastRefreshClick, setLastRefreshClick] = useState(0);
-  
+
   // Debug log for refresh clicks
-  console.log('🔄 [TransactionList] Refresh click count:', refreshClickCount);
+  // console.log('🔄 [TransactionList] Refresh click count:', refreshClickCount);
 
   const handleRefresh = useCallback(async () => {
     const success = await fetchTransactions();
@@ -766,7 +766,7 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
         const newCount = prev + 1;
         if (newCount >= 5) {
           // Show all transactions after 5 clicks
-    setShowAllTransactions(true);
+          setShowAllTransactions(true);
           console.log('🔓 [TransactionList] 5x refresh clicked - showing all transactions');
           return 0; // Reset counter
         }
@@ -818,10 +818,10 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
   // Get payment method label
   const getPaymentMethodLabel = (transaction: Transaction | string) => {
     // Handle both transaction object and string for backward compatibility
-    const method = typeof transaction === 'string' 
+    const method = typeof transaction === 'string'
       ? transaction.toLowerCase()
       : getPaymentMethodCode(transaction as Transaction);
-    
+
     const labels: { [key: string]: string } = {
       'cash': 'Cash',
       'debit': 'Debit',
@@ -844,7 +844,7 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
     const method = typeof transaction === 'string'
       ? transaction.toLowerCase()
       : getPaymentMethodCode(transaction as Transaction);
-    
+
     const colors: { [key: string]: string } = {
       'cash': 'bg-green-100 text-green-800',
       'debit': 'bg-blue-100 text-blue-800',
@@ -866,7 +866,7 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
     if (sortField !== field) {
       return <ChevronUp className="w-3 h-3 text-gray-400" />;
     }
-    return sortDirection === 'asc' 
+    return sortDirection === 'asc'
       ? <ChevronUp className="w-3 h-3 text-blue-600" />
       : <ChevronDown className="w-3 h-3 text-blue-600" />;
   };
@@ -889,13 +889,13 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
   const baseTransactions = showAllTransactions
     ? transactions
     : (receiptizePrintedIds.size > 0
-        ? transactions.filter(transaction => {
-            const txId = String(transaction.id);
-            // Show if transaction is in receiptizePrintedIds (meaning it was printed to Printer2/receiptize)
-            // This is more reliable than checking counters since IDs are set even for reprints
-            return receiptizePrintedIds.has(txId);
-          })
-        : transactions); // Fallback: show all if no receiptize data available
+      ? transactions.filter(transaction => {
+        const txId = String(transaction.id);
+        // Show if transaction is in receiptizePrintedIds (meaning it was printed to Printer2/receiptize)
+        // This is more reliable than checking counters since IDs are set even for reprints
+        return receiptizePrintedIds.has(txId);
+      })
+      : transactions); // Fallback: show all if no receiptize data available
 
   // Debug logging
   console.log('🔍 [TransactionList] Filter Debug:', {
@@ -923,19 +923,19 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
 
   const resolveReceiptSequence = (tx: Transaction) => {
     const txId = String(tx.id);
-    
+
     // First check for Receiptize counter (from Printer2 audit log - original print)
     const receiptizeCounter = receiptizeCounters[txId];
     if (typeof receiptizeCounter === 'number' && receiptizeCounter > 0) {
       return receiptizeCounter;
     }
-    
+
     // Then check for Receipt counter (from Printer1 audit log - original print)
     const receiptCounter = receiptCounters[txId];
     if (typeof receiptCounter === 'number' && receiptCounter > 0) {
       return receiptCounter;
     }
-    
+
     // Fallback to transaction table value (may not match original print)
     return typeof tx.receipt_number === 'number' ? tx.receipt_number : 0;
   };
@@ -943,16 +943,16 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
   // Filter and sort transactions
   const filteredTransactions = baseTransactions
     .filter(transaction => {
-      const matchesSearch = searchTerm === '' || 
+      const matchesSearch = searchTerm === '' ||
         transaction.user_name?.toLowerCase().includes(searchTerm.toLowerCase()) ||
         transaction.customer_name?.toLowerCase().includes(searchTerm.toLowerCase()) ||
         (transaction.customer_unit !== undefined && transaction.customer_unit !== null && transaction.customer_unit.toString().includes(searchTerm)) ||
         transaction.payment_method.toLowerCase().includes(searchTerm.toLowerCase()) ||
         transaction.receipt_number?.toString().includes(searchTerm) ||
         transaction.voucher_label?.toLowerCase().includes(searchTerm.toLowerCase());
-      
+
       const matchesFilter = filterMethod === 'all' || transaction.payment_method === filterMethod;
-      
+
       return matchesSearch && matchesFilter;
     })
     .sort((a, b) => {
@@ -997,12 +997,12 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
   const { totalCustomerUnit, totalTransactionCount } = (() => {
     let totalCU = 0;
     let txCount = 0;
-    
+
     transactions.forEach((tx) => {
       const txId = String(tx.id);
       const hasReceiptCounter = typeof receiptCounters[txId] === 'number' && receiptCounters[txId] > 0;
       const hasReceiptizeCounter = typeof receiptizeCounters[txId] === 'number' && receiptizeCounters[txId] > 0;
-      
+
       // Include transaction if it has either receipt or receiptize counter
       if (hasReceiptCounter || hasReceiptizeCounter) {
         txCount += 1;
@@ -1010,7 +1010,7 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
         totalCU += Number.isFinite(cuValue) ? cuValue : 0;
       }
     });
-    
+
     return { totalCustomerUnit: totalCU, totalTransactionCount: txCount };
   })();
 
@@ -1081,28 +1081,28 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
               year: 'numeric'
             })}
           </h1>
-          
+
           {/* Online/Offline Toggle - Only show for authorized users */}
           {canViewOfflineOnlineSwitch && (
-          <div className="flex items-center gap-3">
-            <span className={`text-sm font-medium ${!isOnlineMode ? 'text-gray-900' : 'text-gray-500'}`}>
-              <WifiOff className="inline w-4 h-4 mr-1" />
-              Offline
-            </span>
-            <label className="relative inline-flex items-center cursor-pointer">
-              <input
-                type="checkbox"
-                checked={isOnlineMode}
-                onChange={(e) => setIsOnlineMode(e.target.checked)}
-                className="sr-only peer"
-              />
-              <div className="w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-blue-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-600"></div>
-            </label>
-            <span className={`text-sm font-medium ${isOnlineMode ? 'text-gray-900' : 'text-gray-500'}`}>
-              <Wifi className="inline w-4 h-4 mr-1" />
-              Online
-            </span>
-          </div>
+            <div className="flex items-center gap-3">
+              <span className={`text-sm font-medium ${!isOnlineMode ? 'text-gray-900' : 'text-gray-500'}`}>
+                <WifiOff className="inline w-4 h-4 mr-1" />
+                Offline
+              </span>
+              <label className="relative inline-flex items-center cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={isOnlineMode}
+                  onChange={(e) => setIsOnlineMode(e.target.checked)}
+                  className="sr-only peer"
+                />
+                <div className="w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-blue-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-600"></div>
+              </label>
+              <span className={`text-sm font-medium ${isOnlineMode ? 'text-gray-900' : 'text-gray-500'}`}>
+                <Wifi className="inline w-4 h-4 mr-1" />
+                Online
+              </span>
+            </div>
           )}
         </div>
 
@@ -1130,7 +1130,7 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
                   <span className="font-medium text-gray-900">{paymentMethodCounts.qr}</span>
                 </div>
               </div>
-              
+
               {/* Column 2 */}
               <div className="space-y-1.5">
                 <div className="flex justify-between">
@@ -1257,7 +1257,7 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
               className="w-full pl-10 pr-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent text-black"
             />
           </div>
-          
+
           <div className="flex items-center gap-2">
             <label className="text-sm font-medium text-gray-700">Dari:</label>
             <input
@@ -1274,7 +1274,7 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
               className="px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent text-black"
             />
           </div>
-          
+
           <div className="relative">
             <Filter className="absolute left-3 top-1/2 transform -translate-y-1/2 text-gray-400 w-4 h-4" />
             <select
@@ -1296,7 +1296,7 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
               <option value="tiktok" className="text-black">TikTok</option>
             </select>
           </div>
-          
+
           <button
             onClick={handleRefresh}
             className="flex items-center space-x-2 bg-blue-500 hover:bg-blue-600 text-white px-4 py-2 rounded-lg transition-colors"
@@ -1321,7 +1321,7 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
               <div>
                 <p className="text-blue-800 font-medium">No transactions found for this date in offline database</p>
                 <p className="text-blue-600 text-sm mt-1">
-                  Try syncing data from online database or select a different date. 
+                  Try syncing data from online database or select a different date.
                   Check console for available dates in offline database.
                 </p>
               </div>
@@ -1343,356 +1343,354 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
             <div className="flex flex-col bg-white rounded-lg border border-gray-200 overflow-hidden h-full">
               <div className="overflow-y-auto flex-1">
                 <table className="w-full table-fixed">
-                <thead className="bg-gray-50 sticky top-0 z-10">
-                  <tr>
-                    <th 
-                      className="px-2 py-3 text-left text-[10px] font-medium text-gray-500 uppercase tracking-wider cursor-pointer hover:bg-gray-100 select-none w-16"
-                      onClick={() => handleSort('receipt_number')}
-                    >
-                      <div className="flex items-center gap-1">
-                        <span className="text-[10px]">#</span>
-                        {getSortIcon('receipt_number')}
-                      </div>
-                    </th>
-                    <th className="px-2 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider w-16">
-                      <div className="flex items-center gap-1">
-                        <span className="text-xs">UUID</span>
-                      </div>
-                    </th>
-                    <th 
-                      className="px-3 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider cursor-pointer hover:bg-gray-100 select-none w-20"
-                      onClick={() => handleSort('transaction_type')}
-                    >
-                      <div className="flex items-center gap-1">
-                        Type
-                        {getSortIcon('transaction_type')}
-                      </div>
-                    </th>
-                    <th 
-                      className="px-6 py-3 text-left text-[10px] font-medium text-gray-500 uppercase tracking-wider cursor-pointer hover:bg-gray-100 select-none"
-                      onClick={() => handleSort('created_at')}
-                    >
-                      <div className="flex items-center gap-1">
-                        Waktu
-                        {getSortIcon('created_at')}
-                      </div>
-                    </th>
-                    <th 
-                      className="px-2 py-3 text-left text-[10px] font-medium text-gray-500 uppercase tracking-wider cursor-pointer hover:bg-gray-100 select-none w-20"
-                      onClick={() => handleSort('payment_method')}
-                    >
-                      <div className="flex items-center gap-1">
-                        <span className="text-[10px]">Metode</span>
-                        {getSortIcon('payment_method')}
-                      </div>
-                    </th>
-                    <th 
-                      className="px-2 py-3 text-left text-[10px] font-medium text-gray-500 uppercase tracking-wider cursor-pointer hover:bg-gray-100 select-none w-16"
-                      onClick={() => handleSort('pickup_method')}
-                    >
-                      <div className="flex items-center gap-1">
-                        <span className="text-[10px]">DI/TA</span>
-                        {getSortIcon('pickup_method')}
-                      </div>
-                    </th>
-                    <th 
-                      className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider cursor-pointer hover:bg-gray-100 select-none"
-                      onClick={() => handleSort('total_amount')}
-                    >
-                      <div className="flex items-center gap-1">
-                        Total
-                        {getSortIcon('total_amount')}
-                      </div>
-                    </th>
-                    <th 
-                      className="px-6 py-3 text-left text-[10px] font-medium text-gray-500 uppercase tracking-wider cursor-pointer hover:bg-gray-100 select-none"
-                      onClick={() => handleSort('voucher_discount')}
-                    >
-                      <div className="flex items-center gap-1">
-                        Disc/Vc
-                        {getSortIcon('voucher_discount')}
-                      </div>
-                    </th>
-                    <th 
-                      className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider cursor-pointer hover:bg-gray-100 select-none"
-                      onClick={() => handleSort('final_amount')}
-                    >
-                      <div className="flex items-center gap-1">
-                        Final
-                        {getSortIcon('final_amount')}
-                      </div>
-                    </th>
-                    <th 
-                      className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider cursor-pointer hover:bg-gray-100 select-none"
-                      onClick={() => handleSort('refund_total')}
-                    >
-                      <div className="flex items-center gap-1">
-                        Refund
-                        {getSortIcon('refund_total')}
-                      </div>
-                    </th>
-                    <th 
-                      className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider cursor-pointer hover:bg-gray-100 select-none w-12"
-                      onClick={() => handleSort('customer_unit')}
-                    >
-                      <div className="flex items-center gap-1">
-                        CU
-                        {getSortIcon('customer_unit')}
-                      </div>
-                    </th>
-                    <th 
-                      className="px-6 py-3 text-left text-[10px] font-medium text-gray-500 uppercase tracking-wider cursor-pointer hover:bg-gray-100 select-none"
-                      onClick={() => handleSort('customer_name')}
-                    >
-                      <div className="flex items-center gap-1">
-                        Pelanggan
-                        {getSortIcon('customer_name')}
-                      </div>
-                    </th>
-                    <th 
-                      className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider cursor-pointer hover:bg-gray-100 select-none"
-                      onClick={() => handleSort('user_name')}
-                    >
-                      <div className="flex items-center gap-1">
-                        Kasir
-                        {getSortIcon('user_name')}
-                      </div>
-                    </th>
-                    <th 
-                      className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider cursor-pointer hover:bg-gray-100 select-none"
-                      onClick={() => handleSort('note')}
-                    >
-                      <div className="flex items-center gap-1">
-                        Catatan
-                        {getSortIcon('note')}
-                      </div>
-                    </th>
-                  </tr>
-                </thead>
-                <tbody className="bg-white divide-y divide-gray-200">
-                  {filteredTransactions.map((transaction, index) => (
-                    <tr 
-                      key={transaction.id} 
-                      className={`hover:bg-gray-50 cursor-pointer transition-colors ${index % 2 === 0 ? 'bg-blue-50' : 'bg-white'} ${loadingTransactionId === transaction.id ? 'opacity-50' : ''}`}
-                      onClick={() => handleRowClick(transaction.id)}
-                    >
-                      <td className="px-2 py-4 whitespace-nowrap">
+                  <thead className="bg-gray-50 sticky top-0 z-10">
+                    <tr>
+                      <th
+                        className="px-2 py-3 text-left text-[10px] font-medium text-gray-500 uppercase tracking-wider cursor-pointer hover:bg-gray-100 select-none w-16"
+                        onClick={() => handleSort('receipt_number')}
+                      >
                         <div className="flex items-center gap-1">
-                          {(() => {
-                            const txId = String(transaction.id);
-                            const receiptizeCounter = receiptizeCounters[txId];
-                            const receiptCounter = receiptCounters[txId];
-                            const hasReceiptizeCounter = typeof receiptizeCounter === 'number' && receiptizeCounter > 0;
-                            const hasReceiptCounter = typeof receiptCounter === 'number' && receiptCounter > 0;
-                            const isInReceiptizeIds = receiptizePrintedIds.has(txId);
-                            
-                            // Determine if this is a receiptize transaction (printed to Printer2)
-                            // A transaction is receiptize if it's in receiptizePrintedIds OR has a receiptize counter
-                            const isReceiptize = isInReceiptizeIds || hasReceiptizeCounter;
-                            
-                            // Determine the number to display using resolveReceiptSequence logic
-                            let displayNumber: number;
-                            if (hasReceiptizeCounter) {
-                              displayNumber = receiptizeCounter;
-                            } else if (hasReceiptCounter) {
-                              displayNumber = receiptCounter;
-                            } else {
-                              // Fallback to transaction receipt_number
-                              displayNumber = typeof transaction.receipt_number === 'number' && transaction.receipt_number > 0
-                                ? transaction.receipt_number
-                                : 0;
-                            }
-                            
-                            // Receiptize transaction (printed to Printer2/receiptize)
-                            if (isReceiptize) {
-                              if (showAllTransactions) {
-                                // Show all mode: Show RR badge to distinguish from R transactions
+                          <span className="text-[10px]">#</span>
+                          {getSortIcon('receipt_number')}
+                        </div>
+                      </th>
+                      <th className="px-2 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider w-16">
+                        <div className="flex items-center gap-1">
+                          <span className="text-xs">UUID</span>
+                        </div>
+                      </th>
+                      <th
+                        className="px-3 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider cursor-pointer hover:bg-gray-100 select-none w-20"
+                        onClick={() => handleSort('transaction_type')}
+                      >
+                        <div className="flex items-center gap-1">
+                          Type
+                          {getSortIcon('transaction_type')}
+                        </div>
+                      </th>
+                      <th
+                        className="px-6 py-3 text-left text-[10px] font-medium text-gray-500 uppercase tracking-wider cursor-pointer hover:bg-gray-100 select-none"
+                        onClick={() => handleSort('created_at')}
+                      >
+                        <div className="flex items-center gap-1">
+                          Waktu
+                          {getSortIcon('created_at')}
+                        </div>
+                      </th>
+                      <th
+                        className="px-2 py-3 text-left text-[10px] font-medium text-gray-500 uppercase tracking-wider cursor-pointer hover:bg-gray-100 select-none w-20"
+                        onClick={() => handleSort('payment_method')}
+                      >
+                        <div className="flex items-center gap-1">
+                          <span className="text-[10px]">Metode</span>
+                          {getSortIcon('payment_method')}
+                        </div>
+                      </th>
+                      <th
+                        className="px-2 py-3 text-left text-[10px] font-medium text-gray-500 uppercase tracking-wider cursor-pointer hover:bg-gray-100 select-none w-16"
+                        onClick={() => handleSort('pickup_method')}
+                      >
+                        <div className="flex items-center gap-1">
+                          <span className="text-[10px]">DI/TA</span>
+                          {getSortIcon('pickup_method')}
+                        </div>
+                      </th>
+                      <th
+                        className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider cursor-pointer hover:bg-gray-100 select-none"
+                        onClick={() => handleSort('total_amount')}
+                      >
+                        <div className="flex items-center gap-1">
+                          Total
+                          {getSortIcon('total_amount')}
+                        </div>
+                      </th>
+                      <th
+                        className="px-6 py-3 text-left text-[10px] font-medium text-gray-500 uppercase tracking-wider cursor-pointer hover:bg-gray-100 select-none"
+                        onClick={() => handleSort('voucher_discount')}
+                      >
+                        <div className="flex items-center gap-1">
+                          Disc/Vc
+                          {getSortIcon('voucher_discount')}
+                        </div>
+                      </th>
+                      <th
+                        className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider cursor-pointer hover:bg-gray-100 select-none"
+                        onClick={() => handleSort('final_amount')}
+                      >
+                        <div className="flex items-center gap-1">
+                          Final
+                          {getSortIcon('final_amount')}
+                        </div>
+                      </th>
+                      <th
+                        className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider cursor-pointer hover:bg-gray-100 select-none"
+                        onClick={() => handleSort('refund_total')}
+                      >
+                        <div className="flex items-center gap-1">
+                          Refund
+                          {getSortIcon('refund_total')}
+                        </div>
+                      </th>
+                      <th
+                        className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider cursor-pointer hover:bg-gray-100 select-none w-12"
+                        onClick={() => handleSort('customer_unit')}
+                      >
+                        <div className="flex items-center gap-1">
+                          CU
+                          {getSortIcon('customer_unit')}
+                        </div>
+                      </th>
+                      <th
+                        className="px-6 py-3 text-left text-[10px] font-medium text-gray-500 uppercase tracking-wider cursor-pointer hover:bg-gray-100 select-none"
+                        onClick={() => handleSort('customer_name')}
+                      >
+                        <div className="flex items-center gap-1">
+                          Pelanggan
+                          {getSortIcon('customer_name')}
+                        </div>
+                      </th>
+                      <th
+                        className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider cursor-pointer hover:bg-gray-100 select-none"
+                        onClick={() => handleSort('user_name')}
+                      >
+                        <div className="flex items-center gap-1">
+                          Kasir
+                          {getSortIcon('user_name')}
+                        </div>
+                      </th>
+                      <th
+                        className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider cursor-pointer hover:bg-gray-100 select-none"
+                        onClick={() => handleSort('note')}
+                      >
+                        <div className="flex items-center gap-1">
+                          Catatan
+                          {getSortIcon('note')}
+                        </div>
+                      </th>
+                    </tr>
+                  </thead>
+                  <tbody className="bg-white divide-y divide-gray-200">
+                    {filteredTransactions.map((transaction, index) => (
+                      <tr
+                        key={transaction.id}
+                        className={`hover:bg-gray-50 cursor-pointer transition-colors ${index % 2 === 0 ? 'bg-blue-50' : 'bg-white'} ${loadingTransactionId === transaction.id ? 'opacity-50' : ''}`}
+                        onClick={() => handleRowClick(transaction.id)}
+                      >
+                        <td className="px-2 py-4 whitespace-nowrap">
+                          <div className="flex items-center gap-1">
+                            {(() => {
+                              const txId = String(transaction.id);
+                              const receiptizeCounter = receiptizeCounters[txId];
+                              const receiptCounter = receiptCounters[txId];
+                              const hasReceiptizeCounter = typeof receiptizeCounter === 'number' && receiptizeCounter > 0;
+                              const hasReceiptCounter = typeof receiptCounter === 'number' && receiptCounter > 0;
+                              const isInReceiptizeIds = receiptizePrintedIds.has(txId);
+
+                              // Determine if this is a receiptize transaction (printed to Printer2)
+                              // A transaction is receiptize if it's in receiptizePrintedIds OR has a receiptize counter
+                              const isReceiptize = isInReceiptizeIds || hasReceiptizeCounter;
+
+                              // Determine the number to display using resolveReceiptSequence logic
+                              let displayNumber: number;
+                              if (hasReceiptizeCounter) {
+                                displayNumber = receiptizeCounter;
+                              } else if (hasReceiptCounter) {
+                                displayNumber = receiptCounter;
+                              } else {
+                                // Fallback to transaction receipt_number
+                                displayNumber = typeof transaction.receipt_number === 'number' && transaction.receipt_number > 0
+                                  ? transaction.receipt_number
+                                  : 0;
+                              }
+
+                              // Receiptize transaction (printed to Printer2/receiptize)
+                              if (isReceiptize) {
+                                if (showAllTransactions) {
+                                  // Show all mode: Show RR badge to distinguish from R transactions
+                                  return (
+                                    <>
+                                      <span className="inline-flex items-center px-1 py-0.5 rounded text-xs font-medium bg-green-100 text-green-800">
+                                        RR
+                                      </span>
+                                      <span className="text-xs font-medium text-blue-600">
+                                        {displayNumber}
+                                      </span>
+                                    </>
+                                  );
+                                } else {
+                                  // Default mode: Show just the number without badge (to avoid suspicion)
+                                  return (
+                                    <span className="text-xs font-medium text-blue-600">
+                                      {displayNumber}
+                                    </span>
+                                  );
+                                }
+                              }
+
+                              // Receipt transaction (printed to Printer1/receipt, but NOT to Printer2)
+                              // Only show in "show all" mode (after 5x refresh clicks)
+                              if (showAllTransactions && hasReceiptCounter && !isReceiptize) {
                                 return (
                                   <>
-                                    <span className="inline-flex items-center px-1 py-0.5 rounded text-xs font-medium bg-green-100 text-green-800">
-                                      RR
+                                    <span className="inline-flex items-center px-1 py-0.5 rounded text-xs font-medium bg-blue-100 text-blue-800">
+                                      R
                                     </span>
                                     <span className="text-xs font-medium text-blue-600">
                                       {displayNumber}
                                     </span>
                                   </>
                                 );
-                              } else {
-                                // Default mode: Show just the number without badge (to avoid suspicion)
+                              }
+
+                              // Fallback: Show number if available (for transactions without audit log entries)
+                              // This handles cases where audit logs are empty or not yet synced
+                              if (displayNumber > 0) {
+                                // In default mode, if we can't determine receiptize vs receipt, show without badge
+                                // In show all mode, if neither counter exists, also show without badge
                                 return (
                                   <span className="text-xs font-medium text-blue-600">
                                     {displayNumber}
                                   </span>
                                 );
                               }
-                            }
-                            
-                            // Receipt transaction (printed to Printer1/receipt, but NOT to Printer2)
-                            // Only show in "show all" mode (after 5x refresh clicks)
-                            if (showAllTransactions && hasReceiptCounter && !isReceiptize) {
+
+                              // Last resort: Show N/A
                               return (
-                                <>
-                                  <span className="inline-flex items-center px-1 py-0.5 rounded text-xs font-medium bg-blue-100 text-blue-800">
-                                    R
-                                  </span>
-                                  <span className="text-xs font-medium text-blue-600">
-                                    {displayNumber}
-                                  </span>
-                                </>
-                              );
-                            }
-                            
-                            // Fallback: Show number if available (for transactions without audit log entries)
-                            // This handles cases where audit logs are empty or not yet synced
-                            if (displayNumber > 0) {
-                              // In default mode, if we can't determine receiptize vs receipt, show without badge
-                              // In show all mode, if neither counter exists, also show without badge
-                              return (
-                                <span className="text-xs font-medium text-blue-600">
-                                  {displayNumber}
+                                <span className="inline-flex items-center px-1 py-0.5 rounded text-xs font-medium bg-gray-100 text-gray-600">
+                                  N/A
                                 </span>
                               );
-                            }
-                            
-                            // Last resort: Show N/A
-                            return (
-                              <span className="inline-flex items-center px-1 py-0.5 rounded text-xs font-medium bg-gray-100 text-gray-600">
-                                N/A
-                              </span>
-                            );
-                          })()}
-                        </div>
-                      </td>
-                      <td className="px-2 py-4 whitespace-nowrap">
-                        <button
-                          onClick={(e) => {
-                            e.stopPropagation(); // Prevent row click
-                            handleCopyUuid(String(transaction.id), e);
+                            })()}
+                          </div>
+                        </td>
+                        <td className="px-2 py-4 whitespace-nowrap">
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation(); // Prevent row click
+                              handleCopyUuid(String(transaction.id), e);
+                            }}
+                            className="p-1 hover:bg-gray-200 rounded transition-colors"
+                            title={`Copy UUID: ${String(transaction.id)}`}
+                          >
+                            <svg className="w-4 h-4 text-gray-500 hover:text-gray-700" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
+                            </svg>
+                          </button>
+                        </td>
+                        <td className="px-3 py-4 whitespace-nowrap">
+                          <span className={`inline-flex px-1.5 py-0.5 text-xs font-semibold rounded-full ${transaction.transaction_type === 'drinks'
+                              ? 'bg-blue-100 text-blue-800'
+                              : 'bg-orange-100 text-orange-800'
+                            }`}>
+                            {transaction.transaction_type === 'drinks' ? '🥤' : '🥖'} {transaction.transaction_type}
+                          </span>
+                        </td>
+                        <td className="px-6 py-4 whitespace-nowrap">
+                          <span className="text-[10px] text-gray-900">
+                            {formatDate(transaction.created_at)}
+                          </span>
+                        </td>
+                        <td className="px-2 py-4 whitespace-nowrap">
+                          <span className={`inline-flex px-1.5 py-0.5 text-xs font-semibold rounded-full ${getPaymentMethodColor(transaction)}`}>
+                            {getPaymentMethodLabel(transaction)}
+                          </span>
+                        </td>
+                        <td className="px-2 py-4 whitespace-nowrap">
+                          <span className="text-xs text-gray-900 capitalize">
+                            {transaction.pickup_method.replace('-', ' ')}
+                          </span>
+                        </td>
+                        <td className="px-6 py-4 whitespace-nowrap">
+                          <span className="text-xs font-medium text-gray-900">
+                            {formatPrice(transaction.total_amount)}
+                          </span>
+                        </td>
+                        <td
+                          className="px-6 py-4 whitespace-nowrap cursor-pointer"
+                          onClick={() => {
+                            setVoucherClickCount(prev => {
+                              const newCount = prev + 1;
+                              if (newCount >= 5 && canViewPrintingLogs) {
+                                setShowPrintingLogs(true);
+                                return 0; // Reset counter
+                              }
+                              return newCount;
+                            });
                           }}
-                          className="p-1 hover:bg-gray-200 rounded transition-colors"
-                          title={`Copy UUID: ${String(transaction.id)}`}
                         >
-                          <svg className="w-4 h-4 text-gray-500 hover:text-gray-700" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
-                          </svg>
-                        </button>
-                      </td>
-                      <td className="px-3 py-4 whitespace-nowrap">
-                        <span className={`inline-flex px-1.5 py-0.5 text-xs font-semibold rounded-full ${
-                          transaction.transaction_type === 'drinks' 
-                            ? 'bg-blue-100 text-blue-800' 
-                            : 'bg-orange-100 text-orange-800'
-                        }`}>
-                          {transaction.transaction_type === 'drinks' ? '🥤' : '🥖'} {transaction.transaction_type}
-                        </span>
-                      </td>
-                      <td className="px-6 py-4 whitespace-nowrap">
-                        <span className="text-[10px] text-gray-900">
-                          {formatDate(transaction.created_at)}
-                        </span>
-                      </td>
-                      <td className="px-2 py-4 whitespace-nowrap">
-                        <span className={`inline-flex px-1.5 py-0.5 text-xs font-semibold rounded-full ${getPaymentMethodColor(transaction)}`}>
-                          {getPaymentMethodLabel(transaction)}
-                        </span>
-                      </td>
-                      <td className="px-2 py-4 whitespace-nowrap">
-                        <span className="text-xs text-gray-900 capitalize">
-                          {transaction.pickup_method.replace('-', ' ')}
-                        </span>
-                      </td>
-                      <td className="px-6 py-4 whitespace-nowrap">
-                        <span className="text-xs font-medium text-gray-900">
-                          {formatPrice(transaction.total_amount)}
-                        </span>
-                      </td>
-                      <td 
-                        className="px-6 py-4 whitespace-nowrap cursor-pointer"
-                        onClick={() => {
-                          setVoucherClickCount(prev => {
-                            const newCount = prev + 1;
-                            if (newCount >= 5 && canViewPrintingLogs) {
-                              setShowPrintingLogs(true);
-                              return 0; // Reset counter
-                            }
-                            return newCount;
-                          });
-                        }}
-                      >
-                        {transaction.voucher_discount > 0 ? (
-                          <div className="flex flex-col">
-                            <span className="text-xs text-green-600 font-medium">
-                              -{formatPrice(transaction.voucher_discount)}
-                            </span>
-                            {transaction.voucher_label && (
-                              <span className="text-[10px] text-green-500 font-medium">
-                                {transaction.voucher_label}
+                          {transaction.voucher_discount > 0 ? (
+                            <div className="flex flex-col">
+                              <span className="text-xs text-green-600 font-medium">
+                                -{formatPrice(transaction.voucher_discount)}
                               </span>
-                            )}
-                          </div>
-                        ) : (
-                          <span className="text-xs text-gray-400">-</span>
-                        )}
-                      </td>
-                      <td className="px-6 py-4 whitespace-nowrap">
-                        <span className="text-xs font-bold text-gray-900">
-                          {formatPrice(transaction.final_amount)}
-                        </span>
-                      </td>
-                      <td className="px-4 py-4 whitespace-nowrap">
-                        {transaction.refund_total && transaction.refund_total > 0 ? (
-                          <div className="flex flex-col">
-                            <span className="text-xs text-red-600 font-medium">
-                              -{formatPrice(transaction.refund_total)}
-                            </span>
-                            {transaction.refund_status && (
-                              <span className={`text-[10px] font-medium ${
-                                transaction.refund_status === 'full' 
-                                  ? 'text-red-600' 
-                                  : 'text-orange-600'
-                              }`}>
-                                {transaction.refund_status === 'full' ? 'Full' : 'Partial'}
+                              {transaction.voucher_label && (
+                                <span className="text-[10px] text-green-500 font-medium">
+                                  {transaction.voucher_label}
+                                </span>
+                              )}
+                            </div>
+                          ) : (
+                            <span className="text-xs text-gray-400">-</span>
+                          )}
+                        </td>
+                        <td className="px-6 py-4 whitespace-nowrap">
+                          <span className="text-xs font-bold text-gray-900">
+                            {formatPrice(transaction.final_amount)}
+                          </span>
+                        </td>
+                        <td className="px-4 py-4 whitespace-nowrap">
+                          {transaction.refund_total && transaction.refund_total > 0 ? (
+                            <div className="flex flex-col">
+                              <span className="text-xs text-red-600 font-medium">
+                                -{formatPrice(transaction.refund_total)}
                               </span>
-                            )}
-                          </div>
-                        ) : (
-                          <span className="text-xs text-gray-400">-</span>
-                        )}
-                      </td>
-                      <td className="px-2 py-4 whitespace-nowrap">
-                        <span className="text-xs text-gray-900">
-                          {transaction.customer_unit !== undefined && transaction.customer_unit !== null
-                            ? transaction.customer_unit
-                            : '-'}
-                        </span>
-                      </td>
-                      <td className="px-6 py-4">
-                        <span 
-                          className="text-xs text-gray-900 truncate block max-w-[120px]" 
-                          title={transaction.customer_name || 'Guest'}
-                        >
-                          {transaction.customer_name || 'Guest'}
-                        </span>
-                      </td>
-                      <td className="px-6 py-4">
-                        <span 
-                          className="text-xs text-gray-900 truncate block max-w-[120px]" 
-                          title={transaction.user_name || 'Unknown'}
-                        >
-                          {transaction.user_name || 'Unknown'}
-                        </span>
-                      </td>
-                      <td className="px-6 py-4">
-                        <span 
-                          className="text-xs text-gray-500 italic truncate block max-w-[120px]" 
-                          title={transaction.note || '-'}
-                        >
-                          {transaction.note || '-'}
-                        </span>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
+                              {transaction.refund_status && (
+                                <span className={`text-[10px] font-medium ${transaction.refund_status === 'full'
+                                    ? 'text-red-600'
+                                    : 'text-orange-600'
+                                  }`}>
+                                  {transaction.refund_status === 'full' ? 'Full' : 'Partial'}
+                                </span>
+                              )}
+                            </div>
+                          ) : (
+                            <span className="text-xs text-gray-400">-</span>
+                          )}
+                        </td>
+                        <td className="px-2 py-4 whitespace-nowrap">
+                          <span className="text-xs text-gray-900">
+                            {transaction.customer_unit !== undefined && transaction.customer_unit !== null
+                              ? transaction.customer_unit
+                              : '-'}
+                          </span>
+                        </td>
+                        <td className="px-6 py-4">
+                          <span
+                            className="text-xs text-gray-900 truncate block max-w-[120px]"
+                            title={transaction.customer_name || 'Guest'}
+                          >
+                            {transaction.customer_name || 'Guest'}
+                          </span>
+                        </td>
+                        <td className="px-6 py-4">
+                          <span
+                            className="text-xs text-gray-900 truncate block max-w-[120px]"
+                            title={transaction.user_name || 'Unknown'}
+                          >
+                            {transaction.user_name || 'Unknown'}
+                          </span>
+                        </td>
+                        <td className="px-6 py-4">
+                          <span
+                            className="text-xs text-gray-500 italic truncate block max-w-[120px]"
+                            title={transaction.note || '-'}
+                          >
+                            {transaction.note || '-'}
+                          </span>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
                 </table>
               </div>
             </div>
@@ -1774,7 +1772,7 @@ interface GrandTotalCardProps {
 
 function GrandTotalCard({ totalRevenue, totalRefund, totalCustomerUnit, totalTransactionCount }: GrandTotalCardProps) {
   const netRevenue = totalRevenue - totalRefund;
-  
+
   return (
     <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-4 md:col-span-1">
       <div className="flex items-center gap-2 mb-3">

@@ -41,8 +41,8 @@ class DatabaseHealthService {
     try {
       // Check if methods are available
       const electronAPI = typeof window !== 'undefined' ? (window as { electronAPI?: UnknownRecord }).electronAPI : undefined;
-      if (!electronAPI?.localDbGetAllProducts || 
-          !electronAPI?.localDbGetCategories) {
+      if (!electronAPI?.localDbGetAllProducts ||
+        !electronAPI?.localDbGetCategories) {
         console.warn('⚠️ [DB HEALTH] Required Electron API methods not available - Electron may need restart');
         return {
           hasProducts: false,
@@ -57,20 +57,20 @@ class DatabaseHealthService {
       // Check products
       const products = await (electronAPI.localDbGetAllProducts as () => Promise<unknown[]>)();
       const productCount = Array.isArray(products) ? products.length : 0;
-      
+
       // Check categories
       const categories = await (electronAPI.localDbGetCategories as () => Promise<unknown[]>)();
       const categoryCount = Array.isArray(categories) ? categories.length : 0;
-      
+
       // Check last sync status
-      const syncStatus = electronAPI.localDbGetSyncStatus ? 
+      const syncStatus = electronAPI.localDbGetSyncStatus ?
         await (electronAPI.localDbGetSyncStatus as (key: string) => Promise<{ key: string; last_sync: number; status: string } | null>)('last_sync') : null;
       const lastSync = syncStatus ? syncStatus.last_sync : null;
-      
+
       // Determine if sync is needed
-      const needsSync: boolean = productCount === 0 || categoryCount === 0 || 
-                       (lastSync !== null && Date.now() - lastSync > 3600000); // 1 hour
-      
+      const needsSync: boolean = productCount === 0 || categoryCount === 0 ||
+        (lastSync !== null && Date.now() - lastSync > 3600000); // 1 hour
+
       return {
         hasProducts: productCount > 0,
         hasCategories: categoryCount > 0,
@@ -97,21 +97,21 @@ class DatabaseHealthService {
    */
   async ensureDatabasePopulated(): Promise<boolean> {
     const health = await this.checkDatabaseHealth();
-    
+
     if (!health.needsSync) {
       console.log('✅ [DB HEALTH] Database is healthy, no sync needed');
       return true;
     }
 
     console.log('🔄 [DB HEALTH] Database needs sync, performing initial sync...');
-    
+
     try {
       // Trigger comprehensive sync
       const response = await fetch(getApiUrl('/api/sync'));
       if (response.ok) {
         await response.json();
         console.log('✅ [DB HEALTH] Initial sync completed');
-        
+
         // Verify sync was successful
         const newHealth = await this.checkDatabaseHealth();
         return newHealth.hasProducts && newHealth.hasCategories;
@@ -129,7 +129,7 @@ class DatabaseHealthService {
    */
   async getStatusMessage(): Promise<string> {
     const health = await this.checkDatabaseHealth();
-    
+
     if (health.hasProducts && health.hasCategories) {
       return `Database ready (${health.productCount} products, ${health.categoryCount} categories)`;
     } else if (health.needsSync) {
@@ -153,14 +153,14 @@ class DatabaseHealthService {
    * - Use "Download Transaction Data" feature for emergency recovery only
    */
   async forceSync(): Promise<boolean> {
-    console.log('🔄 [DB HEALTH] Force syncing master data (transactions skipped for safety)...');
-    
+    // console.log('🔄 [DB HEALTH] Force syncing master data (transactions skipped for safety)...');
+
     try {
       const response = await fetch(getApiUrl('/api/sync'));
       if (response.ok) {
         const jsonData = await response.json();
         const data = jsonData.data || jsonData;
-        
+
         // Save to local database
         const electronAPI = typeof window !== 'undefined' ? (window as { electronAPI?: UnknownRecord }).electronAPI : undefined;
         if (electronAPI) {
@@ -169,10 +169,16 @@ class DatabaseHealthService {
             await (electronAPI.localDbUpsertCategory1 as (rows: unknown[]) => Promise<{ success: boolean }>)(data.category1);
             console.log(`✅ ${data.category1.length} category1 synced to local database`);
           }
-          
+
           if (data.category2 && data.category2.length > 0) {
-            await (electronAPI.localDbUpsertCategory2 as (rows: unknown[]) => Promise<{ success: boolean }>)(data.category2);
-            console.log(`✅ ${data.category2.length} category2 synced to local database`);
+            // Get junction table data (REQUIRED - junction table only, no business_id column)
+            const junctionTableData = (data.category2Businesses as Array<{ category2_id: number; business_id: number }> | undefined) || undefined;
+            if (!junctionTableData || junctionTableData.length === 0) {
+              console.warn(`⚠️ [DB HEALTH] No junction table data provided for category2 - skipping sync`);
+            } else {
+              await (electronAPI.localDbUpsertCategory2 as (rows: unknown[], junctionData?: Array<{ category2_id: number; business_id: number }>) => Promise<{ success: boolean }>)(data.category2, junctionTableData);
+              console.log(`✅ ${data.category2.length} category2 synced to local database with ${junctionTableData.length} business relationships`);
+            }
           }
 
           // Legacy categories format support
@@ -183,7 +189,7 @@ class DatabaseHealthService {
                 updated_at: Date.now()
               }))
               .filter((cat: { category2_name?: string }) => !!cat.category2_name);
-            
+
             if (formattedCategories.length > 0) {
               await (electronAPI.localDbUpsertCategories as (rows: unknown[]) => Promise<{ success: boolean }>)(formattedCategories);
               console.log(`✅ ${formattedCategories.length} categories synced to local database`);
@@ -212,7 +218,7 @@ class DatabaseHealthService {
             await (electronAPI.localDbUpsertProductCustomizations as (rows: unknown[]) => Promise<{ success: boolean }>)(data.productCustomizations);
             console.log(`✅ ${data.productCustomizations.length} product customizations synced to local database`);
           }
-          
+
           if (Array.isArray(data.bundleItems) && data.bundleItems.length > 0) {
             await (electronAPI.localDbUpsertBundleItems as (rows: unknown[]) => Promise<{ success: boolean }>)(data.bundleItems);
             console.log(`✅ ${data.bundleItems.length} bundle items synced to local database`);
@@ -229,29 +235,29 @@ class DatabaseHealthService {
             await (electronAPI.localDbUpsertPaymentMethods as (rows: unknown[]) => Promise<{ success: boolean }>)(data.paymentMethods);
             console.log(`✅ ${data.paymentMethods.length} payment methods synced to local database`);
           }
-          
+
           if (data.banks && data.banks.length > 0) {
             await (electronAPI.localDbUpsertBanks as (rows: unknown[]) => Promise<{ success: boolean }>)(data.banks);
             console.log(`✅ ${data.banks.length} banks synced to local database`);
           }
-          
+
           if (data.organizations && data.organizations.length > 0) {
             await (electronAPI.localDbUpsertOrganizations as (rows: unknown[]) => Promise<{ success: boolean }>)(data.organizations);
             console.log(`✅ ${data.organizations.length} organizations synced to local database`);
           }
-          
+
           if (data.managementGroups && data.managementGroups.length > 0) {
             await (electronAPI.localDbUpsertManagementGroups as (rows: unknown[]) => Promise<{ success: boolean }>)(data.managementGroups);
             console.log(`✅ ${data.managementGroups.length} management groups synced to local database`);
           }
-          
+
           if (data.clAccounts && data.clAccounts.length > 0) {
             await (electronAPI.localDbUpsertClAccounts as (rows: unknown[]) => Promise<{ success: boolean }>)(data.clAccounts);
             console.log(`✅ ${data.clAccounts.length} CL accounts synced to local database`);
           }
-          
+
         }
-        
+
         console.log('✅ [DB HEALTH] Master data sync completed (transactions protected)');
         return true;
       } else {

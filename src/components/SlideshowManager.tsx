@@ -1,6 +1,7 @@
 'use client';
 
 import { useState, useEffect, useRef } from 'react';
+import Image from 'next/image';
 import { Plus, Trash2, Upload, Play, Pause, Image as ImageIcon, RefreshCw, FolderOpen, X } from 'lucide-react';
 
 interface SlideshowImage {
@@ -31,7 +32,7 @@ export default function SlideshowManager() {
     try {
       if (window.electronAPI?.getSlideshowImages) {
         const result = await window.electronAPI.getSlideshowImages();
-        
+
         if (result.success && result.images) {
           // Load each image as data URL for preview
           const imagesWithDataUrls = await Promise.all(
@@ -57,7 +58,7 @@ export default function SlideshowManager() {
               return image;
             })
           );
-          
+
           setSlideshowImages(imagesWithDataUrls);
           console.log('📸 Loaded slideshow images from userData:', imagesWithDataUrls.length);
         } else {
@@ -82,14 +83,14 @@ export default function SlideshowManager() {
   const handleFileUpload = async (files: FileList) => {
     setUploadError(null);
     setUploadSuccess(null);
-    
+
     const validImageTypes = ['image/jpeg', 'image/png', 'image/webp', 'image/gif'];
     const maxFileSize = 5 * 1024 * 1024; // 5MB
-    
+
     const filesArray = Array.from(files);
     let uploadedCount = 0;
     let errorCount = 0;
-    
+
     for (const file of filesArray) {
       // Validate file type
       if (!validImageTypes.includes(file.type)) {
@@ -97,31 +98,31 @@ export default function SlideshowManager() {
         errorCount++;
         continue;
       }
-      
+
       // Validate file size
       if (file.size > maxFileSize) {
         setUploadError(`${file.name}: File too large. Maximum size is 5MB.`);
         errorCount++;
         continue;
       }
-      
+
       try {
         // Read file as buffer
         const arrayBuffer = await file.arrayBuffer();
         const buffer = Buffer.from(arrayBuffer);
-        
+
         // Generate safe filename
         const timestamp = Date.now();
         const safeName = file.name.replace(/[^a-zA-Z0-9.-]/g, '_');
         const filename = `${timestamp}-${safeName}`;
-        
+
         // Save via Electron API
         if (window.electronAPI?.saveSlideshowImage) {
           const result = await window.electronAPI.saveSlideshowImage({
             filename,
             buffer
           });
-          
+
           if (result.success) {
             uploadedCount++;
             console.log('✅ Uploaded:', filename);
@@ -136,17 +137,17 @@ export default function SlideshowManager() {
         errorCount++;
       }
     }
-    
+
     // Show success message
     if (uploadedCount > 0) {
       setUploadSuccess(`Successfully uploaded ${uploadedCount} image(s)`);
       // Reload images
       await loadSlideshowImages();
-      
+
       // Clear success message after 3 seconds
       setTimeout(() => setUploadSuccess(null), 3000);
     }
-    
+
     if (errorCount > 0) {
       setTimeout(() => setUploadError(null), 5000);
     }
@@ -173,7 +174,7 @@ export default function SlideshowManager() {
   const handleDrop = (e: React.DragEvent) => {
     e.preventDefault();
     setIsDragging(false);
-    
+
     if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
       handleFileUpload(e.dataTransfer.files);
     }
@@ -184,11 +185,11 @@ export default function SlideshowManager() {
     if (!confirm(`Are you sure you want to delete "${filename}"?`)) {
       return;
     }
-    
+
     try {
       if (window.electronAPI?.deleteSlideshowImage) {
         const result = await window.electronAPI.deleteSlideshowImage(filename);
-        
+
         if (result.success) {
           console.log('🗑️ Deleted:', filename);
           setUploadSuccess('Image deleted successfully');
@@ -211,7 +212,7 @@ export default function SlideshowManager() {
     try {
       if (window.electronAPI?.openSlideshowFolder) {
         const result = await window.electronAPI.openSlideshowFolder();
-        
+
         if (result.success) {
           console.log('📁 Opened folder:', result.path);
         }
@@ -256,11 +257,10 @@ export default function SlideshowManager() {
           </button>
           <button
             onClick={toggleSlideshow}
-            className={`px-3 py-1 rounded-lg transition-colors flex items-center space-x-1 ${
-              isSlideshowActive 
-                ? 'bg-gray-200 hover:bg-gray-300 text-black' 
+            className={`px-3 py-1 rounded-lg transition-colors flex items-center space-x-1 ${isSlideshowActive
+                ? 'bg-gray-200 hover:bg-gray-300 text-black'
                 : 'bg-gray-200 hover:bg-gray-300 text-black'
-            }`}
+              }`}
           >
             {isSlideshowActive ? <Pause className="w-4 h-4" /> : <Play className="w-4 h-4" />}
             <span className="text-sm">{isSlideshowActive ? 'Active' : 'Paused'}</span>
@@ -280,7 +280,7 @@ export default function SlideshowManager() {
           </button>
         </div>
       )}
-      
+
       {uploadSuccess && (
         <div className="mb-4 p-3 bg-green-50 border border-green-200 rounded-lg flex items-start space-x-2">
           <div className="flex-1">
@@ -316,11 +316,10 @@ export default function SlideshowManager() {
 
       {/* Upload Area */}
       <div
-        className={`mb-6 border-2 border-dashed rounded-lg p-6 text-center transition-colors ${
-          isDragging 
-            ? 'border-blue-500 bg-blue-50' 
+        className={`mb-6 border-2 border-dashed rounded-lg p-6 text-center transition-colors ${isDragging
+            ? 'border-blue-500 bg-blue-50'
             : 'border-gray-300 hover:border-gray-400 bg-gray-50'
-        }`}
+          }`}
         onDragOver={handleDragOver}
         onDragLeave={handleDragLeave}
         onDrop={handleDrop}
@@ -356,10 +355,11 @@ export default function SlideshowManager() {
             <div key={image.id} className="bg-white border border-gray-200 rounded-lg overflow-hidden group hover:shadow-md transition-shadow">
               <div className="relative aspect-video bg-gray-100">
                 {image.dataUrl ? (
-                  <img
+                  <Image
                     src={image.dataUrl}
                     alt={image.title}
-                    className="w-full h-full object-cover"
+                    fill
+                    className="object-cover"
                   />
                 ) : (
                   <div className="w-full h-full flex items-center justify-center text-gray-400">

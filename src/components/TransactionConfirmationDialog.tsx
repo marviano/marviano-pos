@@ -188,25 +188,25 @@ export default function TransactionConfirmationDialog({
               {cartItems.map((item, index) => {
                 // Use the same pricing logic as PaymentModal
                 const getEffectiveProductPrice = (product: typeof item.product): number => {
-                if (isOnline && selectedOnlinePlatform) {
-                  switch (selectedOnlinePlatform) {
-                    case 'qpon':
+                  if (isOnline && selectedOnlinePlatform) {
+                    switch (selectedOnlinePlatform) {
+                      case 'qpon':
                         const qponPrice = product.harga_qpon;
                         if (qponPrice && qponPrice > 0) return qponPrice;
                         return 0; // No fallback in online mode when platform is selected
-                    case 'gofood':
+                      case 'gofood':
                         const gofoodPrice = product.harga_gofood;
                         if (gofoodPrice && gofoodPrice > 0) return gofoodPrice;
                         return 0;
-                    case 'grabfood':
+                      case 'grabfood':
                         const grabfoodPrice = product.harga_grabfood;
                         if (grabfoodPrice && grabfoodPrice > 0) return grabfoodPrice;
                         return 0;
-                    case 'shopeefood':
+                      case 'shopeefood':
                         const shopeefoodPrice = product.harga_shopeefood;
                         if (shopeefoodPrice && shopeefoodPrice > 0) return shopeefoodPrice;
                         return 0;
-                    case 'tiktok':
+                      case 'tiktok':
                         const tiktokPrice = product.harga_tiktok;
                         if (tiktokPrice && tiktokPrice > 0) return tiktokPrice;
                         return 0;
@@ -216,15 +216,15 @@ export default function TransactionConfirmationDialog({
                   }
                   return product.harga_jual;
                 };
-                
+
                 let itemPrice = getEffectiveProductPrice(item.product);
                 itemPrice += sumCustomizationPrice(item.customizations);
                 itemPrice += calculateBundleCustomizationCharge(item.bundleSelections);
-                
+
                 const totalItemPrice = itemPrice * item.quantity;
-                
+
                 // Debug logging
-                console.log('🔍 [TransactionConfirmationDialog] Pricing Debug:', {
+                /* console.log('🔍 [TransactionConfirmationDialog] Pricing Debug:', {
                   productName: item.product.nama,
                   isOnline,
                   selectedOnlinePlatform,
@@ -233,8 +233,8 @@ export default function TransactionConfirmationDialog({
                   effectivePrice: getEffectiveProductPrice(item.product),
                   finalItemPrice: itemPrice,
                   totalItemPrice
-                });
-                
+                }); */
+
                 return (
                   <div key={index} className="flex justify-between items-start">
                     <div className="flex-1">

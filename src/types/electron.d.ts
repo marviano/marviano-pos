@@ -59,31 +59,32 @@ declare global {
       playSound: (soundType: string) => Promise<unknown>;
       // System printers
       listPrinters: () => Promise<{ success: boolean; printers: Array<{ name: string; displayName?: string; status?: string; isDefault?: boolean }> }>;
-      
+
       // Window controls
       closeWindow: () => Promise<unknown>;
       minimizeWindow: () => Promise<unknown>;
       maximizeWindow: () => Promise<unknown>;
       navigateTo: (path: string) => Promise<unknown>;
       focusWindow: () => Promise<{ success: boolean; error?: string }>;
-      
+      openProductionDisplay: (displayType: 'kitchen' | 'barista') => Promise<{ success: boolean; displayType?: string; error?: string }>;
+
       // Authentication events
       notifyLoginSuccess: () => Promise<unknown>;
       notifyLogout: () => Promise<unknown>;
-      
+
       // Menu events
       onMenuNewOrder: (callback: () => void) => void;
-      
+
       // Dual-display communication
       updateCustomerDisplay: (data: unknown) => Promise<unknown>;
       updateCustomerSlideshow: (data: unknown) => Promise<unknown>;
       getCustomerDisplayStatus: () => Promise<unknown>;
       createCustomerDisplay: () => Promise<unknown>;
-      
+
       // Customer display event listeners
       onOrderUpdate?: (callback: (data: unknown) => void) => void;
       onSlideshowUpdate?: (callback: (data: unknown) => void) => void;
-      
+
       // Slideshow image management (userData storage)
       getSlideshowImages?: () => Promise<{
         success: boolean;
@@ -133,7 +134,7 @@ declare global {
         existing?: number;
         error?: string;
       }>;
-      
+
       // Offline/local DB operations
       localDbUpsertCategories?: (rows: { category2_name: string; updated_at?: number }[]) => Promise<{ success: boolean }>;
       localDbGetCategories?: () => Promise<{ category2_name: string; updated_at: number }[]>;
@@ -145,7 +146,7 @@ declare global {
       localDbUpsertBundleItems?: (rows: unknown[]) => Promise<{ success: boolean }>;
       localDbUpdateSyncStatus?: (key: string, status: string) => Promise<{ success: boolean }>;
       localDbGetSyncStatus?: (key: string) => Promise<{ key: string; last_sync: number; status: string } | null>;
-      
+
       // Offline transaction queue
       localDbQueueOfflineTransaction?: (transactionData: unknown) => Promise<{ success: boolean; offlineTransactionId?: number; error?: string }>;
       localDbGetPendingTransactions?: () => Promise<unknown[]>;
@@ -155,7 +156,7 @@ declare global {
       localDbGetPendingRefunds?: () => Promise<unknown[]>;
       localDbMarkRefundSynced?: (offlineRefundId: number) => Promise<{ success: boolean }>;
       localDbMarkRefundFailed?: (offlineRefundId: number) => Promise<{ success: boolean }>;
-      
+
       // Transaction operations
       localDbGetTransactions?: (businessId?: number, limit?: number) => Promise<unknown[]>;
       localDbUpsertTransactions?: (rows: unknown[]) => Promise<unknown>;
@@ -184,39 +185,39 @@ declare global {
       localDbUpsertTransactionRefunds?: (rows: unknown[]) => Promise<{ success: boolean; error?: string }>;
       localDbApplyTransactionRefund?: (payload: unknown) => Promise<{ success: boolean; error?: string }>;
       localDbGetUnsyncedTransactions?: (businessId?: number) => Promise<unknown[]>;
+      localDbDeleteUnsyncedTransactions?: (businessId?: number) => Promise<{ success: boolean; deletedCount?: number; error?: string }>;
       localDbMarkTransactionsSynced?: (transactionIds: string[]) => Promise<unknown>;
       localDbResetTransactionSync?: (transactionId: string | number) => Promise<{ success: boolean }>;
       localDbMarkTransactionsSyncedByIds?: (transactionIds: number[]) => Promise<{ success: boolean }>;
       localDbArchiveTransactions?: (payload: { businessId: number; from?: string | null; to?: string | null }) => Promise<number>;
       localDbDeleteTransactions?: (payload: { businessId: number; from?: string | null; to?: string | null }) => Promise<number>;
-      localDbDeleteTransactionsByEmail?: (payload: { userEmail: string }) => Promise<{ success: boolean; deleted: number; deletedItems?: number; error?: string }>;
       localDbDeleteTransactionItems?: (payload: { businessId: number; from?: string | null; to?: string | null }) => Promise<{ success: boolean; deleted?: number }>;
-      
+
       // Comprehensive POS table operations
       // Users
       localDbUpsertUsers?: (rows: unknown[]) => Promise<{ success: boolean }>;
       localDbGetUsers?: () => Promise<unknown[]>;
-      
+
       // Businesses
       localDbUpsertBusinesses?: (rows: unknown[]) => Promise<{ success: boolean }>;
       localDbGetBusinesses?: () => Promise<unknown[]>;
-      
+
       // Ingredients
       localDbUpsertIngredients?: (rows: unknown[]) => Promise<{ success: boolean }>;
       localDbGetIngredients?: (businessId?: number) => Promise<unknown[]>;
-      
+
       // COGS
       localDbUpsertCogs?: (rows: unknown[]) => Promise<{ success: boolean }>;
       localDbGetCogs?: () => Promise<unknown[]>;
-      
+
       // Contacts
       localDbUpsertContacts?: (rows: unknown[]) => Promise<{ success: boolean }>;
       localDbGetContacts?: (teamId?: number) => Promise<unknown[]>;
-      
+
       // Teams
       localDbUpsertTeams?: (rows: unknown[]) => Promise<{ success: boolean }>;
       localDbGetTeams?: () => Promise<unknown[]>;
-      
+
       // Roles & permissions
       localDbUpsertRoles?: (rows: unknown[]) => Promise<{ success: boolean }>;
       localDbGetRoles?: () => Promise<unknown[]>;
@@ -235,46 +236,46 @@ declare global {
         permissions: string[];
       } | null>;
       checkOfflineDbExists?: () => Promise<{ exists: boolean; path?: string; error?: string }>;
-      
+
       // Supporting tables
       localDbUpsertSource?: (rows: unknown[]) => Promise<{ success: boolean }>;
       localDbGetSource?: () => Promise<unknown[]>;
       localDbUpsertPekerjaan?: (rows: unknown[]) => Promise<{ success: boolean }>;
       localDbGetPekerjaan?: () => Promise<unknown[]>;
-      
+
       // Banks
       localDbUpsertBanks?: (rows: unknown[]) => Promise<unknown>;
       localDbGetBanks?: () => Promise<unknown[]>;
-      
+
       // Payment Methods
       localDbUpsertPaymentMethods?: (rows: unknown[]) => Promise<unknown>;
       localDbGetPaymentMethods?: () => Promise<unknown[]>;
-      
+
       // Organizations
       localDbUpsertOrganizations?: (rows: unknown[]) => Promise<unknown>;
       localDbGetOrganizations?: () => Promise<unknown[]>;
-      
+
       // Management Groups
       localDbUpsertManagementGroups?: (rows: unknown[]) => Promise<unknown>;
       localDbGetManagementGroups?: () => Promise<unknown[]>;
-      
+
       // Categories
       localDbUpsertCategory1?: (rows: unknown[]) => Promise<unknown>;
       localDbGetCategory1?: () => Promise<unknown[]>;
-      localDbUpsertCategory2?: (rows: unknown[]) => Promise<unknown>;
+      localDbUpsertCategory2?: (rows: unknown[], junctionData?: Array<{ category2_id: number; business_id: number }>) => Promise<unknown>;
       localDbGetCategory2?: () => Promise<unknown[]>;
-      
+
       // CL Accounts
       localDbUpsertClAccounts?: (rows: unknown[]) => Promise<unknown>;
       localDbGetClAccounts?: () => Promise<unknown[]>;
-      
+
       // Customization
       localDbUpsertCustomizationTypes?: (rows: unknown[]) => Promise<unknown>;
       localDbUpsertCustomizationOptions?: (rows: unknown[]) => Promise<unknown>;
       localDbUpsertProductCustomizations?: (rows: unknown[]) => Promise<unknown>;
       localDbGetProductCustomizations?: (productId: number) => Promise<unknown[]>;
-      
-      
+
+
       // Shifts
       localDbGetActiveShift?: (userId: number, businessId?: number) => Promise<{
         shift: {
@@ -388,11 +389,11 @@ declare global {
         }>;
       }>;
       printShiftBreakdown?: (data: ShiftPrintBreakdownPayload) => Promise<{ success: boolean; error?: string }>;
-      
+
       // Printer configurations
       localDbSavePrinterConfig?: (printerType: string, systemPrinterName: string, extraSettings?: Record<string, unknown>) => Promise<{ success: boolean; error?: string }>;
       localDbGetPrinterConfigs?: () => Promise<unknown[]>;
-      
+
       // Printer Management (new multi-printer system)
       generateNumericUuid?: (businessId: number) => Promise<{ success: boolean; uuid?: string; error?: string }>;
       getPrinterCounter?: (printerType: string, businessId: number, increment: boolean) => Promise<{ success: boolean; counter: number; error?: string }>;
@@ -405,12 +406,31 @@ declare global {
       getPrinter2AuditLog?: (fromDate?: string, toDate?: string, limit?: number) => Promise<{ success: boolean; entries: unknown[] }>;
       logPrinter1Print?: (transactionId: string, printer1ReceiptNumber: number, globalCounter?: number | null, isReprint?: boolean, reprintCount?: number) => Promise<{ success: boolean }>;
       getPrinter1AuditLog?: (fromDate?: string, toDate?: string, limit?: number) => Promise<{ success: boolean; entries: unknown[] }>;
+      queueTransactionForSystemPos?: (transactionId: string) => Promise<{ success: boolean; alreadyQueued?: boolean; alreadySynced?: boolean; error?: string }>;
+      getSystemPosQueue?: () => Promise<{ success: boolean; queue: Array<{ id: number; transaction_id: string; queued_at: number; synced_at: number | null; retry_count: number; last_error: string | null }> }>;
+      markSystemPosSynced?: (transactionId: string) => Promise<{ success: boolean }>;
+      markSystemPosFailed?: (transactionId: string, error: string) => Promise<{ success: boolean }>;
+      resetSystemPosRetryCount?: (transactionIds?: string[]) => Promise<{ success: boolean; error?: string }>;
+      repopulateSystemPosQueue?: (options?: { days?: number }) => Promise<{ success: boolean; count?: number; error?: string }>;
+      debugSystemPosTransaction?: (transactionId: string) => Promise<{
+        success: boolean;
+        transaction: { id: string; business_id: number; user_id: number; created_at: string; synced_at: number | null } | null;
+        queue: { id: number; transaction_id: string; queued_at: number; synced_at: number | null; retry_count: number; last_error: string | null } | null;
+        existsInLocalDb: boolean;
+        isQueued: boolean;
+        isSynced: boolean;
+        retryCount: number;
+        lastError: string | null;
+        error?: string;
+      }>;
       localDbUpsertPrinterAudits?: (printerType: 'receipt' | 'receiptize', rows: unknown[]) => Promise<{ success: boolean; count?: number; error?: string }>;
+      localDbGetAllPrinterDailyCounters?: () => Promise<Array<{ printer_type: string; business_id: number; date: string; counter: number }>>;
       localDbUpsertPrinterDailyCounters?: (rows: Array<{ printer_type: string; business_id: number; date: string; counter: number }>) => Promise<{ success: boolean; count?: number; error?: string }>;
       localDbResetPrinterDailyCounters?: (businessId: number) => Promise<{ success: boolean }>;
       localDbGetUnsyncedPrinterAudits?: () => Promise<{ p1: unknown[]; p2: unknown[] }>;
+      localDbGetPrinterAuditsByTransactionId?: (transactionId: string) => Promise<{ printer1: unknown[]; printer2: unknown[] }>;
       localDbMarkPrinterAuditsSynced?: (payload: { p1Ids?: number[]; p2Ids?: number[] }) => Promise<{ success: boolean }>;
-      
+
       // Database Restore
       restoreFromServer?: (options: {
         businessId: number;
@@ -422,8 +442,94 @@ declare global {
         error?: string;
         stats: Record<string, number>;
       }>;
+
+      // Admin: Delete transactions by user email or NULL
+      localDbDeleteTransactionsByRole?: () => Promise<{
+        success: boolean;
+        message?: string;
+        deleted?: number;
+        deletedItems?: number;
+        details?: {
+          database: string;
+          targetUserIds: number[];
+          printer1_audit_log: number;
+          printer2_audit_log: number;
+          transaction_items: number;
+          transactions: number;
+          success: boolean;
+          error: string | null;
+        };
+        error?: string;
+      }>;
+
+      // WebSocket Server Management
+      websocketServerStart?: (port?: number) => Promise<{ success: boolean; error?: string; port?: number }>;
+      websocketServerStop?: () => Promise<{ success: boolean; error?: string }>;
+      websocketServerStatus?: () => Promise<{
+        isRunning: boolean;
+        port: number;
+        clientCount: number;
+        clients: Array<{ id: string; type: 'pos' | 'kitchen' | 'barista'; connectedAt: number }>;
+      }>;
+      websocketBroadcastOrder?: (order: {
+        transactionId: string;
+        receiptNumber: number;
+        businessId: number;
+        items: Array<{
+          itemId: string;
+          productId: number;
+          productName: string;
+          category1_id: number;
+          quantity: number;
+          unitPrice: number;
+          totalPrice: number;
+          customNote?: string;
+          bundleSelections?: Array<{
+            category2_id: number;
+            category2_name: string;
+            selectedProducts: Array<{
+              product: {
+                id: number;
+                nama: string;
+              };
+              quantity?: number;
+              customizations?: Array<{
+                customization_id: number;
+                customization_name: string;
+                selected_options: Array<{
+                  option_id: number;
+                  option_name: string;
+                  price_adjustment: number;
+                }>;
+              }>;
+              customNote?: string;
+            }>;
+            requiredQuantity: number;
+          }>;
+          customizations?: Array<{
+            customization_id: number;
+            customization_name: string;
+            selected_options: Array<{
+              option_id: number;
+              option_name: string;
+              price_adjustment: number;
+            }>;
+          }>;
+          status: 'pending' | 'preparing' | 'ready';
+        }>;
+        createdAt: string;
+        customerName?: string;
+        customerUnit?: number;
+        pickupMethod: 'dine-in' | 'take-away';
+      }) => Promise<{ success: boolean; sentTo: string[] }>;
+      websocketBroadcastStatus?: (update: {
+        transactionId: string;
+        itemId: string;
+        status: 'pending' | 'preparing' | 'ready';
+        preparedBy?: string;
+      }) => Promise<{ success: boolean; sentTo: string[] }>;
     };
   }
 }
 
-export {};
+export { };
