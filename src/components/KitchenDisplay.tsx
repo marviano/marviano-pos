@@ -2,13 +2,15 @@
 
 import { useEffect, useState, useCallback, useRef } from 'react';
 import { networkClient, OrderData, OrderItem, StatusUpdate } from '@/lib/networkClient';
+import { getServerSettings, saveServerSettings } from '@/lib/serverSettings';
 
 interface KitchenOrderItem extends OrderItem {
   transactionId: string;
   receiptNumber: number;
   customerName?: string;
   pickupMethod: 'dine-in' | 'take-away';
-  receivedAt: string;
+  startedAt: string; // When item first appeared (for timer)
+  finishedAt?: string; // When item was marked finished (for timer stop)
 }
 
 type ConnectionStatus = 'disconnected' | 'connecting' | 'connected' | 'error';
@@ -16,10 +18,25 @@ type ConnectionStatus = 'disconnected' | 'connecting' | 'connected' | 'error';
 export default function KitchenDisplay() {
   const [orderItems, setOrderItems] = useState<KitchenOrderItem[]>([]);
   const [connectionStatus, setConnectionStatus] = useState<ConnectionStatus>('disconnected');
-  const [serverAddress, setServerAddress] = useState('localhost');
-  const [serverPort, setServerPort] = useState(19967);
+  const initialSettings = getServerSettings();
+  const [serverAddress, setServerAddress] = useState(initialSettings.address);
+  const [serverPort, setServerPort] = useState(initialSettings.port);
   const [showSettings, setShowSettings] = useState(false);
+  const [, setTimerTick] = useState(0); // Force re-render for timer updates
   const audioRef = useRef<HTMLAudioElement | null>(null);
+
+  // Update timer every second for items in "preparing" status
+  useEffect(() => {
+    const interval = setInterval(() => {
+      // Only update if there are items in preparing status
+      const hasPreparingItems = orderItems.some(item => item.status === 'preparing');
+      if (hasPreparingItems) {
+        setTimerTick(prev => prev + 1);
+      }
+    }, 1000);
+
+    return () => clearInterval(interval);
+  }, [orderItems]);
 
   // Play notification sound
   const playNotificationSound = useCallback(() => {
@@ -52,7 +69,7 @@ export default function KitchenDisplay() {
   useEffect(() => {
     // Define all handlers inside effect to avoid dependency issues
     const onConnected = () => {
-      console.log('[KitchenDisplay] Connected to server');
+      console.log('[KitchenDisplay] ✅ Connected to server successfully!');
       setConnectionStatus('connected');
     };
 
@@ -77,14 +94,16 @@ export default function KitchenDisplay() {
         return;
       }
 
-      // Add order metadata to each item
+      // Add order metadata to each item - set status to 'preparing' and start timer
+      const now = new Date().toISOString();
       const newItems: KitchenOrderItem[] = kitchenItems.map(item => ({
         ...item,
+        status: 'preparing' as const, // Always start as preparing
         transactionId: order.transactionId,
         receiptNumber: order.receiptNumber,
         customerName: order.customerName,
         pickupMethod: order.pickupMethod,
-        receivedAt: new Date().toISOString()
+        startedAt: now // Timer starts when item appears
       }));
 
       setOrderItems(prev => [...prev, ...newItems]);
@@ -97,6 +116,10 @@ export default function KitchenDisplay() {
       
       setOrderItems(prev => prev.map(item => {
         if (item.transactionId === update.transactionId && item.itemId === update.itemId) {
+          // If status changed to finished, stop the timer
+          if (update.status === 'finished' && item.status !== 'finished') {
+            return { ...item, status: update.status, finishedAt: new Date().toISOString() };
+          }
           return { ...item, status: update.status };
         }
         return item;
@@ -110,12 +133,19 @@ export default function KitchenDisplay() {
     networkClient.on('new_order', onNewOrder);
     networkClient.on('status_update', onStatusUpdate);
 
-    // Auto-connect on mount
+    // Auto-connect on mount using stored settings
+    const settings = getServerSettings();
+    console.log('[KitchenDisplay] Connecting to server:', settings.address, ':', settings.port);
+    setServerAddress(settings.address);
+    setServerPort(settings.port);
     setConnectionStatus('connecting');
-    networkClient.connect('localhost', 19967, 'kitchen').then(result => {
+    networkClient.connect(settings.address, settings.port, 'kitchen').then(result => {
       if (!result.success) {
         setConnectionStatus('error');
-        console.error('[KitchenDisplay] Connection failed:', result.error);
+        console.error('[KitchenDisplay] ❌ Connection failed:', result.error);
+        console.error('[KitchenDisplay] Server settings:', settings);
+      } else {
+        console.log('[KitchenDisplay] ✅ Connection attempt successful, waiting for confirmation...');
       }
     });
 
@@ -130,17 +160,18 @@ export default function KitchenDisplay() {
     };
   }, []); // Empty dependency array - run only once
 
-  // Handle double-tap to mark item as ready
+  // Handle double-tap to toggle item status: preparing → finished
   const handleItemDoubleTap = useCallback((item: KitchenOrderItem) => {
-    const newStatus = item.status === 'pending' ? 'preparing' : 
-                      item.status === 'preparing' ? 'ready' : item.status;
-    
-    if (newStatus === item.status) return;
+    // Only toggle if currently preparing
+    if (item.status !== 'preparing') return;
 
-    // Update local state
+    const newStatus = 'finished' as const;
+    const finishedAt = new Date().toISOString();
+
+    // Update local state - stop timer when finished
     setOrderItems(prev => prev.map(i => {
       if (i.transactionId === item.transactionId && i.itemId === item.itemId) {
-        return { ...i, status: newStatus };
+        return { ...i, status: newStatus, finishedAt };
       }
       return i;
     }));
@@ -152,43 +183,41 @@ export default function KitchenDisplay() {
       status: newStatus,
       preparedBy: 'kitchen'
     });
-
-    // Remove ready items after 3 seconds
-    if (newStatus === 'ready') {
-      setTimeout(() => {
-        setOrderItems(prev => prev.filter(i => 
-          !(i.transactionId === item.transactionId && i.itemId === item.itemId)
-        ));
-      }, 3000);
-    }
   }, []);
 
   // Get status color
   const getStatusColor = (status: string) => {
     switch (status) {
-      case 'pending': return 'bg-red-500';
       case 'preparing': return 'bg-yellow-500';
-      case 'ready': return 'bg-green-500';
+      case 'finished': return 'bg-green-500';
       default: return 'bg-gray-500';
     }
   };
 
-  // Get status text
+  // Get status text (Indonesian)
   const getStatusText = (status: string) => {
     switch (status) {
-      case 'pending': return 'Menunggu';
-      case 'preparing': return 'Diproses';
-      case 'ready': return 'Siap';
+      case 'preparing': return 'Proses';
+      case 'finished': return 'Selesai';
       default: return status;
     }
   };
 
-  // Format time
-  const formatTime = (isoString: string) => {
-    return new Date(isoString).toLocaleTimeString('id-ID', { 
-      hour: '2-digit', 
-      minute: '2-digit' 
-    });
+  // Format timer: MM:SS or HH:MM:SS if > 60 minutes
+  const formatTimer = (startedAt: string, finishedAt?: string): string => {
+    const start = new Date(startedAt).getTime();
+    const end = finishedAt ? new Date(finishedAt).getTime() : Date.now();
+    const elapsedMs = end - start;
+    const elapsedSeconds = Math.floor(elapsedMs / 1000);
+    const minutes = Math.floor(elapsedSeconds / 60);
+    const seconds = elapsedSeconds % 60;
+
+    if (minutes >= 60) {
+      const hours = Math.floor(minutes / 60);
+      const mins = minutes % 60;
+      return `${hours}:${mins.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
+    }
+    return `${minutes}:${seconds.toString().padStart(2, '0')}`;
   };
 
   return (
@@ -198,7 +227,7 @@ export default function KitchenDisplay() {
         <div className="flex items-center gap-4">
           <h1 className="text-2xl font-bold text-orange-500">🍳 DAPUR</h1>
           <span className="text-gray-400">|</span>
-          <span className="text-gray-300">{orderItems.filter(i => i.status !== 'ready').length} item menunggu</span>
+          <span className="text-gray-300">{orderItems.filter(i => i.status === 'preparing').length} item diproses</span>
         </div>
         
         <div className="flex items-center gap-4">
@@ -251,6 +280,8 @@ export default function KitchenDisplay() {
             </div>
             <button
               onClick={() => {
+                // Save settings before reconnecting
+                saveServerSettings({ address: serverAddress, port: serverPort });
                 networkClient.disconnect();
                 setConnectionStatus('connecting');
                 networkClient.connect(serverAddress, serverPort, 'kitchen').then(result => {
@@ -268,82 +299,161 @@ export default function KitchenDisplay() {
         </div>
       )}
 
-      {/* Order Grid */}
-      <div className="flex-1 p-4 overflow-auto">
-        {orderItems.length === 0 ? (
-          <div className="h-full flex items-center justify-center">
-            <div className="text-center text-gray-500">
-              <div className="text-6xl mb-4">🍳</div>
-              <div className="text-xl">Tidak ada pesanan</div>
-              <div className="text-sm mt-2">Pesanan makanan akan muncul di sini</div>
-            </div>
-          </div>
-        ) : (
-          <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-4">
-            {orderItems.map((item) => (
-              <div
-                key={`${item.transactionId}-${item.itemId}`}
-                onDoubleClick={() => handleItemDoubleTap(item)}
-                className={`
-                  ${getStatusColor(item.status)} 
-                  rounded-xl p-4 cursor-pointer select-none
-                  transition-all duration-200 hover:scale-105 hover:shadow-lg
-                  ${item.status === 'ready' ? 'opacity-60' : ''}
-                `}
-              >
-                {/* Receipt Number */}
-                <div className="text-xs font-bold mb-2 opacity-80">
-                  #{item.receiptNumber} • {formatTime(item.receivedAt)}
-                </div>
-
-                {/* Product Name */}
-                <div className="text-xl font-bold mb-2 leading-tight">
-                  {item.productName}
-                </div>
-
-                {/* Quantity */}
-                <div className="text-4xl font-black mb-2">
-                  x{item.quantity}
-                </div>
-
-                {/* Customizations */}
-                {item.customizations && item.customizations.length > 0 && (
-                  <div className="text-sm mb-2 opacity-90">
-                    {item.customizations.map((c, idx) => (
-                      <div key={idx}>
-                        {c.selected_options.map(o => o.option_name).join(', ')}
-                      </div>
-                    ))}
+      {/* 2-Column Layout: Proses (left) and Selesai (right) */}
+      <div className="flex-1 flex gap-4 p-4 overflow-hidden">
+        {/* Proses Column (Left) */}
+        <div className="flex-1 flex flex-col border-r border-gray-700 pr-4">
+          <h2 className="text-lg font-bold text-yellow-500 mb-3">PROSES</h2>
+          <div className="flex-1 overflow-y-auto space-y-3">
+            {orderItems
+              .filter(item => item.status === 'preparing')
+              .sort((a, b) => new Date(a.startedAt).getTime() - new Date(b.startedAt).getTime()) // Oldest first
+              .map((item) => (
+                <div
+                  key={`${item.transactionId}-${item.itemId}`}
+                  onDoubleClick={() => handleItemDoubleTap(item)}
+                  className={`
+                    ${getStatusColor(item.status)} 
+                    rounded-xl p-4 cursor-pointer select-none
+                    transition-all duration-200 hover:scale-105 hover:shadow-lg
+                  `}
+                >
+                  {/* Timer and Receipt Number */}
+                  <div className="text-xs font-bold mb-2 opacity-80 flex justify-between items-center">
+                    <span>#{item.receiptNumber}</span>
+                    <span className="bg-black/20 px-2 py-1 rounded">⏱️ {formatTimer(item.startedAt)}</span>
                   </div>
-                )}
 
-                {/* Custom Note */}
-                {item.customNote && (
-                  <div className="text-sm italic bg-black/20 rounded px-2 py-1 mb-2">
-                    📝 {item.customNote}
+                  {/* Product Name */}
+                  <div className="text-xl font-bold mb-2 leading-tight">
+                    {item.productName}
                   </div>
-                )}
 
-                {/* Pickup Method */}
-                <div className="text-xs uppercase tracking-wide opacity-80">
-                  {item.pickupMethod === 'dine-in' ? '🍽️ Makan di tempat' : '📦 Bawa pulang'}
-                </div>
+                  {/* Quantity */}
+                  <div className="text-4xl font-black mb-2">
+                    x{item.quantity}
+                  </div>
 
-                {/* Status */}
-                <div className="mt-3 text-center">
-                  <span className="text-xs font-bold uppercase bg-black/20 px-3 py-1 rounded-full">
-                    {getStatusText(item.status)}
-                  </span>
+                  {/* Customizations */}
+                  {item.customizations && item.customizations.length > 0 && (
+                    <div className="text-sm mb-2 opacity-90">
+                      {item.customizations.map((c, idx) => (
+                        <div key={idx}>
+                          {c.selected_options.map(o => o.option_name).join(', ')}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+
+                  {/* Custom Note */}
+                  {item.customNote && (
+                    <div className="text-sm italic bg-black/20 rounded px-2 py-1 mb-2">
+                      📝 {item.customNote}
+                    </div>
+                  )}
+
+                  {/* Pickup Method */}
+                  <div className="text-xs uppercase tracking-wide opacity-80">
+                    {item.pickupMethod === 'dine-in' ? '🍽️ Makan di tempat' : '📦 Bawa pulang'}
+                  </div>
+
+                  {/* Status */}
+                  <div className="mt-3 text-center">
+                    <span className="text-xs font-bold uppercase bg-black/20 px-3 py-1 rounded-full">
+                      {getStatusText(item.status)}
+                    </span>
+                  </div>
                 </div>
+              ))}
+            {orderItems.filter(item => item.status === 'preparing').length === 0 && (
+              <div className="text-center text-gray-500 py-8">
+                <div className="text-4xl mb-2">🍳</div>
+                <div className="text-sm">Tidak ada item diproses</div>
               </div>
-            ))}
+            )}
           </div>
-        )}
+        </div>
+
+        {/* Selesai Column (Right) */}
+        <div className="flex-1 flex flex-col pl-4">
+          <h2 className="text-lg font-bold text-green-500 mb-3">SELESAI</h2>
+          <div className="flex-1 overflow-y-auto space-y-3">
+            {orderItems
+              .filter(item => item.status === 'finished')
+              .sort((a, b) => {
+                // Sort by finishedAt if available, otherwise by startedAt
+                const aTime = a.finishedAt ? new Date(a.finishedAt).getTime() : new Date(a.startedAt).getTime();
+                const bTime = b.finishedAt ? new Date(b.finishedAt).getTime() : new Date(b.startedAt).getTime();
+                return aTime - bTime; // Oldest first
+              })
+              .map((item) => (
+                <div
+                  key={`${item.transactionId}-${item.itemId}`}
+                  className={`
+                    ${getStatusColor(item.status)} 
+                    rounded-xl p-4 select-none opacity-90
+                  `}
+                >
+                  {/* Timer and Receipt Number */}
+                  <div className="text-xs font-bold mb-2 opacity-80 flex justify-between items-center">
+                    <span>#{item.receiptNumber}</span>
+                    <span className="bg-black/20 px-2 py-1 rounded">⏱️ {formatTimer(item.startedAt, item.finishedAt)}</span>
+                  </div>
+
+                  {/* Product Name */}
+                  <div className="text-xl font-bold mb-2 leading-tight">
+                    {item.productName}
+                  </div>
+
+                  {/* Quantity */}
+                  <div className="text-4xl font-black mb-2">
+                    x{item.quantity}
+                  </div>
+
+                  {/* Customizations */}
+                  {item.customizations && item.customizations.length > 0 && (
+                    <div className="text-sm mb-2 opacity-90">
+                      {item.customizations.map((c, idx) => (
+                        <div key={idx}>
+                          {c.selected_options.map(o => o.option_name).join(', ')}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+
+                  {/* Custom Note */}
+                  {item.customNote && (
+                    <div className="text-sm italic bg-black/20 rounded px-2 py-1 mb-2">
+                      📝 {item.customNote}
+                    </div>
+                  )}
+
+                  {/* Pickup Method */}
+                  <div className="text-xs uppercase tracking-wide opacity-80">
+                    {item.pickupMethod === 'dine-in' ? '🍽️ Makan di tempat' : '📦 Bawa pulang'}
+                  </div>
+
+                  {/* Status */}
+                  <div className="mt-3 text-center">
+                    <span className="text-xs font-bold uppercase bg-black/20 px-3 py-1 rounded-full">
+                      {getStatusText(item.status)}
+                    </span>
+                  </div>
+                </div>
+              ))}
+            {orderItems.filter(item => item.status === 'finished').length === 0 && (
+              <div className="text-center text-gray-500 py-8">
+                <div className="text-4xl mb-2">✅</div>
+                <div className="text-sm">Tidak ada item selesai</div>
+              </div>
+            )}
+          </div>
+        </div>
       </div>
 
       {/* Footer Instructions */}
       <div className="bg-gray-800 px-4 py-2 text-center text-sm text-gray-500 border-t border-gray-700">
-        💡 Double-tap item: Menunggu → Diproses → Siap
+        💡 Double-tap item di kolom PROSES untuk memindahkan ke SELESAI
       </div>
 
       {/* Hidden audio element for notification */}

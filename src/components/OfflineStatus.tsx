@@ -59,11 +59,11 @@ export default function OfflineStatus({ className = '' }: OfflineStatusProps) {
   useEffect(() => {
     const checkPendingTransactions = async () => {
       const electronAPI = getElectronAPI();
-      if (!electronAPI?.localDbGetPendingTransactions) {
+      if (!electronAPI?.localDbGetUnsyncedTransactions) {
         return;
       }
       try {
-        const pending = await electronAPI.localDbGetPendingTransactions();
+        const pending = await electronAPI.localDbGetUnsyncedTransactions();
         setPendingCount(Array.isArray(pending) ? pending.length : 0);
       } catch (error) {
         console.warn('Failed to get pending transactions:', error);

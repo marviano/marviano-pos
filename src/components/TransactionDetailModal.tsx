@@ -872,7 +872,7 @@ const TransactionDetailModal: React.FC<TransactionDetailModalProps> = ({
 
                               // Calculate total customization adjustments
                               const totalAdjustments = customizations.reduce((total, customization) => {
-                                return total + customization.selected_options.reduce((optTotal, option) => {
+                                return total + (customization.selected_options || []).reduce((optTotal, option) => {
                                   return optTotal + (option.price_adjustment || 0);
                                 }, 0);
                               }, 0);
@@ -898,7 +898,7 @@ const TransactionDetailModal: React.FC<TransactionDetailModalProps> = ({
                                           <span className="text-gray-500 font-medium">{customization.customization_name}:</span>
                                         </div>
                                         <div className="ml-2 space-y-0.5">
-                                          {customization.selected_options.map((option, optIdx) => (
+                                          {(customization.selected_options || []).map((option, optIdx) => (
                                             <div key={optIdx} className="flex items-center justify-between">
                                               <span className="text-gray-600">• {option.option_name}</span>
                                               {option.price_adjustment !== 0 && (

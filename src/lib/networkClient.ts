@@ -43,7 +43,7 @@ export interface OrderItem {
   customNote?: string;
   bundleSelections?: BundleSelection[];
   customizations?: Customization[];
-  status: 'pending' | 'preparing' | 'ready';
+  status: 'preparing' | 'finished';
 }
 
 export interface OrderData {
@@ -60,7 +60,7 @@ export interface OrderData {
 export interface StatusUpdate {
   transactionId: string;
   itemId: string;
-  status: 'pending' | 'preparing' | 'ready';
+  status: 'preparing' | 'finished';
   preparedBy?: string;
 }
 

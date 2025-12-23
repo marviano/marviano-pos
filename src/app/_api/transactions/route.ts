@@ -149,7 +149,7 @@ export async function POST(request: NextRequest) {
         transactionData.cl_account_name || null,
         receiptNumber,
         transactionData.transaction_type,
-        (transactionData as { status?: string }).status || 'completed',
+        (transactionData as { status?: string }).status || 'paid',
         createdAt // Use provided or current timestamp
       ] as (string | number | null)[]);
       

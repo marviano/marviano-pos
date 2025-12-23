@@ -32,7 +32,7 @@ export async function GET(request: NextRequest) {
     // Sync Businesses
     try {
       const businesses = await query<unknown[]>(`
-        SELECT id, name, permission_name, organization_id, management_group_id, image_url, created_at 
+        SELECT id, name, permission_name, organization_id, status, management_group_id, image_url, created_at 
         FROM businesses 
         ORDER BY name ASC
       `);
@@ -278,7 +278,7 @@ export async function GET(request: NextRequest) {
     // Sync Category2
     try {
       const category2 = await query<unknown[]>(`
-        SELECT id, name, business_id, description, display_order, is_active, created_at
+        SELECT id, name, description, display_order, is_active, created_at
         FROM category2 
         WHERE is_active = 1
         ORDER BY display_order ASC, name ASC
@@ -290,6 +290,22 @@ export async function GET(request: NextRequest) {
       console.warn('⚠️ Failed to sync category2:', error);
       syncResults.category2 = [];
       counts.category2 = 0;
+    }
+
+    // Sync Category2-Businesses Junction Table (for multi-business support)
+    try {
+      const category2Businesses = await query<unknown[]>(`
+        SELECT category2_id, business_id, created_at
+        FROM category2_businesses
+        ORDER BY category2_id ASC, business_id ASC
+      `);
+      syncResults.category2Businesses = category2Businesses;
+      counts.category2Businesses = category2Businesses.length;
+      console.log(`✅ Synced ${category2Businesses.length} category2-business relationships`);
+    } catch (error: unknown) {
+      console.warn('⚠️ Failed to sync category2_businesses:', error);
+      syncResults.category2Businesses = [];
+      counts.category2Businesses = 0;
     }
 
     // Sync CL Accounts

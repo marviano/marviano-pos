@@ -16,9 +16,8 @@ export function checkElectronAPI() {
   const requiredMethods = [
     'localDbGetAllProducts',
     'localDbGetCategories', 
-    'localDbGetPendingTransactions',
-    'localDbQueueOfflineTransaction',
-    'localDbMarkTransactionSynced',
+    'localDbGetUnsyncedTransactions',
+    'localDbMarkTransactionsSynced',
     'localDbMarkTransactionFailed',
     'localDbGetProductsByCategory2'
   ];

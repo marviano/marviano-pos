@@ -8,6 +8,7 @@ import SlideshowManager from './SlideshowManager';
 import TransactionList from './TransactionList';
 import PrinterSetup from './PrinterSetup';
 import SyncManagement from './SyncManagement';
+import ServerSettings from './ServerSettings';
 import GantiShift from './GantiShift';
 import Laporan from './Laporan';
 import GlobalSettings from './GlobalSettings';
@@ -593,6 +594,15 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
                     Printer Setup
                   </button>
                 )}
+                <button
+                  onClick={() => setActiveSettingsTab('server')}
+                  className={`py-2 px-1 border-b-2 font-semibold text-lg ${activeSettingsTab === 'server'
+                    ? 'border-blue-500 text-blue-600'
+                    : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
+                    }`}
+                >
+                  Server
+                </button>
               </nav>
             </div>
 
@@ -601,6 +611,7 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
               {activeSettingsTab === 'sync' && canAccessSync && <SyncManagement />}
               {activeSettingsTab === 'slideshow' && <SlideshowManager />}
               {activeSettingsTab === 'printers' && canAccessPrinter && <PrinterSetup />}
+              {activeSettingsTab === 'server' && <ServerSettings />}
             </div>
           </div>
         );

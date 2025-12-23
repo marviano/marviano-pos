@@ -147,11 +147,8 @@ declare global {
       localDbUpdateSyncStatus?: (key: string, status: string) => Promise<{ success: boolean }>;
       localDbGetSyncStatus?: (key: string) => Promise<{ key: string; last_sync: number; status: string } | null>;
 
-      // Offline transaction queue
-      localDbQueueOfflineTransaction?: (transactionData: unknown) => Promise<{ success: boolean; offlineTransactionId?: number; error?: string }>;
-      localDbGetPendingTransactions?: () => Promise<unknown[]>;
-      localDbMarkTransactionSynced?: (offlineTransactionId: number) => Promise<{ success: boolean }>;
-      localDbMarkTransactionFailed?: (offlineTransactionId: number) => Promise<{ success: boolean }>;
+      // Transaction sync status (using transactions table directly)
+      localDbMarkTransactionFailed?: (transactionId: string) => Promise<{ success: boolean }>;
       localDbQueueOfflineRefund?: (refundData: unknown) => Promise<{ success: boolean; offlineRefundId?: number; error?: string }>;
       localDbGetPendingRefunds?: () => Promise<unknown[]>;
       localDbMarkRefundSynced?: (offlineRefundId: number) => Promise<{ success: boolean }>;
@@ -515,17 +512,17 @@ declare global {
               price_adjustment: number;
             }>;
           }>;
-          status: 'pending' | 'preparing' | 'ready';
+          status: 'preparing' | 'finished';
         }>;
         createdAt: string;
         customerName?: string;
         customerUnit?: number;
         pickupMethod: 'dine-in' | 'take-away';
-      }) => Promise<{ success: boolean; sentTo: string[] }>;
+      }) => Promise<{ success: boolean; sentTo: string[]; sentToKitchen: number; sentToBarista: number }>;
       websocketBroadcastStatus?: (update: {
         transactionId: string;
         itemId: string;
-        status: 'pending' | 'preparing' | 'ready';
+        status: 'preparing' | 'finished';
         preparedBy?: string;
       }) => Promise<{ success: boolean; sentTo: string[] }>;
     };

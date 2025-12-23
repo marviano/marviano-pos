@@ -123,12 +123,16 @@ class WebSocketServerManager {
      */
     broadcastOrder(order) {
         if (!this.isRunning) {
-            return { success: false, sentTo: [] };
+            return { success: false, sentTo: [], sentToKitchen: 0, sentToBarista: 0 };
         }
         const sentTo = [];
-        // Route items to kitchen (category1_id = 1) or barista (category1_id = 2)
-        const kitchenItems = order.items.filter((item) => item.category1_id === 1);
-        const baristaItems = order.items.filter((item) => item.category1_id === 2);
+        let sentToKitchen = 0;
+        let sentToBarista = 0;
+        // Route items to kitchen (category1_id = 1 or 5) or barista (category1_id = 2 or 3)
+        // Kitchen: category1_id = 1 (Makanan) or 5 (Bakery)
+        // Barista: category1_id = 2 (Minuman) or 3 (Dessert)
+        const kitchenItems = order.items.filter((item) => item.category1_id === 1 || item.category1_id === 5);
+        const baristaItems = order.items.filter((item) => item.category1_id === 2 || item.category1_id === 3);
         // Send to kitchen displays
         if (kitchenItems.length > 0) {
             const kitchenOrder = { ...order, items: kitchenItems };
@@ -139,6 +143,7 @@ class WebSocketServerManager {
                         order: kitchenOrder
                     });
                     sentTo.push(client.id);
+                    sentToKitchen++;
                 }
             });
         }
@@ -152,10 +157,11 @@ class WebSocketServerManager {
                         order: baristaOrder
                     });
                     sentTo.push(client.id);
+                    sentToBarista++;
                 }
             });
         }
-        return { success: true, sentTo };
+        return { success: true, sentTo, sentToKitchen, sentToBarista };
     }
     /**
      * Broadcast status update to all POS clients

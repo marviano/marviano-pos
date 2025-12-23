@@ -86,7 +86,7 @@ export default function Login() {
           throw new Error('Perangkat belum terhubung ke internet. Harap sambungkan terlebih dahulu.');
         }
 
-        setSyncStatus('Menjalankan Sinkronisasi Lengkap. Mohon tunggu...');
+        setSyncStatus('Menjalankan Sinkronisasi Knowledge Base PoS. Mohon tunggu...');
         setSyncProgress(0);
 
         if (typeof offlineSyncService.subscribeSyncProgress === 'function') {
@@ -96,7 +96,7 @@ export default function Login() {
         }
 
         await offlineSyncService.syncFromOnline();
-        setSyncStatus('Sinkronisasi lengkap selesai.');
+        setSyncStatus('Sinkronisasi Knowledge Base PoS selesai.');
         setSyncProgress(100);
         setHasOfflineDb(true);
 

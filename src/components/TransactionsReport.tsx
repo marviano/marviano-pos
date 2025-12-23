@@ -488,11 +488,11 @@ export default function TransactionsReport() {
             <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-4">
               <div className="text-sm font-medium text-gray-600 mb-1">Status</div>
               <div className="flex flex-col gap-2">
-                <span className={`inline-flex items-center px-2 py-1 rounded-full text-xs font-medium ${transaction.status === 'completed'
+                <span className={`inline-flex items-center px-2 py-1 rounded-full text-xs font-medium ${transaction.status === 'paid' || transaction.status === 'completed'
                     ? 'bg-green-100 text-green-800'
                     : 'bg-yellow-100 text-yellow-800'
                   }`}>
-                  {transaction.status}
+                  {transaction.status === 'completed' ? 'paid' : transaction.status}
                 </span>
                 {transaction.refund_status && (
                   <span className="inline-flex items-center px-2 py-1 rounded-full text-xs font-medium bg-red-100 text-red-800">
@@ -874,13 +874,13 @@ export default function TransactionsReport() {
                       )}
                     </td>
                     <td className="px-4 py-3 text-center">
-                      <span className={`inline-flex items-center px-2 py-1 rounded-full text-xs font-medium ${transaction.status === 'completed'
+                      <span className={`inline-flex items-center px-2 py-1 rounded-full text-xs font-medium ${transaction.status === 'paid' || transaction.status === 'completed'
                           ? 'bg-green-100 text-green-800'
                           : transaction.status === 'cancelled'
                             ? 'bg-red-100 text-red-800'
                             : 'bg-yellow-100 text-yellow-800'
                         }`}>
-                        {transaction.status}
+                        {transaction.status === 'completed' ? 'paid' : transaction.status}
                       </span>
                     </td>
                     <td className="px-4 py-3 text-center">

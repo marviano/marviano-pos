@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from 'react';
 import { X, Eye, EyeOff, ChevronDown, Settings, Loader2, RefreshCw, ChevronLeft } from 'lucide-react';
 import Image from 'next/image';
 import { getMostRecentEmail, getSavedEmails } from '@/lib/savedLoginEmails';
+import { getServerSettings, saveServerSettings, type ServerSettings } from '@/lib/serverSettings';
 
 interface LoginPageProps {
   onLogin?: (email: string, password: string) => void;
@@ -37,6 +38,7 @@ export default function LoginPage({
   const [savedEmails, setSavedEmails] = useState<string[]>(() => getSavedEmails());
   const [isDropdownOpen, setIsDropdownOpen] = useState(false);
   const emailFieldRef = useRef<HTMLDivElement | null>(null);
+  const [serverSettings, setServerSettings] = useState<ServerSettings>(() => getServerSettings());
 
   useEffect(() => {
     const emails = getSavedEmails();
@@ -169,58 +171,119 @@ export default function LoginPage({
 
           {isSettingsView ? (
             <div className="flex flex-col justify-between h-full space-y-6" style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}>
-              <div className="space-y-6">
+              <div className="space-y-6 overflow-y-auto pr-2">
                 <div>
                   <h2 className="text-xl font-semibold text-gray-800">Pengaturan</h2>
-                  <p className="text-sm text-gray-500">Kelola sinkronisasi data offline.</p>
+                  <p className="text-sm text-gray-500">Kelola sinkronisasi data offline dan server WebSocket.</p>
                 </div>
-                {syncStatus && (
-                  <p className="text-xs text-blue-600 bg-blue-50 border border-blue-100 rounded px-2 py-2">
-                    {syncStatus}
-                  </p>
-                )}
-                {syncError && (
-                  <p className="text-xs text-red-600 bg-red-50 border border-red-100 rounded px-2 py-2">
-                    {syncError}
-                  </p>
-                )}
-                {typeof syncProgress === 'number' && (
-                  <div className="space-y-1">
-                    <div className="flex justify-between text-xs text-gray-600">
-                      <span>Progres Sinkronisasi</span>
-                      <span>{Math.max(0, Math.min(100, Math.round(syncProgress)))}%</span>
-                    </div>
-                    <div className="h-2 rounded-full bg-gray-200 overflow-hidden">
-                      <div
-                        className="h-full bg-blue-500 transition-all duration-300 ease-out"
-                        style={{ width: `${Math.max(0, Math.min(100, syncProgress))}%` }}
-                      />
+                
+                {/* Server Settings */}
+                <div className="space-y-4 border-t border-gray-200 pt-4">
+                  <div>
+                    <h3 className="text-sm font-semibold text-gray-700 mb-3">Server WebSocket</h3>
+                    <p className="text-xs text-gray-500 mb-3">Konfigurasi server untuk komunikasi dengan Dapur dan Barista.</p>
+                    
+                    <div className="space-y-3">
+                      <div>
+                        <label className="block text-xs font-medium text-gray-700 mb-1">
+                          Alamat Server
+                        </label>
+                        <input
+                          type="text"
+                          value={serverSettings.address}
+                          onChange={(e) => setServerSettings(prev => ({ ...prev, address: e.target.value }))}
+                          placeholder="localhost atau IP address"
+                          className="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 text-gray-900"
+                        />
+                        <p className="mt-1 text-xs text-gray-500">
+                          Contoh: localhost, 192.168.1.16
+                        </p>
+                      </div>
+                      
+                      <div>
+                        <label className="block text-xs font-medium text-gray-700 mb-1">
+                          Port Server
+                        </label>
+                        <input
+                          type="number"
+                          value={serverSettings.port}
+                          onChange={(e) => setServerSettings(prev => ({ ...prev, port: parseInt(e.target.value) || 19967 }))}
+                          min="1024"
+                          max="65535"
+                          className="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 text-gray-900"
+                        />
+                        <p className="mt-1 text-xs text-gray-500">
+                          Port default: 19967 (1024-65535)
+                        </p>
+                      </div>
+                      
+                      <button
+                        type="button"
+                        onClick={() => {
+                          saveServerSettings(serverSettings);
+                          alert('Pengaturan server berhasil disimpan!');
+                        }}
+                        className="w-full bg-blue-600 hover:bg-blue-700 text-white text-sm font-semibold px-4 py-2 rounded-lg transition-colors"
+                      >
+                        Simpan Pengaturan Server
+                      </button>
                     </div>
                   </div>
-                )}
-                <button
-                  type="button"
-                  onClick={async () => {
-                    if (onSyncRequest) {
-                      await onSyncRequest();
-                    }
-                  }}
-                  className="w-full flex items-center justify-center gap-2 bg-blue-600 hover:bg-blue-700 text-white text-sm font-semibold px-4 py-3 rounded-lg transition-colors disabled:bg-blue-300"
-                  style={{ WebkitAppRegion: 'no-drag', cursor: isSyncing ? 'not-allowed' : 'pointer' } as React.CSSProperties}
-                  disabled={isSyncing}
-                >
-                  {isSyncing ? (
-                    <>
-                      <Loader2 className="w-4 h-4 animate-spin" />
-                      Sedang Sinkronisasi
-                    </>
-                  ) : (
-                    <>
-                      <RefreshCw className="w-4 h-4" />
-                      Jalankan Sinkronisasi Lengkap
-                    </>
+                </div>
+                
+                {/* Sync Settings */}
+                <div className="space-y-4 border-t border-gray-200 pt-4">
+                  <div>
+                    <h3 className="text-sm font-semibold text-gray-700 mb-3">Sinkronisasi Data</h3>
+                  </div>
+                  {syncStatus && (
+                    <p className="text-xs text-blue-600 bg-blue-50 border border-blue-100 rounded px-2 py-2">
+                      {syncStatus}
+                    </p>
                   )}
-                </button>
+                  {syncError && (
+                    <p className="text-xs text-red-600 bg-red-50 border border-red-100 rounded px-2 py-2">
+                      {syncError}
+                    </p>
+                  )}
+                  {typeof syncProgress === 'number' && (
+                    <div className="space-y-1">
+                      <div className="flex justify-between text-xs text-gray-600">
+                        <span>Progres Sinkronisasi</span>
+                        <span>{Math.max(0, Math.min(100, Math.round(syncProgress)))}%</span>
+                      </div>
+                      <div className="h-2 rounded-full bg-gray-200 overflow-hidden">
+                        <div
+                          className="h-full bg-blue-500 transition-all duration-300 ease-out"
+                          style={{ width: `${Math.max(0, Math.min(100, syncProgress))}%` }}
+                        />
+                      </div>
+                    </div>
+                  )}
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      if (onSyncRequest) {
+                        await onSyncRequest();
+                      }
+                    }}
+                    className="w-full flex items-center justify-center gap-2 bg-blue-600 hover:bg-blue-700 text-white text-sm font-semibold px-4 py-3 rounded-lg transition-colors disabled:bg-blue-300"
+                    style={{ WebkitAppRegion: 'no-drag', cursor: isSyncing ? 'not-allowed' : 'pointer' } as React.CSSProperties}
+                    disabled={isSyncing}
+                  >
+                    {isSyncing ? (
+                      <>
+                        <Loader2 className="w-4 h-4 animate-spin" />
+                        Sedang Sinkronisasi
+                      </>
+                    ) : (
+                      <>
+                        <RefreshCw className="w-4 h-4" />
+                        Sinkronisasi Knowledge Base PoS
+                      </>
+                    )}
+                  </button>
+                </div>
               </div>
               <button
                 type="button"

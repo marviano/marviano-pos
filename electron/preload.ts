@@ -92,11 +92,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.invoke('localdb-save-printer-config', printerType, systemPrinterName, extraSettings),
   localDbGetPrinterConfigs: () => ipcRenderer.invoke('localdb-get-printer-configs'),
 
-  // Offline transaction queue
-  localDbQueueOfflineTransaction: (transactionData: UnknownRecord) => ipcRenderer.invoke('localdb-queue-offline-transaction', transactionData),
-  localDbGetPendingTransactions: () => ipcRenderer.invoke('localdb-get-pending-transactions'),
-  localDbMarkTransactionSynced: (offlineTransactionId: number) => ipcRenderer.invoke('localdb-mark-transaction-synced', offlineTransactionId),
-  localDbMarkTransactionFailed: (offlineTransactionId: number) => ipcRenderer.invoke('localdb-mark-transaction-failed', offlineTransactionId),
+  // Transaction sync status (using transactions table directly)
+  localDbMarkTransactionFailed: (transactionId: string) => ipcRenderer.invoke('localdb-mark-transaction-failed', transactionId),
   localDbQueueOfflineRefund: (refundData: UnknownRecord) => ipcRenderer.invoke('localdb-queue-offline-refund', refundData),
   localDbGetPendingRefunds: () => ipcRenderer.invoke('localdb-get-pending-refunds'),
   localDbMarkRefundSynced: (offlineRefundId: number) => ipcRenderer.invoke('localdb-mark-refund-synced', offlineRefundId),

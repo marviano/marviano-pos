@@ -21,7 +21,7 @@ export interface OrderItem {
   customNote?: string;
   bundleSelections?: any;
   customizations?: any;
-  status: 'pending' | 'preparing' | 'ready';
+  status: 'preparing' | 'finished';
 }
 
 export interface OrderData {
@@ -38,7 +38,7 @@ export interface OrderData {
 export interface StatusUpdate {
   transactionId: string;
   itemId: string;
-  status: 'pending' | 'preparing' | 'ready';
+  status: 'preparing' | 'finished';
   preparedBy?: string;
 }
 
@@ -177,16 +177,20 @@ export class WebSocketServerManager {
   /**
    * Broadcast order to appropriate displays
    */
-  broadcastOrder(order: OrderData): { success: boolean; sentTo: string[] } {
+  broadcastOrder(order: OrderData): { success: boolean; sentTo: string[]; sentToKitchen: number; sentToBarista: number } {
     if (!this.isRunning) {
-      return { success: false, sentTo: [] };
+      return { success: false, sentTo: [], sentToKitchen: 0, sentToBarista: 0 };
     }
 
     const sentTo: string[] = [];
+    let sentToKitchen = 0;
+    let sentToBarista = 0;
 
-    // Route items to kitchen (category1_id = 1) or barista (category1_id = 2)
-    const kitchenItems = order.items.filter((item) => item.category1_id === 1);
-    const baristaItems = order.items.filter((item) => item.category1_id === 2);
+    // Route items to kitchen (category1_id = 1 or 5) or barista (category1_id = 2 or 3)
+    // Kitchen: category1_id = 1 (Makanan) or 5 (Bakery)
+    // Barista: category1_id = 2 (Minuman) or 3 (Dessert)
+    const kitchenItems = order.items.filter((item) => item.category1_id === 1 || item.category1_id === 5);
+    const baristaItems = order.items.filter((item) => item.category1_id === 2 || item.category1_id === 3);
 
     // Send to kitchen displays
     if (kitchenItems.length > 0) {
@@ -198,6 +202,7 @@ export class WebSocketServerManager {
             order: kitchenOrder
           });
           sentTo.push(client.id);
+          sentToKitchen++;
         }
       });
     }
@@ -212,11 +217,12 @@ export class WebSocketServerManager {
             order: baristaOrder
           });
           sentTo.push(client.id);
+          sentToBarista++;
         }
       });
     }
 
-    return { success: true, sentTo };
+    return { success: true, sentTo, sentToKitchen, sentToBarista };
   }
 
   /**

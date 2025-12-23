@@ -64,15 +64,16 @@ export default function Home() {
       // Just accessing it ensures the module is loaded
       // console.log('🔍 [PAGE] System POS Sync Service:', systemPosSyncService);
 
+      // DISABLED: system_pos database has been dropped, sync service is disabled
       // Trigger initial sync check
-      if (systemPosSyncService) {
-        // Service should auto-start, but we can manually trigger if needed
-        setTimeout(() => {
-          systemPosSyncService.triggerSync().catch(err => {
-            console.error('❌ [PAGE] Failed to trigger System POS sync:', err);
-          });
-        }, 2000); // Wait 2 seconds after page load
-      }
+      // if (systemPosSyncService) {
+      //   // Service should auto-start, but we can manually trigger if needed
+      //   setTimeout(() => {
+      //     systemPosSyncService.triggerSync().catch(err => {
+      //       console.error('❌ [PAGE] Failed to trigger System POS sync:', err);
+      //     });
+      //   }, 2000); // Wait 2 seconds after page load
+      // }
     }
   }, []);
 

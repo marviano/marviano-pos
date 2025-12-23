@@ -52,49 +52,47 @@ export async function fetchProducts(
     return await fetchFromLocalDatabase(category2Name, transactionType, options);
   }
 
-  // For online tabs (qpon, gofood, etc), prioritize fetching from offline database first
-  // to ensure instant loading, then optionally refresh from online in background
+  // For online tabs (qpon, gofood, etc), ALWAYS use offline database first (offline-first)
+  // SQLite is populated at app startup, so we should never need blocking API calls
+  // Only refresh from online in background if needed
   if (options?.platform) {
-    // Attempt to fetch locally first
+    // Always fetch from local database first (offline-first)
     const localProducts = await fetchFromLocalDatabase(category2Name, transactionType, options);
 
-    // If we have local data, return it immediately
-    if (localProducts.length > 0) {
+    // Trigger background refresh if online (non-blocking)
+    // This ensures we have the latest data but doesn't block the UI
+    if (options.isOnline) {
+      // Define a separate function for the background fetch to avoid recursive loops
+      const backgroundRefresh = async () => {
+        try {
+          let url = category2Name ? getApiUrl(`/api/products?category2_name=${encodeURIComponent(category2Name)}`) : getApiUrl('/api/products');
+          if (options?.businessId) url += (url.includes('?') ? '&' : '?') + `businessId=${options.businessId}`;
+          if (transactionType) url += (url.includes('?') ? '&' : '?') + `transaction_type=${transactionType}`;
+          if (options?.isOnline) url += (url.includes('?') ? '&' : '?') + `online=true`;
+          if (options?.platform) url += (url.includes('?') ? '&' : '?') + `platform=${options.platform}`;
 
-      // Trigger background refresh if online
-      // We use a non-blocking promise here
-      if (options.isOnline) {
-        // Define a separate function for the background fetch to avoid recursive loops if we called fetchProducts
-        const backgroundRefresh = async () => {
-          try {
-            let url = category2Name ? getApiUrl(`/api/products?category2_name=${encodeURIComponent(category2Name)}`) : getApiUrl('/api/products');
-            if (options?.businessId) url += (url.includes('?') ? '&' : '?') + `businessId=${options.businessId}`;
-            if (transactionType) url += (url.includes('?') ? '&' : '?') + `transaction_type=${transactionType}`;
-            if (options?.isOnline) url += (url.includes('?') ? '&' : '?') + `online=true`;
-            if (options?.platform) url += (url.includes('?') ? '&' : '?') + `platform=${options.platform}`;
-
-            const response = await fetch(url, { cache: 'no-store' });
-            if (response.ok) {
-              const data = await response.json();
-              if (data.success && data.products && isElectron) {
-                const electronAPI = typeof window !== 'undefined' ? (window as { electronAPI?: UnknownRecord }).electronAPI : undefined;
-                if (electronAPI?.localDbUpsertProducts) {
-                  await (electronAPI.localDbUpsertProducts as (rows: unknown[]) => Promise<{ success: boolean }>)(data.products);
-                  // Dispatch event to update UI if needed
-                  window.dispatchEvent(new CustomEvent('dataSynced'));
-                }
+          const response = await fetch(url, { cache: 'no-store' });
+          if (response.ok) {
+            const data = await response.json();
+            if (data.success && data.products && isElectron) {
+              const electronAPI = typeof window !== 'undefined' ? (window as { electronAPI?: UnknownRecord }).electronAPI : undefined;
+              if (electronAPI?.localDbUpsertProducts) {
+                await (electronAPI.localDbUpsertProducts as (rows: unknown[]) => Promise<{ success: boolean }>)(data.products);
+                // Dispatch event to update UI if needed
+                window.dispatchEvent(new CustomEvent('dataSynced'));
               }
             }
-          } catch (e) {
-            console.warn('Background refresh failed:', e);
           }
-        };
-        backgroundRefresh();
-      }
-
-      return localProducts;
+        } catch (e) {
+          console.warn('Background refresh failed:', e);
+        }
+      };
+      backgroundRefresh();
     }
-    // If local is empty, fall through to online fetch below
+
+    // ALWAYS return local products immediately (offline-first, no blocking API calls)
+    // Even if empty, return it - SQLite should have data from app startup sync
+    return localProducts;
   }
 
   try {
@@ -246,6 +244,63 @@ export async function fetchCategories(
   if (options?.isOnline === false) {
     // console.log('📱 [OFFLINE MODE] Skipping API call for categories, using local database directly');
     return await fetchCategoriesFromLocalDatabase(transactionType, options);
+  }
+
+  // For online tabs (qpon, gofood, etc), ALWAYS use offline database first (offline-first)
+  // SQLite is populated at app startup, so we should never need blocking API calls
+  // Only refresh from online in background if needed
+  if (options?.platform) {
+    // Always fetch from local database first (offline-first)
+    const localCategories = await fetchCategoriesFromLocalDatabase(transactionType, options);
+
+    // Trigger background refresh if online (non-blocking)
+    if (options.isOnline) {
+      const backgroundRefresh = async () => {
+        try {
+          let url = getApiUrl('/api/categories');
+          const params = new URLSearchParams();
+          if (options?.businessId) {
+            params.append('businessId', String(options.businessId));
+          }
+          if (transactionType) {
+            params.append('transaction_type', transactionType);
+          }
+          if (options?.isOnline) {
+            params.append('online', 'true');
+          }
+          if (options?.platform) {
+            params.append('platform', options.platform);
+          }
+          if (params.toString()) {
+            url += '?' + params.toString();
+          }
+
+          const response = await fetch(url, { cache: 'no-store' });
+          if (response.ok) {
+            const data = await response.json();
+            if (data.success && data.categories && isElectron) {
+              const electronAPI = typeof window !== 'undefined' ? (window as { electronAPI?: UnknownRecord }).electronAPI : undefined;
+              if (electronAPI?.localDbUpsertCategories) {
+                await (electronAPI.localDbUpsertCategories as (rows: unknown[]) => Promise<{ success: boolean }>)(
+                  data.categories.map((cat: Category) => ({
+                    jenis: cat.jenis,
+                    updated_at: Date.now(),
+                  }))
+                );
+                // Dispatch event to update UI if needed
+                window.dispatchEvent(new CustomEvent('dataSynced'));
+              }
+            }
+          }
+        } catch (e) {
+          console.warn('Background refresh failed:', e);
+        }
+      };
+      backgroundRefresh();
+    }
+
+    // ALWAYS return local categories immediately (offline-first, no blocking API calls)
+    return localCategories;
   }
 
   try {

@@ -19,7 +19,6 @@ import { smartSyncService } from '@/lib/smartSync';
 import { getApiUrl } from '@/lib/api';
 import { useAuth } from '@/hooks/useAuth';
 import { getAutoSyncEnabled, setAutoSyncEnabled, onAutoSyncSettingChanged } from '@/lib/autoSyncSettings';
-import SystemPosDebugTool from './SystemPosDebugTool';
 
 type UnknownRecord = Record<string, unknown>;
 // type SmartSyncStatus = ReturnType<typeof smartSyncService.getStatus>;
@@ -249,7 +248,6 @@ export default function SyncManagement() {
   const [showGatePasswordModal, setShowGatePasswordModal] = useState(false);
   const [orphanedTransactions, setOrphanedTransactions] = useState<OfflineTransaction[]>([]);
   const [showOrphanedData, setShowOrphanedData] = useState(false);
-  const [showDebugTool, setShowDebugTool] = useState(false);
   const [dangerFrom, setDangerFrom] = useState<string>('');
   const [dangerTo, setDangerTo] = useState<string>('');
   const [copiedSqlPreview, setCopiedSqlPreview] = useState<string | null>(null);
@@ -292,11 +290,11 @@ export default function SyncManagement() {
   useEffect(() => {
     const checkPendingTransactions = async () => {
       const electronAPI = getElectronAPI();
-      if (!electronAPI?.localDbGetPendingTransactions) {
+      if (!electronAPI?.localDbGetUnsyncedTransactions) {
         return;
       }
       try {
-        const pending = await electronAPI.localDbGetPendingTransactions();
+        const pending = await electronAPI.localDbGetUnsyncedTransactions();
         // Pending count is now managed by syncStatus state
         console.log('Pending transactions:', Array.isArray(pending) ? pending.length : 0);
       } catch (error) {
@@ -2291,36 +2289,6 @@ WHERE ${baseWhere};`;
           </div>
         </div>
 
-        {/* System-POS Debug Tool - Prominent Location */}
-        <div className="bg-gradient-to-r from-blue-50 to-indigo-50 dark:from-blue-900/20 dark:to-indigo-900/20 rounded-lg shadow-md border-2 border-blue-300 dark:border-blue-700 mb-6">
-          <button
-            onClick={() => setShowDebugTool(!showDebugTool)}
-            className="w-full px-6 py-4 flex items-center justify-between hover:bg-blue-100/50 dark:hover:bg-blue-900/30 transition-colors rounded-t-lg"
-          >
-            <div className="flex items-center gap-3">
-              <AlertCircle className="w-6 h-6 text-blue-600 dark:text-blue-400" />
-              <div className="flex flex-col items-start">
-                <h3 className="text-lg font-bold text-gray-900 dark:text-gray-100">
-                  🔍 System-POS Sync Debug Tool
-                </h3>
-                <p className="text-xs text-gray-600 dark:text-gray-400 mt-0.5">
-                  Debug missing transactions - Check why transactions aren&apos;t syncing to System-POS
-                </p>
-              </div>
-            </div>
-            {showDebugTool ? (
-              <X className="w-5 h-5 text-gray-500" />
-            ) : (
-              <AlertCircle className="w-5 h-5 text-blue-400" />
-            )}
-          </button>
-          {showDebugTool && (
-            <div className="border-t-2 border-blue-300 dark:border-blue-700 p-6 bg-white dark:bg-gray-800 rounded-b-lg">
-              <SystemPosDebugTool />
-            </div>
-          )}
-        </div>
-
         {/* System POS Status */}
         <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-4 mb-6">
           <div className="flex items-center justify-between">
@@ -2570,11 +2538,11 @@ WHERE ${baseWhere};`;
                             </td>
                             <td className="px-2 py-1">
                               <div className="flex items-center gap-1">
-                                <span className={`inline-flex px-1.5 py-0.5 text-[9px] font-semibold rounded-full ${transaction.status === 'completed'
+                                <span className={`inline-flex px-1.5 py-0.5 text-[9px] font-semibold rounded-full ${transaction.status === 'paid' || transaction.status === 'completed'
                                   ? 'bg-green-100 text-green-800'
                                   : 'bg-yellow-100 text-yellow-800'
                                   }`}>
-                                  {transaction.status}
+                                  {transaction.status === 'completed' ? 'paid' : transaction.status}
                                 </span>
                                 {isChecked && existsOnServer && !isIdentical && (
                                   <span className="text-[8px] text-yellow-700" title="Sudah ada di server tapi berbeda">
@@ -2683,11 +2651,11 @@ WHERE ${baseWhere};`;
                               {formatPrice(transaction.final_amount)}
                             </td>
                             <td className="px-3 py-2">
-                              <span className={`inline-flex px-2 py-1 text-xs font-semibold rounded-full ${transaction.status === 'completed'
+                              <span className={`inline-flex px-2 py-1 text-xs font-semibold rounded-full ${transaction.status === 'paid' || transaction.status === 'completed'
                                 ? 'bg-green-100 text-green-800'
                                 : 'bg-yellow-100 text-yellow-800'
                                 }`}>
-                                {transaction.status}
+                                {transaction.status === 'completed' ? 'paid' : transaction.status}
                               </span>
                             </td>
                           </tr>

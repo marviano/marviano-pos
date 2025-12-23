@@ -211,7 +211,37 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
           const data = await response.json();
           if (data.success) {
             const transaction = data.transaction;
-            // Ensure all items have product_name - fetch products if needed for fallback
+            
+            // FIX: If API doesn't return customizations, fetch from local DB and merge
+            if (transaction && transaction.items && Array.isArray(transaction.items)) {
+              const needsCustomizations = transaction.items.some((item: { customizations?: unknown }) => 
+                !item.customizations || (Array.isArray(item.customizations) && item.customizations.length === 0)
+              );
+              
+              if (needsCustomizations && typeof window !== 'undefined' && (window as { electronAPI?: ElectronAPI }).electronAPI) {
+                try {
+                  // Fetch items with customizations from local DB
+                  const localItems: ElectronTransactionItem[] = await (window as { electronAPI: ElectronAPI }).electronAPI.localDbGetTransactionItems(transactionId);
+                  
+                  // Merge customizations from local DB into API response
+                  transaction.items = transaction.items.map((apiItem: { id?: string; customizations?: unknown; custom_note?: string }) => {
+                    const localItem = localItems.find(li => String(li.id) === String(apiItem.id));
+                    if (localItem && localItem.customizations && Array.isArray(localItem.customizations) && localItem.customizations.length > 0) {
+                      return {
+                        ...apiItem,
+                        customizations: localItem.customizations,
+                        custom_note: localItem.custom_note || apiItem.custom_note
+                      };
+                    }
+                    return apiItem;
+                  });
+                } catch (error) {
+                  console.warn('Failed to fetch customizations from local DB:', error);
+                }
+              }
+            }
+            
+            // Ensure all items have product_name, customizations, and custom_note
             if (transaction && transaction.items && Array.isArray(transaction.items)) {
               // If any item is missing product_name, try to get it from local DB as fallback
               const needsProductName = transaction.items.some((item: { product_name?: string; product_id?: number }) =>
@@ -221,29 +251,38 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
               if (needsProductName && typeof window !== 'undefined' && (window as { electronAPI?: ElectronAPI }).electronAPI) {
                 try {
                   const products: ElectronProduct[] = await (window as { electronAPI: ElectronAPI }).electronAPI.localDbGetAllProducts();
-                  transaction.items = transaction.items.map((item: { product_name?: string; product_id?: number }) => {
+                  transaction.items = transaction.items.map((item: { product_name?: string; product_id?: number; customizations?: unknown; custom_note?: string }) => {
+                    const mappedItem: { product_name?: string; product_id?: number; customizations?: unknown; custom_note?: string } = { ...item };
                     if (!item.product_name && item.product_id) {
                       const product = products.find((p) => p.id === item.product_id);
-                      return {
-                        ...item,
-                        product_name: product?.nama || 'Unknown Product'
-                      };
+                      mappedItem.product_name = product?.nama || 'Unknown Product';
                     }
-                    return item;
+                    // Ensure customizations and custom_note are included (even if empty/null)
+                    if (!mappedItem.customizations) {
+                      mappedItem.customizations = [];
+                    }
+                    if (mappedItem.custom_note === undefined || mappedItem.custom_note === null) {
+                      mappedItem.custom_note = undefined;
+                    }
+                    return mappedItem;
                   });
                 } catch (error) {
                   console.warn('Failed to fetch products for fallback:', error);
-                  // Ensure at least Unknown Product is set
-                  transaction.items = transaction.items.map((item: { product_name?: string }) => ({
+                  // Ensure at least Unknown Product is set, and customizations/custom_note
+                  transaction.items = transaction.items.map((item: { product_name?: string; customizations?: unknown; custom_note?: string }) => ({
                     ...item,
-                    product_name: item.product_name || 'Unknown Product'
+                    product_name: item.product_name || 'Unknown Product',
+                    customizations: item.customizations || [],
+                    custom_note: item.custom_note || undefined
                   }));
                 }
               } else {
-                // Ensure at least Unknown Product is set for items without product_name
-                transaction.items = transaction.items.map((item: { product_name?: string }) => ({
+                // Ensure at least Unknown Product is set, and customizations/custom_note
+                transaction.items = transaction.items.map((item: { product_name?: string; customizations?: unknown; custom_note?: string }) => ({
                   ...item,
-                  product_name: item.product_name || 'Unknown Product'
+                  product_name: item.product_name || 'Unknown Product',
+                  customizations: item.customizations || [],
+                  custom_note: item.custom_note || undefined
                 }));
               }
             }
@@ -312,8 +351,8 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
                 quantity: item.quantity,
                 unit_price: item.unit_price,
                 total_price: item.total_price,
-                custom_note: item.custom_note,
-                customizations: item.customizations || [],
+                custom_note: item.custom_note || undefined,
+                customizations: Array.isArray(item.customizations) ? item.customizations : (item.customizations ? [item.customizations] : []),
                 bundleSelections: item.bundleSelections || undefined
               };
             }),
@@ -530,7 +569,6 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
         }
       }
 
-      console.log(`📊 [TransactionList] Receipt audit log: ${entries.length} total entries, ${Object.keys(originalCounters).length} with counters`);
       return { success: true, counters: originalCounters };
     } catch (err) {
       console.error('Failed to fetch Receipt audit log:', err);
@@ -622,7 +660,7 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
             note: tx.note || null,
             receipt_number: tx.receipt_number,
             transaction_type: (tx.transaction_type || 'drinks') as Transaction['transaction_type'],
-            status: tx.status || 'completed',
+            status: tx.status || 'paid',
             created_at: tx.created_at,
             shift_uuid: tx.shift_uuid, // Include shift_uuid
             user_name: user?.name || 'Unknown User',
@@ -700,19 +738,6 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
       const receiptResult = await fetchReceiptPrintedIds();
       setReceiptCounters(receiptResult.counters);
 
-      console.log('🔍 [TransactionList] Receipt Result:', {
-        success: receiptResult.success,
-        countersCount: Object.keys(receiptResult.counters).length,
-        sampleCounters: Object.entries(receiptResult.counters).slice(0, 5),
-        dateRange: { fromDate, toDate },
-        fromEpoch: fromDate ? new Date(fromDate).getTime() : null,
-        toEpoch: toDate ? new Date(toDate + 'T23:59:59').getTime() : null,
-        sampleTransactionDates: filteredTransactions.slice(0, 3).map(tx => ({
-          id: tx.id,
-          created_at: tx.created_at,
-          createdEpoch: new Date(tx.created_at).getTime()
-        }))
-      });
 
       return true;
     } catch (err) {
@@ -744,7 +769,7 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
   }, [businessId, fromDate, toDate, isOnlineMode]);
 
   // State for refresh click counter
-  const [refreshClickCount, setRefreshClickCount] = useState(0);
+  const [, setRefreshClickCount] = useState(0);
   const [lastRefreshClick, setLastRefreshClick] = useState(0);
 
   // Debug log for refresh clicks
@@ -897,29 +922,6 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
       })
       : transactions); // Fallback: show all if no receiptize data available
 
-  // Debug logging
-  console.log('🔍 [TransactionList] Filter Debug:', {
-    showAllTransactions,
-    totalTransactions: transactions.length,
-    receiptizePrintedIds: receiptizePrintedIds.size,
-    receiptizeCountersCount: Object.keys(receiptizeCounters).length,
-    receiptCountersCount: Object.keys(receiptCounters).length,
-    filteredTransactions: baseTransactions.length,
-    sampleReceiptizeCounters: Object.entries(receiptizeCounters).slice(0, 3),
-    sampleReceiptCounters: Object.entries(receiptCounters).slice(0, 3),
-    sampleTransactionIds: baseTransactions.slice(0, 3).map(tx => String(tx.id)),
-    sampleTransactionAnalysis: baseTransactions.slice(0, 3).map(tx => {
-      const txId = String(tx.id);
-      return {
-        id: txId,
-        hasReceiptizeCounter: typeof receiptizeCounters[txId] === 'number' && receiptizeCounters[txId] > 0,
-        hasReceiptCounter: typeof receiptCounters[txId] === 'number' && receiptCounters[txId] > 0,
-        isInReceiptizeIds: receiptizePrintedIds.has(txId),
-        receiptizeCounter: receiptizeCounters[txId],
-        receiptCounter: receiptCounters[txId]
-      };
-    })
-  });
 
   const resolveReceiptSequence = (tx: Transaction) => {
     const txId = String(tx.id);

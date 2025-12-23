@@ -445,11 +445,20 @@ function createWindows() {
             localDb = new better_sqlite3_1.default(actualDbPath /*, { verbose: console.log } */); // Optional: enable verbose for queries
             // Test access
             const tableCount = localDb.prepare('SELECT count(*) as count FROM sqlite_master').get();
-            const txCount = localDb.prepare('SELECT count(*) as count FROM transactions').get();
+            // Check if transactions table exists before querying it (might be a new database)
+            let txCount = 0;
+            try {
+                const txCountResult = localDb.prepare('SELECT count(*) as count FROM transactions').get();
+                txCount = txCountResult?.count || 0;
+            }
+            catch (txError) {
+                // Table doesn't exist yet - this is okay for new databases
+                console.log('ℹ️ [CREATE WINDOWS] Transactions table does not exist yet (new database)');
+            }
             originalConsoleLog('✅ Database opened successfully (Plaintext). Tables found:', tableCount.count);
             try {
                 const dbStats = fs.statSync(actualDbPath);
-                fs.appendFileSync(diagLogPath2, `${new Date().toISOString()} ✅ Database opened successfully. Tables: ${tableCount.count}, Transactions: ${txCount.count}, FileSize: ${dbStats.size} bytes\n`);
+                fs.appendFileSync(diagLogPath2, `${new Date().toISOString()} ✅ Database opened successfully. Tables: ${tableCount.count}, Transactions: ${txCount}, FileSize: ${dbStats.size} bytes\n`);
             }
             catch (e) { }
             // If we have very few tables, it might be a new/empty database
@@ -462,20 +471,30 @@ function createWindows() {
         catch (dbErr) {
             originalConsoleError('❌ Failed to open database:', dbErr);
             originalConsoleError('❌ Database path attempted:', discoveredDbPath || dbPath);
+            originalConsoleError('❌ Error details:', dbErr instanceof Error ? dbErr.message : String(dbErr));
+            originalConsoleError('❌ Error stack:', dbErr instanceof Error ? dbErr.stack : 'No stack trace');
             localDb = null; // Only reset if database opening fails
-            throw dbErr;
+            // Don't throw - allow window to be created even if database fails
+            // The app can still run, just without offline database support
+            originalConsoleError('⚠️ Continuing without database - app will run in online-only mode');
         }
         // CRITICAL: Database is now open - don't reset localDb if errors occur after this point
         // Enable WAL mode for better concurrency (must be done after keying)
-        try {
-            localDb.pragma('journal_mode = WAL');
-            localDb.pragma('synchronous = NORMAL');
-            localDb.pragma('cache_size = 10000');
-            localDb.pragma('temp_store = MEMORY');
+        if (localDb) {
+            try {
+                localDb.pragma('journal_mode = WAL');
+                localDb.pragma('synchronous = NORMAL');
+                localDb.pragma('cache_size = 10000');
+                localDb.pragma('temp_store = MEMORY');
+                originalConsoleLog('✅ Database pragmas set successfully');
+            }
+            catch (pragmaErr) {
+                originalConsoleError('⚠️ Failed to set database pragmas (non-critical):', pragmaErr);
+                // Don't reset localDb - database is still usable
+            }
         }
-        catch (pragmaErr) {
-            originalConsoleError('⚠️ Failed to set database pragmas (non-critical):', pragmaErr);
-            // Don't reset localDb - database is still usable
+        else {
+            originalConsoleError('⚠️ Cannot set database pragmas - localDb is null');
         }
         // Initialize MySQL Connection Pool for Shadow DB
         console.log('🔍 Initializing MySQL Shadow DB connection...');
@@ -540,107 +559,286 @@ function createWindows() {
             .then(() => console.log('✅ MySQL Shadow DB schema verified'))
             .catch(err => console.error('❌ MySQL Shadow DB connection failed:', err));
         // Schema migration: Add synced_at column if it doesn't exist
-        try {
-            const schemaCheck = localDb.prepare(`PRAGMA table_info(transactions)`).all();
-            const hasSyncedAt = schemaCheck.some(col => col.name === 'synced_at');
-            if (!hasSyncedAt) {
-                console.log('📋 Migrating database: Adding synced_at column...');
-                localDb.prepare(`ALTER TABLE transactions ADD COLUMN synced_at INTEGER`).run();
-                console.log('✅ Migration complete');
-            }
-            const hasVoucherType = schemaCheck.some(col => col.name === 'voucher_type');
-            if (!hasVoucherType) {
-                console.log('📋 Migrating database: Adding transactions.voucher_type column...');
-                localDb.prepare(`ALTER TABLE transactions ADD COLUMN voucher_type TEXT DEFAULT 'none'`).run();
-            }
-            const hasVoucherValue = schemaCheck.some(col => col.name === 'voucher_value');
-            if (!hasVoucherValue) {
-                console.log('📋 Migrating database: Adding transactions.voucher_value column...');
-                localDb.prepare(`ALTER TABLE transactions ADD COLUMN voucher_value REAL`).run();
-            }
-            const hasVoucherLabel = schemaCheck.some(col => col.name === 'voucher_label');
-            if (!hasVoucherLabel) {
-                console.log('📋 Migrating database: Adding transactions.voucher_label column...');
-                localDb.prepare(`ALTER TABLE transactions ADD COLUMN voucher_label TEXT`).run();
-            }
-            const hasCustomerUnit = schemaCheck.some(col => col.name === 'customer_unit');
-            if (!hasCustomerUnit) {
-                console.log('📋 Migrating database: Adding transactions.customer_unit column...');
-                localDb.prepare(`ALTER TABLE transactions ADD COLUMN customer_unit INTEGER`).run();
-            }
-            const hasRefundStatus = schemaCheck.some(col => col.name === 'refund_status');
-            if (!hasRefundStatus) {
-                console.log('📋 Migrating database: Adding transactions.refund_status column...');
-                localDb.prepare(`ALTER TABLE transactions ADD COLUMN refund_status TEXT DEFAULT 'none'`).run();
-            }
-            const hasRefundTotal = schemaCheck.some(col => col.name === 'refund_total');
-            if (!hasRefundTotal) {
-                console.log('📋 Migrating database: Adding transactions.refund_total column...');
-                localDb.prepare(`ALTER TABLE transactions ADD COLUMN refund_total REAL DEFAULT 0.0`).run();
-            }
-            const hasLastRefundedAt = schemaCheck.some(col => col.name === 'last_refunded_at');
-            if (!hasLastRefundedAt) {
-                console.log('📋 Migrating database: Adding transactions.last_refunded_at column...');
-                localDb.prepare(`ALTER TABLE transactions ADD COLUMN last_refunded_at TEXT`).run();
-            }
+        // Only run migrations if database is available
+        if (!localDb) {
+            originalConsoleError('⚠️ Cannot run migrations - localDb is null');
         }
-        catch (e) {
-            console.log('⚠️ Migration check failed:', e);
-        }
-        // Schema migration: ensure new cash tracking columns exist on shifts
-        try {
-            const shiftSchema = localDb.prepare(`PRAGMA table_info(shifts)`).all();
-            const hasKasAkhir = shiftSchema.some(col => col.name === 'kas_akhir');
-            if (!hasKasAkhir) {
-                console.log('📋 Migrating database: Adding shifts.kas_akhir column...');
-                localDb.prepare(`ALTER TABLE shifts ADD COLUMN kas_akhir REAL`).run();
-            }
-            const hasKasExpected = shiftSchema.some(col => col.name === 'kas_expected');
-            if (!hasKasExpected) {
-                console.log('📋 Migrating database: Adding shifts.kas_expected column...');
-                localDb.prepare(`ALTER TABLE shifts ADD COLUMN kas_expected REAL`).run();
-            }
-            const hasKasSelisih = shiftSchema.some(col => col.name === 'kas_selisih');
-            if (!hasKasSelisih) {
-                console.log('📋 Migrating database: Adding shifts.kas_selisih column...');
-                localDb.prepare(`ALTER TABLE shifts ADD COLUMN kas_selisih REAL`).run();
-            }
-            const hasKasSelisihLabel = shiftSchema.some(col => col.name === 'kas_selisih_label');
-            if (!hasKasSelisihLabel) {
-                console.log('📋 Migrating database: Adding shifts.kas_selisih_label column...');
-                localDb.prepare(`ALTER TABLE shifts ADD COLUMN kas_selisih_label TEXT DEFAULT 'balanced'`).run();
-            }
-            const hasCashSalesTotal = shiftSchema.some(col => col.name === 'cash_sales_total');
-            if (!hasCashSalesTotal) {
-                console.log('📋 Migrating database: Adding shifts.cash_sales_total column...');
-                localDb.prepare(`ALTER TABLE shifts ADD COLUMN cash_sales_total REAL`).run();
-            }
-            const hasCashRefundTotal = shiftSchema.some(col => col.name === 'cash_refund_total');
-            if (!hasCashRefundTotal) {
-                console.log('📋 Migrating database: Adding shifts.cash_refund_total column...');
-                localDb.prepare(`ALTER TABLE shifts ADD COLUMN cash_refund_total REAL`).run();
-            }
-        }
-        catch (shiftError) {
-            console.log('⚠️ Shift migration check failed:', shiftError);
-        }
-        // Schema migration: Ensure platform price columns exist on products
-        try {
-            const productSchema = localDb.prepare(`PRAGMA table_info(products)`).all();
-            const hasHargaGofood = productSchema.some(col => col.name === 'harga_gofood');
-            const hasHargaGrabfood = productSchema.some(col => col.name === 'harga_grabfood');
-            const hasHargaShopeefood = productSchema.some(col => col.name === 'harga_shopeefood');
-            const hasHargaTiktok = productSchema.some(col => col.name === 'harga_tiktok');
-            const hasHargaQpon = productSchema.some(col => col.name === 'harga_qpon');
-            const hasCategory2Name = productSchema.some(col => col.name === 'category2_name');
-            const hasCategory2Id = productSchema.some(col => col.name === 'category2_id');
-            const hasIsBundle = productSchema.some(col => col.name === 'is_bundle');
-            if (!hasCategory2Id) {
-                console.log('📋 Migrating database: Adding products.category2_id column...');
-                localDb.prepare('ALTER TABLE products ADD COLUMN category2_id INTEGER').run();
-                // Try to backfill category2_id from category2 table using category2_name
+        else {
+            try {
+                const schemaCheck = localDb.prepare(`PRAGMA table_info(transactions)`).all();
+                const hasSyncedAt = schemaCheck.some(col => col.name === 'synced_at');
+                if (!hasSyncedAt) {
+                    console.log('📋 Migrating database: Adding synced_at column...');
+                    localDb.prepare(`ALTER TABLE transactions ADD COLUMN synced_at INTEGER`).run();
+                    console.log('✅ Migration complete');
+                }
+                const hasVoucherType = schemaCheck.some(col => col.name === 'voucher_type');
+                if (!hasVoucherType) {
+                    console.log('📋 Migrating database: Adding transactions.voucher_type column...');
+                    localDb.prepare(`ALTER TABLE transactions ADD COLUMN voucher_type TEXT DEFAULT 'none'`).run();
+                }
+                // Migration: Add sync_status, sync_attempts, last_sync_attempt columns
+                const hasSyncStatus = schemaCheck.some(col => col.name === 'sync_status');
+                if (!hasSyncStatus) {
+                    console.log('📋 Migrating database: Adding sync_status, sync_attempts, last_sync_attempt columns...');
+                    localDb.prepare(`ALTER TABLE transactions ADD COLUMN sync_status TEXT DEFAULT 'pending'`).run();
+                    localDb.prepare(`ALTER TABLE transactions ADD COLUMN sync_attempts INTEGER DEFAULT 0`).run();
+                    localDb.prepare(`ALTER TABLE transactions ADD COLUMN last_sync_attempt INTEGER`).run();
+                    // Set sync_status based on synced_at
+                    localDb.prepare(`UPDATE transactions SET sync_status = 'synced' WHERE synced_at IS NOT NULL`).run();
+                    localDb.prepare(`UPDATE transactions SET sync_status = 'pending' WHERE synced_at IS NULL`).run();
+                    console.log('✅ Sync status migration complete');
+                }
+                // Migration: Drop offline_transactions and offline_transaction_items tables if they exist
+                // These tables are no longer needed as we use sync_status directly in transactions table
                 try {
-                    localDb.prepare(`
+                    const tables = localDb.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name IN ('offline_transactions', 'offline_transaction_items')`).all();
+                    for (const table of tables) {
+                        console.log(`📋 Migrating database: Dropping obsolete table ${table.name}...`);
+                        localDb.prepare(`DROP TABLE IF EXISTS ${table.name}`).run();
+                        console.log(`✅ Dropped table ${table.name}`);
+                    }
+                    if (tables.length > 0) {
+                        console.log('✅ Offline transactions tables cleanup complete');
+                    }
+                }
+                catch (error) {
+                    console.warn('⚠️ Could not drop offline_transactions tables (may not exist):', error);
+                }
+                const hasVoucherValue = schemaCheck.some(col => col.name === 'voucher_value');
+                if (!hasVoucherValue) {
+                    console.log('📋 Migrating database: Adding transactions.voucher_value column...');
+                    localDb.prepare(`ALTER TABLE transactions ADD COLUMN voucher_value REAL`).run();
+                }
+                const hasVoucherLabel = schemaCheck.some(col => col.name === 'voucher_label');
+                if (!hasVoucherLabel) {
+                    console.log('📋 Migrating database: Adding transactions.voucher_label column...');
+                    localDb.prepare(`ALTER TABLE transactions ADD COLUMN voucher_label TEXT`).run();
+                }
+                const hasCustomerUnit = schemaCheck.some(col => col.name === 'customer_unit');
+                if (!hasCustomerUnit) {
+                    console.log('📋 Migrating database: Adding transactions.customer_unit column...');
+                    localDb.prepare(`ALTER TABLE transactions ADD COLUMN customer_unit INTEGER`).run();
+                }
+                const hasRefundStatus = schemaCheck.some(col => col.name === 'refund_status');
+                if (!hasRefundStatus) {
+                    console.log('📋 Migrating database: Adding transactions.refund_status column...');
+                    localDb.prepare(`ALTER TABLE transactions ADD COLUMN refund_status TEXT DEFAULT 'none'`).run();
+                }
+                const hasRefundTotal = schemaCheck.some(col => col.name === 'refund_total');
+                if (!hasRefundTotal) {
+                    console.log('📋 Migrating database: Adding transactions.refund_total column...');
+                    localDb.prepare(`ALTER TABLE transactions ADD COLUMN refund_total REAL DEFAULT 0.0`).run();
+                }
+                const hasLastRefundedAt = schemaCheck.some(col => col.name === 'last_refunded_at');
+                if (!hasLastRefundedAt) {
+                    console.log('📋 Migrating database: Adding transactions.last_refunded_at column...');
+                    localDb.prepare(`ALTER TABLE transactions ADD COLUMN last_refunded_at TEXT`).run();
+                }
+            }
+            catch (e) {
+                console.log('⚠️ Migration check failed:', e);
+            }
+        } // End of localDb check for transactions migration
+        // Schema migration: ensure new cash tracking columns exist on shifts
+        if (localDb) {
+            try {
+                const shiftSchema = localDb.prepare(`PRAGMA table_info(shifts)`).all();
+                const hasKasAkhir = shiftSchema.some(col => col.name === 'kas_akhir');
+                if (!hasKasAkhir) {
+                    console.log('📋 Migrating database: Adding shifts.kas_akhir column...');
+                    localDb.prepare(`ALTER TABLE shifts ADD COLUMN kas_akhir REAL`).run();
+                }
+                const hasKasExpected = shiftSchema.some(col => col.name === 'kas_expected');
+                if (!hasKasExpected) {
+                    console.log('📋 Migrating database: Adding shifts.kas_expected column...');
+                    localDb.prepare(`ALTER TABLE shifts ADD COLUMN kas_expected REAL`).run();
+                }
+                const hasKasSelisih = shiftSchema.some(col => col.name === 'kas_selisih');
+                if (!hasKasSelisih) {
+                    console.log('📋 Migrating database: Adding shifts.kas_selisih column...');
+                    localDb.prepare(`ALTER TABLE shifts ADD COLUMN kas_selisih REAL`).run();
+                }
+                const hasKasSelisihLabel = shiftSchema.some(col => col.name === 'kas_selisih_label');
+                if (!hasKasSelisihLabel) {
+                    console.log('📋 Migrating database: Adding shifts.kas_selisih_label column...');
+                    localDb.prepare(`ALTER TABLE shifts ADD COLUMN kas_selisih_label TEXT DEFAULT 'balanced'`).run();
+                }
+                const hasCashSalesTotal = shiftSchema.some(col => col.name === 'cash_sales_total');
+                if (!hasCashSalesTotal) {
+                    console.log('📋 Migrating database: Adding shifts.cash_sales_total column...');
+                    localDb.prepare(`ALTER TABLE shifts ADD COLUMN cash_sales_total REAL`).run();
+                }
+                const hasCashRefundTotal = shiftSchema.some(col => col.name === 'cash_refund_total');
+                if (!hasCashRefundTotal) {
+                    console.log('📋 Migrating database: Adding shifts.cash_refund_total column...');
+                    localDb.prepare(`ALTER TABLE shifts ADD COLUMN cash_refund_total REAL`).run();
+                }
+            }
+            catch (shiftError) {
+                console.log('⚠️ Shift migration check failed:', shiftError);
+            }
+        } // End of localDb check for shifts migration
+        // Schema migration: Add businesses.status column if it doesn't exist (for MySQL compatibility)
+        if (localDb) {
+            try {
+                const businessesSchema = localDb.prepare(`PRAGMA table_info(businesses)`).all();
+                const hasStatus = businessesSchema.some(col => col.name === 'status');
+                if (!hasStatus) {
+                    console.log('📋 Migrating database: Adding businesses.status column...');
+                    localDb.prepare(`ALTER TABLE businesses ADD COLUMN status TEXT DEFAULT 'active'`).run();
+                    // Set default value for existing records
+                    localDb.prepare(`UPDATE businesses SET status = 'active' WHERE status IS NULL`).run();
+                    console.log('✅ Added businesses.status column with default value');
+                }
+            }
+            catch (businessesError) {
+                console.log('⚠️ Businesses status migration check failed:', businessesError);
+            }
+        } // End of localDb check for businesses migration
+        // Schema migration: Add category2_businesses.created_at column if it doesn't exist (for MySQL compatibility)
+        if (localDb) {
+            try {
+                const category2BusinessesSchema = localDb.prepare(`PRAGMA table_info(category2_businesses)`).all();
+                const hasCreatedAt = category2BusinessesSchema.some(col => col.name === 'created_at');
+                if (!hasCreatedAt) {
+                    console.log('📋 Migrating database: Adding category2_businesses.created_at column...');
+                    localDb.prepare(`ALTER TABLE category2_businesses ADD COLUMN created_at TEXT`).run();
+                    console.log('✅ Added category2_businesses.created_at column');
+                }
+            }
+            catch (category2BusinessesError) {
+                console.log('⚠️ Category2_businesses created_at migration check failed:', category2BusinessesError);
+            }
+        } // End of localDb check for category2_businesses migration
+        // Phase 2: Ensure NOT NULL constraints are satisfied for critical fields
+        // Only run if tables exist (for new databases, tables will be created later)
+        if (localDb) {
+            try {
+                // Check if tables exist before trying to migrate
+                const tableList = localDb.prepare(`
+        SELECT name FROM sqlite_master WHERE type='table' AND name IN ('businesses', 'users', 'transactions', 'organizations', 'roles')
+      `).all();
+                const existingTables = new Set(tableList.map(t => t.name));
+                // Ensure businesses have organization_id (required by MySQL)
+                if (existingTables.has('businesses')) {
+                    try {
+                        const businessesWithoutOrg = localDb.prepare(`
+            SELECT COUNT(*) as count FROM businesses WHERE organization_id IS NULL
+          `).get();
+                        if (businessesWithoutOrg.count > 0) {
+                            console.log(`📋 Migrating database: Setting default organization_id for ${businessesWithoutOrg.count} businesses...`);
+                            // Get first organization_id from organizations table, or use 1 as fallback
+                            let defaultOrgId = 1;
+                            if (existingTables.has('organizations')) {
+                                try {
+                                    const firstOrg = localDb.prepare('SELECT id FROM organizations LIMIT 1').get();
+                                    defaultOrgId = firstOrg?.id || 1;
+                                }
+                                catch (e) {
+                                    console.log('⚠️ Could not get organization_id from organizations table, using default 1');
+                                }
+                            }
+                            localDb.prepare(`UPDATE businesses SET organization_id = ? WHERE organization_id IS NULL`).run(defaultOrgId);
+                            console.log(`✅ Set organization_id = ${defaultOrgId} for businesses without organization`);
+                        }
+                    }
+                    catch (e) {
+                        console.log('⚠️ Failed to migrate businesses.organization_id:', e);
+                    }
+                }
+                // Ensure users have role_id and organization_id (required by MySQL)
+                if (existingTables.has('users')) {
+                    try {
+                        const usersWithoutRole = localDb.prepare(`
+            SELECT COUNT(*) as count FROM users WHERE role_id IS NULL OR organization_id IS NULL
+          `).get();
+                        if (usersWithoutRole.count > 0) {
+                            console.log(`📋 Migrating database: Setting default role_id and organization_id for ${usersWithoutRole.count} users...`);
+                            // Get first role_id and organization_id, or use 1 as fallback
+                            let defaultRoleId = 1;
+                            let defaultOrgId = 1;
+                            if (existingTables.has('roles')) {
+                                try {
+                                    const firstRole = localDb.prepare('SELECT id FROM roles LIMIT 1').get();
+                                    defaultRoleId = firstRole?.id || 1;
+                                }
+                                catch (e) {
+                                    console.log('⚠️ Could not get role_id from roles table, using default 1');
+                                }
+                            }
+                            if (existingTables.has('organizations')) {
+                                try {
+                                    const firstOrg = localDb.prepare('SELECT id FROM organizations LIMIT 1').get();
+                                    defaultOrgId = firstOrg?.id || 1;
+                                }
+                                catch (e) {
+                                    console.log('⚠️ Could not get organization_id from organizations table, using default 1');
+                                }
+                            }
+                            localDb.prepare(`UPDATE users SET role_id = ? WHERE role_id IS NULL`).run(defaultRoleId);
+                            localDb.prepare(`UPDATE users SET organization_id = ? WHERE organization_id IS NULL`).run(defaultOrgId);
+                            console.log(`✅ Set role_id = ${defaultRoleId} and organization_id = ${defaultOrgId} for users without these fields`);
+                        }
+                    }
+                    catch (e) {
+                        console.log('⚠️ Failed to migrate users.role_id and users.organization_id:', e);
+                    }
+                }
+                // Ensure transactions have created_at (required by MySQL)
+                if (existingTables.has('transactions')) {
+                    try {
+                        const transactionsWithoutCreatedAt = localDb.prepare(`
+            SELECT COUNT(*) as count FROM transactions WHERE created_at IS NULL OR created_at = ''
+          `).get();
+                        if (transactionsWithoutCreatedAt.count > 0) {
+                            console.log(`📋 Migrating database: Setting default created_at for ${transactionsWithoutCreatedAt.count} transactions...`);
+                            const currentTime = new Date().toISOString();
+                            localDb.prepare(`UPDATE transactions SET created_at = ? WHERE created_at IS NULL OR created_at = ''`).run(currentTime);
+                            console.log(`✅ Set created_at for transactions without timestamp`);
+                        }
+                        // Ensure transactions have refund_status and refund_total (required by MySQL with defaults)
+                        try {
+                            localDb.prepare(`UPDATE transactions SET refund_status = 'none' WHERE refund_status IS NULL`).run();
+                        }
+                        catch (e) {
+                            // Column might not exist yet, that's okay
+                        }
+                        try {
+                            localDb.prepare(`UPDATE transactions SET refund_total = 0.0 WHERE refund_total IS NULL`).run();
+                        }
+                        catch (e) {
+                            // Column might not exist yet, that's okay
+                        }
+                    }
+                    catch (e) {
+                        console.log('⚠️ Failed to migrate transactions.created_at:', e);
+                    }
+                }
+            }
+            catch (notNullMigrationError) {
+                console.log('⚠️ NOT NULL constraint migration check failed:', notNullMigrationError);
+                // Don't throw - this is non-critical and shouldn't prevent database initialization
+            }
+        } // End of localDb check for NOT NULL migration
+        // Schema migration: Ensure platform price columns exist on products
+        if (localDb) {
+            try {
+                const productSchema = localDb.prepare(`PRAGMA table_info(products)`).all();
+                const hasHargaGofood = productSchema.some(col => col.name === 'harga_gofood');
+                const hasHargaGrabfood = productSchema.some(col => col.name === 'harga_grabfood');
+                const hasHargaShopeefood = productSchema.some(col => col.name === 'harga_shopeefood');
+                const hasHargaTiktok = productSchema.some(col => col.name === 'harga_tiktok');
+                const hasHargaQpon = productSchema.some(col => col.name === 'harga_qpon');
+                const hasCategory2Name = productSchema.some(col => col.name === 'category2_name');
+                const hasCategory2Id = productSchema.some(col => col.name === 'category2_id');
+                const hasIsBundle = productSchema.some(col => col.name === 'is_bundle');
+                if (!hasCategory2Id) {
+                    console.log('📋 Migrating database: Adding products.category2_id column...');
+                    localDb.prepare('ALTER TABLE products ADD COLUMN category2_id INTEGER').run();
+                    // Try to backfill category2_id from category2 table using category2_name
+                    try {
+                        localDb.prepare(`
               UPDATE products 
               SET category2_id = (
                 SELECT c2.id 
@@ -650,105 +848,141 @@ function createWindows() {
               )
               WHERE category2_name IS NOT NULL AND category2_name != ''
             `).run();
-                    console.log('✅ Backfilled category2_id from category2 table');
+                        console.log('✅ Backfilled category2_id from category2 table');
+                    }
+                    catch (e) {
+                        console.log('⚠️ Failed to backfill category2_id:', e);
+                    }
                 }
-                catch (e) {
-                    console.log('⚠️ Failed to backfill category2_id:', e);
+                if (!hasHargaGofood) {
+                    console.log('📋 Migrating database: Adding products.harga_gofood column...');
+                    localDb.prepare('ALTER TABLE products ADD COLUMN harga_gofood REAL').run();
+                }
+                if (!hasHargaGrabfood) {
+                    console.log('📋 Migrating database: Adding products.harga_grabfood column...');
+                    localDb.prepare('ALTER TABLE products ADD COLUMN harga_grabfood REAL').run();
+                }
+                if (!hasHargaShopeefood) {
+                    console.log('📋 Migrating database: Adding products.harga_shopeefood column...');
+                    localDb.prepare('ALTER TABLE products ADD COLUMN harga_shopeefood REAL').run();
+                }
+                if (!hasHargaTiktok) {
+                    console.log('📋 Migrating database: Adding products.harga_tiktok column...');
+                    localDb.prepare('ALTER TABLE products ADD COLUMN harga_tiktok REAL').run();
+                }
+                if (!hasHargaQpon) {
+                    console.log('📋 Migrating database: Adding products.harga_qpon column...');
+                    localDb.prepare('ALTER TABLE products ADD COLUMN harga_qpon REAL').run();
+                }
+                if (!hasCategory2Name) {
+                    console.log('📋 Migrating database: Adding products.category2_name column...');
+                    localDb.prepare('ALTER TABLE products ADD COLUMN category2_name TEXT').run();
+                    // Backfill from existing jenis if present
+                    try {
+                        localDb.prepare('UPDATE products SET category2_name = jenis WHERE category2_name IS NULL').run();
+                        console.log('✅ Backfilled category2_name from jenis');
+                    }
+                    catch (e) {
+                        console.log('⚠️ Failed to backfill category2_name from jenis:', e);
+                    }
+                }
+                if (!hasIsBundle) {
+                    console.log('📋 Migrating database: Adding products.is_bundle column...');
+                    localDb.prepare('ALTER TABLE products ADD COLUMN is_bundle INTEGER DEFAULT 0').run();
                 }
             }
-            if (!hasHargaGofood) {
-                console.log('📋 Migrating database: Adding products.harga_gofood column...');
-                localDb.prepare('ALTER TABLE products ADD COLUMN harga_gofood REAL').run();
+            catch (e) {
+                console.log('⚠️ Products table migration check failed:', e);
             }
-            if (!hasHargaGrabfood) {
-                console.log('📋 Migrating database: Adding products.harga_grabfood column...');
-                localDb.prepare('ALTER TABLE products ADD COLUMN harga_grabfood REAL').run();
-            }
-            if (!hasHargaShopeefood) {
-                console.log('📋 Migrating database: Adding products.harga_shopeefood column...');
-                localDb.prepare('ALTER TABLE products ADD COLUMN harga_shopeefood REAL').run();
-            }
-            if (!hasHargaTiktok) {
-                console.log('📋 Migrating database: Adding products.harga_tiktok column...');
-                localDb.prepare('ALTER TABLE products ADD COLUMN harga_tiktok REAL').run();
-            }
-            if (!hasHargaQpon) {
-                console.log('📋 Migrating database: Adding products.harga_qpon column...');
-                localDb.prepare('ALTER TABLE products ADD COLUMN harga_qpon REAL').run();
-            }
-            if (!hasCategory2Name) {
-                console.log('📋 Migrating database: Adding products.category2_name column...');
-                localDb.prepare('ALTER TABLE products ADD COLUMN category2_name TEXT').run();
-                // Backfill from existing jenis if present
-                try {
-                    localDb.prepare('UPDATE products SET category2_name = jenis WHERE category2_name IS NULL').run();
-                    console.log('✅ Backfilled category2_name from jenis');
-                }
-                catch (e) {
-                    console.log('⚠️ Failed to backfill category2_name from jenis:', e);
-                }
-            }
-            if (!hasIsBundle) {
-                console.log('📋 Migrating database: Adding products.is_bundle column...');
-                localDb.prepare('ALTER TABLE products ADD COLUMN is_bundle INTEGER DEFAULT 0').run();
-            }
-        }
-        catch (e) {
-            console.log('⚠️ Products table migration check failed:', e);
-        }
+        } // End of localDb check for products migration
         // Schema migration: Bundle feature tables
-        try {
-            // Check if bundle_items table exists
-            const bundleItemsExists = localDb.prepare(`
-          SELECT name FROM sqlite_master WHERE type='table' AND name='bundle_items'
-        `).get();
-            if (!bundleItemsExists) {
-                console.log('📋 Migrating database: Creating bundle_items table...');
-                localDb.prepare(`
-            CREATE TABLE bundle_items (
-              id INTEGER PRIMARY KEY AUTOINCREMENT,
-              bundle_product_id INTEGER NOT NULL,
-              category2_id INTEGER NOT NULL,
-              required_quantity INTEGER NOT NULL DEFAULT 1,
-              display_order INTEGER DEFAULT 0,
-              created_at TEXT,
-              updated_at INTEGER,
-              FOREIGN KEY (bundle_product_id) REFERENCES products(id) ON DELETE CASCADE,
-              FOREIGN KEY (category2_id) REFERENCES category2(id) ON DELETE CASCADE
-            )
-          `).run();
-                console.log('✅ Created bundle_items table');
-            }
-            // Check if transaction_item_customizations has bundle_product_id column
+        if (localDb) {
             try {
-                const ticSchema = localDb.prepare(`PRAGMA table_info(transaction_item_customizations)`).all();
-                const hasBundleProductId = ticSchema.some(col => col.name === 'bundle_product_id');
-                if (!hasBundleProductId) {
-                    console.log('📋 Migrating database: Adding bundle_product_id to transaction_item_customizations...');
-                    localDb.prepare('ALTER TABLE transaction_item_customizations ADD COLUMN bundle_product_id INTEGER DEFAULT NULL').run();
-                    // Add index for the new column
-                    localDb.prepare('CREATE INDEX IF NOT EXISTS idx_tic_bundle_product ON transaction_item_customizations(bundle_product_id)').run();
-                    localDb.prepare('CREATE INDEX IF NOT EXISTS idx_tic_item_bundle ON transaction_item_customizations(transaction_item_id, bundle_product_id)').run();
-                    console.log('✅ Added bundle_product_id column');
+                // Check if bundle_items table exists
+                const bundleItemsExists = localDb.prepare(`
+            SELECT name FROM sqlite_master WHERE type='table' AND name='bundle_items'
+          `).get();
+                if (!bundleItemsExists) {
+                    console.log('📋 Migrating database: Creating bundle_items table...');
+                    localDb.prepare(`
+              CREATE TABLE bundle_items (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                bundle_product_id INTEGER NOT NULL,
+                category2_id INTEGER NOT NULL,
+                required_quantity INTEGER NOT NULL DEFAULT 1,
+                display_order INTEGER DEFAULT 0,
+                created_at TEXT,
+                updated_at INTEGER,
+                FOREIGN KEY (bundle_product_id) REFERENCES products(id) ON DELETE CASCADE,
+                FOREIGN KEY (category2_id) REFERENCES category2(id) ON DELETE CASCADE
+              )
+            `).run();
+                    console.log('✅ Created bundle_items table');
+                }
+                // Check if transaction_item_customizations has bundle_product_id column
+                try {
+                    const ticSchema = localDb.prepare(`PRAGMA table_info(transaction_item_customizations)`).all();
+                    const hasBundleProductId = ticSchema.some(col => col.name === 'bundle_product_id');
+                    if (!hasBundleProductId) {
+                        console.log('📋 Migrating database: Adding bundle_product_id to transaction_item_customizations...');
+                        localDb.prepare('ALTER TABLE transaction_item_customizations ADD COLUMN bundle_product_id INTEGER DEFAULT NULL').run();
+                        // Add index for the new column
+                        localDb.prepare('CREATE INDEX IF NOT EXISTS idx_tic_bundle_product ON transaction_item_customizations(bundle_product_id)').run();
+                        localDb.prepare('CREATE INDEX IF NOT EXISTS idx_tic_item_bundle ON transaction_item_customizations(transaction_item_id, bundle_product_id)').run();
+                        console.log('✅ Added bundle_product_id column');
+                    }
+                }
+                catch (error) {
+                    console.warn('⚠️ Error checking/adding bundle_product_id column:', error);
+                }
+                // Check if transaction_items has bundle_selections_json column
+                const transactionItemsSchema = localDb.prepare(`PRAGMA table_info(transaction_items)`).all();
+                const hasBundleSelections = transactionItemsSchema.some(col => col.name === 'bundle_selections_json');
+                if (!hasBundleSelections) {
+                    console.log('📋 Migrating database: Adding transaction_items.bundle_selections_json column...');
+                    localDb.prepare('ALTER TABLE transaction_items ADD COLUMN bundle_selections_json TEXT').run();
+                }
+                // Schema migration: Add production status columns if they don't exist
+                const hasProductionStatus = transactionItemsSchema.some(col => col.name === 'production_status');
+                if (!hasProductionStatus) {
+                    console.log('📋 Migrating database: Adding transaction_items.production_status column...');
+                    try {
+                        localDb.prepare('ALTER TABLE transaction_items ADD COLUMN production_status TEXT DEFAULT NULL').run();
+                    }
+                    catch (error) {
+                        console.warn('⚠️ Error adding production_status column:', error);
+                    }
+                }
+                const hasProductionStartedAt = transactionItemsSchema.some(col => col.name === 'production_started_at');
+                if (!hasProductionStartedAt) {
+                    console.log('📋 Migrating database: Adding transaction_items.production_started_at column...');
+                    try {
+                        localDb.prepare('ALTER TABLE transaction_items ADD COLUMN production_started_at TEXT DEFAULT NULL').run();
+                    }
+                    catch (error) {
+                        console.warn('⚠️ Error adding production_started_at column:', error);
+                    }
+                }
+                const hasProductionFinishedAt = transactionItemsSchema.some(col => col.name === 'production_finished_at');
+                if (!hasProductionFinishedAt) {
+                    console.log('📋 Migrating database: Adding transaction_items.production_finished_at column...');
+                    try {
+                        localDb.prepare('ALTER TABLE transaction_items ADD COLUMN production_finished_at TEXT DEFAULT NULL').run();
+                    }
+                    catch (error) {
+                        console.warn('⚠️ Error adding production_finished_at column:', error);
+                    }
                 }
             }
-            catch (error) {
-                console.warn('⚠️ Error checking/adding bundle_product_id column:', error);
+            catch (e) {
+                console.log('⚠️ Bundle feature migration check failed:', e);
             }
-            // Check if transaction_items has bundle_selections_json column
-            const transactionItemsSchema = localDb.prepare(`PRAGMA table_info(transaction_items)`).all();
-            const hasBundleSelections = transactionItemsSchema.some(col => col.name === 'bundle_selections_json');
-            if (!hasBundleSelections) {
-                console.log('📋 Migrating database: Adding transaction_items.bundle_selections_json column...');
-                localDb.prepare('ALTER TABLE transaction_items ADD COLUMN bundle_selections_json TEXT').run();
-            }
-        }
-        catch (e) {
-            console.log('⚠️ Bundle feature migration check failed:', e);
-        }
-        try {
-            // First block of SQL execution
-            localDb.exec(`
+        } // End of localDb check for bundle migration
+        // Phase 2 Part 2: Only run table creation if database is available
+        if (localDb) {
+            try {
+                // First block of SQL execution
+                localDb.exec(`
         -- Core POS Tables
         CREATE TABLE IF NOT EXISTS users (
           id INTEGER PRIMARY KEY,
@@ -768,6 +1002,7 @@ function createWindows() {
         name TEXT NOT NULL,
         permission_name TEXT UNIQUE NOT NULL,
         organization_id INTEGER,
+        status TEXT DEFAULT 'active',
         management_group_id INTEGER,
         image_url TEXT,
         created_at TEXT,
@@ -781,6 +1016,7 @@ function createWindows() {
         nama TEXT NOT NULL,
         satuan TEXT NOT NULL,
         kategori TEXT NOT NULL,
+        category1_id INTEGER,
         jenis TEXT,
         category2_id INTEGER,
         category2_name TEXT,
@@ -965,6 +1201,9 @@ function createWindows() {
         created_at TEXT NOT NULL,
         updated_at INTEGER,
         synced_at INTEGER,
+        sync_status TEXT DEFAULT 'pending',
+        sync_attempts INTEGER DEFAULT 0,
+        last_sync_attempt INTEGER,
         contact_id INTEGER,
         customer_name TEXT,
         customer_unit INTEGER,
@@ -1100,6 +1339,7 @@ function createWindows() {
       CREATE TABLE IF NOT EXISTS category2_businesses (
         category2_id INTEGER NOT NULL,
         business_id INTEGER NOT NULL,
+        created_at TEXT,
         PRIMARY KEY (category2_id, business_id),
         FOREIGN KEY (category2_id) REFERENCES category2(id) ON DELETE CASCADE,
         FOREIGN KEY (business_id) REFERENCES businesses(id) ON DELETE CASCADE
@@ -1207,22 +1447,7 @@ function createWindows() {
         synced_at INTEGER,
         FOREIGN KEY (transaction_id) REFERENCES transactions(id)
       );
-      `);
-            // Add shift_uuid column to transactions table if it doesn't exist
-            try {
-                const tableInfo = localDb.prepare("PRAGMA table_info(transactions)").all();
-                const hasShiftUuid = tableInfo.some(col => col.name === 'shift_uuid');
-                if (!hasShiftUuid) {
-                    console.log('Adding shift_uuid column to transactions table...');
-                    localDb.prepare("ALTER TABLE transactions ADD COLUMN shift_uuid TEXT").run();
-                    // Add index for shift_uuid
-                    localDb.prepare("CREATE INDEX IF NOT EXISTS idx_transactions_shift ON transactions(shift_uuid)").run();
-                }
-            }
-            catch (error) {
-                console.error('Error checking/adding shift_uuid column:', error);
-            }
-            localDb.exec(`
+      
       -- Printer 1 audit log (local)
       CREATE TABLE IF NOT EXISTS printer1_audit_log (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1318,24 +1543,6 @@ function createWindows() {
       CREATE INDEX IF NOT EXISTS idx_cl_accounts_active ON cl_accounts(is_active);
       
       
-      -- Offline transaction queue for sync when online
-      CREATE TABLE IF NOT EXISTS offline_transactions (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        transaction_data TEXT NOT NULL,
-        created_at INTEGER NOT NULL,
-        sync_status TEXT DEFAULT 'pending',
-        sync_attempts INTEGER DEFAULT 0,
-        last_sync_attempt INTEGER
-      );
-      
-      -- Offline transaction items queue
-      CREATE TABLE IF NOT EXISTS offline_transaction_items (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        offline_transaction_id INTEGER NOT NULL,
-        item_data TEXT NOT NULL,
-        FOREIGN KEY (offline_transaction_id) REFERENCES offline_transactions(id) ON DELETE CASCADE
-      );
-      
       CREATE TABLE IF NOT EXISTS offline_refunds (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         refund_data TEXT NOT NULL,
@@ -1355,12 +1562,33 @@ function createWindows() {
         last_error TEXT
       );
       
-      -- Indexes for offline sync performance
-      CREATE INDEX IF NOT EXISTS idx_offline_transactions_sync ON offline_transactions(sync_status);
-      CREATE INDEX IF NOT EXISTS idx_offline_transactions_created ON offline_transactions(created_at);
+      -- Indexes for sync performance
+      CREATE INDEX IF NOT EXISTS idx_transactions_sync_status ON transactions(sync_status);
       CREATE INDEX IF NOT EXISTS idx_system_pos_queue_sync ON system_pos_queue(synced_at);
       CREATE INDEX IF NOT EXISTS idx_system_pos_queue_transaction ON system_pos_queue(transaction_id);
     `);
+            }
+            catch (dbExecError) {
+                console.error('❌ Database execution error:', dbExecError);
+                throw dbExecError;
+            }
+            // Migration: Add category1_id column if it doesn't exist (for existing databases)
+            // This must be done AFTER the SQL exec block
+            // We're already inside if (localDb) block, so no need to check again
+            try {
+                const productsSchema = localDb.prepare(`PRAGMA table_info(products)`).all();
+                const hasCategory1Id = productsSchema.some(col => col.name === 'category1_id');
+                if (!hasCategory1Id) {
+                    localDb.prepare(`ALTER TABLE products ADD COLUMN category1_id INTEGER`).run();
+                    console.log('✅ [MIGRATION] Added category1_id column to products table');
+                }
+            }
+            catch (error) {
+                // Column already exists, ignore error
+                if (!String(error).includes('duplicate column name')) {
+                    console.warn('⚠️ [MIGRATION] Could not add category1_id column (may already exist):', error);
+                }
+            }
             console.log('✅ SQLite database initialized successfully');
             console.log('📊 Database file location:', dbPath);
             // Initialize printer management service
@@ -1461,11 +1689,7 @@ function createWindows() {
             catch (migrationError) {
                 console.error('⚠️ Schema migration error (this is OK for first run):', migrationError);
             }
-        }
-        catch (dbExecError) {
-            console.error('❌ Database execution error:', dbExecError);
-            throw dbExecError;
-        }
+        } // End of localDb check for table creation
     }
     catch (error) {
         originalConsoleError('❌ Failed to initialize SQLite:', error);
@@ -1704,15 +1928,16 @@ function createWindows() {
         console.log(`🔄 [PRODUCTS UPSERT] Received ${rows.length} products to upsert`);
         const tx = localDb.transaction((data) => {
             const stmt = localDb.prepare(`INSERT INTO products (
-        id, business_id, menu_code, nama, satuan, kategori, jenis, category2_id, category2_name, keterangan,
+        id, business_id, menu_code, nama, satuan, kategori, category1_id, jenis, category2_id, category2_name, keterangan,
         harga_beli, ppn, harga_jual, harga_khusus, harga_online, harga_qpon, harga_gofood, harga_grabfood, harga_shopeefood, harga_tiktok, fee_kerja, status, is_bundle, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET
         business_id=excluded.business_id,
         menu_code=excluded.menu_code,
         nama=excluded.nama,
         satuan=excluded.satuan,
         kategori=excluded.kategori,
+        category1_id=excluded.category1_id,
         jenis=excluded.jenis,
         category2_id=excluded.category2_id,
         category2_name=excluded.category2_name,
@@ -1752,8 +1977,22 @@ function createWindows() {
                     const hargaJual = (r.harga_jual != null && r.harga_jual !== undefined) ? r.harga_jual : 0;
                     // Map MySQL columns to SQLite columns
                     const kategori = r.kategori || r.category1_name || '';
+                    let category1Id = r.category1_id ? Number(r.category1_id) : null;
                     let category2Id = r.category2_id ? Number(r.category2_id) : null;
                     const category2Name = r.category2_name || r.jenis || '';
+                    // If category1_id is missing but category1_name/kategori exists, try to map it
+                    if (!category1Id && (r.category1_name || r.kategori)) {
+                        const categoryName = String(r.category1_name || r.kategori || '').toLowerCase().trim();
+                        if (categoryName === 'makanan' || categoryName === 'food') {
+                            category1Id = 1;
+                        }
+                        else if (categoryName === 'minuman' || categoryName === 'drinks' || categoryName === 'drink') {
+                            category1Id = 2;
+                        }
+                        if (category1Id) {
+                            console.log(`✅ [PRODUCTS UPSERT] Mapped category1_name "${r.category1_name || r.kategori}" to category1_id: ${category1Id}`);
+                        }
+                    }
                     // If category2_id is missing but category2_name exists, try to look it up from category2 table
                     if (!category2Id && category2Name && localDb) {
                         try {
@@ -1769,7 +2008,7 @@ function createWindows() {
                         }
                     }
                     const isBundle = r.is_bundle === 1 || r.is_bundle === true ? 1 : 0;
-                    stmt.run(r.id, r.business_id, r.menu_code, r.nama, r.satuan || '', kategori, null, category2Id, category2Name, r.keterangan || null, r.harga_beli || null, r.ppn || null, hargaJual, r.harga_khusus || null, r.harga_online || null, r.harga_qpon || null, r.harga_gofood || null, r.harga_grabfood || null, r.harga_shopeefood || null, r.harga_tiktok || null, r.fee_kerja || null, r.status, isBundle, Date.now());
+                    stmt.run(r.id, r.business_id, r.menu_code, r.nama, r.satuan || '', kategori, category1Id, null, category2Id, category2Name, r.keterangan || null, r.harga_beli || null, r.ppn || null, hargaJual, r.harga_khusus || null, r.harga_online || null, r.harga_qpon || null, r.harga_gofood || null, r.harga_grabfood || null, r.harga_shopeefood || null, r.harga_tiktok || null, r.fee_kerja || null, r.status, isBundle, Date.now());
                     successCount++;
                 }
                 catch (error) {
@@ -2118,14 +2357,14 @@ function createWindows() {
             return { success: false };
         const tx = localDb.transaction((data) => {
             const stmt = localDb.prepare(`INSERT INTO businesses (
-        id, name, permission_name, organization_id, management_group_id, image_url, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        id, name, permission_name, organization_id, status, management_group_id, image_url, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET
         name=excluded.name, permission_name=excluded.permission_name, organization_id=excluded.organization_id,
-        management_group_id=excluded.management_group_id, image_url=excluded.image_url,
+        status=excluded.status, management_group_id=excluded.management_group_id, image_url=excluded.image_url,
         created_at=excluded.created_at, updated_at=excluded.updated_at`);
             for (const r of data) {
-                stmt.run(r.id, r.name, r.permission_name, r.organization_id, r.management_group_id, r.image_url, r.created_at, Date.now());
+                stmt.run(r.id, r.name, r.permission_name, r.organization_id, r.status || 'active', r.management_group_id, r.image_url, r.created_at, Date.now());
             }
         });
         tx(rows);
@@ -2424,16 +2663,17 @@ function createWindows() {
             const stmt = localDb.prepare(`INSERT INTO transactions (
         id, business_id, user_id, shift_uuid, payment_method, pickup_method, total_amount,
         voucher_discount, voucher_type, voucher_value, voucher_label, final_amount, amount_received, change_amount, status,
-        created_at, updated_at, synced_at, contact_id, customer_name, customer_unit, note, bank_name,
+        created_at, updated_at, synced_at, sync_status, sync_attempts, last_sync_attempt, contact_id, customer_name, customer_unit, note, bank_name,
         card_number, cl_account_id, cl_account_name, bank_id, receipt_number,
         transaction_type, payment_method_id
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET
         business_id=excluded.business_id, user_id=excluded.user_id, shift_uuid=excluded.shift_uuid, payment_method=excluded.payment_method,
         pickup_method=excluded.pickup_method, total_amount=excluded.total_amount, voucher_discount=excluded.voucher_discount,
         voucher_type=excluded.voucher_type, voucher_value=excluded.voucher_value, voucher_label=excluded.voucher_label,
         final_amount=excluded.final_amount, amount_received=excluded.amount_received, change_amount=excluded.change_amount,
         status=excluded.status, created_at=excluded.created_at, updated_at=excluded.updated_at, synced_at=excluded.synced_at,
+        sync_status=excluded.sync_status, sync_attempts=excluded.sync_attempts, last_sync_attempt=excluded.last_sync_attempt,
         contact_id=excluded.contact_id, customer_name=excluded.customer_name, customer_unit=excluded.customer_unit, note=excluded.note,
         bank_name=excluded.bank_name, card_number=excluded.card_number, cl_account_id=excluded.cl_account_id,
         cl_account_name=excluded.cl_account_name, bank_id=excluded.bank_id, receipt_number=excluded.receipt_number,
@@ -2509,6 +2749,9 @@ function createWindows() {
                     r.created_at,
                     Date.now(),
                     r.synced_at ?? null, // Keep existing synced_at or NULL for new unsynced transactions
+                    r.sync_status ?? 'pending', // Default to 'pending' for new transactions
+                    r.sync_attempts ?? 0,
+                    r.last_sync_attempt ?? null,
                     r.contact_id ?? null,
                     r.customer_name ?? null,
                     typeof r.customer_unit === 'number' ? r.customer_unit : (r.customer_unit ? Number(r.customer_unit) : null),
@@ -2738,7 +2981,7 @@ function createWindows() {
     electron_1.ipcMain.handle('localdb-get-unsynced-transactions', async (event, businessId) => {
         if (!localDb)
             return [];
-        // For now, return all transactions where receipt_number is null or synced_at is null
+        // Return all transactions where sync_status = 'pending'
         // This indicates they haven't been synced to cloud yet
         let query = `
       SELECT 
@@ -2752,7 +2995,7 @@ function createWindows() {
           ELSE NULL
         END as receipt_number
       FROM transactions t
-      WHERE t.synced_at IS NULL
+      WHERE t.sync_status = 'pending'
     `;
         const params = [];
         if (businessId) {
@@ -3270,8 +3513,9 @@ function createWindows() {
         if (!localDb || transactionIds.length === 0)
             return { success: true };
         try {
-            const stmt = localDb.prepare('UPDATE transactions SET synced_at = ? WHERE id IN (' + transactionIds.map(() => '?').join(',') + ')');
-            stmt.run(Date.now(), ...transactionIds);
+            const now = Date.now();
+            const stmt = localDb.prepare('UPDATE transactions SET synced_at = ?, sync_status = ?, sync_attempts = 0 WHERE id IN (' + transactionIds.map(() => '?').join(',') + ')');
+            stmt.run(now, 'synced', ...transactionIds);
             return { success: true };
         }
         catch (error) {
@@ -4329,11 +4573,13 @@ function createWindows() {
             // Upsert junction table relationships (REQUIRED - no fallback)
             if (junctionData && junctionData.length > 0) {
                 const junctionStmt = db.prepare(`
-          INSERT OR REPLACE INTO category2_businesses (category2_id, business_id)
-          VALUES (?, ?)
+          INSERT OR REPLACE INTO category2_businesses (category2_id, business_id, created_at)
+          VALUES (?, ?, ?)
         `);
                 for (const rel of junctionData) {
-                    junctionStmt.run(rel.category2_id, rel.business_id);
+                    // Use created_at from data if available, otherwise use current timestamp or NULL
+                    const createdAt = rel.created_at || new Date().toISOString();
+                    junctionStmt.run(rel.category2_id, rel.business_id, createdAt);
                 }
                 console.log(`✅ [CATEGORY2 UPSERT] Stored ${junctionData.length} category2-business relationships`);
             }
@@ -4526,34 +4772,34 @@ function createWindows() {
         return { success: result };
     });
     // Queue transaction for System POS sync (when printed to Printer 2)
+    // DISABLED: system_pos database has been dropped on VPS
     electron_1.ipcMain.handle('queue-transaction-for-system-pos', async (event, transactionId) => {
-        if (!localDb) {
-            console.error('❌ [SYSTEM POS] Local database not available');
-            return { success: false, error: 'Local database not available' };
-        }
-        try {
-            // Check if already queued or synced
-            const existing = localDb.prepare('SELECT id, synced_at FROM system_pos_queue WHERE transaction_id = ?').get(transactionId);
-            if (existing) {
-                if (existing.synced_at) {
-                    console.log(`✅ [SYSTEM POS] Transaction ${transactionId} already synced`);
-                    return { success: true, alreadySynced: true };
-                }
-                else {
-                    console.log(`⚠️ [SYSTEM POS] Transaction ${transactionId} already queued`);
-                    return { success: true, alreadyQueued: true };
-                }
-            }
-            // Insert into queue
-            const now = Date.now();
-            localDb.prepare('INSERT INTO system_pos_queue (transaction_id, queued_at) VALUES (?, ?)').run(transactionId, now);
-            console.log(`✅ [SYSTEM POS] Queued transaction ${transactionId} for System POS sync`);
-            return { success: true };
-        }
-        catch (error) {
-            console.error('❌ [SYSTEM POS] Error queueing transaction:', error);
-            return { success: false, error: String(error) };
-        }
+        console.log('⚠️ [SYSTEM POS] queue-transaction-for-system-pos called but service is DISABLED - system_pos database has been dropped');
+        return { success: false, error: 'System POS sync is disabled - database has been dropped' };
+        // Original code disabled below:
+        // if (!localDb) {
+        //   console.error('❌ [SYSTEM POS] Local database not available');
+        //   return { success: false, error: 'Local database not available' };
+        // }
+        // try {
+        //   const existing = localDb.prepare('SELECT id, synced_at FROM system_pos_queue WHERE transaction_id = ?').get(transactionId) as { id: number; synced_at: number | null } | undefined;
+        //   if (existing) {
+        //     if (existing.synced_at) {
+        //       console.log(`✅ [SYSTEM POS] Transaction ${transactionId} already synced`);
+        //       return { success: true, alreadySynced: true };
+        //     } else {
+        //       console.log(`⚠️ [SYSTEM POS] Transaction ${transactionId} already queued`);
+        //       return { success: true, alreadyQueued: true };
+        //     }
+        //   }
+        //   const now = Date.now();
+        //   localDb.prepare('INSERT INTO system_pos_queue (transaction_id, queued_at) VALUES (?, ?)').run(transactionId, now);
+        //   console.log(`✅ [SYSTEM POS] Queued transaction ${transactionId} for System POS sync`);
+        //   return { success: true };
+        // } catch (error) {
+        //   console.error('❌ [SYSTEM POS] Error queueing transaction:', error);
+        //   return { success: false, error: String(error) };
+        // }
     });
     // Get queued transactions for System POS sync
     electron_1.ipcMain.handle('get-system-pos-queue', async () => {
@@ -4712,8 +4958,10 @@ function createWindows() {
         if (!localDb)
             return { p1: [], p2: [] };
         try {
-            const p1 = localDb.prepare('SELECT id, transaction_id, printer1_receipt_number, global_counter, printed_at, printed_at_epoch FROM printer1_audit_log WHERE synced_at IS NULL ORDER BY printed_at_epoch ASC LIMIT 1000').all();
-            const p2 = localDb.prepare('SELECT id, transaction_id, printer2_receipt_number, print_mode, cycle_number, global_counter, printed_at, printed_at_epoch FROM printer2_audit_log WHERE synced_at IS NULL ORDER BY printed_at_epoch ASC LIMIT 1000').all();
+            // Fetch ALL columns from printer audit logs (including reprint_count, is_reprint for MySQL compatibility)
+            // Note: business_id and printed_by_user_id don't exist in SQLite printer2_audit_log table, only in MySQL
+            const p1 = localDb.prepare('SELECT id, transaction_id, printer1_receipt_number, global_counter, printed_at, printed_at_epoch, reprint_count, is_reprint FROM printer1_audit_log WHERE synced_at IS NULL ORDER BY printed_at_epoch ASC LIMIT 1000').all();
+            const p2 = localDb.prepare('SELECT id, transaction_id, printer2_receipt_number, print_mode, cycle_number, global_counter, printed_at, printed_at_epoch, reprint_count, is_reprint FROM printer2_audit_log WHERE synced_at IS NULL ORDER BY printed_at_epoch ASC LIMIT 1000').all();
             return { p1, p2 };
         }
         catch (error) {
@@ -4874,133 +5122,18 @@ function createWindows() {
             return { success: false, error: String(error) };
         }
     });
-    // Offline transaction queue management
-    electron_1.ipcMain.handle('localdb-queue-offline-transaction', async (event, transactionData) => {
-        if (!localDb)
-            return { success: false, error: 'Database not available' };
-        try {
-            // Try to link to an active shift if not already provided
-            if (!transactionData.shift_uuid && transactionData.user_id) {
-                try {
-                    const shiftStmt = localDb.prepare(`
-            SELECT uuid_id 
-            FROM shifts 
-            WHERE user_id = ? AND status = 'active' AND business_id = ?
-            ORDER BY shift_start DESC 
-            LIMIT 1
-          `);
-                    const activeShift = shiftStmt.get(transactionData.user_id, transactionData.business_id ?? 14);
-                    if (activeShift) {
-                        transactionData.shift_uuid = activeShift.uuid_id;
-                        console.log(`🔗 Linking offline transaction to shift ${activeShift.uuid_id}`);
-                    }
-                    else {
-                        console.warn(`⚠️ No active shift found for user ${transactionData.user_id} when queuing transaction`);
-                    }
-                }
-                catch (shiftError) {
-                    console.error('Error finding active shift for offline transaction:', shiftError);
-                }
-            }
-            const stmt = localDb.prepare(`
-        INSERT INTO offline_transactions (transaction_data, created_at, sync_status)
-        VALUES (?, ?, 'pending')
-      `);
-            const result = stmt.run(JSON.stringify(transactionData), Date.now());
-            // Queue transaction items
-            const items = Array.isArray(transactionData.items) ? transactionData.items : [];
-            if (items.length > 0) {
-                const itemStmt = localDb.prepare(`
-          INSERT INTO offline_transaction_items (offline_transaction_id, item_data)
-          VALUES (?, ?)
-        `);
-                for (const item of items) {
-                    itemStmt.run(result.lastInsertRowid, JSON.stringify(item));
-                }
-            }
-            console.log(`✅ Queued offline transaction ${result.lastInsertRowid}`);
-            return { success: true, offlineTransactionId: result.lastInsertRowid };
-        }
-        catch (error) {
-            console.error('Error queueing offline transaction:', error);
-            return { success: false, error: String(error) };
-        }
-    });
-    electron_1.ipcMain.handle('localdb-get-pending-transactions', async () => {
-        if (!localDb)
-            return [];
-        try {
-            const stmt = localDb.prepare(`
-        SELECT id, transaction_data, created_at, sync_attempts, last_sync_attempt
-        FROM offline_transactions 
-        WHERE sync_status = 'pending' 
-        ORDER BY created_at ASC
-        LIMIT 50
-      `);
-            const transactions = stmt.all();
-            // Fetch items for each transaction and include them
-            const transactionsWithItems = transactions.map(transaction => {
-                try {
-                    const transactionData = JSON.parse(transaction.transaction_data);
-                    // Fetch items for this transaction
-                    if (!localDb) {
-                        // If localDb becomes null, return transaction without items
-                        return transaction;
-                    }
-                    const itemsStmt = localDb.prepare(`
-            SELECT item_data
-            FROM offline_transaction_items
-            WHERE offline_transaction_id = ?
-            ORDER BY id ASC
-          `);
-                    const items = itemsStmt.all(transaction.id);
-                    // Parse and include items in transaction data
-                    transactionData.items = items.map(item => JSON.parse(item.item_data));
-                    return {
-                        ...transaction,
-                        transaction_data: JSON.stringify(transactionData)
-                    };
-                }
-                catch (error) {
-                    console.error(`Error processing transaction ${transaction.id}:`, error);
-                    // Return transaction without items if parsing fails
-                    return transaction;
-                }
-            });
-            return transactionsWithItems;
-        }
-        catch (error) {
-            console.error('Error getting pending transactions:', error);
-            return [];
-        }
-    });
-    electron_1.ipcMain.handle('localdb-mark-transaction-synced', async (event, offlineTransactionId) => {
+    // Mark transaction as failed (for transactions table)
+    electron_1.ipcMain.handle('localdb-mark-transaction-failed', async (event, transactionId) => {
         if (!localDb)
             return { success: false };
         try {
+            const now = Date.now();
             const stmt = localDb.prepare(`
-        UPDATE offline_transactions 
-        SET sync_status = 'synced', last_sync_attempt = ?
+        UPDATE transactions 
+        SET sync_status = 'failed', sync_attempts = sync_attempts + 1, last_sync_attempt = ?
         WHERE id = ?
       `);
-            stmt.run(Date.now(), offlineTransactionId);
-            return { success: true };
-        }
-        catch (error) {
-            console.error('Error marking transaction as synced:', error);
-            return { success: false, error: String(error) };
-        }
-    });
-    electron_1.ipcMain.handle('localdb-mark-transaction-failed', async (event, offlineTransactionId) => {
-        if (!localDb)
-            return { success: false };
-        try {
-            const stmt = localDb.prepare(`
-        UPDATE offline_transactions 
-        SET sync_attempts = sync_attempts + 1, last_sync_attempt = ?
-        WHERE id = ?
-      `);
-            stmt.run(Date.now(), offlineTransactionId);
+            stmt.run(now, transactionId);
             return { success: true };
         }
         catch (error) {
@@ -7194,7 +7327,11 @@ electron_1.ipcMain.handle('open-cash-drawer', async () => {
 // Open production display (kitchen/barista) in fullscreen window
 electron_1.ipcMain.handle('open-production-display', async (event, displayType) => {
     try {
-        console.log(`🖥️ Opening ${displayType} display in fullscreen...`);
+        // #region agent log - H1: Log entry and parameters
+        console.log(`🖥️ [DEBUG] Opening ${displayType} display in fullscreen...`);
+        console.log(`🖥️ [DEBUG] mainWindow exists: ${!!mainWindow}`);
+        console.log(`🖥️ [DEBUG] mainWindow.webContents exists: ${!!(mainWindow?.webContents)}`);
+        // #endregion
         const { screen } = require('electron');
         const primaryDisplay = screen.getPrimaryDisplay();
         const { width, height } = primaryDisplay.workAreaSize;
@@ -7211,12 +7348,46 @@ electron_1.ipcMain.handle('open-production-display', async (event, displayType) 
                 preload: path.join(__dirname, 'preload.js')
             }
         });
-        // Load the display page
-        const displayUrl = isDev
-            ? `http://localhost:3000/${displayType}`
-            : `file://${path.join(__dirname, '../out', displayType, 'index.html')}`;
-        console.log(`📺 Loading ${displayType} display from: ${displayUrl}`);
-        displayWindow.loadURL(displayUrl);
+        // #region agent log - H6: Log window creation
+        console.log(`🖥️ [DEBUG] Created displayWindow with id: ${displayWindow.id}`);
+        console.log(`🖥️ [DEBUG] displayWindow.webContents.id: ${displayWindow.webContents.id}`);
+        // #endregion
+        // Load the display page - handle dev vs production differently
+        if (isDev) {
+            // Development: use HTTP localhost with port detection
+            const preferredPort = Number(process.env.PORT ?? '');
+            const fallbackPorts = [3000, 3001, 3002];
+            const ports = preferredPort ? [preferredPort, ...fallbackPorts] : fallbackPorts;
+            let loaded = false;
+            for (const port of ports) {
+                try {
+                    const devUrl = `http://localhost:${port}/${displayType}`;
+                    console.log(`🖥️ [DEBUG] Trying dev URL: ${devUrl}`);
+                    await displayWindow.loadURL(devUrl);
+                    console.log(`✅ Successfully loaded ${displayType} display on port ${port}`);
+                    loaded = true;
+                    break;
+                }
+                catch (error) {
+                    console.log(`❌ Failed to load on port ${port}:`, error);
+                }
+            }
+            if (!loaded) {
+                throw new Error(`Failed to load ${displayType} display on any port`);
+            }
+        }
+        else {
+            // Production: Next.js static export creates kitchen.html and barista.html directly
+            const routeHtmlPath = path.join(__dirname, '../../out', `${displayType}.html`);
+            console.log(`🖥️ [DEBUG] Production mode - loading: ${routeHtmlPath}`);
+            if (fs.existsSync(routeHtmlPath)) {
+                await displayWindow.loadFile(routeHtmlPath);
+                console.log(`✅ Successfully loaded ${displayType} display`);
+            }
+            else {
+                throw new Error(`Display file not found: ${routeHtmlPath}`);
+            }
+        }
         // Allow exiting fullscreen with Escape
         displayWindow.webContents.on('before-input-event', (event, input) => {
             if (input.key === 'Escape') {
@@ -8199,7 +8370,9 @@ electron_1.ipcMain.handle('websocket-broadcast-order', async (event, order) => {
         console.error('[IPC] Error broadcasting order:', error);
         return {
             success: false,
-            sentTo: []
+            sentTo: [],
+            sentToKitchen: 0,
+            sentToBarista: 0
         };
     }
 });

@@ -1,6 +1,7 @@
 import { conflictResolutionService } from './conflictResolution';
 import { getApiUrl } from '@/lib/api';
 import { getAutoSyncEnabled, onAutoSyncSettingChanged } from './autoSyncSettings';
+import { validateNotNullFields, convertTransactionDatesForMySQL, convertShiftDatesForMySQL, cleanRefundForMySQL } from './syncUtils';
 
 type UnknownRecord = Record<string, unknown>;
 
@@ -51,6 +52,8 @@ function normalizePaymentMethodString(paymentMethod: string): string {
   return method || 'cash';
 }
 
+// Date conversion and validation functions moved to syncUtils.ts
+
 interface SyncConfig {
   maxBatchSize: number;
   syncInterval: number;
@@ -60,11 +63,10 @@ interface SyncConfig {
 }
 
 interface PendingTransaction {
-  id: number;
-  transaction_data: string;
-  created_at: number;
-  sync_attempts: number;
-  last_sync_attempt?: number;
+  id: string; // Transaction UUID
+  business_id: number;
+  user_id: number;
+  [key: string]: unknown; // All transaction fields
 }
 
 class SmartSyncService {
@@ -197,16 +199,13 @@ class SmartSyncService {
     try {
       // Check if the method is available
       const electronAPI = typeof window !== 'undefined' ? (window as { electronAPI?: UnknownRecord }).electronAPI : undefined;
-      if (!electronAPI?.localDbGetPendingTransactions) {
-        console.warn('⚠️ [SMART SYNC] localDbGetPendingTransactions not available - Electron may need restart');
+      if (!electronAPI?.localDbGetUnsyncedTransactions) {
+        console.warn('⚠️ [SMART SYNC] localDbGetUnsyncedTransactions not available - Electron may need restart');
         return;
       }
 
-
-
-
-      // Get pending transactions
-      const pendingTransactions = await (electronAPI.localDbGetPendingTransactions as () => Promise<PendingTransaction[]>)();
+      // Get pending transactions (sync_status = 'pending')
+      const pendingTransactions = await (electronAPI.localDbGetUnsyncedTransactions as (businessId?: number) => Promise<PendingTransaction[]>)();
 
       if (pendingTransactions.length === 0) {
         // console.log('✅ [SMART SYNC] No pending transactions');
@@ -291,8 +290,8 @@ class SmartSyncService {
           continue;
         }
 
-        // Parse transaction data
-        const transactionData = JSON.parse(transaction.transaction_data) as UnknownRecord;
+        // Use transaction data directly from transactions table
+        let transactionData = transaction as UnknownRecord;
 
         // Ensure items array exists (even if empty)
         if (!Array.isArray(transactionData.items)) {
@@ -301,10 +300,10 @@ class SmartSyncService {
 
         // Validate required fields
         if (!transactionData.id) {
-          console.warn(`⚠️ [SMART SYNC] Transaction ${transaction.id} missing required field: id`);
+          console.warn(`⚠️ [SMART SYNC] Transaction missing required field: id`);
           const electronAPI = typeof window !== 'undefined' ? (window as { electronAPI?: UnknownRecord }).electronAPI : undefined;
-          if (electronAPI?.localDbMarkTransactionFailed) {
-            await (electronAPI.localDbMarkTransactionFailed as (id: number) => Promise<void>)(transaction.id);
+          if (electronAPI?.localDbMarkTransactionFailed && transaction.id) {
+            await (electronAPI.localDbMarkTransactionFailed as (id: string) => Promise<void>)(String(transaction.id));
           }
           continue;
         }
@@ -314,22 +313,37 @@ class SmartSyncService {
           console.warn(`⚠️ [SMART SYNC] Transaction ${transaction.id} missing required field: business_id`);
           const electronAPI = typeof window !== 'undefined' ? (window as { electronAPI?: UnknownRecord }).electronAPI : undefined;
           if (electronAPI?.localDbMarkTransactionFailed) {
-            await (electronAPI.localDbMarkTransactionFailed as (id: number) => Promise<void>)(transaction.id);
+            await (electronAPI.localDbMarkTransactionFailed as (id: string) => Promise<void>)(String(transaction.id));
           }
           continue;
         }
 
-        // Ensure created_at is in a valid format (ISO string or timestamp)
-        if (transactionData.created_at) {
-          // If it's a number (timestamp), convert to ISO string
-          if (typeof transactionData.created_at === 'number') {
-            transactionData.created_at = new Date(transactionData.created_at).toISOString();
-          } else if (transactionData.created_at instanceof Date) {
-            transactionData.created_at = transactionData.created_at.toISOString();
+        // Phase 2: Validate NOT NULL constraints for transactions
+        const transactionRequiredFields = ['id', 'business_id', 'user_id', 'payment_method', 'pickup_method', 
+          'total_amount', 'final_amount', 'amount_received', 'payment_method_id', 'created_at'];
+        const missingFields = validateNotNullFields(transactionData, transactionRequiredFields);
+        
+        if (missingFields.length > 0) {
+          console.warn(`⚠️ [SMART SYNC] Transaction ${transaction.id} missing required fields: ${missingFields.join(', ')}`);
+          const electronAPI = typeof window !== 'undefined' ? (window as { electronAPI?: UnknownRecord }).electronAPI : undefined;
+          if (electronAPI?.localDbMarkTransactionFailed) {
+            await (electronAPI.localDbMarkTransactionFailed as (id: string) => Promise<void>)(String(transaction.id));
           }
-        } else {
-          // If missing, use current time
-          transactionData.created_at = new Date().toISOString();
+          continue;
+        }
+
+        // #region agent log
+        fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'smartSync.ts:335',message:'Before date conversion',data:{transactionId:transaction.id,created_at:transactionData.created_at,updated_at:transactionData.updated_at},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})}).catch(()=>{});
+        // #endregion
+        // Phase 2: Convert all date fields to MySQL format
+        transactionData = convertTransactionDatesForMySQL(transactionData);
+        // #region agent log
+        fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'smartSync.ts:336',message:'After date conversion',data:{transactionId:transaction.id,created_at:transactionData.created_at,updated_at:transactionData.updated_at},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})}).catch(()=>{});
+        // #endregion
+        
+        // Ensure created_at exists (required by MySQL)
+        if (!transactionData.created_at) {
+          transactionData.created_at = new Date().toISOString().slice(0, 19).replace('T', ' ');
         }
 
         // Normalize payment_method and set payment_method_id
@@ -379,13 +393,19 @@ class SmartSyncService {
           }
         }
 
-        // Validate data before sync
-        const validation = conflictResolutionService.validateData(transactionData);
+        // Phase 2: Enhanced validation with NOT NULL constraints
+        // #region agent log
+        fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'smartSync.ts:391',message:'Before validation',data:{transactionId:transaction.id,created_at:transactionData.created_at,updated_at:transactionData.updated_at},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})}).catch(()=>{});
+        // #endregion
+        const validation = conflictResolutionService.validateData(transactionData, transactionRequiredFields);
+        // #region agent log
+        fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'smartSync.ts:392',message:'Validation result',data:{transactionId:transaction.id,isValid:validation.isValid,errors:validation.errors},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
+        // #endregion
         if (!validation.isValid) {
           console.warn(`⚠️ [SMART SYNC] Transaction ${transaction.id} validation failed:`, validation.errors);
           const electronAPI = typeof window !== 'undefined' ? (window as { electronAPI?: UnknownRecord }).electronAPI : undefined;
           if (electronAPI?.localDbMarkTransactionFailed) {
-            await (electronAPI.localDbMarkTransactionFailed as (id: number) => Promise<void>)(transaction.id);
+            await (electronAPI.localDbMarkTransactionFailed as (id: string) => Promise<void>)(String(transaction.id));
           }
           continue;
         }
@@ -418,17 +438,43 @@ class SmartSyncService {
             // Fetch transaction items from transaction_items table (source of truth)
             const rawItems = await (electronAPI.localDbGetTransactionItems as (transactionId: string) => Promise<Array<UnknownRecord>>)(String(transactionData.id));
 
-            // Map items to upload format (with UUIDs)
+            // Map items to upload format (with UUIDs and ALL columns)
             if (Array.isArray(rawItems) && rawItems.length > 0) {
-              transactionData.items = rawItems.map(item => ({
-                id: item.id as string, // UUID
-                product_id: item.product_id as number,
-                quantity: item.quantity as number,
-                unit_price: item.unit_price as number,
-                total_price: item.total_price as number,
-                custom_note: item.custom_note as string | undefined,
-                bundle_selections_json: item.bundle_selections_json as unknown | undefined,
-              }));
+              transactionData.items = rawItems.map(item => {
+                const itemData: UnknownRecord = {
+                  id: item.id as string, // UUID
+                  product_id: item.product_id as number,
+                  quantity: item.quantity as number,
+                  unit_price: item.unit_price as number,
+                  total_price: item.total_price as number,
+                  custom_note: item.custom_note as string | undefined,
+                  bundle_selections_json: item.bundle_selections_json as unknown | undefined,
+                };
+
+                // Add created_at if it exists (convert to MySQL format)
+                if (item.created_at) {
+                  itemData.created_at = typeof item.created_at === 'string' 
+                    ? item.created_at.replace('T', ' ').slice(0, 19) 
+                    : item.created_at;
+                }
+
+                // Add production tracking fields if they exist
+                if (item.production_status !== undefined) {
+                  itemData.production_status = item.production_status;
+                }
+                if (item.production_started_at) {
+                  itemData.production_started_at = typeof item.production_started_at === 'string'
+                    ? item.production_started_at.replace('T', ' ').slice(0, 19)
+                    : item.production_started_at;
+                }
+                if (item.production_finished_at) {
+                  itemData.production_finished_at = typeof item.production_finished_at === 'string'
+                    ? item.production_finished_at.replace('T', ' ').slice(0, 19)
+                    : item.production_finished_at;
+                }
+
+                return itemData;
+              });
               console.log(`✅ [SMART SYNC] Fetched ${rawItems.length} items from transaction_items table for transaction ${transactionData.id}`);
             }
 
@@ -480,25 +526,14 @@ class SmartSyncService {
           // const result = await response.json();
           console.log(`✅ [SMART SYNC] Transaction ${transaction.id} synced successfully`);
 
-          // Mark as synced
+          // Mark transaction as synced
           const electronAPI = typeof window !== 'undefined' ? (window as { electronAPI?: UnknownRecord }).electronAPI : undefined;
-          if (electronAPI?.localDbMarkTransactionSynced) {
-            try {
-              await (electronAPI.localDbMarkTransactionSynced as (id: number) => Promise<void>)(transaction.id);
-              console.log(`✅ [SMART SYNC] Marked offline_transactions ${transaction.id} as synced`);
-            } catch (markError) {
-              console.error(`❌ [SMART SYNC] Failed to mark offline_transactions ${transaction.id} as synced:`, markError);
-            }
-          }
-
-          // ALSO mark the main transaction table as synced using the UUID
-          // This ensures the SyncPanel and other UI components see it as synced
           if (transactionData.id && electronAPI?.localDbMarkTransactionsSynced) {
             try {
               await (electronAPI.localDbMarkTransactionsSynced as (ids: string[]) => Promise<void>)([String(transactionData.id)]);
-              console.log(`✅ [SMART SYNC] Marked transactions table ${transactionData.id} as synced`);
+              console.log(`✅ [SMART SYNC] Marked transaction ${transactionData.id} as synced`);
             } catch (markError) {
-              console.error(`❌ [SMART SYNC] Failed to mark transactions table ${transactionData.id} as synced:`, markError);
+              console.error(`❌ [SMART SYNC] Failed to mark transaction ${transactionData.id} as synced:`, markError);
             }
           }
         } else {
@@ -551,12 +586,13 @@ class SmartSyncService {
 
         // Mark as failed (will retry later)
         const electronAPI = typeof window !== 'undefined' ? (window as { electronAPI?: UnknownRecord }).electronAPI : undefined;
-        if (electronAPI?.localDbMarkTransactionFailed) {
-          await (electronAPI.localDbMarkTransactionFailed as (id: number) => Promise<void>)(transaction.id);
+        if (electronAPI?.localDbMarkTransactionFailed && transaction.id) {
+          await (electronAPI.localDbMarkTransactionFailed as (id: string) => Promise<void>)(String(transaction.id));
         }
 
         // If too many failures, stop processing this batch
-        if (transaction.sync_attempts >= this.config.maxRetries) {
+        const syncAttempts = (transaction as UnknownRecord).sync_attempts as number | undefined;
+        if (syncAttempts !== undefined && syncAttempts >= this.config.maxRetries) {
           console.log(`🚫 [SMART SYNC] Transaction ${transaction.id} exceeded max retries - skipping`);
         }
       }
@@ -598,25 +634,6 @@ class SmartSyncService {
     }
   }
 
-  /**
-   * Queue a transaction for offline sync
-   */
-  async queueTransaction(transactionData: UnknownRecord): Promise<{ success: boolean; offlineTransactionId?: number; error?: string }> {
-    const electronAPI = typeof window !== 'undefined' ? (window as { electronAPI?: UnknownRecord }).electronAPI : undefined;
-    if (!isElectron || !electronAPI?.localDbQueueOfflineTransaction) {
-      console.warn('⚠️ [SMART SYNC] localDbQueueOfflineTransaction not available - Electron may need restart');
-      return { success: false };
-    }
-
-    try {
-      const result = await (electronAPI.localDbQueueOfflineTransaction as (data: UnknownRecord) => Promise<{ success: boolean; offlineTransactionId?: number; error?: string }>)(transactionData);
-      // console.log('📝 [SMART SYNC] Transaction queued for offline sync');
-      return result;
-    } catch (error) {
-      console.error('❌ [SMART SYNC] Failed to queue transaction:', error);
-      return { success: false };
-    }
-  }
 
   /**
    * Queue a refund for offline sync
@@ -680,13 +697,13 @@ class SmartSyncService {
       }
 
       const electronAPI = typeof window !== 'undefined' ? (window as { electronAPI?: UnknownRecord }).electronAPI : undefined;
-      // Use localDbGetPendingTransactions to get ALL pending transactions regardless of business_id
-      // This matches what the sync process uses and ensures we count all queued transactions
-      if (!electronAPI?.localDbGetPendingTransactions) {
+      // Use localDbGetUnsyncedTransactions to get ALL pending transactions (sync_status = 'pending')
+      // This matches what the sync process uses and ensures we count all pending transactions
+      if (!electronAPI?.localDbGetUnsyncedTransactions) {
         return 0;
       }
 
-      const pendingTransactions = await (electronAPI.localDbGetPendingTransactions as () => Promise<PendingTransaction[]>)();
+      const pendingTransactions = await (electronAPI.localDbGetUnsyncedTransactions as (businessId?: number) => Promise<PendingTransaction[]>)();
       return Array.isArray(pendingTransactions) ? pendingTransactions.length : 0;
     } catch (error) {
       console.warn('⚠️ [SMART SYNC] Failed to get pending transaction count:', error);
@@ -735,22 +752,36 @@ class SmartSyncService {
       // Format shifts for server (server expects { shifts: [...] })
       const formattedShifts = unsyncedShifts.map(shift => {
         const shiftRecord = shift as unknown as UnknownRecord;
+        
+        // Phase 2: Validate NOT NULL constraints for shifts
+        const shiftRequiredFields = ['uuid_id', 'business_id', 'user_id', 'shift_start'];
+        const missingFields = validateNotNullFields(shiftRecord, shiftRequiredFields);
+        
+        if (missingFields.length > 0) {
+          console.warn(`⚠️ [SMART SYNC] Shift missing required fields: ${missingFields.join(', ')}`);
+          return null; // Will be filtered out
+        }
+
+        // Phase 2: Convert all date fields to MySQL format
+        const convertedShift = convertShiftDatesForMySQL(shiftRecord);
+
         return {
-          id: shiftRecord.uuid_id || String(shiftRecord.id),
-          uuid: shiftRecord.uuid_id || String(shiftRecord.id),
-          business_id: shiftRecord.business_id,
-          user_id: shiftRecord.user_id,
-          shift_start: shiftRecord.shift_start,
-          shift_end: shiftRecord.shift_end || null,
-          starting_cash: shiftRecord.modal_awal || shiftRecord.starting_cash || 0,
-          ending_cash: shiftRecord.kas_akhir || shiftRecord.ending_cash || null,
-          cash_drawer_difference: shiftRecord.kas_selisih || shiftRecord.cash_drawer_difference || null,
-          status: shiftRecord.status || 'active',
-          closed_by: shiftRecord.closed_by || null,
-          closed_at: shiftRecord.closed_at || null,
-          created_at: shiftRecord.created_at || shiftRecord.shift_start,
+          id: convertedShift.uuid_id || String(convertedShift.id),
+          uuid: convertedShift.uuid_id || String(convertedShift.id),
+          business_id: convertedShift.business_id,
+          user_id: convertedShift.user_id,
+          shift_start: convertedShift.shift_start,
+          shift_end: convertedShift.shift_end || null,
+          starting_cash: convertedShift.modal_awal || convertedShift.starting_cash || 0,
+          ending_cash: convertedShift.kas_akhir || convertedShift.ending_cash || null,
+          cash_drawer_difference: convertedShift.kas_selisih || convertedShift.cash_drawer_difference || null,
+          status: convertedShift.status || 'active',
+          closed_by: convertedShift.closed_by || null,
+          closed_at: convertedShift.closed_at || null,
+          created_at: convertedShift.created_at || convertedShift.shift_start,
+          updated_at: convertedShift.updated_at || null,
         };
-      });
+      }).filter((shift): shift is NonNullable<typeof shift> => shift !== null); // Remove null entries
 
       try {
         const response = await fetch(getApiUrl('/api/shifts'), {
@@ -895,6 +926,17 @@ class SmartSyncService {
             throw new Error('Invalid refund payload');
           }
 
+          // Phase 2: Validate NOT NULL constraints for refunds
+          const refundRequiredFields = ['transaction_uuid', 'business_id', 'refunded_by', 'refund_amount', 
+            'payment_method_id', 'refunded_at'];
+          const missingFields = validateNotNullFields(payload, refundRequiredFields);
+          
+          if (missingFields.length > 0) {
+            console.warn(`⚠️ [SMART SYNC] Refund ${refund.id} missing required fields: ${missingFields.join(', ')}`);
+            await (electronAPI.localDbMarkRefundFailed as (id: number) => Promise<{ success: boolean }>)(refund.id);
+            continue;
+          }
+
           const transactionUuid = String(
             payload.transaction_uuid ??
             payload.transactionId ??
@@ -907,6 +949,17 @@ class SmartSyncService {
             await (electronAPI.localDbMarkRefundFailed as (id: number) => Promise<{ success: boolean }>)(refund.id);
             continue;
           }
+
+          // Phase 2 Part 2: Clean and validate refund data (ENUMs, dates, etc.)
+          const cleanedPayload = cleanRefundForMySQL(payload);
+          
+          // Ensure refunded_at exists (required by MySQL)
+          if (!cleanedPayload.refunded_at) {
+            cleanedPayload.refunded_at = new Date().toISOString().slice(0, 19).replace('T', ' ');
+          }
+          
+          // Update payload with cleaned data
+          Object.assign(payload, cleanedPayload);
 
           const response = await fetch(getApiUrl(`/api/transactions/${transactionUuid}/refund`), {
             method: 'POST',

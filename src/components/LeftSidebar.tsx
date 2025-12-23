@@ -3,16 +3,13 @@
 import {
   Database,
   Clock,
-  Mail,
   Heart,
   PieChart,
   Settings,
   Grid3X3,
   Wifi,
   Minimize2,
-  Receipt,
-  ChefHat,
-  Coffee
+  Receipt
 } from 'lucide-react';
 import { useAuth } from '@/hooks/useAuth';
 import { isSuperAdmin } from '@/lib/auth';

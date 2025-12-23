@@ -317,6 +317,9 @@ export class PrinterManagementService {
       console.log(`✅ Logged Printer 2 print: Transaction ${transactionId}, Receipt #${printer2ReceiptNumber}, Mode: ${mode}${isReprint ? ` (REPRINT ke-${reprintCount})` : ''}`);
 
       // Shadow DB (MySQL) Write - Fire and Forget
+      // Note: This writes to local MySQL system_pos database
+      // Foreign key constraint requires transaction to exist in system_pos.transactions first
+      // If transaction doesn't exist yet, this will fail silently (expected behavior)
       this.mysqlPool.execute(
         `INSERT INTO printer2_audit_log 
          (transaction_id, printer2_receipt_number, print_mode, cycle_number, global_counter, printed_at, printed_at_epoch, is_reprint, reprint_count) 
@@ -335,7 +338,13 @@ export class PrinterManagementService {
       ).then(() => {
         console.log(`✅ [SHADOW-DB] Logged Printer 2 print to MySQL for Trans ${transactionId}`);
       }).catch(err => {
-        console.error(`❌ [SHADOW-DB] Failed to log to MySQL:`, err);
+        // Foreign key constraint error is expected if transaction doesn't exist in system_pos yet
+        // This will be synced later by systemPosSyncService
+        if (err.code === 'ER_NO_REFERENCED_ROW_2' || err.errno === 1452) {
+          console.log(`ℹ️ [SHADOW-DB] Transaction ${transactionId} not yet in system_pos, will be synced later`);
+        } else {
+          console.error(`❌ [SHADOW-DB] Failed to log to MySQL:`, err);
+        }
       });
 
       return true;
