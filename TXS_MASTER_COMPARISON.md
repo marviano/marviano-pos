@@ -80,3 +80,20 @@ FROM transactions t
 - **Display completeness**: Missing receipt numbers and transaction types
 - **Data visibility**: Payment details (amount_received, change_amount) not shown
 - **Bank information**: Debit payment bank names not displayed
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

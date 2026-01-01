@@ -1,6 +1,6 @@
 /**
  * Sync Utility Functions
- * Shared utilities for data synchronization between SQLite and MySQL
+ * Shared utilities for data synchronization
  * Phase 2: Date conversion and validation helpers
  * Phase 2 Part 2: ENUM validation and field cleanup
  */
@@ -20,7 +20,6 @@ const ENUM_VALUES: Record<string, string[]> = {
   'transactions.transaction_type': ['drinks', 'bakery'],
   'transaction_refunds.refund_type': ['full', 'partial'],
   'transaction_refunds.status': ['pending', 'completed', 'failed'],
-  'transaction_items.production_status': ['preparing', 'finished'],
   'shifts.kas_selisih_label': ['balanced', 'plus', 'minus'],
   'product_customization_options.status': ['active', 'inactive'],
   'product_customization_types.selection_mode': ['single', 'multiple'],
@@ -39,7 +38,6 @@ const ENUM_DEFAULTS: Record<string, string | null> = {
   'transactions.transaction_type': 'drinks',
   'transaction_refunds.refund_type': 'full',
   'transaction_refunds.status': 'completed',
-  'transaction_items.production_status': null, // nullable field
   'shifts.kas_selisih_label': 'balanced',
   'product_customization_options.status': 'active',
   'product_customization_types.selection_mode': 'single',
@@ -93,8 +91,7 @@ export function validateEnumValue(
 }
 
 /**
- * Convert SQLite date/timestamp to MySQL-compatible format
- * SQLite uses INTEGER (milliseconds) or TEXT (ISO string)
+ * Convert date/timestamp to MySQL-compatible format
  * MySQL expects datetime/timestamp (ISO string) or bigint
  */
 export function convertDateForMySQL(value: unknown, fieldName: string): string | null {
@@ -225,6 +222,10 @@ export function convertTransactionDatesForMySQL(transactionData: UnknownRecord):
     converted.voucher_type = validateEnumValue(converted.voucher_type, 'transactions.voucher_type', 'voucher_type');
   }
   if (converted.status !== undefined) {
+    // Convert "completed" to "paid" for compatibility (local DB uses "completed", remote expects "paid")
+    if (String(converted.status).toLowerCase() === 'completed') {
+      converted.status = 'paid';
+    }
     converted.status = validateEnumValue(converted.status, 'transactions.status', 'status');
   }
   if (converted.refund_status !== undefined) {
@@ -267,23 +268,6 @@ export function convertTransactionDatesForMySQL(transactionData: UnknownRecord):
         const itemDate = convertDateForMySQL(item.created_at, 'item.created_at');
         if (itemDate) {
           item.created_at = itemDate;
-        }
-      }
-      // Phase 2 Part 2: Validate production_status ENUM
-      if (item.production_status !== undefined) {
-        item.production_status = validateEnumValue(item.production_status, 'transaction_items.production_status', 'production_status');
-      }
-      // Convert production tracking dates
-      if (item.production_started_at) {
-        const productionStartedDate = convertDateForMySQL(item.production_started_at, 'item.production_started_at');
-        if (productionStartedDate) {
-          item.production_started_at = productionStartedDate;
-        }
-      }
-      if (item.production_finished_at) {
-        const productionFinishedDate = convertDateForMySQL(item.production_finished_at, 'item.production_finished_at');
-        if (productionFinishedDate) {
-          item.production_finished_at = productionFinishedDate;
         }
       }
       return item;

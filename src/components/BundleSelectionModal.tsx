@@ -3,7 +3,6 @@
 import { useState, useEffect } from 'react';
 import Image from 'next/image';
 import { X, Check, Plus, Minus, SlidersHorizontal, MessageCircle } from 'lucide-react';
-import { offlineSyncService } from '@/lib/offlineSync';
 import BundleProductCustomizationModal, { SelectedCustomization } from './BundleProductCustomizationModal';
 import CustomNoteModal from './CustomNoteModal';
 import { getApiUrl } from '@/lib/api';
@@ -179,55 +178,30 @@ export default function BundleSelectionModal({
                 continue;
               }
               
-              const products = await offlineSyncService.fetchWithFallback(
-                // Online fetch
-                async () => {
-                  // Use category2_name from bundle item
-                  const categoryName = item.category2_name || '';
-                  
-                  if (!categoryName) {
-                    throw new Error('Category name not found');
-                  }
-                  
-                  console.log(`🌐 [BUNDLE MODAL] Fetching online products for category: ${categoryName}`);
-                  const response = await fetch(getApiUrl(`/api/products?category2_name=${encodeURIComponent(categoryName)}`), {
-                    signal: AbortSignal.timeout(5000)
-                  });
-                  if (!response.ok) throw new Error('Failed to fetch');
-                  const data = await response.json();
-                  console.log(`✅ [BUNDLE MODAL] Got ${data.products?.length || 0} products online for ${categoryName}`);
-                  return data.products || [];
-                },
-                // Offline fetch
-                async () => {
-                  console.log(`📱 [BUNDLE MODAL] Fetching offline products for category: ${item.category2_name}`);
+              // Use category2_name from bundle item
+              const categoryName = item.category2_name || '';
+              
+              let products: RawProduct[] = [];
+              
+              if (!categoryName) {
+                console.warn(`⚠️ [BUNDLE MODAL] Category name not found`);
+              } else {
+                console.log(`🔍 [BUNDLE MODAL] Fetching products from MySQL for category: ${categoryName}`);
+                try {
                   const electronAPI = typeof window !== 'undefined' ? window.electronAPI : undefined;
-                  
-                  // Try using category2_name first (more efficient)
-                  if (electronAPI?.localDbGetProductsByCategory2 && item.category2_name) {
-                    console.log(`📱 [BUNDLE MODAL] Using localDbGetProductsByCategory2 for: ${item.category2_name}`);
-                    const categoryProducts = await electronAPI.localDbGetProductsByCategory2(item.category2_name);
-                    console.log(`✅ [BUNDLE MODAL] Got ${Array.isArray(categoryProducts) ? categoryProducts.length : 0} products from category name`);
-                    return Array.isArray(categoryProducts) ? categoryProducts.filter(isRawProduct) : [];
+                  if (electronAPI?.localDbGetProductsByCategory2) {
+                    const categoryProducts = await electronAPI.localDbGetProductsByCategory2(categoryName);
+                    products = Array.isArray(categoryProducts) ? categoryProducts.filter(isRawProduct) : [];
+                    console.log(`✅ [BUNDLE MODAL] Got ${products.length} products from MySQL for ${categoryName}`);
+                  } else {
+                    console.warn(`⚠️ [BUNDLE MODAL] MySQL query method not available`);
+                    products = [];
                   }
-                  
-                  // Fallback: get all products and filter by category2_id
-                  if (electronAPI?.localDbGetAllProducts) {
-                    console.log(`📱 [BUNDLE MODAL] Fallback: Using localDbGetAllProducts and filtering by category2_id: ${item.category2_id}`);
-                    const allProducts = await electronAPI.localDbGetAllProducts();
-                    if (!Array.isArray(allProducts)) {
-                      console.warn(`⚠️ [BUNDLE MODAL] localDbGetAllProducts returned non-array`);
-                      return [];
-                    }
-                    const filtered = allProducts.filter(isRawProduct).filter((p) => p.category2_id === item.category2_id);
-                    console.log(`✅ [BUNDLE MODAL] Got ${filtered.length} products after filtering by category2_id`);
-                    return filtered;
-                  }
-                  
-                  console.warn(`⚠️ [BUNDLE MODAL] No offline product fetch method available`);
-                  return [];
+                } catch (error) {
+                  console.error(`❌ [BUNDLE MODAL] Error fetching products from MySQL:`, error);
+                  products = [];
                 }
-              );
+              }
               
               console.log(`📦 [BUNDLE MODAL] Raw products fetched: ${Array.isArray(products) ? products.length : 0}`);
               

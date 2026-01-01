@@ -1,463 +1,450 @@
 'use client';
 
-import { useEffect, useState, useCallback, useRef } from 'react';
-import { networkClient, OrderData, OrderItem, StatusUpdate } from '@/lib/networkClient';
-import { getServerSettings, saveServerSettings } from '@/lib/serverSettings';
+import { useState, useEffect } from 'react';
+import { useAuth } from '@/hooks/useAuth';
 
-interface KitchenOrderItem extends OrderItem {
-  transactionId: string;
-  receiptNumber: number;
-  customerName?: string;
-  pickupMethod: 'dine-in' | 'take-away';
-  startedAt: string; // When item first appeared (for timer)
-  finishedAt?: string; // When item was marked finished (for timer stop)
+interface OrderItem {
+  id: number;
+  uuid_id: string;
+  transaction_id: string;
+  product_id: number;
+  product_name: string;
+  quantity: number;
+  custom_note: string | null;
+  production_status: string | null;
+  production_started_at: string | null;
+  production_finished_at: string | null;
+  table_number: string | null;
+  room_name: string | null;
+  created_at: string;
+  customizations: Array<{
+    customization_name: string;
+    options: Array<{
+      option_name: string;
+      price_adjustment: number;
+    }>;
+  }>;
 }
 
-type ConnectionStatus = 'disconnected' | 'connecting' | 'connected' | 'error';
+interface GroupedOrderItem extends OrderItem {
+  total_quantity: number;
+  display_text: string;
+  timer: string;
+}
+
+const getElectronAPI = () => (typeof window !== 'undefined' ? window.electronAPI : undefined);
 
 export default function KitchenDisplay() {
-  const [orderItems, setOrderItems] = useState<KitchenOrderItem[]>([]);
-  const [connectionStatus, setConnectionStatus] = useState<ConnectionStatus>('disconnected');
-  const initialSettings = getServerSettings();
-  const [serverAddress, setServerAddress] = useState(initialSettings.address);
-  const [serverPort, setServerPort] = useState(initialSettings.port);
-  const [showSettings, setShowSettings] = useState(false);
-  const [, setTimerTick] = useState(0); // Force re-render for timer updates
-  const audioRef = useRef<HTMLAudioElement | null>(null);
+  const { user } = useAuth();
+  const businessId = user?.selectedBusinessId ?? 14;
+  const [activeOrders, setActiveOrders] = useState<GroupedOrderItem[]>([]);
+  const [finishedOrders, setFinishedOrders] = useState<GroupedOrderItem[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [currentTime, setCurrentTime] = useState(new Date());
 
-  // Update timer every second for items in "preparing" status
+  // Update timer every second
   useEffect(() => {
     const interval = setInterval(() => {
-      // Only update if there are items in preparing status
-      const hasPreparingItems = orderItems.some(item => item.status === 'preparing');
-      if (hasPreparingItems) {
-        setTimerTick(prev => prev + 1);
-      }
+      setCurrentTime(new Date());
     }, 1000);
-
     return () => clearInterval(interval);
-  }, [orderItems]);
-
-  // Play notification sound
-  const playNotificationSound = useCallback(() => {
-    try {
-      // Create a simple beep using Web Audio API
-      const audioContext = new (window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext)();
-      const oscillator = audioContext.createOscillator();
-      const gainNode = audioContext.createGain();
-      
-      oscillator.connect(gainNode);
-      gainNode.connect(audioContext.destination);
-      
-      oscillator.frequency.value = 800;
-      oscillator.type = 'sine';
-      gainNode.gain.setValueAtTime(0.3, audioContext.currentTime);
-      gainNode.gain.exponentialRampToValueAtTime(0.01, audioContext.currentTime + 0.5);
-      
-      oscillator.start(audioContext.currentTime);
-      oscillator.stop(audioContext.currentTime + 0.5);
-    } catch (error) {
-      console.error('Failed to play notification sound:', error);
-    }
   }, []);
 
-  // Use refs to store latest callbacks without triggering effect re-runs
-  const playNotificationSoundRef = useRef(playNotificationSound);
-  playNotificationSoundRef.current = playNotificationSound;
-
-  // Setup WebSocket handlers - run only once on mount
-  useEffect(() => {
-    // Define all handlers inside effect to avoid dependency issues
-    const onConnected = () => {
-      console.log('[KitchenDisplay] ✅ Connected to server successfully!');
-      setConnectionStatus('connected');
-    };
-
-    const onDisconnected = () => {
-      console.log('[KitchenDisplay] Disconnected from server');
-      setConnectionStatus('disconnected');
-    };
-
-    const onError = () => {
-      setConnectionStatus('error');
-    };
-
-    const onNewOrder = (data: unknown) => {
-      const order = data as OrderData;
-      console.log('[KitchenDisplay] New order received:', order);
-      
-      // Filter only kitchen items (category1_id = 1)
-      const kitchenItems = order.items.filter(item => item.category1_id === 1);
-      
-      if (kitchenItems.length === 0) {
-        console.log('[KitchenDisplay] No kitchen items in this order');
+  // Fetch orders from database
+  const fetchOrders = async () => {
+    try {
+      const electronAPI = getElectronAPI();
+      if (!electronAPI) {
+        console.error('Electron API not available');
         return;
       }
 
-      // Add order metadata to each item - set status to 'preparing' and start timer
-      const now = new Date().toISOString();
-      const newItems: KitchenOrderItem[] = kitchenItems.map(item => ({
-        ...item,
-        status: 'preparing' as const, // Always start as preparing
-        transactionId: order.transactionId,
-        receiptNumber: order.receiptNumber,
-        customerName: order.customerName,
-        pickupMethod: order.pickupMethod,
-        startedAt: now // Timer starts when item appears
-      }));
-
-      setOrderItems(prev => [...prev, ...newItems]);
-      playNotificationSoundRef.current();
-    };
-
-    const onStatusUpdate = (data: unknown) => {
-      const update = data as StatusUpdate;
-      console.log('[KitchenDisplay] Status update received:', update);
+      // Fetch all pending transactions
+      const transactions = await electronAPI.localDbGetTransactions?.(businessId, 10000);
+      const transactionsArray = Array.isArray(transactions) ? transactions : [];
       
-      setOrderItems(prev => prev.map(item => {
-        if (item.transactionId === update.transactionId && item.itemId === update.itemId) {
-          // If status changed to finished, stop the timer
-          if (update.status === 'finished' && item.status !== 'finished') {
-            return { ...item, status: update.status, finishedAt: new Date().toISOString() };
-          }
-          return { ...item, status: update.status };
+      // Filter for pending transactions
+      const pendingTransactions = transactionsArray.filter((tx: any) => 
+        tx.status === 'pending'
+      );
+
+      // Fetch all products to get category info
+      const allProducts = await electronAPI.localDbGetAllProducts?.();
+      const productsArray = Array.isArray(allProducts) ? allProducts : [];
+      const productsMap = new Map<number, any>();
+      productsArray.forEach((p: any) => {
+        if (p.id) {
+          productsMap.set(p.id, p);
         }
-        return item;
-      }));
-    };
+      });
 
-    // Register handlers
-    networkClient.on('connected', onConnected);
-    networkClient.on('disconnected', onDisconnected);
-    networkClient.on('error', onError);
-    networkClient.on('new_order', onNewOrder);
-    networkClient.on('status_update', onStatusUpdate);
+      // Fetch tables and rooms
+      const tablesMap = new Map<number, { table_number: string; room_id: number }>();
+      const roomsMap = new Map<number, string>();
+      if (electronAPI.getRestaurantRooms) {
+        const rooms = await electronAPI.getRestaurantRooms(businessId);
+        const roomsArray = Array.isArray(rooms) ? rooms : [];
+        roomsArray.forEach((room: { id: number; name: string }) => {
+          if (room.id) {
+            roomsMap.set(room.id, room.name);
+          }
+        });
 
-    // Auto-connect on mount using stored settings
-    const settings = getServerSettings();
-    console.log('[KitchenDisplay] Connecting to server:', settings.address, ':', settings.port);
-    setServerAddress(settings.address);
-    setServerPort(settings.port);
-    setConnectionStatus('connecting');
-    networkClient.connect(settings.address, settings.port, 'kitchen').then(result => {
-      if (!result.success) {
-        setConnectionStatus('error');
-        console.error('[KitchenDisplay] ❌ Connection failed:', result.error);
-        console.error('[KitchenDisplay] Server settings:', settings);
-      } else {
-        console.log('[KitchenDisplay] ✅ Connection attempt successful, waiting for confirmation...');
+        for (const room of roomsArray) {
+          if (room.id && electronAPI.getRestaurantTables) {
+            const tables = await electronAPI.getRestaurantTables(room.id);
+            const tablesArray = Array.isArray(tables) ? tables : [];
+            tablesArray.forEach((table: { id: number; table_number: string; room_id: number }) => {
+              tablesMap.set(table.id, { table_number: table.table_number, room_id: table.room_id });
+            });
+          }
+        }
       }
-    });
 
-    // Cleanup - remove all handlers
-    return () => {
-      networkClient.off('connected', onConnected);
-      networkClient.off('disconnected', onDisconnected);
-      networkClient.off('error', onError);
-      networkClient.off('new_order', onNewOrder);
-      networkClient.off('status_update', onStatusUpdate);
-      networkClient.disconnect();
-    };
-  }, []); // Empty dependency array - run only once
+      // Fetch transaction items for all pending transactions
+      const allOrderItems: OrderItem[] = [];
+      
+      for (const tx of pendingTransactions) {
+        const transactionId = tx.uuid_id || tx.id;
+        const items = await electronAPI.localDbGetTransactionItems?.(transactionId);
+        const itemsArray = Array.isArray(items) ? items : [];
+        
+        // Fetch customizations
+        const customizationsData = await electronAPI.localDbGetTransactionItemCustomizationsNormalized?.(transactionId);
+        const customizations = customizationsData?.customizations || [];
+        const customizationOptions = customizationsData?.options || [];
 
-  // Handle double-tap to toggle item status: preparing → finished
-  const handleItemDoubleTap = useCallback((item: KitchenOrderItem) => {
-    // Only toggle if currently preparing
-    if (item.status !== 'preparing') return;
+        // Create customizations map
+        const customizationsMap = new Map<number, Array<{
+          customization_name: string;
+          options: Array<{ option_name: string; price_adjustment: number }>;
+        }>>();
 
-    const newStatus = 'finished' as const;
-    const finishedAt = new Date().toISOString();
+        customizations.forEach((cust: any) => {
+          const itemId = typeof cust.transaction_item_id === 'string' 
+            ? parseInt(cust.transaction_item_id, 10) 
+            : cust.transaction_item_id;
+          
+          if (!customizationsMap.has(itemId)) {
+            customizationsMap.set(itemId, []);
+          }
 
-    // Update local state - stop timer when finished
-    setOrderItems(prev => prev.map(i => {
-      if (i.transactionId === item.transactionId && i.itemId === item.itemId) {
-        return { ...i, status: newStatus, finishedAt };
+          const options = customizationOptions
+            .filter((opt: any) => opt.transaction_item_customization_id === cust.id)
+            .map((opt: any) => ({
+              option_name: opt.option_name,
+              price_adjustment: typeof opt.price_adjustment === 'number' 
+                ? opt.price_adjustment 
+                : (typeof opt.price_adjustment === 'string' ? parseFloat(opt.price_adjustment) || 0 : 0),
+            }));
+
+          const existingCust = customizationsMap.get(itemId)!.find(c => 
+            c.customization_name === cust.customization_type_name
+          );
+
+          if (existingCust) {
+            existingCust.options.push(...options);
+          } else {
+            customizationsMap.get(itemId)!.push({
+              customization_name: cust.customization_type_name || `Customization ${cust.customization_type_id}`,
+              options,
+            });
+          }
+        });
+
+        // Process items
+        for (const item of itemsArray) {
+          const product = productsMap.get(item.product_id);
+          if (!product) continue;
+
+          // Filter by category - makanan and bakery for kitchen
+          const categoryName = product.category1_name?.toLowerCase();
+          if (categoryName !== 'makanan' && categoryName !== 'bakery') {
+            continue;
+          }
+
+          const tableId = tx.table_id;
+          const tableInfo = tableId && tablesMap.has(tableId) ? tablesMap.get(tableId)! : null;
+          const tableNumber = tableInfo ? tableInfo.table_number : null;
+          const roomId = tableInfo ? tableInfo.room_id : null;
+          const roomName = roomId && roomsMap.has(roomId) ? roomsMap.get(roomId)! : null;
+
+          const itemCustomizations = customizationsMap.get(item.id) || [];
+
+          allOrderItems.push({
+            id: item.id,
+            uuid_id: item.uuid_id || item.id?.toString() || '',
+            transaction_id: transactionId,
+            product_id: item.product_id,
+            product_name: product.nama || 'Unknown',
+            quantity: item.quantity || 1,
+            custom_note: item.custom_note || null,
+            production_status: item.production_status || null,
+            production_started_at: item.production_started_at || null,
+            production_finished_at: item.production_finished_at || null,
+            table_number: tableNumber || null,
+            room_name: roomName || null,
+            created_at: tx.created_at || item.created_at || new Date().toISOString(),
+            customizations: itemCustomizations,
+          });
+        }
       }
-      return i;
-    }));
 
-    // Send status update to server
-    networkClient.sendStatusUpdate({
-      transactionId: item.transactionId,
-      itemId: item.itemId,
-      status: newStatus,
-      preparedBy: 'kitchen'
-    });
-  }, []);
+      // Group items by product_id + customization signature
+      const groupedMap = new Map<string, GroupedOrderItem>();
 
-  // Get status color
-  const getStatusColor = (status: string) => {
-    switch (status) {
-      case 'preparing': return 'bg-yellow-500';
-      case 'finished': return 'bg-green-500';
-      default: return 'bg-gray-500';
+      allOrderItems.forEach(item => {
+        // Create customization signature
+        const allOptionIds: number[] = [];
+        item.customizations.forEach(customization => {
+          customization.options.forEach(option => {
+            // Use option name for signature (since we don't have option_id here)
+            allOptionIds.push(option.option_name.charCodeAt(0)); // Simple hash
+          });
+        });
+        const sortedOptionIds = allOptionIds.sort((a, b) => a - b).join(',');
+        const customNote = item.custom_note || '';
+        const signature = `${item.product_id}_${sortedOptionIds}_${customNote}`;
+
+        if (groupedMap.has(signature)) {
+          const existing = groupedMap.get(signature)!;
+          existing.total_quantity += item.quantity;
+          // Update display text with new total quantity
+          let displayText = `${existing.total_quantity}x ${item.product_name}`;
+          
+          // Add customizations
+          const customizationTexts: string[] = [];
+          item.customizations.forEach(customization => {
+            customization.options.forEach(option => {
+              const priceText = option.price_adjustment !== 0 
+                ? ` (+${option.price_adjustment})` 
+                : '';
+              customizationTexts.push(`+${option.option_name}${priceText}`);
+            });
+          });
+          if (customizationTexts.length > 0) {
+            displayText += ` ${customizationTexts.join(', ')}`;
+          }
+
+          // Add custom note
+          if (item.custom_note) {
+            displayText += ` note: ${item.custom_note}`;
+          }
+
+          // Add table number
+          if (item.table_number) {
+            displayText += ` table ${item.table_number}`;
+          }
+
+          existing.display_text = displayText;
+        } else {
+          // Build display text
+          let displayText = `${item.quantity}x ${item.product_name}`;
+          
+          // Add customizations
+          const customizationTexts: string[] = [];
+          item.customizations.forEach(customization => {
+            customization.options.forEach(option => {
+              const priceText = option.price_adjustment !== 0 
+                ? ` (+${option.price_adjustment})` 
+                : '';
+              customizationTexts.push(`+${option.option_name}${priceText}`);
+            });
+          });
+          if (customizationTexts.length > 0) {
+            displayText += ` ${customizationTexts.join(', ')}`;
+          }
+
+          // Add custom note
+          if (item.custom_note) {
+            displayText += ` note: ${item.custom_note}`;
+          }
+
+          // Add table number
+          if (item.table_number) {
+            displayText += ` table ${item.table_number}`;
+          }
+
+          groupedMap.set(signature, {
+            ...item,
+            total_quantity: item.quantity,
+            display_text: displayText,
+            timer: formatTimer(item.created_at),
+          });
+        }
+      });
+
+      // Separate active and finished orders
+      const active: GroupedOrderItem[] = [];
+      const finished: GroupedOrderItem[] = [];
+
+      groupedMap.forEach(item => {
+        const groupedItem = {
+          ...item,
+          timer: formatTimer(item.created_at),
+        };
+
+        if (item.production_status === 'finished') {
+          finished.push(groupedItem);
+        } else {
+          active.push(groupedItem);
+        }
+      });
+
+      // Sort active by created_at (oldest first)
+      active.sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime());
+      
+      // Sort finished by finished_at (most recent first)
+      finished.sort((a, b) => {
+        const aTime = a.production_finished_at ? new Date(a.production_finished_at).getTime() : 0;
+        const bTime = b.production_finished_at ? new Date(b.production_finished_at).getTime() : 0;
+        return bTime - aTime;
+      });
+
+      setActiveOrders(active);
+      setFinishedOrders(finished);
+      setLoading(false);
+    } catch (error) {
+      console.error('Error fetching orders:', error);
+      setLoading(false);
     }
   };
 
-  // Get status text (Indonesian)
-  const getStatusText = (status: string) => {
-    switch (status) {
-      case 'preparing': return 'Proses';
-      case 'finished': return 'Selesai';
-      default: return status;
+  const formatTimer = (createdAt: string): string => {
+    const created = new Date(createdAt);
+    const diffMs = currentTime.getTime() - created.getTime();
+    const totalSeconds = Math.floor(diffMs / 1000);
+    const minutes = Math.floor(totalSeconds / 60);
+    const seconds = totalSeconds % 60;
+    return `${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
+  };
+
+  // Poll database every 5 seconds
+  useEffect(() => {
+    fetchOrders();
+    const interval = setInterval(fetchOrders, 5000);
+    return () => clearInterval(interval);
+  }, [businessId, currentTime]);
+
+  const handleMarkFinished = async (item: GroupedOrderItem) => {
+    try {
+      const electronAPI = getElectronAPI();
+      if (!electronAPI?.localDbGetTransactionItems || !electronAPI?.localDbUpsertTransactionItems) {
+        alert('Function not available');
+        return;
+      }
+
+      // Fetch the transaction item to get all its data
+      const items = await electronAPI.localDbGetTransactionItems?.(item.transaction_id);
+      const itemsArray = Array.isArray(items) ? items : [];
+      const itemToUpdate = itemsArray.find((i: any) => 
+        (i.uuid_id === item.uuid_id) || (i.id?.toString() === item.uuid_id)
+      );
+
+      if (!itemToUpdate) {
+        alert('Item tidak ditemukan');
+        return;
+      }
+
+      // Update production status
+      const updatedItem = {
+        ...itemToUpdate,
+        production_status: 'finished',
+        production_finished_at: new Date().toISOString(),
+      };
+
+      // Upsert the updated item
+      await electronAPI.localDbUpsertTransactionItems?.([updatedItem]);
+
+      // Refresh orders
+      fetchOrders();
+    } catch (error) {
+      console.error('Error marking item as finished:', error);
+      alert('Gagal menandai item sebagai selesai');
     }
   };
 
-  // Format timer: MM:SS or HH:MM:SS if > 60 minutes
-  const formatTimer = (startedAt: string, finishedAt?: string): string => {
-    const start = new Date(startedAt).getTime();
-    const end = finishedAt ? new Date(finishedAt).getTime() : Date.now();
-    const elapsedMs = end - start;
-    const elapsedSeconds = Math.floor(elapsedMs / 1000);
-    const minutes = Math.floor(elapsedSeconds / 60);
-    const seconds = elapsedSeconds % 60;
-
-    if (minutes >= 60) {
-      const hours = Math.floor(minutes / 60);
-      const mins = minutes % 60;
-      return `${hours}:${mins.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
-    }
-    return `${minutes}:${seconds.toString().padStart(2, '0')}`;
-  };
+  if (loading) {
+    return (
+      <div className="flex-1 flex items-center justify-center">
+        <div className="text-gray-600">Memuat data...</div>
+      </div>
+    );
+  }
 
   return (
-    <div className="h-screen bg-gray-900 text-white flex flex-col">
-      {/* Header */}
-      <div className="bg-gray-800 px-4 py-3 flex items-center justify-between border-b border-gray-700">
-        <div className="flex items-center gap-4">
-          <h1 className="text-2xl font-bold text-orange-500">🍳 DAPUR</h1>
-          <span className="text-gray-400">|</span>
-          <span className="text-gray-300">{orderItems.filter(i => i.status === 'preparing').length} item diproses</span>
+    <div className="flex-1 flex h-full bg-gray-50">
+      {/* Column 1: Active Orders */}
+      <div className="w-1/2 border-r border-gray-300 flex flex-col">
+        <div className="bg-orange-500 text-white px-6 py-4 flex-shrink-0">
+          <h2 className="text-2xl font-bold">Dapur - Pesanan Aktif</h2>
         </div>
-        
-        <div className="flex items-center gap-4">
-          {/* Connection Status */}
-          <div className="flex items-center gap-2">
-            <div className={`w-3 h-3 rounded-full ${
-              connectionStatus === 'connected' ? 'bg-green-500' :
-              connectionStatus === 'connecting' ? 'bg-yellow-500 animate-pulse' :
-              connectionStatus === 'error' ? 'bg-red-500' : 'bg-gray-500'
-            }`} />
-            <span className="text-sm text-gray-400">
-              {connectionStatus === 'connected' ? 'Terhubung' :
-               connectionStatus === 'connecting' ? 'Menghubungkan...' :
-               connectionStatus === 'error' ? 'Error' : 'Terputus'}
-            </span>
-          </div>
-
-          {/* Settings Button */}
-          <button
-            onClick={() => setShowSettings(!showSettings)}
-            className="p-2 rounded-lg bg-gray-700 hover:bg-gray-600 transition-colors"
-          >
-            ⚙️
-          </button>
-        </div>
-      </div>
-
-      {/* Settings Panel */}
-      {showSettings && (
-        <div className="bg-gray-800 px-4 py-3 border-b border-gray-700">
-          <div className="flex items-center gap-4">
-            <div className="flex items-center gap-2">
-              <label className="text-sm text-gray-400">Server:</label>
-              <input
-                type="text"
-                value={serverAddress}
-                onChange={(e) => setServerAddress(e.target.value)}
-                className="bg-gray-700 px-3 py-1 rounded text-sm w-32"
-                placeholder="localhost"
-              />
+        <div className="flex-1 overflow-y-auto p-4">
+          {activeOrders.length === 0 ? (
+            <div className="text-center text-gray-500 mt-8">
+              <p>Tidak ada pesanan aktif</p>
             </div>
-            <div className="flex items-center gap-2">
-              <label className="text-sm text-gray-400">Port:</label>
-              <input
-                type="number"
-                value={serverPort}
-                onChange={(e) => setServerPort(Number(e.target.value))}
-                className="bg-gray-700 px-3 py-1 rounded text-sm w-24"
-              />
-            </div>
-            <button
-              onClick={() => {
-                // Save settings before reconnecting
-                saveServerSettings({ address: serverAddress, port: serverPort });
-                networkClient.disconnect();
-                setConnectionStatus('connecting');
-                networkClient.connect(serverAddress, serverPort, 'kitchen').then(result => {
-                  if (!result.success) {
-                    setConnectionStatus('error');
-                    console.error('[KitchenDisplay] Reconnection failed:', result.error);
-                  }
-                });
-              }}
-              className="px-4 py-1 bg-blue-600 hover:bg-blue-500 rounded text-sm transition-colors"
-            >
-              Hubungkan Ulang
-            </button>
-          </div>
-        </div>
-      )}
-
-      {/* 2-Column Layout: Proses (left) and Selesai (right) */}
-      <div className="flex-1 flex gap-4 p-4 overflow-hidden">
-        {/* Proses Column (Left) */}
-        <div className="flex-1 flex flex-col border-r border-gray-700 pr-4">
-          <h2 className="text-lg font-bold text-yellow-500 mb-3">PROSES</h2>
-          <div className="flex-1 overflow-y-auto space-y-3">
-            {orderItems
-              .filter(item => item.status === 'preparing')
-              .sort((a, b) => new Date(a.startedAt).getTime() - new Date(b.startedAt).getTime()) // Oldest first
-              .map((item) => (
+          ) : (
+            <div className="space-y-3">
+              {activeOrders.map((item, index) => (
                 <div
-                  key={`${item.transactionId}-${item.itemId}`}
-                  onDoubleClick={() => handleItemDoubleTap(item)}
-                  className={`
-                    ${getStatusColor(item.status)} 
-                    rounded-xl p-4 cursor-pointer select-none
-                    transition-all duration-200 hover:scale-105 hover:shadow-lg
-                  `}
+                  key={`${item.uuid_id}-${index}`}
+                  onDoubleClick={() => handleMarkFinished(item)}
+                  className="bg-white border-2 border-orange-300 rounded-lg p-4 cursor-pointer hover:border-orange-500 hover:shadow-md transition-all"
                 >
-                  {/* Timer and Receipt Number */}
-                  <div className="text-xs font-bold mb-2 opacity-80 flex justify-between items-center">
-                    <span>#{item.receiptNumber}</span>
-                    <span className="bg-black/20 px-2 py-1 rounded">⏱️ {formatTimer(item.startedAt)}</span>
-                  </div>
-
-                  {/* Product Name */}
-                  <div className="text-xl font-bold mb-2 leading-tight">
-                    {item.productName}
-                  </div>
-
-                  {/* Quantity */}
-                  <div className="text-4xl font-black mb-2">
-                    x{item.quantity}
-                  </div>
-
-                  {/* Customizations */}
-                  {item.customizations && item.customizations.length > 0 && (
-                    <div className="text-sm mb-2 opacity-90">
-                      {item.customizations.map((c, idx) => (
-                        <div key={idx}>
-                          {c.selected_options.map(o => o.option_name).join(', ')}
-                        </div>
-                      ))}
+                  <div className="flex justify-between items-start mb-2">
+                    <div className="flex-1">
+                      <div className="text-lg font-semibold text-gray-900">
+                        {item.display_text}
+                      </div>
                     </div>
-                  )}
-
-                  {/* Custom Note */}
-                  {item.customNote && (
-                    <div className="text-sm italic bg-black/20 rounded px-2 py-1 mb-2">
-                      📝 {item.customNote}
+                    <div className="ml-4">
+                      <div className="text-2xl font-mono font-bold text-orange-600">
+                        {item.timer}
+                      </div>
                     </div>
-                  )}
-
-                  {/* Pickup Method */}
-                  <div className="text-xs uppercase tracking-wide opacity-80">
-                    {item.pickupMethod === 'dine-in' ? '🍽️ Makan di tempat' : '📦 Bawa pulang'}
                   </div>
-
-                  {/* Status */}
-                  <div className="mt-3 text-center">
-                    <span className="text-xs font-bold uppercase bg-black/20 px-3 py-1 rounded-full">
-                      {getStatusText(item.status)}
-                    </span>
+                  <div className="text-xs text-gray-500 mt-1">
+                    Double tap to mark as finished
                   </div>
                 </div>
               ))}
-            {orderItems.filter(item => item.status === 'preparing').length === 0 && (
-              <div className="text-center text-gray-500 py-8">
-                <div className="text-4xl mb-2">🍳</div>
-                <div className="text-sm">Tidak ada item diproses</div>
-              </div>
-            )}
-          </div>
+            </div>
+          )}
         </div>
+      </div>
 
-        {/* Selesai Column (Right) */}
-        <div className="flex-1 flex flex-col pl-4">
-          <h2 className="text-lg font-bold text-green-500 mb-3">SELESAI</h2>
-          <div className="flex-1 overflow-y-auto space-y-3">
-            {orderItems
-              .filter(item => item.status === 'finished')
-              .sort((a, b) => {
-                // Sort by finishedAt if available, otherwise by startedAt
-                const aTime = a.finishedAt ? new Date(a.finishedAt).getTime() : new Date(a.startedAt).getTime();
-                const bTime = b.finishedAt ? new Date(b.finishedAt).getTime() : new Date(b.startedAt).getTime();
-                return aTime - bTime; // Oldest first
-              })
-              .map((item) => (
+      {/* Column 2: Finished Orders */}
+      <div className="w-1/2 flex flex-col">
+        <div className="bg-green-500 text-white px-6 py-4 flex-shrink-0">
+          <h2 className="text-2xl font-bold">Dapur - Pesanan Selesai</h2>
+        </div>
+        <div className="flex-1 overflow-y-auto p-4">
+          {finishedOrders.length === 0 ? (
+            <div className="text-center text-gray-500 mt-8">
+              <p>Tidak ada pesanan selesai</p>
+            </div>
+          ) : (
+            <div className="space-y-3">
+              {finishedOrders.map((item, index) => (
                 <div
-                  key={`${item.transactionId}-${item.itemId}`}
-                  className={`
-                    ${getStatusColor(item.status)} 
-                    rounded-xl p-4 select-none opacity-90
-                  `}
+                  key={`${item.uuid_id}-${index}`}
+                  className="bg-gray-100 border-2 border-gray-300 rounded-lg p-4 opacity-75"
                 >
-                  {/* Timer and Receipt Number */}
-                  <div className="text-xs font-bold mb-2 opacity-80 flex justify-between items-center">
-                    <span>#{item.receiptNumber}</span>
-                    <span className="bg-black/20 px-2 py-1 rounded">⏱️ {formatTimer(item.startedAt, item.finishedAt)}</span>
+                  <div className="text-lg font-semibold text-gray-600 line-through">
+                    {item.display_text}
                   </div>
-
-                  {/* Product Name */}
-                  <div className="text-xl font-bold mb-2 leading-tight">
-                    {item.productName}
-                  </div>
-
-                  {/* Quantity */}
-                  <div className="text-4xl font-black mb-2">
-                    x{item.quantity}
-                  </div>
-
-                  {/* Customizations */}
-                  {item.customizations && item.customizations.length > 0 && (
-                    <div className="text-sm mb-2 opacity-90">
-                      {item.customizations.map((c, idx) => (
-                        <div key={idx}>
-                          {c.selected_options.map(o => o.option_name).join(', ')}
-                        </div>
-                      ))}
+                  {item.production_finished_at && (
+                    <div className="text-xs text-gray-500 mt-1">
+                      Selesai: {new Date(item.production_finished_at).toLocaleTimeString('id-ID')}
                     </div>
                   )}
-
-                  {/* Custom Note */}
-                  {item.customNote && (
-                    <div className="text-sm italic bg-black/20 rounded px-2 py-1 mb-2">
-                      📝 {item.customNote}
-                    </div>
-                  )}
-
-                  {/* Pickup Method */}
-                  <div className="text-xs uppercase tracking-wide opacity-80">
-                    {item.pickupMethod === 'dine-in' ? '🍽️ Makan di tempat' : '📦 Bawa pulang'}
-                  </div>
-
-                  {/* Status */}
-                  <div className="mt-3 text-center">
-                    <span className="text-xs font-bold uppercase bg-black/20 px-3 py-1 rounded-full">
-                      {getStatusText(item.status)}
-                    </span>
-                  </div>
                 </div>
               ))}
-            {orderItems.filter(item => item.status === 'finished').length === 0 && (
-              <div className="text-center text-gray-500 py-8">
-                <div className="text-4xl mb-2">✅</div>
-                <div className="text-sm">Tidak ada item selesai</div>
-              </div>
-            )}
-          </div>
+            </div>
+          )}
         </div>
       </div>
-
-      {/* Footer Instructions */}
-      <div className="bg-gray-800 px-4 py-2 text-center text-sm text-gray-500 border-t border-gray-700">
-        💡 Double-tap item di kolom PROSES untuk memindahkan ke SELESAI
-      </div>
-
-      {/* Hidden audio element for notification */}
-      <audio ref={audioRef} />
     </div>
   );
 }

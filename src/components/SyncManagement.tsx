@@ -229,14 +229,10 @@ export default function SyncManagement() {
   const [showArchiveModal, setShowArchiveModal] = useState(false);
   const [checkingStatus, setCheckingStatus] = useState(false);
   const [checkResults, setCheckResults] = useState<Map<string, { exists: boolean; checked: boolean; identical?: boolean }>>(new Map());
-  const [systemPosQueueStatus, setSystemPosQueueStatus] = useState<{
-    total: number;
-    pending: number;
-    synced: number;
-    failed: number;
-    lastCheck: Date | null;
-  } | null>(null);
-  const [isCheckingSystemPos, setIsCheckingSystemPos] = useState(false);
+  const [resetSyncDateRange, setResetSyncDateRange] = useState<'today' | 'alltime' | 'custom'>('today');
+  const [resetSyncFromDate, setResetSyncFromDate] = useState<string>('');
+  const [resetSyncToDate, setResetSyncToDate] = useState<string>('');
+  const [isResettingSync, setIsResettingSync] = useState(false);
   const [showDeleteModal, setShowDeleteModal] = useState(false);
   const [showPasswordModal, setShowPasswordModal] = useState(false);
   const [passwordInput, setPasswordInput] = useState('');
@@ -711,93 +707,78 @@ export default function SyncManagement() {
     }
   }, [offlineTransactions, businessId, addLog, loadOfflineTransactions, fetchTransactionCounts]);
 
-  // Check System POS queue status
-  const handleCheckSystemPosStatus = useCallback(async () => {
-    setIsCheckingSystemPos(true);
-    addLog('info', 'Memeriksa status System POS queue...');
+  // Reset transaction sync status by date range
+  const handleResetTransactionSyncStatus = useCallback(async () => {
+    let fromDate: string | null = null;
+    let toDate: string | null = null;
+    let dateRangeText = '';
 
-    try {
-      const electronAPI = getElectronAPI();
-      if (!electronAPI?.getSystemPosQueue) {
-        addLog('error', 'System POS queue feature not available');
+    if (resetSyncDateRange === 'today') {
+      const today = new Date();
+      today.setHours(0, 0, 0, 0);
+      fromDate = today.toISOString().split('T')[0];
+      toDate = today.toISOString().split('T')[0];
+      dateRangeText = 'hari ini';
+    } else if (resetSyncDateRange === 'alltime') {
+      dateRangeText = 'semua waktu';
+    } else if (resetSyncDateRange === 'custom') {
+      if (!resetSyncFromDate || !resetSyncToDate) {
+        addLog('error', 'Pilih tanggal mulai dan tanggal akhir untuk custom date range');
         return;
       }
-
-      const result = await electronAPI.getSystemPosQueue();
-
-      if (result.success && Array.isArray(result.queue)) {
-        const queue = result.queue as UnknownRecord[];
-        const pending = queue.filter((q: UnknownRecord) => !q.synced_at);
-        const synced = queue.filter((q: UnknownRecord) => q.synced_at);
-        const failed = queue.filter((q: UnknownRecord) => (typeof q.retry_count === 'number' && q.retry_count >= 5));
-
-        setSystemPosQueueStatus({
-          total: queue.length,
-          pending: pending.length,
-          synced: synced.length,
-          failed: failed.length,
-          lastCheck: new Date(),
-        });
-
-        addLog('success', `✅ System POS Queue: ${pending.length} pending, ${synced.length} synced, ${failed.length} failed`);
-
-        if (pending.length > 0) {
-          addLog('info', `📋 ${pending.length} transaksi menunggu sync ke System POS`);
-          // Show first few pending transactions
-          const firstPending = pending.slice(0, 5);
-          firstPending.forEach((q: UnknownRecord) => {
-            const transactionId = String(q.transaction_id || 'unknown');
-            const retryCount = typeof q.retry_count === 'number' ? q.retry_count : 0;
-            const lastError = typeof q.last_error === 'string' ? q.last_error.substring(0, 50) : '';
-            addLog('info', `  - Transaction ${transactionId}: ${retryCount} retries${lastError ? `, Error: ${lastError}` : ''}`);
-          });
-        }
-
-        if (failed.length > 0) {
-          addLog('warning', `⚠️ ${failed.length} transaksi gagal sync (max retries exceeded)`);
-        }
-      } else {
-        addLog('error', 'Failed to get System POS queue status');
-      }
-    } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-      addLog('error', `Gagal memeriksa System POS status: ${errorMessage}`);
-      console.error('[SYSTEM POS CHECK] Error:', error);
-    } finally {
-      setIsCheckingSystemPos(false);
+      fromDate = resetSyncFromDate;
+      toDate = resetSyncToDate;
+      dateRangeText = `${resetSyncFromDate} sampai ${resetSyncToDate}`;
     }
-  }, [addLog]);
 
-  // Reset retry count for failed System POS transactions
-  const handleResetSystemPosRetryCount = useCallback(async () => {
-    if (!window.confirm('Reset retry count untuk semua transaksi yang gagal? Transaksi akan dicoba sync lagi.')) {
+    const confirmMessage = resetSyncDateRange === 'alltime'
+      ? `Apakah Anda yakin ingin mengatur ulang status sinkronisasi untuk SEMUA transaksi (semua waktu)?\n\nIni akan mengatur semua transaksi kembali ke status 'pending' agar dapat di-sync ulang.`
+      : `Apakah Anda yakin ingin mengatur ulang status sinkronisasi untuk transaksi ${dateRangeText}?\n\nIni akan mengatur transaksi tersebut kembali ke status 'pending' agar dapat di-sync ulang.`;
+
+    if (!window.confirm(confirmMessage)) {
       return;
     }
 
-    addLog('info', 'Mereset retry count...');
+    setIsResettingSync(true);
+    addLog('info', `Mereset status sinkronisasi untuk transaksi ${dateRangeText}...`);
 
     try {
       const electronAPI = getElectronAPI();
-      if (!electronAPI?.resetSystemPosRetryCount) {
-        addLog('error', 'Reset retry count feature not available. Silakan restart aplikasi.');
+      if (!electronAPI?.localDbResetTransactionsSyncByDate) {
+        addLog('error', 'Reset sync status feature not available');
         return;
       }
 
-      const result = await electronAPI.resetSystemPosRetryCount();
+      const result = await electronAPI.localDbResetTransactionsSyncByDate({
+        businessId,
+        fromDate,
+        toDate
+      });
 
       if (result.success) {
-        addLog('success', `✅ Berhasil reset retry count`);
-        // Refresh status
-        await handleCheckSystemPosStatus();
+        const count = result.count || 0;
+        if (count === 0) {
+          addLog('warning', `⚠️ Tidak ada transaksi yang ditemukan untuk di-reset ${dateRangeText}. Pastikan database yang digunakan benar (cek .env DB_HOST dan DB_NAME).`);
+        } else {
+          addLog('success', `✅ Berhasil reset status sinkronisasi untuk ${count} transaksi ${dateRangeText}`);
+        }
+        // Refresh offline transactions to reflect the change
+        await loadOfflineTransactions();
+        // Reset date range to today after successful reset
+        setResetSyncDateRange('today');
+        setResetSyncFromDate('');
+        setResetSyncToDate('');
       } else {
-        addLog('error', 'Gagal reset retry count');
+        addLog('error', `Gagal reset status sinkronisasi: ${result.error || 'Unknown error'}`);
       }
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-      addLog('error', `Gagal reset retry count: ${errorMessage}`);
-      console.error('[RESET RETRY] Error:', error);
+      addLog('error', `Gagal reset status sinkronisasi: ${errorMessage}`);
+      console.error('[RESET SYNC STATUS] Error:', error);
+    } finally {
+      setIsResettingSync(false);
     }
-  }, [addLog, handleCheckSystemPosStatus]);
+  }, [resetSyncDateRange, resetSyncFromDate, resetSyncToDate, businessId, addLog, loadOfflineTransactions]);
 
   // Update synced_at for transactions that exist on server
   const handleUpdateSyncedStatus = useCallback(async () => {
@@ -1693,7 +1674,7 @@ export default function SyncManagement() {
   const cleanupTestTransactions = async () => {
     const confirmed = window.confirm(
       `⚠️ WARNING: This will PERMANENTLY DELETE ALL transactions from all 3 databases:\n\n` +
-      `1. Offline SQLite (local POS)\n` +
+      `1. Local MySQL (local POS)\n` +
       `2. SalesPulse MySQL (online)\n` +
       `3. System-POS MySQL (online)\n\n` +
       `Target: marviano.austin@gmail.com OR user_id IS NULL\n\n` +
@@ -1721,31 +1702,31 @@ export default function SyncManagement() {
       }
 
       // ============================================
-      // DATABASE 1: OFFLINE SQLITE
+      // DATABASE 1: LOCAL MYSQL
       // ============================================
-      console.log('[CLEANUP] 📦 [Database 1/3] Offline SQLite - Starting deletion...');
-      addLog('info', '📦 [Database 1/3] Offline SQLite - Starting deletion...');
+      console.log('[CLEANUP] 📦 [Database 1/3] Local MySQL - Starting deletion...');
+      addLog('info', '📦 [Database 1/3] Local MySQL - Starting deletion...');
       const offlineResult = await electronAPI.localDbDeleteTransactionsByRole();
-      console.log('[CLEANUP] [Offline SQLite] Result:', offlineResult);
+      console.log('[CLEANUP] [Local MySQL] Result:', offlineResult);
 
       if (offlineResult.success && offlineResult.details) {
         const d = offlineResult.details;
-        console.log(`[CLEANUP] [Offline SQLite] Target User IDs: ${d.targetUserIds?.join(', ') || 'NULL'}`);
-        console.log(`[CLEANUP] [Offline SQLite] printer1_audit_log: ${d.printer1_audit_log} rows`);
-        console.log(`[CLEANUP] [Offline SQLite] printer2_audit_log: ${d.printer2_audit_log} rows`);
-        console.log(`[CLEANUP] [Offline SQLite] transaction_items: ${d.transaction_items} rows`);
-        console.log(`[CLEANUP] [Offline SQLite] transactions: ${d.transactions} rows`);
+        console.log(`[CLEANUP] [Local MySQL] Target User IDs: ${d.targetUserIds?.join(', ') || 'NULL'}`);
+        console.log(`[CLEANUP] [Local MySQL] printer1_audit_log: ${d.printer1_audit_log} rows`);
+        console.log(`[CLEANUP] [Local MySQL] printer2_audit_log: ${d.printer2_audit_log} rows`);
+        console.log(`[CLEANUP] [Local MySQL] transaction_items: ${d.transaction_items} rows`);
+        console.log(`[CLEANUP] [Local MySQL] transactions: ${d.transactions} rows`);
 
-        addLog('success', `✅ [Offline SQLite] Target User IDs: ${d.targetUserIds?.join(', ') || 'NULL'}`);
+        addLog('success', `✅ [Local MySQL] Target User IDs: ${d.targetUserIds?.join(', ') || 'NULL'}`);
         addLog('info', `   └─ printer1_audit_log: ${d.printer1_audit_log} rows deleted`);
         addLog('info', `   └─ printer2_audit_log: ${d.printer2_audit_log} rows deleted`);
         addLog('info', `   └─ transaction_items: ${d.transaction_items} rows deleted`);
         addLog('info', `   └─ transactions: ${d.transactions} rows deleted`);
-        addLog('success', `✅ [Offline SQLite] Completed: ${d.transactions} transactions, ${d.transaction_items} items`);
+        addLog('success', `✅ [Local MySQL] Completed: ${d.transactions} transactions, ${d.transaction_items} items`);
       } else {
         const errorMsg = offlineResult.error || 'Unknown error';
-        console.error(`[CLEANUP] [Offline SQLite] ❌ Failed: ${errorMsg}`);
-        addLog('error', `❌ [Offline SQLite] Failed: ${errorMsg}`);
+        console.error(`[CLEANUP] [Local MySQL] ❌ Failed: ${errorMsg}`);
+        addLog('error', `❌ [Local MySQL] Failed: ${errorMsg}`);
       }
 
       // ============================================
@@ -1995,8 +1976,22 @@ export default function SyncManagement() {
 
     try {
       const orphanedIds = orphanedTransactions.map(t => t.id);
+      let successCount = 0;
+      let failCount = 0;
       for (const id of orphanedIds) {
-        await electronAPI.localDbResetTransactionSync(id);
+        const result = await electronAPI.localDbResetTransactionSync(id);
+        if (result.success) {
+          successCount++;
+        } else {
+          failCount++;
+          console.warn(`Failed to reset transaction ${id}:`, result.error);
+        }
+      }
+      
+      if (failCount > 0) {
+        addLog('warning', `⚠️ Reset ${successCount} transaksi, gagal ${failCount} transaksi. Cek console untuk detail.`);
+      } else {
+        addLog('success', `✅ Berhasil reset ${successCount} transaksi orphaned`);
       }
 
       addLog('success', `✅ Reset ${orphanedIds.length} transaction(s) - they will now appear in upload list`);
@@ -2289,67 +2284,98 @@ WHERE ${baseWhere};`;
           </div>
         </div>
 
-        {/* System POS Status */}
+        {/* Reset Transaction Sync Status */}
         <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-4 mb-6">
-          <div className="flex items-center justify-between">
-            <div>
-              <h3 className="text-sm font-semibold text-gray-800 flex items-center gap-2">
-                <Database className="w-4 h-4" />
-                System POS Queue Status
-              </h3>
-              <p className="text-xs text-gray-500 mt-1">
-                Status antrian transaksi untuk System POS (Printer 2 / Receiptize)
-              </p>
-            </div>
-            <button
-              onClick={handleCheckSystemPosStatus}
-              disabled={isCheckingSystemPos}
-              className="flex items-center gap-1 px-3 py-1.5 text-xs bg-blue-50 hover:bg-blue-100 text-blue-700 rounded transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-            >
-              <RefreshCw className={`w-3 h-3 ${isCheckingSystemPos ? 'animate-spin' : ''}`} />
-              <span>{isCheckingSystemPos ? 'Mengecek...' : 'Cek Status'}</span>
-            </button>
+          <div className="mb-4">
+            <h3 className="text-sm font-semibold text-gray-800 flex items-center gap-2">
+              <RefreshCw className="w-4 h-4" />
+              Reset Status Sinkronisasi Transaksi
+            </h3>
+            <p className="text-xs text-gray-500 mt-1">
+              Atur ulang status sinkronisasi transaksi ke &quot;pending&quot; untuk testing fitur sync
+            </p>
           </div>
 
-          {systemPosQueueStatus && (
-            <>
-              <div className="mt-4 grid grid-cols-4 gap-3">
-                <div className="bg-gray-50 rounded p-2">
-                  <div className="text-xs text-gray-500">Total</div>
-                  <div className="text-lg font-semibold text-gray-900">{systemPosQueueStatus.total}</div>
+          <div className="space-y-3">
+            {/* Date Range Selection */}
+            <div className="flex flex-col gap-2">
+              <label className="text-xs font-medium text-gray-700">Pilih Rentang Waktu:</label>
+              <div className="flex gap-2">
+                <button
+                  onClick={() => setResetSyncDateRange('today')}
+                  className={`px-3 py-1.5 text-xs rounded transition-colors ${
+                    resetSyncDateRange === 'today'
+                      ? 'bg-blue-100 text-blue-700 font-medium'
+                      : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+                  }`}
+                >
+                  Hari Ini
+                </button>
+                <button
+                  onClick={() => setResetSyncDateRange('alltime')}
+                  className={`px-3 py-1.5 text-xs rounded transition-colors ${
+                    resetSyncDateRange === 'alltime'
+                      ? 'bg-blue-100 text-blue-700 font-medium'
+                      : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+                  }`}
+                >
+                  Semua Waktu
+                </button>
+                <button
+                  onClick={() => setResetSyncDateRange('custom')}
+                  className={`px-3 py-1.5 text-xs rounded transition-colors ${
+                    resetSyncDateRange === 'custom'
+                      ? 'bg-blue-100 text-blue-700 font-medium'
+                      : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+                  }`}
+                >
+                  Custom
+                </button>
+              </div>
+            </div>
+
+            {/* Custom Date Range Inputs */}
+            {resetSyncDateRange === 'custom' && (
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-medium text-gray-700 mb-1">Dari Tanggal:</label>
+                  <input
+                    type="date"
+                    value={resetSyncFromDate}
+                    onChange={(e) => setResetSyncFromDate(e.target.value)}
+                    className="w-full px-2 py-1.5 text-xs border border-gray-300 rounded focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                  />
                 </div>
-                <div className="bg-yellow-50 rounded p-2">
-                  <div className="text-xs text-yellow-600">Pending</div>
-                  <div className="text-lg font-semibold text-yellow-900">{systemPosQueueStatus.pending}</div>
-                </div>
-                <div className="bg-green-50 rounded p-2">
-                  <div className="text-xs text-green-600">Synced</div>
-                  <div className="text-lg font-semibold text-green-900">{systemPosQueueStatus.synced}</div>
-                </div>
-                <div className="bg-red-50 rounded p-2">
-                  <div className="text-xs text-red-600">Failed</div>
-                  <div className="text-lg font-semibold text-red-900">{systemPosQueueStatus.failed}</div>
+                <div>
+                  <label className="block text-xs font-medium text-gray-700 mb-1">Sampai Tanggal:</label>
+                  <input
+                    type="date"
+                    value={resetSyncToDate}
+                    onChange={(e) => setResetSyncToDate(e.target.value)}
+                    className="w-full px-2 py-1.5 text-xs border border-gray-300 rounded focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                  />
                 </div>
               </div>
-              {systemPosQueueStatus.failed > 0 && (
-                <div className="mt-3">
-                  <button
-                    onClick={handleResetSystemPosRetryCount}
-                    className="flex items-center gap-1 px-3 py-1.5 text-xs bg-orange-50 hover:bg-orange-100 text-orange-700 rounded transition-colors"
-                  >
-                    <RefreshCw className="w-3 h-3" />
-                    <span>Reset Retry Count ({systemPosQueueStatus.failed} transaksi)</span>
-                  </button>
-                </div>
-              )}
-            </>
-          )}
+            )}
 
-          {!systemPosQueueStatus && (
-            <div className="mt-4 text-xs text-gray-500 text-center py-2">
-              Klik &quot;Cek Status&quot; untuk melihat status System POS queue
-            </div>
-          )}
+            {/* Reset Button */}
+            <button
+              onClick={handleResetTransactionSyncStatus}
+              disabled={isResettingSync || (resetSyncDateRange === 'custom' && (!resetSyncFromDate || !resetSyncToDate))}
+              className="w-full flex items-center justify-center gap-2 px-4 py-2 text-xs font-medium bg-orange-50 hover:bg-orange-100 text-orange-700 rounded transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              <RefreshCw className={`w-3.5 h-3.5 ${isResettingSync ? 'animate-spin' : ''}`} />
+              <span>
+                {isResettingSync
+                  ? 'Mereset...'
+                  : resetSyncDateRange === 'today'
+                  ? 'Reset Status Sync (Hari Ini)'
+                  : resetSyncDateRange === 'alltime'
+                  ? 'Reset Status Sync (Semua Waktu)'
+                  : 'Reset Status Sync (Custom Range)'}
+              </span>
+            </button>
+          </div>
         </div>
 
         {/* Sync Progress Bar - Always visible */}
@@ -2958,7 +2984,7 @@ WHERE ${baseWhere};`;
                     <h4 className="font-semibold text-gray-900 text-lg">Cleanup Test Transactions</h4>
                   </div>
                   <p className="text-sm text-gray-700 mb-4">
-                    Permanently delete ALL test transactions from all 3 databases (Offline SQLite, SalesPulse MySQL, System-POS MySQL).
+                    Permanently delete ALL test transactions from all 3 databases (Local MySQL, SalesPulse MySQL, System-POS MySQL).
                   </p>
                   <div className="bg-red-100 border border-red-300 rounded-lg p-3 mb-4">
                     <p className="text-xs text-red-800 font-medium mb-1">
@@ -3065,7 +3091,7 @@ WHERE ${baseWhere};`;
                       <h5 className="font-semibold text-gray-900 text-sm">SQL Queries to be Executed (Preview)</h5>
                       <button
                         onClick={() => {
-                          const fullSql = `-- Archive (Keeps Data)\n-- Offline SQLite:\n${offlineArchivePreview}\n\n-- Online MySQL:\n${onlineArchivePreview}\n\n-- Delete (Permanent)\n-- Offline SQLite:\n${offlineDeletePreview}\n\n-- Online MySQL:\n${onlineDeletePreview}`;
+                          const fullSql = `-- Archive (Keeps Data)\n-- Local MySQL:\n${offlineArchivePreview}\n\n-- Online MySQL:\n${onlineArchivePreview}\n\n-- Delete (Permanent)\n-- Local MySQL:\n${offlineDeletePreview}\n\n-- Online MySQL:\n${onlineDeletePreview}`;
                           copySqlToClipboard(fullSql, 'bulkActions');
                         }}
                         className="flex items-center gap-1 px-2 py-1 text-xs bg-gray-100 hover:bg-gray-200 rounded transition-colors"
@@ -3090,7 +3116,7 @@ WHERE ${baseWhere};`;
                           <CheckCircle className="w-3 h-3 text-orange-600" />
                           <strong className="text-gray-900 text-xs">Archive (Keeps Data):</strong>
                         </div>
-                        <div className="text-orange-700 text-xs mb-1">-- Offline SQLite:</div>
+                        <div className="text-orange-700 text-xs mb-1">-- Local MySQL:</div>
                         <pre className="text-gray-800 whitespace-pre-wrap text-xs mb-2">{offlineArchivePreview}</pre>
                         <div className="text-orange-700 text-xs mb-1">-- Online MySQL:</div>
                         <pre className="text-gray-800 whitespace-pre-wrap text-xs">{onlineArchivePreview}</pre>
@@ -3100,7 +3126,7 @@ WHERE ${baseWhere};`;
                           <Trash2 className="w-3 h-3 text-red-600" />
                           <strong className="text-red-900 text-xs">Delete (Permanent):</strong>
                         </div>
-                        <div className="text-red-700 text-xs mb-1">-- Offline SQLite:</div>
+                        <div className="text-red-700 text-xs mb-1">-- Local MySQL:</div>
                         <pre className="text-red-900 whitespace-pre-wrap text-xs mb-2">{offlineDeletePreview}</pre>
                         <div className="text-red-700 text-xs mb-1">-- Online MySQL:</div>
                         <pre className="text-red-900 whitespace-pre-wrap text-xs">{onlineDeletePreview}</pre>

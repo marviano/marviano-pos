@@ -3,7 +3,6 @@
 import { useEffect, useMemo, useState, Fragment, useCallback, useRef } from 'react';
 import { useRouter } from 'next/navigation';
 import { useAuth } from '@/hooks/useAuth';
-import { getApiUrl } from '@/lib/api';
 
 // Transaction type from API
 type Transaction = {
@@ -55,7 +54,6 @@ export default function PrintingLogsPage() {
   const { user, isAuthenticated } = useAuth();
   const [isClient, setIsClient] = useState(false);
   const businessId = user?.selectedBusinessId || 14; // Default to 14 if not set
-  const abortControllerRef = useRef<AbortController | null>(null);
 
   // Ensure we're on the client side
   useEffect(() => {
@@ -96,66 +94,45 @@ export default function PrintingLogsPage() {
   const [error, setError] = useState<string | null>(null);
   const [paymentMethodMap, setPaymentMethodMap] = useState<{ byId: Record<number, string>; byCode: Record<string, string> }>({ byId: {}, byCode: {} });
 
-  // Compute UTC timestamp range for UTC+7 date filtering
-  const computeUtcMsRangeUTC7 = useCallback((from: string, to: string) => {
-    const parse = (s: string) => {
-      const [y, m, d] = s.split('-').map(Number);
-      // Create a Date at UTC for UTC+7 midnight by subtracting 7 hours
-      const utcStart = Date.UTC(y, (m || 1) - 1, d || 1, 0, 0, 0);
-      return utcStart - 7 * 60 * 60 * 1000;
-    };
-    const fromUtc7StartUtc = parse(from);
-    const toUtc7EndUtc = parse(to) + (24 * 60 * 60 * 1000) - 1;
-    return { fromMs: fromUtc7StartUtc, toMs: toUtc7EndUtc };
-  }, []);
 
-  // Load data from Electron local database (with optional API fallback)
+  // Electron API interface
+  interface ElectronAPI {
+    localDbGetTransactions?: (businessId: number, limit: number) => Promise<Array<Record<string, unknown>>>;
+    getPrinter1AuditLog?: (fromDate?: string, toDate?: string, limit?: number) => Promise<{ entries: Array<Record<string, unknown>> }>;
+    getPrinter2AuditLog?: (fromDate?: string, toDate?: string, limit?: number) => Promise<{ entries: Array<Record<string, unknown>> }>;
+    localDbGetPaymentMethods?: () => Promise<Array<{ id?: number; code?: string; name?: string }>>;
+  }
+
+  // Load data from local MySQL database via Electron API (offline-first, same as TransactionList)
   const loadData = useCallback(async () => {
-    // Cancel any pending requests
-    if (abortControllerRef.current) {
-      abortControllerRef.current.abort();
-    }
-
-    // Create new abort controller for this request
-    const abortController = new AbortController();
-    abortControllerRef.current = abortController;
-
     setIsLoading(true);
     setError(null);
     
-    const electronAPI = typeof window !== 'undefined' ? (window as { electronAPI?: {
-      localDbGetTransactions?: (businessId?: number, limit?: number) => Promise<unknown[]>;
-      getPrinter1AuditLog?: (fromDate?: string, toDate?: string, limit?: number) => Promise<{ success: boolean; entries?: unknown[] }>;
-      getPrinter2AuditLog?: (fromDate?: string, toDate?: string, limit?: number) => Promise<{ success: boolean; entries?: unknown[] }>;
-      localDbGetPaymentMethods?: () => Promise<unknown[]>;
-    } }).electronAPI : undefined;
+    const electronAPI = typeof window !== 'undefined' ? (window as { electronAPI?: ElectronAPI }).electronAPI : undefined;
     
     try {
-      // Use Electron local database - fully offline, no internet required
       if (!electronAPI?.localDbGetTransactions || !electronAPI?.getPrinter1AuditLog || !electronAPI?.getPrinter2AuditLog) {
         throw new Error('Electron local database API is not available. This page requires offline database support.');
       }
       
-      console.log('📱 [PrintingLogs] Loading from offline SQLite database (no internet required)');
-      console.log('📱 [PrintingLogs] Electron API available:', {
-        hasLocalDbGetTransactions: !!electronAPI.localDbGetTransactions,
-        hasGetPrinter1AuditLog: !!electronAPI.getPrinter1AuditLog,
-        hasGetPrinter2AuditLog: !!electronAPI.getPrinter2AuditLog,
-        hasLocalDbGetPaymentMethods: !!electronAPI.localDbGetPaymentMethods,
-      });
+      console.log('📱 [PrintingLogs] Loading from local MySQL database (offline-first)');
+      console.log('📱 [PrintingLogs] Fetching data for businessId:', businessId, 'from', fromDate, 'to', toDate);
       
       // Fetch transactions from local database
-      console.log('📱 [PrintingLogs] Fetching transactions for businessId:', businessId);
-      const allTransactions = await electronAPI.localDbGetTransactions(businessId, 50000) as Array<Record<string, unknown>>;
+      const allTransactions = await electronAPI.localDbGetTransactions(businessId, 50000);
       console.log('📱 [PrintingLogs] Raw transactions received:', allTransactions.length);
       
-      // Filter by date range
-      const { fromMs, toMs } = computeUtcMsRangeUTC7(fromDate, toDate);
+      // Filter by date range - use same logic as TransactionList (date string comparison, not epoch)
       const txList = allTransactions
         .filter((tx: Record<string, unknown>) => {
           if (!tx.created_at) return false;
-          const txDate = typeof tx.created_at === 'string' ? new Date(tx.created_at).getTime() : 0;
-          return txDate >= fromMs && txDate <= toMs;
+          // Convert UTC to local date for accurate filtering (same as TransactionList)
+          const localDate = new Date(String(tx.created_at));
+          const localDateString = localDate.getFullYear() + '-' +
+            String(localDate.getMonth() + 1).padStart(2, '0') + '-' +
+            String(localDate.getDate()).padStart(2, '0');
+          const isInRange = localDateString >= fromDate && localDateString <= toDate;
+          return isInRange;
         })
         .map((tx: Record<string, unknown>) => {
           const txId = String(tx.id || '');
@@ -178,22 +155,17 @@ export default function PrintingLogsPage() {
       setTransactions(txList);
       
       // Fetch printer audits from local database
-      const startDate = new Date(fromMs);
-      const endDate = new Date(toMs);
-      const fromDateStr = startDate.toISOString().split('T')[0];
-      const toDateStr = endDate.toISOString().split('T')[0];
-      
-      const printer1Result = await electronAPI.getPrinter1AuditLog(fromDateStr, toDateStr, 50000);
-      const printer2Result = await electronAPI.getPrinter2AuditLog(fromDateStr, toDateStr, 50000);
+      const printer1Result = await electronAPI.getPrinter1AuditLog(fromDate, toDate, 50000);
+      const printer2Result = await electronAPI.getPrinter2AuditLog(fromDate, toDate, 50000);
       
       const p1Audits = ((printer1Result?.entries || []) as Array<Record<string, unknown>>).map((a: Record<string, unknown>): Printer1Audit => ({
         transaction_id: String(a.transaction_id || ''),
         printer1_receipt_number: Number(a.printer1_receipt_number || 0),
         printed_at: a.printed_at ? String(a.printed_at) : new Date().toISOString(),
         printed_at_epoch: a.printed_at_epoch ? Number(a.printed_at_epoch) : (a.printed_at ? new Date(String(a.printed_at)).getTime() : Date.now()),
-        global_counter: a.global_counter ? Number(a.global_counter) : undefined,
-        is_reprint: a.is_reprint ? Number(a.is_reprint) : undefined,
-        reprint_count: a.reprint_count ? Number(a.reprint_count) : undefined,
+        global_counter: a.global_counter !== null && a.global_counter !== undefined ? Number(a.global_counter) : undefined,
+        is_reprint: a.is_reprint !== null && a.is_reprint !== undefined ? Number(a.is_reprint) : undefined,
+        reprint_count: a.reprint_count !== null && a.reprint_count !== undefined ? Number(a.reprint_count) : undefined,
       }));
       
       const p2Audits = ((printer2Result?.entries || []) as Array<Record<string, unknown>>).map((a: Record<string, unknown>): Printer2Audit => ({
@@ -203,9 +175,9 @@ export default function PrintingLogsPage() {
         cycle_number: a.cycle_number !== undefined && a.cycle_number !== null ? Number(a.cycle_number) : null,
         printed_at: a.printed_at ? String(a.printed_at) : new Date().toISOString(),
         printed_at_epoch: a.printed_at_epoch ? Number(a.printed_at_epoch) : (a.printed_at ? new Date(String(a.printed_at)).getTime() : Date.now()),
-        global_counter: a.global_counter ? Number(a.global_counter) : undefined,
-        is_reprint: a.is_reprint ? Number(a.is_reprint) : undefined,
-        reprint_count: a.reprint_count ? Number(a.reprint_count) : undefined,
+        global_counter: a.global_counter !== null && a.global_counter !== undefined ? Number(a.global_counter) : undefined,
+        is_reprint: a.is_reprint !== null && a.is_reprint !== undefined ? Number(a.is_reprint) : undefined,
+        reprint_count: a.reprint_count !== null && a.reprint_count !== undefined ? Number(a.reprint_count) : undefined,
       }));
       
       console.log('🖨️ [PrintingLogs] Loaded printer audits from offline DB:', {
@@ -218,7 +190,7 @@ export default function PrintingLogsPage() {
       
       // Fetch payment methods from local database
       if (electronAPI.localDbGetPaymentMethods) {
-        const paymentMethods = await electronAPI.localDbGetPaymentMethods() as Array<{ id?: number; code?: string; name?: string }>;
+        const paymentMethods = await electronAPI.localDbGetPaymentMethods();
         const pmMapById: Record<number, string> = {};
         const pmMapByCode: Record<string, string> = {};
         paymentMethods.forEach((pm) => {
@@ -234,12 +206,6 @@ export default function PrintingLogsPage() {
         setPaymentMethodMap({ byId: pmMapById, byCode: pmMapByCode });
       }
     } catch (e) {
-      // Ignore abort errors
-      if (e instanceof Error && e.name === 'AbortError') {
-        console.log('🔄 [PrintingLogs] Request was aborted');
-        return;
-      }
-      
       const errorMessage = e instanceof Error ? e.message : String(e);
       console.error('❌ [PrintingLogs] Failed to load printing logs:', {
         error: e,
@@ -254,7 +220,7 @@ export default function PrintingLogsPage() {
       });
       
       // Set a user-friendly error message
-      let displayError = 'Failed to load data from offline database. ';
+      let displayError = 'Failed to load data from local database. ';
       if (errorMessage.includes('Electron local database API')) {
         displayError += 'Please ensure you are running the Electron app. The printing logs require offline database access.';
       } else {
@@ -268,7 +234,7 @@ export default function PrintingLogsPage() {
     } finally {
       setIsLoading(false);
     }
-  }, [businessId, fromDate, toDate, computeUtcMsRangeUTC7]);
+  }, [businessId, fromDate, toDate]);
 
   useEffect(() => {
     // Only load data if authenticated and client-side
@@ -282,13 +248,6 @@ export default function PrintingLogsPage() {
     } else {
       console.log('⏸️ [PrintingLogs] Not loading data yet:', { isClient, isAuthenticated, businessId });
     }
-    
-    // Cleanup on unmount
-    return () => {
-      if (abortControllerRef.current) {
-        abortControllerRef.current.abort();
-      }
-    };
   }, [isClient, isAuthenticated, businessId, fromDate, toDate, loadData]);
 
   // Create sets for quick lookup of printed transactions
@@ -319,14 +278,11 @@ export default function PrintingLogsPage() {
     return set;
   }, [audit2]);
 
-  // Filter transactions by date range and search query
+  // Filter transactions by search query (date filtering already done in loadData)
   const filteredTxs = useMemo(() => {
     const q = search.trim().toLowerCase();
-    const { fromMs, toMs } = computeUtcMsRangeUTC7(fromDate, toDate);
+    if (!q) return transactions;
     return transactions.filter(t => {
-      const txMs = new Date(t.created_at).getTime();
-      const inDate = (!fromDate && !toDate) || (txMs >= fromMs && txMs <= toMs);
-      if (!q) return inDate;
       return (
         (t.id && String(t.id).toLowerCase().includes(q)) ||
         (t.uuid_id && t.uuid_id.toLowerCase().includes(q)) ||
@@ -334,7 +290,7 @@ export default function PrintingLogsPage() {
         (typeof t.customer_unit === 'number' && t.customer_unit.toString().includes(q))
       );
     });
-  }, [transactions, search, fromDate, toDate, computeUtcMsRangeUTC7]);
+  }, [transactions, search]);
 
   // Calculate summary statistics
   const { totalAll, totalReceiptize, percentReceiptize } = useMemo(() => {
@@ -417,7 +373,7 @@ export default function PrintingLogsPage() {
                 <ul className="list-disc list-inside mt-1 space-y-1">
                   <li>Open DevTools (Press F12) to see detailed console logs</li>
                   <li>Ensure you are running the built Electron app (not just the web version)</li>
-                  <li>The offline database should be located at: {typeof window !== 'undefined' && (window as { electronAPI?: unknown }).electronAPI ? 'userData/pos-offline.db' : 'Unknown (not in Electron)'}</li>
+                  <li>The offline database should be connected to localhost MySQL</li>
                 </ul>
               </div>
             </div>

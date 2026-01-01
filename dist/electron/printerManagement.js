@@ -1,68 +1,20 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.PrinterManagementService = void 0;
+const mysqlDb_1 = require("./mysqlDb");
 /**
  * Printer Management Service
  * Handles multi-printer system with separate counters and automation
  */
 class PrinterManagementService {
-    constructor(database, mysqlPool) {
-        this.db = database;
+    constructor(mysqlPool) {
         this.mysqlPool = mysqlPool;
-        this.ensureGlobalCounterColumns();
-    }
-    ensureGlobalCounterColumns() {
-        try {
-            const printer1Cols = this.db.prepare(`PRAGMA table_info(printer1_audit_log)`).all();
-            const hasPrinter1Global = printer1Cols.some(col => col.name === 'global_counter');
-            if (!hasPrinter1Global) {
-                this.db.prepare(`ALTER TABLE printer1_audit_log ADD COLUMN global_counter INTEGER`).run();
-                console.log('📋 Added printer1_audit_log.global_counter column');
-            }
-            // Add is_reprint column
-            const hasPrinter1Reprint = printer1Cols.some(col => col.name === 'is_reprint');
-            if (!hasPrinter1Reprint) {
-                this.db.prepare(`ALTER TABLE printer1_audit_log ADD COLUMN is_reprint INTEGER DEFAULT 0`).run();
-                console.log('📋 Added printer1_audit_log.is_reprint column');
-            }
-            // Add reprint_count column
-            const hasPrinter1ReprintCount = printer1Cols.some(col => col.name === 'reprint_count');
-            if (!hasPrinter1ReprintCount) {
-                this.db.prepare(`ALTER TABLE printer1_audit_log ADD COLUMN reprint_count INTEGER DEFAULT 0`).run();
-                console.log('📋 Added printer1_audit_log.reprint_count column');
-            }
-        }
-        catch (error) {
-            console.error('Error ensuring printer1_audit_log columns:', error);
-        }
-        try {
-            const printer2Cols = this.db.prepare(`PRAGMA table_info(printer2_audit_log)`).all();
-            const hasPrinter2Global = printer2Cols.some(col => col.name === 'global_counter');
-            if (!hasPrinter2Global) {
-                this.db.prepare(`ALTER TABLE printer2_audit_log ADD COLUMN global_counter INTEGER`).run();
-                console.log('📋 Added printer2_audit_log.global_counter column');
-            }
-            // Add is_reprint column
-            const hasPrinter2Reprint = printer2Cols.some(col => col.name === 'is_reprint');
-            if (!hasPrinter2Reprint) {
-                this.db.prepare(`ALTER TABLE printer2_audit_log ADD COLUMN is_reprint INTEGER DEFAULT 0`).run();
-                console.log('📋 Added printer2_audit_log.is_reprint column');
-            }
-            // Add reprint_count column
-            const hasPrinter2ReprintCount = printer2Cols.some(col => col.name === 'reprint_count');
-            if (!hasPrinter2ReprintCount) {
-                this.db.prepare(`ALTER TABLE printer2_audit_log ADD COLUMN reprint_count INTEGER DEFAULT 0`).run();
-                console.log('📋 Added printer2_audit_log.reprint_count column');
-            }
-        }
-        catch (error) {
-            console.error('Error ensuring printer2_audit_log columns:', error);
-        }
+        // MySQL schema is initialized separately, no need for column checks
     }
     /**
      * Generate 19-digit numeric UUID: [Business(3)][YYMMDD(6)][HHMMSS(6)][Seq(4)]
      */
-    generateNumericUUID(businessId) {
+    async generateNumericUUID(businessId) {
         const now = new Date();
         const year = now.getFullYear().toString().slice(2);
         const month = (now.getMonth() + 1).toString().padStart(2, '0');
@@ -77,13 +29,13 @@ class PrinterManagementService {
         const counterKey = `uuid_seq_${businessId}_${thisSecond}`;
         let sequence = 1;
         try {
-            const existing = this.db.prepare('SELECT counter FROM uuid_sequence_tracker WHERE key = ?').get(counterKey);
+            const existing = await (0, mysqlDb_1.executeQueryOne)('SELECT counter FROM uuid_sequence_tracker WHERE `key` = ?', [counterKey]);
             if (existing && typeof existing.counter === 'number') {
                 sequence = existing.counter + 1;
-                this.db.prepare('UPDATE uuid_sequence_tracker SET counter = ?, updated_at = ? WHERE key = ?').run(sequence, Date.now(), counterKey);
+                await (0, mysqlDb_1.executeUpdate)('UPDATE uuid_sequence_tracker SET counter = ?, updated_at = ? WHERE `key` = ?', [sequence, Date.now(), counterKey]);
             }
             else {
-                this.db.prepare('INSERT INTO uuid_sequence_tracker (key, counter, created_at, updated_at) VALUES (?, ?, ?, ?)').run(counterKey, sequence, Date.now(), Date.now());
+                await (0, mysqlDb_1.executeUpdate)('INSERT INTO uuid_sequence_tracker (`key`, counter, created_at, updated_at) VALUES (?, ?, ?, ?)', [counterKey, sequence, Date.now(), Date.now()]);
             }
         }
         catch (error) {
@@ -95,7 +47,7 @@ class PrinterManagementService {
         // Clean up old entries (keep only last 24 hours)
         try {
             const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1000).getTime();
-            this.db.prepare('DELETE FROM uuid_sequence_tracker WHERE created_at < ?').run(yesterday);
+            await (0, mysqlDb_1.executeUpdate)('DELETE FROM uuid_sequence_tracker WHERE created_at < ?', [yesterday]);
         }
         catch (error) {
             console.error('Error cleaning up old sequences:', error);
@@ -107,23 +59,20 @@ class PrinterManagementService {
      * Get or increment printer daily counter
      * Uses GMT+7 timezone to match local business day
      */
-    getPrinterCounter(printerType, businessId, increment = false) {
+    async getPrinterCounter(printerType, businessId, increment = false) {
         // Get today's date in GMT+7 (Indonesia timezone)
         const now = new Date();
         const utc7Time = new Date(now.getTime() + (7 * 60 * 60 * 1000));
         const today = utc7Time.toISOString().split('T')[0];
         try {
-            const existing = this.db.prepare('SELECT counter FROM printer_daily_counters WHERE printer_type = ? AND business_id = ? AND date = ?')
-                .get(printerType, businessId, today);
+            const existing = await (0, mysqlDb_1.executeQueryOne)('SELECT counter FROM printer_daily_counters WHERE printer_type = ? AND business_id = ? AND date = ?', [printerType, businessId, today]);
             if (existing && typeof existing.counter === 'number') {
                 if (increment) {
                     const newCounter = existing.counter + 1;
-                    const updateStmt = this.db.prepare('UPDATE printer_daily_counters SET counter = ?, last_reset_at = ? WHERE printer_type = ? AND business_id = ? AND date = ?');
-                    const updateResult = updateStmt.run(newCounter, Date.now(), printerType, businessId, today);
-                    console.log(`✅ Incremented ${printerType} counter from ${existing.counter} to ${newCounter} (date: ${today}, businessId: ${businessId}, rows updated: ${updateResult.changes})`);
+                    const rowsUpdated = await (0, mysqlDb_1.executeUpdate)('UPDATE printer_daily_counters SET counter = ?, updated_at = NOW() WHERE printer_type = ? AND business_id = ? AND date = ?', [newCounter, printerType, businessId, today]);
+                    console.log(`✅ Incremented ${printerType} counter from ${existing.counter} to ${newCounter} (date: ${today}, businessId: ${businessId}, rows updated: ${rowsUpdated})`);
                     // Verify the update actually happened
-                    const verify = this.db.prepare('SELECT counter FROM printer_daily_counters WHERE printer_type = ? AND business_id = ? AND date = ?')
-                        .get(printerType, businessId, today);
+                    const verify = await (0, mysqlDb_1.executeQueryOne)('SELECT counter FROM printer_daily_counters WHERE printer_type = ? AND business_id = ? AND date = ?', [printerType, businessId, today]);
                     if (verify && verify.counter !== newCounter) {
                         console.error(`❌ Counter update verification failed! Expected ${newCounter}, got ${verify.counter}`);
                     }
@@ -135,9 +84,8 @@ class PrinterManagementService {
             else {
                 // First transaction today - start at 1
                 const counter = increment ? 1 : 0;
-                const insertStmt = this.db.prepare('INSERT INTO printer_daily_counters (printer_type, business_id, date, counter, last_reset_at) VALUES (?, ?, ?, ?, ?)');
-                const insertResult = insertStmt.run(printerType, businessId, today, counter, Date.now());
-                console.log(`✅ Created new ${printerType} counter starting at ${counter} (date: ${today}, businessId: ${businessId}, increment: ${increment}, rows inserted: ${insertResult.changes})`);
+                await (0, mysqlDb_1.executeUpdate)('INSERT INTO printer_daily_counters (printer_type, business_id, date, counter, updated_at) VALUES (?, ?, ?, ?, NOW())', [printerType, businessId, today, counter]);
+                console.log(`✅ Created new ${printerType} counter starting at ${counter} (date: ${today}, businessId: ${businessId}, increment: ${increment})`);
                 return increment ? 1 : 0;
             }
         }
@@ -149,10 +97,9 @@ class PrinterManagementService {
     /**
      * Get Printer 2 mode setting
      */
-    getPrinter2Mode() {
+    async getPrinter2Mode() {
         try {
-            const result = this.db.prepare('SELECT mode FROM printer_mode_settings WHERE printer_type = ?')
-                .get('receiptizePrinter');
+            const result = await (0, mysqlDb_1.executeQueryOne)('SELECT mode FROM printer_mode_settings WHERE printer_type = ?', ['receiptizePrinter']);
             if (result?.mode === 'auto' || result?.mode === 'manual') {
                 return result.mode;
             }
@@ -166,12 +113,10 @@ class PrinterManagementService {
     /**
      * Set Printer 2 mode
      */
-    setPrinter2Mode(mode) {
+    async setPrinter2Mode(mode) {
         try {
-            const now = Date.now();
-            this.db.prepare('INSERT INTO printer_mode_settings (printer_type, mode, created_at, updated_at) VALUES (?, ?, ?, ?) ' +
-                'ON CONFLICT(printer_type) DO UPDATE SET mode = excluded.mode, updated_at = excluded.updated_at')
-                .run('receiptizePrinter', mode, now, now);
+            await (0, mysqlDb_1.executeUpsert)(`INSERT INTO printer_mode_settings (printer_type, mode, updated_at) VALUES (?, ?, NOW())
+         ON DUPLICATE KEY UPDATE mode = VALUES(mode), updated_at = NOW()`, ['receiptizePrinter', mode]);
             console.log(`✅ Set Printer 2 mode to ${mode}`);
             return true;
         }
@@ -183,10 +128,9 @@ class PrinterManagementService {
     /**
      * Get Printer 2 automation selections for current cycle
      */
-    getPrinter2AutomationSelections(businessId) {
+    async getPrinter2AutomationSelections(businessId) {
         try {
-            const result = this.db.prepare('SELECT cycle_number, selected_transactions FROM printer2_automation WHERE business_id = ? ORDER BY created_at DESC LIMIT 1')
-                .get(businessId);
+            const result = await (0, mysqlDb_1.executeQueryOne)('SELECT cycle_number, selected_transactions FROM printer2_automation WHERE business_id = ? ORDER BY created_at DESC LIMIT 1', [businessId]);
             if (result) {
                 const parsed = JSON.parse(result.selected_transactions);
                 const selections = Array.isArray(parsed) ? parsed.filter((value) => Number.isFinite(value)) : [];
@@ -202,11 +146,11 @@ class PrinterManagementService {
     /**
      * Save Printer 2 automation selections
      */
-    savePrinter2AutomationSelections(businessId, cycleNumber, selections) {
+    async savePrinter2AutomationSelections(businessId, cycleNumber, selections) {
         try {
-            this.db.prepare('INSERT INTO printer2_automation (business_id, cycle_number, selected_transactions, created_at) ' +
-                'VALUES (?, ?, ?, ?) ON CONFLICT(business_id, cycle_number) DO UPDATE SET selected_transactions = excluded.selected_transactions')
-                .run(businessId, cycleNumber, JSON.stringify(selections), Date.now());
+            await (0, mysqlDb_1.executeUpsert)(`INSERT INTO printer2_automation (business_id, cycle_number, selected_transactions, created_at)
+         VALUES (?, ?, ?, NOW())
+         ON DUPLICATE KEY UPDATE selected_transactions = VALUES(selected_transactions)`, [businessId, cycleNumber, JSON.stringify(selections)]);
             console.log(`✅ Saved Printer 2 automation: Cycle ${cycleNumber}, Selections: ${selections.join(',')}`);
             return true;
         }
@@ -233,21 +177,12 @@ class PrinterManagementService {
     /**
      * Log Printer 2 print to audit
      */
-    logPrinter2Print(transactionId, printer2ReceiptNumber, mode, cycleNumber, globalCounter, isReprint = false, reprintCount = 0) {
+    async logPrinter2Print(transactionId, printer2ReceiptNumber, mode, cycleNumber, globalCounter, isReprint = false, reprintCount = 0) {
         try {
-            // Convert to UTC+7 and format as MySQL datetime
-            const utc7Date = new Date(Date.now() + 7 * 60 * 60 * 1000);
-            const now = utc7Date.toISOString().slice(0, 19).replace('T', ' ');
+            // Convert to UTC+7 and format as MySQL datetime (using centralized function)
+            const now = (0, mysqlDb_1.toMySQLDateTime)(new Date());
             const printedAtEpoch = Date.now();
-            this.db.prepare('INSERT INTO printer2_audit_log (transaction_id, printer2_receipt_number, print_mode, cycle_number, global_counter, printed_at, printed_at_epoch, is_reprint, reprint_count) ' +
-                'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)')
-                .run(transactionId, printer2ReceiptNumber, mode, cycleNumber || null, typeof globalCounter === 'number' ? globalCounter : null, now, printedAtEpoch, isReprint ? 1 : 0, reprintCount);
-            console.log(`✅ Logged Printer 2 print: Transaction ${transactionId}, Receipt #${printer2ReceiptNumber}, Mode: ${mode}${isReprint ? ` (REPRINT ke-${reprintCount})` : ''}`);
-            // Shadow DB (MySQL) Write - Fire and Forget
-            // Note: This writes to local MySQL system_pos database
-            // Foreign key constraint requires transaction to exist in system_pos.transactions first
-            // If transaction doesn't exist yet, this will fail silently (expected behavior)
-            this.mysqlPool.execute(`INSERT INTO printer2_audit_log 
+            await (0, mysqlDb_1.executeUpdate)(`INSERT INTO printer2_audit_log 
          (transaction_id, printer2_receipt_number, print_mode, cycle_number, global_counter, printed_at, printed_at_epoch, is_reprint, reprint_count) 
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`, [
                 transactionId,
@@ -255,22 +190,12 @@ class PrinterManagementService {
                 mode,
                 cycleNumber || null,
                 typeof globalCounter === 'number' ? globalCounter : null,
-                now, // Use the same timestamp string
+                now,
                 printedAtEpoch,
                 isReprint ? 1 : 0,
                 reprintCount
-            ]).then(() => {
-                console.log(`✅ [SHADOW-DB] Logged Printer 2 print to MySQL for Trans ${transactionId}`);
-            }).catch(err => {
-                // Foreign key constraint error is expected if transaction doesn't exist in system_pos yet
-                // This will be synced later by systemPosSyncService
-                if (err.code === 'ER_NO_REFERENCED_ROW_2' || err.errno === 1452) {
-                    console.log(`ℹ️ [SHADOW-DB] Transaction ${transactionId} not yet in system_pos, will be synced later`);
-                }
-                else {
-                    console.error(`❌ [SHADOW-DB] Failed to log to MySQL:`, err);
-                }
-            });
+            ]);
+            console.log(`✅ Logged Printer 2 print: Transaction ${transactionId}, Receipt #${printer2ReceiptNumber}, Mode: ${mode}${isReprint ? ` (REPRINT ke-${reprintCount})` : ''}`);
             return true;
         }
         catch (error) {
@@ -281,14 +206,19 @@ class PrinterManagementService {
     /**
      * Log Printer 1 print to audit
      */
-    logPrinter1Print(transactionId, printer1ReceiptNumber, globalCounter, isReprint = false, reprintCount = 0) {
+    async logPrinter1Print(transactionId, printer1ReceiptNumber, globalCounter, isReprint = false, reprintCount = 0) {
         try {
-            // Convert to UTC+7 and format as MySQL datetime
-            const utc7Date = new Date(Date.now() + 7 * 60 * 60 * 1000);
-            const now = utc7Date.toISOString().slice(0, 19).replace('T', ' ');
-            this.db.prepare('INSERT INTO printer1_audit_log (transaction_id, printer1_receipt_number, global_counter, printed_at, printed_at_epoch, is_reprint, reprint_count) ' +
-                'VALUES (?, ?, ?, ?, ?, ?, ?)')
-                .run(transactionId, printer1ReceiptNumber, typeof globalCounter === 'number' ? globalCounter : null, now, Date.now(), isReprint ? 1 : 0, reprintCount);
+            // Convert to UTC+7 and format as MySQL datetime (using centralized function)
+            const now = (0, mysqlDb_1.toMySQLDateTime)(new Date());
+            await (0, mysqlDb_1.executeUpdate)('INSERT INTO printer1_audit_log (transaction_id, printer1_receipt_number, global_counter, printed_at, printed_at_epoch, is_reprint, reprint_count) VALUES (?, ?, ?, ?, ?, ?, ?)', [
+                transactionId,
+                printer1ReceiptNumber,
+                typeof globalCounter === 'number' ? globalCounter : null,
+                now,
+                Date.now(),
+                isReprint ? 1 : 0,
+                reprintCount
+            ]);
             console.log(`✅ Logged Printer 1 print: Transaction ${transactionId}, Receipt #${printer1ReceiptNumber}${isReprint ? ` (REPRINT ke-${reprintCount})` : ''}`);
             return true;
         }
@@ -300,7 +230,7 @@ class PrinterManagementService {
     /**
      * Get Printer 1 audit log entries
      */
-    getPrinter1AuditLog(fromDate, toDate, limit = 100) {
+    async getPrinter1AuditLog(fromDate, toDate, limit = 100) {
         try {
             let query = 'SELECT * FROM printer1_audit_log';
             const params = [];
@@ -326,10 +256,12 @@ class PrinterManagementService {
                     query += ' WHERE ' + conditions.join(' AND ');
                 }
             }
-            query += ' ORDER BY printed_at_epoch DESC LIMIT ?';
-            params.push(limit);
-            console.log(`🔍 [Printer1AuditLog] Query params: fromDate=${fromDate}, toDate=${toDate}, fromEpoch=${fromEpoch}, toEpoch=${toEpoch}, limit=${limit}`);
-            const results = this.db.prepare(query).all(...params);
+            // LIMIT cannot be parameterized in prepared statements reliably
+            // Use string interpolation (safe since we validate it's a number)
+            const safeLimit = typeof limit === 'number' && limit > 0 ? Math.min(Math.max(limit, 1), 10000) : 100;
+            query += ` ORDER BY printed_at_epoch DESC LIMIT ${safeLimit}`;
+            console.log(`🔍 [Printer1AuditLog] Query params: fromDate=${fromDate}, toDate=${toDate}, fromEpoch=${fromEpoch}, toEpoch=${toEpoch}, limit=${safeLimit}`);
+            const results = await (0, mysqlDb_1.executeQuery)(query, params);
             console.log(`✅ Retrieved ${results.length} printer1 audit log entries`);
             // Debug: show sample entries if any
             if (results.length > 0) {
@@ -337,10 +269,10 @@ class PrinterManagementService {
             }
             else {
                 // Check total count without filters
-                const totalCount = this.db.prepare('SELECT COUNT(*) as count FROM printer1_audit_log').get();
-                console.log(`⚠️ [Printer1AuditLog] No results. Total entries in table: ${totalCount.count}`);
-                if (totalCount.count > 0) {
-                    const sampleRow = this.db.prepare('SELECT printed_at_epoch FROM printer1_audit_log ORDER BY printed_at_epoch DESC LIMIT 1').get();
+                const totalCount = await (0, mysqlDb_1.executeQueryOne)('SELECT COUNT(*) as count FROM printer1_audit_log');
+                console.log(`⚠️ [Printer1AuditLog] No results. Total entries in table: ${totalCount?.count || 0}`);
+                if (totalCount && totalCount.count > 0) {
+                    const sampleRow = await (0, mysqlDb_1.executeQueryOne)('SELECT printed_at_epoch FROM printer1_audit_log ORDER BY printed_at_epoch DESC LIMIT 1');
                     if (sampleRow) {
                         console.log(`⚠️ [Printer1AuditLog] Latest entry epoch: ${sampleRow.printed_at_epoch} (${new Date(sampleRow.printed_at_epoch).toISOString()})`);
                     }
@@ -356,7 +288,7 @@ class PrinterManagementService {
     /**
      * Get Printer 2 audit log entries
      */
-    getPrinter2AuditLog(fromDate, toDate, limit = 100) {
+    async getPrinter2AuditLog(fromDate, toDate, limit = 100) {
         try {
             let query = 'SELECT * FROM printer2_audit_log';
             const params = [];
@@ -382,10 +314,12 @@ class PrinterManagementService {
                     query += ' WHERE ' + conditions.join(' AND ');
                 }
             }
-            query += ' ORDER BY printed_at_epoch DESC LIMIT ?';
-            params.push(limit);
-            console.log(`🔍 [Printer2AuditLog] Query params: fromDate=${fromDate}, toDate=${toDate}, fromEpoch=${fromEpoch}, toEpoch=${toEpoch}, limit=${limit}`);
-            const results = this.db.prepare(query).all(...params);
+            // LIMIT cannot be parameterized in prepared statements reliably
+            // Use string interpolation (safe since we validate it's a number)
+            const safeLimit = typeof limit === 'number' && limit > 0 ? Math.min(Math.max(limit, 1), 10000) : 100;
+            query += ` ORDER BY printed_at_epoch DESC LIMIT ${safeLimit}`;
+            console.log(`🔍 [Printer2AuditLog] Query params: fromDate=${fromDate}, toDate=${toDate}, fromEpoch=${fromEpoch}, toEpoch=${toEpoch}, limit=${safeLimit}`);
+            const results = await (0, mysqlDb_1.executeQuery)(query, params);
             console.log(`✅ Retrieved ${results.length} printer2 audit log entries`);
             // Debug: show sample entries if any
             if (results.length > 0) {
@@ -393,10 +327,10 @@ class PrinterManagementService {
             }
             else {
                 // Check total count without filters
-                const totalCount = this.db.prepare('SELECT COUNT(*) as count FROM printer2_audit_log').get();
-                console.log(`⚠️ [Printer2AuditLog] No results. Total entries in table: ${totalCount.count}`);
-                if (totalCount.count > 0) {
-                    const sampleRow = this.db.prepare('SELECT printed_at_epoch FROM printer2_audit_log ORDER BY printed_at_epoch DESC LIMIT 1').get();
+                const totalCount = await (0, mysqlDb_1.executeQueryOne)('SELECT COUNT(*) as count FROM printer2_audit_log');
+                console.log(`⚠️ [Printer2AuditLog] No results. Total entries in table: ${totalCount?.count || 0}`);
+                if (totalCount && totalCount.count > 0) {
+                    const sampleRow = await (0, mysqlDb_1.executeQueryOne)('SELECT printed_at_epoch FROM printer2_audit_log ORDER BY printed_at_epoch DESC LIMIT 1');
                     if (sampleRow) {
                         console.log(`⚠️ [Printer2AuditLog] Latest entry epoch: ${sampleRow.printed_at_epoch} (${new Date(sampleRow.printed_at_epoch).toISOString()})`);
                     }

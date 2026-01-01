@@ -43,10 +43,14 @@ const RefundModal: React.FC<RefundModalProps> = ({
   const [error, setError] = useState<string | null>(null);
 
   const totalRefunded = useMemo(() => {
-    if (typeof transaction.refund_total === 'number') {
+    if (typeof transaction.refund_total === 'number' && !Number.isNaN(transaction.refund_total)) {
       return transaction.refund_total;
     }
-    return (transaction.refunds || []).reduce((sum, refund) => sum + (refund.refund_amount || 0), 0);
+    const calculated = (transaction.refunds || []).reduce((sum, refund) => {
+      const amount = typeof refund.refund_amount === 'number' ? refund.refund_amount : 0;
+      return sum + (Number.isNaN(amount) ? 0 : amount);
+    }, 0);
+    return Number.isNaN(calculated) ? 0 : calculated;
   }, [transaction.refund_total, transaction.refunds]);
 
   const outstandingAmount = useMemo(() => {
@@ -114,11 +118,29 @@ const RefundModal: React.FC<RefundModalProps> = ({
       const cashDelta = paymentMethodId === 1 ? numericAmount : 0;
       const timestamp = new Date().toISOString();
 
+      // Get shift_uuid from transaction, or try to get active shift if transaction doesn't have it
+      let shiftUuid = transaction.shift_uuid ?? null;
+      if (!shiftUuid) {
+        try {
+          const electronAPI = typeof window !== 'undefined' ? (window as { electronAPI?: { localDbGetActiveShift?: (userId: number, businessId?: number) => Promise<{ shift?: { uuid_id?: string } | null }> } }).electronAPI : undefined;
+          if (electronAPI?.localDbGetActiveShift) {
+            const activeShiftResponse = await electronAPI.localDbGetActiveShift(refundedBy, transaction.business_id);
+            if (activeShiftResponse?.shift?.uuid_id) {
+              shiftUuid = activeShiftResponse.shift.uuid_id;
+              console.log(`🔗 [REFUND] Linked refund to active shift ${shiftUuid} (transaction had no shift_uuid)`);
+            }
+          }
+        } catch (e) {
+          console.warn('⚠️ [REFUND] Failed to get active shift for refund:', e);
+        }
+      }
+
+      // Create refund payload - always use local transaction UUID
       const refundPayload = {
         uuid_id: refundUuid,
-        transaction_uuid: transaction.id,
+        transaction_uuid: transaction.id, // Always use local transaction UUID
         business_id: transaction.business_id,
-        shift_uuid: transaction.shift_uuid ?? null,
+        shift_uuid: shiftUuid,
         refund_amount: numericAmount,
         refund_type: refundType,
         reason: reason || null,
@@ -129,80 +151,147 @@ const RefundModal: React.FC<RefundModalProps> = ({
         refunded_at: timestamp
       };
 
-      let updatedTransaction: TransactionDetail | null = null;
+      // Calculate updated transaction state
+      // Ensure both values are numbers before calculation
+      const safeTotalRefunded = Number.isNaN(totalRefunded) ? 0 : Number(totalRefunded);
+      const safeNumericAmount = Number.isNaN(numericAmount) ? 0 : Number(numericAmount);
+      const newRefundTotal = Number((safeTotalRefunded + safeNumericAmount).toFixed(2));
+      const newStatus = refundType === 'full' ? 'refunded' : transaction.status;
+      
       const baseRefundRecord: TransactionRefund = {
         ...refundPayload,
-        status: isOnline ? 'completed' : 'pending',
+        status: 'pending', // Always start as pending, will be marked completed if server accepts
         cash_delta: cashDelta
       };
 
-      if (isOnline) {
-        const response = await fetch(getApiUrl(`/api/transactions/${transaction.id}/refund`), {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify(refundPayload),
-        });
+      // Always create refund locally first (offline-first approach)
+      const mergedRefunds: TransactionRefund[] = [
+        baseRefundRecord,
+        ...(transaction.refunds || [])
+      ];
 
-        if (!response.ok) {
-          const errorText = await response.text();
-          throw new Error(errorText || `HTTP ${response.status}`);
-        }
+      const updatedTransaction: TransactionDetail = {
+        ...transaction,
+        refund_total: newRefundTotal,
+        refund_status: refundType,
+        status: newStatus,
+        refunds: mergedRefunds
+      };
 
-        const result = await response.json();
-
-        // IMPORTANT: Do NOT download transaction data from server response
-        // Local database is the source of truth for transactions
-        // Use local transaction data, not server response
-        const mergedTransaction: TransactionDetail = {
-          ...transaction,
-          // Only merge refunds from server response, not transaction data
-          refunds: (result.refunds ?? result.transaction?.refunds ?? transaction.refunds) as TransactionRefund[] | undefined
-        };
-
-        updatedTransaction = mergedTransaction;
-
-        // Do NOT upsert transaction from server - local DB is source of truth
-        // Refund was accepted by server (response.ok), that's all we need
-
-        if (result.refund) {
-          await applyLocalRefund(result.refund as TransactionRefund, mergedTransaction);
-        } else {
-          await applyLocalRefund(baseRefundRecord, mergedTransaction);
-        }
-      } else {
-        const newRefundTotal = Number((totalRefunded + numericAmount).toFixed(2));
-        const newStatus = refundType === 'full' ? 'refunded' : transaction.status;
-        const mergedRefunds: TransactionRefund[] = [
-          {
-            ...baseRefundRecord,
-            status: 'pending'
-          },
-          ...(transaction.refunds || [])
-        ];
-
-        updatedTransaction = {
-          ...transaction,
+      // Apply refund to local database
+      await applyLocalRefund(
+        baseRefundRecord,
+        {
           refund_total: newRefundTotal,
           refund_status: refundType,
-          status: newStatus,
-          refunds: mergedRefunds
-        };
+          status: newStatus
+        }
+      );
 
-        await applyLocalRefund(
-          {
-            ...baseRefundRecord,
-            status: 'pending'
-          },
-          {
-            refund_total: newRefundTotal,
-            refund_status: refundType,
-            status: newStatus
+      // Queue refund for sync (will sync when transaction exists on server)
+      await smartSyncService.queueRefund(refundPayload);
+
+      // If online, try to sync immediately (but don't fail if transaction doesn't exist yet)
+      if (isOnline) {
+        try {
+          // Try to find transaction on server
+          let transactionFound = false;
+          let serverTransactionUuid = transaction.id;
+
+          try {
+            const checkResponse = await fetch(getApiUrl(`/api/transactions/${transaction.id}`), {
+              method: 'GET',
+              headers: {
+                'Content-Type': 'application/json',
+              },
+            });
+
+            if (checkResponse.ok) {
+              transactionFound = true;
+            } else if (transaction.receipt_number) {
+              // Try receipt_number as fallback
+              const receiptCheckResponse = await fetch(getApiUrl(`/api/transactions/${transaction.receipt_number}`), {
+                method: 'GET',
+                headers: {
+                  'Content-Type': 'application/json',
+                },
+              });
+              
+              if (receiptCheckResponse.ok) {
+                const receiptData = await receiptCheckResponse.json();
+                if (receiptData.transaction?.uuid_id) {
+                  serverTransactionUuid = receiptData.transaction.uuid_id;
+                  transactionFound = true;
+                }
+              }
+            }
+          } catch (checkError) {
+            console.warn('[RefundModal] Transaction check failed, will sync later:', checkError);
           }
-        );
 
-        await smartSyncService.queueRefund(refundPayload);
+          // If transaction exists on server, try to create refund immediately
+          if (transactionFound) {
+            try {
+              const response = await fetch(getApiUrl(`/api/transactions/${serverTransactionUuid}/refund`), {
+                method: 'POST',
+                headers: {
+                  'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                  ...refundPayload,
+                  transaction_uuid: serverTransactionUuid
+                }),
+              });
+
+              if (response.ok) {
+                const result = await response.json();
+                // Update local refund status to uploaded (synced to server)
+                // DO NOT update transaction.refund_total here - it was already updated when we created the refund locally
+                // Only update the refund record status to mark it as synced
+                // Use the server's refund data but keep our UUID to prevent duplicates
+                const completedRefund: TransactionRefund = {
+                  ...baseRefundRecord, // Use local refund data (with our UUID)
+                  ...(result.refund || {}), // Merge server data (like server ID, timestamps)
+                  uuid_id: baseRefundRecord.uuid_id, // IMPORTANT: Keep our UUID to match existing record
+                  status: 'completed' // Mark as completed
+                };
+                // Update existing refund record (will update, not insert duplicate due to UUID check)
+                await applyLocalRefund(completedRefund, {
+                  id: transaction.id, // Need transaction ID for the query
+                  // Pass undefined to avoid updating transaction - it's already been updated
+                  refund_total: undefined,
+                  refund_status: undefined,
+                  status: undefined,
+                  last_refunded_at: undefined
+                });
+                console.log('[RefundModal] Refund synced to server successfully');
+              } else {
+                console.warn('[RefundModal] Server refund creation failed, will sync later. Status:', response.status);
+                // Don't throw - refund is already saved locally and queued for sync
+              }
+            } catch (serverError) {
+              console.warn('[RefundModal] Server refund creation error, will sync later:', serverError);
+              // Don't throw - refund is already saved locally and queued for sync
+            }
+          } else {
+            // Transaction doesn't exist on server yet - reset its sync status and queue for sync
+            console.log('[RefundModal] Transaction not on server yet, marking for sync...');
+            const electronAPI = typeof window !== 'undefined' ? (window as { electronAPI?: Record<string, unknown> }).electronAPI : undefined;
+            if (electronAPI?.localDbResetTransactionSync) {
+              try {
+                await (electronAPI.localDbResetTransactionSync as (transactionId: string) => Promise<{ success: boolean }>)(transaction.id);
+                // Trigger sync to upload transaction, then refund will sync
+                await smartSyncService.forceSync();
+              } catch (resetError) {
+                console.warn('[RefundModal] Failed to reset transaction sync status:', resetError);
+                // Continue - refund is queued and will sync when transaction syncs
+              }
+            }
+          }
+        } catch (onlineError) {
+          console.warn('[RefundModal] Online sync attempt failed, refund will sync later:', onlineError);
+          // Don't throw - refund is already saved locally and queued for sync
+        }
       }
 
       if (updatedTransaction) {

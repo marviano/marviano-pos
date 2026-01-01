@@ -511,9 +511,9 @@ class SystemPosSyncService {
   }
 
   /**
-   * Fetch products from SQLite by product IDs
+   * Fetch products from local database by product IDs
    */
-  private async fetchProductsFromSQLite(productIds: number[]): Promise<UnknownRecord[]> {
+  private async fetchProductsFromLocalDB(productIds: number[]): Promise<UnknownRecord[]> {
     const electronAPI = (window as { electronAPI?: UnknownRecord }).electronAPI;
     if (!electronAPI?.localDbGetAllProducts) {
       console.warn('⚠️ [SYSTEM POS SYNC] localDbGetAllProducts not available');
@@ -523,7 +523,7 @@ class SystemPosSyncService {
     try {
       const allProducts = await (electronAPI.localDbGetAllProducts as () => Promise<Array<UnknownRecord>>)();
       // #region agent log
-      fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'systemPosSync.ts:513',message:'Fetched all products from SQLite',data:{allProductsCount:allProducts?.length||0,requestedProductIds:productIds,firstProduct:allProducts?.[0]?Object.keys(allProducts[0]):[]},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'E'})}).catch(()=>{});
+      fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'systemPosSync.ts:513',message:'Fetched all products from local database',data:{allProductsCount:allProducts?.length||0,requestedProductIds:productIds,firstProduct:allProducts?.[0]?Object.keys(allProducts[0]):[]},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'E'})}).catch(()=>{});
       // #endregion
       if (!Array.isArray(allProducts)) {
         return [];
@@ -539,7 +539,7 @@ class SystemPosSyncService {
       // #endregion
       return filtered;
     } catch (error) {
-      console.error('❌ [SYSTEM POS SYNC] Error fetching products from SQLite:', error);
+      console.error('❌ [SYSTEM POS SYNC] Error fetching products from local database:', error);
       return [];
     }
   }
@@ -635,7 +635,7 @@ class SystemPosSyncService {
   }
 
   /**
-   * Handle missing products error by syncing them from SQLite
+   * Handle missing products error by syncing them from local database
    */
   private async handleMissingProductsError(
     error: unknown,
@@ -669,15 +669,15 @@ class SystemPosSyncService {
     fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'systemPosSync.ts:477',message:'Extracted product IDs from transaction',data:{transactionId:queuedTx.transaction_id,productIds},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'F'})}).catch(()=>{});
     // #endregion
 
-    // Fetch products from SQLite
-    const products = await this.fetchProductsFromSQLite(productIds);
+    // Fetch products from local database
+    const products = await this.fetchProductsFromLocalDB(productIds);
     if (products.length === 0) {
-      console.warn(`⚠️ [SYSTEM POS SYNC] Products not found in SQLite for IDs: ${productIds.join(', ')}`);
+      console.warn(`⚠️ [SYSTEM POS SYNC] Products not found in local database for IDs: ${productIds.join(', ')}`);
       return false;
     }
 
     // #region agent log
-    fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'systemPosSync.ts:485',message:'Fetched products from SQLite',data:{transactionId:queuedTx.transaction_id,productCount:products.length,productIds:products.map((p:UnknownRecord)=>p.id)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'F'})}).catch(()=>{});
+    fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'systemPosSync.ts:485',message:'Fetched products from local database',data:{transactionId:queuedTx.transaction_id,productCount:products.length,productIds:products.map((p:UnknownRecord)=>p.id)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'F'})}).catch(()=>{});
     // #endregion
 
     // Sync products to System POS

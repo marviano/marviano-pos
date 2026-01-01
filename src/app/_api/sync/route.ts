@@ -1,5 +1,5 @@
 import { NextResponse, NextRequest } from 'next/server';
-import { query } from '@/lib/db';
+import { queryVps } from '@/lib/db';
 
 export async function GET(request: NextRequest) {
   try {
@@ -15,15 +15,21 @@ export async function GET(request: NextRequest) {
 
     // Sync Users
     try {
-      const users = await query<unknown[]>(`
+      const users = await queryVps<unknown[]>(`
         SELECT id, email, password, name, googleId, createdAt, role_id, organization_id 
         FROM users 
         ORDER BY name ASC
       `);
+      // #region agent log
+      fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'sync/route.ts:18',message:'Users fetched from VPS',data:{totalUsers:Array.isArray(users)?users.length:0,userIds:Array.isArray(users)?users.map((u:any)=>u?.id).filter(Boolean):[],user1Exists:Array.isArray(users)?users.some((u:any)=>u?.id===1):false,user1Data:Array.isArray(users)?users.find((u:any)=>u?.id===1):null},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
+      // #endregion
       syncResults.users = users || [];
       counts.users = Array.isArray(users) ? users.length : 0;
       console.log(`✅ Synced ${counts.users} users`);
     } catch (error: unknown) {
+      // #region agent log
+      fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'sync/route.ts:27',message:'Failed to fetch users from VPS',data:{error:String(error)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
+      // #endregion
       console.warn('⚠️ Failed to sync users:', error);
       syncResults.users = [];
       counts.users = 0;
@@ -31,7 +37,7 @@ export async function GET(request: NextRequest) {
 
     // Sync Businesses
     try {
-      const businesses = await query<unknown[]>(`
+      const businesses = await queryVps<unknown[]>(`
         SELECT id, name, permission_name, organization_id, status, management_group_id, image_url, created_at 
         FROM businesses 
         ORDER BY name ASC
@@ -47,7 +53,7 @@ export async function GET(request: NextRequest) {
 
     // Sync Products using junction table
     try {
-      const products = await query<unknown[]>(`
+      const products = await queryVps<unknown[]>(`
         SELECT 
           p.id, p.menu_code, p.nama, p.satuan, p.category1_id, p.category2_id,
           c1.name as category1_name, c2.name as category2_name,
@@ -85,9 +91,34 @@ export async function GET(request: NextRequest) {
       counts.products = 0;
     }
 
+    // Sync Product-Businesses Junction Table (for multi-business support)
+    try {
+      console.log(`🔄 [SYNC] Fetching product_businesses for business_id ${BUSINESS_ID}...`);
+      const productBusinesses = await queryVps<unknown[]>(`
+        SELECT product_id, business_id
+        FROM product_businesses
+        WHERE business_id = ?
+        ORDER BY product_id ASC, business_id ASC
+      `, [BUSINESS_ID] as (string | number)[]);
+      const productBusinessesArray = Array.isArray(productBusinesses) ? productBusinesses : [];
+      syncResults.productBusinesses = productBusinessesArray;
+      counts.productBusinesses = productBusinessesArray.length;
+      console.log(`✅ Synced ${productBusinessesArray.length} product-business relationships`);
+      if (productBusinessesArray.length > 0) {
+        const hasProduct298 = productBusinessesArray.some((pb: any) => pb?.product_id === 298);
+        console.log(`   ${hasProduct298 ? '✅' : '❌'} Product 298 ${hasProduct298 ? 'found' : 'NOT found'} in product_businesses`);
+      }
+    } catch (error: unknown) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      console.error('❌ Failed to sync product_businesses:', errorMessage);
+      console.error('   Full error:', error);
+      syncResults.productBusinesses = [];
+      counts.productBusinesses = 0;
+    }
+
     // Sync Categories (all categories from category2 table, including empty ones)
     try {
-      const categories = await query<unknown[]>(`
+      const categories = await queryVps<unknown[]>(`
         SELECT c2.name as category2_name
         FROM category2 c2
         WHERE c2.business_id = ? AND c2.is_active = 1
@@ -108,7 +139,7 @@ export async function GET(request: NextRequest) {
 
     // Sync Ingredients
     try {
-      const ingredients = await query<unknown[]>(`
+      const ingredients = await queryVps<unknown[]>(`
         SELECT id, ingredient_code, nama, kategori, satuan_beli, isi_satuan_beli, satuan_keluar,
                harga_beli, stok_min, status, business_id, created_at
         FROM ingredients 
@@ -126,7 +157,7 @@ export async function GET(request: NextRequest) {
 
     // Sync COGS
     try {
-      const cogs = await query<unknown[]>(`
+      const cogs = await queryVps<unknown[]>(`
         SELECT id, menu_code, ingredient_code, amount, created_at
         FROM cogs 
         ORDER BY menu_code ASC
@@ -140,9 +171,58 @@ export async function GET(request: NextRequest) {
       counts.cogs = 0;
     }
 
+    // Sync Source
+    try {
+      const source = await queryVps<unknown[]>(`
+        SELECT id, source_name, created_at
+        FROM source 
+        ORDER BY source_name ASC
+      `);
+      syncResults.source = source;
+      counts.source = source.length;
+      console.log(`✅ Synced ${source.length} source records`);
+    } catch (error: unknown) {
+      console.warn('⚠️ Failed to sync source:', error);
+      syncResults.source = [];
+      counts.source = 0;
+    }
+
+    // Sync Pekerjaan
+    try {
+      const pekerjaan = await queryVps<unknown[]>(`
+        SELECT id, nama_pekerjaan, created_at
+        FROM pekerjaan 
+        ORDER BY nama_pekerjaan ASC
+      `);
+      syncResults.pekerjaan = pekerjaan;
+      counts.pekerjaan = pekerjaan.length;
+      console.log(`✅ Synced ${pekerjaan.length} pekerjaan records`);
+    } catch (error: unknown) {
+      console.warn('⚠️ Failed to sync pekerjaan:', error);
+      syncResults.pekerjaan = [];
+      counts.pekerjaan = 0;
+    }
+
+    // Sync Teams
+    try {
+      const teams = await queryVps<unknown[]>(`
+        SELECT id, name, description, organization_id, team_lead_id, business_id, color, is_active, created_at, updated_at
+        FROM teams 
+        WHERE is_active = 1
+        ORDER BY name ASC
+      `);
+      syncResults.teams = teams;
+      counts.teams = teams.length;
+      console.log(`✅ Synced ${teams.length} teams`);
+    } catch (error: unknown) {
+      console.warn('⚠️ Failed to sync teams:', error);
+      syncResults.teams = [];
+      counts.teams = 0;
+    }
+
     // Sync Contacts
     try {
-      const contacts = await query<unknown[]>(`
+      const contacts = await queryVps<unknown[]>(`
         SELECT id, no_ktp, nama, phone_number, tgl_lahir, no_kk, created_at, updated_at,
                is_active, jenis_kelamin, kota, kecamatan, source_id, pekerjaan_id,
                source_lainnya, alamat, team_id
@@ -161,7 +241,7 @@ export async function GET(request: NextRequest) {
 
     // Sync Roles
     try {
-      const roles = await query<unknown[]>(`
+      const roles = await queryVps<unknown[]>(`
         SELECT id, name, description, organization_id, created_at, updated_at
         FROM roles
         ORDER BY name ASC
@@ -175,10 +255,26 @@ export async function GET(request: NextRequest) {
       counts.roles = 0;
     }
 
+    // Sync Permission Categories
+    try {
+      const permissionCategories = await queryVps<unknown[]>(`
+        SELECT id, name, description, organization_id, created_at
+        FROM permission_categories
+        ORDER BY name ASC
+      `);
+      syncResults.permissionCategories = permissionCategories;
+      counts.permissionCategories = permissionCategories.length;
+      console.log(`✅ Synced ${permissionCategories.length} permission categories`);
+    } catch (error: unknown) {
+      console.warn('⚠️ Failed to sync permission categories:', error);
+      syncResults.permissionCategories = [];
+      counts.permissionCategories = 0;
+    }
+
     // Sync Permissions
     try {
-      const permissions = await query<unknown[]>(`
-        SELECT id, name, description, created_at, category_id, organization_id, status
+      const permissions = await queryVps<unknown[]>(`
+        SELECT id, name, description, created_at, category_id, organization_id, business_id, status
         FROM permissions
         ORDER BY name ASC
       `);
@@ -193,7 +289,7 @@ export async function GET(request: NextRequest) {
 
     // Sync Role Permissions
     try {
-      const rolePermissions = await query<unknown[]>(`
+      const rolePermissions = await queryVps<unknown[]>(`
         SELECT role_id, permission_id
         FROM role_permissions
       `);
@@ -210,7 +306,7 @@ export async function GET(request: NextRequest) {
 
     // Sync Payment Methods
     try {
-      const paymentMethods = await query<unknown[]>(`
+      const paymentMethods = await queryVps<unknown[]>(`
         SELECT id, name, code, description, is_active, requires_additional_info, created_at
         FROM payment_methods 
         WHERE is_active = 1
@@ -227,7 +323,7 @@ export async function GET(request: NextRequest) {
 
     // Sync Banks
     try {
-      const banks = await query<unknown[]>(`
+      const banks = await queryVps<unknown[]>(`
         SELECT id, bank_code, bank_name, is_popular, is_active, created_at
         FROM banks 
         WHERE is_active = 1
@@ -242,10 +338,26 @@ export async function GET(request: NextRequest) {
       counts.banks = 0;
     }
 
+    // Sync Organizations
+    try {
+      const organizations = await queryVps<unknown[]>(`
+        SELECT id, name, slug, owner_user_id, subscription_status, subscription_plan, trial_ends_at, created_at, updated_at
+        FROM organizations 
+        ORDER BY name ASC
+      `);
+      syncResults.organizations = organizations;
+      counts.organizations = organizations.length;
+      console.log(`✅ Synced ${organizations.length} organizations`);
+    } catch (error: unknown) {
+      console.warn('⚠️ Failed to sync organizations:', error);
+      syncResults.organizations = [];
+      counts.organizations = 0;
+    }
+
     // Sync Management Groups
     try {
-      const managementGroups = await query<unknown[]>(`
-        SELECT id, name, permission_name, description, organization_id, manager_user_id, created_at
+      const managementGroups = await queryVps<unknown[]>(`
+        SELECT id, name, permission_name, description, organization_id, manager_user_id, created_at, updated_at
         FROM management_groups 
         ORDER BY name ASC
       `);
@@ -260,7 +372,7 @@ export async function GET(request: NextRequest) {
 
     // Sync Category1
     try {
-      const category1 = await query<unknown[]>(`
+      const category1 = await queryVps<unknown[]>(`
         SELECT id, name, description, display_order, is_active, created_at
         FROM category1 
         WHERE is_active = 1
@@ -275,9 +387,9 @@ export async function GET(request: NextRequest) {
       counts.category1 = 0;
     }
 
-    // Sync Category2
+    // Sync Category2 (ALL records, not filtered by business - junction table handles relationships)
     try {
-      const category2 = await query<unknown[]>(`
+      const category2 = await queryVps<unknown[]>(`
         SELECT id, name, description, display_order, is_active, created_at
         FROM category2 
         WHERE is_active = 1
@@ -294,7 +406,7 @@ export async function GET(request: NextRequest) {
 
     // Sync Category2-Businesses Junction Table (for multi-business support)
     try {
-      const category2Businesses = await query<unknown[]>(`
+      const category2Businesses = await queryVps<unknown[]>(`
         SELECT category2_id, business_id, created_at
         FROM category2_businesses
         ORDER BY category2_id ASC, business_id ASC
@@ -310,7 +422,7 @@ export async function GET(request: NextRequest) {
 
     // Sync CL Accounts
     try {
-      const clAccounts = await query<unknown[]>(`
+      const clAccounts = await queryVps<unknown[]>(`
         SELECT id, account_code, account_name, contact_info, credit_limit, current_balance,
                is_active, created_at
         FROM cl_accounts 
@@ -328,7 +440,7 @@ export async function GET(request: NextRequest) {
 
     // Sync Customization Types
     try {
-      const customizationTypes = await query<unknown[]>(`
+      const customizationTypes = await queryVps<unknown[]>(`
         SELECT id, name, selection_mode, display_order
         FROM product_customization_types
         ORDER BY display_order ASC, name ASC
@@ -344,7 +456,7 @@ export async function GET(request: NextRequest) {
 
     // Sync Customization Options
     try {
-      const customizationOptions = await query<unknown[]>(`
+      const customizationOptions = await queryVps<unknown[]>(`
         SELECT co.id, co.type_id, co.name, co.price_adjustment, co.display_order, co.status
         FROM product_customization_options co
         WHERE co.status = 'active'
@@ -361,7 +473,7 @@ export async function GET(request: NextRequest) {
 
     // Sync Product Customizations
     try {
-      const productCustomizations = await query<unknown[]>(`
+      const productCustomizations = await queryVps<unknown[]>(`
         SELECT pc.id, pc.product_id, pc.customization_type_id
         FROM product_customizations pc
         ORDER BY pc.product_id, pc.customization_type_id ASC
@@ -377,7 +489,7 @@ export async function GET(request: NextRequest) {
 
     // Sync Bundle Items
     try {
-      const bundleItems = await query<unknown[]>(`
+      const bundleItems = await queryVps<unknown[]>(`
         SELECT 
           bi.id, bi.bundle_product_id, bi.category2_id, bi.required_quantity, bi.display_order,
           bi.created_at, c2.name as category2_name
@@ -398,7 +510,7 @@ export async function GET(request: NextRequest) {
 
     // Sync Transactions
     try {
-      const transactions = await query<unknown[]>(`
+      const transactions = await queryVps<unknown[]>(`
         SELECT 
           t.uuid_id as id, t.business_id, t.user_id, pm.code as payment_method, t.pickup_method,
           t.total_amount, t.voucher_discount, t.voucher_type, t.voucher_value, t.voucher_label, t.final_amount, t.amount_received, t.change_amount,
@@ -421,7 +533,7 @@ export async function GET(request: NextRequest) {
 
     // Sync Transaction Items
     try {
-      const transactionItems = await query<unknown[]>(`
+      const transactionItems = await queryVps<unknown[]>(`
         SELECT 
           ti.uuid_id as id, ti.uuid_transaction_id as transaction_id, ti.product_id, ti.quantity,
           ti.unit_price, ti.total_price, ti.custom_note, ti.bundle_selections_json, ti.created_at
@@ -441,12 +553,12 @@ export async function GET(request: NextRequest) {
 
     // Helper utilities for optional tables
     const tableExists = async (tableName: string) => {
-      const result = await query<Array<{ [key: string]: unknown }>>(`SHOW TABLES LIKE ?`, [tableName] as (string | number)[]);
+      const result = await queryVps<Array<{ [key: string]: unknown }>>(`SHOW TABLES LIKE ?`, [tableName] as (string | number)[]);
       return Array.isArray(result) && result.length > 0;
     };
 
     const tableHasColumn = async (tableName: 'printer1_audit_log' | 'printer2_audit_log', columnName: string) => {
-      const result = await query<Array<{ [key: string]: unknown }>>(`SHOW COLUMNS FROM ${tableName} LIKE ?`, [columnName] as (string | number)[]);
+      const result = await queryVps<Array<{ [key: string]: unknown }>>(`SHOW COLUMNS FROM ${tableName} LIKE ?`, [columnName] as (string | number)[]);
       return Array.isArray(result) && result.length > 0;
     };
 
@@ -497,7 +609,7 @@ export async function GET(request: NextRequest) {
         }
         selectFields.push('printed_at', 'printed_at_epoch');
 
-        const audits = await query<unknown[]>(`
+        const audits = await queryVps<unknown[]>(`
           SELECT 
             ${selectFields.join(', ')}
           FROM ${tableName}

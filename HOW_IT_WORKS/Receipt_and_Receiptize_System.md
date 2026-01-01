@@ -279,7 +279,7 @@ const resolveReceiptSequence = (tx: Transaction): number => {
 
 ### Dual Database Strategy
 1. **Online Save**: Attempts to save to cloud database first
-2. **Offline Save**: Always saves to local SQLite database
+2. **Offline Save**: Always saves to local MySQL database
 3. **Background Sync**: Queues failed online saves for retry
 
 ### Audit Log Synchronization

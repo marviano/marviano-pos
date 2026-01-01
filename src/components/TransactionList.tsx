@@ -184,7 +184,13 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
   const [isLoadingDetail, setIsLoadingDetail] = useState(false);
   const [loadingTransactionId, setLoadingTransactionId] = useState<string | null>(null);
   const [copiedUuid, setCopiedUuid] = useState<string | null>(null);
-  const [isOnlineMode, setIsOnlineMode] = useState(false); // Default to offline mode
+  // Default to online mode if offline database is not available (migration scenario)
+  const [isOnlineMode, setIsOnlineMode] = useState(() => {
+    if (typeof window === 'undefined') return true;
+    const hasElectronAPI = !!(window as { electronAPI?: ElectronAPI }).electronAPI;
+    // If no Electron API (offline DB), default to online mode
+    return !hasElectronAPI;
+  });
 
   // Permission checks
   const canViewPastData = hasPermission(user, 'daftartransaksi.viewpastdata');
@@ -199,16 +205,36 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
 
   // Fetch transaction details with offline fallback
   const fetchTransactionDetail = async (transactionId: string) => {
+    // #region agent log
+    fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'TransactionList.tsx:207',message:'fetchTransactionDetail called',data:{transactionId},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
+    // #endregion
+    console.log('🔍 [TransactionList] fetchTransactionDetail called with ID:', transactionId);
     setIsLoadingDetail(true);
     try {
       const response = await offlineSyncService.fetchWithFallback<TransactionDetail>(
         // Online fetch
         async () => {
-          const response = await fetch(getApiUrl(`/api/transactions/${transactionId}`));
+          const apiUrl = getApiUrl(`/api/transactions/${transactionId}`);
+          console.log('🌐 [TransactionList] Fetching transaction detail from API:', apiUrl);
+          const response = await fetch(apiUrl);
           if (!response.ok) {
+            const errorText = await response.text();
+            console.error('❌ [TransactionList] API error response:', {
+              status: response.status,
+              statusText: response.statusText,
+              body: errorText
+            });
             throw new Error('Failed to fetch transaction details');
           }
           const data = await response.json();
+          // #region agent log
+          fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'TransactionList.tsx:226',message:'API response received',data:{success:data.success,itemCount:data.transaction?.items?.length||0,firstItemHasProductName:!!data.transaction?.items?.[0]?.product_name,firstItemHasCustomizations:!!data.transaction?.items?.[0]?.customizations,firstItemCustomizationsCount:Array.isArray(data.transaction?.items?.[0]?.customizations)?data.transaction.items[0].customizations.length:0},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
+          // #endregion
+          console.log('🌐 [TransactionList] API response received:', {
+            success: data.success,
+            transactionId: data.transaction?.id || data.transaction?.uuid_id,
+            itemCount: data.transaction?.items?.length || 0
+          });
           if (data.success) {
             const transaction = data.transaction;
             
@@ -243,6 +269,9 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
             
             // Ensure all items have product_name, customizations, and custom_note
             if (transaction && transaction.items && Array.isArray(transaction.items)) {
+              // #region agent log
+              fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'TransactionList.tsx:265',message:'Before processing items',data:{itemCount:transaction.items.length,itemsBeforeProcessing:transaction.items.map((i:any)=>({id:i.id,product_name:i.product_name,product_id:i.product_id,hasCustomizations:!!i.customizations,customizationsCount:Array.isArray(i.customizations)?i.customizations.length:0}))},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})}).catch(()=>{});
+              // #endregion
               // If any item is missing product_name, try to get it from local DB as fallback
               const needsProductName = transaction.items.some((item: { product_name?: string; product_id?: number }) =>
                 !item.product_name && item.product_id
@@ -285,7 +314,13 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
                   custom_note: item.custom_note || undefined
                 }));
               }
+              // #region agent log
+              fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'TransactionList.tsx:308',message:'After processing items',data:{itemCount:transaction.items.length,itemsAfterProcessing:transaction.items.map((i:any)=>({id:i.id,product_name:i.product_name,product_id:i.product_id,hasCustomizations:!!i.customizations,customizationsCount:Array.isArray(i.customizations)?i.customizations.length:0}))},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'D'})}).catch(()=>{});
+              // #endregion
             }
+            // #region agent log
+            fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'TransactionList.tsx:309',message:'Returning transaction',data:{hasTransaction:!!transaction,itemCount:transaction?.items?.length||0},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'E'})}).catch(()=>{});
+            // #endregion
             return transaction;
           } else {
             throw new Error(data.message || 'Failed to fetch transaction details');
@@ -298,18 +333,60 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
           }
 
           // Get transaction from local database
+          console.log('💾 [TransactionList] Fetching transaction detail from offline DB, ID:', transactionId);
           const transactions: ElectronTransaction[] = await (window as { electronAPI: ElectronAPI }).electronAPI.localDbGetTransactions(businessId, 1000);
-          const transaction = transactions.find((tx) => tx.id === transactionId);
-
+          console.log('💾 [TransactionList] Found', transactions.length, 'transactions in offline DB');
+          
+          // Try to find transaction by ID (UUID) or receipt_number
+          let transaction = transactions.find((tx) => {
+            return String(tx.id) === String(transactionId);
+          });
+          
+          // If not found by ID, try by receipt_number
           if (!transaction) {
-            throw new Error('Transaction not found in offline database');
+            console.log('💾 [TransactionList] Not found by ID, trying receipt_number match');
+            transaction = transactions.find((tx) => {
+              return tx.receipt_number !== null && String(tx.receipt_number) === String(transactionId);
+            });
           }
 
-          // Get transaction items (now includes product_name from JOIN with products table)
-          const items: ElectronTransactionItem[] = await (window as { electronAPI: ElectronAPI }).electronAPI.localDbGetTransactionItems(transactionId);
+          if (!transaction) {
+            console.error('❌ [TransactionList] Transaction not found in offline database:', {
+              transactionId,
+              availableIds: transactions.slice(0, 5).map(tx => ({ id: String(tx.id), receipt_number: tx.receipt_number }))
+            });
+            throw new Error('Transaction not found in offline database');
+          }
+          
+          // Get the actual UUID from the transaction (id field should be UUID)
+          const transactionUuid = transaction.id;
+          
+          console.log('✅ [TransactionList] Found transaction in offline DB:', {
+            id: transaction.id,
+            uuid_id: transactionUuid,
+            receipt_number: transaction.receipt_number,
+            totalAmount: transaction.total_amount,
+            itemCount: 'will fetch items next'
+          });
+
+          // Get transaction items using the transaction's UUID (not the receipt number)
+          console.log('💾 [TransactionList] Fetching transaction items for UUID:', transactionUuid);
+          const items: ElectronTransactionItem[] = await (window as { electronAPI: ElectronAPI }).electronAPI.localDbGetTransactionItems(transactionUuid);
+          console.log('💾 [TransactionList] Found', items.length, 'transaction items:', items.map(i => ({
+            id: i.id,
+            product_id: i.product_id,
+            product_name: i.product_name,
+            quantity: i.quantity,
+            hasCustomizations: !!i.customizations && Array.isArray(i.customizations) && i.customizations.length > 0
+          })));
+          
+          // #region agent log
+          fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'TransactionList.tsx:375',message:'Offline items query result',data:{transactionId,transactionUuid,receiptNumber:transaction.receipt_number,itemCount:items.length,firstItem:items.length>0?{id:items[0].id,product_id:items[0].product_id,product_name:items[0].product_name}:null},timestamp:Date.now(),sessionId:'debug-session',runId:'run2',hypothesisId:'I'})}).catch(()=>{});
+          // #endregion
 
           // Products fetch as fallback in case product_name wasn't in JOIN result
           const products: ElectronProduct[] = await (window as { electronAPI: ElectronAPI }).electronAPI.localDbGetAllProducts();
+          console.log('💾 [TransactionList] Fetched', products.length, 'products for fallback');
 
           // Get users and businesses to show actual names
           const users: ElectronUser[] = await (window as { electronAPI: ElectronAPI }).electronAPI.localDbGetUsers();
@@ -331,31 +408,51 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
                 : 'partial'
               : 'none');
 
+          console.log('💾 [TransactionList] Mapping items to transaction detail format');
+          const mappedItems = items.map((item) => {
+            // Use product_name from JOIN first, then fallback to active products lookup
+            // Ensure product_id is properly compared (handle both number and string)
+            const productId = typeof item.product_id === 'number' ? item.product_id : Number(item.product_id);
+            const product = products.find((p) => p.id === productId);
+            // Check if product_name is null, undefined, or empty string
+            const productName = (item.product_name && String(item.product_name).trim())
+              ? String(item.product_name).trim()
+              : (product?.nama && String(product.nama).trim())
+                ? String(product.nama).trim()
+                : 'Unknown Product';
+            
+            const customizations = Array.isArray(item.customizations) 
+              ? item.customizations 
+              : (item.customizations ? [item.customizations] : []);
+            
+            // Safely convert prices to numbers (handle null, undefined, string, or number)
+            const parsePrice = (value: unknown): number => {
+              if (typeof value === 'number' && !isNaN(value)) return value;
+              if (value === null || value === undefined) return 0;
+              const parsed = Number(value);
+              return isNaN(parsed) ? 0 : parsed;
+            };
+            
+            const mappedItem = {
+              id: item.id,
+              product_name: productName,
+              quantity: item.quantity,
+              unit_price: parsePrice(item.unit_price),
+              total_price: parsePrice(item.total_price),
+              custom_note: item.custom_note || undefined,
+              customizations: customizations,
+              bundleSelections: item.bundleSelections || undefined
+            };
+            
+            return mappedItem;
+          });
+          
+          console.log('💾 [TransactionList] Total mapped items:', mappedItems.length);
+
           return {
             ...transaction,
             payment_method: (transaction.payment_method || 'cash') as TransactionDetail['payment_method'],
-            items: items.map((item) => {
-              // Use product_name from JOIN first, then fallback to active products lookup
-              // Ensure product_id is properly compared (handle both number and string)
-              const productId = typeof item.product_id === 'number' ? item.product_id : Number(item.product_id);
-              const product = products.find((p) => p.id === productId);
-              // Check if product_name is null, undefined, or empty string
-              const productName = (item.product_name && String(item.product_name).trim())
-                ? String(item.product_name).trim()
-                : (product?.nama && String(product.nama).trim())
-                  ? String(product.nama).trim()
-                  : 'Unknown Product';
-              return {
-                id: item.id,
-                product_name: productName,
-                quantity: item.quantity,
-                unit_price: item.unit_price,
-                total_price: item.total_price,
-                custom_note: item.custom_note || undefined,
-                customizations: Array.isArray(item.customizations) ? item.customizations : (item.customizations ? [item.customizations] : []),
-                bundleSelections: item.bundleSelections || undefined
-              };
-            }),
+            items: mappedItems,
             user_name: user?.name || 'Unknown User',
             business_name: business?.name || 'Unknown Business',
             refunds,
@@ -365,6 +462,9 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
         }
       );
 
+      // #region agent log
+      fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'TransactionList.tsx:439',message:'Setting selectedTransaction',data:{hasResponse:!!response,itemCount:response?.items?.length||0,firstItemProductName:response?.items?.[0]?.product_name,firstItemHasCustomizations:!!response?.items?.[0]?.customizations},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'F'})}).catch(()=>{});
+      // #endregion
       setSelectedTransaction(response);
       setIsDetailModalOpen(true);
     } catch (error: unknown) {
@@ -378,6 +478,7 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
 
   // Handle row click
   const handleRowClick = (transactionId: string) => {
+    console.log('🖱️ [TransactionList] Row clicked, fetching details for transaction ID:', transactionId);
     setLoadingTransactionId(transactionId);
     setIsLoadingDetail(true);
     setIsDetailModalOpen(true);
@@ -518,6 +619,12 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
           originalCounters[txId] = counterValue;
         }
       }
+      
+      // Debug: Log sample IDs to see what format they are
+      if (ids.size > 0) {
+        const sampleIds = Array.from(ids).slice(0, 3);
+        console.log('🔍 [TransactionList] Receiptize audit log transaction IDs (sample):', sampleIds);
+      }
 
       console.log(`📊 [TransactionList] Receiptize audit log: ${entries.length} total entries, ${ids.size} unique transactions, ${Object.keys(originalCounters).length} with counters`);
       return { success: true, ids, counters: originalCounters };
@@ -586,22 +693,63 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
       let transactionsData: Transaction[];
 
       if (isOnlineMode) {
-        // console.log('🌐 [TransactionList] Fetching from online API');
+        console.log('🌐 [TransactionList] Fetching from online API');
+        console.log('🌐 [TransactionList] API URL:', getApiUrl(`/api/transactions?business_id=${businessId}&from_date=${fromDate}&to_date=${toDate}&limit=10000`));
         // Fetch from online API only
         // Using 10000 limit to ensure we get all transactions in the date range
-        const response = await fetch(getApiUrl(`/api/transactions?business_id=${businessId}&from_date=${fromDate}&to_date=${toDate}&limit=10000`));
+        const apiUrl = getApiUrl(`/api/transactions?business_id=${businessId}&from_date=${fromDate}&to_date=${toDate}&limit=10000`);
+        const response = await fetch(apiUrl);
+        
         if (!response.ok) {
-          throw new Error('Failed to fetch transactions');
+          const errorText = await response.text();
+          console.error('❌ [TransactionList] API Error Response:', {
+            status: response.status,
+            statusText: response.statusText,
+            body: errorText
+          });
+          throw new Error(`Failed to fetch transactions: ${response.status} ${response.statusText}`);
         }
+        
         const data = await response.json();
-        transactionsData = (data.transactions || []).map((tx: Record<string, unknown>) => ({
-          ...tx,
-          voucher_value: tx.voucher_value !== undefined && tx.voucher_value !== null ? parseFloat(String(tx.voucher_value)) : null,
-          voucher_discount: tx.voucher_discount !== undefined && tx.voucher_discount !== null ? parseFloat(String(tx.voucher_discount)) : 0,
-          voucher_type: tx.voucher_type || 'none',
-          voucher_label: tx.voucher_label || null,
-          customer_unit: tx.customer_unit !== undefined && tx.customer_unit !== null ? Number(tx.customer_unit) : null
-        }));
+        console.log('🌐 [TransactionList] API Response:', {
+          success: data.success,
+          transactionCount: data.transactions?.length || 0,
+          hasTransactions: Array.isArray(data.transactions)
+        });
+        
+        if (!data.success) {
+          throw new Error(data.error || 'API returned unsuccessful response');
+        }
+        
+        transactionsData = (data.transactions || []).map((tx: Record<string, unknown>) => {
+          // CRITICAL: Always use uuid_id as the id, never numeric id or receipt_number
+          // This ensures the transaction list uses UUIDs that match the detail API
+          const transactionId = tx.uuid_id || tx.id;
+          
+          if (!transactionId) {
+            console.warn('⚠️ [TransactionList] Transaction missing both uuid_id and id:', tx);
+          }
+          
+          // Ensure refund_total and refund_status are properly included
+          const refundTotal = tx.refund_total !== undefined && tx.refund_total !== null
+            ? (typeof tx.refund_total === 'number' ? tx.refund_total : parseFloat(String(tx.refund_total)))
+            : null;
+          const refundStatus = tx.refund_status || null;
+
+          return {
+            ...tx,
+            id: transactionId, // Always use UUID, not numeric ID or receipt number
+            voucher_value: tx.voucher_value !== undefined && tx.voucher_value !== null ? parseFloat(String(tx.voucher_value)) : null,
+            voucher_discount: tx.voucher_discount !== undefined && tx.voucher_discount !== null ? parseFloat(String(tx.voucher_discount)) : 0,
+            voucher_type: tx.voucher_type || 'none',
+            voucher_label: tx.voucher_label || null,
+            customer_unit: tx.customer_unit !== undefined && tx.customer_unit !== null ? Number(tx.customer_unit) : null,
+            refund_total: refundTotal,
+            refund_status: refundStatus
+          };
+        });
+        
+        console.log('🌐 [TransactionList] Processed transactions:', transactionsData.length);
       } else {
         // console.log('💾 [TransactionList] Fetching from offline database');
         // Fetch from offline database only
@@ -640,8 +788,31 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
           const user = users.find((u) => u.id === tx.user_id);
           const business = businesses.find((b) => b.id === tx.business_id);
 
+          // CRITICAL: Use UUID as id, not numeric ID
+          // The offline database should have uuid_id field, but if not, use id as fallback
+          // This ensures consistency with the API which uses UUIDs
+          const transactionId = tx.id; // Offline DB already uses UUID as id
+          
+          // Calculate refund_total and refund_status from the transaction data
+          // The query should already include these, but ensure they're properly typed
+          const refundTotal = tx.refund_total !== undefined && tx.refund_total !== null 
+            ? (typeof tx.refund_total === 'number' ? tx.refund_total : Number(tx.refund_total)) 
+            : null;
+          const refundStatus = tx.refund_status || null;
+
+          // Debug logging for transactions with refunds
+          if (refundTotal && refundTotal > 0) {
+            console.log('💰 [TransactionList] Transaction with refund:', {
+              txId: tx.id,
+              refundTotal: refundTotal,
+              refundStatus: refundStatus,
+              rawRefundTotal: tx.refund_total,
+              rawRefundStatus: tx.refund_status
+            });
+          }
+
           return {
-            id: tx.id,
+            id: transactionId, // Should already be UUID from offline DB
             business_id: tx.business_id,
             user_id: tx.user_id,
             payment_method: tx.payment_method as Transaction['payment_method'],
@@ -663,10 +834,18 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
             status: tx.status || 'paid',
             created_at: tx.created_at,
             shift_uuid: tx.shift_uuid, // Include shift_uuid
+            refund_total: refundTotal,
+            refund_status: refundStatus,
             user_name: user?.name || 'Unknown User',
             business_name: business?.name || 'Unknown Business'
           };
         });
+        
+        // Debug: Log sample transaction IDs to compare with receiptize IDs
+        if (transactionsData.length > 0) {
+          const sampleTxIds = transactionsData.slice(0, 3).map(t => String(t.id));
+          console.log('🔍 [TransactionList] Transaction IDs from offline DB (sample):', sampleTxIds);
+        }
 
         // console.log('💾 [TransactionList] Processed transactions for display:', transactionsData.length);
 
@@ -743,7 +922,16 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : 'Failed to fetch transactions';
       setError(errorMessage);
-      console.error('Error fetching transactions:', err);
+      console.error('❌ [TransactionList] Error fetching transactions:', {
+        error: err,
+        message: errorMessage,
+        isOnlineMode,
+        businessId,
+        fromDate,
+        toDate
+      });
+      // Set empty array on error to show empty state
+      setTransactions([]);
       return false;
     } finally {
       setIsLoading(false);
@@ -911,16 +1099,50 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
   // Apply Receiptize filter unless full list unlocked
   // In default mode, only show transactions that are in receiptizePrintedIds (printed to Printer2/receiptize)
   // If no receiptize data is available, show all transactions (fallback)
-  const baseTransactions = showAllTransactions
-    ? transactions
-    : (receiptizePrintedIds.size > 0
-      ? transactions.filter(transaction => {
-        const txId = String(transaction.id);
-        // Show if transaction is in receiptizePrintedIds (meaning it was printed to Printer2/receiptize)
-        // This is more reliable than checking counters since IDs are set even for reprints
-        return receiptizePrintedIds.has(txId);
-      })
-      : transactions); // Fallback: show all if no receiptize data available
+  let baseTransactions: Transaction[];
+  
+  if (showAllTransactions) {
+    baseTransactions = transactions;
+  } else if (receiptizePrintedIds.size > 0) {
+    const filtered = transactions.filter(transaction => {
+      const txId = String(transaction.id);
+      const isInSet = receiptizePrintedIds.has(txId);
+      
+      // Debug logging for first few transactions
+      if (transactions.indexOf(transaction) < 3) {
+        console.log('🔍 [TransactionList] Filter check:', {
+          txId,
+          isInSet,
+          receiptizeIds: Array.from(receiptizePrintedIds).slice(0, 5),
+          transactionId: transaction.id
+        });
+      }
+      
+      // Show if transaction is in receiptizePrintedIds (meaning it was printed to Printer2/receiptize)
+      // This is more reliable than checking counters since IDs are set even for reprints
+      return isInSet;
+    });
+    
+    // If filter resulted in no transactions, show all instead (fallback for ID mismatch issues)
+    if (filtered.length === 0 && transactions.length > 0) {
+      console.warn('⚠️ [TransactionList] Receiptize filter returned 0 transactions, showing all transactions as fallback');
+      baseTransactions = transactions;
+    } else {
+      baseTransactions = filtered;
+    }
+  } else {
+    // Fallback: show all if no receiptize data available
+    baseTransactions = transactions;
+  }
+  
+  console.log('📊 [TransactionList] Transaction filtering:', {
+    totalTransactions: transactions.length,
+    receiptizeIdsCount: receiptizePrintedIds.size,
+    showAllTransactions,
+    baseTransactionsCount: baseTransactions.length,
+    receiptizeIds: Array.from(receiptizePrintedIds).slice(0, 5),
+    transactionIds: transactions.slice(0, 3).map(t => String(t.id))
+  });
 
 
   const resolveReceiptSequence = (tx: Transaction) => {
@@ -987,6 +1209,10 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
     const amount = typeof t.final_amount === 'string' ? parseFloat(t.final_amount) : t.final_amount;
     return sum + (isNaN(amount) ? 0 : amount);
   }, 0);
+  
+  // #region agent log
+  fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'TransactionList.tsx:1211',message:'Total revenue calculated',data:{totalRevenue,transactionCount:filteredTransactions.length,fromDate,toDate,businessId,statuses:filteredTransactions.map(t=>({id:t.id,status:t.status,final_amount:t.final_amount}))},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
+  // #endregion
   const totalRefund = filteredTransactions.reduce((sum, t) => {
     const amount = typeof t.refund_total === 'string' ? parseFloat(t.refund_total) : (t.refund_total || 0);
     return sum + (isNaN(amount) ? 0 : amount);
@@ -1331,6 +1557,22 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
           </div>
         )}
 
+        {/* Info Message for Online Mode */}
+        {isOnlineMode && transactions.length === 0 && !error && (
+          <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-4 mb-6 flex-shrink-0">
+            <div className="flex items-center gap-2">
+              <Wifi className="w-5 h-5 text-yellow-600" />
+              <div>
+                <p className="text-yellow-800 font-medium">No transactions found for this date range in MySQL database</p>
+                <p className="text-yellow-600 text-sm mt-1">
+                  Make sure the database connection is configured correctly and data has been migrated.
+                  Check the console for API errors.
+                </p>
+              </div>
+            </div>
+          </div>
+        )}
+
         {/* Transactions Table Container */}
         <div className="flex-1 flex flex-col min-h-0 mb-8" style={{ maxHeight: 'calc(100vh - 390px)' }}>
           {filteredTransactions.length === 0 ? (
@@ -1641,23 +1883,33 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
                           </span>
                         </td>
                         <td className="px-4 py-4 whitespace-nowrap">
-                          {transaction.refund_total && transaction.refund_total > 0 ? (
-                            <div className="flex flex-col">
-                              <span className="text-xs text-red-600 font-medium">
-                                -{formatPrice(transaction.refund_total)}
-                              </span>
-                              {transaction.refund_status && (
-                                <span className={`text-[10px] font-medium ${transaction.refund_status === 'full'
-                                    ? 'text-red-600'
-                                    : 'text-orange-600'
-                                  }`}>
-                                  {transaction.refund_status === 'full' ? 'Full' : 'Partial'}
-                                </span>
-                              )}
-                            </div>
-                          ) : (
-                            <span className="text-xs text-gray-400">-</span>
-                          )}
+                          {(() => {
+                            // Convert refund_total to number if it's a string, handle null/undefined
+                            const refundAmount = transaction.refund_total !== null && transaction.refund_total !== undefined
+                              ? (typeof transaction.refund_total === 'number' 
+                                  ? transaction.refund_total 
+                                  : parseFloat(String(transaction.refund_total)))
+                              : 0;
+                            
+                            if (refundAmount > 0) {
+                              return (
+                                <div className="flex flex-col">
+                                  <span className="text-xs text-red-600 font-medium">
+                                    -{formatPrice(refundAmount)}
+                                  </span>
+                                  {transaction.refund_status && (
+                                    <span className={`text-[10px] font-medium ${transaction.refund_status === 'full'
+                                        ? 'text-red-600'
+                                        : 'text-orange-600'
+                                      }`}>
+                                      {transaction.refund_status === 'full' ? 'Full' : 'Partial'}
+                                    </span>
+                                  )}
+                                </div>
+                              );
+                            }
+                            return <span className="text-xs text-gray-400">-</span>;
+                          })()}
                         </td>
                         <td className="px-2 py-4 whitespace-nowrap">
                           <span className="text-xs text-gray-900">

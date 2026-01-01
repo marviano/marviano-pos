@@ -4,7 +4,6 @@ import { useEffect, useRef, useState } from 'react';
 import { X, Eye, EyeOff, ChevronDown, Settings, Loader2, RefreshCw, ChevronLeft } from 'lucide-react';
 import Image from 'next/image';
 import { getMostRecentEmail, getSavedEmails } from '@/lib/savedLoginEmails';
-import { getServerSettings, saveServerSettings, type ServerSettings } from '@/lib/serverSettings';
 
 interface LoginPageProps {
   onLogin?: (email: string, password: string) => void;
@@ -38,7 +37,16 @@ export default function LoginPage({
   const [savedEmails, setSavedEmails] = useState<string[]>(() => getSavedEmails());
   const [isDropdownOpen, setIsDropdownOpen] = useState(false);
   const emailFieldRef = useRef<HTMLDivElement | null>(null);
-  const [serverSettings, setServerSettings] = useState<ServerSettings>(() => getServerSettings());
+  const [appConfig, setAppConfig] = useState<{
+    serverHost?: string;
+    apiUrl?: string;
+    dbUser?: string;
+    dbPassword?: string;
+    dbName?: string;
+    dbPort?: number;
+  }>({});
+  const [isLoadingConfig, setIsLoadingConfig] = useState(true);
+  const [isSavingConfig, setIsSavingConfig] = useState(false);
 
   useEffect(() => {
     const emails = getSavedEmails();
@@ -50,6 +58,22 @@ export default function LoginPage({
       return emails[0] ?? '';
     });
   }, []);
+
+  // Load app config when settings view opens
+  useEffect(() => {
+    if (isSettingsView && typeof window !== 'undefined' && window.electronAPI?.getAppConfig) {
+      setIsLoadingConfig(true);
+      window.electronAPI.getAppConfig().then((result) => {
+        if (result?.success && result.config) {
+          setAppConfig(result.config);
+        }
+        setIsLoadingConfig(false);
+      }).catch((error) => {
+        console.error('Failed to load app config:', error);
+        setIsLoadingConfig(false);
+      });
+    }
+  }, [isSettingsView]);
 
   useEffect(() => {
     if (!isDropdownOpen) {
@@ -137,12 +161,13 @@ export default function LoginPage({
               <button
                 type="button"
                 onClick={() => setIsSettingsView(false)}
-                className="w-8 h-8 bg-gray-100 hover:bg-gray-200 rounded-lg flex items-center justify-center transition-colors"
+                className="px-3 py-2 bg-gray-100 hover:bg-gray-200 rounded-lg flex items-center justify-center gap-1 transition-colors mr-2"
                 style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
                 title="Kembali ke Login"
                 disabled={isSyncing}
               >
                 <ChevronLeft className="w-4 h-4 text-gray-600" />
+                <span className="text-sm text-gray-600">Kembali</span>
               </button>
             ) : (
               <button
@@ -172,62 +197,158 @@ export default function LoginPage({
           {isSettingsView ? (
             <div className="flex flex-col justify-between h-full space-y-6" style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}>
               <div className="space-y-6 overflow-y-auto pr-2">
-                <div>
-                  <h2 className="text-xl font-semibold text-gray-800">Pengaturan</h2>
-                  <p className="text-sm text-gray-500">Kelola sinkronisasi data offline dan server WebSocket.</p>
-                </div>
-                
-                {/* Server Settings */}
-                <div className="space-y-4 border-t border-gray-200 pt-4">
+                {/* Database & API Configuration */}
+                <div className="space-y-4 pt-4">
                   <div>
-                    <h3 className="text-sm font-semibold text-gray-700 mb-3">Server WebSocket</h3>
-                    <p className="text-xs text-gray-500 mb-3">Konfigurasi server untuk komunikasi dengan Dapur dan Barista.</p>
+                    <h3 className="text-sm font-semibold text-gray-700 mb-3">Database & API</h3>
                     
-                    <div className="space-y-3">
-                      <div>
-                        <label className="block text-xs font-medium text-gray-700 mb-1">
-                          Alamat Server
-                        </label>
-                        <input
-                          type="text"
-                          value={serverSettings.address}
-                          onChange={(e) => setServerSettings(prev => ({ ...prev, address: e.target.value }))}
-                          placeholder="localhost atau IP address"
-                          className="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 text-gray-900"
-                        />
-                        <p className="mt-1 text-xs text-gray-500">
-                          Contoh: localhost, 192.168.1.16
-                        </p>
+                    {isLoadingConfig ? (
+                      <div className="text-center py-4 text-sm text-gray-500">Memuat konfigurasi...</div>
+                    ) : (
+                      <div className="space-y-3">
+                        <div>
+                          <label className="block text-xs font-medium text-gray-700 mb-1">
+                            Alamat Server Database (IP/Hostname)
+                          </label>
+                          <input
+                            type="text"
+                            value={appConfig.serverHost || ''}
+                            onChange={(e) => setAppConfig(prev => ({ ...prev, serverHost: e.target.value }))}
+                            placeholder="192.168.1.100 atau hostname"
+                            className="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 text-gray-900 placeholder:opacity-50"
+                          />
+                        </div>
+                        
+                        <div>
+                          <label className="block text-xs font-medium text-gray-700 mb-1">
+                            URL API
+                          </label>
+                          <input
+                            type="text"
+                            value={appConfig.apiUrl || ''}
+                            onChange={(e) => setAppConfig(prev => ({ ...prev, apiUrl: e.target.value }))}
+                            placeholder="http://192.168.1.100:3000 atau https://salespulse.cc"
+                            className="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 text-gray-900 placeholder:opacity-50"
+                          />
+                          <p className="mt-1 text-xs text-gray-500">
+                            contoh: http://192.168.1.100:3000
+                          </p>
+                        </div>
+                        
+                        <div>
+                          <label className="block text-xs font-medium text-gray-700 mb-1">
+                            Username Database
+                          </label>
+                          <input
+                            type="text"
+                            value={appConfig.dbUser || ''}
+                            onChange={(e) => setAppConfig(prev => ({ ...prev, dbUser: e.target.value }))}
+                            placeholder="root"
+                            className="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 text-gray-900 placeholder:opacity-50"
+                          />
+                        </div>
+                        
+                        <div>
+                          <label className="block text-xs font-medium text-gray-700 mb-1">
+                            Password Database
+                          </label>
+                          <input
+                            type="password"
+                            value={appConfig.dbPassword || ''}
+                            onChange={(e) => setAppConfig(prev => ({ ...prev, dbPassword: e.target.value }))}
+                            placeholder="Password MySQL"
+                            className="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 text-gray-900 placeholder:opacity-50"
+                          />
+                        </div>
+                        
+                        <div>
+                          <label className="block text-xs font-medium text-gray-700 mb-1">
+                            Nama Database
+                          </label>
+                          <input
+                            type="text"
+                            value={appConfig.dbName || ''}
+                            onChange={(e) => setAppConfig(prev => ({ ...prev, dbName: e.target.value }))}
+                            placeholder="salespulse"
+                            className="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 text-gray-900 placeholder:opacity-50"
+                          />
+                        </div>
+                        
+                        <div className="flex gap-2">
+                          <button
+                            type="button"
+                            onClick={async () => {
+                              if (typeof window === 'undefined' || !window.electronAPI?.resetAppConfig) {
+                                alert('Fitur ini hanya tersedia di Electron');
+                                return;
+                              }
+                              
+                              if (!confirm('Reset konfigurasi ke default (.env)? Semua pengaturan yang disimpan akan dihapus.')) {
+                                return;
+                              }
+                              
+                              setIsSavingConfig(true);
+                              try {
+                                const result = await window.electronAPI.resetAppConfig();
+                                if (result?.success) {
+                                  // Reload config to show .env defaults
+                                  const configResult = await window.electronAPI.getAppConfig();
+                                  if (configResult?.success) {
+                                    setAppConfig(configResult.config || {});
+                                  }
+                                  alert('Konfigurasi berhasil direset ke default (.env). Aplikasi perlu dimulai ulang untuk menerapkan perubahan.');
+                                } else {
+                                  alert(`Gagal mereset konfigurasi: ${result?.error || 'Unknown error'}`);
+                                }
+                              } catch (error) {
+                                console.error('Failed to reset app config:', error);
+                                alert(`Gagal mereset konfigurasi: ${error instanceof Error ? error.message : 'Unknown error'}`);
+                              } finally {
+                                setIsSavingConfig(false);
+                              }
+                            }}
+                            disabled={isSavingConfig}
+                            className="px-4 py-2 bg-gray-600 hover:bg-gray-700 text-white text-sm font-semibold rounded-lg transition-colors disabled:bg-gray-300 disabled:cursor-not-allowed"
+                          >
+                            Reset
+                          </button>
+                          <button
+                            type="button"
+                            onClick={async () => {
+                              if (typeof window === 'undefined' || !window.electronAPI?.saveAppConfig) {
+                                alert('Fitur ini hanya tersedia di Electron');
+                                return;
+                              }
+                              
+                              setIsSavingConfig(true);
+                              try {
+                                const result = await window.electronAPI.saveAppConfig(appConfig);
+                                if (result?.success) {
+                                  alert('Pengaturan database dan API berhasil disimpan! Aplikasi perlu dimulai ulang untuk menerapkan perubahan.');
+                                  // Clear cached API URL to force reload
+                                  if (typeof window !== 'undefined' && 'localStorage' in window) {
+                                    // Trigger API URL cache refresh
+                                    const event = new Event('configUpdated');
+                                    window.dispatchEvent(event);
+                                  }
+                                } else {
+                                  alert(`Gagal menyimpan pengaturan: ${result?.error || 'Unknown error'}`);
+                                }
+                              } catch (error) {
+                                console.error('Failed to save app config:', error);
+                                alert(`Gagal menyimpan pengaturan: ${error instanceof Error ? error.message : 'Unknown error'}`);
+                              } finally {
+                                setIsSavingConfig(false);
+                              }
+                            }}
+                            disabled={isSavingConfig}
+                            className="flex-1 bg-green-600 hover:bg-green-700 text-white text-sm font-semibold px-4 py-2 rounded-lg transition-colors disabled:bg-green-300 disabled:cursor-not-allowed"
+                          >
+                            {isSavingConfig ? 'Menyimpan...' : 'Simpan Pengaturan Database & API'}
+                          </button>
+                        </div>
                       </div>
-                      
-                      <div>
-                        <label className="block text-xs font-medium text-gray-700 mb-1">
-                          Port Server
-                        </label>
-                        <input
-                          type="number"
-                          value={serverSettings.port}
-                          onChange={(e) => setServerSettings(prev => ({ ...prev, port: parseInt(e.target.value) || 19967 }))}
-                          min="1024"
-                          max="65535"
-                          className="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 text-gray-900"
-                        />
-                        <p className="mt-1 text-xs text-gray-500">
-                          Port default: 19967 (1024-65535)
-                        </p>
-                      </div>
-                      
-                      <button
-                        type="button"
-                        onClick={() => {
-                          saveServerSettings(serverSettings);
-                          alert('Pengaturan server berhasil disimpan!');
-                        }}
-                        className="w-full bg-blue-600 hover:bg-blue-700 text-white text-sm font-semibold px-4 py-2 rounded-lg transition-colors"
-                      >
-                        Simpan Pengaturan Server
-                      </button>
-                    </div>
+                    )}
                   </div>
                 </div>
                 

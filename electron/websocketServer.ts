@@ -1,7 +1,7 @@
 import { WebSocketServer, WebSocket } from 'ws';
 import { Server } from 'http';
 
-export type ClientType = 'pos' | 'kitchen' | 'barista';
+export type ClientType = 'pos';
 
 export interface ConnectedClient {
   ws: WebSocket;
@@ -10,37 +10,6 @@ export interface ConnectedClient {
   connectedAt: number;
 }
 
-export interface OrderItem {
-  itemId: string;
-  productId: number;
-  productName: string;
-  category1_id: number;
-  quantity: number;
-  unitPrice: number;
-  totalPrice: number;
-  customNote?: string;
-  bundleSelections?: any;
-  customizations?: any;
-  status: 'preparing' | 'finished';
-}
-
-export interface OrderData {
-  transactionId: string;
-  receiptNumber: number;
-  businessId: number;
-  items: OrderItem[];
-  createdAt: string;
-  customerName?: string;
-  customerUnit?: number;
-  pickupMethod: 'dine-in' | 'take-away';
-}
-
-export interface StatusUpdate {
-  transactionId: string;
-  itemId: string;
-  status: 'preparing' | 'finished';
-  preparedBy?: string;
-}
 
 export class WebSocketServerManager {
   private wss: WebSocketServer | null = null;
@@ -174,79 +143,6 @@ export class WebSocketServerManager {
     };
   }
 
-  /**
-   * Broadcast order to appropriate displays
-   */
-  broadcastOrder(order: OrderData): { success: boolean; sentTo: string[]; sentToKitchen: number; sentToBarista: number } {
-    if (!this.isRunning) {
-      return { success: false, sentTo: [], sentToKitchen: 0, sentToBarista: 0 };
-    }
-
-    const sentTo: string[] = [];
-    let sentToKitchen = 0;
-    let sentToBarista = 0;
-
-    // Route items to kitchen (category1_id = 1 or 5) or barista (category1_id = 2 or 3)
-    // Kitchen: category1_id = 1 (Makanan) or 5 (Bakery)
-    // Barista: category1_id = 2 (Minuman) or 3 (Dessert)
-    const kitchenItems = order.items.filter((item) => item.category1_id === 1 || item.category1_id === 5);
-    const baristaItems = order.items.filter((item) => item.category1_id === 2 || item.category1_id === 3);
-
-    // Send to kitchen displays
-    if (kitchenItems.length > 0) {
-      const kitchenOrder = { ...order, items: kitchenItems };
-      this.clients.forEach((client) => {
-        if (client.type === 'kitchen') {
-          this.send(client.id, {
-            type: 'new_order',
-            order: kitchenOrder
-          });
-          sentTo.push(client.id);
-          sentToKitchen++;
-        }
-      });
-    }
-
-    // Send to barista displays
-    if (baristaItems.length > 0) {
-      const baristaOrder = { ...order, items: baristaItems };
-      this.clients.forEach((client) => {
-        if (client.type === 'barista') {
-          this.send(client.id, {
-            type: 'new_order',
-            order: baristaOrder
-          });
-          sentTo.push(client.id);
-          sentToBarista++;
-        }
-      });
-    }
-
-    return { success: true, sentTo, sentToKitchen, sentToBarista };
-  }
-
-  /**
-   * Broadcast status update to all POS clients
-   */
-  broadcastStatusUpdate(update: StatusUpdate): { success: boolean; sentTo: string[] } {
-    if (!this.isRunning) {
-      return { success: false, sentTo: [] };
-    }
-
-    const sentTo: string[] = [];
-
-    this.clients.forEach((client) => {
-      if (client.type === 'pos') {
-        this.send(client.id, {
-          type: 'status_update',
-          update
-        });
-        sentTo.push(client.id);
-      }
-    });
-
-    return { success: true, sentTo };
-  }
 
   /**
    * Handle incoming messages from clients
@@ -260,22 +156,13 @@ export class WebSocketServerManager {
 
     switch (message.type) {
       case 'identify':
-        // Client identifies itself (pos, kitchen, or barista)
-        client.type = message.clientType || 'pos';
+        // Client identifies itself (always 'pos' now)
+        client.type = 'pos';
         console.log(`[WebSocket] Client ${clientId} identified as: ${client.type}`);
         this.send(clientId, {
           type: 'identified',
           clientType: client.type
         });
-        break;
-
-      case 'status_update':
-        // Kitchen/barista sends status update
-        if (client.type === 'kitchen' || client.type === 'barista') {
-          const update: StatusUpdate = message.update;
-          // Broadcast to all POS clients
-          this.broadcastStatusUpdate(update);
-        }
         break;
 
       case 'ping':

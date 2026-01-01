@@ -8,7 +8,6 @@ import { smartSyncService } from '@/lib/smartSync';
 import { generateTransactionId, generateTransactionItemId } from '@/lib/uuid';
 import { useAuth } from '@/hooks/useAuth';
 import { getApiUrl } from '@/lib/api';
-import type { OrderData, OrderItem } from '@/lib/networkClient';
 
 interface BundleSelection {
   category2_id: number;
@@ -102,6 +101,7 @@ interface PaymentModalProps {
   transactionType: 'drinks' | 'bakery';
   isOnline?: boolean;
   selectedOnlinePlatform?: 'qpon' | 'gofood' | 'grabfood' | 'shopeefood' | 'tiktok' | null;
+  initialCustomerName?: string;
 }
 
 type PaymentMethod = 'cash' | 'debit' | 'qr' | 'ewallet' | 'cl' | 'voucher' | 'qpon' | 'gofood' | 'grabfood' | 'shopeefood' | 'tiktok';
@@ -115,7 +115,8 @@ export default function PaymentModal({
   onPaymentComplete,
   transactionType,
   isOnline = false,
-  selectedOnlinePlatform = null
+  selectedOnlinePlatform = null,
+  initialCustomerName = ''
 }: PaymentModalProps) {
   const { user } = useAuth();
 
@@ -125,7 +126,7 @@ export default function PaymentModal({
   const [selectedPickupMethod, setSelectedPickupMethod] = useState<PickupMethod>('dine-in');
   const [amountReceived, setAmountReceived] = useState<string>('');
   const [customVoucherAmount, setCustomVoucherAmount] = useState<string>('');
-  const [customerName, setCustomerName] = useState<string>('');
+  const [customerName, setCustomerName] = useState<string>(initialCustomerName);
   const [customerUnit, setCustomerUnit] = useState<string>('1');
   const [promotionSelection, setPromotionSelection] = useState<PromotionSelection>('none');
   const [activeInput, setActiveInput] = useState<'amount' | 'voucher' | 'customer' | 'customerUnit'>('amount');
@@ -184,6 +185,15 @@ export default function PaymentModal({
       setSelectedPickupMethod('take-away');
     }
   }, [isOpen, isOnline, selectedOnlinePlatform]);
+
+  // Initialize customer name when modal opens
+  useEffect(() => {
+    if (isOpen && initialCustomerName) {
+      setCustomerName(initialCustomerName);
+    } else if (isOpen && !initialCustomerName) {
+      setCustomerName('');
+    }
+  }, [isOpen, initialCustomerName]);
 
   // Calculate order totals
   const getOnlinePriceForPlatform = (product: ProductInfo): number | null => {
@@ -639,8 +649,8 @@ export default function PaymentModal({
           console.error('❌ Failed to get payment methods from local DB:', error);
         }
 
-        // Map transaction data for SQLite
-        const sqliteTransactionData = {
+        // Map transaction data
+        const localTransactionData = {
           ...transactionData,
           receipt_number: null // Initial local save has no receipt number yet
         };
@@ -676,10 +686,58 @@ export default function PaymentModal({
           };
         });
 
+        // ============================================
+        // DEBUG LOG: Payment Data Before Database Save
+        // ============================================
+        console.log('\n╔═══════════════════════════════════════════════════════════════════════════════════╗');
+        console.log('║                    💳 PAYMENT DEBUG LOG - BEFORE DATABASE SAVE                    ║');
+        console.log('╚═══════════════════════════════════════════════════════════════════════════════════╝\n');
+        
+        console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+        console.log('📝 TRANSACTION DATA (To be saved to database):');
+        console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+        console.log(JSON.stringify(localTransactionData, null, 2));
+        console.log('\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+        console.log('📋 TRANSACTION ITEMS (To be saved to database):');
+        console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+        console.log(`Total Items: ${transactionItems.length}`);
+        transactionItems.forEach((item, index) => {
+          console.log(`\n[Item ${index + 1}]`);
+          console.log(JSON.stringify(item, null, 2));
+        });
+        console.log('\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
+
         // Save transaction and items to local database (Blocking but fast)
         // sync_status will be set to 'pending' by default in the database
-        await electronAPI.localDbUpsertTransactions?.([sqliteTransactionData]);
+        await electronAPI.localDbUpsertTransactions?.([localTransactionData]);
         await electronAPI.localDbUpsertTransactionItems?.(transactionItems);
+
+        // ============================================
+        // DEBUG LOG: Confirmation After Database Save
+        // ============================================
+        console.log('╔═══════════════════════════════════════════════════════════════════════════════════╗');
+        console.log('║                    ✅ PAYMENT DEBUG LOG - AFTER DATABASE SAVE                     ║');
+        console.log('╚═══════════════════════════════════════════════════════════════════════════════════╝\n');
+        console.log(`✅ Transaction ID: ${localTransactionData.id}`);
+        console.log(`✅ Business ID: ${localTransactionData.business_id}`);
+        console.log(`✅ User ID: ${localTransactionData.user_id}`);
+        console.log(`✅ Payment Method: ${localTransactionData.payment_method} (ID: ${localTransactionData.payment_method_id})`);
+        console.log(`✅ Pickup Method: ${localTransactionData.pickup_method}`);
+        console.log(`✅ Total Amount: ${localTransactionData.total_amount}`);
+        console.log(`✅ Final Amount: ${localTransactionData.final_amount}`);
+        console.log(`✅ Amount Received: ${localTransactionData.amount_received}`);
+        console.log(`✅ Change Amount: ${localTransactionData.change_amount}`);
+        console.log(`✅ Voucher Discount: ${localTransactionData.voucher_discount}`);
+        console.log(`✅ Voucher Type: ${localTransactionData.voucher_type || 'N/A'}`);
+        console.log(`✅ Voucher Value: ${localTransactionData.voucher_value || 'N/A'}`);
+        console.log(`✅ Customer Name: ${localTransactionData.customer_name || 'N/A'}`);
+        console.log(`✅ Customer Unit: ${localTransactionData.customer_unit || 'N/A'}`);
+        console.log(`✅ Bank Name: ${localTransactionData.bank_name || 'N/A'}`);
+        console.log(`✅ Card Number: ${localTransactionData.card_number || 'N/A'}`);
+        console.log(`✅ Transaction Type: ${localTransactionData.transaction_type}`);
+        console.log(`✅ Created At: ${localTransactionData.created_at}`);
+        console.log(`✅ Items Saved: ${transactionItems.length} item(s)`);
+        console.log('\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
 
         // Broadcast order (Fire and forget, but keep promise for error logging)
         // Get all products to retrieve category1_id
@@ -844,34 +902,6 @@ export default function PaymentModal({
               }
             });
           }
-        });
-        
-        console.log('\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
-        
-        electronAPI.websocketBroadcastOrder?.(orderData).then(result => {
-          if (result?.success) {
-            const kitchenCount = result.sentToKitchen || 0;
-            const baristaCount = result.sentToBarista || 0;
-            console.log(`✅ [TRANSACTION] Order broadcasted successfully!`);
-            console.log(`   → Sent to ${kitchenCount} Kitchen display(s) and ${baristaCount} Barista display(s)`);
-            if (kitchenCount === 0 && baristaCount === 0) {
-              console.warn(`   ⚠️  No displays connected!`);
-              console.warn(`   → Make sure WebSocket server is running (Setelan → Server → Mulai Server)`);
-              console.warn(`   → Make sure Kitchen/Barista displays are open and connected`);
-              console.warn(`   → Check Barista display connection status (should show "Terhubung" with green dot)`);
-            }
-            
-            // Check if items were filtered out due to invalid category1_id
-            const validItems = orderData.items.filter(item => item.category1_id === 1 || item.category1_id === 2 || item.category1_id === 3 || item.category1_id === 5);
-            if (validItems.length === 0 && orderData.items.length > 0) {
-              console.error(`   ❌ No items were sent because all items have invalid category1_id!`);
-              console.error(`   → Check product database: products should have category1_id = 1 (Makanan), 2 (Minuman), 3 (Dessert), or 5 (Bakery)`);
-            }
-          } else {
-            console.error(`❌ [TRANSACTION] Broadcast failed: Unknown error`);
-          }
-        }).catch(err => {
-          console.error(`❌ [TRANSACTION] Broadcast error:`, err);
         });
 
         // 3. OPTIMISTIC UI UPDATE - CLOSE MODAL IMMEDIATELY
@@ -1224,7 +1254,7 @@ export default function PaymentModal({
               }
 
               // Log to audit FIRST (before queueing) - System POS sync requires printer audit to exist
-              // This ensures the audit is in SQLite before the transaction is queued
+              // This ensures the audit is in local database before the transaction is queued
               try {
                 const logResult = await window.electronAPI?.logPrinter2Print?.(transactionData.id, printer2Counter, 'manual', undefined, globalCounter);
                 if (isSuccessResponse(logResult) && !logResult.success) {
@@ -1233,7 +1263,7 @@ export default function PaymentModal({
                 } else if (!isSuccessResponse(logResult)) {
                   console.warn('⚠️ Failed to log Printer 2 audit: Invalid response', logResult);
                 } else {
-                  // Small delay to ensure SQLite commit is complete before queueing
+                  // Small delay to ensure database commit is complete before queueing
                   await new Promise(resolve => setTimeout(resolve, 100));
                 }
               } catch (logError) {
@@ -1243,7 +1273,7 @@ export default function PaymentModal({
 
               // DISABLED: system_pos database has been dropped on VPS, queueing is disabled
               // Queue transaction for System POS sync AFTER audit is saved and committed
-              // This ensures the printer audit exists in SQLite when system-pos sync queries for it
+              // This ensures the printer audit exists in local database when system-pos sync queries for it
               // try {
               //   const queueResult = await window.electronAPI?.queueTransactionForSystemPos?.(transactionData.id);
               //   if (queueResult?.success) {
@@ -1514,238 +1544,6 @@ export default function PaymentModal({
           } catch (labelError) {
             console.error('❌ Error printing labels:', labelError);
             // Don't fail the transaction if label printing fails
-          }
-
-          // Broadcast order to kitchen/barista displays
-          try {
-            const electronAPI = getElectronAPI();
-            if (electronAPI?.websocketBroadcastOrder) {
-              // Get all products to retrieve category1_id
-              const allProducts = await electronAPI.localDbGetAllProducts?.();
-              const productsMap = new Map<number, { id: number; category1_id?: number | null; category1_name?: string | null; kategori?: string | null; [key: string]: unknown }>();
-              if (Array.isArray(allProducts)) {
-                allProducts.forEach((p: unknown) => {
-                  if (p && typeof p === 'object' && 'id' in p && typeof (p as { id: unknown }).id === 'number') {
-                    const product = p as { id: number; category1_id?: number | null; category1_name?: string | null; kategori?: string | null; [key: string]: unknown };
-                    productsMap.set(product.id, product);
-                  }
-                });
-              }
-
-              // Helper function to map category1_name to category1_id
-              const mapCategoryNameToId = (categoryName: string | null | undefined): number | null => {
-                if (!categoryName) return null;
-                const name = categoryName.toLowerCase().trim();
-                if (name === 'makanan' || name === 'food') return 1;
-                if (name === 'minuman' || name === 'drinks' || name === 'drink') return 2;
-                if (name === 'dessert') return 3;
-                if (name === 'bakery') return 5;
-                return null;
-              };
-
-              // Build order items with category1_id
-              const orderItems: OrderItem[] = cartItems.map((item) => {
-                const product = productsMap.get(item.product.id);
-                
-                // Try to get category1_id, with fallback to category1_name/kategori mapping
-                let category1_id: number | null = null;
-                if (product) {
-                  // First try direct category1_id
-                  if (product.category1_id !== null && product.category1_id !== undefined && typeof product.category1_id === 'number') {
-                    category1_id = product.category1_id;
-                    console.log(`✅ [DEBUG] Product ID ${item.product.id} (${item.product.nama}) has direct category1_id: ${category1_id}`);
-                  } else {
-                    // Fallback: map from category1_name or kategori (local DB uses 'kategori' field)
-                    const categoryName = (product.category1_name || product.kategori) as string | null | undefined;
-                    console.log(`🔍 [DEBUG] Product ID ${item.product.id} (${item.product.nama}) - checking category fields:`, {
-                      category1_id: product.category1_id,
-                      category1_name: product.category1_name,
-                      kategori: product.kategori,
-                      resolvedName: categoryName
-                    });
-                    
-                    category1_id = mapCategoryNameToId(categoryName);
-                    
-                    if (category1_id === null) {
-                      console.warn(`⚠️ [DEBUG] Product ID ${item.product.id} (${item.product.nama}) has no category1_id and category name "${categoryName}" could not be mapped. Available fields:`, {
-                        id: product.id,
-                        category1_id: product.category1_id,
-                        category1_name: product.category1_name,
-                        kategori: product.kategori,
-                        allKeys: Object.keys(product)
-                      });
-                    } else {
-                      console.log(`✅ [DEBUG] Product ID ${item.product.id} (${item.product.nama}) mapped "${categoryName}" → category1_id: ${category1_id}`);
-                    }
-                  }
-                }
-
-                // Calculate item price (same logic as transaction items)
-                let basePrice = item.product.harga_jual;
-                if (isOnline && selectedOnlinePlatform) {
-                  switch (selectedOnlinePlatform) {
-                    case 'qpon':
-                      basePrice = item.product.harga_qpon || item.product.harga_jual;
-                      break;
-                    case 'gofood':
-                      basePrice = item.product.harga_gofood || item.product.harga_jual;
-                      break;
-                    case 'grabfood':
-                      basePrice = item.product.harga_grabfood || item.product.harga_jual;
-                      break;
-                    case 'shopeefood':
-                      basePrice = item.product.harga_shopeefood || item.product.harga_jual;
-                      break;
-                    case 'tiktok':
-                      basePrice = item.product.harga_tiktok || item.product.harga_jual;
-                      break;
-                  }
-                }
-
-                let itemPrice = basePrice;
-                // Add customization prices
-                if (item.customizations) {
-                  item.customizations.forEach(customization => {
-                    customization.selected_options.forEach(option => {
-                      itemPrice += option.price_adjustment;
-                    });
-                  });
-                }
-
-                return {
-                  itemId: generateTransactionItemId(),
-                  productId: item.product.id,
-                  productName: item.product.nama,
-                  category1_id: category1_id ?? 0, // Default to 0 if null (will be skipped in routing)
-                  quantity: item.quantity,
-                  unitPrice: itemPrice,
-                  totalPrice: itemPrice * item.quantity,
-                  customNote: item.customNote,
-                  bundleSelections: item.bundleSelections,
-                  customizations: item.customizations,
-                  status: 'preparing' as const
-                };
-              });
-
-              // Build order data
-              const orderData: OrderData = {
-                transactionId: transactionData.id,
-                receiptNumber: 0, // No onlineResult, so 0
-                businessId: transactionData.business_id,
-                items: orderItems,
-                createdAt: transactionData.created_at,
-                customerName: transactionData.customer_name || undefined,
-                customerUnit: transactionData.customer_unit || undefined,
-                pickupMethod: transactionData.pickup_method
-              };
-
-              // Debug: Check productsMap size
-              console.log(`🔍 [DEBUG] ProductsMap size: ${productsMap.size}, Order items: ${orderItems.length}`);
-              
-              // Detailed logging for debugging (online sync path)
-              console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-              console.log(`📦 [TRANSACTION] Broadcasting order #${orderData.transactionId} (Online Sync)`);
-              console.log(`   Receipt: #${orderData.receiptNumber || 0} | Customer: ${orderData.customerName || 'N/A'} | Pickup: ${orderData.pickupMethod}`);
-              console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-              
-              // Check for items with invalid category1_id
-              // Check for items with invalid category1_id (valid: 1=Makanan, 2=Minuman, 3=Dessert, 5=Bakery)
-              const itemsWithInvalidCategory = orderData.items.filter(item => 
-                item.category1_id === 0 || 
-                item.category1_id === null || 
-                (item.category1_id !== 1 && item.category1_id !== 2 && item.category1_id !== 3 && item.category1_id !== 5)
-              );
-              if (itemsWithInvalidCategory.length > 0) {
-                console.warn(`⚠️ [WARNING] ${itemsWithInvalidCategory.length} item(s) have invalid category1_id and will NOT be sent to any display:`);
-                itemsWithInvalidCategory.forEach(item => {
-                  console.warn(`   - ${item.productName} (Product ID: ${item.productId}, category1_id: ${item.category1_id})`);
-                });
-              }
-              
-              orderData.items.forEach((item, index) => {
-                let destination = '❓ UNKNOWN';
-                let categoryInfo = '(Kategori tidak diketahui)';
-                if (item.category1_id === 1) {
-                  destination = '🍳 DAPUR';
-                  categoryInfo = '(Makanan)';
-                } else if (item.category1_id === 2) {
-                  destination = '☕ BARISTA';
-                  categoryInfo = '(Minuman)';
-                } else if (item.category1_id === 3) {
-                  destination = '☕ BARISTA';
-                  categoryInfo = '(Dessert)';
-                } else if (item.category1_id === 5) {
-                  destination = '🍳 DAPUR';
-                  categoryInfo = '(Bakery)';
-                }
-                
-                console.log(`\n   [Item ${index + 1}] ${item.productName} x${item.quantity} → ${destination} ${categoryInfo}`);
-                if (item.category1_id === 0 || item.category1_id === null) {
-                  console.warn(`      ⚠️  This item will NOT be sent to any display because category1_id is invalid!`);
-                }
-                
-                // Log customizations
-                if (item.customizations && Array.isArray(item.customizations) && item.customizations.length > 0) {
-                  console.log(`      🎨 Customizations:`);
-                  item.customizations.forEach((customization: unknown, custIdx: number) => {
-                    if (customization && typeof customization === 'object' && 'customization_name' in customization) {
-                      const cust = customization as { customization_name: string; selected_options?: Array<{ option_name: string; price_adjustment?: number }> };
-                      const options = cust.selected_options?.map(opt => {
-                        const price = opt.price_adjustment && opt.price_adjustment !== 0 ? ` (+${opt.price_adjustment})` : '';
-                        return `${opt.option_name}${price}`;
-                      }).join(', ') || 'N/A';
-                      console.log(`         ${custIdx + 1}. ${cust.customization_name}: ${options}`);
-                    }
-                  });
-                }
-                
-                // Log custom note
-                if (item.customNote && item.customNote.trim()) {
-                  console.log(`      📝 Custom Note: "${item.customNote}"`);
-                }
-                
-                // Log bundle selections if any
-                if (item.bundleSelections && Array.isArray(item.bundleSelections) && item.bundleSelections.length > 0) {
-                  console.log(`      📦 Bundle Selections:`);
-                  item.bundleSelections.forEach((bundle: unknown, bundleIdx: number) => {
-                    if (bundle && typeof bundle === 'object' && 'category2_name' in bundle) {
-                      const b = bundle as { category2_name: string; selectedProducts?: Array<{ product: { nama: string }; quantity?: number }> };
-                      const products = b.selectedProducts?.map(sp => `${sp.product.nama}${sp.quantity && sp.quantity > 1 ? ` x${sp.quantity}` : ''}`).join(', ') || 'N/A';
-                      console.log(`         ${bundleIdx + 1}. ${b.category2_name}: ${products}`);
-                    }
-                  });
-                }
-              });
-              
-              console.log('\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
-
-              // Broadcast order via Electron IPC
-              const broadcastResult = await electronAPI.websocketBroadcastOrder(orderData);
-              if (broadcastResult?.success) {
-                const kitchenCount = broadcastResult.sentToKitchen || 0;
-                const baristaCount = broadcastResult.sentToBarista || 0;
-                console.log(`✅ [TRANSACTION] Order broadcasted successfully!`);
-                console.log(`   → Sent to ${kitchenCount} Kitchen display(s) and ${baristaCount} Barista display(s)`);
-                if (kitchenCount === 0 && baristaCount === 0) {
-                  console.warn(`   ⚠️  No displays connected!`);
-                  console.warn(`   → Make sure WebSocket server is running (Setelan → Server → Mulai Server)`);
-                  console.warn(`   → Make sure Kitchen/Barista displays are open and connected`);
-                  console.warn(`   → Check Barista display connection status (should show "Terhubung" with green dot)`);
-                }
-                
-                // Check if items were filtered out due to invalid category1_id
-                const validItems = orderData.items.filter(item => item.category1_id === 1 || item.category1_id === 2 || item.category1_id === 3 || item.category1_id === 5);
-                if (validItems.length === 0 && orderData.items.length > 0) {
-                  console.error(`   ❌ No items were sent because all items have invalid category1_id!`);
-                  console.error(`   → Check product database: products should have category1_id = 1 (Makanan), 2 (Minuman), 3 (Dessert), or 5 (Bakery)`);
-                }
-              } else {
-                console.error(`❌ [TRANSACTION] Broadcast failed: Unknown error`);
-              }
-            }
-          } catch (broadcastError) {
-            console.error('❌ Error broadcasting order:', broadcastError);
-            // Don't fail the transaction if broadcasting fails
           }
         }, 10); // Small delay to ensure UI updates first
       } else {

@@ -226,8 +226,7 @@ export default function ServerSettings() {
       <div className="mt-6 bg-blue-50 border border-blue-200 rounded-lg p-4">
         <h4 className="font-semibold text-blue-900 mb-2">ℹ️ Informasi</h4>
         <ul className="text-sm text-blue-800 space-y-1">
-          <li>• Server WebSocket memungkinkan komunikasi real-time antara POS, Dapur, dan Barista</li>
-          <li>• Server harus berjalan untuk fitur produksi (Dapur/Barista) berfungsi</li>
+          <li>• Server WebSocket memungkinkan komunikasi real-time</li>
           <li>• Port default: 19967 (dapat diubah jika diperlukan)</li>
           <li>• Server otomatis dimulai saat aplikasi dibuka</li>
         </ul>

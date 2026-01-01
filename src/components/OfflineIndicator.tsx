@@ -97,19 +97,22 @@ export default function OfflineIndicator() {
         </div>
       )}
 
-      {/* Sync Button */}
+      {/* Sync TX Button */}
       {internetConnected && (
         <button
           onClick={triggerSync}
           disabled={syncInProgress}
-          className={`p-1.5 rounded-lg transition-colors ${
+          className={`px-2 py-1.5 rounded-lg transition-colors text-xs font-medium ${
             syncInProgress
               ? 'bg-gray-100 text-gray-400 cursor-not-allowed'
               : 'bg-blue-100 text-blue-600 hover:bg-blue-200'
           }`}
-          title="Sync data now"
+          title="Sync transactions to server"
         >
-          <RefreshCw className={`w-3.5 h-3.5 ${syncInProgress ? 'animate-spin' : ''}`} />
+          <div className="flex items-center gap-1">
+            <RefreshCw className={`w-3.5 h-3.5 ${syncInProgress ? 'animate-spin' : ''}`} />
+            <span>Sync TX</span>
+          </div>
         </button>
       )}
 

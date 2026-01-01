@@ -250,6 +250,7 @@ export async function GET(request: NextRequest) {
         t.uuid_id as id,
         t.business_id,
         t.user_id,
+        t.payment_method_id,
         t.pickup_method,
         t.total_amount,
         t.voucher_discount,

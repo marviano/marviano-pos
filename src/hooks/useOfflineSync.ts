@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import { offlineSyncService } from '@/lib/offlineSync';
+import { smartSyncService } from '@/lib/smartSync';
 
 interface SyncStatus {
   isOnline: boolean;
@@ -43,9 +44,9 @@ export function useOfflineSync() {
     };
   }, []);
 
-  // Trigger manual sync
+  // Trigger manual sync (uses smart sync - upload transactions only)
   const triggerSync = () => {
-    offlineSyncService.syncFromOnline();
+    smartSyncService.forceSync();
   };
 
   return {

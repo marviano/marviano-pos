@@ -1,6 +1,6 @@
 /**
  * Database Health Check and Initial Sync
- * Ensures SQLite database has master data before going offline
+ * Ensures local database has master data before going offline
  * 
  * IMPORTANT: This service only syncs MASTER DATA (products, categories, etc.)
  * Transaction data is NOT synced to prevent data corruption.
@@ -160,6 +160,10 @@ class DatabaseHealthService {
       if (response.ok) {
         const jsonData = await response.json();
         const data = jsonData.data || jsonData;
+        
+        // #region agent log - Check API response
+        fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'databaseHealth.ts:162',message:'Sync API response received',data:{hasData:!!data,dataKeys:data?Object.keys(data):[],hasRestaurantRooms:!!data.restaurantRooms,restaurantRoomsCount:Array.isArray(data.restaurantRooms)?data.restaurantRooms.length:'not array',hasRestaurantTables:!!data.restaurantTables,restaurantTablesCount:Array.isArray(data.restaurantTables)?data.restaurantTables.length:'not array'},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
+        // #endregion
 
         // Save to local database
         const electronAPI = typeof window !== 'undefined' ? (window as { electronAPI?: UnknownRecord }).electronAPI : undefined;
@@ -213,6 +217,16 @@ class DatabaseHealthService {
             console.log(`✅ ${data.products.length} products synced to local database`);
           }
 
+          // 3.5. PRODUCT-BUSINESSES JUNCTION TABLE (REQUIRED for product filtering)
+          if (electronAPI.localDbUpsertProductBusinesses && Array.isArray(data.productBusinesses) && data.productBusinesses.length > 0) {
+            await (electronAPI.localDbUpsertProductBusinesses as (rows: Array<{ product_id: number; business_id: number }>) => Promise<{ success: boolean }>)(data.productBusinesses);
+            console.log(`✅ ${data.productBusinesses.length} product-business relationships synced to local database`);
+          } else if (Array.isArray(data.productBusinesses) && data.productBusinesses.length === 0) {
+            console.warn('⚠️ [DB HEALTH] product_businesses data is empty - products may not appear correctly');
+          } else if (!data.productBusinesses) {
+            console.warn('⚠️ [DB HEALTH] product_businesses data is missing from API response - products may not appear correctly');
+          }
+
           // 4. PRODUCT-RELATED DATA
           if (electronAPI.localDbUpsertProductCustomizations && data.productCustomizations && data.productCustomizations.length > 0) {
             await (electronAPI.localDbUpsertProductCustomizations as (rows: unknown[]) => Promise<{ success: boolean }>)(data.productCustomizations);
@@ -254,6 +268,55 @@ class DatabaseHealthService {
           if (data.clAccounts && data.clAccounts.length > 0) {
             await (electronAPI.localDbUpsertClAccounts as (rows: unknown[]) => Promise<{ success: boolean }>)(data.clAccounts);
             console.log(`✅ ${data.clAccounts.length} CL accounts synced to local database`);
+          }
+
+          // 7. RESTAURANT TABLE LAYOUT (rooms first, then tables due to foreign key)
+          // #region agent log - Check handler availability
+          fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'databaseHealth.ts:269',message:'Checking restaurant sync handlers',data:{hasUpsertRooms:!!electronAPI.localDbUpsertRestaurantRooms,hasUpsertTables:!!electronAPI.localDbUpsertRestaurantTables,hasDataRooms:!!data.restaurantRooms,hasDataTables:!!data.restaurantTables},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
+          // #endregion
+          if (electronAPI.localDbUpsertRestaurantRooms) {
+            if (data.restaurantRooms && Array.isArray(data.restaurantRooms) && data.restaurantRooms.length > 0) {
+              // #region agent log - Before upsert
+              fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'databaseHealth.ts:272',message:'Calling localDbUpsertRestaurantRooms',data:{roomCount:data.restaurantRooms.length,sampleRoom:data.restaurantRooms[0]},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})}).catch(()=>{});
+              // #endregion
+              const result = await (electronAPI.localDbUpsertRestaurantRooms as (rows: unknown[]) => Promise<{ success: boolean }>)(data.restaurantRooms);
+              // #region agent log - After upsert
+              fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'databaseHealth.ts:275',message:'localDbUpsertRestaurantRooms result',data:{success:result.success,roomCount:data.restaurantRooms.length},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})}).catch(()=>{});
+              // #endregion
+              console.log(`✅ ${data.restaurantRooms.length} restaurant rooms synced to local database`);
+            } else {
+              console.log(`ℹ️ [DB HEALTH] No restaurant rooms to sync (received: ${data.restaurantRooms ? (Array.isArray(data.restaurantRooms) ? data.restaurantRooms.length : 'not array') : 'undefined'})`);
+            }
+          } else {
+            console.warn('⚠️ [DB HEALTH] localDbUpsertRestaurantRooms not available in Electron API');
+          }
+
+          if (electronAPI.localDbUpsertRestaurantTables) {
+            if (data.restaurantTables && Array.isArray(data.restaurantTables) && data.restaurantTables.length > 0) {
+              // #region agent log - Before upsert
+              fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'databaseHealth.ts:283',message:'Calling localDbUpsertRestaurantTables',data:{tableCount:data.restaurantTables.length,sampleTable:data.restaurantTables[0]},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'D'})}).catch(()=>{});
+              // #endregion
+              const result = await (electronAPI.localDbUpsertRestaurantTables as (rows: unknown[]) => Promise<{ success: boolean }>)(data.restaurantTables);
+              // #region agent log - After upsert
+              fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'databaseHealth.ts:286',message:'localDbUpsertRestaurantTables result',data:{success:result.success,tableCount:data.restaurantTables.length},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'D'})}).catch(()=>{});
+              // #endregion
+              console.log(`✅ ${data.restaurantTables.length} restaurant tables synced to local database`);
+            } else {
+              console.log(`ℹ️ [DB HEALTH] No restaurant tables to sync (received: ${data.restaurantTables ? (Array.isArray(data.restaurantTables) ? data.restaurantTables.length : 'not array') : 'undefined'})`);
+            }
+          } else {
+            console.warn('⚠️ [DB HEALTH] localDbUpsertRestaurantTables not available in Electron API');
+          }
+
+          if (electronAPI.localDbUpsertRestaurantLayoutElements) {
+            if (data.restaurantLayoutElements && Array.isArray(data.restaurantLayoutElements) && data.restaurantLayoutElements.length > 0) {
+              const result = await (electronAPI.localDbUpsertRestaurantLayoutElements as (rows: unknown[]) => Promise<{ success: boolean }>)(data.restaurantLayoutElements);
+              console.log(`✅ ${data.restaurantLayoutElements.length} restaurant layout elements synced to local database`);
+            } else {
+              console.log(`ℹ️ [DB HEALTH] No restaurant layout elements to sync (received: ${data.restaurantLayoutElements ? (Array.isArray(data.restaurantLayoutElements) ? data.restaurantLayoutElements.length : 'not array') : 'undefined'})`);
+            }
+          } else {
+            console.warn('⚠️ [DB HEALTH] localDbUpsertRestaurantLayoutElements not available in Electron API');
           }
 
         }

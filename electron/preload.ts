@@ -20,7 +20,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
   maximizeWindow: () => ipcRenderer.invoke('maximize-window'),
   navigateTo: (path: string) => ipcRenderer.invoke('navigate-to', path),
   focusWindow: () => ipcRenderer.invoke('focus-window'),
-  openProductionDisplay: (displayType: 'kitchen' | 'barista') => ipcRenderer.invoke('open-production-display', displayType),
 
   // Authentication events
   notifyLoginSuccess: () => ipcRenderer.invoke('login-success'),
@@ -39,10 +38,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   // Offline/local DB primitives
   localDbUpsertCategories: (rows: { jenis: string; updated_at?: number }[]) => ipcRenderer.invoke('localdb-upsert-categories', rows),
-  localDbGetCategories: () => ipcRenderer.invoke('localdb-get-categories'),
+  localDbGetCategories: (businessId?: number) => ipcRenderer.invoke('localdb-get-categories', businessId),
   localDbUpsertProducts: (rows: UnknownRecord[]) => ipcRenderer.invoke('localdb-upsert-products', rows),
-  localDbGetProductsByJenis: (jenis: string) => ipcRenderer.invoke('localdb-get-products-by-jenis', jenis),
-  localDbGetAllProducts: () => ipcRenderer.invoke('localdb-get-all-products'),
+  localDbCleanupOrphanedProducts: (businessId: number, syncedProductIds: number[]) => ipcRenderer.invoke('localdb-cleanup-orphaned-products', businessId, syncedProductIds),
+  localDbUpsertProductBusinesses: (rows: Array<{ product_id: number; business_id: number }>) => ipcRenderer.invoke('localdb-upsert-product-businesses', rows),
+  localDbGetProductsByJenis: (jenis: string, businessId?: number) => ipcRenderer.invoke('localdb-get-products-by-jenis', jenis, businessId),
+  localDbGetAllProducts: (businessId?: number) => ipcRenderer.invoke('localdb-get-all-products', businessId),
   localDbUpdateSyncStatus: (key: string, status: string) => ipcRenderer.invoke('localdb-update-sync-status', key, status),
   localDbGetSyncStatus: (key: string) => ipcRenderer.invoke('localdb-get-sync-status', key),
 
@@ -97,10 +98,18 @@ contextBridge.exposeInMainWorld('electronAPI', {
   localDbQueueOfflineRefund: (refundData: UnknownRecord) => ipcRenderer.invoke('localdb-queue-offline-refund', refundData),
   localDbGetPendingRefunds: () => ipcRenderer.invoke('localdb-get-pending-refunds'),
   localDbMarkRefundSynced: (offlineRefundId: number) => ipcRenderer.invoke('localdb-mark-refund-synced', offlineRefundId),
+
+  // Restaurant Table Layout
+  getRestaurantRooms: (businessId: number) => ipcRenderer.invoke('get-restaurant-rooms', businessId),
+    getRestaurantTables: (roomId: number) => ipcRenderer.invoke('get-restaurant-tables', roomId),
+    getRestaurantLayoutElements: (roomId: number) => ipcRenderer.invoke('get-restaurant-layout-elements', roomId),
+  localDbUpsertRestaurantRooms: (rows: UnknownRecord[]) => ipcRenderer.invoke('localdb-upsert-restaurant-rooms', rows),
+  localDbUpsertRestaurantTables: (rows: UnknownRecord[]) => ipcRenderer.invoke('localdb-upsert-restaurant-tables', rows),
+  localDbUpsertRestaurantLayoutElements: (rows: UnknownRecord[]) => ipcRenderer.invoke('localdb-upsert-restaurant-layout-elements', rows),
   localDbMarkRefundFailed: (offlineRefundId: number) => ipcRenderer.invoke('localdb-mark-refund-failed', offlineRefundId),
 
   // Add missing method
-  localDbGetProductsByCategory2: (category2Name: string) => ipcRenderer.invoke('localdb-get-products-by-category2', category2Name),
+  localDbGetProductsByCategory2: (category2Name: string, businessId?: number) => ipcRenderer.invoke('localdb-get-products-by-category2', category2Name, businessId),
 
   // Customization handlers
   localDbUpsertCustomizationTypes: (rows: UnknownRecord[]) => ipcRenderer.invoke('localdb-upsert-customization-types', rows),
@@ -127,6 +136,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   localDbDeleteUnsyncedTransactions: (businessId?: number) => ipcRenderer.invoke('localdb-delete-unsynced-transactions', businessId),
   localDbMarkTransactionsSynced: (transactionIds: string[]) => ipcRenderer.invoke('localdb-mark-transactions-synced', transactionIds),
   localDbResetTransactionSync: (transactionId: string) => ipcRenderer.invoke('localdb-reset-transaction-sync', transactionId),
+  localDbResetTransactionsSyncByDate: (payload: { businessId: number; fromDate?: string | null; toDate?: string | null }) => ipcRenderer.invoke('localdb-reset-transactions-sync-by-date', payload),
 
   // Transaction Items
   localDbUpsertTransactionItems: (rows: UnknownRecord[]) => ipcRenderer.invoke('localdb-upsert-transaction-items', rows),
@@ -135,6 +145,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   localDbUpsertTransactionItemCustomizations: (rows: UnknownRecord[]) => ipcRenderer.invoke('localdb-upsert-transaction-item-customizations', rows),
   localDbUpsertTransactionItemCustomizationOptions: (rows: UnknownRecord[]) => ipcRenderer.invoke('localdb-upsert-transaction-item-customization-options', rows),
   localDbGetTransactionRefunds: (transactionUuid: string) => ipcRenderer.invoke('localdb-get-transaction-refunds', transactionUuid),
+  localDbGetShiftRefunds: (userId: number | null, shiftStart: string, shiftEnd: string | null, businessId?: number, shiftUuid?: string | null) => ipcRenderer.invoke('localdb-get-shift-refunds', userId, shiftStart, shiftEnd, businessId, shiftUuid),
   localDbUpsertTransactionRefunds: (rows: UnknownRecord[]) => ipcRenderer.invoke('localdb-upsert-transaction-refunds', rows),
   localDbApplyTransactionRefund: (payload: UnknownRecord) => ipcRenderer.invoke('localdb-apply-transaction-refund', payload),
 
@@ -209,10 +220,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
     modal_awal: number;
   }) => ipcRenderer.invoke('localdb-create-shift', shiftData),
   localDbEndShift: (shiftId: number) => ipcRenderer.invoke('localdb-end-shift', shiftId),
-  localDbGetShiftStatistics: (userId: number, shiftStart: string, shiftEnd: string | null, businessId?: number) => ipcRenderer.invoke('localdb-get-shift-statistics', userId, shiftStart, shiftEnd, businessId),
-  localDbGetPaymentBreakdown: (userId: number, shiftStart: string, shiftEnd: string | null, businessId?: number) => ipcRenderer.invoke('localdb-get-payment-breakdown', userId, shiftStart, shiftEnd, businessId),
-  localDbGetCategory2Breakdown: (userId: number, shiftStart: string, shiftEnd: string | null, businessId?: number) => ipcRenderer.invoke('localdb-get-category2-breakdown', userId, shiftStart, shiftEnd, businessId),
-  localDbGetCashSummary: (userId: number, shiftStart: string, shiftEnd: string | null, businessId?: number) => ipcRenderer.invoke('localdb-get-cash-summary', userId, shiftStart, shiftEnd, businessId),
+  localDbGetShiftStatistics: (userId: number | null, shiftStart: string, shiftEnd: string | null, businessId?: number, shiftUuid?: string | null) => ipcRenderer.invoke('localdb-get-shift-statistics', userId, shiftStart, shiftEnd, businessId, shiftUuid),
+  localDbGetPaymentBreakdown: (userId: number | null, shiftStart: string, shiftEnd: string | null, businessId?: number) => ipcRenderer.invoke('localdb-get-payment-breakdown', userId, shiftStart, shiftEnd, businessId),
+  localDbGetCategory2Breakdown: (userId: number | null, shiftStart: string, shiftEnd: string | null, businessId?: number) => ipcRenderer.invoke('localdb-get-category2-breakdown', userId, shiftStart, shiftEnd, businessId),
+  localDbGetCashSummary: (userId: number | null, shiftStart: string, shiftEnd: string | null, businessId?: number, shiftUuid?: string | null) => ipcRenderer.invoke('localdb-get-cash-summary', userId, shiftStart, shiftEnd, businessId, shiftUuid),
   localDbGetShifts: (filters: { businessId?: number; startDate?: string; endDate?: string; userId?: number; limit?: number; offset?: number } | undefined) => ipcRenderer.invoke('localdb-get-shifts', filters),
   localDbGetShiftUsers: (businessId?: number) => ipcRenderer.invoke('localdb-get-shift-users', businessId),
   localDbGetUnsyncedShifts: (businessId?: number) => ipcRenderer.invoke('localdb-get-unsynced-shifts', businessId),
@@ -220,7 +231,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   localDbUpsertShifts: (rows: UnknownRecord[]) => ipcRenderer.invoke('localdb-upsert-shifts', rows),
   localDbCheckTodayTransactions: (userId: number, shiftStart: string, businessId?: number) => ipcRenderer.invoke('localdb-check-today-transactions', userId, shiftStart, businessId),
   localDbUpdateShiftStart: (shiftId: number, newStartTime: string) => ipcRenderer.invoke('localdb-update-shift-start', shiftId, newStartTime),
-  localDbGetProductSales: (userId: number, shiftStart: string, shiftEnd: string | null, businessId?: number) => ipcRenderer.invoke('localdb-get-product-sales', userId, shiftStart, shiftEnd, businessId),
+  localDbGetProductSales: (userId: number | null, shiftStart: string, shiftEnd: string | null, businessId?: number) => ipcRenderer.invoke('localdb-get-product-sales', userId, shiftStart, shiftEnd, businessId),
   printShiftBreakdown: (data: {
     user_name: string;
     shift_start: string;
@@ -279,7 +290,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
   websocketServerStart: (port?: number) => ipcRenderer.invoke('websocket-server-start', port),
   websocketServerStop: () => ipcRenderer.invoke('websocket-server-stop'),
   websocketServerStatus: () => ipcRenderer.invoke('websocket-server-status'),
-  websocketBroadcastOrder: (order: UnknownRecord) => ipcRenderer.invoke('websocket-broadcast-order', order),
-  websocketBroadcastStatus: (update: UnknownRecord) => ipcRenderer.invoke('websocket-broadcast-status', update),
+
+  // Configuration Management
+  getAppConfig: () => ipcRenderer.invoke('get-app-config'),
+  saveAppConfig: (config: { serverHost?: string; apiUrl?: string; dbUser?: string; dbPassword?: string; dbName?: string; dbPort?: number }) => ipcRenderer.invoke('save-app-config', config),
+  resetAppConfig: () => ipcRenderer.invoke('reset-app-config'),
 });
 

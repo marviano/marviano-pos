@@ -18,7 +18,6 @@ electron_1.contextBridge.exposeInMainWorld('electronAPI', {
     maximizeWindow: () => electron_1.ipcRenderer.invoke('maximize-window'),
     navigateTo: (path) => electron_1.ipcRenderer.invoke('navigate-to', path),
     focusWindow: () => electron_1.ipcRenderer.invoke('focus-window'),
-    openProductionDisplay: (displayType) => electron_1.ipcRenderer.invoke('open-production-display', displayType),
     // Authentication events
     notifyLoginSuccess: () => electron_1.ipcRenderer.invoke('login-success'),
     notifyLogout: () => electron_1.ipcRenderer.invoke('logout'),
@@ -33,10 +32,12 @@ electron_1.contextBridge.exposeInMainWorld('electronAPI', {
     createCustomerDisplay: () => electron_1.ipcRenderer.invoke('create-customer-display'),
     // Offline/local DB primitives
     localDbUpsertCategories: (rows) => electron_1.ipcRenderer.invoke('localdb-upsert-categories', rows),
-    localDbGetCategories: () => electron_1.ipcRenderer.invoke('localdb-get-categories'),
+    localDbGetCategories: (businessId) => electron_1.ipcRenderer.invoke('localdb-get-categories', businessId),
     localDbUpsertProducts: (rows) => electron_1.ipcRenderer.invoke('localdb-upsert-products', rows),
-    localDbGetProductsByJenis: (jenis) => electron_1.ipcRenderer.invoke('localdb-get-products-by-jenis', jenis),
-    localDbGetAllProducts: () => electron_1.ipcRenderer.invoke('localdb-get-all-products'),
+    localDbCleanupOrphanedProducts: (businessId, syncedProductIds) => electron_1.ipcRenderer.invoke('localdb-cleanup-orphaned-products', businessId, syncedProductIds),
+    localDbUpsertProductBusinesses: (rows) => electron_1.ipcRenderer.invoke('localdb-upsert-product-businesses', rows),
+    localDbGetProductsByJenis: (jenis, businessId) => electron_1.ipcRenderer.invoke('localdb-get-products-by-jenis', jenis, businessId),
+    localDbGetAllProducts: (businessId) => electron_1.ipcRenderer.invoke('localdb-get-all-products', businessId),
     localDbUpdateSyncStatus: (key, status) => electron_1.ipcRenderer.invoke('localdb-update-sync-status', key, status),
     localDbGetSyncStatus: (key) => electron_1.ipcRenderer.invoke('localdb-get-sync-status', key),
     // Comprehensive POS table operations
@@ -80,9 +81,16 @@ electron_1.contextBridge.exposeInMainWorld('electronAPI', {
     localDbQueueOfflineRefund: (refundData) => electron_1.ipcRenderer.invoke('localdb-queue-offline-refund', refundData),
     localDbGetPendingRefunds: () => electron_1.ipcRenderer.invoke('localdb-get-pending-refunds'),
     localDbMarkRefundSynced: (offlineRefundId) => electron_1.ipcRenderer.invoke('localdb-mark-refund-synced', offlineRefundId),
+    // Restaurant Table Layout
+    getRestaurantRooms: (businessId) => electron_1.ipcRenderer.invoke('get-restaurant-rooms', businessId),
+    getRestaurantTables: (roomId) => electron_1.ipcRenderer.invoke('get-restaurant-tables', roomId),
+    getRestaurantLayoutElements: (roomId) => electron_1.ipcRenderer.invoke('get-restaurant-layout-elements', roomId),
+    localDbUpsertRestaurantRooms: (rows) => electron_1.ipcRenderer.invoke('localdb-upsert-restaurant-rooms', rows),
+    localDbUpsertRestaurantTables: (rows) => electron_1.ipcRenderer.invoke('localdb-upsert-restaurant-tables', rows),
+    localDbUpsertRestaurantLayoutElements: (rows) => electron_1.ipcRenderer.invoke('localdb-upsert-restaurant-layout-elements', rows),
     localDbMarkRefundFailed: (offlineRefundId) => electron_1.ipcRenderer.invoke('localdb-mark-refund-failed', offlineRefundId),
     // Add missing method
-    localDbGetProductsByCategory2: (category2Name) => electron_1.ipcRenderer.invoke('localdb-get-products-by-category2', category2Name),
+    localDbGetProductsByCategory2: (category2Name, businessId) => electron_1.ipcRenderer.invoke('localdb-get-products-by-category2', category2Name, businessId),
     // Customization handlers
     localDbUpsertCustomizationTypes: (rows) => electron_1.ipcRenderer.invoke('localdb-upsert-customization-types', rows),
     localDbUpsertCustomizationOptions: (rows) => electron_1.ipcRenderer.invoke('localdb-upsert-customization-options', rows),
@@ -103,6 +111,7 @@ electron_1.contextBridge.exposeInMainWorld('electronAPI', {
     localDbDeleteUnsyncedTransactions: (businessId) => electron_1.ipcRenderer.invoke('localdb-delete-unsynced-transactions', businessId),
     localDbMarkTransactionsSynced: (transactionIds) => electron_1.ipcRenderer.invoke('localdb-mark-transactions-synced', transactionIds),
     localDbResetTransactionSync: (transactionId) => electron_1.ipcRenderer.invoke('localdb-reset-transaction-sync', transactionId),
+    localDbResetTransactionsSyncByDate: (payload) => electron_1.ipcRenderer.invoke('localdb-reset-transactions-sync-by-date', payload),
     // Transaction Items
     localDbUpsertTransactionItems: (rows) => electron_1.ipcRenderer.invoke('localdb-upsert-transaction-items', rows),
     localDbGetTransactionItems: (transactionId) => electron_1.ipcRenderer.invoke('localdb-get-transaction-items', transactionId),
@@ -110,6 +119,7 @@ electron_1.contextBridge.exposeInMainWorld('electronAPI', {
     localDbUpsertTransactionItemCustomizations: (rows) => electron_1.ipcRenderer.invoke('localdb-upsert-transaction-item-customizations', rows),
     localDbUpsertTransactionItemCustomizationOptions: (rows) => electron_1.ipcRenderer.invoke('localdb-upsert-transaction-item-customization-options', rows),
     localDbGetTransactionRefunds: (transactionUuid) => electron_1.ipcRenderer.invoke('localdb-get-transaction-refunds', transactionUuid),
+    localDbGetShiftRefunds: (userId, shiftStart, shiftEnd, businessId, shiftUuid) => electron_1.ipcRenderer.invoke('localdb-get-shift-refunds', userId, shiftStart, shiftEnd, businessId, shiftUuid),
     localDbUpsertTransactionRefunds: (rows) => electron_1.ipcRenderer.invoke('localdb-upsert-transaction-refunds', rows),
     localDbApplyTransactionRefund: (payload) => electron_1.ipcRenderer.invoke('localdb-apply-transaction-refund', payload),
     // Payment Methods
@@ -164,10 +174,10 @@ electron_1.contextBridge.exposeInMainWorld('electronAPI', {
     localDbGetActiveShift: (userId, businessId) => electron_1.ipcRenderer.invoke('localdb-get-active-shift', userId, businessId),
     localDbCreateShift: (shiftData) => electron_1.ipcRenderer.invoke('localdb-create-shift', shiftData),
     localDbEndShift: (shiftId) => electron_1.ipcRenderer.invoke('localdb-end-shift', shiftId),
-    localDbGetShiftStatistics: (userId, shiftStart, shiftEnd, businessId) => electron_1.ipcRenderer.invoke('localdb-get-shift-statistics', userId, shiftStart, shiftEnd, businessId),
+    localDbGetShiftStatistics: (userId, shiftStart, shiftEnd, businessId, shiftUuid) => electron_1.ipcRenderer.invoke('localdb-get-shift-statistics', userId, shiftStart, shiftEnd, businessId, shiftUuid),
     localDbGetPaymentBreakdown: (userId, shiftStart, shiftEnd, businessId) => electron_1.ipcRenderer.invoke('localdb-get-payment-breakdown', userId, shiftStart, shiftEnd, businessId),
     localDbGetCategory2Breakdown: (userId, shiftStart, shiftEnd, businessId) => electron_1.ipcRenderer.invoke('localdb-get-category2-breakdown', userId, shiftStart, shiftEnd, businessId),
-    localDbGetCashSummary: (userId, shiftStart, shiftEnd, businessId) => electron_1.ipcRenderer.invoke('localdb-get-cash-summary', userId, shiftStart, shiftEnd, businessId),
+    localDbGetCashSummary: (userId, shiftStart, shiftEnd, businessId, shiftUuid) => electron_1.ipcRenderer.invoke('localdb-get-cash-summary', userId, shiftStart, shiftEnd, businessId, shiftUuid),
     localDbGetShifts: (filters) => electron_1.ipcRenderer.invoke('localdb-get-shifts', filters),
     localDbGetShiftUsers: (businessId) => electron_1.ipcRenderer.invoke('localdb-get-shift-users', businessId),
     localDbGetUnsyncedShifts: (businessId) => electron_1.ipcRenderer.invoke('localdb-get-unsynced-shifts', businessId),
@@ -199,6 +209,8 @@ electron_1.contextBridge.exposeInMainWorld('electronAPI', {
     websocketServerStart: (port) => electron_1.ipcRenderer.invoke('websocket-server-start', port),
     websocketServerStop: () => electron_1.ipcRenderer.invoke('websocket-server-stop'),
     websocketServerStatus: () => electron_1.ipcRenderer.invoke('websocket-server-status'),
-    websocketBroadcastOrder: (order) => electron_1.ipcRenderer.invoke('websocket-broadcast-order', order),
-    websocketBroadcastStatus: (update) => electron_1.ipcRenderer.invoke('websocket-broadcast-status', update),
+    // Configuration Management
+    getAppConfig: () => electron_1.ipcRenderer.invoke('get-app-config'),
+    saveAppConfig: (config) => electron_1.ipcRenderer.invoke('save-app-config', config),
+    resetAppConfig: () => electron_1.ipcRenderer.invoke('reset-app-config'),
 });

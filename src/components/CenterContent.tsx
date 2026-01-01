@@ -8,6 +8,7 @@ import CustomNoteModal from './CustomNoteModal';
 import EditItemModal from './EditItemModal';
 import PaymentModal from './PaymentModal';
 import BundleSelectionModal from './BundleSelectionModal';
+import TableSelectionModal from './TableSelectionModal';
 import { offlineSyncService } from '@/lib/offlineSync';
 import { getApiUrl } from '@/lib/api';
 
@@ -29,7 +30,7 @@ interface Product {
   category2_id: number | null;
   category1_name: string | null;
   category2_name: string | null;
-  harga_jual: number;
+  harga_jual: number | null;
   harga_qpon?: number | null;
   harga_gofood?: number | null;
   harga_grabfood?: number | null;
@@ -75,6 +76,10 @@ interface CartItem {
   customizations?: SelectedCustomization[];
   customNote?: string;
   bundleSelections?: BundleSelection[];
+  isLocked?: boolean; // Item from pending transaction - requires password to remove
+  transactionItemId?: number; // ID of the transaction_item in database (for logging)
+  transactionId?: string; // UUID of the transaction (for logging)
+  tableId?: number | null; // Table ID (for logging)
 }
 
 const categoryEmoji = (categoryName?: string | null) => {
@@ -136,9 +141,15 @@ interface CenterContentProps {
   selectedOnlinePlatform?: 'qpon' | 'gofood' | 'grabfood' | 'shopeefood' | 'tiktok' | null;
   searchQuery?: string;
   setSearchQuery?: (query: string) => void;
+  loadedTransactionInfo?: {
+    transactionId: string;
+    tableName: string | null;
+    roomName: string | null;
+    customerName: string | null;
+  } | null;
 }
 
-export default function CenterContent({ products, cartItems, setCartItems, transactionType, isLoadingProducts = false, isOnline = false, selectedOnlinePlatform = null, searchQuery = '', setSearchQuery }: CenterContentProps) {
+export default function CenterContent({ products, cartItems, setCartItems, transactionType, isLoadingProducts = false, isOnline = false, selectedOnlinePlatform = null, searchQuery = '', setSearchQuery, loadedTransactionInfo = null }: CenterContentProps) {
   const [showCustomizationModal, setShowCustomizationModal] = useState(false);
   const [showCustomNoteModal, setShowCustomNoteModal] = useState(false);
   const [showEditModal, setShowEditModal] = useState(false);
@@ -147,7 +158,9 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
   const [selectedCartItem, setSelectedCartItem] = useState<CartItem | null>(null);
   const [loadingProductId, setLoadingProductId] = useState<number | null>(null);
   const [showPaymentModal, setShowPaymentModal] = useState(false);
+  const [showTableSelectionModal, setShowTableSelectionModal] = useState(false);
   const [bundleItems, setBundleItems] = useState<BundleItem[]>([]);
+  const [customerName, setCustomerName] = useState<string>('');
 
   // Column count state - load from localStorage, default to 5
   const [columnCount, setColumnCount] = useState<number>(() => {
@@ -169,6 +182,16 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
       localStorage.setItem('product-grid-columns', columnCount.toString());
     }
   }, [columnCount]);
+
+  // Populate customer name when transaction is loaded
+  useEffect(() => {
+    if (loadedTransactionInfo?.customerName) {
+      setCustomerName(loadedTransactionInfo.customerName);
+    } else if (!loadedTransactionInfo) {
+      // Clear customer name when no transaction is loaded (e.g., when New button is clicked)
+      setCustomerName('');
+    }
+  }, [loadedTransactionInfo]);
 
   // Calculate responsive sizes based on column count
   const gridStyles = useMemo(() => {
@@ -235,7 +258,15 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
   const sumCustomizationPrice = (customizations?: SelectedCustomization[]) => {
     if (!customizations || customizations.length === 0) return 0;
     return customizations.reduce((sum, customization) => {
-      const optionTotal = customization.selected_options.reduce((optionSum, option) => optionSum + option.price_adjustment, 0);
+      const optionTotal = customization.selected_options.reduce((optionSum, option) => {
+        const priceAdj = typeof option.price_adjustment === 'number' ? option.price_adjustment : (typeof option.price_adjustment === 'string' ? parseFloat(option.price_adjustment) || 0 : 0);
+        // #region agent log
+        if (isNaN(priceAdj) || priceAdj !== option.price_adjustment) {
+          fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'CenterContent.tsx:244',message:'Price adjustment type issue',data:{priceAdjustment:option.price_adjustment,priceAdjustmentType:typeof option.price_adjustment,parsedPriceAdj:priceAdj,optionName:option.option_name},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'T'})}).catch(()=>{});
+        }
+        // #endregion
+        return optionSum + priceAdj;
+      }, 0);
       return sum + optionTotal;
     }, 0);
   };
@@ -303,11 +334,15 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
     }
   };
 
-  const effectiveProductPrice = (product: Product): number => {
+  const effectiveProductPrice = (product: Product): number | null => {
     if (isOnline && selectedOnlinePlatform) {
       const p = getOnlinePriceForPlatform(product);
-      if (p && p > 0) return p;
-      return 0; // No fallback in online mode when platform is selected
+      if (p === null) return null; // NULL price - don't show
+      return p; // Return 0 if price is 0, or the actual price
+    }
+    // For offline mode, check if harga_jual is null
+    if (product.harga_jual === null || product.harga_jual === undefined) {
+      return null;
     }
     return product.harga_jual;
   };
@@ -315,8 +350,15 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
   const handleProductClick = async (product: Product) => {
     if (isOnline && selectedOnlinePlatform) {
       const platformPrice = getOnlinePriceForPlatform(product);
-      if (!platformPrice || platformPrice <= 0) {
-        return; // disabled in online mode for this platform
+      if (platformPrice === null) {
+        return; // disabled in online mode for this platform (NULL price)
+      }
+      // Allow 0 prices - they should be clickable
+    } else {
+      // Offline mode - check if harga_jual is null
+      const price = effectiveProductPrice(product);
+      if (price === null) {
+        return; // disabled if price is null
       }
     }
     setLoadingProductId(product.id);
@@ -500,55 +542,93 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
   const totalItems = cartItems.reduce((sum, item) => sum + item.quantity, 0);
   const totalPrice = cartItems.reduce((sum, item) => {
     let itemPrice = effectiveProductPrice(item.product);
+    
+    // If price is null, skip this item (shouldn't happen if items are already in cart, but safety check)
+    if (itemPrice === null) return sum;
 
     // Add customization prices
     if (item.customizations) {
       item.customizations.forEach(customization => {
         customization.selected_options.forEach(option => {
-          itemPrice += option.price_adjustment;
+          itemPrice! += option.price_adjustment;
         });
       });
     }
 
     // Add bundle customization prices per bundle unit
     if (item.bundleSelections) {
-      itemPrice += calculateBundleCustomizationCharge(item.bundleSelections);
+      itemPrice! += calculateBundleCustomizationCharge(item.bundleSelections);
     }
 
-    return sum + (itemPrice * item.quantity);
+    return sum + (itemPrice! * item.quantity);
   }, 0);
 
   return (
     <div className="flex-1 bg-gray-50 flex">
       {/* Left Side - Cart Area */}
-      <div className="w-[34%] p-4 flex flex-col relative" style={{ height: 'calc(100vh - 80px)', maxHeight: 'calc(100vh - 80px)' }}>
-        {/* Top Navigation */}
-        <div className="flex items-center justify-between mb-6 flex-shrink-0">
-          <div className="flex space-x-2">
-            <button className="px-3 py-1 bg-gray-200 text-gray-700 rounded text-sm font-medium">
-              Masuk
-            </button>
-            <button disabled className="px-3 py-1 text-gray-400 text-sm font-medium cursor-not-allowed opacity-50">
-              <span className="line-through">Mendaftar</span>
+      <div className={`w-[34%] flex flex-col relative ${loadedTransactionInfo ? 'bg-yellow-50' : ''}`} style={{ height: 'calc(100vh - 80px)', maxHeight: 'calc(100vh - 80px)' }}>
+        {/* Opening Transaction Header - Only show in lihat mode */}
+        {loadedTransactionInfo && (
+          <div className="bg-yellow-100 border-b-2 border-yellow-400 px-4 py-2 flex-shrink-0">
+            <div className="flex items-center justify-between">
+              <span className="text-sm font-semibold text-yellow-900">
+                Opening - {loadedTransactionInfo.transactionId}
+                {loadedTransactionInfo.tableName && loadedTransactionInfo.roomName
+                  ? `/${loadedTransactionInfo.tableName}/${loadedTransactionInfo.roomName}`
+                  : ''}
+                {loadedTransactionInfo.customerName
+                  ? `/${loadedTransactionInfo.customerName}`
+                  : ''}
+              </span>
+            </div>
+          </div>
+        )}
+        <div className="flex-1 p-4 flex flex-col overflow-hidden">
+        {/* Top Navigation - Only show when not in lihat mode */}
+        {!loadedTransactionInfo && (
+          <div className="flex items-center justify-between mb-6 flex-shrink-0">
+            <div className="flex space-x-2">
+              <button className="px-3 py-1 bg-gray-200 text-gray-700 rounded text-sm font-medium">
+                Masuk
+              </button>
+              <button disabled className="px-3 py-1 text-gray-400 text-sm font-medium cursor-not-allowed opacity-50">
+                <span className="line-through">Mendaftar</span>
+              </button>
+            </div>
+            <button
+              onClick={() => {
+                if (cartItems.length > 0) {
+                  if (confirm('Are you sure you want to clear all items from the cart?')) {
+                    setCartItems([]);
+                    sendCartUpdate([]);
+                  }
+                }
+              }}
+              className="p-2 text-gray-600 hover:text-gray-800 hover:bg-red-50 rounded-lg transition-colors"
+              title="Clear Cart"
+            >
+              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+              </svg>
             </button>
           </div>
-          <button
-            onClick={() => {
-              if (cartItems.length > 0) {
-                if (confirm('Are you sure you want to clear all items from the cart?')) {
-                  setCartItems([]);
-                  sendCartUpdate([]);
-                }
-              }
-            }}
-            className="p-2 text-gray-600 hover:text-gray-800 hover:bg-red-50 rounded-lg transition-colors"
-            title="Clear Cart"
-          >
-            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-            </svg>
-          </button>
-        </div>
+        )}
+
+        {/* Customer Name Input - Only show when no transaction is loaded */}
+        {!loadedTransactionInfo && (
+          <div className="mb-4 flex-shrink-0">
+            <label className="block text-sm font-medium text-gray-700 mb-1">
+              Nama Pelanggan
+            </label>
+            <input
+              type="text"
+              value={customerName}
+              onChange={(e) => setCustomerName(e.target.value)}
+              placeholder="Masukkan nama pelanggan"
+              className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm text-black placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+            />
+          </div>
+        )}
 
         {/* Cart Items Area - Scrollable with Padding for Summary */}
         <div className="flex-1 overflow-y-auto mb-4" style={{ minHeight: 0, paddingBottom: '220px' }}>
@@ -575,33 +655,49 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
                   <div className="flex justify-between items-start">
                     <div className="flex-1">
                       <h4 className="font-medium text-gray-800 text-sm">{item.product.nama}</h4>
-                      <p className="text-gray-600 text-xs">
-                        {formatPrice(effectiveProductPrice(item.product))} each
-                      </p>
+                      {effectiveProductPrice(item.product) !== null && (
+                        <p className="text-gray-600 text-xs">
+                          {formatPrice(effectiveProductPrice(item.product)!)} each
+                        </p>
+                      )}
 
                       {/* Customizations */}
-                      {item.customizations && item.customizations.length > 0 && (
+                      {item.customizations && item.customizations.length > 0 && (() => {
+                        // #region agent log
+                        fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'CenterContent.tsx:605',message:'Rendering customizations in cart',data:{itemId:item.id,productName:item.product.nama,customizationsCount:item.customizations.length,customizations:item.customizations.map((c:any)=>({customization_id:c.customization_id,customization_name:c.customization_name,selected_options_count:c.selected_options?.length||0,selected_options:c.selected_options?.map((o:any)=>({option_id:o.option_id,option_name:o.option_name,hasOptionName:!!o.option_name}))||[],selected_options_type:typeof c.selected_options})),firstCustomization:item.customizations[0]?{name:item.customizations[0].customization_name,options:item.customizations[0].selected_options}:null},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'K'})}).catch(()=>{});
+                        // #endregion
+                        return (
                         <div className="mt-1 space-y-1">
                           {item.customizations.map((customization) => (
                             <div key={customization.customization_id} className="text-xs">
                               <span className="text-gray-500">{customization.customization_name}:</span>
                               <div className="ml-2 space-y-0.5">
-                                {customization.selected_options.map((option) => (
-                                  <div key={option.option_id} className="flex items-center justify-between">
-                                    <span className="text-gray-600">• {option.option_name}</span>
-                                    {option.price_adjustment !== 0 && (
-                                      <span className={`text-xs ${option.price_adjustment > 0 ? 'text-green-600' : 'text-red-600'
-                                        }`}>
-                                        {option.price_adjustment > 0 ? '+' : ''}{formatPrice(option.price_adjustment)}
-                                      </span>
-                                    )}
-                                  </div>
-                                ))}
+                                {customization.selected_options && customization.selected_options.length > 0 ? (
+                                  customization.selected_options.map((option) => (
+                                    <div key={option.option_id} className="flex items-center justify-between">
+                                      <span className="text-gray-600">• {option.option_name}</span>
+                                      {option.price_adjustment !== 0 && (
+                                        <span className={`text-xs ${option.price_adjustment > 0 ? 'text-green-600' : 'text-red-600'
+                                          }`}>
+                                          {option.price_adjustment > 0 ? '+' : ''}{formatPrice(option.price_adjustment)}
+                                        </span>
+                                      )}
+                                    </div>
+                                  ))
+                                ) : (
+                                  // #region agent log
+                                  (() => {
+                                    fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'CenterContent.tsx:611',message:'Customization has no selected_options',data:{customization_id:customization.customization_id,customization_name:customization.customization_name,selected_options:customization.selected_options,selected_options_type:typeof customization.selected_options,selected_options_length:Array.isArray(customization.selected_options)?customization.selected_options.length:'not_array'},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'L'})}).catch(()=>{});
+                                    return null;
+                                  })()
+                                  // #endregion
+                                )}
                               </div>
                             </div>
                           ))}
                         </div>
-                      )}
+                        );
+                      })()}
 
                       {/* Custom Note */}
                       {item.customNote && (
@@ -706,16 +802,40 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
                   <div className="mt-2 flex justify-between items-center">
                     <span className="text-xs text-gray-500">Subtotal</span>
                     <span className="font-semibold text-green-600">
-                      {formatPrice((() => {
+                      {(() => {
+                        // #region agent log
+                        const logData = {location:'CenterContent.tsx:746',message:'Calculating subtotal',data:{itemId:item.id,productId:item.product.id,productName:item.product.nama,hasCustomizations:!!item.customizations,customizationsCount:item.customizations?.length||0,hasBundleSelections:!!item.bundleSelections,quantity:item.quantity,quantityType:typeof item.quantity},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'O'};
+                        fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(logData)}).catch(()=>{});
+                        // #endregion
                         let itemPrice = effectiveProductPrice(item.product);
+                        // #region agent log
+                        const logData2 = {location:'CenterContent.tsx:747',message:'After effectiveProductPrice',data:{itemId:item.id,itemPrice,itemPriceType:typeof itemPrice,isNull:itemPrice===null,isNaN:Number.isNaN(itemPrice)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'P'};
+                        fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(logData2)}).catch(()=>{});
+                        // #endregion
+                        if (itemPrice === null) return 'N/A';
                         if (item.customizations) {
-                          itemPrice += sumCustomizationPrice(item.customizations);
+                          const customizationPrice = sumCustomizationPrice(item.customizations);
+                          // #region agent log
+                          const logData3 = {location:'CenterContent.tsx:749',message:'After sumCustomizationPrice',data:{itemId:item.id,customizationPrice,customizationPriceType:typeof customizationPrice,isNaN:Number.isNaN(customizationPrice),itemPriceBefore:itemPrice,itemPriceAfter:itemPrice+customizationPrice},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'Q'};
+                          fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(logData3)}).catch(()=>{});
+                          // #endregion
+                          itemPrice += customizationPrice;
                         }
                         if (item.bundleSelections) {
-                          itemPrice += calculateBundleCustomizationCharge(item.bundleSelections);
+                          const bundleCharge = calculateBundleCustomizationCharge(item.bundleSelections);
+                          // #region agent log
+                          const logData4 = {location:'CenterContent.tsx:752',message:'After calculateBundleCustomizationCharge',data:{itemId:item.id,bundleCharge,bundleChargeType:typeof bundleCharge,isNaN:Number.isNaN(bundleCharge),itemPriceBefore:itemPrice,itemPriceAfter:itemPrice+bundleCharge},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'R'};
+                          fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(logData4)}).catch(()=>{});
+                          // #endregion
+                          itemPrice += bundleCharge;
                         }
-                        return itemPrice * item.quantity;
-                      })())}
+                        const finalPrice = itemPrice * item.quantity;
+                        // #region agent log
+                        const logData5 = {location:'CenterContent.tsx:754',message:'Final calculation',data:{itemId:item.id,itemPrice,quantity:item.quantity,quantityType:typeof item.quantity,finalPrice,finalPriceType:typeof finalPrice,isNaN:Number.isNaN(finalPrice)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'S'};
+                        fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(logData5)}).catch(()=>{});
+                        // #endregion
+                        return formatPrice(finalPrice);
+                      })()}
                     </span>
                   </div>
                 </div>
@@ -731,14 +851,6 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
               <span className="text-black">Harga produk asli</span>
               <span className="font-medium text-black">{formatPrice(totalPrice)}</span>
             </div>
-            <div className="flex justify-between text-red-600">
-              <span>Berpartisipasi</span>
-              <span>-{formatPrice(0)}</span>
-            </div>
-            <div className="flex justify-between opacity-50">
-              <span className="text-gray-400 line-through">Kupon</span>
-              <span className="text-gray-400">-</span>
-            </div>
             <hr className="border-gray-200" />
             <div className="flex justify-between items-center">
               <span className="text-gray-600">{totalItems} Barang</span>
@@ -750,17 +862,22 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
 
           {/* Action Buttons */}
           <div className="flex space-x-2 mt-3">
-            <button disabled className="flex-1 bg-gray-300 text-gray-500 py-1.5 px-3 rounded-lg cursor-not-allowed opacity-50 text-sm">
-              <span className="line-through">Pesanan Tertunda</span>
+            <button
+              onClick={() => setShowTableSelectionModal(true)}
+              disabled={cartItems.length === 0}
+              className="flex-1 bg-blue-500 hover:bg-blue-600 disabled:bg-gray-400 disabled:cursor-not-allowed text-white py-1.5 px-3 rounded-lg transition-colors text-sm"
+            >
+              Simpan Order
             </button>
             <button
               onClick={() => setShowPaymentModal(true)}
               disabled={cartItems.length === 0}
               className="flex-1 bg-green-500 hover:bg-green-600 disabled:bg-gray-400 disabled:cursor-not-allowed text-white py-1.5 px-3 rounded-lg transition-colors text-sm"
             >
-              Menerima Pesanan
+              Bayar
             </button>
           </div>
+        </div>
         </div>
       </div>
 
@@ -825,13 +942,82 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
         <div className="overflow-y-auto mb-4" style={{ height: 'calc(97vh)' }}>
           <div className={`grid ${gridStyles.gridCols} gap-2`}>
             {(() => {
-              // First filter by platform/online status
+              // Debug: Log ALL products and their harga_jual values
+              console.log('🔍 [CENTER CONTENT] Total products received:', products.length);
+              console.log('🔍 [CENTER CONTENT] Sample products (first 5):', products.slice(0, 5).map(p => ({ 
+                id: p.id, 
+                nama: p.nama, 
+                harga_jual: p.harga_jual, 
+                harga_jual_type: typeof p.harga_jual,
+                isNull: p.harga_jual === null,
+                isUndefined: p.harga_jual === undefined,
+                isZero: p.harga_jual === 0
+              })));
+              
+              // Debug: Log products with null harga_jual
+              const productsWithNullPrice = products.filter(p => p.harga_jual === null || p.harga_jual === undefined);
+              if (productsWithNullPrice.length > 0) {
+                console.log('⚠️ [CENTER CONTENT] Products with NULL harga_jual found:', productsWithNullPrice.length, productsWithNullPrice.map(p => ({ id: p.id, nama: p.nama, harga_jual: p.harga_jual })));
+              }
+              
+              // Debug: Log products with zero harga_jual
+              const productsWithZeroPrice = products.filter(p => p.harga_jual === 0);
+              if (productsWithZeroPrice.length > 0) {
+                console.log('ℹ️ [CENTER CONTENT] Products with ZERO harga_jual (should show):', productsWithZeroPrice.length, productsWithZeroPrice.map(p => ({ id: p.id, nama: p.nama, harga_jual: p.harga_jual })));
+              }
+
+              // Helper function to check if price is null/undefined
+              // Note: 0 is handled separately in filtering logic (filtered out in offline mode)
+              const isPriceNull = (price: number | null | undefined): boolean => {
+                return price === null || price === undefined;
+              };
+
+              // First filter by platform/online status and null harga_jual
               let filteredProducts = products.filter((product) => {
-                if (!isOnline) return true;
-                if (!selectedOnlinePlatform) return true;
+                // ALWAYS filter out products with null/undefined/zero harga_jual in offline mode
+                if (!isOnline) {
+                  // Filter out NULL, undefined, or 0 (0 is used as fallback for products that only have platform prices)
+                  if (isPriceNull(product.harga_jual) || product.harga_jual === 0) {
+                    return false; // Don't show products with NULL or 0 harga_jual in offline mode
+                  }
+                  return true;
+                }
+                
+                // Online mode
+                if (!selectedOnlinePlatform) {
+                  // Online mode but no platform selected - still check harga_jual
+                  if (isPriceNull(product.harga_jual)) {
+                    return false;
+                  }
+                  return true;
+                }
+                
+                // Online mode with platform selected - check platform price
                 const p = getOnlinePriceForPlatform(product);
-                return !!p && p > 0;
+                // Allow 0 prices, only filter out null prices
+                return !isPriceNull(p);
               });
+
+              // Debug: Log filtering results
+              const filteredOutCount = products.length - filteredProducts.length;
+              console.log('🔍 [CENTER CONTENT] Filtering results:', {
+                totalProducts: products.length,
+                filteredOut: filteredOutCount,
+                remaining: filteredProducts.length,
+                isOnline: isOnline,
+                selectedPlatform: selectedOnlinePlatform
+              });
+              
+              // Debug: Check what was filtered out
+              if (filteredOutCount > 0) {
+                const filteredOutProducts = products.filter(p => !filteredProducts.includes(p));
+                console.log('🔍 [CENTER CONTENT] Filtered out products details:', filteredOutProducts.map(p => ({ 
+                  id: p.id, 
+                  nama: p.nama, 
+                  harga_jual: p.harga_jual,
+                  harga_jual_type: typeof p.harga_jual
+                })));
+              }
 
               // Then filter by search query if provided
               if (searchQuery.trim()) {
@@ -847,9 +1033,11 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
                   let priceMatch = false;
                   if (isNumericQuery) {
                     const productPrice = effectiveProductPrice(product);
-                    // Convert price to string and check if it contains the numeric query
-                    const priceString = productPrice.toString();
-                    priceMatch = priceString.includes(numericQuery);
+                    // Only check price if it's not null
+                    if (productPrice !== null) {
+                      const priceString = productPrice.toString();
+                      priceMatch = priceString.includes(numericQuery);
+                    }
                   }
 
                   return nameMatch || priceMatch;
@@ -873,6 +1061,20 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
               return filteredProducts.map((product) => {
                 const isDisabledOnline = false;
                 const isBundle = product.is_bundle === 1 || product.is_bundle === true;
+                const productPrice = effectiveProductPrice(product);
+                
+                // Debug: Log if productPrice is null or 0 for products that shouldn't show
+                if (productPrice === null) {
+                  console.log('⚠️ [CENTER CONTENT] Product with NULL effectivePrice still in filtered list:', {
+                    id: product.id,
+                    nama: product.nama,
+                    harga_jual: product.harga_jual,
+                    effectivePrice: productPrice,
+                    isOnline: isOnline,
+                    platform: selectedOnlinePlatform
+                  });
+                }
+                
                 return (
                   <button
                     key={product.id}
@@ -909,13 +1111,15 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
                     <div className="space-y-1">
                       {/* Product Name */}
                       <h3 className={`font-medium text-gray-800 ${gridStyles.productNameSize} leading-tight line-clamp-2`}>{product.nama}</h3>
-                      {/* Price */}
-                      <div className="flex items-baseline">
-                        <span className={`text-gray-600 ${gridStyles.priceLabelSize}`}>RP</span>
-                        <span className={`text-green-600 font-bold ${gridStyles.priceValueSize} ml-0.5`}>
-                          {effectiveProductPrice(product).toLocaleString('id-ID')}
-                        </span>
-                      </div>
+                      {/* Price - Only show if price is not null */}
+                      {productPrice !== null && (
+                        <div className="flex items-baseline">
+                          <span className={`text-gray-600 ${gridStyles.priceLabelSize}`}>RP</span>
+                          <span className={`text-green-600 font-bold ${gridStyles.priceValueSize} ml-0.5`}>
+                            {productPrice.toLocaleString('id-ID')}
+                          </span>
+                        </div>
+                      )}
                     </div>
                   </button>
                 );
@@ -966,7 +1170,7 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
           setSelectedProduct(null);
         }}
         product={selectedProduct as unknown as { id: number; business_id: number; menu_code: string; nama: string; kategori: string; harga_jual: number; status: string } | null}
-        effectivePrice={selectedProduct ? effectiveProductPrice(selectedProduct) : undefined}
+        effectivePrice={selectedProduct ? (effectiveProductPrice(selectedProduct) ?? undefined) : undefined}
         onAddToCart={(product, customizations, quantity, customNote) => {
           const centerProduct = product as unknown as Product;
           addToCart(centerProduct, customizations, quantity, customNote);
@@ -977,6 +1181,7 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
       <PaymentModal
         isOpen={showPaymentModal}
         onClose={() => setShowPaymentModal(false)}
+        initialCustomerName={customerName}
         cartItems={cartItems as unknown as Array<{
           id: number;
           product: {
@@ -1012,6 +1217,43 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
         selectedOnlinePlatform={selectedOnlinePlatform}
       />
 
+      {/* Table Selection Modal */}
+      <TableSelectionModal
+        isOpen={showTableSelectionModal}
+        onClose={() => setShowTableSelectionModal(false)}
+        customerName={customerName}
+        cartItems={cartItems as unknown as Array<{
+          id: number;
+          product: {
+            id: number;
+            harga_jual: number;
+            harga_qpon?: number;
+            harga_gofood?: number;
+            harga_grabfood?: number;
+            harga_shopeefood?: number;
+            harga_tiktok?: number;
+          };
+          quantity: number;
+          customizations?: Array<{
+            customization_id: number;
+            customization_name: string;
+            selected_options: Array<{
+              option_id: number;
+              option_name: string;
+              price_adjustment: number;
+            }>;
+          }>;
+          customNote?: string;
+          bundleSelections?: unknown[];
+        }>}
+        transactionType={transactionType}
+        onSuccess={() => {
+          // Clear cart after successful save
+          setCartItems([]);
+          sendCartUpdate([]);
+        }}
+      />
+
       {/* Custom Note Modal */}
       <CustomNoteModal
         isOpen={showCustomNoteModal}
@@ -1020,7 +1262,7 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
           setSelectedProduct(null);
         }}
         product={selectedProduct as unknown as { id: number; business_id: number; menu_code: string; nama: string; kategori: string; harga_jual: number; status: string } | null}
-        effectivePrice={selectedProduct ? effectiveProductPrice(selectedProduct) : undefined}
+        effectivePrice={selectedProduct ? (effectiveProductPrice(selectedProduct) ?? undefined) : undefined}
         onConfirm={handleCustomNoteConfirm}
       />
 
@@ -1054,7 +1296,7 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
           }>;
           customNote?: string;
         } | null}
-        effectivePrice={selectedCartItem ? effectiveProductPrice(selectedCartItem.product) : undefined}
+        effectivePrice={selectedCartItem ? (effectiveProductPrice(selectedCartItem.product) ?? undefined) : undefined}
         onUpdate={(updatedItem) => {
           const centerCartItem = updatedItem as unknown as CartItem;
           handleUpdateItem(centerCartItem);

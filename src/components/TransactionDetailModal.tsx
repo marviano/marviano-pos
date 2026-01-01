@@ -127,12 +127,43 @@ const TransactionDetailModal: React.FC<TransactionDetailModalProps> = ({
   // canRefund prop is unused
   onTransactionUpdated
 }) => {
+  // #region agent log
+  React.useEffect(() => {
+    if (isOpen && transaction) {
+      fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'TransactionDetailModal.tsx:129',message:'Modal received transaction',data:{hasTransaction:!!transaction,itemCount:transaction?.items?.length||0,firstItemProductName:transaction?.items?.[0]?.product_name,firstItemHasCustomizations:!!transaction?.items?.[0]?.customizations,firstItemCustomizationsCount:Array.isArray(transaction?.items?.[0]?.customizations)?transaction.items[0].customizations.length:0},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'G'})}).catch(()=>{});
+    }
+  }, [isOpen, transaction]);
+  // #endregion
+
+  // Fetch users to display refund creator names
+  useEffect(() => {
+    const fetchUsers = async () => {
+      if (!isOpen) return;
+      
+      const electronAPI = typeof window !== 'undefined' ? (window as { electronAPI?: { localDbGetUsers?: () => Promise<Array<{ id: number; name: string; email: string }>> } }).electronAPI : undefined;
+      if (electronAPI?.localDbGetUsers) {
+        try {
+          const users = await electronAPI.localDbGetUsers();
+          const map = new Map<number, string>();
+          users.forEach(u => {
+            map.set(u.id, u.name || u.email || `User ${u.id}`);
+          });
+          setUsersMap(map);
+        } catch (error) {
+          console.warn('[TransactionDetailModal] Failed to fetch users:', error);
+        }
+      }
+    };
+
+    fetchUsers();
+  }, [isOpen]);
   const { user } = useAuth();
   const [isReprinting, setIsReprinting] = useState(false);
   const [reprintStatus, setReprintStatus] = useState<'idle' | 'success' | 'error'>('idle');
   const [receiptizeCounter, setReceiptizeCounter] = useState<number | null>(null);
   const [isReceiptize, setIsReceiptize] = useState(false);
   const [isRefundModalOpen, setIsRefundModalOpen] = useState(false);
+  const [usersMap, setUsersMap] = useState<Map<number, string>>(new Map());
 
   // Calculate canRefund based on current user state to ensure it's always up-to-date
   // This prevents the button from appearing/disappearing due to stale prop values
@@ -817,10 +848,21 @@ const TransactionDetailModal: React.FC<TransactionDetailModalProps> = ({
                               : 'text-green-700 bg-green-100'
                               } px-2 py-0.5 rounded-full`}
                           >
-                            {refund.status ?? 'completed'}
+                            {refund.status === 'pending' 
+                              ? 'Pending Upload' 
+                              : refund.status === 'completed' 
+                                ? 'Uploaded' 
+                                : refund.status ?? 'Uploaded'}
                           </span>
                         </div>
-                        <p className="text-xs text-gray-500 mt-1">{formatDate(refund.refunded_at)}</p>
+                        <div className="flex items-center justify-between mt-1">
+                          <p className="text-xs text-gray-500">{formatDate(refund.refunded_at)}</p>
+                          {refund.refunded_by && usersMap.has(refund.refunded_by) && (
+                            <p className="text-xs text-gray-600">
+                              Oleh: <span className="font-medium">{usersMap.get(refund.refunded_by)}</span>
+                            </p>
+                          )}
+                        </div>
                         {refund.reason && (
                           <p className="text-sm text-gray-700 mt-1">
                             Alasan: {refund.reason}
@@ -859,7 +901,13 @@ const TransactionDetailModal: React.FC<TransactionDetailModalProps> = ({
                     </tr>
                   </thead>
                   <tbody>
-                    {transaction.items.map((item, index) => (
+                    {transaction.items.map((item, index) => {
+                      // #region agent log
+                      if (index === 0) {
+                        fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'TransactionDetailModal.tsx:862',message:'Rendering first item',data:{itemId:item.id,productName:item.product_name,hasCustomizations:!!item.customizations,customizationsCount:Array.isArray(item.customizations)?item.customizations.length:0,customizationsType:typeof item.customizations},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'H'})}).catch(()=>{});
+                      }
+                      // #endregion
+                      return (
                       <tr key={item.id} className={`border-b border-gray-100 ${index % 2 === 0 ? 'bg-gray-50' : 'bg-white'}`}>
                         <td className="py-3 px-3">
                           <div>
@@ -870,15 +918,38 @@ const TransactionDetailModal: React.FC<TransactionDetailModalProps> = ({
                               const customizations = item.customizations;
                               if (!customizations || customizations.length === 0) return null;
 
+                              // Helper function to safely convert to number
+                              const parseNumber = (value: unknown): number => {
+                                if (typeof value === 'number' && !isNaN(value)) return value;
+                                if (value === null || value === undefined) return 0;
+                                const parsed = Number(value);
+                                return isNaN(parsed) ? 0 : parsed;
+                              };
+                              
                               // Calculate total customization adjustments
+                              // Ensure price_adjustment is converted to number (may be string from database)
                               const totalAdjustments = customizations.reduce((total, customization) => {
                                 return total + (customization.selected_options || []).reduce((optTotal, option) => {
-                                  return optTotal + (option.price_adjustment || 0);
+                                  return optTotal + parseNumber(option.price_adjustment);
                                 }, 0);
                               }, 0);
 
                               // Calculate base price (unit price minus customization adjustments)
-                              const basePrice = item.unit_price - totalAdjustments;
+                              
+                              // Get unit_price, or calculate from total_price / quantity if unit_price is missing
+                              let unitPrice = parseNumber(item.unit_price);
+                              if (isNaN(unitPrice)) {
+                                const totalPrice = parseNumber(item.total_price);
+                                const quantity = parseNumber(item.quantity);
+                                if (!isNaN(totalPrice) && !isNaN(quantity) && quantity > 0) {
+                                  unitPrice = totalPrice / quantity;
+                                } else {
+                                  unitPrice = 0;
+                                }
+                              }
+                              
+                              // Base price = unit price minus customization adjustments
+                              const basePrice = unitPrice - totalAdjustments;
 
                               return (
                                 <div className="mt-2 space-y-2">
@@ -1033,7 +1104,8 @@ const TransactionDetailModal: React.FC<TransactionDetailModalProps> = ({
                           {formatPrice(item.total_price)}
                         </td>
                       </tr>
-                    ))}
+                      );
+                    })}
                   </tbody>
                   <tfoot>
                     <tr className="border-t-2 border-gray-300 bg-gray-100">

@@ -128,3 +128,20 @@ const mapCategoryNameToId = (categoryName: string | null | undefined): number | 
 1. **Service Worker**: `public/sw.js` or service worker registration
 2. **Category Mapping**: `src/components/PaymentModal.tsx` (line 698-704)
 3. **Product Database**: Product ID 236 needs `category1_id` set
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

@@ -132,3 +132,20 @@ After these changes, test with:
   - `category1_id: 5` for Bakery products
 - Or they can use `kategori: 'Dessert'` or `kategori: 'Bakery'` and the mapping function will convert them
 - The old categories (1=Makanan, 2=Minuman) continue to work as before
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

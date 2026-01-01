@@ -136,6 +136,22 @@ interface ReportDataPayload {
   customizationSales: CustomizationSale[];
 }
 
+interface RefundDetail {
+  refund_uuid: string;
+  transaction_uuid: string;
+  transaction_uuid_id: string;
+  refund_amount: number;
+  cash_delta: number;
+  refunded_at: string;
+  refunded_by: number;
+  payment_method_id: number;
+  payment_method: string;
+  final_amount: number;
+  transaction_created_at: string;
+  reason?: string | null;
+  note?: string | null;
+}
+
 const getGmt7DayBounds = (dateString?: string | null): { dayStartUtc: string; dayEndUtc: string } | null => {
   if (!dateString) {
     return null;
@@ -205,6 +221,33 @@ const formatTime = (dateString: string): string => {
   });
 };
 
+// Format full date and time in Indonesian (e.g., "Senin, 27 Desember 2025 14.53 PM")
+const formatDateTime = (dateString: string): string => {
+  const date = new Date(dateString);
+  // Adjust for GMT+7
+  const gmt7Date = new Date(date.getTime() + (7 * 60 * 60 * 1000));
+  
+  // Get day name
+  const dayNames = ['Minggu', 'Senin', 'Selasa', 'Rabu', 'Kamis', 'Jumat', 'Sabtu'];
+  const dayName = dayNames[gmt7Date.getUTCDay()];
+  
+  // Format date
+  const datePart = gmt7Date.toLocaleDateString('id-ID', {
+    day: 'numeric',
+    month: 'long',
+    year: 'numeric',
+    timeZone: 'UTC'
+  });
+  
+  // Format time in 24-hour format with dot separator and AM/PM
+  const hours = gmt7Date.getUTCHours();
+  const minutes = gmt7Date.getUTCMinutes();
+  const ampm = hours >= 12 ? 'PM' : 'AM';
+  const timePart = `${hours.toString().padStart(2, '0')}.${minutes.toString().padStart(2, '0')} ${ampm}`;
+  
+  return `${dayName}, ${datePart} ${timePart}`;
+};
+
 export default function GantiShift() {
   const { user } = useAuth();
 
@@ -252,6 +295,30 @@ export default function GantiShift() {
   });
   const [productSales, setProductSales] = useState<ProductSale[]>([]);
   const [customizationSales, setCustomizationSales] = useState<CustomizationSale[]>([]);
+  const [refunds, setRefunds] = useState<RefundDetail[]>([]);
+  const [selectedRefundTransaction, setSelectedRefundTransaction] = useState<{
+    refund: RefundDetail;
+    items: Array<{
+      id: string;
+      product_name: string;
+      quantity: number;
+      unit_price: number;
+      total_price: number;
+      custom_note?: string;
+      customizations?: Array<{
+        customization_id: number;
+        customization_name: string;
+        selected_options: Array<{
+          option_id: number;
+          option_name: string;
+          price_adjustment: number;
+        }>;
+      }>;
+    }>;
+    note?: string | null;
+    userName?: string;
+  } | null>(null);
+  const [isLoadingRefundDetails, setIsLoadingRefundDetails] = useState(false);
 
   // Date-time picker states for custom date range printing
   const [showDatePicker, setShowDatePicker] = useState(false);
@@ -519,9 +586,9 @@ export default function GantiShift() {
       const defaultCash: CashSummary = { cash_shift: 0, cash_whole_day: 0 };
 
       // Load all statistics in parallel with error handling
-      const [statsResult, breakdownResult, category2BreakdownResult, cashResult, productSalesResult] = await Promise.allSettled([
+      const [statsResult, breakdownResult, category2BreakdownResult, cashResult, productSalesResult, refundsResult] = await Promise.allSettled([
         electronAPI.localDbGetShiftStatistics
-          ? electronAPI.localDbGetShiftStatistics(shiftOwnerId, activeShift.shift_start, activeShift.shift_end, businessId)
+          ? electronAPI.localDbGetShiftStatistics(shiftOwnerId, activeShift.shift_start, activeShift.shift_end, businessId, activeShift.uuid_id)
           : Promise.resolve(defaultStats),
         electronAPI.localDbGetPaymentBreakdown
           ? electronAPI.localDbGetPaymentBreakdown(shiftOwnerId, activeShift.shift_start, activeShift.shift_end, businessId)
@@ -530,11 +597,20 @@ export default function GantiShift() {
           ? electronAPI.localDbGetCategory2Breakdown(shiftOwnerId, activeShift.shift_start, activeShift.shift_end, businessId)
           : Promise.resolve<Category2Breakdown[]>([]),
         electronAPI.localDbGetCashSummary
-          ? electronAPI.localDbGetCashSummary(shiftOwnerId, activeShift.shift_start, activeShift.shift_end, businessId)
+          ? electronAPI.localDbGetCashSummary(shiftOwnerId, activeShift.shift_start, activeShift.shift_end, businessId, activeShift.uuid_id)
           : Promise.resolve(defaultCash),
         electronAPI.localDbGetProductSales
           ? electronAPI.localDbGetProductSales(shiftOwnerId, activeShift.shift_start, activeShift.shift_end, businessId)
-          : Promise.resolve<ProductSalesPayload>({ products: [], customizations: [] })
+          : Promise.resolve<ProductSalesPayload>({ products: [], customizations: [] }),
+        electronAPI.localDbGetShiftRefunds
+          ? electronAPI.localDbGetShiftRefunds({
+              userId: shiftOwnerId,
+              businessId: businessId,
+              shiftUuid: activeShift.uuid_id,
+              shiftStart: activeShift.shift_start,
+              shiftEnd: activeShift.shift_end
+            })
+          : Promise.resolve<RefundDetail[]>([])
       ]);
 
       const stats =
@@ -565,6 +641,9 @@ export default function GantiShift() {
       setCashSummary(cash);
       setProductSales(productSalesData.products || []);
       setCustomizationSales(productSalesData.customizations || []);
+      
+      const refundsData = refundsResult.status === 'fulfilled' ? (refundsResult.value as RefundDetail[]) : [];
+      setRefunds(refundsData);
 
       // Only show error if all requests failed
       if (
@@ -582,8 +661,66 @@ export default function GantiShift() {
     }
   }, [activeShift, businessId]);
 
+  const handleRefundClick = useCallback(async (refund: RefundDetail) => {
+    const electronAPI = getElectronAPI();
+    if (!electronAPI) return;
+
+    setIsLoadingRefundDetails(true);
+    try {
+      // Fetch transaction items (this already includes customizations via readCustomizationsFromNormalizedTables)
+      const items = electronAPI.localDbGetTransactionItems
+        ? await electronAPI.localDbGetTransactionItems(refund.transaction_uuid)
+        : [];
+
+      // Map items - customizations are already attached by localDbGetTransactionItems
+      const itemsWithCustomizations = (items as any[]).map((item: any) => {
+        // Handle customizations - they're already in the item object
+        const customizations = Array.isArray(item.customizations) 
+          ? item.customizations 
+          : (item.customizations ? [item.customizations] : []);
+
+        return {
+          id: item.uuid_id || item.id,
+          product_name: item.product_name || '',
+          quantity: item.quantity || 0,
+          unit_price: item.unit_price || 0,
+          total_price: item.total_price || 0,
+          custom_note: item.custom_note || null,
+          customizations: customizations.length > 0 ? customizations : undefined,
+          bundleSelections: item.bundleSelections || undefined
+        };
+      });
+
+      // Fetch transaction note and user info if available
+      const transactions = await electronAPI.localDbGetTransactions?.(businessId, 1000);
+      const transaction = (transactions as any[])?.find((t: any) => t.uuid_id === refund.transaction_uuid);
+      const transactionNote = transaction?.note || null;
+      const transactionUserId = transaction?.user_id || null;
+      const transactionUserName = transaction?.user_name || null;
+
+      // If user_name not in transaction, fetch from users table
+      let userName = transactionUserName;
+      if (!userName && transactionUserId && electronAPI.localDbGetUsers) {
+        const users = await electronAPI.localDbGetUsers();
+        const user = (users as any[])?.find((u: any) => u.id === transactionUserId);
+        userName = user?.name || user?.email || `User ID: ${transactionUserId}`;
+      }
+
+      setSelectedRefundTransaction({
+        refund,
+        items: itemsWithCustomizations,
+        note: transactionNote,
+        userName: userName || 'Unknown'
+      });
+    } catch (error) {
+      console.error('Error loading refund transaction details:', error);
+    } finally {
+      setIsLoadingRefundDetails(false);
+    }
+  }, [businessId]);
+
   const fetchReportPayload = useCallback(
-    async ({ start, end, userId, businessId: reportBusinessId = businessId }: { start: string; end: string | null; userId: number; businessId?: number; }): Promise<ReportDataPayload> => {
+    async ({ start, end, userId, businessId: reportBusinessId = businessId, shiftUuid }: { start: string; end: string | null; userId: number | null; businessId?: number; shiftUuid?: string | null; }): Promise<ReportDataPayload> => {
       const electronAPI = getElectronAPI();
       if (!electronAPI) {
         throw new Error('Aplikasi Electron tidak terdeteksi.');
@@ -614,7 +751,7 @@ export default function GantiShift() {
             ? electronAPI.localDbGetCategory2Breakdown(userId, start, end, reportBusinessId)
             : Promise.resolve<Category2Breakdown[]>([]),
           electronAPI.localDbGetCashSummary
-            ? electronAPI.localDbGetCashSummary(userId, start, end, reportBusinessId)
+            ? electronAPI.localDbGetCashSummary(userId, start, end, reportBusinessId, shiftUuid)
             : Promise.resolve(defaultCash),
           electronAPI.localDbGetProductSales
             ? electronAPI.localDbGetProductSales(userId, start, end, reportBusinessId)
@@ -626,6 +763,10 @@ export default function GantiShift() {
           breakdownResult.status === 'fulfilled' ? (breakdownResult.value as PaymentBreakdown[]) : [];
         const category2BreakdownPayload =
           category2BreakdownResult.status === 'fulfilled' ? (category2BreakdownResult.value as Category2Breakdown[]) : [];
+        
+        // #region agent log
+        fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'GantiShift.tsx:654',message:'Category2 breakdown payload',data:{status:category2BreakdownResult.status,payloadLength:category2BreakdownPayload.length,payload:category2BreakdownPayload.slice(0,3),userId,start,end,reportBusinessId},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'D'})}).catch(()=>{});
+        // #endregion
         const rawCash = cashResult.status === 'fulfilled' ? (cashResult.value as CashSummary) : defaultCash;
         const productSalesPayload =
           productSalesResult.status === 'fulfilled'
@@ -1040,7 +1181,7 @@ export default function GantiShift() {
           const dayReportData = await fetchReportPayload({
             start: shiftSequenceInfo.dayStartUtc, // START FROM DAY START - INCLUDES SHIFT 1
             end: shiftSequenceInfo.dayEndUtc,
-            userId: shiftOwnerId
+            userId: null // null = all users for whole day report
           });
 
           console.log('📊 [PRINT WHOLE DAY] Data fetched:', {
@@ -1048,6 +1189,10 @@ export default function GantiShift() {
             total: dayReportData.statistics.total_amount,
             products: dayReportData.productSales.length
           });
+          
+          // #region agent log
+          fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'GantiShift.tsx:1046',message:'Print all total revenue',data:{total_amount:dayReportData.statistics.total_amount,order_count:dayReportData.statistics.order_count,userId:shiftOwnerId,dayStart:shiftSequenceInfo.dayStartUtc,dayEnd:shiftSequenceInfo.dayEndUtc,businessId},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'E'})}).catch(()=>{});
+          // #endregion
 
           const dayCash = dayReportData.cashSummary;
           const dayCashSales = dayCash.cash_shift_sales ?? dayCash.cash_shift ?? 0;
@@ -1153,7 +1298,13 @@ export default function GantiShift() {
               transaction_count: p.transaction_count,
               total_amount: p.total_amount || 0
             })),
-            category2Breakdown: shiftReportData.category2Breakdown || [],
+            category2Breakdown: (() => {
+              const cat2Data = shiftReportData.category2Breakdown || [];
+              // #region agent log
+              fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'GantiShift.tsx:1187',message:'Category2 data before print',data:{category2Length:cat2Data.length,category2Data:cat2Data.slice(0,3),shiftId:shift.id},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'E'})}).catch(()=>{});
+              // #endregion
+              return cat2Data;
+            })(),
             cashSummary: {
               cash_shift: shiftCash.cash_shift ?? 0,
               cash_shift_sales: shiftCashSales,
@@ -1319,7 +1470,7 @@ export default function GantiShift() {
         const dayData = await fetchReportPayload({
           start: shiftSequenceInfo.dayStartUtc,
           end: shiftSequenceInfo.dayEndUtc,
-          userId: shiftOwnerId
+          userId: null // null = all users for whole day report
         });
 
         // setTabData(prev => ({ ...prev, 'all-day': dayData }));
@@ -1340,7 +1491,8 @@ export default function GantiShift() {
         const shiftData = await fetchReportPayload({
           start: shift.shift_start,
           end: shift.shift_end,
-          userId: shiftUserId
+          userId: shiftUserId,
+          shiftUuid: shift.uuid_id
         });
 
         // setTabData(prev => ({ ...prev, [tabView]: shiftData }));
@@ -1377,7 +1529,7 @@ export default function GantiShift() {
 
     const confirmed = window.confirm(
       `Migrasikan ${todayTransactionsInfo.count} transaksi hari ini ke shift ini?\n\n` +
-      `Shift start akan diubah dari ${formatTime(activeShift.shift_start)} menjadi ${formatTime(todayTransactionsInfo.earliestTime)}.\n\n` +
+      `Shift start akan diubah dari ${formatDateTime(activeShift.shift_start)} menjadi ${formatDateTime(todayTransactionsInfo.earliestTime)}.\n\n` +
       `Transaksi yang sudah ada akan otomatis termasuk dalam statistik shift.`
     );
 
@@ -1416,10 +1568,11 @@ export default function GantiShift() {
   };
 
   // Cash reconciliation helpers - based on active tab
-  const cashShiftSales = cashSummary.cash_shift_sales ?? cashSummary.cash_shift ?? 0;
-  const cashShiftRefunds = cashSummary.cash_shift_refunds ?? 0;
-  const cashWholeDaySales = cashSummary.cash_whole_day_sales ?? cashSummary.cash_whole_day ?? 0;
-  const cashWholeDayRefunds = cashSummary.cash_whole_day_refunds ?? 0;
+  // Convert string values to numbers (MySQL returns decimal as strings)
+  const cashShiftSales = Number(cashSummary.cash_shift_sales ?? cashSummary.cash_shift ?? 0) || 0;
+  const cashShiftRefunds = Number(cashSummary.cash_shift_refunds ?? 0) || 0;
+  const cashWholeDaySales = Number(cashSummary.cash_whole_day_sales ?? cashSummary.cash_whole_day ?? 0) || 0;
+  const cashWholeDayRefunds = Number(cashSummary.cash_whole_day_refunds ?? 0) || 0;
   const cashNetShift = cashShiftSales - cashShiftRefunds;
   const cashNetWholeDay = cashWholeDaySales - cashWholeDayRefunds;
 
@@ -1431,12 +1584,12 @@ export default function GantiShift() {
 
   if (activeTab === 'all-day') {
     // For all-day view, use the first shift's modal awal
-    kasMulaiActive = shiftSequenceInfo?.shifts[0]?.modal_awal ?? 0;
+    kasMulaiActive = Number(shiftSequenceInfo?.shifts[0]?.modal_awal ?? 0) || 0;
   } else {
     // For individual shift view
     const displayShift = shiftSequenceInfo?.shifts.find(s => s.id === activeTab) || activeShift;
-    kasMulaiActive = displayShift?.modal_awal ?? 0;
-    kasAkhirActive = displayShift?.kas_akhir ?? null;
+    kasMulaiActive = Number(displayShift?.modal_awal ?? 0) || 0;
+    kasAkhirActive = displayShift?.kas_akhir !== null && displayShift?.kas_akhir !== undefined ? Number(displayShift.kas_akhir) : null;
 
     if (kasAkhirActive !== null) {
       const kasExpectedForShift = kasMulaiActive + cashShiftSales - cashShiftRefunds;
@@ -1454,7 +1607,9 @@ export default function GantiShift() {
     }
   }
 
-  const kasExpectedActive = kasMulaiActive + cashShiftSales - cashShiftRefunds;
+  // Ensure all values are numbers for calculation
+  const kasMulaiActiveNum = Number(kasMulaiActive) || 0;
+  const kasExpectedActive = kasMulaiActiveNum + cashShiftSales - cashShiftRefunds;
   const kasExpectedDisplay = activeShift ? kasExpectedActive : 0;
   const totalCashInCashier = activeShift ? kasExpectedActive : 0;
 
@@ -1794,12 +1949,12 @@ export default function GantiShift() {
                             </div>
                             <div className="flex items-center gap-2">
                               <span className="text-xs text-gray-600">Started:</span>
-                              <span className="text-sm font-medium text-black">{formatTime(displayShift.shift_start)}</span>
+                              <span className="text-sm font-medium text-black">{formatDateTime(displayShift.shift_start)}</span>
                             </div>
                             <div className="flex items-center gap-2">
                               <span className="text-xs text-gray-600">Ended:</span>
                               <span className="text-sm font-medium text-black">
-                                {displayShift.shift_end ? formatTime(displayShift.shift_end) : (
+                                {displayShift.shift_end ? formatDateTime(displayShift.shift_end) : (
                                   <span className="inline-flex items-center text-green-600 text-xs">
                                     <span className="w-1.5 h-1.5 bg-green-500 rounded-full mr-1 animate-pulse"></span>
                                     Active
@@ -1825,89 +1980,6 @@ export default function GantiShift() {
                 </div>
               )}
 
-              {/* Shift Summary and Cash Summary - 2 columns */}
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                {/* Shift Summary */}
-                <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-3">
-                  <h2 className="text-sm font-semibold text-gray-800 mb-2">Shift Summary</h2>
-                  <div className="space-y-1">
-                    <div className="flex items-center justify-between">
-                      <div className="flex items-center space-x-1.5">
-                        <Package className="w-3 h-3 text-blue-600" />
-                        <span className="text-xs text-gray-600">Pesanan:</span>
-                      </div>
-                      <span className="text-xs font-semibold text-black">{statistics.order_count} transaksi</span>
-                    </div>
-                    <div className="flex items-center justify-between">
-                      <span className="text-xs text-gray-600">Total Transaksi:</span>
-                      <span className="text-xs font-semibold text-black">{formatRupiah(statistics.total_amount)}</span>
-                    </div>
-                    <div className="flex items-center justify-between">
-                      <div className="flex items-center space-x-1.5">
-                        <Ticket className="w-3 h-3 text-orange-600" />
-                        <span className="text-xs text-gray-600">Voucher Dipakai:</span>
-                      </div>
-                      <span className="text-xs font-semibold text-black">{statistics.voucher_count} transaksi</span>
-                    </div>
-                    <div className="flex items-center justify-between">
-                      <div className="flex items-center space-x-1.5">
-                        <Ticket className="w-3 h-3 text-green-600" />
-                        <span className="text-xs text-gray-600">Total Diskon Voucher:</span>
-                      </div>
-                      <span className="text-xs font-semibold text-green-600">
-                        {statistics.total_discount > 0 ? formatRupiah(-statistics.total_discount) : formatRupiah(0)}
-                      </span>
-                    </div>
-                  </div>
-                </div>
-
-                {/* Cash Summary */}
-                <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-3">
-                  <h2 className="text-sm font-semibold text-gray-800 mb-2">Cash Summary</h2>
-                  <div className="space-y-1">
-                    <div className="flex items-center justify-between">
-                      <span className="text-xs text-gray-600">Kas Mulai:</span>
-                      <span className="text-xs font-semibold text-black">
-                        {formatRupiah(activeShift?.modal_awal || 0)}
-                      </span>
-                    </div>
-                    <div className="flex items-center justify-between">
-                      <div className="flex items-center space-x-1.5">
-                        <Wallet className="w-3 h-3 text-green-600" />
-                        <span className="text-xs text-gray-600">Cash (Shift):</span>
-                      </div>
-                      <span className="text-xs font-semibold text-black">{formatRupiah(cashSummary.cash_shift)}</span>
-                    </div>
-                    <div className="flex items-center justify-between">
-                      <span className="text-xs text-gray-600">Cash Refund:</span>
-                      <span className="text-xs font-semibold text-black">
-                        {formatRupiah(cashSummary.cash_shift_refunds || 0)}
-                      </span>
-                    </div>
-                    <div className="flex items-center justify-between">
-                      <div className="flex items-center space-x-1.5">
-                        <Wallet className="w-3 h-3 text-blue-600" />
-                        <span className="text-xs text-gray-600">Cash (Hari):</span>
-                      </div>
-                      <span className="text-xs font-semibold text-black">{formatRupiah(cashSummary.cash_whole_day)}</span>
-                    </div>
-                    <div className="flex items-center justify-between">
-                      <span className="text-xs text-gray-600">Kas Diharapkan:</span>
-                      <span className="text-xs font-semibold text-black">
-                        {formatRupiah(kasExpectedDisplay)}
-                      </span>
-                    </div>
-                    <div className="flex items-center justify-between pt-1 border-t border-gray-200">
-                      <div className="flex items-center space-x-1.5">
-                        <CreditCard className="w-3 h-3 text-purple-600" />
-                        <span className="text-xs font-medium text-gray-800">Cash in Cashier:</span>
-                      </div>
-                      <span className="text-xs font-bold text-purple-600">{formatRupiah(totalCashInCashier)}</span>
-                    </div>
-                  </div>
-                </div>
-              </div>
-
               {/* RINGKASAN (Final Summary) */}
               <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-6">
                 <h2 className="text-xl font-semibold text-gray-800 mb-3 text-center">RINGKASAN</h2>
@@ -1915,32 +1987,31 @@ export default function GantiShift() {
                   {/* Left Column - Transaction Summary */}
                   <div className="space-y-0">
                     <h3 className="text-xs font-semibold text-gray-700 mb-2 pb-1 border-b border-gray-300">Transaksi</h3>
-                    <div className="flex justify-between py-0.5">
+                    <div className="flex items-center py-0.5">
                       <span className="text-xs text-gray-700">Total Pesanan:</span>
+                      <span className="flex-grow border-b border-dotted border-gray-300 mx-2"></span>
                       <span className="text-xs font-semibold text-gray-900">{statistics.order_count} transaksi</span>
                     </div>
-                    <div className="flex justify-between py-0.5">
+                    <div className="flex items-center py-0.5">
                       <span className="text-xs text-gray-700">Total Transaksi:</span>
+                      <span className="flex-grow border-b border-dotted border-gray-300 mx-2"></span>
                       <span className="text-xs font-semibold text-gray-900">{formatRupiah(statistics.total_amount)}</span>
                     </div>
-                    <div className="flex justify-between py-0.5">
-                      <span className="text-xs text-gray-700">Topping Units:</span>
-                      <span className="text-xs font-semibold text-gray-900">
-                        {customizationSales.reduce((sum, c) => sum + c.total_quantity, 0)}
-                      </span>
-                    </div>
-                    <div className="flex justify-between py-0.5">
+                    <div className="flex items-center py-0.5">
                       <span className="text-xs text-gray-700">Total Topping:</span>
+                      <span className="flex-grow border-b border-dotted border-gray-300 mx-2"></span>
                       <span className="text-xs font-semibold text-gray-900">
                         {formatRupiah(customizationSales.reduce((sum, c) => sum + c.total_revenue, 0))}
                       </span>
                     </div>
-                    <div className="flex justify-between py-0.5">
+                    <div className="flex items-center py-0.5">
                       <span className="text-xs text-gray-700">Voucher Dipakai:</span>
+                      <span className="flex-grow border-b border-dotted border-gray-300 mx-2"></span>
                       <span className="text-xs font-semibold text-gray-900">{statistics.voucher_count} transaksi</span>
                     </div>
-                    <div className="flex justify-between py-0.5">
+                    <div className="flex items-center py-0.5">
                       <span className="text-xs text-gray-700">Total Diskon Voucher:</span>
+                      <span className="flex-grow border-b border-dotted border-gray-300 mx-2"></span>
                       <span className="text-xs font-semibold text-green-600">
                         {statistics.total_discount > 0 ? formatRupiah(-statistics.total_discount) : formatRupiah(0)}
                       </span>
@@ -1950,34 +2021,46 @@ export default function GantiShift() {
                   {/* Right Column - Cash Summary */}
                   <div className="space-y-0">
                     <h3 className="text-xs font-semibold text-gray-700 mb-2 pb-1 border-b border-gray-300">Kas</h3>
-                    <div className="flex justify-between py-0.5">
+                    <div className="flex items-center py-0.5">
                       <span className="text-xs text-gray-700">Kas Mulai:</span>
+                      <span className="flex-grow border-b border-dotted border-gray-300 mx-2"></span>
                       <span className="text-xs font-semibold text-gray-900">{formatRupiah(kasMulaiActive)}</span>
                     </div>
-                    <div className="flex justify-between py-0.5">
+                    <div className="flex items-center py-0.5">
                       <span className="text-xs text-gray-700">Cash Sales (Shift):</span>
+                      <span className="flex-grow border-b border-dotted border-gray-300 mx-2"></span>
                       <span className="text-xs font-semibold text-gray-900">{formatRupiah(cashShiftSales)}</span>
                     </div>
-                    <div className="flex justify-between py-0.5">
+                    <div className="flex items-center py-0.5">
                       <span className="text-xs text-gray-700">Cash Refunds (Shift):</span>
+                      <span className="flex-grow border-b border-dotted border-gray-300 mx-2"></span>
                       <span className="text-xs font-semibold text-red-600">-{formatRupiah(cashShiftRefunds)}</span>
                     </div>
-                    <div className="flex justify-between py-0.5">
+                    <div className="flex items-center py-0.5">
                       <span className="text-xs text-gray-700">Net Cash (Shift):</span>
+                      <span className="flex-grow border-b border-dotted border-gray-300 mx-2"></span>
                       <span className="text-xs font-semibold text-gray-900">{formatRupiah(cashNetShift)}</span>
                     </div>
-                    <div className="flex justify-between py-0.5 border-t border-gray-200 mt-1 pt-1">
+                    <div className="flex items-center py-0.5">
+                      <span className="text-xs text-gray-700">Cash (Hari):</span>
+                      <span className="flex-grow border-b border-dotted border-gray-300 mx-2"></span>
+                      <span className="text-xs font-semibold text-gray-900">{formatRupiah(cashSummary.cash_whole_day)}</span>
+                    </div>
+                    <div className="flex items-center py-0.5">
                       <span className="text-xs font-semibold text-gray-800">Kas Diharapkan:</span>
+                      <span className="flex-grow border-b border-dotted border-gray-300 mx-2"></span>
                       <span className="text-xs font-bold text-purple-700">{formatRupiah(kasExpectedActive)}</span>
                     </div>
                     {kasAkhirActive !== null && (
                       <>
-                        <div className="flex justify-between py-0.5">
+                        <div className="flex items-center py-0.5">
                           <span className="text-xs text-gray-700">Kas Akhir:</span>
+                          <span className="flex-grow border-b border-dotted border-gray-300 mx-2"></span>
                           <span className="text-xs font-semibold text-gray-900">{formatRupiah(kasAkhirActive)}</span>
                         </div>
-                        <div className="flex justify-between py-0.5">
+                        <div className="flex items-center py-0.5">
                           <span className="text-xs text-gray-700">Selisih Kas:</span>
+                          <span className="flex-grow border-b border-dotted border-gray-300 mx-2"></span>
                           <span className={`text-xs font-semibold ${kasSelisihLabelValue === 'balanced' ? 'text-green-600' :
                             kasSelisihLabelValue === 'plus' ? 'text-blue-600' : 'text-red-600'
                             }`}>
@@ -1991,23 +2074,225 @@ export default function GantiShift() {
                         </div>
                       </>
                     )}
-                    <div className="border-t border-gray-200 mt-1 pt-1">
-                      <div className="flex justify-between py-0.5">
+                    <div className="flex items-center py-0.5">
+                      <span className="text-xs font-medium text-gray-800">Cash in Cashier:</span>
+                      <span className="flex-grow border-b border-dotted border-gray-300 mx-2"></span>
+                      <span className="text-xs font-bold text-purple-600">{formatRupiah(totalCashInCashier)}</span>
+                    </div>
+                    <div>
+                      <div className="flex items-center py-0.5">
                         <span className="text-xs text-gray-700">Cash Sales (Whole Day):</span>
+                        <span className="flex-grow border-b border-dotted border-gray-300 mx-2"></span>
                         <span className="text-xs font-semibold text-gray-900">{formatRupiah(cashWholeDaySales)}</span>
                       </div>
-                      <div className="flex justify-between py-0.5">
+                      <div className="flex items-center py-0.5">
                         <span className="text-xs text-gray-700">Cash Refunds (Whole Day):</span>
+                        <span className="flex-grow border-b border-dotted border-gray-300 mx-2"></span>
                         <span className="text-xs font-semibold text-red-600">-{formatRupiah(cashWholeDayRefunds)}</span>
                       </div>
-                      <div className="flex justify-between py-0.5">
+                      <div className="flex items-center py-0.5">
                         <span className="text-xs text-gray-700">Net Cash (Whole Day):</span>
+                        <span className="flex-grow border-b border-dotted border-gray-300 mx-2"></span>
                         <span className="text-xs font-semibold text-gray-900">{formatRupiah(cashNetWholeDay)}</span>
                       </div>
                     </div>
                   </div>
                 </div>
               </div>
+
+              {/* REFUND SECTION */}
+              {refunds.length > 0 && (
+                <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-4">
+                  <h2 className="text-base font-semibold text-gray-800 mb-3 text-center">REFUND</h2>
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-xs">
+                      <thead>
+                        <tr className="border-b-2 border-gray-300 bg-gray-50">
+                          <th className="px-2 py-2 text-left font-semibold text-gray-700">Transaction ID</th>
+                          <th className="px-2 py-2 text-left font-semibold text-gray-700">Method</th>
+                          <th className="px-2 py-2 text-right font-semibold text-gray-700">Total</th>
+                          <th className="px-2 py-2 text-right font-semibold text-gray-700">Refund Amount</th>
+                          <th className="px-2 py-2 text-left font-semibold text-gray-700">Alasan</th>
+                          <th className="px-2 py-2 text-left font-semibold text-gray-700">Refund Time</th>
+                          <th className="px-2 py-2 text-left font-semibold text-gray-700">Transaction Created</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {refunds.map((refund, idx) => {
+                          const refundDate = new Date(refund.refunded_at);
+                          const transactionDate = new Date(refund.transaction_created_at);
+                          const formatDateTime = (date: Date) => {
+                            return date.toLocaleString('id-ID', {
+                              year: 'numeric',
+                              month: '2-digit',
+                              day: '2-digit',
+                              hour: '2-digit',
+                              minute: '2-digit',
+                              second: '2-digit',
+                              hour12: false
+                            });
+                          };
+                          
+                          return (
+                            <tr 
+                              key={refund.refund_uuid || idx} 
+                              className="border-b border-gray-200 hover:bg-gray-50 cursor-pointer"
+                              onClick={() => handleRefundClick(refund)}
+                            >
+                              <td className="px-2 py-2 text-gray-900 font-mono text-[10px]">
+                                {refund.transaction_uuid_id || refund.transaction_uuid}
+                              </td>
+                              <td className="px-2 py-2 text-gray-700">
+                                {formatPlatformLabel(refund.payment_method || 'offline')}
+                              </td>
+                              <td className="px-2 py-2 text-right text-gray-900">
+                                {formatRupiah(Number(refund.final_amount || 0))}
+                              </td>
+                              <td className="px-2 py-2 text-right text-red-600 font-semibold">
+                                -{formatRupiah(Number(refund.refund_amount || 0))}
+                              </td>
+                              <td className="px-2 py-2 text-black">
+                                {refund.reason || '-'}
+                              </td>
+                              <td className="px-2 py-2 text-gray-600">
+                                {formatDateTime(refundDate)}
+                              </td>
+                              <td className="px-2 py-2 text-gray-600">
+                                {formatDateTime(transactionDate)}
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
+
+              {/* Refund Transaction Detail Modal */}
+              {selectedRefundTransaction && (
+                <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50" onClick={() => setSelectedRefundTransaction(null)}>
+                  <div className="bg-white rounded-lg shadow-xl max-w-2xl w-full mx-4 max-h-[90vh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
+                    <div className="p-6">
+                      <div className="flex justify-between items-center mb-4">
+                        <h2 className="text-lg font-semibold text-gray-800">Transaction Details</h2>
+                        <button
+                          onClick={() => setSelectedRefundTransaction(null)}
+                          className="text-gray-400 hover:text-gray-600"
+                        >
+                          <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                          </svg>
+                        </button>
+                      </div>
+
+                      <div className="mb-4 space-y-2 text-sm">
+                        <div className="flex justify-between">
+                          <span className="text-black font-medium">Transaction ID:</span>
+                          <span className="font-mono text-xs text-black">{selectedRefundTransaction.refund.transaction_uuid_id || selectedRefundTransaction.refund.transaction_uuid}</span>
+                        </div>
+                        <div className="flex justify-between">
+                          <span className="text-black font-medium">Created By:</span>
+                          <span className="text-black">{selectedRefundTransaction.userName || 'Unknown'}</span>
+                        </div>
+                        <div className="flex justify-between">
+                          <span className="text-black font-medium">Payment Method:</span>
+                          <span className="text-black">{formatPlatformLabel(selectedRefundTransaction.refund.payment_method || 'offline')}</span>
+                        </div>
+                        <div className="flex justify-between">
+                          <span className="text-black font-medium">Total Amount:</span>
+                          <span className="font-semibold text-black">{formatRupiah(Number(selectedRefundTransaction.refund.final_amount || 0))}</span>
+                        </div>
+                        <div className="flex justify-between">
+                          <span className="text-black font-medium">Refund Amount:</span>
+                          <span className="font-semibold text-red-600">-{formatRupiah(Number(selectedRefundTransaction.refund.refund_amount || 0))}</span>
+                        </div>
+                        <div className="flex justify-between">
+                          <span className="text-black font-medium">Alasan:</span>
+                          <span className="text-black">{selectedRefundTransaction.refund.reason || '-'}</span>
+                        </div>
+                        <div className="flex justify-between">
+                          <span className="text-black font-medium">Catatan:</span>
+                          <span className="text-black">{selectedRefundTransaction.refund.note || '-'}</span>
+                        </div>
+                        <div className="flex justify-between">
+                          <span className="text-black font-medium">Refund Date:</span>
+                          <span className="text-black">{new Date(selectedRefundTransaction.refund.refunded_at).toLocaleString('id-ID', {
+                            year: 'numeric',
+                            month: '2-digit',
+                            day: '2-digit',
+                            hour: '2-digit',
+                            minute: '2-digit',
+                            second: '2-digit',
+                            hour12: false
+                          })}</span>
+                        </div>
+                        <div className="flex justify-between">
+                          <span className="text-black font-medium">Transaction Created:</span>
+                          <span className="text-black">{new Date(selectedRefundTransaction.refund.transaction_created_at).toLocaleString('id-ID', {
+                            year: 'numeric',
+                            month: '2-digit',
+                            day: '2-digit',
+                            hour: '2-digit',
+                            minute: '2-digit',
+                            second: '2-digit',
+                            hour12: false
+                          })}</span>
+                        </div>
+                      </div>
+
+                      <div className="border-t pt-4">
+                        <h3 className="text-sm font-semibold text-black mb-3">Items</h3>
+                        <div className="space-y-3">
+                          {selectedRefundTransaction.items.map((item, itemIdx) => (
+                            <div key={item.id || itemIdx} className="border-b pb-3 last:border-b-0">
+                              <div className="flex justify-between items-start mb-1">
+                                <div className="flex-1">
+                                  <span className="font-medium text-black">{item.product_name}</span>
+                                  <span className="text-black ml-2">x{item.quantity}</span>
+                                </div>
+                                <span className="font-semibold text-black">{formatRupiah(item.total_price)}</span>
+                              </div>
+                              {item.customizations && item.customizations.length > 0 && (
+                                <div className="ml-4 mt-1 space-y-1">
+                                  {item.customizations.map((cust, custIdx) => (
+                                    <div key={custIdx} className="text-xs text-black">
+                                      <span className="font-medium">{cust.customization_name || 'Customization'}:</span>
+                                      <span className="ml-1">
+                                        {cust.selected_options.map(opt => opt.option_name).join(', ')}
+                                        {cust.selected_options.some(opt => opt.price_adjustment !== 0) && (
+                                          <span className="text-black ml-1">
+                                            ({cust.selected_options
+                                              .filter(opt => opt.price_adjustment !== 0)
+                                              .map(opt => `${opt.price_adjustment > 0 ? '+' : ''}${formatRupiah(opt.price_adjustment)}`)
+                                              .join(', ')})
+                                          </span>
+                                        )}
+                                      </span>
+                                    </div>
+                                  ))}
+                                </div>
+                              )}
+                              {item.custom_note && (
+                                <div className="ml-4 mt-1 text-xs text-black italic">
+                                  Note: {item.custom_note}
+                                </div>
+                              )}
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+
+                      {selectedRefundTransaction.note && (
+                        <div className="border-t pt-4 mt-4">
+                          <h3 className="text-sm font-semibold text-black mb-2">Transaction Note</h3>
+                          <p className="text-sm text-black">{selectedRefundTransaction.note}</p>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              )}
 
               {/* BARANG TERJUAL */}
               <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-4">
@@ -2288,7 +2573,7 @@ export default function GantiShift() {
                 <div className="flex-1">
                   <span className="font-semibold text-gray-900">Whole Day (Semua Shift)</span>
                   <p className="text-sm text-gray-600">
-                    {formatTime(shiftSequenceInfo.dayStartUtc)} - Sekarang
+                    {formatDateTime(shiftSequenceInfo.dayStartUtc)} - Sekarang
                   </p>
                 </div>
               </label>
@@ -2324,8 +2609,8 @@ export default function GantiShift() {
                         Shift {selection.shiftIndex} - {shift.user_name}
                       </span>
                       <p className="text-sm text-gray-600">
-                        {formatTime(shift.shift_start)}
-                        {shift.shift_end && ` - ${formatTime(shift.shift_end)}`}
+                        {formatDateTime(shift.shift_start)}
+                        {shift.shift_end && ` - ${formatDateTime(shift.shift_end)}`}
                         {shift.status === 'active' && <span className="ml-2 text-green-600 font-medium">(Aktif)</span>}
                       </p>
                     </div>

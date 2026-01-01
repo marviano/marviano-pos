@@ -38,6 +38,15 @@ export default function Login() {
   // Ensure we're on the client side to prevent hydration mismatch
   useEffect(() => {
     setIsClient(true);
+    
+    // Initialize API URL cache
+    if (typeof window !== 'undefined') {
+      import('@/lib/api').then(({ initApiUrlCache }) => {
+        initApiUrlCache().catch((error) => {
+          console.warn('Failed to initialize API URL cache:', error);
+        });
+      });
+    }
   }, []);
 
   // Redirect to main page if already authenticated

@@ -177,25 +177,40 @@ export default function Home() {
             <span className="text-[9.6px] text-blue-700">{databaseStatus}</span>
             <button
               onClick={async () => {
+                // #region agent log
+                fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'page.tsx:179',message:'Sync Tx button clicked',data:{timestamp:Date.now()},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
+                // #endregion
                 setIsSyncing(true);
                 setDatabaseStatus('Syncing...');
                 try {
-                  // First: Upload any pending local transactions to cloud
+                  // Upload any pending local transactions to cloud
                   console.log('🔄 [SYNC] Starting upload sync...');
-                  await smartSyncService.forceSync();
-                  console.log('✅ [SYNC] Upload sync completed');
+                  // #region agent log
+                  fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'page.tsx:185',message:'Before forceSync call',data:{timestamp:Date.now()},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
+                  // #endregion
+                  const syncResult = await smartSyncService.forceSync();
+                  // #region agent log
+                  fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'page.tsx:188',message:'After forceSync call',data:{success:syncResult.success,syncedCount:syncResult.syncedCount,message:syncResult.message},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
+                  // #endregion
+                  console.log('✅ [SYNC] Upload sync completed', syncResult);
 
-                  // Then: Download fresh data from cloud
-                  console.log('🔄 [SYNC] Starting download sync...');
-                  await databaseHealthService.forceSync();
-                  console.log('✅ [SYNC] Download sync completed');
-
-                  const newStatus = await databaseHealthService.getStatusMessage();
-                  setDatabaseStatus(newStatus);
+                  // Show user-friendly status message
+                  if (syncResult.success) {
+                    if (syncResult.syncedCount === 0) {
+                      setDatabaseStatus('No pending transactions');
+                    } else {
+                      setDatabaseStatus(`Synced ${syncResult.syncedCount} transaction(s)`);
+                    }
+                  } else {
+                    setDatabaseStatus(syncResult.message || 'Sync failed');
+                  }
 
                   // Trigger data refresh event for POSLayout
                   window.dispatchEvent(new CustomEvent('dataSynced'));
                 } catch (error) {
+                  // #region agent log
+                  fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'page.tsx:196',message:'Sync error caught',data:{error:error instanceof Error?error.message:String(error),stack:error instanceof Error?error.stack:undefined},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'E'})}).catch(()=>{});
+                  // #endregion
                   console.error('❌ Sync failed:', error);
                   setDatabaseStatus('Sync failed');
                 } finally {
@@ -206,7 +221,7 @@ export default function Home() {
               className="px-[3.2px] py-[1.6px] text-[9.6px] bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
               title="Sync database"
             >
-              Sync Now
+              Sync Tx
             </button>
           </div>
           <div className="w-px h-[16px] bg-gray-300"></div>

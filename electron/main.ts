@@ -1,11 +1,12 @@
 import { app, BrowserWindow, Menu, ipcMain, screen, protocol } from 'electron';
-import Database from 'better-sqlite3';
-import mysql from 'mysql2/promise';
 import * as path from 'path';
 import * as fs from 'fs';
 import * as os from 'os';
 import { PrinterManagementService } from './printerManagement';
 import { websocketServer } from './websocketServer';
+import { initializeMySQLPool, getMySQLPool, executeQuery, executeQueryOne, executeUpdate, executeUpsert, executeTransaction, getConnection, initializeSystemPosPool, executeSystemPosQuery, executeSystemPosQueryOne, executeSystemPosUpdate, executeSystemPosTransaction, toMySQLDateTime, toMySQLTimestamp } from './mysqlDb';
+import { initializeMySQLSchema } from './mysqlSchema';
+import { readConfig, writeConfig, resetConfig, getDbConfig, type AppConfig } from './configManager';
 
 // Store original console functions early (before they might be suppressed)
 // These are used to bypass console suppression for critical error messages
@@ -14,134 +15,9 @@ const originalConsoleError = console.error.bind(console);
 const originalConsoleInfo = console.info.bind(console);
 const originalConsoleDebug = console.debug.bind(console);
 
-// Store the discovered database path globally (declared early so it can be used in initializeDatabasePath)
-let discoveredDbPath: string | null = null;
+// MySQL pool will be initialized in createWindow
 
-// Initialize database path early - before app is ready
-// This ensures the path is set correctly for both dev and production
-function initializeDatabasePath(): void {
-  console.log('🔍 [EARLY INIT] Initializing database path...');
-  
-  // SMART PATH DISCOVERY: Check likely locations for existing DB
-  // In production, app.getPath('appData') should still work, but we need to handle it carefully
-  let appData: string;
-  try {
-    appData = app.getPath('appData');
-  } catch (error) {
-    // Fallback if app is not ready yet
-    appData = path.join(os.homedir(), 'AppData', 'Roaming');
-    console.log('⚠️ [EARLY INIT] App not ready, using fallback appData path:', appData);
-  }
-  
-  console.log(`📂 [EARLY INIT] AppData path: ${appData}`);
-  
-  // Diagnostic logging to file for debugging on other machines
-  const diagLogPath = path.join(os.homedir(), 'AppData', 'Roaming', 'marviano-pos', 'path-diagnostic.log');
-  const diagLog = (msg: string) => {
-    try {
-      const timestamp = new Date().toISOString();
-      const dir = path.dirname(diagLogPath);
-      if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-      fs.appendFileSync(diagLogPath, `${timestamp} ${msg}\n`);
-    } catch (e) { /* ignore */ }
-  };
-  
-  diagLog(`=== APP STARTUP ===`);
-  diagLog(`os.homedir() = ${os.homedir()}`);
-  diagLog(`appData = ${appData}`);
-  diagLog(`process.platform = ${process.platform}`);
-  diagLog(`app.getPath('userData') = ${(() => { try { return app.getPath('userData'); } catch(e) { return 'ERROR: ' + e; } })()}`);
-  diagLog(`app.getPath('appData') = ${(() => { try { return app.getPath('appData'); } catch(e) { return 'ERROR: ' + e; } })()}`);
-  
-  // Build list of possible paths, including explicit user path
-  const possiblePaths = [
-    // Explicit path from user (most reliable) - CHECK THIS FIRST
-    path.join(os.homedir(), 'AppData', 'Roaming', 'marviano-pos', 'pos-offline.db'),
-    // Standard appData paths
-    path.join(appData, 'marviano-pos', 'pos-offline.db')
-  ];
-  
-  // Remove duplicates
-  const uniquePaths = Array.from(new Set(possiblePaths));
-
-  diagLog(`Checking ${uniquePaths.length} possible database paths:`);
-  console.log(`🔍 [EARLY INIT] Checking possible database paths:`);
-  uniquePaths.forEach((p, i) => {
-    const exists = fs.existsSync(p);
-    diagLog(`  ${i + 1}. ${p} - ${exists ? 'EXISTS' : 'NOT FOUND'}`);
-    console.log(`  ${i + 1}. ${p} ${exists ? '✅ EXISTS' : '❌ NOT FOUND'}`);
-    if (exists) {
-      const stats = fs.statSync(p);
-      diagLog(`     File size: ${stats.size} bytes, modified: ${stats.mtime}`);
-      console.log(`     File size: ${stats.size} bytes, modified: ${stats.mtime}`);
-    }
-  });
-
-  let dbPath = uniquePaths[1] || uniquePaths[0]; // Default to appData/marviano-pos (skip explicit path as default)
-  let found = false;
-
-  for (const p of uniquePaths) {
-    if (fs.existsSync(p)) {
-      console.log(`✅ [EARLY INIT] Found existing database at: ${p}`);
-      diagLog(`✅ Found existing database at: ${p}`);
-      dbPath = p;
-      found = true;
-
-      // Store the discovered path globally
-      discoveredDbPath = p;
-      
-      // Align UserData path to where the DB is found
-      try {
-        const userDataDir = path.dirname(p);
-        app.setPath('userData', userDataDir);
-        console.log(`📂 [EARLY INIT] Set userData path to: ${userDataDir}`);
-        // Verify it was set correctly
-        const verifyUserData = app.getPath('userData');
-        if (userDataDir !== verifyUserData) {
-          console.warn(`⚠️ [EARLY INIT] WARNING: userData path mismatch! Requested: ${userDataDir}, Actual: ${verifyUserData}`);
-        }
-      } catch (error) {
-        console.warn('⚠️ [EARLY INIT] Could not set userData path (app may not be ready):', error);
-        // Even if setPath fails, we still have the discovered path stored
-      }
-      break;
-    }
-  }
-
-  if (!found) {
-    console.log(`⚠️ [EARLY INIT] No existing database found. Will create at: ${dbPath}`);
-    diagLog(`⚠️ No existing database found. Will create at: ${dbPath}`);
-    // Store the path we'll use
-    discoveredDbPath = dbPath;
-    
-    // Ensure directory exists
-    const dbDir = path.dirname(dbPath);
-    if (!fs.existsSync(dbDir)) {
-      try {
-        fs.mkdirSync(dbDir, { recursive: true });
-        console.log(`📂 [EARLY INIT] Created directory: ${dbDir}`);
-      } catch (error) {
-        console.error('❌ [EARLY INIT] Failed to create directory:', error);
-      }
-    }
-    // Set userData path to match where we'll create the database
-    try {
-      app.setPath('userData', dbDir);
-      console.log(`📂 [EARLY INIT] Set userData path to: ${dbDir}`);
-    } catch (error) {
-      console.warn('⚠️ [EARLY INIT] Could not set userData path (app may not be ready):', error);
-      // Even if setPath fails, we still have the discovered path stored
-    }
-  }
-
-  console.log('📂 [EARLY INIT] Final database path will be:', discoveredDbPath || dbPath);
-  console.log('📂 [EARLY INIT] Stored discoveredDbPath:', discoveredDbPath);
-}
-
-// Initialize database path as early as possible
-// This must happen before app.whenReady() to ensure path is set correctly
-// app.getPath() should work even before app.whenReady()
-initializeDatabasePath();
+// MySQL database will be initialized in createWindow function
 
 // Register custom protocol before app is ready
 protocol.registerSchemesAsPrivileged([
@@ -307,14 +183,32 @@ const parseJsonArray = <T>(
  * Reads customizations from normalized tables (NO JSON)
  * bundleProductId: NULL/undefined = main product, number = specific bundle product
  */
-const readCustomizationsFromNormalizedTables = (
-  db: Database.Database,
-  transactionItemId: string,
+const readCustomizationsFromNormalizedTables = async (
+  transactionItemUuid: string,
   bundleProductId?: number | null
-): RawCustomization[] | null => {
+): Promise<RawCustomization[] | null> => {
   try {
+    // Look up the INT id from transaction_items using UUID
+    const itemRow = await executeQueryOne<{ id: number }>(
+      'SELECT id FROM transaction_items WHERE uuid_id = ? LIMIT 1',
+      [transactionItemUuid]
+    );
+
+    if (!itemRow || typeof itemRow.id !== 'number') {
+      return null;
+    }
+
+    const transactionItemId = itemRow.id;
+
     // Read from normalized tables - filter by bundle_product_id
-    const customizations = db.prepare(`
+    const customizations = await executeQuery<{
+      customization_id: number;
+      customization_name: string;
+      option_id: number | null;
+      option_name: string | null;
+      price_adjustment: number | null;
+      bundle_product_id: number | null;
+    }>(`
       SELECT 
         tic.customization_type_id as customization_id,
         pct.name as customization_name,
@@ -328,14 +222,7 @@ const readCustomizationsFromNormalizedTables = (
       WHERE tic.transaction_item_id = ?
         AND (tic.bundle_product_id IS NULL AND ? IS NULL OR tic.bundle_product_id = ?)
       ORDER BY tic.id, tico.id
-    `).all(transactionItemId, bundleProductId || null, bundleProductId || null) as Array<{
-      customization_id: number;
-      customization_name: string;
-      option_id: number | null;
-      option_name: string | null;
-      price_adjustment: number | null;
-      bundle_product_id: number | null;
-    }>;
+    `, [transactionItemId, bundleProductId || null, bundleProductId || null]);
 
     if (customizations.length === 0) {
       return null;
@@ -374,82 +261,92 @@ const readCustomizationsFromNormalizedTables = (
  * Saves customizations to normalized tables for analytics
  * NO JSON - only normalized tables
  */
-const saveCustomizationsToNormalizedTables = (
-  db: Database.Database,
-  transactionItemId: string,
+const saveCustomizationsToNormalizedTables = async (
+  transactionItemUuid: string,
   customizations: RawCustomization[] | null | undefined,
   createdAt: string,
   bundleProductId?: number | null  // NULL or undefined = main product, number = bundle product ID
-): void => {
+): Promise<void> => {
   if (!customizations || !Array.isArray(customizations) || customizations.length === 0) {
     return;
   }
 
   try {
-    // Delete existing normalized data for this transaction item and bundle product (in case of update)
-    // If bundleProductId is provided, only delete customizations for that specific bundle product
-    // If bundleProductId is null/undefined, delete main product customizations (bundle_product_id IS NULL)
-    const deleteStmt = db.prepare(`
-      DELETE FROM transaction_item_customization_options 
-      WHERE transaction_item_customization_id IN (
-        SELECT id FROM transaction_item_customizations 
+    // Look up the INT id from transaction_items using UUID
+    const itemRow = await executeQueryOne<{ id: number }>(
+      'SELECT id FROM transaction_items WHERE uuid_id = ? LIMIT 1',
+      [transactionItemUuid]
+    );
+
+    if (!itemRow || typeof itemRow.id !== 'number') {
+      console.warn(`⚠️ Transaction item UUID ${transactionItemUuid} not found, skipping customizations save`);
+      return;
+    }
+
+    const transactionItemId = itemRow.id;
+
+    const connection = await getConnection();
+    try {
+      await connection.beginTransaction();
+
+      // Delete existing normalized data for this transaction item and bundle product (in case of update)
+      await connection.query(`
+        DELETE FROM transaction_item_customization_options 
+        WHERE transaction_item_customization_id IN (
+          SELECT id FROM transaction_item_customizations 
+          WHERE transaction_item_id = ? 
+            AND (bundle_product_id IS NULL AND ? IS NULL OR bundle_product_id = ?)
+        )
+      `, [transactionItemId, bundleProductId || null, bundleProductId || null]);
+      
+      await connection.query(`
+        DELETE FROM transaction_item_customizations 
         WHERE transaction_item_id = ? 
           AND (bundle_product_id IS NULL AND ? IS NULL OR bundle_product_id = ?)
-      )
-    `);
-    const deleteTicStmt = db.prepare(`
-      DELETE FROM transaction_item_customizations 
-      WHERE transaction_item_id = ? 
-        AND (bundle_product_id IS NULL AND ? IS NULL OR bundle_product_id = ?)
-    `);
+      `, [transactionItemId, bundleProductId || null, bundleProductId || null]);
 
-    deleteStmt.run(transactionItemId, bundleProductId || null, bundleProductId || null);
-    deleteTicStmt.run(transactionItemId, bundleProductId || null, bundleProductId || null);
+      // Insert into normalized tables
+      for (const customization of customizations) {
+        const customizationId = Number(customization.customization_id);
+        if (!customizationId || Number.isNaN(customizationId)) {
+          console.warn('⚠️ Invalid customization_id:', customization.customization_id);
+          continue;
+        }
 
-    // Insert into normalized tables
-    const insertTicStmt = db.prepare(`
-      INSERT INTO transaction_item_customizations (transaction_item_id, customization_type_id, bundle_product_id, created_at)
-      VALUES (?, ?, ?, ?)
-    `);
+        // Insert customization type link (use INT id and UUID)
+        const [ticResult] = await connection.query(`
+          INSERT INTO transaction_item_customizations (transaction_item_id, uuid_transaction_item_id, customization_type_id, bundle_product_id, created_at)
+          VALUES (?, ?, ?, ?, ?)
+        `, [transactionItemId, transactionItemUuid, customizationId, bundleProductId || null, createdAt]) as any;
+        const ticId = ticResult.insertId;
 
-    const insertTicoStmt = db.prepare(`
-      INSERT INTO transaction_item_customization_options (
-        transaction_item_customization_id, customization_option_id, option_name, price_adjustment, created_at
-      ) VALUES (?, ?, ?, ?, ?)
-    `);
+        // Insert selected options
+        if (Array.isArray(customization.selected_options)) {
+          for (const option of customization.selected_options) {
+            const optionId = Number(option.option_id);
+            if (!optionId || Number.isNaN(optionId)) {
+              console.warn('⚠️ Invalid option_id:', option.option_id);
+              continue;
+            }
 
-    for (const customization of customizations) {
-      const customizationId = Number(customization.customization_id);
-      if (!customizationId || Number.isNaN(customizationId)) {
-        console.warn('⚠️ Invalid customization_id:', customization.customization_id);
-        continue;
-      }
+            const optionName = option.option_name || 'Unknown Option';
+            const priceAdjustment = Number(option.price_adjustment) || 0;
 
-      // Insert customization type link
-      const ticResult = insertTicStmt.run(transactionItemId, customizationId, bundleProductId || null, createdAt);
-      const ticId = (ticResult as { lastInsertRowid: number }).lastInsertRowid;
-
-      // Insert selected options
-      if (Array.isArray(customization.selected_options)) {
-        for (const option of customization.selected_options) {
-          const optionId = Number(option.option_id);
-          if (!optionId || Number.isNaN(optionId)) {
-            console.warn('⚠️ Invalid option_id:', option.option_id);
-            continue;
+            await connection.query(`
+              INSERT INTO transaction_item_customization_options (
+                transaction_item_customization_id, customization_option_id, option_name, price_adjustment, created_at
+              ) VALUES (?, ?, ?, ?, ?)
+            `, [ticId, optionId, optionName, priceAdjustment, createdAt]);
           }
-
-          const optionName = option.option_name || 'Unknown Option';
-          const priceAdjustment = Number(option.price_adjustment) || 0;
-
-          insertTicoStmt.run(
-            ticId,
-            optionId,
-            optionName,
-            priceAdjustment,
-            createdAt
-          );
         }
       }
+
+      await connection.commit();
+    } catch (error) {
+      await connection.rollback();
+      throw error;
+    } finally {
+      connection.release();
     }
   } catch (error) {
     console.error('❌ Error saving customizations to normalized tables:', error);
@@ -511,35 +408,57 @@ if (!shouldLog) {
 let mainWindow: BrowserWindow | null = null;
 let customerWindow: BrowserWindow | null = null;
 let printWindow: BrowserWindow | null = null;
-let localDb: Database.Database | null = null;
+// MySQL pool is managed by mysqlDb module
 let printerService: PrinterManagementService | null = null;
 
-function getLocalDbPath(): string {
-  // ALWAYS use discoveredDbPath if available - never fall back to app.getPath('userData')
-  // because in packaged apps, app.getPath('userData') returns path based on productName
-  // which might be different from where the actual database is located
-  if (discoveredDbPath) {
-    return discoveredDbPath;
+// Print queue system to prevent label printing interruption
+interface PrintJob {
+  type: 'label' | 'labels-batch';
+  data: any;
+  resolve: (result: { success: boolean; error?: string }) => void;
+  reject: (error: Error) => void;
+}
+
+let printQueue: PrintJob[] = [];
+let isProcessingQueue = false;
+
+async function processPrintQueue(): Promise<void> {
+  if (isProcessingQueue || printQueue.length === 0) {
+    return;
   }
-  
-  // CRITICAL: If discoveredDbPath is not set, try to find the database again
-  // This should not happen if initializeDatabasePath() ran correctly, but handle it anyway
-  originalConsoleError('⚠️ [CRITICAL] getLocalDbPath() called but discoveredDbPath is null! Attempting emergency discovery...');
-  
-  // Emergency: Check the known location
-  const emergencyPath = path.join(os.homedir(), 'AppData', 'Roaming', 'marviano-pos', 'pos-offline.db');
-  if (fs.existsSync(emergencyPath)) {
-    originalConsoleLog(`✅ [EMERGENCY] Found database at: ${emergencyPath}`);
-    discoveredDbPath = emergencyPath;
-    return emergencyPath;
+
+  isProcessingQueue = true;
+  console.log(`📋 [PRINT QUEUE] Processing queue, ${printQueue.length} job(s) pending`);
+
+  while (printQueue.length > 0) {
+    const job = printQueue.shift();
+    if (!job) break;
+
+    try {
+      console.log(`🖨️ [PRINT QUEUE] Processing ${job.type} job`);
+      let result: { success: boolean; error?: string };
+
+      if (job.type === 'label') {
+        result = await executeLabelPrint(job.data);
+      } else {
+        result = await executeLabelsBatchPrint(job.data);
+      }
+
+      job.resolve(result);
+      console.log(`✅ [PRINT QUEUE] ${job.type} job completed`);
+    } catch (error) {
+      console.error(`❌ [PRINT QUEUE] ${job.type} job failed:`, error);
+      job.reject(error instanceof Error ? error : new Error(String(error)));
+    }
+
+    // Small delay between jobs to ensure printer is ready
+    if (printQueue.length > 0) {
+      await new Promise(resolve => setTimeout(resolve, 300));
+    }
   }
-  
-  // Last resort: Use userData directory (but log a warning)
-  const userDataPath = app.getPath('userData');
-  const dbPath = path.join(userDataPath, 'pos-offline.db');
-  originalConsoleError(`❌ [CRITICAL] Using fallback path (database may not exist): ${dbPath}`);
-  originalConsoleError(`❌ [CRITICAL] Expected database at: ${emergencyPath}`);
-  return dbPath;
+
+  isProcessingQueue = false;
+  console.log(`✅ [PRINT QUEUE] Queue processing complete`);
 }
 
 let windowsInitialized = false;
@@ -553,1360 +472,83 @@ function createWindows(): void {
   }
   windowsInitialized = true;
 
-  // Initialize local SQLite (offline storage)
+  // Initialize MySQL database (local LAN database)
   try {
-    originalConsoleLog('🔍 Initializing SQLite database for offline support...');
+    originalConsoleLog('🔍 Initializing MySQL database connection...');
 
-    // CRITICAL: Always use discoveredDbPath - it's the source of truth
-    // Don't rely on getLocalDbPath() which might return wrong path in packaged apps
-    if (!discoveredDbPath) {
-      originalConsoleError('❌ [CRITICAL] discoveredDbPath is null in createWindows()!');
-      // Emergency discovery
-      const emergencyPath = path.join(os.homedir(), 'AppData', 'Roaming', 'marviano-pos', 'pos-offline.db');
-      if (fs.existsSync(emergencyPath)) {
-        originalConsoleLog(`✅ [EMERGENCY] Found database at: ${emergencyPath}`);
-        discoveredDbPath = emergencyPath;
-      } else {
-        throw new Error('Database path not discovered and emergency discovery failed');
-      }
-    }
+    // Initialize MySQL connection pool
+    const mysqlPool = initializeMySQLPool();
     
-    const dbPath = discoveredDbPath; // Use discovered path as the primary path
-    originalConsoleLog('📂 [CREATE WINDOWS] Using database path:', dbPath);
-    originalConsoleLog('📂 [CREATE WINDOWS] Discovered path stored:', discoveredDbPath);
-    
-    // Verify the path exists or can be created
-    const dbDir = path.dirname(dbPath);
-    if (!fs.existsSync(dbDir)) {
-      originalConsoleLog(`📂 [CREATE WINDOWS] Creating directory: ${dbDir}`);
-      fs.mkdirSync(dbDir, { recursive: true });
-    }
-    
-    // Double-check the database file exists (or will be created)
-    if (fs.existsSync(dbPath)) {
-      const stats = fs.statSync(dbPath);
-      originalConsoleLog(`✅ [CREATE WINDOWS] Database file exists: ${dbPath} (${stats.size} bytes)`);
-      
-      // Verify it's not empty (which would indicate a new database)
-      if (stats.size < 100) {
-        originalConsoleError(`⚠️ [CREATE WINDOWS] Database file is very small (${stats.size} bytes), might be empty or corrupted`);
-      }
-    } else {
-      originalConsoleError(`⚠️ [CREATE WINDOWS] Database file does not exist yet, will be created: ${dbPath}`);
-      originalConsoleError(`⚠️ [CREATE WINDOWS] WARNING: This will create a NEW database. Existing data will not be accessible!`);
-      originalConsoleError(`⚠️ [CREATE WINDOWS] Expected location: ${path.join(os.homedir(), 'AppData', 'Roaming', 'marviano-pos', 'pos-offline.db')}`);
-    }
-
-    // OPTIMIZATION: User requested to disable encryption to keep using legacy database
-    console.log('🔓 Opening database in legacy plaintext mode (Encryption disabled)');
-
-    try {
-      // CRITICAL: Always prefer discoveredDbPath - it's the actual location of the database
-      // Never use dbPath from getLocalDbPath() as fallback because it might point to wrong location in packaged apps
-      if (!discoveredDbPath) {
-        originalConsoleError('❌ [CRITICAL] discoveredDbPath is null when opening database!');
-        originalConsoleError(`❌ [CRITICAL] dbPath from getLocalDbPath(): ${dbPath}`);
-        // Emergency: Try to find it again
-        const emergencyPath = path.join(os.homedir(), 'AppData', 'Roaming', 'marviano-pos', 'pos-offline.db');
-        if (fs.existsSync(emergencyPath)) {
-          originalConsoleLog(`✅ [EMERGENCY] Found database at: ${emergencyPath}`);
-          discoveredDbPath = emergencyPath;
-        } else {
-          throw new Error(`Database path not discovered and emergency path not found: ${emergencyPath}`);
-        }
-      }
-      const actualDbPath = discoveredDbPath;
-      originalConsoleLog(`📂 [CREATE WINDOWS] Opening database at: ${actualDbPath}`);
-      
-      // Write to diagnostic log
-      const diagLogPath2 = path.join(os.homedir(), 'AppData', 'Roaming', 'marviano-pos', 'path-diagnostic.log');
-      try { fs.appendFileSync(diagLogPath2, `${new Date().toISOString()} [CREATE WINDOWS] Opening database at: ${actualDbPath}\n`); } catch(e) {}
-      
-      localDb = new Database(actualDbPath/*, { verbose: console.log } */); // Optional: enable verbose for queries
-      // Test access
-      const tableCount = localDb.prepare('SELECT count(*) as count FROM sqlite_master').get() as { count: number };
-      
-      // Check if transactions table exists before querying it (might be a new database)
-      let txCount = 0;
-      try {
-        const txCountResult = localDb.prepare('SELECT count(*) as count FROM transactions').get() as { count: number } | undefined;
-        txCount = txCountResult?.count || 0;
-      } catch (txError) {
-        // Table doesn't exist yet - this is okay for new databases
-        console.log('ℹ️ [CREATE WINDOWS] Transactions table does not exist yet (new database)');
-      }
-      
-      originalConsoleLog('✅ Database opened successfully (Plaintext). Tables found:', tableCount.count);
-      try { 
-        const dbStats = fs.statSync(actualDbPath);
-        fs.appendFileSync(diagLogPath2, `${new Date().toISOString()} ✅ Database opened successfully. Tables: ${tableCount.count}, Transactions: ${txCount}, FileSize: ${dbStats.size} bytes\n`); 
-      } catch(e) {}
-      
-      // If we have very few tables, it might be a new/empty database
-      if (tableCount.count < 5) {
-        console.warn(`⚠️ [CREATE WINDOWS] Database has only ${tableCount.count} tables. This might be a new/empty database!`);
-        console.warn(`⚠️ [CREATE WINDOWS] Expected location: ${path.join(os.homedir(), 'AppData', 'Roaming', 'marviano-pos', 'pos-offline.db')}`);
-        console.warn(`⚠️ [CREATE WINDOWS] Actual location: ${actualDbPath}`);
-      }
-    } catch (dbErr) {
-      originalConsoleError('❌ Failed to open database:', dbErr);
-      originalConsoleError('❌ Database path attempted:', discoveredDbPath || dbPath);
-      originalConsoleError('❌ Error details:', dbErr instanceof Error ? dbErr.message : String(dbErr));
-      originalConsoleError('❌ Error stack:', dbErr instanceof Error ? dbErr.stack : 'No stack trace');
-      localDb = null; // Only reset if database opening fails
-      // Don't throw - allow window to be created even if database fails
-      // The app can still run, just without offline database support
-      originalConsoleError('⚠️ Continuing without database - app will run in online-only mode');
-    }
-
-    // CRITICAL: Database is now open - don't reset localDb if errors occur after this point
-    // Enable WAL mode for better concurrency (must be done after keying)
-    if (localDb) {
-      try {
-        localDb.pragma('journal_mode = WAL');
-        localDb.pragma('synchronous = NORMAL');
-        localDb.pragma('cache_size = 10000');
-        localDb.pragma('temp_store = MEMORY');
-        originalConsoleLog('✅ Database pragmas set successfully');
-      } catch (pragmaErr) {
-        originalConsoleError('⚠️ Failed to set database pragmas (non-critical):', pragmaErr);
-        // Don't reset localDb - database is still usable
-      }
-    } else {
-      originalConsoleError('⚠️ Cannot set database pragmas - localDb is null');
-    }
-
-    // Initialize MySQL Connection Pool for Shadow DB
-    console.log('🔍 Initializing MySQL Shadow DB connection...');
-
-    // Load environment variables from .env file (optional - don't crash if dotenv is not available)
-    // We try multiple paths because in production the path might differ
-    try {
-      const dotenv = require('dotenv');
-      const possibleEnvPaths = [
-        path.join(process.cwd(), '.env'),
-        path.join(app.getAppPath(), '.env'),
-        path.join(path.dirname(app.getPath('exe')), '.env')
-      ];
-
-      let envLoaded = false;
-      for (const envPath of possibleEnvPaths) {
-        if (fs.existsSync(envPath)) {
-          console.log(`Loading .env from: ${envPath}`);
-          dotenv.config({ path: envPath });
-          envLoaded = true;
-          break;
-        }
-      }
-
-      if (!envLoaded) {
-        console.warn('⚠️ No .env file found for MySQL credentials, falling back to defaults');
-      }
-    } catch (dotenvErr) {
-      console.warn('⚠️ dotenv module not available, using environment defaults. Error:', dotenvErr);
-    }
-
-    const mysqlPool = mysql.createPool({
-      host: process.env.DB_HOST || 'localhost',
-      user: process.env.DB_USER || 'root',
-      password: process.env.DB_PASSWORD || '',
-      database: process.env.DB_NAME || 'system_pos',
-      waitForConnections: true,
-      connectionLimit: 10,
-      queueLimit: 0
+    // Initialize MySQL schema
+    initializeMySQLSchema().catch(err => {
+      console.error('❌ Failed to initialize MySQL schema:', err);
     });
 
-    // Test MySQL Connection
-    mysqlPool.getConnection()
-      .then(conn => {
-        console.log('✅ MySQL Shadow DB connected successfully');
-        conn.release();
-        // Create printer2_audit_log if not exists
-        return mysqlPool.execute(`
-                CREATE TABLE IF NOT EXISTS printer2_audit_log (
-                    id INT AUTO_INCREMENT PRIMARY KEY,
-                    transaction_id VARCHAR(255) NOT NULL,
-                    printer2_receipt_number INT NOT NULL,
-                    print_mode ENUM('auto', 'manual') NOT NULL,
-                    cycle_number INT,
-                    global_counter INT,
-                    printed_at DATETIME NOT NULL,
-                    printed_at_epoch BIGINT NOT NULL,
-                    is_reprint TINYINT DEFAULT 0,
-                    reprint_count INT DEFAULT 0,
-                    completed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    INDEX idx_transaction (transaction_id),
-                    INDEX idx_printed_at (printed_at)
-                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-            `);
-      })
-      .then(() => console.log('✅ MySQL Shadow DB schema verified'))
-      .catch(err => console.error('❌ MySQL Shadow DB connection failed:', err));
+    // MySQL pool is already initialized above
+    console.log('✅ MySQL database connection initialized (salespulse)');
+    
+    // Initialize System POS MySQL connection pool (for printer 2 transactions)
+    initializeSystemPosPool();
+    console.log('✅ System POS MySQL database connection initialized (system_pos)');
 
-    // Schema migration: Add synced_at column if it doesn't exist
-    // Only run migrations if database is available
-    if (!localDb) {
-      originalConsoleError('⚠️ Cannot run migrations - localDb is null');
-    } else {
-      try {
-        const schemaCheck = localDb.prepare(`PRAGMA table_info(transactions)`).all() as TableInfoRow[];
-      const hasSyncedAt = schemaCheck.some(col => col.name === 'synced_at');
-
-      if (!hasSyncedAt) {
-        console.log('📋 Migrating database: Adding synced_at column...');
-        localDb.prepare(`ALTER TABLE transactions ADD COLUMN synced_at INTEGER`).run();
-        console.log('✅ Migration complete');
-      }
-      const hasVoucherType = schemaCheck.some(col => col.name === 'voucher_type');
-      if (!hasVoucherType) {
-        console.log('📋 Migrating database: Adding transactions.voucher_type column...');
-        localDb.prepare(`ALTER TABLE transactions ADD COLUMN voucher_type TEXT DEFAULT 'none'`).run();
-      }
-      
-      // Migration: Add sync_status, sync_attempts, last_sync_attempt columns
-      const hasSyncStatus = schemaCheck.some(col => col.name === 'sync_status');
-      if (!hasSyncStatus) {
-        console.log('📋 Migrating database: Adding sync_status, sync_attempts, last_sync_attempt columns...');
-        localDb.prepare(`ALTER TABLE transactions ADD COLUMN sync_status TEXT DEFAULT 'pending'`).run();
-        localDb.prepare(`ALTER TABLE transactions ADD COLUMN sync_attempts INTEGER DEFAULT 0`).run();
-        localDb.prepare(`ALTER TABLE transactions ADD COLUMN last_sync_attempt INTEGER`).run();
-        
-        // Set sync_status based on synced_at
-        localDb.prepare(`UPDATE transactions SET sync_status = 'synced' WHERE synced_at IS NOT NULL`).run();
-        localDb.prepare(`UPDATE transactions SET sync_status = 'pending' WHERE synced_at IS NULL`).run();
-        
-        console.log('✅ Sync status migration complete');
-      }
-      
-      // Migration: Drop offline_transactions and offline_transaction_items tables if they exist
-      // These tables are no longer needed as we use sync_status directly in transactions table
-      try {
-        const tables = localDb.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name IN ('offline_transactions', 'offline_transaction_items')`).all() as Array<{ name: string }>;
-        for (const table of tables) {
-          console.log(`📋 Migrating database: Dropping obsolete table ${table.name}...`);
-          localDb.prepare(`DROP TABLE IF EXISTS ${table.name}`).run();
-          console.log(`✅ Dropped table ${table.name}`);
-        }
-        if (tables.length > 0) {
-          console.log('✅ Offline transactions tables cleanup complete');
-        }
-      } catch (error) {
-        console.warn('⚠️ Could not drop offline_transactions tables (may not exist):', error);
-      }
-      const hasVoucherValue = schemaCheck.some(col => col.name === 'voucher_value');
-      if (!hasVoucherValue) {
-        console.log('📋 Migrating database: Adding transactions.voucher_value column...');
-        localDb.prepare(`ALTER TABLE transactions ADD COLUMN voucher_value REAL`).run();
-      }
-      const hasVoucherLabel = schemaCheck.some(col => col.name === 'voucher_label');
-      if (!hasVoucherLabel) {
-        console.log('📋 Migrating database: Adding transactions.voucher_label column...');
-        localDb.prepare(`ALTER TABLE transactions ADD COLUMN voucher_label TEXT`).run();
-      }
-      const hasCustomerUnit = schemaCheck.some(col => col.name === 'customer_unit');
-      if (!hasCustomerUnit) {
-        console.log('📋 Migrating database: Adding transactions.customer_unit column...');
-        localDb.prepare(`ALTER TABLE transactions ADD COLUMN customer_unit INTEGER`).run();
-      }
-      const hasRefundStatus = schemaCheck.some(col => col.name === 'refund_status');
-      if (!hasRefundStatus) {
-        console.log('📋 Migrating database: Adding transactions.refund_status column...');
-        localDb.prepare(`ALTER TABLE transactions ADD COLUMN refund_status TEXT DEFAULT 'none'`).run();
-      }
-      const hasRefundTotal = schemaCheck.some(col => col.name === 'refund_total');
-      if (!hasRefundTotal) {
-        console.log('📋 Migrating database: Adding transactions.refund_total column...');
-        localDb.prepare(`ALTER TABLE transactions ADD COLUMN refund_total REAL DEFAULT 0.0`).run();
-      }
-      const hasLastRefundedAt = schemaCheck.some(col => col.name === 'last_refunded_at');
-      if (!hasLastRefundedAt) {
-        console.log('📋 Migrating database: Adding transactions.last_refunded_at column...');
-        localDb.prepare(`ALTER TABLE transactions ADD COLUMN last_refunded_at TEXT`).run();
-      }
-    } catch (e) {
-      console.log('⚠️ Migration check failed:', e);
+    // Initialize printer management service with MySQL pool only
+    try {
+      printerService = new PrinterManagementService(mysqlPool);
+      console.log('✅ Printer Management Service initialized with MySQL');
+    } catch (printerServiceError) {
+      console.error('❌ Failed to initialize Printer Management Service:', printerServiceError);
     }
-      } // End of localDb check for transactions migration
 
-    // Schema migration: ensure new cash tracking columns exist on shifts
-    if (localDb) {
-      try {
-        const shiftSchema = localDb.prepare(`PRAGMA table_info(shifts)`).all() as TableInfoRow[];
-      const hasKasAkhir = shiftSchema.some(col => col.name === 'kas_akhir');
-      if (!hasKasAkhir) {
-        console.log('📋 Migrating database: Adding shifts.kas_akhir column...');
-        localDb.prepare(`ALTER TABLE shifts ADD COLUMN kas_akhir REAL`).run();
-      }
-      const hasKasExpected = shiftSchema.some(col => col.name === 'kas_expected');
-      if (!hasKasExpected) {
-        console.log('📋 Migrating database: Adding shifts.kas_expected column...');
-        localDb.prepare(`ALTER TABLE shifts ADD COLUMN kas_expected REAL`).run();
-      }
-      const hasKasSelisih = shiftSchema.some(col => col.name === 'kas_selisih');
-      if (!hasKasSelisih) {
-        console.log('📋 Migrating database: Adding shifts.kas_selisih column...');
-        localDb.prepare(`ALTER TABLE shifts ADD COLUMN kas_selisih REAL`).run();
-      }
-      const hasKasSelisihLabel = shiftSchema.some(col => col.name === 'kas_selisih_label');
-      if (!hasKasSelisihLabel) {
-        console.log('📋 Migrating database: Adding shifts.kas_selisih_label column...');
-        localDb.prepare(`ALTER TABLE shifts ADD COLUMN kas_selisih_label TEXT DEFAULT 'balanced'`).run();
-      }
-      const hasCashSalesTotal = shiftSchema.some(col => col.name === 'cash_sales_total');
-      if (!hasCashSalesTotal) {
-        console.log('📋 Migrating database: Adding shifts.cash_sales_total column...');
-        localDb.prepare(`ALTER TABLE shifts ADD COLUMN cash_sales_total REAL`).run();
-      }
-      const hasCashRefundTotal = shiftSchema.some(col => col.name === 'cash_refund_total');
-      if (!hasCashRefundTotal) {
-        console.log('📋 Migrating database: Adding shifts.cash_refund_total column...');
-        localDb.prepare(`ALTER TABLE shifts ADD COLUMN cash_refund_total REAL`).run();
-      }
-    } catch (shiftError) {
-      console.log('⚠️ Shift migration check failed:', shiftError);
-    }
-      } // End of localDb check for shifts migration
+    // Migrate slideshow images from /public/ to userData on first run
+    try {
+      const slideshowPath = getSlideshowPath();
+      const publicSlideshowPath = path.join(process.cwd(), 'public', 'images', 'slideshow');
 
-    // Schema migration: Add businesses.status column if it doesn't exist (for MySQL compatibility)
-    if (localDb) {
-      try {
-        const businessesSchema = localDb.prepare(`PRAGMA table_info(businesses)`).all() as TableInfoRow[];
-      const hasStatus = businessesSchema.some(col => col.name === 'status');
-      if (!hasStatus) {
-        console.log('📋 Migrating database: Adding businesses.status column...');
-        localDb.prepare(`ALTER TABLE businesses ADD COLUMN status TEXT DEFAULT 'active'`).run();
-        // Set default value for existing records
-        localDb.prepare(`UPDATE businesses SET status = 'active' WHERE status IS NULL`).run();
-        console.log('✅ Added businesses.status column with default value');
-      }
-    } catch (businessesError) {
-      console.log('⚠️ Businesses status migration check failed:', businessesError);
-    }
-      } // End of localDb check for businesses migration
+      if (fs.existsSync(publicSlideshowPath)) {
+        const existingFiles = fs.readdirSync(slideshowPath);
+        const imageExtensions = ['.jpg', '.jpeg', '.png', '.webp', '.gif'];
+        const existingImages = existingFiles.filter((file: string) => {
+          const ext = path.extname(file).toLowerCase();
+          return imageExtensions.includes(ext);
+        });
 
-    // Schema migration: Add category2_businesses.created_at column if it doesn't exist (for MySQL compatibility)
-    if (localDb) {
-      try {
-        const category2BusinessesSchema = localDb.prepare(`PRAGMA table_info(category2_businesses)`).all() as TableInfoRow[];
-      const hasCreatedAt = category2BusinessesSchema.some(col => col.name === 'created_at');
-      if (!hasCreatedAt) {
-        console.log('📋 Migrating database: Adding category2_businesses.created_at column...');
-        localDb.prepare(`ALTER TABLE category2_businesses ADD COLUMN created_at TEXT`).run();
-        console.log('✅ Added category2_businesses.created_at column');
-      }
-    } catch (category2BusinessesError) {
-      console.log('⚠️ Category2_businesses created_at migration check failed:', category2BusinessesError);
-    }
-    } // End of localDb check for category2_businesses migration
-
-    // Phase 2: Ensure NOT NULL constraints are satisfied for critical fields
-    // Only run if tables exist (for new databases, tables will be created later)
-    if (localDb) {
-      try {
-      // Check if tables exist before trying to migrate
-      const tableList = localDb.prepare(`
-        SELECT name FROM sqlite_master WHERE type='table' AND name IN ('businesses', 'users', 'transactions', 'organizations', 'roles')
-      `).all() as Array<{ name: string }>;
-      
-      const existingTables = new Set(tableList.map(t => t.name));
-      
-      // Ensure businesses have organization_id (required by MySQL)
-      if (existingTables.has('businesses')) {
-        try {
-          const businessesWithoutOrg = localDb.prepare(`
-            SELECT COUNT(*) as count FROM businesses WHERE organization_id IS NULL
-          `).get() as { count: number };
-          
-          if (businessesWithoutOrg.count > 0) {
-            console.log(`📋 Migrating database: Setting default organization_id for ${businessesWithoutOrg.count} businesses...`);
-            // Get first organization_id from organizations table, or use 1 as fallback
-            let defaultOrgId = 1;
-            if (existingTables.has('organizations')) {
-              try {
-                const firstOrg = localDb.prepare('SELECT id FROM organizations LIMIT 1').get() as { id: number } | undefined;
-                defaultOrgId = firstOrg?.id || 1;
-              } catch (e) {
-                console.log('⚠️ Could not get organization_id from organizations table, using default 1');
-              }
-            }
-            localDb.prepare(`UPDATE businesses SET organization_id = ? WHERE organization_id IS NULL`).run(defaultOrgId);
-            console.log(`✅ Set organization_id = ${defaultOrgId} for businesses without organization`);
-          }
-        } catch (e) {
-          console.log('⚠️ Failed to migrate businesses.organization_id:', e);
-        }
-      }
-
-      // Ensure users have role_id and organization_id (required by MySQL)
-      if (existingTables.has('users')) {
-        try {
-          const usersWithoutRole = localDb.prepare(`
-            SELECT COUNT(*) as count FROM users WHERE role_id IS NULL OR organization_id IS NULL
-          `).get() as { count: number };
-          
-          if (usersWithoutRole.count > 0) {
-            console.log(`📋 Migrating database: Setting default role_id and organization_id for ${usersWithoutRole.count} users...`);
-            // Get first role_id and organization_id, or use 1 as fallback
-            let defaultRoleId = 1;
-            let defaultOrgId = 1;
-            
-            if (existingTables.has('roles')) {
-              try {
-                const firstRole = localDb.prepare('SELECT id FROM roles LIMIT 1').get() as { id: number } | undefined;
-                defaultRoleId = firstRole?.id || 1;
-              } catch (e) {
-                console.log('⚠️ Could not get role_id from roles table, using default 1');
-              }
-            }
-            
-            if (existingTables.has('organizations')) {
-              try {
-                const firstOrg = localDb.prepare('SELECT id FROM organizations LIMIT 1').get() as { id: number } | undefined;
-                defaultOrgId = firstOrg?.id || 1;
-              } catch (e) {
-                console.log('⚠️ Could not get organization_id from organizations table, using default 1');
-              }
-            }
-            
-            localDb.prepare(`UPDATE users SET role_id = ? WHERE role_id IS NULL`).run(defaultRoleId);
-            localDb.prepare(`UPDATE users SET organization_id = ? WHERE organization_id IS NULL`).run(defaultOrgId);
-            console.log(`✅ Set role_id = ${defaultRoleId} and organization_id = ${defaultOrgId} for users without these fields`);
-          }
-        } catch (e) {
-          console.log('⚠️ Failed to migrate users.role_id and users.organization_id:', e);
-        }
-      }
-
-      // Ensure transactions have created_at (required by MySQL)
-      if (existingTables.has('transactions')) {
-        try {
-          const transactionsWithoutCreatedAt = localDb.prepare(`
-            SELECT COUNT(*) as count FROM transactions WHERE created_at IS NULL OR created_at = ''
-          `).get() as { count: number };
-          
-          if (transactionsWithoutCreatedAt.count > 0) {
-            console.log(`📋 Migrating database: Setting default created_at for ${transactionsWithoutCreatedAt.count} transactions...`);
-            const currentTime = new Date().toISOString();
-            localDb.prepare(`UPDATE transactions SET created_at = ? WHERE created_at IS NULL OR created_at = ''`).run(currentTime);
-            console.log(`✅ Set created_at for transactions without timestamp`);
-          }
-
-          // Ensure transactions have refund_status and refund_total (required by MySQL with defaults)
-          try {
-            localDb.prepare(`UPDATE transactions SET refund_status = 'none' WHERE refund_status IS NULL`).run();
-          } catch (e) {
-            // Column might not exist yet, that's okay
-          }
-          try {
-            localDb.prepare(`UPDATE transactions SET refund_total = 0.0 WHERE refund_total IS NULL`).run();
-          } catch (e) {
-            // Column might not exist yet, that's okay
-          }
-        } catch (e) {
-          console.log('⚠️ Failed to migrate transactions.created_at:', e);
-        }
-      }
-      
-    } catch (notNullMigrationError) {
-      console.log('⚠️ NOT NULL constraint migration check failed:', notNullMigrationError);
-      // Don't throw - this is non-critical and shouldn't prevent database initialization
-    }
-      } // End of localDb check for NOT NULL migration
-
-    // Schema migration: Ensure platform price columns exist on products
-    if (localDb) {
-      try {
-        const productSchema = localDb.prepare(`PRAGMA table_info(products)`).all() as TableInfoRow[];
-      const hasHargaGofood = productSchema.some(col => col.name === 'harga_gofood');
-      const hasHargaGrabfood = productSchema.some(col => col.name === 'harga_grabfood');
-      const hasHargaShopeefood = productSchema.some(col => col.name === 'harga_shopeefood');
-      const hasHargaTiktok = productSchema.some(col => col.name === 'harga_tiktok');
-      const hasHargaQpon = productSchema.some(col => col.name === 'harga_qpon');
-      const hasCategory2Name = productSchema.some(col => col.name === 'category2_name');
-      const hasCategory2Id = productSchema.some(col => col.name === 'category2_id');
-      const hasIsBundle = productSchema.some(col => col.name === 'is_bundle');
-
-      if (!hasCategory2Id) {
-        console.log('📋 Migrating database: Adding products.category2_id column...');
-        localDb.prepare('ALTER TABLE products ADD COLUMN category2_id INTEGER').run();
-        // Try to backfill category2_id from category2 table using category2_name
-        try {
-          localDb.prepare(`
-              UPDATE products 
-              SET category2_id = (
-                SELECT c2.id 
-                FROM category2 c2 
-                WHERE c2.name = products.category2_name 
-                LIMIT 1
-              )
-              WHERE category2_name IS NOT NULL AND category2_name != ''
-            `).run();
-          console.log('✅ Backfilled category2_id from category2 table');
-        } catch (e) {
-          console.log('⚠️ Failed to backfill category2_id:', e);
-        }
-      }
-      if (!hasHargaGofood) {
-        console.log('📋 Migrating database: Adding products.harga_gofood column...');
-        localDb.prepare('ALTER TABLE products ADD COLUMN harga_gofood REAL').run();
-      }
-      if (!hasHargaGrabfood) {
-        console.log('📋 Migrating database: Adding products.harga_grabfood column...');
-        localDb.prepare('ALTER TABLE products ADD COLUMN harga_grabfood REAL').run();
-      }
-      if (!hasHargaShopeefood) {
-        console.log('📋 Migrating database: Adding products.harga_shopeefood column...');
-        localDb.prepare('ALTER TABLE products ADD COLUMN harga_shopeefood REAL').run();
-      }
-      if (!hasHargaTiktok) {
-        console.log('📋 Migrating database: Adding products.harga_tiktok column...');
-        localDb.prepare('ALTER TABLE products ADD COLUMN harga_tiktok REAL').run();
-      }
-      if (!hasHargaQpon) {
-        console.log('📋 Migrating database: Adding products.harga_qpon column...');
-        localDb.prepare('ALTER TABLE products ADD COLUMN harga_qpon REAL').run();
-      }
-      if (!hasCategory2Name) {
-        console.log('📋 Migrating database: Adding products.category2_name column...');
-        localDb.prepare('ALTER TABLE products ADD COLUMN category2_name TEXT').run();
-        // Backfill from existing jenis if present
-        try {
-          localDb.prepare('UPDATE products SET category2_name = jenis WHERE category2_name IS NULL').run();
-          console.log('✅ Backfilled category2_name from jenis');
-        } catch (e) {
-          console.log('⚠️ Failed to backfill category2_name from jenis:', e);
-        }
-      }
-      if (!hasIsBundle) {
-        console.log('📋 Migrating database: Adding products.is_bundle column...');
-        localDb.prepare('ALTER TABLE products ADD COLUMN is_bundle INTEGER DEFAULT 0').run();
-      }
-    } catch (e) {
-      console.log('⚠️ Products table migration check failed:', e);
-    }
-      } // End of localDb check for products migration
-
-    // Schema migration: Bundle feature tables
-    if (localDb) {
-      try {
-        // Check if bundle_items table exists
-        const bundleItemsExists = localDb.prepare(`
-            SELECT name FROM sqlite_master WHERE type='table' AND name='bundle_items'
-          `).get();
-
-        if (!bundleItemsExists) {
-          console.log('📋 Migrating database: Creating bundle_items table...');
-          localDb.prepare(`
-              CREATE TABLE bundle_items (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                bundle_product_id INTEGER NOT NULL,
-                category2_id INTEGER NOT NULL,
-                required_quantity INTEGER NOT NULL DEFAULT 1,
-                display_order INTEGER DEFAULT 0,
-                created_at TEXT,
-                updated_at INTEGER,
-                FOREIGN KEY (bundle_product_id) REFERENCES products(id) ON DELETE CASCADE,
-                FOREIGN KEY (category2_id) REFERENCES category2(id) ON DELETE CASCADE
-              )
-            `).run();
-          console.log('✅ Created bundle_items table');
-        }
-
-        // Check if transaction_item_customizations has bundle_product_id column
-        try {
-          const ticSchema = localDb.prepare(`PRAGMA table_info(transaction_item_customizations)`).all() as TableInfoRow[];
-          const hasBundleProductId = ticSchema.some(col => col.name === 'bundle_product_id');
-          if (!hasBundleProductId) {
-            console.log('📋 Migrating database: Adding bundle_product_id to transaction_item_customizations...');
-            localDb.prepare('ALTER TABLE transaction_item_customizations ADD COLUMN bundle_product_id INTEGER DEFAULT NULL').run();
-            // Add index for the new column
-            localDb.prepare('CREATE INDEX IF NOT EXISTS idx_tic_bundle_product ON transaction_item_customizations(bundle_product_id)').run();
-            localDb.prepare('CREATE INDEX IF NOT EXISTS idx_tic_item_bundle ON transaction_item_customizations(transaction_item_id, bundle_product_id)').run();
-            console.log('✅ Added bundle_product_id column');
-          }
-        } catch (error) {
-          console.warn('⚠️ Error checking/adding bundle_product_id column:', error);
-        }
-
-        // Check if transaction_items has bundle_selections_json column
-        const transactionItemsSchema = localDb.prepare(`PRAGMA table_info(transaction_items)`).all() as TableInfoRow[];
-        const hasBundleSelections = transactionItemsSchema.some(col => col.name === 'bundle_selections_json');
-
-        if (!hasBundleSelections) {
-          console.log('📋 Migrating database: Adding transaction_items.bundle_selections_json column...');
-          localDb.prepare('ALTER TABLE transaction_items ADD COLUMN bundle_selections_json TEXT').run();
-        }
-
-        // Schema migration: Add production status columns if they don't exist
-        const hasProductionStatus = transactionItemsSchema.some(col => col.name === 'production_status');
-        if (!hasProductionStatus) {
-          console.log('📋 Migrating database: Adding transaction_items.production_status column...');
-          try {
-            localDb.prepare('ALTER TABLE transaction_items ADD COLUMN production_status TEXT DEFAULT NULL').run();
-          } catch (error) {
-            console.warn('⚠️ Error adding production_status column:', error);
-          }
-        }
-
-        const hasProductionStartedAt = transactionItemsSchema.some(col => col.name === 'production_started_at');
-        if (!hasProductionStartedAt) {
-          console.log('📋 Migrating database: Adding transaction_items.production_started_at column...');
-          try {
-            localDb.prepare('ALTER TABLE transaction_items ADD COLUMN production_started_at TEXT DEFAULT NULL').run();
-          } catch (error) {
-            console.warn('⚠️ Error adding production_started_at column:', error);
-          }
-        }
-
-        const hasProductionFinishedAt = transactionItemsSchema.some(col => col.name === 'production_finished_at');
-        if (!hasProductionFinishedAt) {
-          console.log('📋 Migrating database: Adding transaction_items.production_finished_at column...');
-          try {
-            localDb.prepare('ALTER TABLE transaction_items ADD COLUMN production_finished_at TEXT DEFAULT NULL').run();
-          } catch (error) {
-            console.warn('⚠️ Error adding production_finished_at column:', error);
-          }
-        }
-      } catch (e) {
-        console.log('⚠️ Bundle feature migration check failed:', e);
-      }
-    } // End of localDb check for bundle migration
-
-    // Phase 2 Part 2: Only run table creation if database is available
-    if (localDb) {
-      try {
-        // First block of SQL execution
-        localDb.exec(`
-        -- Core POS Tables
-        CREATE TABLE IF NOT EXISTS users (
-          id INTEGER PRIMARY KEY,
-          email TEXT UNIQUE NOT NULL,
-          password TEXT,
-          name TEXT,
-          googleId TEXT UNIQUE,
-          createdAt TEXT,
-          role_id INTEGER,
-          organization_id INTEGER,
-          updated_at INTEGER
-        );
-
-      
-      CREATE TABLE IF NOT EXISTS businesses (
-        id INTEGER PRIMARY KEY,
-        name TEXT NOT NULL,
-        permission_name TEXT UNIQUE NOT NULL,
-        organization_id INTEGER,
-        status TEXT DEFAULT 'active',
-        management_group_id INTEGER,
-        image_url TEXT,
-        created_at TEXT,
-        updated_at INTEGER
-      );
-      
-      CREATE TABLE IF NOT EXISTS products (
-        id INTEGER PRIMARY KEY,
-        business_id INTEGER,
-        menu_code TEXT,
-        nama TEXT NOT NULL,
-        satuan TEXT NOT NULL,
-        kategori TEXT NOT NULL,
-        category1_id INTEGER,
-        jenis TEXT,
-        category2_id INTEGER,
-        category2_name TEXT,
-        keterangan TEXT,
-        harga_beli REAL,
-        ppn REAL,
-        harga_jual INTEGER NOT NULL,
-        harga_khusus REAL,
-        harga_online REAL,
-        harga_qpon REAL,
-        harga_gofood REAL,
-        harga_grabfood REAL,
-        harga_shopeefood REAL,
-        harga_tiktok REAL,
-        fee_kerja REAL,
-        status TEXT DEFAULT 'active',
-        created_at TEXT,
-        updated_at INTEGER,
-        has_customization INTEGER DEFAULT 0,
-        is_bundle INTEGER DEFAULT 0
-      );
-      
-      -- Customization tables for offline support
-      CREATE TABLE IF NOT EXISTS product_customization_types (
-        id INTEGER PRIMARY KEY,
-        name TEXT NOT NULL,
-        selection_mode TEXT NOT NULL CHECK (selection_mode IN ('single', 'multiple')),
-        display_order INTEGER DEFAULT 0,
-        updated_at INTEGER
-      );
-      
-      CREATE TABLE IF NOT EXISTS product_customization_options (
-        id INTEGER PRIMARY KEY,
-        type_id INTEGER NOT NULL,
-        name TEXT NOT NULL,
-        price_adjustment REAL DEFAULT 0.0,
-        display_order INTEGER DEFAULT 0,
-        status TEXT DEFAULT 'active' CHECK (status IN ('active', 'inactive')),
-        updated_at INTEGER,
-        FOREIGN KEY (type_id) REFERENCES product_customization_types(id) ON DELETE CASCADE
-      );
-      
-      CREATE TABLE IF NOT EXISTS bundle_items (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        bundle_product_id INTEGER NOT NULL,
-        category2_id INTEGER NOT NULL,
-        required_quantity INTEGER NOT NULL DEFAULT 1,
-        display_order INTEGER DEFAULT 0,
-        created_at TEXT,
-        updated_at INTEGER,
-        FOREIGN KEY (bundle_product_id) REFERENCES products(id) ON DELETE CASCADE,
-        FOREIGN KEY (category2_id) REFERENCES category2(id) ON DELETE CASCADE
-      );
-      
-      CREATE TABLE IF NOT EXISTS product_customizations (
-        id INTEGER PRIMARY KEY,
-        product_id INTEGER NOT NULL,
-        customization_type_id INTEGER NOT NULL,
-        updated_at INTEGER,
-        FOREIGN KEY (product_id) REFERENCES products(id) ON DELETE CASCADE,
-        FOREIGN KEY (customization_type_id) REFERENCES product_customization_types(id) ON DELETE CASCADE
-      );
-      
-      CREATE TABLE IF NOT EXISTS ingredients (
-        id INTEGER PRIMARY KEY,
-        ingredient_code TEXT NOT NULL,
-        nama TEXT NOT NULL,
-        kategori TEXT NOT NULL,
-        satuan_beli TEXT NOT NULL,
-        isi_satuan_beli REAL NOT NULL,
-        satuan_keluar TEXT NOT NULL,
-        harga_beli INTEGER NOT NULL,
-        stok_min INTEGER DEFAULT 0,
-        status TEXT DEFAULT 'active',
-        business_id INTEGER NOT NULL,
-        created_at TEXT,
-        updated_at INTEGER
-      );
-      
-      CREATE TABLE IF NOT EXISTS cogs (
-        id INTEGER PRIMARY KEY,
-        menu_code TEXT,
-        ingredient_code TEXT,
-        amount REAL NOT NULL DEFAULT 0.0,
-        created_at TEXT,
-        updated_at INTEGER
-      );
-      
-      CREATE TABLE IF NOT EXISTS contacts (
-        id INTEGER PRIMARY KEY,
-        no_ktp TEXT UNIQUE,
-        nama TEXT NOT NULL,
-        phone_number TEXT,
-        tgl_lahir TEXT,
-        no_kk TEXT,
-        created_at TEXT,
-        updated_at INTEGER,
-        is_active INTEGER DEFAULT 1,
-        jenis_kelamin TEXT,
-        kota TEXT,
-        kecamatan TEXT,
-        source_id INTEGER,
-        pekerjaan_id INTEGER,
-        source_lainnya TEXT,
-        alamat TEXT,
-        team_id INTEGER
-      );
-      
-      CREATE TABLE IF NOT EXISTS teams (
-        id INTEGER PRIMARY KEY,
-        name TEXT NOT NULL,
-        description TEXT,
-        organization_id INTEGER NOT NULL,
-        team_lead_id INTEGER,
-        business_id INTEGER,
-        color TEXT DEFAULT '#3B82F6',
-        is_active INTEGER DEFAULT 1,
-        created_at TEXT,
-        updated_at INTEGER
-      );
-      
-      CREATE TABLE IF NOT EXISTS roles (
-        id INTEGER PRIMARY KEY,
-        name TEXT UNIQUE NOT NULL,
-        description TEXT,
-        organization_id INTEGER,
-        created_at TEXT,
-        updated_at INTEGER
-      );
-      
-      CREATE TABLE IF NOT EXISTS permissions (
-        id INTEGER PRIMARY KEY,
-        name TEXT UNIQUE NOT NULL,
-        description TEXT,
-        created_at TEXT,
-        category_id INTEGER,
-        organization_id INTEGER,
-        status TEXT DEFAULT 'active'
-      );
-      
-      CREATE TABLE IF NOT EXISTS role_permissions (
-        role_id INTEGER NOT NULL,
-        permission_id INTEGER NOT NULL,
-        PRIMARY KEY (role_id, permission_id)
-      );
-      
-      -- Supporting Tables
-      CREATE TABLE IF NOT EXISTS source (
-        id INTEGER PRIMARY KEY,
-        source_name TEXT UNIQUE NOT NULL,
-        created_at TEXT,
-        updated_at INTEGER
-      );
-      
-      CREATE TABLE IF NOT EXISTS pekerjaan (
-        id INTEGER PRIMARY KEY,
-        nama_pekerjaan TEXT UNIQUE NOT NULL,
-        created_at TEXT,
-        updated_at INTEGER
-      );
-      
-      -- Core missing tables for full offline support
-      CREATE TABLE IF NOT EXISTS transactions (
-        id TEXT PRIMARY KEY,  -- UUID instead of INTEGER
-        business_id INTEGER NOT NULL,
-        user_id INTEGER NOT NULL,
-        shift_uuid TEXT, -- Link to specific shift (UUID)
-        payment_method TEXT NOT NULL,
-        pickup_method TEXT NOT NULL,
-        total_amount REAL NOT NULL,
-        voucher_discount REAL DEFAULT 0.0,
-        voucher_type TEXT DEFAULT 'none',
-        voucher_value REAL,
-        voucher_label TEXT,
-        final_amount REAL NOT NULL,
-        amount_received REAL NOT NULL,
-        change_amount REAL DEFAULT 0.0,
-        status TEXT DEFAULT 'completed',
-        refund_status TEXT DEFAULT 'none',
-        refund_total REAL DEFAULT 0.0,
-        last_refunded_at TEXT,
-        created_at TEXT NOT NULL,
-        updated_at INTEGER,
-        synced_at INTEGER,
-        sync_status TEXT DEFAULT 'pending',
-        sync_attempts INTEGER DEFAULT 0,
-        last_sync_attempt INTEGER,
-        contact_id INTEGER,
-        customer_name TEXT,
-        customer_unit INTEGER,
-        note TEXT,
-        bank_name TEXT,
-        card_number TEXT,
-        cl_account_id INTEGER,
-        cl_account_name TEXT,
-        bank_id INTEGER,
-        receipt_number INTEGER,
-        transaction_type TEXT DEFAULT 'drinks',
-        payment_method_id INTEGER NOT NULL
-      );
-      
-      CREATE TABLE IF NOT EXISTS transaction_items (
-        id TEXT PRIMARY KEY,  -- UUID instead of INTEGER
-        transaction_id TEXT NOT NULL,  -- References transaction UUID
-        product_id INTEGER NOT NULL,
-        quantity INTEGER NOT NULL DEFAULT 1,
-        unit_price REAL NOT NULL,
-        total_price REAL NOT NULL,
-        custom_note TEXT,
-        bundle_selections_json TEXT,
-        created_at TEXT NOT NULL,
-        FOREIGN KEY (transaction_id) REFERENCES transactions(id) ON DELETE CASCADE
-      );
-      
-      -- Normalized customization tables for analytics
-      CREATE TABLE IF NOT EXISTS transaction_item_customizations (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        transaction_item_id TEXT NOT NULL,  -- UUID reference to transaction_items.id
-        customization_type_id INTEGER NOT NULL,
-        bundle_product_id INTEGER DEFAULT NULL,  -- NULL = main product, otherwise ID of bundle product
-        created_at TEXT NOT NULL,
-        FOREIGN KEY (customization_type_id) REFERENCES product_customization_types(id) ON DELETE CASCADE
-      );
-      
-      CREATE TABLE IF NOT EXISTS transaction_item_customization_options (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        transaction_item_customization_id INTEGER NOT NULL,
-        customization_option_id INTEGER NOT NULL,
-        option_name TEXT NOT NULL,  -- Snapshot of option name at time of sale
-        price_adjustment REAL NOT NULL DEFAULT 0.0,  -- Snapshot of price adjustment at time of sale
-        created_at TEXT NOT NULL,
-        FOREIGN KEY (transaction_item_customization_id) REFERENCES transaction_item_customizations(id) ON DELETE CASCADE,
-        FOREIGN KEY (customization_option_id) REFERENCES product_customization_options(id) ON DELETE CASCADE
-      );
-      
-      CREATE TABLE IF NOT EXISTS transaction_refunds (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        uuid_id TEXT UNIQUE NOT NULL,
-        transaction_uuid TEXT NOT NULL,
-        business_id INTEGER NOT NULL,
-        shift_uuid TEXT,
-        refunded_by INTEGER NOT NULL,
-        refund_amount REAL NOT NULL,
-        cash_delta REAL NOT NULL DEFAULT 0.0,
-        payment_method_id INTEGER NOT NULL,
-        reason TEXT,
-        note TEXT,
-        refund_type TEXT DEFAULT 'full',
-        status TEXT DEFAULT 'completed',
-        refunded_at TEXT NOT NULL,
-        created_at TEXT NOT NULL,
-        updated_at INTEGER,
-        synced_at INTEGER
-      );
-      
-      CREATE TABLE IF NOT EXISTS payment_methods (
-        id INTEGER PRIMARY KEY,
-        name TEXT NOT NULL,
-        code TEXT UNIQUE NOT NULL,
-        description TEXT,
-        is_active INTEGER DEFAULT 1,
-        requires_additional_info INTEGER DEFAULT 0,
-        created_at TEXT,
-        updated_at INTEGER
-      );
-      
-      CREATE TABLE IF NOT EXISTS banks (
-        id INTEGER PRIMARY KEY,
-        bank_code TEXT UNIQUE NOT NULL,
-        bank_name TEXT NOT NULL,
-        is_popular INTEGER DEFAULT 0,
-        is_active INTEGER DEFAULT 1,
-        created_at TEXT
-      );
-      
-      CREATE TABLE IF NOT EXISTS organizations (
-        id INTEGER PRIMARY KEY,
-        name TEXT NOT NULL,
-        slug TEXT UNIQUE NOT NULL,
-        owner_user_id INTEGER NOT NULL,
-        subscription_status TEXT DEFAULT 'trial',
-        subscription_plan TEXT DEFAULT 'basic',
-        trial_ends_at TEXT,
-        created_at TEXT,
-        updated_at INTEGER
-      );
-      
-      CREATE TABLE IF NOT EXISTS management_groups (
-        id INTEGER PRIMARY KEY,
-        name TEXT NOT NULL,
-        permission_name TEXT NOT NULL,
-        description TEXT,
-        organization_id INTEGER NOT NULL,
-        manager_user_id INTEGER,
-        created_at TEXT,
-        updated_at INTEGER
-      );
-      
-      CREATE TABLE IF NOT EXISTS category1 (
-        id INTEGER PRIMARY KEY,
-        name TEXT UNIQUE NOT NULL,
-        description TEXT,
-        display_order INTEGER DEFAULT 0,
-        is_active INTEGER DEFAULT 1,
-        created_at TEXT,
-        updated_at INTEGER
-      );
-      
-      CREATE TABLE IF NOT EXISTS category2 (
-        id INTEGER PRIMARY KEY,
-        name TEXT UNIQUE NOT NULL,
-        description TEXT,
-        display_order INTEGER DEFAULT 0,
-        is_active INTEGER DEFAULT 1,
-        created_at TEXT,
-        updated_at INTEGER
-      );
-      
-      -- Junction table for category2 to businesses (new multi-business support)
-      CREATE TABLE IF NOT EXISTS category2_businesses (
-        category2_id INTEGER NOT NULL,
-        business_id INTEGER NOT NULL,
-        created_at TEXT,
-        PRIMARY KEY (category2_id, business_id),
-        FOREIGN KEY (category2_id) REFERENCES category2(id) ON DELETE CASCADE,
-        FOREIGN KEY (business_id) REFERENCES businesses(id) ON DELETE CASCADE
-      );
-      
-      CREATE TABLE IF NOT EXISTS cl_accounts (
-        id INTEGER PRIMARY KEY,
-        account_code TEXT UNIQUE NOT NULL,
-        account_name TEXT NOT NULL,
-        contact_info TEXT,
-        credit_limit REAL DEFAULT 0.0,
-        current_balance REAL DEFAULT 0.0,
-        is_active INTEGER DEFAULT 1,
-        created_at TEXT,
-        updated_at INTEGER
-      );
-      
-      -- Shifts table for cashier shift tracking
-      CREATE TABLE IF NOT EXISTS shifts (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        uuid_id TEXT UNIQUE NOT NULL,
-        business_id INTEGER NOT NULL,
-        user_id INTEGER NOT NULL,
-        user_name TEXT NOT NULL,
-        shift_start TEXT NOT NULL,
-        shift_end TEXT,
-        modal_awal REAL NOT NULL DEFAULT 0.0,
-        kas_akhir REAL,
-        kas_expected REAL,
-        kas_selisih REAL,
-        kas_selisih_label TEXT DEFAULT 'balanced',
-        cash_sales_total REAL,
-        cash_refund_total REAL,
-        status TEXT DEFAULT 'active' CHECK (status IN ('active', 'completed', 'cancelled')),
-        created_at TEXT NOT NULL,
-        updated_at INTEGER,
-        synced_at INTEGER,
-        FOREIGN KEY (business_id) REFERENCES businesses(id) ON DELETE CASCADE,
-        FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
-      );
-      
-      -- Legacy tables for backward compatibility
-      CREATE TABLE IF NOT EXISTS categories (
-        category2_name TEXT PRIMARY KEY,
-        updated_at INTEGER
-      );
-      
-      -- Sync status tracking
-      CREATE TABLE IF NOT EXISTS sync_status (
-        key TEXT PRIMARY KEY,
-        last_sync INTEGER,
-        status TEXT
-      );
-      
-      -- Printer configurations
-      CREATE TABLE IF NOT EXISTS printer_configs (
-        id TEXT PRIMARY KEY,
-        printer_type TEXT NOT NULL,
-        system_printer_name TEXT NOT NULL,
-        extra_settings TEXT,
-        created_at INTEGER,
-        updated_at INTEGER
-      );
-      
-      -- Printer mode settings
-      CREATE TABLE IF NOT EXISTS printer_mode_settings (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        printer_type TEXT UNIQUE NOT NULL,
-        mode TEXT NOT NULL CHECK (mode IN ('auto', 'manual')),
-        created_at INTEGER,
-        updated_at INTEGER
-      );
-      
-      -- Daily printer counters (reset daily)
-      CREATE TABLE IF NOT EXISTS printer_daily_counters (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        printer_type TEXT NOT NULL,
-        business_id INTEGER NOT NULL,
-        date TEXT NOT NULL,
-        counter INTEGER DEFAULT 0,
-        last_reset_at INTEGER,
-        UNIQUE(printer_type, business_id, date)
-      );
-      
-      -- Printer 2 automation tracking (for auto mode)
-      CREATE TABLE IF NOT EXISTS printer2_automation (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        business_id INTEGER NOT NULL,
-        cycle_number INTEGER NOT NULL,
-        selected_transactions TEXT NOT NULL,
-        created_at INTEGER,
-        UNIQUE(business_id, cycle_number)
-      );
-      
-      -- Printer 2 audit log
-      CREATE TABLE IF NOT EXISTS printer2_audit_log (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        transaction_id TEXT NOT NULL,
-        printer2_receipt_number INTEGER NOT NULL,
-        print_mode TEXT NOT NULL CHECK (print_mode IN ('auto', 'manual')),
-        cycle_number INTEGER,
-        global_counter INTEGER,
-        printed_at TEXT NOT NULL,
-        printed_at_epoch INTEGER NOT NULL,
-        synced_at INTEGER,
-        FOREIGN KEY (transaction_id) REFERENCES transactions(id)
-      );
-      
-      -- Printer 1 audit log (local)
-      CREATE TABLE IF NOT EXISTS printer1_audit_log (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        transaction_id TEXT NOT NULL,
-        printer1_receipt_number INTEGER NOT NULL,
-        global_counter INTEGER,
-        printed_at TEXT NOT NULL,
-        printed_at_epoch INTEGER NOT NULL,
-        synced_at INTEGER,
-        FOREIGN KEY (transaction_id) REFERENCES transactions(id)
-      );
-      
-      -- UUID sequence tracker for numeric UUID generation
-      CREATE TABLE IF NOT EXISTS uuid_sequence_tracker (
-        key TEXT PRIMARY KEY,
-        counter INTEGER DEFAULT 0,
-        created_at INTEGER,
-        updated_at INTEGER
-      );
-      
-      -- Indexes for performance
-      CREATE INDEX IF NOT EXISTS idx_products_jenis ON products(jenis);
-      CREATE INDEX IF NOT EXISTS idx_products_status ON products(status);
-      CREATE INDEX IF NOT EXISTS idx_products_business ON products(business_id);
-      CREATE INDEX IF NOT EXISTS idx_ingredients_business ON ingredients(business_id);
-      CREATE INDEX IF NOT EXISTS idx_contacts_team ON contacts(team_id);
-      CREATE INDEX IF NOT EXISTS idx_users_organization ON users(organization_id);
-      CREATE INDEX IF NOT EXISTS idx_teams_organization ON teams(organization_id);
-      
-      -- Indexes for new tables
-      CREATE INDEX IF NOT EXISTS idx_transactions_business ON transactions(business_id);
-      CREATE INDEX IF NOT EXISTS idx_transactions_user ON transactions(user_id);
-      CREATE INDEX IF NOT EXISTS idx_transactions_date ON transactions(created_at);
-      CREATE INDEX IF NOT EXISTS idx_transactions_status ON transactions(status);
-      CREATE INDEX IF NOT EXISTS idx_transactions_contact ON transactions(contact_id);
-      CREATE INDEX IF NOT EXISTS idx_transactions_cl_account ON transactions(cl_account_id);
-      CREATE INDEX IF NOT EXISTS idx_transactions_bank ON transactions(bank_name);
-      CREATE INDEX IF NOT EXISTS idx_transactions_bank_id ON transactions(bank_id);
-      CREATE INDEX IF NOT EXISTS idx_transactions_receipt_number ON transactions(receipt_number);
-      CREATE INDEX IF NOT EXISTS idx_transactions_transaction_type ON transactions(transaction_type);
-      CREATE INDEX IF NOT EXISTS idx_transactions_daily_receipt ON transactions(business_id, created_at, receipt_number);
-      CREATE INDEX IF NOT EXISTS idx_transactions_payment_method ON transactions(payment_method_id);
-      
-      CREATE INDEX IF NOT EXISTS idx_transaction_items_transaction ON transaction_items(transaction_id);
-      CREATE INDEX IF NOT EXISTS idx_transaction_items_product ON transaction_items(product_id);
-      CREATE INDEX IF NOT EXISTS idx_transaction_items_created ON transaction_items(created_at);
-      
-      -- Indexes for normalized customization tables
-      CREATE INDEX IF NOT EXISTS idx_tic_transaction_item ON transaction_item_customizations(transaction_item_id);
-      CREATE INDEX IF NOT EXISTS idx_tic_customization_type ON transaction_item_customizations(customization_type_id);
-      CREATE INDEX IF NOT EXISTS idx_tic_bundle_product ON transaction_item_customizations(bundle_product_id);
-      CREATE INDEX IF NOT EXISTS idx_tic_item_type ON transaction_item_customizations(transaction_item_id, customization_type_id);
-      CREATE INDEX IF NOT EXISTS idx_tic_item_bundle ON transaction_item_customizations(transaction_item_id, bundle_product_id);
-      
-      CREATE INDEX IF NOT EXISTS idx_tico_transaction_item_customization ON transaction_item_customization_options(transaction_item_customization_id);
-      CREATE INDEX IF NOT EXISTS idx_tico_customization_option ON transaction_item_customization_options(customization_option_id);
-      CREATE INDEX IF NOT EXISTS idx_tico_customization_option_composite ON transaction_item_customization_options(transaction_item_customization_id, customization_option_id);
-      
-      CREATE INDEX IF NOT EXISTS idx_printer_mode_settings_type ON printer_mode_settings(printer_type);
-      CREATE INDEX IF NOT EXISTS idx_printer_daily_counters_lookup ON printer_daily_counters(printer_type, business_id, date);
-      CREATE INDEX IF NOT EXISTS idx_printer2_automation_lookup ON printer2_automation(business_id, cycle_number);
-      CREATE INDEX IF NOT EXISTS idx_printer2_audit_transaction ON printer2_audit_log(transaction_id);
-      CREATE INDEX IF NOT EXISTS idx_printer2_audit_mode ON printer2_audit_log(print_mode);
-      CREATE INDEX IF NOT EXISTS idx_printer2_audit_date ON printer2_audit_log(printed_at_epoch);
-      
-      CREATE INDEX IF NOT EXISTS idx_printer1_audit_transaction ON printer1_audit_log(transaction_id);
-      CREATE INDEX IF NOT EXISTS idx_printer1_audit_date ON printer1_audit_log(printed_at_epoch);
-      
-      CREATE INDEX IF NOT EXISTS idx_payment_methods_code ON payment_methods(code);
-      CREATE INDEX IF NOT EXISTS idx_payment_methods_active ON payment_methods(is_active);
-      
-      CREATE INDEX IF NOT EXISTS idx_banks_code ON banks(bank_code);
-      CREATE INDEX IF NOT EXISTS idx_banks_active ON banks(is_active);
-      CREATE INDEX IF NOT EXISTS idx_banks_popular ON banks(is_popular);
-      
-      CREATE INDEX IF NOT EXISTS idx_organizations_slug ON organizations(slug);
-      CREATE INDEX IF NOT EXISTS idx_organizations_owner ON organizations(owner_user_id);
-      
-      CREATE INDEX IF NOT EXISTS idx_management_groups_organization ON management_groups(organization_id);
-      CREATE INDEX IF NOT EXISTS idx_management_groups_manager ON management_groups(manager_user_id);
-      
-      CREATE INDEX IF NOT EXISTS idx_category1_active ON category1(is_active);
-      CREATE INDEX IF NOT EXISTS idx_category1_display_order ON category1(display_order);
-      
-      CREATE INDEX IF NOT EXISTS idx_category2_active ON category2(is_active);
-      CREATE INDEX IF NOT EXISTS idx_category2_display_order ON category2(display_order);
-      
-      -- Indexes for category2_businesses junction table
-      CREATE INDEX IF NOT EXISTS idx_category2_businesses_category2 ON category2_businesses(category2_id);
-      CREATE INDEX IF NOT EXISTS idx_category2_businesses_business ON category2_businesses(business_id);
-      
-      CREATE INDEX IF NOT EXISTS idx_cl_accounts_code ON cl_accounts(account_code);
-      CREATE INDEX IF NOT EXISTS idx_cl_accounts_active ON cl_accounts(is_active);
-      
-      
-      CREATE TABLE IF NOT EXISTS offline_refunds (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        refund_data TEXT NOT NULL,
-        created_at INTEGER NOT NULL,
-        sync_status TEXT DEFAULT 'pending',
-        sync_attempts INTEGER DEFAULT 0,
-        last_sync_attempt INTEGER
-      );
-      
-      -- System POS queue for transactions printed to Printer 2 (receiptize)
-      CREATE TABLE IF NOT EXISTS system_pos_queue (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        transaction_id TEXT NOT NULL UNIQUE,
-        queued_at INTEGER NOT NULL,
-        synced_at INTEGER,
-        retry_count INTEGER DEFAULT 0,
-        last_error TEXT
-      );
-      
-      -- Indexes for sync performance
-      CREATE INDEX IF NOT EXISTS idx_transactions_sync_status ON transactions(sync_status);
-      CREATE INDEX IF NOT EXISTS idx_system_pos_queue_sync ON system_pos_queue(synced_at);
-      CREATE INDEX IF NOT EXISTS idx_system_pos_queue_transaction ON system_pos_queue(transaction_id);
-    `);
-      } catch (dbExecError) {
-        console.error('❌ Database execution error:', dbExecError);
-        throw dbExecError;
-      }
-
-      // Migration: Add category1_id column if it doesn't exist (for existing databases)
-      // This must be done AFTER the SQL exec block
-      // We're already inside if (localDb) block, so no need to check again
-      try {
-        const productsSchema = localDb.prepare(`PRAGMA table_info(products)`).all() as TableInfoRow[];
-        const hasCategory1Id = productsSchema.some(col => col.name === 'category1_id');
-        if (!hasCategory1Id) {
-          localDb.prepare(`ALTER TABLE products ADD COLUMN category1_id INTEGER`).run();
-          console.log('✅ [MIGRATION] Added category1_id column to products table');
-        }
-      } catch (error) {
-        // Column already exists, ignore error
-        if (!String(error).includes('duplicate column name')) {
-          console.warn('⚠️ [MIGRATION] Could not add category1_id column (may already exist):', error);
-        }
-      }
-
-      console.log('✅ SQLite database initialized successfully');
-      console.log('📊 Database file location:', dbPath);
-      
-      // Initialize printer management service
-      if (localDb) {
-        try {
-          printerService = new PrinterManagementService(localDb, mysqlPool);
-          console.log('✅ Printer Management Service initialized with Shadow DB support');
-        } catch (printerServiceError) {
-          console.error('❌ Failed to initialize Printer Management Service:', printerServiceError);
-        }
-      } else {
-        console.error('❌ localDb is null, cannot initialize Printer Management Service');
-      }
-
-      // Migrate slideshow images from /public/ to userData on first run
-      try {
-        const slideshowPath = getSlideshowPath();
-        const publicSlideshowPath = path.join(process.cwd(), 'public', 'images', 'slideshow');
-
-        if (fs.existsSync(publicSlideshowPath)) {
-          const existingFiles = fs.readdirSync(slideshowPath);
-          const imageExtensions = ['.jpg', '.jpeg', '.png', '.webp', '.gif'];
-          const existingImages = existingFiles.filter((file: string) => {
+        if (existingImages.length === 0) {
+          const publicFiles = fs.readdirSync(publicSlideshowPath);
+          const imagesToMigrate = publicFiles.filter((file: string) => {
             const ext = path.extname(file).toLowerCase();
             return imageExtensions.includes(ext);
           });
 
-          if (existingImages.length === 0) {
-            const publicFiles = fs.readdirSync(publicSlideshowPath);
-            const imagesToMigrate = publicFiles.filter((file: string) => {
-              const ext = path.extname(file).toLowerCase();
-              return imageExtensions.includes(ext);
-            });
+          if (imagesToMigrate.length > 0) {
+            console.log(`📸 Migrating ${imagesToMigrate.length} slideshow images from /public/ to userData...`);
+            let migratedCount = 0;
 
-            if (imagesToMigrate.length > 0) {
-              console.log(`📸 Migrating ${imagesToMigrate.length} slideshow images from /public/ to userData...`);
-              let migratedCount = 0;
-
-              for (const file of imagesToMigrate) {
-                try {
-                  const sourcePath = path.join(publicSlideshowPath, file);
-                  const destPath = path.join(slideshowPath, file);
-                  fs.copyFileSync(sourcePath, destPath);
-                  migratedCount++;
-                } catch (error) {
-                  console.error('❌ Failed to migrate:', file, error);
-                }
+            for (const file of imagesToMigrate) {
+              try {
+                const sourcePath = path.join(publicSlideshowPath, file);
+                const destPath = path.join(slideshowPath, file);
+                fs.copyFileSync(sourcePath, destPath);
+                migratedCount++;
+              } catch (error) {
+                console.error('❌ Failed to migrate:', file, error);
               }
+            }
 
-              if (migratedCount > 0) {
-                console.log(`✅ Migrated ${migratedCount} slideshow images to userData`);
-              }
+            if (migratedCount > 0) {
+              console.log(`✅ Migrated ${migratedCount} slideshow images to userData`);
             }
           }
         }
-      } catch (error) {
-        console.error('❌ Error during slideshow migration:', error);
       }
-
-      console.log('🔍 Testing database connection...');
-
-      // Test the database connection
-      try {
-        const testResult = localDb.prepare('SELECT 1 as test').get();
-        console.log('✅ Database test query successful:', testResult);
-      } catch (testError) {
-        console.error('❌ Database test query failed:', testError);
-      }
-
-      // Schema migration: Add missing columns to existing tables
-      try {
-        console.log('🔍 Running schema migrations...');
-
-        // Ensure printer_configs.extra_settings column exists for per-printer settings
-        const printerConfigSchema = localDb.prepare(`PRAGMA table_info(printer_configs)`).all() as TableInfoRow[];
-        const hasExtraSettingsColumn = printerConfigSchema.some(col => col.name === 'extra_settings');
-        if (!hasExtraSettingsColumn) {
-          console.log('📝 Adding extra_settings column to printer_configs...');
-          localDb.prepare('ALTER TABLE printer_configs ADD COLUMN extra_settings TEXT').run();
-        }
-
-        // Check if display_order column exists in product_customization_types
-        const columnsResult = localDb.prepare(`
-        SELECT sql FROM sqlite_master WHERE type='table' AND name='product_customization_types'
-      `).get() as { sql?: string } | undefined;
-
-        if (columnsResult && columnsResult.sql && !columnsResult.sql.includes('display_order')) {
-          console.log('📝 Adding display_order to product_customization_types...');
-          localDb.prepare('ALTER TABLE product_customization_types ADD COLUMN display_order INTEGER DEFAULT 0').run();
-        }
-
-        // Check if display_order and status columns exist in product_customization_options
-        const optionsColumnsResult = localDb.prepare(`
-        SELECT sql FROM sqlite_master WHERE type='table' AND name='product_customization_options'
-      `).get() as { sql?: string } | undefined;
-
-        if (optionsColumnsResult && optionsColumnsResult.sql && !optionsColumnsResult.sql.includes('display_order')) {
-          console.log('📝 Adding display_order to product_customization_options...');
-          localDb.prepare('ALTER TABLE product_customization_options ADD COLUMN display_order INTEGER DEFAULT 0').run();
-        }
-
-        if (optionsColumnsResult && optionsColumnsResult.sql && !optionsColumnsResult.sql.includes('status')) {
-          console.log('📝 Adding status to product_customization_options...');
-          localDb.prepare('ALTER TABLE product_customization_options ADD COLUMN status TEXT DEFAULT \'active\' CHECK (status IN (\'active\', \'inactive\'))').run();
-        }
-
-        console.log('✅ Schema migrations completed');
-      } catch (migrationError) {
-        console.error('⚠️ Schema migration error (this is OK for first run):', migrationError);
-      }
-    } // End of localDb check for table creation
-  } catch (error) {
-    originalConsoleError('❌ Failed to initialize SQLite:', error);
-    // Only reset localDb if it wasn't successfully opened
-    // If database was opened but later operations failed, keep it available
-    if (!localDb) {
-      originalConsoleError('❌ Database was never opened, localDb is null');
-    } else {
-      originalConsoleError('⚠️ Database was opened but later initialization failed - keeping database available');
-      originalConsoleError('⚠️ Error details:', error);
+    } catch (error) {
+      console.error('❌ Error during slideshow migration:', error);
     }
-    // Don't reset localDb here - let it remain if it was successfully opened
+
+    console.log('✅ MySQL database initialization completed');
+  } catch (error) {
+    originalConsoleError('❌ Failed to initialize MySQL:', error);
   }
+
 
   // Get all displays
   const displays = screen.getAllDisplays();
@@ -2107,6 +749,47 @@ function createWindows(): void {
     return { success: true };
   });
 
+  // Configuration management IPC handlers
+  ipcMain.handle('get-app-config', async () => {
+    try {
+      const config = readConfig();
+      return { success: true, config: config || null };
+    } catch (error) {
+      console.error('❌ Failed to read app config:', error);
+      return { success: false, error: String(error) };
+    }
+  });
+
+  ipcMain.handle('save-app-config', async (event, config: AppConfig) => {
+    try {
+      const success = writeConfig(config);
+      if (success) {
+        console.log('✅ App config saved successfully');
+        return { success: true };
+      } else {
+        return { success: false, error: 'Failed to write config file' };
+      }
+    } catch (error) {
+      console.error('❌ Failed to save app config:', error);
+      return { success: false, error: String(error) };
+    }
+  });
+
+  ipcMain.handle('reset-app-config', async () => {
+    try {
+      const success = resetConfig();
+      if (success) {
+        console.log('✅ App config reset successfully');
+        return { success: true };
+      } else {
+        return { success: false, error: 'Failed to reset config file' };
+      }
+    } catch (error) {
+      console.error('❌ Failed to reset app config:', error);
+      return { success: false, error: String(error) };
+    }
+  });
+
   // Listen for logout via IPC
   ipcMain.handle('logout', async () => {
     console.log('🔍 Logout - resizing back to login size');
@@ -2121,233 +804,572 @@ function createWindows(): void {
 
   // Offline/local DB IPC
   ipcMain.handle('localdb-upsert-categories', async (event, rows: { category2_name: string; updated_at?: number }[]) => {
-    if (!localDb) return { success: false };
-    const tx = localDb.transaction((data: { category2_name: string; updated_at?: number }[]) => {
-      const stmt = localDb!.prepare('INSERT INTO categories (category2_name, updated_at) VALUES (?, ?) ON CONFLICT(category2_name) DO UPDATE SET updated_at=excluded.updated_at');
-      for (const r of data) {
-        stmt.run(r.category2_name, r.updated_at || Date.now());
+    try {
+      // Legacy table - may not exist in MySQL schema, skip gracefully
+      // Category2 table is the source of truth
+      console.log('⚠️ [CATEGORIES] Skipping legacy categories table - category2 is source of truth');
+      return { success: true };
+    } catch (error) {
+      console.error('Error upserting categories:', error);
+      return { success: false };
+    }
+  });
+  ipcMain.handle('localdb-get-categories', async (event, businessId?: number) => {
+    try {
+      // Get categories from products filtered by business (if businessId provided)
+      // This ensures categories match the products available for the business
+      let query = `SELECT DISTINCT c2.name AS category2_name, c2.updated_at, c2.display_order
+        FROM category2 c2
+        INNER JOIN products p ON p.category2_id = c2.id`;
+      
+      const params: number[] = [];
+      
+      // Add business filter if businessId is provided
+      if (businessId) {
+        query += ` INNER JOIN product_businesses pb ON p.id = pb.product_id`;
       }
-    });
-    tx(rows);
-    return { success: true };
+      
+      query += ` WHERE p.status = 'active' AND c2.is_active = 1`;
+      
+      if (businessId) {
+        query += ` AND pb.business_id = ?`;
+        params.push(businessId);
+      }
+      
+      query += ` ORDER BY c2.display_order ASC, c2.name ASC`;
+      
+      return await executeQuery<{ category2_name: string; updated_at: number }>(query, params);
+    } catch (error) {
+      console.error('Error getting categories:', error);
+      return [];
+    }
   });
-  ipcMain.handle('localdb-get-categories', async () => {
-    if (!localDb) return [];
-    const stmt = localDb.prepare('SELECT category2_name, updated_at FROM categories ORDER BY category2_name ASC');
-    return stmt.all();
-  });
-  ipcMain.handle('localdb-upsert-products', async (event, rows: RowArray) => {
-    if (!localDb) return { success: false };
-
-    console.log(`🔄 [PRODUCTS UPSERT] Received ${rows.length} products to upsert`);
-
-    const tx = localDb.transaction((data: RowArray) => {
-      const stmt = localDb!.prepare(`INSERT INTO products (
-        id, business_id, menu_code, nama, satuan, kategori, category1_id, jenis, category2_id, category2_name, keterangan,
-        harga_beli, ppn, harga_jual, harga_khusus, harga_online, harga_qpon, harga_gofood, harga_grabfood, harga_shopeefood, harga_tiktok, fee_kerja, status, is_bundle, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT(id) DO UPDATE SET
-        business_id=excluded.business_id,
-        menu_code=excluded.menu_code,
-        nama=excluded.nama,
-        satuan=excluded.satuan,
-        kategori=excluded.kategori,
-        category1_id=excluded.category1_id,
-        jenis=excluded.jenis,
-        category2_id=excluded.category2_id,
-        category2_name=excluded.category2_name,
-        keterangan=excluded.keterangan,
-        harga_beli=excluded.harga_beli,
-        ppn=excluded.ppn,
-        harga_jual=excluded.harga_jual,
-        harga_khusus=excluded.harga_khusus,
-        harga_online=excluded.harga_online,
-        harga_qpon=excluded.harga_qpon,
-        harga_gofood=excluded.harga_gofood,
-        harga_grabfood=excluded.harga_grabfood,
-        harga_shopeefood=excluded.harga_shopeefood,
-        harga_tiktok=excluded.harga_tiktok,
-        fee_kerja=excluded.fee_kerja,
-        status=excluded.status,
-        is_bundle=excluded.is_bundle,
-        updated_at=excluded.updated_at`);
-
-      let successCount = 0;
-      let errorCount = 0;
-
-      for (const r of data) {
+  ipcMain.handle('localdb-upsert-product-businesses', async (event, rows: Array<{ product_id: number; business_id: number }>) => {
+    try {
+      // #region agent log
+      const logDataEntry = JSON.stringify({location:'main.ts:731',message:'localdb-upsert-product-businesses called',data:{totalRows:Array.isArray(rows)?rows.length:0,hasProduct298:Array.isArray(rows)?rows.some((r:any)=>r.product_id===298):false,product298Data:Array.isArray(rows)?rows.find((r:any)=>r.product_id===298):null},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'});
+      require('fs').appendFileSync('c:\\Code\\marviano-pos\\.cursor\\debug.log', logDataEntry + '\n');
+      // #endregion
+      const queries: Array<{ sql: string; params?: (string | number | null | boolean)[] }> = [];
+      
+      // Verify business_id and product_id exist before inserting (foreign key constraints)
+      const validJunctionData: Array<{ product_id: number; business_id: number }> = [];
+      
+      for (const rel of rows) {
         try {
-          // Check if product has any platform prices (for online tabs)
-          const hasPlatformPrice =
-            (r.harga_shopeefood != null && r.harga_shopeefood !== undefined) ||
-            (r.harga_gofood != null && r.harga_gofood !== undefined) ||
-            (r.harga_grabfood != null && r.harga_grabfood !== undefined) ||
-            (r.harga_tiktok != null && r.harga_tiktok !== undefined) ||
-            (r.harga_qpon != null && r.harga_qpon !== undefined) ||
-            (r.harga_online != null && r.harga_online !== undefined);
-
-          // Skip products with NULL harga_jual ONLY if they also have no platform prices
-          // If they have platform prices, we'll use harga_jual = 0 as fallback so they show in online tabs
-          if ((r.harga_jual == null || r.harga_jual === undefined) && !hasPlatformPrice) {
-            console.log(`⏭️ [PRODUCTS UPSERT] Skipping product ${r.id} (${r.nama}) - harga_jual is NULL and no platform prices`);
+          const [businessExists, productExists] = await Promise.all([
+            executeQueryOne<{ id: number }>('SELECT id FROM businesses WHERE id = ? LIMIT 1', [rel.business_id]),
+            executeQueryOne<{ id: number }>('SELECT id FROM products WHERE id = ? LIMIT 1', [rel.product_id])
+          ]);
+          if (!businessExists) {
+            console.warn(`⚠️ [PRODUCT BUSINESSES UPSERT] Skipping: business_id ${rel.business_id} does not exist`);
             continue;
           }
-
-          // Use 0 as fallback for harga_jual if NULL but product has platform prices
-          const hargaJual = (r.harga_jual != null && r.harga_jual !== undefined) ? r.harga_jual : 0;
-
-          // Map MySQL columns to SQLite columns
-          const kategori = r.kategori || r.category1_name || '';
-          let category1Id = r.category1_id ? Number(r.category1_id) : null;
-          let category2Id = r.category2_id ? Number(r.category2_id) : null;
-          const category2Name = r.category2_name || r.jenis || '';
-
-          // If category1_id is missing but category1_name/kategori exists, try to map it
-          if (!category1Id && (r.category1_name || r.kategori)) {
-            const categoryName = String(r.category1_name || r.kategori || '').toLowerCase().trim();
-            if (categoryName === 'makanan' || categoryName === 'food') {
-              category1Id = 1;
-            } else if (categoryName === 'minuman' || categoryName === 'drinks' || categoryName === 'drink') {
-              category1Id = 2;
-            }
-            if (category1Id) {
-              console.log(`✅ [PRODUCTS UPSERT] Mapped category1_name "${r.category1_name || r.kategori}" to category1_id: ${category1Id}`);
-            }
+          if (!productExists) {
+            console.warn(`⚠️ [PRODUCT BUSINESSES UPSERT] Skipping: product_id ${rel.product_id} does not exist`);
+            continue;
           }
-
-          // If category2_id is missing but category2_name exists, try to look it up from category2 table
-          if (!category2Id && category2Name && localDb) {
-            try {
-              const lookupStmt = localDb.prepare('SELECT id FROM category2 WHERE name = ? LIMIT 1');
-              const category2Lookup = lookupStmt.get(category2Name) as { id: number } | undefined;
-              if (category2Lookup) {
-                category2Id = category2Lookup.id;
-                console.log(`✅ [PRODUCTS UPSERT] Looked up category2_id ${category2Id} for category2_name "${category2Name}"`);
-              }
-            } catch (lookupError) {
-              console.warn(`⚠️ [PRODUCTS UPSERT] Failed to lookup category2_id for "${category2Name}":`, lookupError);
-            }
-          }
-
-          const isBundle = r.is_bundle === 1 || r.is_bundle === true ? 1 : 0;
-
-          stmt.run(
-            r.id, r.business_id, r.menu_code, r.nama, r.satuan || '', kategori, category1Id, null, category2Id, category2Name, r.keterangan || null,
-            r.harga_beli || null, r.ppn || null, hargaJual, r.harga_khusus || null,
-            r.harga_online || null, r.harga_qpon || null, r.harga_gofood || null, r.harga_grabfood || null, r.harga_shopeefood || null, r.harga_tiktok || null,
-            r.fee_kerja || null, r.status, isBundle, Date.now()
-          );
-          successCount++;
-        } catch (error) {
-          errorCount++;
-          console.warn(`⚠️ [PRODUCTS UPSERT] Skipping product ${r.id} (${r.nama}) due to error:`, error);
+          validJunctionData.push(rel);
+        } catch (checkError) {
+          console.warn(`⚠️ [PRODUCT BUSINESSES UPSERT] Error checking product_id ${rel.product_id}, business_id ${rel.business_id}:`, checkError);
+          continue;
         }
       }
-      console.log(`✅ [PRODUCTS UPSERT] Completed: ${successCount} success, ${errorCount} errors`);
-    });
+      
+      if (validJunctionData.length > 0) {
+        const junctionQueries = validJunctionData.map(rel => ({
+          sql: `
+            INSERT INTO product_businesses (product_id, business_id)
+            VALUES (?, ?)
+            ON DUPLICATE KEY UPDATE product_id=product_id
+          `,
+          params: [rel.product_id, rel.business_id]
+        }));
+        queries.push(...junctionQueries);
+        // #region agent log
+        const logDataSuccess = JSON.stringify({location:'main.ts:760',message:'product_businesses upsert success',data:{totalRows:rows.length,validRows:validJunctionData.length,skippedRows:rows.length-validJunctionData.length,hasProduct298:validJunctionData.some((r:any)=>r.product_id===298)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'});
+        require('fs').appendFileSync('c:\\Code\\marviano-pos\\.cursor\\debug.log', logDataSuccess + '\n');
+        // #endregion
+        console.log(`✅ [PRODUCT BUSINESSES UPSERT] Stored ${validJunctionData.length} product-business relationships (${rows.length - validJunctionData.length} skipped)`);
+      } else {
+        console.warn(`⚠️ [PRODUCT BUSINESSES UPSERT] No valid junction table data (all ${rows.length} skipped)`);
+      }
+      
+      if (queries.length > 0) {
+        await executeTransaction(queries);
+      }
+      return { success: true };
+    } catch (error) {
+      console.error('Error upserting product_businesses:', error);
+      // #region agent log
+      const logDataError = JSON.stringify({location:'main.ts:775',message:'product_businesses upsert error',data:{error:String(error)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'});
+      require('fs').appendFileSync('c:\\Code\\marviano-pos\\.cursor\\debug.log', logDataError + '\n');
+      // #endregion
+      return { success: false };
+    }
+  });
+
+  ipcMain.handle('localdb-upsert-products', async (event, rows: RowArray) => {
+    console.log(`🔄 [PRODUCTS UPSERT] Received ${rows.length} products to upsert`);
+
+    let successCount = 0;
+    let errorCount = 0;
+    const queries: Array<{ sql: string; params?: (string | number | null | boolean)[] }> = [];
+
+    for (const r of rows) {
+      try {
+        // Check if product has any platform prices (for online tabs)
+        const hasPlatformPrice =
+          (r.harga_shopeefood != null && r.harga_shopeefood !== undefined) ||
+          (r.harga_gofood != null && r.harga_gofood !== undefined) ||
+          (r.harga_grabfood != null && r.harga_grabfood !== undefined) ||
+          (r.harga_tiktok != null && r.harga_tiktok !== undefined) ||
+          (r.harga_qpon != null && r.harga_qpon !== undefined) ||
+          (r.harga_online != null && r.harga_online !== undefined);
+
+        // Skip products with NULL harga_jual ONLY if they also have no platform prices
+        // If they have platform prices, we'll use harga_jual = 0 as fallback so they show in online tabs
+        if ((r.harga_jual == null || r.harga_jual === undefined) && !hasPlatformPrice) {
+          console.log(`⏭️ [PRODUCTS UPSERT] Skipping product ${r.id} (${r.nama}) - harga_jual is NULL and no platform prices`);
+          continue;
+        }
+
+        // Use 0 as fallback for harga_jual if NULL but product has platform prices
+        const hargaJual = (r.harga_jual != null && r.harga_jual !== undefined) ? r.harga_jual : 0;
+
+        // Map MySQL columns
+        const kategori = r.kategori || r.category1_name || '';
+        let category1Id = r.category1_id ? Number(r.category1_id) : null;
+        let category2Id = r.category2_id ? Number(r.category2_id) : null;
+        const category2Name = r.category2_name || r.jenis || '';
+
+        // If category1_id is missing but category1_name/kategori exists, try to map it
+        if (!category1Id && (r.category1_name || r.kategori)) {
+          const categoryName = String(r.category1_name || r.kategori || '').toLowerCase().trim();
+          if (categoryName === 'makanan' || categoryName === 'food') {
+            category1Id = 1;
+          } else if (categoryName === 'minuman' || categoryName === 'drinks' || categoryName === 'drink') {
+            category1Id = 2;
+          }
+          if (category1Id) {
+            console.log(`✅ [PRODUCTS UPSERT] Mapped category1_name "${r.category1_name || r.kategori}" to category1_id: ${category1Id}`);
+          }
+        }
+
+        // If category2_id is missing but category2_name exists, try to look it up from category2 table
+        if (!category2Id && category2Name) {
+          try {
+            const category2Lookup = await executeQueryOne<{ id: number }>('SELECT id FROM category2 WHERE name = ? LIMIT 1', [category2Name]);
+            if (category2Lookup) {
+              category2Id = category2Lookup.id;
+              console.log(`✅ [PRODUCTS UPSERT] Looked up category2_id ${category2Id} for category2_name "${category2Name}"`);
+            }
+          } catch (lookupError) {
+            console.warn(`⚠️ [PRODUCTS UPSERT] Failed to lookup category2_id for "${category2Name}":`, lookupError);
+          }
+        }
+
+        // Verify category1_id exists before inserting (foreign key constraint)
+        if (category1Id) {
+          try {
+            const category1Exists = await executeQueryOne<{ id: number }>('SELECT id FROM category1 WHERE id = ? LIMIT 1', [category1Id]);
+            if (!category1Exists) {
+              console.warn(`⚠️ [PRODUCTS UPSERT] category1_id ${category1Id} does not exist, setting to NULL`);
+              category1Id = null;
+            }
+          } catch (checkError) {
+            console.warn(`⚠️ [PRODUCTS UPSERT] Failed to verify category1_id ${category1Id}:`, checkError);
+            category1Id = null;
+          }
+        }
+
+        // Verify category2_id exists before inserting (foreign key constraint)
+        if (category2Id) {
+          try {
+            const category2Exists = await executeQueryOne<{ id: number }>('SELECT id FROM category2 WHERE id = ? LIMIT 1', [category2Id]);
+            if (!category2Exists) {
+              console.warn(`⚠️ [PRODUCTS UPSERT] category2_id ${category2Id} does not exist, setting to NULL`);
+              category2Id = null;
+            }
+          } catch (checkError) {
+            console.warn(`⚠️ [PRODUCTS UPSERT] Failed to verify category2_id ${category2Id}:`, checkError);
+            category2Id = null;
+          }
+        }
+
+        const isBundle = r.is_bundle === 1 || r.is_bundle === true ? 1 : 0;
+
+        queries.push({
+          sql: `INSERT INTO products (
+            id, menu_code, nama, satuan, category1_id, category2_id, keterangan,
+            harga_beli, ppn, harga_jual, harga_khusus, harga_online, harga_qpon, harga_gofood, harga_grabfood, harga_shopeefood, harga_tiktok, fee_kerja, image_url, status, has_customization, is_bundle, created_at, updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          ON DUPLICATE KEY UPDATE
+            menu_code=VALUES(menu_code),
+            nama=VALUES(nama),
+            satuan=VALUES(satuan),
+            category1_id=VALUES(category1_id),
+            category2_id=VALUES(category2_id),
+            keterangan=VALUES(keterangan),
+            harga_beli=VALUES(harga_beli),
+            ppn=VALUES(ppn),
+            harga_jual=VALUES(harga_jual),
+            harga_khusus=VALUES(harga_khusus),
+            harga_online=VALUES(harga_online),
+            harga_qpon=VALUES(harga_qpon),
+            harga_gofood=VALUES(harga_gofood),
+            harga_grabfood=VALUES(harga_grabfood),
+            harga_shopeefood=VALUES(harga_shopeefood),
+            harga_tiktok=VALUES(harga_tiktok),
+            fee_kerja=VALUES(fee_kerja),
+            image_url=VALUES(image_url),
+            status=VALUES(status),
+            has_customization=VALUES(has_customization),
+            is_bundle=VALUES(is_bundle),
+            updated_at=VALUES(updated_at)`,
+          params: [
+            r.id, r.menu_code, r.nama, r.satuan || '', category1Id, category2Id, r.keterangan || null,
+            r.harga_beli || null, r.ppn || null, hargaJual, r.harga_khusus || null,
+            r.harga_online ?? null, r.harga_qpon ?? null, r.harga_gofood ?? null, r.harga_grabfood ?? null, r.harga_shopeefood ?? null, r.harga_tiktok ?? null,
+            r.fee_kerja || null, r.image_url || null, r.status, (r.has_customization ? 1 : 0), isBundle, 
+            toMySQLTimestamp(r.created_at || new Date()), toMySQLTimestamp(Date.now())
+          ]
+        });
+        successCount++;
+      } catch (error) {
+        errorCount++;
+        console.warn(`⚠️ [PRODUCTS UPSERT] Skipping product ${r.id} (${r.nama}) due to error:`, error);
+      }
+    }
 
     try {
-      tx(rows);
+      if (queries.length > 0) {
+        await executeTransaction(queries);
+      }
+      console.log(`✅ [PRODUCTS UPSERT] Completed: ${successCount} success, ${errorCount} errors`);
       return { success: true };
     } catch (error) {
       console.error('❌ [PRODUCTS UPSERT] Transaction failed:', error);
       return { success: false };
     }
   });
-  ipcMain.handle('localdb-get-products-by-jenis', async (event, jenis: string) => {
-    if (!localDb) return [];
-    const stmt = localDb.prepare(`SELECT 
-      id, business_id, menu_code, nama, satuan, kategori, category2_name, keterangan,
-      harga_beli, ppn, harga_jual, harga_khusus, harga_online, harga_qpon, harga_gofood, harga_grabfood, harga_shopeefood, harga_tiktok, fee_kerja, status, is_bundle
-      FROM products WHERE category2_name = ? AND status = 'active' ORDER BY nama ASC`);
-    return stmt.all(jenis);
+  ipcMain.handle('localdb-cleanup-orphaned-products', async (event, businessId: number, syncedProductIds: number[]) => {
+    try {
+      if (!Array.isArray(syncedProductIds) || syncedProductIds.length === 0) {
+        console.log('ℹ️ [PRODUCTS CLEANUP] No synced product IDs provided, skipping cleanup');
+        return { success: true, deletedCount: 0 };
+      }
+
+      // Find products that belong to this business but are NOT in the synced list
+      const placeholders = syncedProductIds.map(() => '?').join(',');
+      const orphanedProductsQuery = `
+        SELECT DISTINCT p.id, p.nama
+        FROM products p
+        INNER JOIN product_businesses pb ON p.id = pb.product_id
+        WHERE pb.business_id = ? AND p.id NOT IN (${placeholders})
+      `;
+
+      const orphanedProducts = await executeQuery<{ id: number; nama: string }>(
+        orphanedProductsQuery,
+        [businessId, ...syncedProductIds]
+      );
+
+      if (orphanedProducts.length === 0) {
+        console.log('✅ [PRODUCTS CLEANUP] No orphaned products found');
+        return { success: true, deletedCount: 0 };
+      }
+
+      const orphanedProductIds = orphanedProducts.map(p => p.id);
+      console.log(`🧹 [PRODUCTS CLEANUP] Found ${orphanedProductIds.length} orphaned products to clean up: ${orphanedProductIds.join(', ')}`);
+
+      const deletePlaceholders = orphanedProductIds.map(() => '?').join(',');
+
+      // Delete in correct order to respect foreign key constraints
+      const queries: Array<{ sql: string; params?: (string | number | null | boolean)[] }> = [];
+
+      // 1. Delete product_customizations (references products)
+      queries.push({
+        sql: `DELETE FROM product_customizations WHERE product_id IN (${deletePlaceholders})`,
+        params: [...orphanedProductIds]
+      });
+
+      // 2. Delete bundle_items where bundle_product_id is in orphaned products
+      queries.push({
+        sql: `DELETE FROM bundle_items WHERE bundle_product_id IN (${deletePlaceholders})`,
+        params: [...orphanedProductIds]
+      });
+
+      // 3. Delete product_businesses relationships for orphaned products
+      queries.push({
+        sql: `DELETE FROM product_businesses WHERE product_id IN (${deletePlaceholders}) AND business_id = ?`,
+        params: [...orphanedProductIds, businessId]
+      });
+
+      // 4. Finally, delete the products themselves
+      queries.push({
+        sql: `DELETE FROM products WHERE id IN (${deletePlaceholders})`,
+        params: [...orphanedProductIds]
+      });
+
+      await executeTransaction(queries);
+      console.log(`✅ [PRODUCTS CLEANUP] Successfully deleted ${orphanedProductIds.length} orphaned products and their related data`);
+      
+      return { success: true, deletedCount: orphanedProductIds.length, deletedProductIds: orphanedProductIds };
+    } catch (error) {
+      console.error('❌ [PRODUCTS CLEANUP] Failed to cleanup orphaned products:', error);
+      return { success: false, error: error instanceof Error ? error.message : 'Unknown error' };
+    }
+  });
+  ipcMain.handle('localdb-get-products-by-jenis', async (event, jenis: string, businessId?: number) => {
+    try {
+      let query = `SELECT 
+        p.id, p.menu_code, p.nama, p.satuan, 
+        c2.name AS category2_name, c1.name AS category1_name,
+        p.keterangan, p.harga_beli, p.ppn, p.harga_jual, p.harga_khusus, 
+        p.harga_online, p.harga_qpon, p.harga_gofood, p.harga_grabfood, 
+        p.harga_shopeefood, p.harga_tiktok, p.fee_kerja, p.image_url, p.status, p.has_customization, p.is_bundle
+        FROM products p
+        LEFT JOIN category2 c2 ON p.category2_id = c2.id
+        LEFT JOIN category1 c1 ON p.category1_id = c1.id`;
+      
+      const params: (string | number)[] = [];
+      
+      // Add business filter if businessId is provided
+      if (businessId) {
+        query += ` INNER JOIN product_businesses pb ON p.id = pb.product_id`;
+      }
+      
+      query += ` WHERE c2.name = ? AND p.status = 'active'`;
+      params.push(jenis);
+      
+      if (businessId) {
+        query += ` AND pb.business_id = ?`;
+        params.push(businessId);
+      }
+      
+      query += ` ORDER BY p.nama ASC`;
+      
+      return await executeQuery(query, params);
+    } catch (error) {
+      console.error('Error getting products by jenis:', error);
+      return [];
+    }
   });
 
   // Add the missing method for category2 filtering
-  ipcMain.handle('localdb-get-products-by-category2', async (event, category2Name: string) => {
-    if (!localDb) return [];
-    const stmt = localDb.prepare(`SELECT 
-      id, business_id, menu_code, nama, satuan, kategori, category2_name, keterangan,
-      harga_beli, ppn, harga_jual, harga_khusus, harga_online, harga_qpon, harga_gofood, harga_grabfood, harga_shopeefood, harga_tiktok, fee_kerja, status, is_bundle
-      FROM products WHERE category2_name = ? AND status = 'active' ORDER BY nama ASC`);
-    return stmt.all(category2Name);
-  });
-  ipcMain.handle('localdb-get-all-products', async () => {
-    if (!localDb) return [];
+  ipcMain.handle('localdb-get-products-by-category2', async (event, category2Name: string, businessId?: number) => {
     try {
-      const stmt = localDb.prepare(`SELECT 
-        id, business_id, menu_code, nama, satuan, kategori, category2_name, keterangan,
-        harga_beli, ppn, harga_jual, harga_khusus, harga_online, harga_qpon, harga_gofood, harga_grabfood, harga_shopeefood, harga_tiktok, fee_kerja, status, is_bundle
-        FROM products WHERE status = 'active' ORDER BY nama ASC`);
-      return stmt.all();
+      // #region agent log
+      const logDataEntry = JSON.stringify({location:'main.ts:912',message:'localdb-get-products-by-category2 called',data:{category2Name,businessId},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'});
+      require('fs').appendFileSync('c:\\Code\\marviano-pos\\.cursor\\debug.log', logDataEntry + '\n');
+      // #endregion
+      let query = `SELECT 
+        p.id, p.menu_code, p.nama, p.satuan, 
+        c2.name AS category2_name, c1.name AS category1_name,
+        p.keterangan, p.harga_beli, p.ppn, p.harga_jual, p.harga_khusus, 
+        p.harga_online, p.harga_qpon, p.harga_gofood, p.harga_grabfood, 
+        p.harga_shopeefood, p.harga_tiktok, p.fee_kerja, p.image_url, p.status, p.has_customization, p.is_bundle
+        FROM products p
+        LEFT JOIN category2 c2 ON p.category2_id = c2.id
+        LEFT JOIN category1 c1 ON p.category1_id = c1.id`;
+      
+      const params: (string | number)[] = [];
+      
+      // Filter by businessId using junction table (product_businesses)
+      // Note: Only using junction table because p.business_id column doesn't exist in this MySQL schema
+      let useBusinessFilter = false;
+      if (businessId) {
+        // Check if product_businesses table has entries for this businessId
+        try {
+          const pbCheck = await executeQuery('SELECT COUNT(*) as count FROM product_businesses WHERE business_id = ?', [businessId]);
+          const pbCount = Array.isArray(pbCheck) && pbCheck.length > 0 ? (pbCheck[0] as any).count : 0;
+          useBusinessFilter = pbCount > 0;
+          // #region agent log
+          const logDataPb = JSON.stringify({location:'main.ts:932',message:'product_businesses check',data:{businessId,productBusinessesCount:pbCount,useBusinessFilter},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'});
+          require('fs').appendFileSync('c:\\Code\\marviano-pos\\.cursor\\debug.log', logDataPb + '\n');
+          // #endregion
+        } catch (e) {
+          // If check fails, don't use business filter (fallback to all products)
+          useBusinessFilter = false;
+          // #region agent log
+          const logDataError = JSON.stringify({location:'main.ts:936',message:'product_businesses check error',data:{businessId,error:String(e)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'});
+          require('fs').appendFileSync('c:\\Code\\marviano-pos\\.cursor\\debug.log', logDataError + '\n');
+          // #endregion
+        }
+      }
+      
+      if (businessId && useBusinessFilter) {
+        query += ` INNER JOIN product_businesses pb ON p.id = pb.product_id`;
+      }
+      
+      query += ` WHERE c2.name = ? AND p.status = 'active' AND p.harga_jual IS NOT NULL`;
+      params.push(category2Name);
+      
+      if (businessId && useBusinessFilter) {
+        // Use junction table only (p.business_id column doesn't exist in this schema)
+        query += ` AND pb.business_id = ?`;
+        params.push(businessId);
+      }
+      
+      query += ` ORDER BY p.nama ASC`;
+      
+      // #region agent log
+      const logDataQuery = JSON.stringify({location:'main.ts:953',message:'Executing query',data:{query,params,useBusinessFilter},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'D'});
+      require('fs').appendFileSync('c:\\Code\\marviano-pos\\.cursor\\debug.log', logDataQuery + '\n');
+      // #endregion
+      
+      const result = await executeQuery(query, params);
+      
+      // #region agent log
+      const logDataResult = JSON.stringify({location:'main.ts:956',message:'Query result',data:{resultCount:Array.isArray(result)?result.length:0,productIds:Array.isArray(result)?result.map((r:any)=>r.id):[],hasProduct298:Array.isArray(result)?result.some((r:any)=>r.id===298):false},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'E'});
+      require('fs').appendFileSync('c:\\Code\\marviano-pos\\.cursor\\debug.log', logDataResult + '\n');
+      // #endregion
+      
+      return result;
+    } catch (error) {
+      console.error('Error getting products by category2:', error);
+      return [];
+    }
+  });
+  ipcMain.handle('localdb-get-all-products', async (event, businessId?: number) => {
+    try {
+      let query = `SELECT 
+        p.id, p.menu_code, p.nama, p.satuan, 
+        c2.name AS category2_name, c1.name AS category1_name,
+        p.keterangan, p.harga_beli, p.ppn, p.harga_jual, p.harga_khusus, 
+        p.harga_online, p.harga_qpon, p.harga_gofood, p.harga_grabfood, 
+        p.harga_shopeefood, p.harga_tiktok, p.fee_kerja, p.image_url, p.status, p.has_customization, p.is_bundle
+        FROM products p
+        LEFT JOIN category2 c2 ON p.category2_id = c2.id
+        LEFT JOIN category1 c1 ON p.category1_id = c1.id`;
+      
+      const params: number[] = [];
+      
+      // Filter by businessId using junction table (product_businesses)
+      // Note: Only using junction table because p.business_id column doesn't exist in this MySQL schema
+      let useBusinessFilter = false;
+      if (businessId) {
+        // Check if product_businesses table has entries for this businessId
+        try {
+          const pbCheck = await executeQuery('SELECT COUNT(*) as count FROM product_businesses WHERE business_id = ?', [businessId]);
+          const pbCount = Array.isArray(pbCheck) && pbCheck.length > 0 ? (pbCheck[0] as any).count : 0;
+          const totalProducts = await executeQuery('SELECT COUNT(*) as count FROM products WHERE status = ?', ['active']);
+          // #region agent log
+          const logDataPb = JSON.stringify({location:'main.ts:962',message:'product_businesses check',data:{businessId,productBusinessesCount:pbCount,totalActiveProducts:Array.isArray(totalProducts)&&totalProducts.length>0?(totalProducts[0] as any).count:0,willUseBusinessFilter:pbCount>0},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'H'});
+          require('fs').appendFileSync('c:\\Code\\marviano-pos\\.cursor\\debug.log', logDataPb + '\n');
+          // #endregion
+          useBusinessFilter = pbCount > 0;
+        } catch (e) {
+          // If check fails, don't use business filter (fallback to all products)
+          useBusinessFilter = false;
+        }
+      }
+      
+      if (businessId && useBusinessFilter) {
+        query += ` INNER JOIN product_businesses pb ON p.id = pb.product_id`;
+      }
+      
+      query += ` WHERE p.status = 'active' AND p.harga_jual IS NOT NULL`;
+      
+      if (businessId && useBusinessFilter) {
+        // Use junction table only (p.business_id column doesn't exist in this schema)
+        query += ` AND pb.business_id = ?`;
+        params.push(businessId);
+      }
+      
+      query += ` ORDER BY p.nama ASC`;
+      
+      // #region agent log
+      const logData = JSON.stringify({location:'main.ts:947',message:'localdb-get-all-products query',data:{businessId,useBusinessFilter,query,params},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'});
+      require('fs').appendFileSync('c:\\Code\\marviano-pos\\.cursor\\debug.log', logData + '\n');
+      // #endregion
+      
+      const result = await executeQuery(query, params);
+      
+      // #region agent log
+      const logData2 = JSON.stringify({location:'main.ts:975',message:'localdb-get-all-products result',data:{businessId,resultCount:Array.isArray(result)?result.length:0,firstProduct:Array.isArray(result)&&result.length>0?result[0]:null,productIds:Array.isArray(result)?result.slice(0,10).map((r:any)=>r.id):[]},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'});
+      require('fs').appendFileSync('c:\\Code\\marviano-pos\\.cursor\\debug.log', logData2 + '\n');
+      // #endregion
+      
+      return result;
     } catch (error) {
       console.error('Error getting all products:', error);
+      // #region agent log
+      const logData3 = JSON.stringify({location:'main.ts:982',message:'localdb-get-all-products error',data:{businessId,error:String(error)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'G'});
+      require('fs').appendFileSync('c:\\Code\\marviano-pos\\.cursor\\debug.log', logData3 + '\n');
+      // #endregion
       return [];
     }
   });
 
   // Customization handlers
   ipcMain.handle('localdb-upsert-customization-types', async (event, rows: RowArray) => {
-    if (!localDb) return { success: false };
-    const tx = localDb.transaction((data: RowArray) => {
-      const stmt = localDb!.prepare(`INSERT INTO product_customization_types (
-        id, name, selection_mode, display_order, updated_at
-      ) VALUES (?, ?, ?, ?, ?)
-      ON CONFLICT(id) DO UPDATE SET
-        name=excluded.name, selection_mode=excluded.selection_mode,
-        display_order=excluded.display_order, updated_at=excluded.updated_at`);
-      for (const r of data) {
-        stmt.run(r.id, r.name, r.selection_mode, r.display_order || 0, Date.now());
-      }
-    });
-    tx(rows);
-    return { success: true };
+    try {
+      const queries = rows.map(r => ({
+        sql: `INSERT INTO product_customization_types (
+          id, name, selection_mode, display_order
+        ) VALUES (?, ?, ?, ?)
+        ON DUPLICATE KEY UPDATE
+          name=VALUES(name), selection_mode=VALUES(selection_mode),
+          display_order=VALUES(display_order)`,
+        params: [r.id ?? null, r.name ?? null, r.selection_mode ?? null, r.display_order ?? 0]
+      }));
+      await executeTransaction(queries);
+      return { success: true };
+    } catch (error) {
+      console.error('Error upserting customization types:', error);
+      return { success: false };
+    }
   });
 
   ipcMain.handle('localdb-upsert-customization-options', async (event, rows: RowArray) => {
-    if (!localDb) return { success: false };
-    const tx = localDb.transaction((data: RowArray) => {
-      const stmt = localDb!.prepare(`INSERT INTO product_customization_options (
-        id, type_id, name, price_adjustment, display_order, status, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT(id) DO UPDATE SET
-        type_id=excluded.type_id, name=excluded.name, price_adjustment=excluded.price_adjustment,
-        display_order=excluded.display_order, status=excluded.status, updated_at=excluded.updated_at`);
-      for (const r of data) {
-        stmt.run(r.id, r.type_id, r.name, r.price_adjustment || 0.0, r.display_order || 0, r.status || 'active', Date.now());
-      }
-    });
-    tx(rows);
-    return { success: true };
+    try {
+      const queries = rows.map(r => ({
+        sql: `INSERT INTO product_customization_options (
+          id, type_id, name, price_adjustment, display_order, status
+        ) VALUES (?, ?, ?, ?, ?, ?)
+        ON DUPLICATE KEY UPDATE
+          type_id=VALUES(type_id), name=VALUES(name), price_adjustment=VALUES(price_adjustment),
+          display_order=VALUES(display_order), status=VALUES(status)`,
+        params: [r.id ?? null, r.type_id ?? null, r.name ?? null, r.price_adjustment || 0.0, r.display_order || 0, r.status || 'active']
+      }));
+      await executeTransaction(queries);
+      return { success: true };
+    } catch (error) {
+      console.error('Error upserting customization options:', error);
+      return { success: false };
+    }
   });
 
   ipcMain.handle('localdb-upsert-product-customizations', async (event, rows: RowArray) => {
-    if (!localDb) return { success: false };
-    const tx = localDb.transaction((data: RowArray) => {
-      const stmt = localDb!.prepare(`INSERT INTO product_customizations (
-        id, product_id, customization_type_id, updated_at
-      ) VALUES (?, ?, ?, ?)
-      ON CONFLICT(id) DO UPDATE SET
-        product_id=excluded.product_id, customization_type_id=excluded.customization_type_id,
-        updated_at=excluded.updated_at`);
-      for (const r of data) {
+    try {
+      const queries: Array<{ sql: string; params?: (string | number | null | boolean)[] }> = [];
+      for (const r of rows) {
         try {
-          stmt.run(r.id, r.product_id, r.customization_type_id, Date.now());
+          queries.push({
+            sql: `INSERT INTO product_customizations (
+              id, product_id, customization_type_id
+            ) VALUES (?, ?, ?)
+            ON DUPLICATE KEY UPDATE
+              product_id=VALUES(product_id), customization_type_id=VALUES(customization_type_id)`,
+            params: [r.id ?? null, r.product_id ?? null, r.customization_type_id ?? null]
+          });
         } catch (error) {
           console.warn(`⚠️ [PRODUCT CUSTOMIZATION UPSERT] Skipping row ${r.id} due to error:`, error);
         }
       }
-    });
-    tx(rows);
-    return { success: true };
+      if (queries.length > 0) {
+        await executeTransaction(queries);
+      }
+      return { success: true };
+    } catch (error) {
+      console.error('Error upserting product customizations:', error);
+      return { success: false };
+    }
   });
 
   // Bundle items handlers
   ipcMain.handle('localdb-get-bundle-items', async (event, productId: number | string) => {
-    if (!localDb) {
-      console.warn('⚠️ [BUNDLE ITEMS] Local DB not available');
-      return [];
-    }
     try {
       // Ensure productId is a number
       const productIdNum = typeof productId === 'string' ? parseInt(productId, 10) : productId;
@@ -2359,10 +1381,10 @@ function createWindows(): void {
       console.log(`🔍 [BUNDLE ITEMS] Fetching bundle items for product ID: ${productIdNum} (type: ${typeof productId}, converted from: ${productId})`);
 
       // First, check if any bundle items exist at all
-      const allBundleItems = localDb.prepare('SELECT bundle_product_id, COUNT(*) as count FROM bundle_items GROUP BY bundle_product_id').all() as Array<{ bundle_product_id: number; count: number }>;
+      const allBundleItems = await executeQuery<{ bundle_product_id: number; count: number }>('SELECT bundle_product_id, COUNT(*) as count FROM bundle_items GROUP BY bundle_product_id');
       console.log(`📊 [BUNDLE ITEMS] Bundle items by product:`, allBundleItems);
 
-      const bundleItems = localDb.prepare(`
+      const bundleItems = await executeQuery<BundleItemRow>(`
         SELECT 
           bi.id,
           bi.bundle_product_id,
@@ -2374,14 +1396,14 @@ function createWindows(): void {
         LEFT JOIN category2 c2 ON bi.category2_id = c2.id
         WHERE bi.bundle_product_id = ?
         ORDER BY bi.display_order ASC
-      `).all(productIdNum) as BundleItemRow[];
+      `, [productIdNum]);
 
       console.log(`✅ [BUNDLE ITEMS] Found ${bundleItems.length} bundle items for product ${productIdNum}`);
       if (bundleItems.length > 0) {
         console.log(`📦 [BUNDLE ITEMS] First item:`, JSON.stringify(bundleItems[0], null, 2));
       } else {
         console.warn(`⚠️ [BUNDLE ITEMS] No bundle items found for product ${productIdNum}. Checking if product exists in products table...`);
-        const productCheck = localDb.prepare('SELECT id, nama, is_bundle FROM products WHERE id = ?').get(productIdNum);
+        const productCheck = await executeQueryOne('SELECT id, nama, is_bundle FROM products WHERE id = ?', [productIdNum]);
         console.log(`🔍 [BUNDLE ITEMS] Product check result:`, productCheck);
       }
 
@@ -2403,10 +1425,6 @@ function createWindows(): void {
   });
 
   ipcMain.handle('localdb-upsert-bundle-items', async (event, rows: RowArray) => {
-    if (!localDb) {
-      console.warn('⚠️ [BUNDLE ITEMS UPSERT] Local DB not available');
-      return { success: false };
-    }
     try {
       if (!Array.isArray(rows)) {
         console.error(`❌ [BUNDLE ITEMS UPSERT] Invalid data: rows is not an array, got ${typeof rows}`);
@@ -2418,51 +1436,98 @@ function createWindows(): void {
         console.log(`📦 [BUNDLE ITEMS UPSERT] First item sample:`, JSON.stringify(rows[0], null, 2));
       }
 
-      const tx = localDb.transaction((data: RowArray) => {
-        const stmt = localDb!.prepare(`
-          INSERT INTO bundle_items (
-            id, bundle_product_id, category2_id, required_quantity, display_order, created_at, updated_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?)
-          ON CONFLICT(id) DO UPDATE SET
-            bundle_product_id = excluded.bundle_product_id,
-            category2_id = excluded.category2_id,
-            required_quantity = excluded.required_quantity,
-            display_order = excluded.display_order,
-            updated_at = excluded.updated_at
-        `);
-        let successCount = 0;
-        let errorCount = 0;
-        for (const r of data) {
+      const queries: Array<{ sql: string; params?: (string | number | null | boolean)[] }> = [];
+      let successCount = 0;
+      let errorCount = 0;
+
+      for (const r of rows) {
+        try {
+          // Skip if bundle_product_id is null or invalid
+          if (!r.bundle_product_id) {
+            errorCount++;
+            console.warn(`⚠️ [BUNDLE ITEMS UPSERT] Skipping row ${r.id}: bundle_product_id is null`);
+            continue;
+          }
+
+          // Verify product exists before inserting bundle item
           try {
-            const createdAt = r.created_at || new Date().toISOString();
-            const updatedAt = Date.now();
-            stmt.run(
-              r.id,
-              r.bundle_product_id,
-              r.category2_id,
-              r.required_quantity,
-              r.display_order,
+            const productExists = await executeQueryOne<{ id: number }>('SELECT id FROM products WHERE id = ? LIMIT 1', [r.bundle_product_id]);
+            if (!productExists) {
+              console.warn(`⚠️ [BUNDLE ITEMS UPSERT] Skipping row ${r.id}: bundle_product_id ${r.bundle_product_id} does not exist`);
+              errorCount++;
+              continue;
+            }
+          } catch (checkError) {
+            console.warn(`⚠️ [BUNDLE ITEMS UPSERT] Error checking product ${r.bundle_product_id} for bundle item ${r.id}:`, checkError);
+            errorCount++;
+            continue;
+          }
+
+          // Verify category2_id exists before inserting (foreign key constraint)
+          // category2_id is NOT NULL in schema, so skip if it doesn't exist
+          let category2Id = r.category2_id;
+          if (category2Id) {
+            try {
+              const category2Exists = await executeQueryOne<{ id: number }>('SELECT id FROM category2 WHERE id = ? LIMIT 1', [category2Id]);
+              if (!category2Exists) {
+                console.warn(`⚠️ [BUNDLE ITEMS UPSERT] Skipping row ${r.id}: category2_id ${category2Id} does not exist (required, cannot be NULL)`);
+                errorCount++;
+                continue;
+              }
+            } catch (checkError) {
+              console.warn(`⚠️ [BUNDLE ITEMS UPSERT] Error checking category2_id ${r.category2_id} for bundle item ${r.id}:`, checkError);
+              errorCount++;
+              continue;
+            }
+          } else {
+            console.warn(`⚠️ [BUNDLE ITEMS UPSERT] Skipping row ${r.id}: category2_id is null (required)`);
+            errorCount++;
+            continue;
+          }
+
+          const createdAt = toMySQLTimestamp(r.created_at || new Date());
+          const updatedAt = toMySQLTimestamp(r.updated_at || Date.now());
+          queries.push({
+            sql: `
+              INSERT INTO bundle_items (
+                id, bundle_product_id, category2_id, required_quantity, display_order, created_at, updated_at
+              ) VALUES (?, ?, ?, ?, ?, ?, ?)
+              ON DUPLICATE KEY UPDATE
+                bundle_product_id = VALUES(bundle_product_id),
+                category2_id = VALUES(category2_id),
+                required_quantity = VALUES(required_quantity),
+                display_order = VALUES(display_order),
+                updated_at = VALUES(updated_at)
+            `,
+            params: [
+              r.id ?? null,
+              r.bundle_product_id ?? null,
+              category2Id ?? null,
+              r.required_quantity ?? null,
+              r.display_order ?? null,
               createdAt,
               updatedAt
-            );
-            successCount++;
-          } catch (rowError: unknown) {
-            errorCount++;
-            // Simply log warning and continue, instead of error which scares users
-            const rowErrorMessage = (rowError && typeof rowError === 'object' && 'message' in rowError)
-              ? String((rowError as { message: unknown }).message)
-              : String(rowError);
-            console.warn(`⚠️ [BUNDLE ITEMS UPSERT] Skipping row ${r.id}: ${rowErrorMessage}`);
-          }
+            ]
+          });
+          successCount++;
+        } catch (rowError: unknown) {
+          errorCount++;
+          const rowErrorMessage = (rowError && typeof rowError === 'object' && 'message' in rowError)
+            ? String((rowError as { message: unknown }).message)
+            : String(rowError);
+          console.warn(`⚠️ [BUNDLE ITEMS UPSERT] Skipping row ${r.id}: ${rowErrorMessage}`);
         }
-        console.log(`📊 [BUNDLE ITEMS UPSERT] Upserted ${successCount} items, ${errorCount} errors`);
-      });
-      tx(rows);
+      }
+
+      if (queries.length > 0) {
+        await executeTransaction(queries);
+      }
+      console.log(`📊 [BUNDLE ITEMS UPSERT] Upserted ${successCount} items, ${errorCount} errors`);
       console.log(`✅ [BUNDLE ITEMS UPSERT] Successfully upserted bundle items`);
 
       // Verify the data was saved
-      const verifyCount = localDb.prepare('SELECT COUNT(*) as count FROM bundle_items').get() as { count: number };
-      console.log(`✅ [BUNDLE ITEMS UPSERT] Total bundle items in database: ${verifyCount.count}`);
+      const verifyCount = await executeQueryOne<{ count: number }>('SELECT COUNT(*) as count FROM bundle_items');
+      console.log(`✅ [BUNDLE ITEMS UPSERT] Total bundle items in database: ${verifyCount?.count || 0}`);
 
       return { success: true };
     } catch (error: unknown) {
@@ -2476,9 +1541,8 @@ function createWindows(): void {
 
   // Debug handler to list all bundle items
   ipcMain.handle('localdb-debug-bundle-items', async () => {
-    if (!localDb) return { success: false, items: [] };
     try {
-      const allItems = localDb.prepare(`
+      const allItems = await executeQuery<BundleItemRow>(`
         SELECT 
           bi.id,
           bi.bundle_product_id,
@@ -2489,7 +1553,7 @@ function createWindows(): void {
         FROM bundle_items bi
         LEFT JOIN category2 c2 ON bi.category2_id = c2.id
         ORDER BY bi.bundle_product_id, bi.display_order ASC
-      `).all() as BundleItemRow[];
+      `);
 
       console.log(`🔍 [DEBUG] Total bundle items in database: ${allItems.length}`);
       if (allItems.length > 0) {
@@ -2507,30 +1571,27 @@ function createWindows(): void {
   });
 
   ipcMain.handle('localdb-get-product-customizations', async (event, productId: number) => {
-    if (!localDb) return [];
     try {
       console.log(`🔍 [OFFLINE] Fetching customizations for product ${productId}`);
 
       // Get customization types for this product
-      const typesStmt = localDb.prepare(`
+      const types = await executeQuery<CustomizationTypeRow>(`
         SELECT DISTINCT ct.id, ct.name, ct.selection_mode, ct.display_order
         FROM product_customization_types ct
         INNER JOIN product_customizations pc ON ct.id = pc.customization_type_id
         WHERE pc.product_id = ?
         ORDER BY ct.display_order ASC, ct.name ASC
-      `);
-      const types = typesStmt.all(productId) as CustomizationTypeRow[];
+      `, [productId]);
       console.log(`📋 [OFFLINE] Found ${types.length} customization types for product ${productId}`, types);
 
       // For each type, get all available options (not just for this product)
-      const customizations = types.map((type) => {
-        const optionsStmt = localDb!.prepare(`
+      const customizations = await Promise.all(types.map(async (type) => {
+        const options = await executeQuery<CustomizationOptionRow>(`
           SELECT co.id, co.type_id, co.name, co.price_adjustment, co.display_order
           FROM product_customization_options co
           WHERE co.type_id = ? AND co.status = 'active'
           ORDER BY co.display_order ASC, co.name ASC
-        `);
-        const options = optionsStmt.all(type.id) as CustomizationOptionRow[];
+        `, [type.id]);
         console.log(`📋 [OFFLINE] Type "${type.name}": found ${options.length} options`, options);
 
         return {
@@ -2545,7 +1606,7 @@ function createWindows(): void {
             display_order: option.display_order
           }))
         };
-      });
+      }));
 
       console.log(`✅ [OFFLINE] Returning ${customizations.length} customizations:`, customizations);
       return customizations;
@@ -2556,282 +1617,722 @@ function createWindows(): void {
   });
 
   ipcMain.handle('localdb-update-sync-status', async (event, key: string, status: string) => {
-    if (!localDb) return { success: false };
-    const stmt = localDb.prepare('INSERT INTO sync_status (key, last_sync, status) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET last_sync=excluded.last_sync, status=excluded.status');
-    stmt.run(key, Date.now(), status);
-    return { success: true };
+    try {
+      // 'key' is a reserved word in MySQL, need to escape it with backticks
+      // Table may not exist - handle gracefully
+      await executeUpdate('INSERT INTO sync_status (`key`, last_sync, status) VALUES (?, ?, ?) ON DUPLICATE KEY UPDATE last_sync=VALUES(last_sync), status=VALUES(status)', [key, Date.now(), status]);
+      return { success: true };
+    } catch (error) {
+      const err = error as { code?: string; errno?: number };
+      // If table doesn't exist, just log and continue (not critical)
+      if (err.code === 'ER_NO_SUCH_TABLE' || err.errno === 1146) {
+        console.warn('⚠️ [SYNC STATUS] sync_status table does not exist - skipping status update');
+        return { success: true }; // Return success to not break sync flow
+      }
+      console.error('Error updating sync status:', error);
+      return { success: false };
+    }
   });
   ipcMain.handle('localdb-get-sync-status', async (event, key: string) => {
-    if (!localDb) return null;
-    const stmt = localDb.prepare('SELECT * FROM sync_status WHERE key = ?');
-    return stmt.get(key);
+    try {
+      // 'key' is a reserved word in MySQL, need to escape it with backticks
+      return await executeQueryOne('SELECT * FROM sync_status WHERE `key` = ?', [key]);
+    } catch (error) {
+      const err = error as { code?: string; errno?: number };
+      // If table doesn't exist, just return null (not critical)
+      if (err.code === 'ER_NO_SUCH_TABLE' || err.errno === 1146) {
+        console.warn('⚠️ [SYNC STATUS] sync_status table does not exist');
+        return null;
+      }
+      console.error('Error getting sync status:', error);
+      return null;
+    }
   });
 
   // Comprehensive IPC handlers for all POS tables
   // Users
-  ipcMain.handle('localdb-upsert-users', async (event, rows: RowArray) => {
-    if (!localDb) return { success: false };
-    const tx = localDb.transaction((data: RowArray) => {
-      const stmt = localDb!.prepare(`INSERT INTO users (
-        id, email, password, name, googleId, createdAt, role_id, organization_id, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT(id) DO UPDATE SET
-        email=excluded.email, password=excluded.password, name=excluded.name,
-        googleId=excluded.googleId, createdAt=excluded.createdAt, role_id=excluded.role_id,
-        organization_id=excluded.organization_id, updated_at=excluded.updated_at`);
-      for (const r of data) {
-        stmt.run(r.id, r.email, r.password, r.name, r.googleId, r.createdAt, r.role_id, r.organization_id, Date.now());
+  ipcMain.handle('localdb-upsert-users', async (event, rows: RowArray, skipRoleValidation: boolean = false) => {
+    try {
+      // #region agent log
+      fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'main.ts:1331',message:'localdb-upsert-users called',data:{totalRows:Array.isArray(rows)?rows.length:0,userIds:Array.isArray(rows)?rows.map((r:any)=>r?.id).filter(Boolean):[],user1InRows:Array.isArray(rows)?rows.some((r:any)=>r?.id===1):false,skipRoleValidation:skipRoleValidation},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})}).catch(()=>{});
+      // #endregion
+      const queries: Array<{ sql: string; params?: (string | number | null | boolean)[] }> = [];
+      let skippedCount = 0;
+      
+      for (const r of rows) {
+        // #region agent log
+        if (r.id === 1) {
+          fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'main.ts:1336',message:'Processing user 1',data:{userId:r.id,roleId:r.role_id,orgId:r.organization_id,skipRoleValidation:skipRoleValidation},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'D'})}).catch(()=>{});
+        }
+        // #endregion
+        let roleId = r.role_id;
+        let orgId = r.organization_id;
+        
+        // Verify role_id exists before inserting (foreign key constraint) - SKIP on first pass to break circular dependency
+        if (roleId && !skipRoleValidation) {
+          try {
+            const roleExists = await executeQueryOne<{ id: number }>('SELECT id FROM roles WHERE id = ? LIMIT 1', [roleId]);
+            // #region agent log
+            if (r.id === 1) {
+              fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'main.ts:1343',message:'User 1 role check result',data:{userId:r.id,roleId:roleId,roleExists:!!roleExists},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'E'})}).catch(()=>{});
+            }
+            // #endregion
+            if (!roleExists) {
+              console.warn(`⚠️ [USERS] Skipping user ${r.id}: role_id ${roleId} does not exist`);
+              // #region agent log
+              if (r.id === 1) {
+                fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'main.ts:1345',message:'User 1 skipped - role missing',data:{userId:r.id,roleId:roleId},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'F'})}).catch(()=>{});
+              }
+              // #endregion
+              skippedCount++;
+              continue;
+            }
+          } catch (checkError) {
+            // #region agent log
+            if (r.id === 1) {
+              fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'main.ts:1350',message:'User 1 role check error',data:{userId:r.id,roleId:roleId,error:String(checkError)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'G'})}).catch(()=>{});
+            }
+            // #endregion
+            console.warn(`⚠️ [USERS] Failed to verify role_id ${roleId}:`, checkError);
+            skippedCount++;
+            continue;
+          }
+        } else if (roleId && skipRoleValidation) {
+          // #region agent log
+          if (r.id === 1) {
+            fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'main.ts:1355',message:'User 1 skipping role validation (first pass)',data:{userId:r.id,roleId:roleId},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'X'})}).catch(()=>{});
+          }
+          // #endregion
+          console.log(`ℹ️ [USERS] Skipping role validation for user ${r.id} (first pass - breaking circular dependency)`);
+        }
+        
+        // Verify organization_id exists before inserting (foreign key constraint) - SKIP on first pass
+        if (orgId && !skipRoleValidation) {
+          try {
+            const orgExists = await executeQueryOne<{ id: number }>('SELECT id FROM organizations WHERE id = ? LIMIT 1', [orgId]);
+            if (!orgExists) {
+              console.warn(`⚠️ [USERS] Skipping user ${r.id}: organization_id ${orgId} does not exist`);
+              skippedCount++;
+              continue;
+            }
+          } catch (checkError) {
+            console.warn(`⚠️ [USERS] Failed to verify organization_id ${orgId}:`, checkError);
+            skippedCount++;
+            continue;
+          }
+        } else if (orgId && skipRoleValidation) {
+          // #region agent log
+          if (r.id === 1) {
+            fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'main.ts:1370',message:'User 1 skipping org validation (first pass)',data:{userId:r.id,orgId:orgId},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'Y'})}).catch(()=>{});
+          }
+          // #endregion
+          console.log(`ℹ️ [USERS] Skipping organization validation for user ${r.id} (first pass - breaking circular dependency)`);
+        }
+        
+        queries.push({
+          sql: `INSERT INTO users (
+            id, email, password, name, googleId, createdAt, role_id, organization_id
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+          ON DUPLICATE KEY UPDATE
+            email=VALUES(email), password=VALUES(password), name=VALUES(name),
+            googleId=VALUES(googleId), createdAt=VALUES(createdAt), role_id=VALUES(role_id),
+            organization_id=VALUES(organization_id)`,
+          params: [r.id ?? null, r.email ?? null, r.password ?? null, r.name ?? null, r.googleId ?? null, toMySQLTimestamp(r.createdAt || new Date()), roleId ?? null, orgId ?? null]
+        });
+        // #region agent log
+        if (r.id === 1) {
+          fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'main.ts:1409',message:'User 1 added to queries',data:{userId:r.id,roleId:roleId,orgId:orgId},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'H'})}).catch(()=>{});
+        }
+        // #endregion
       }
-    });
-    tx(rows);
-    return { success: true };
+      
+      if (queries.length > 0) {
+        // #region agent log
+        fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'main.ts:1426',message:'Executing user transaction',data:{queryCount:queries.length,skippedCount:skippedCount,user1InQueries:queries.some((q:any)=>q.params?.[0]===1),skipRoleValidation:skipRoleValidation},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'I'})}).catch(()=>{});
+        // #endregion
+        if (skipRoleValidation) {
+          // On first pass: Insert users one by one to handle foreign key errors individually
+          let successCount = 0;
+          let failCount = 0;
+          for (const query of queries) {
+            try {
+              await executeUpdate(query.sql, query.params || []);
+              successCount++;
+              // #region agent log
+              if (query.params?.[0] === 1) {
+                fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'main.ts:1433',message:'User 1 inserted successfully (first pass)',data:{userId:query.params?.[0]},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'AB'})}).catch(()=>{});
+              }
+              // #endregion
+            } catch (insertError: unknown) {
+              const err = insertError as { code?: string; errno?: number; message?: string };
+              if (err.code === 'ER_NO_REFERENCED_ROW_2' || err.errno === 1452) {
+                // Foreign key constraint - expected on first pass, will retry later
+                failCount++;
+                // #region agent log
+                if (query.params?.[0] === 1) {
+                  fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'main.ts:1441',message:'User 1 insert failed (expected - will retry)',data:{userId:query.params?.[0],error:String(err)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'AC'})}).catch(()=>{});
+                }
+                // #endregion
+                console.log(`ℹ️ [USERS] User ${query.params?.[0]} insert failed (foreign key - will retry later): ${err.message}`);
+              } else {
+                // Unexpected error - log and continue
+                failCount++;
+                console.warn(`⚠️ [USERS] User ${query.params?.[0]} insert failed: ${err.message}`);
+              }
+            }
+          }
+          // #region agent log
+          fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'main.ts:1449',message:'User transaction completed (first pass)',data:{successCount:successCount,failCount:failCount,total:queries.length},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'AD'})}).catch(()=>{});
+          // #endregion
+          console.log(`ℹ️ [USERS] First pass: ${successCount} inserted, ${failCount} failed (will retry later)`);
+        } else {
+          // On retry pass: Use transaction for better performance
+          try {
+            await executeTransaction(queries);
+            // #region agent log
+            fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'main.ts:1455',message:'User transaction completed (retry pass)',data:{success:true},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'J'})}).catch(()=>{});
+            // #endregion
+            if (skippedCount > 0) {
+              console.log(`⚠️ [USERS] Skipped ${skippedCount} users due to missing roles/organizations`);
+            }
+          } catch (transactionError: unknown) {
+            const err = transactionError as { code?: string; errno?: number; message?: string };
+            // #region agent log
+            fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'main.ts:1461',message:'User transaction failed (retry pass)',data:{error:String(err)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'AA'})}).catch(()=>{});
+            // #endregion
+            console.error(`❌ [USERS] Transaction error:`, transactionError);
+            throw transactionError;
+          }
+        }
+      } else {
+        // #region agent log
+        fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'main.ts:1387',message:'No valid users to insert',data:{totalRows:rows.length,skippedCount:skippedCount},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'K'})}).catch(()=>{});
+        // #endregion
+        console.warn(`⚠️ [USERS] No valid users to insert (all ${rows.length} skipped)`);
+      }
+      return { success: true };
+    } catch (error) {
+      console.error('Error upserting users:', error);
+      return { success: false };
+    }
   });
 
   ipcMain.handle('localdb-get-users', async () => {
-    if (!localDb) return [];
-    const stmt = localDb.prepare('SELECT * FROM users ORDER BY name ASC');
-    return stmt.all();
+    try {
+      return await executeQuery('SELECT * FROM users ORDER BY name ASC');
+    } catch (error) {
+      console.error('Error getting users:', error);
+      return [];
+    }
   });
 
   // Businesses
   ipcMain.handle('localdb-upsert-businesses', async (event, rows: RowArray) => {
-    if (!localDb) return { success: false };
-    const tx = localDb.transaction((data: RowArray) => {
-      const stmt = localDb!.prepare(`INSERT INTO businesses (
-        id, name, permission_name, organization_id, status, management_group_id, image_url, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT(id) DO UPDATE SET
-        name=excluded.name, permission_name=excluded.permission_name, organization_id=excluded.organization_id,
-        status=excluded.status, management_group_id=excluded.management_group_id, image_url=excluded.image_url,
-        created_at=excluded.created_at, updated_at=excluded.updated_at`);
-      for (const r of data) {
-        stmt.run(r.id, r.name, r.permission_name, r.organization_id, r.status || 'active', r.management_group_id, r.image_url, r.created_at, Date.now());
+    try {
+      const queries: Array<{ sql: string; params?: (string | number | null | boolean)[] }> = [];
+      let skippedCount = 0;
+      
+      for (const r of rows) {
+        let orgId = r.organization_id;
+        let mgmtGroupId = r.management_group_id;
+        
+        // Verify organization_id exists before inserting (foreign key constraint)
+        if (orgId) {
+          try {
+            const orgExists = await executeQueryOne<{ id: number }>('SELECT id FROM organizations WHERE id = ? LIMIT 1', [orgId]);
+            if (!orgExists) {
+              console.warn(`⚠️ [BUSINESSES] Skipping business ${r.id}: organization_id ${orgId} does not exist`);
+              skippedCount++;
+              continue;
+            }
+          } catch (checkError) {
+            console.warn(`⚠️ [BUSINESSES] Failed to verify organization_id ${orgId}:`, checkError);
+            skippedCount++;
+            continue;
+          }
+        }
+        
+        // Verify management_group_id exists if provided
+        if (mgmtGroupId) {
+          try {
+            const mgmtExists = await executeQueryOne<{ id: number }>('SELECT id FROM management_groups WHERE id = ? LIMIT 1', [mgmtGroupId]);
+            if (!mgmtExists) {
+              console.warn(`⚠️ [BUSINESSES] management_group_id ${mgmtGroupId} does not exist, setting to NULL`);
+              mgmtGroupId = null;
+            }
+          } catch (checkError) {
+            console.warn(`⚠️ [BUSINESSES] Failed to verify management_group_id ${mgmtGroupId}:`, checkError);
+            mgmtGroupId = null;
+          }
+        }
+        
+        queries.push({
+          sql: `INSERT INTO businesses (
+            id, name, permission_name, organization_id, status, management_group_id, image_url, created_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+          ON DUPLICATE KEY UPDATE
+            name=VALUES(name), permission_name=VALUES(permission_name), organization_id=VALUES(organization_id),
+            status=VALUES(status), management_group_id=VALUES(management_group_id), image_url=VALUES(image_url),
+            created_at=VALUES(created_at)`,
+          params: [r.id ?? null, r.name ?? null, r.permission_name ?? null, orgId ?? null, r.status || 'active', mgmtGroupId ?? null, r.image_url ?? null, toMySQLTimestamp(r.created_at || new Date())]
+        });
       }
-    });
-    tx(rows);
-    return { success: true };
+      
+      if (queries.length > 0) {
+        await executeTransaction(queries);
+        if (skippedCount > 0) {
+          console.log(`⚠️ [BUSINESSES] Skipped ${skippedCount} businesses due to missing organizations`);
+        }
+      } else {
+        console.warn(`⚠️ [BUSINESSES] No valid businesses to insert (all ${rows.length} skipped)`);
+      }
+      return { success: true };
+    } catch (error) {
+      console.error('Error upserting businesses:', error);
+      return { success: false };
+    }
   });
 
   ipcMain.handle('localdb-get-businesses', async () => {
-    if (!localDb) return [];
-    const stmt = localDb.prepare('SELECT * FROM businesses ORDER BY name ASC');
-    return stmt.all();
+    try {
+      return await executeQuery('SELECT * FROM businesses ORDER BY name ASC');
+    } catch (error) {
+      console.error('Error getting businesses:', error);
+      return [];
+    }
   });
 
   // Ingredients
   ipcMain.handle('localdb-upsert-ingredients', async (event, rows: RowArray) => {
-    if (!localDb) return { success: false };
-    const tx = localDb.transaction((data: RowArray) => {
-      const stmt = localDb!.prepare(`INSERT INTO ingredients (
-        id, ingredient_code, nama, kategori, satuan_beli, isi_satuan_beli, satuan_keluar,
-        harga_beli, stok_min, status, business_id, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT(id) DO UPDATE SET
-        ingredient_code=excluded.ingredient_code, nama=excluded.nama, kategori=excluded.kategori,
-        satuan_beli=excluded.satuan_beli, isi_satuan_beli=excluded.isi_satuan_beli, satuan_keluar=excluded.satuan_keluar,
-        harga_beli=excluded.harga_beli, stok_min=excluded.stok_min, status=excluded.status,
-        business_id=excluded.business_id, created_at=excluded.created_at, updated_at=excluded.updated_at`);
-      for (const r of data) {
-        stmt.run(r.id, r.ingredient_code, r.nama, r.kategori, r.satuan_beli, r.isi_satuan_beli, r.satuan_keluar,
-          r.harga_beli, r.stok_min, r.status, r.business_id, r.created_at, Date.now());
-      }
-    });
-    tx(rows);
-    return { success: true };
+    try {
+      const queries = rows.map(r => ({
+        sql: `INSERT INTO ingredients (
+          id, ingredient_code, nama, kategori, satuan_beli, isi_satuan_beli, satuan_keluar,
+          harga_beli, stok_min, status, business_id, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON DUPLICATE KEY UPDATE
+          ingredient_code=VALUES(ingredient_code), nama=VALUES(nama), kategori=VALUES(kategori),
+          satuan_beli=VALUES(satuan_beli), isi_satuan_beli=VALUES(isi_satuan_beli), satuan_keluar=VALUES(satuan_keluar),
+          harga_beli=VALUES(harga_beli), stok_min=VALUES(stok_min), status=VALUES(status),
+          business_id=VALUES(business_id), created_at=VALUES(created_at), updated_at=VALUES(updated_at)`,
+        params: [r.id ?? null, r.ingredient_code ?? null, r.nama ?? null, r.kategori ?? null, r.satuan_beli ?? null, r.isi_satuan_beli ?? null, r.satuan_keluar ?? null,
+          r.harga_beli ?? null, r.stok_min ?? null, r.status ?? null, r.business_id ?? null, toMySQLTimestamp(r.created_at || new Date()), toMySQLTimestamp(Date.now())]
+      }));
+      await executeTransaction(queries);
+      return { success: true };
+    } catch (error) {
+      console.error('Error upserting ingredients:', error);
+      return { success: false };
+    }
   });
 
   ipcMain.handle('localdb-get-ingredients', async (event, businessId?: number) => {
-    if (!localDb) return [];
-    if (businessId) {
-      const stmt = localDb.prepare('SELECT * FROM ingredients WHERE business_id = ? AND status = \'active\' ORDER BY nama ASC');
-      return stmt.all(businessId);
-    } else {
-      const stmt = localDb.prepare('SELECT * FROM ingredients WHERE status = \'active\' ORDER BY nama ASC');
-      return stmt.all();
+    try {
+      if (businessId) {
+        return await executeQuery('SELECT * FROM ingredients WHERE business_id = ? AND status = \'active\' ORDER BY nama ASC', [businessId]);
+      } else {
+        return await executeQuery('SELECT * FROM ingredients WHERE status = \'active\' ORDER BY nama ASC');
+      }
+    } catch (error) {
+      console.error('Error getting ingredients:', error);
+      return [];
     }
   });
 
   // COGS
   ipcMain.handle('localdb-upsert-cogs', async (event, rows: RowArray) => {
-    if (!localDb) return { success: false };
-    const tx = localDb.transaction((data: RowArray) => {
-      const stmt = localDb!.prepare(`INSERT INTO cogs (
-        id, menu_code, ingredient_code, amount, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?)
-      ON CONFLICT(id) DO UPDATE SET
-        menu_code=excluded.menu_code, ingredient_code=excluded.ingredient_code,
-        amount=excluded.amount, created_at=excluded.created_at, updated_at=excluded.updated_at`);
-      for (const r of data) {
-        stmt.run(r.id, r.menu_code, r.ingredient_code, r.amount, r.created_at, Date.now());
-      }
-    });
-    tx(rows);
-    return { success: true };
+    try {
+      const queries = rows.map(r => ({
+        sql: `INSERT INTO cogs (
+          id, menu_code, ingredient_code, amount, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?)
+        ON DUPLICATE KEY UPDATE
+          menu_code=VALUES(menu_code), ingredient_code=VALUES(ingredient_code),
+          amount=VALUES(amount), created_at=VALUES(created_at), updated_at=VALUES(updated_at)`,
+        params: [r.id, r.menu_code, r.ingredient_code, r.amount, toMySQLTimestamp(r.created_at || new Date()), toMySQLTimestamp(Date.now())]
+      }));
+      await executeTransaction(queries);
+      return { success: true };
+    } catch (error) {
+      console.error('Error upserting COGS:', error);
+      return { success: false };
+    }
   });
 
   ipcMain.handle('localdb-get-cogs', async () => {
-    if (!localDb) return [];
-    const stmt = localDb.prepare('SELECT * FROM cogs ORDER BY menu_code ASC');
-    return stmt.all();
+    try {
+      return await executeQuery('SELECT * FROM cogs ORDER BY menu_code ASC');
+    } catch (error) {
+      console.error('Error getting COGS:', error);
+      return [];
+    }
   });
 
   // Contacts
   ipcMain.handle('localdb-upsert-contacts', async (event, rows: RowArray) => {
-    if (!localDb) return { success: false };
-    const tx = localDb.transaction((data: RowArray) => {
-      const stmt = localDb!.prepare(`INSERT INTO contacts (
-        id, no_ktp, nama, phone_number, tgl_lahir, no_kk, created_at, updated_at,
-        is_active, jenis_kelamin, kota, kecamatan, source_id, pekerjaan_id,
-        source_lainnya, alamat, team_id
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT(id) DO UPDATE SET
-        no_ktp=excluded.no_ktp, nama=excluded.nama, phone_number=excluded.phone_number,
-        tgl_lahir=excluded.tgl_lahir, no_kk=excluded.no_kk, created_at=excluded.created_at,
-        updated_at=excluded.updated_at, is_active=excluded.is_active, jenis_kelamin=excluded.jenis_kelamin,
-        kota=excluded.kota, kecamatan=excluded.kecamatan, source_id=excluded.source_id,
-        pekerjaan_id=excluded.pekerjaan_id, source_lainnya=excluded.source_lainnya,
-        alamat=excluded.alamat, team_id=excluded.team_id`);
-      for (const r of data) {
-        stmt.run(r.id, r.no_ktp, r.nama, r.phone_number, r.tgl_lahir, r.no_kk, r.created_at, Date.now(),
-          r.is_active, r.jenis_kelamin, r.kota, r.kecamatan, r.source_id, r.pekerjaan_id,
-          r.source_lainnya, r.alamat, r.team_id);
+    try {
+      const queries: Array<{ sql: string; params?: (string | number | null | boolean)[] }> = [];
+      
+      for (const r of rows) {
+        let sourceId = r.source_id;
+        
+        // Verify source_id exists before inserting (foreign key constraint)
+        if (sourceId) {
+          try {
+            const sourceExists = await executeQueryOne<{ id: number }>('SELECT id FROM source WHERE id = ? LIMIT 1', [sourceId]);
+            if (!sourceExists) {
+              console.warn(`⚠️ [CONTACTS] source_id ${sourceId} does not exist, setting to NULL`);
+              sourceId = null;
+            }
+          } catch (checkError) {
+            console.warn(`⚠️ [CONTACTS] Failed to verify source_id ${r.source_id}:`, checkError);
+            sourceId = null;
+          }
+        }
+        
+        queries.push({
+          sql: `INSERT INTO contacts (
+            id, no_ktp, nama, phone_number, tgl_lahir, no_kk, created_at, updated_at,
+            is_active, jenis_kelamin, kota, kecamatan, source_id, pekerjaan_id,
+            source_lainnya, alamat, team_id
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          ON DUPLICATE KEY UPDATE
+            no_ktp=VALUES(no_ktp), nama=VALUES(nama), phone_number=VALUES(phone_number),
+            tgl_lahir=VALUES(tgl_lahir), no_kk=VALUES(no_kk), created_at=VALUES(created_at),
+            updated_at=VALUES(updated_at), is_active=VALUES(is_active), jenis_kelamin=VALUES(jenis_kelamin),
+            kota=VALUES(kota), kecamatan=VALUES(kecamatan), source_id=VALUES(source_id),
+            pekerjaan_id=VALUES(pekerjaan_id), source_lainnya=VALUES(source_lainnya),
+            alamat=VALUES(alamat), team_id=VALUES(team_id)`,
+          params: [
+            r.id, r.no_ktp, r.nama, r.phone_number, r.tgl_lahir, r.no_kk, toMySQLTimestamp(r.created_at || new Date()), toMySQLTimestamp(Date.now()),
+            r.is_active, r.jenis_kelamin, r.kota, r.kecamatan, sourceId, r.pekerjaan_id,
+            r.source_lainnya, r.alamat, r.team_id
+          ]
+        });
       }
-    });
-    tx(rows);
-    return { success: true };
-  });
-
-  ipcMain.handle('localdb-get-contacts', async (event, teamId?: number) => {
-    if (!localDb) return [];
-    if (teamId) {
-      const stmt = localDb.prepare('SELECT * FROM contacts WHERE team_id = ? AND is_active = 1 ORDER BY nama ASC');
-      return stmt.all(teamId);
-    } else {
-      const stmt = localDb.prepare('SELECT * FROM contacts WHERE is_active = 1 ORDER BY nama ASC');
-      return stmt.all();
+      
+      if (queries.length > 0) {
+        await executeTransaction(queries);
+      }
+      return { success: true };
+    } catch (error) {
+      console.error('Error upserting contacts:', error);
+      return { success: false };
     }
   });
 
-  // Teams
-  ipcMain.handle('localdb-upsert-teams', async (event, rows: RowArray) => {
-    if (!localDb) return { success: false };
-    const tx = localDb.transaction((data: RowArray) => {
-      const stmt = localDb!.prepare(`INSERT INTO teams (
-        id, name, description, organization_id, team_lead_id, business_id, color, is_active, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT(id) DO UPDATE SET
-        name=excluded.name, description=excluded.description, organization_id=excluded.organization_id,
-        team_lead_id=excluded.team_lead_id, business_id=excluded.business_id, color=excluded.color,
-        is_active=excluded.is_active, created_at=excluded.created_at, updated_at=excluded.updated_at`);
-      for (const r of data) {
-        stmt.run(r.id, r.name, r.description, r.organization_id, r.team_lead_id, r.business_id,
-          r.color, r.is_active, r.created_at, Date.now());
+  ipcMain.handle('localdb-get-contacts', async (event, teamId?: number) => {
+    try {
+      if (teamId) {
+        return await executeQuery('SELECT * FROM contacts WHERE team_id = ? AND is_active = 1 ORDER BY nama ASC', [teamId]);
+      } else {
+        return await executeQuery('SELECT * FROM contacts WHERE is_active = 1 ORDER BY nama ASC');
       }
-    });
-    tx(rows);
-    return { success: true };
+    } catch (error) {
+      console.error('Error getting contacts:', error);
+      return [];
+    }
   });
 
-  ipcMain.handle('localdb-get-teams', async () => {
-    if (!localDb) return [];
-    const stmt = localDb.prepare('SELECT * FROM teams WHERE is_active = 1 ORDER BY name ASC');
-    return stmt.all();
-  });
+  // Teams (duplicate handler - already migrated above, removing this duplicate)
+  // This handler was already migrated earlier in the file
 
   // Roles
   ipcMain.handle('localdb-upsert-roles', async (event, rows: RowArray) => {
-    if (!localDb) return { success: false };
-    const tx = localDb.transaction((data: RowArray) => {
-      const stmt = localDb!.prepare(`INSERT INTO roles (
-        id, name, description, organization_id, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?)
-      ON CONFLICT(id) DO UPDATE SET
-        name=excluded.name,
-        description=excluded.description,
-        organization_id=excluded.organization_id,
-        created_at=excluded.created_at,
-        updated_at=excluded.updated_at`);
-      for (const r of data) {
-        stmt.run(r.id, r.name, r.description, r.organization_id, r.created_at, Date.now());
+    try {
+      const queries: Array<{ sql: string; params?: (string | number | null | boolean)[] }> = [];
+      let skippedCount = 0;
+      
+      for (const r of rows) {
+        let orgId = r.organization_id;
+        
+        // Verify organization_id exists before inserting (foreign key constraint)
+        if (orgId) {
+          try {
+            const orgExists = await executeQueryOne<{ id: number }>('SELECT id FROM organizations WHERE id = ? LIMIT 1', [orgId]);
+            if (!orgExists) {
+              console.warn(`⚠️ [ROLES] Skipping role ${r.id}: organization_id ${orgId} does not exist`);
+              skippedCount++;
+              continue;
+            }
+          } catch (checkError) {
+            console.warn(`⚠️ [ROLES] Failed to verify organization_id ${orgId}:`, checkError);
+            skippedCount++;
+            continue;
+          }
+        }
+        
+        queries.push({
+          sql: `INSERT INTO roles (
+            id, name, description, organization_id, created_at
+          ) VALUES (?, ?, ?, ?, ?)
+          ON DUPLICATE KEY UPDATE
+            name=VALUES(name),
+            description=VALUES(description),
+            organization_id=VALUES(organization_id),
+            created_at=VALUES(created_at)`,
+          params: [r.id, r.name, r.description, orgId ?? null, toMySQLTimestamp(r.created_at || new Date())]
+        });
       }
-    });
-    tx(rows ?? []);
-    return { success: true };
+      
+      if (queries.length > 0) {
+        await executeTransaction(queries);
+        if (skippedCount > 0) {
+          console.log(`⚠️ [ROLES] Skipped ${skippedCount} roles due to missing organizations`);
+        }
+      } else {
+        console.warn(`⚠️ [ROLES] No valid roles to insert (all ${rows.length} skipped)`);
+      }
+      return { success: true };
+    } catch (error) {
+      console.error('Error upserting roles:', error);
+      return { success: false };
+    }
   });
 
   ipcMain.handle('localdb-get-roles', async () => {
-    if (!localDb) return [];
-    const stmt = localDb.prepare('SELECT * FROM roles ORDER BY name ASC');
-    return stmt.all();
+    try {
+      return await executeQuery('SELECT * FROM roles ORDER BY name ASC');
+    } catch (error) {
+      console.error('Error getting roles:', error);
+      return [];
+    }
+  });
+
+  // Permission Categories
+  ipcMain.handle('localdb-upsert-permission-categories', async (event, rows: RowArray) => {
+    try {
+      const queries: Array<{ sql: string; params?: (string | number | null | boolean)[] }> = [];
+      let skippedCount = 0;
+      
+      for (const r of rows) {
+        let orgId = r.organization_id;
+        
+        // Verify organization_id exists if provided
+        if (orgId) {
+          try {
+            const orgExists = await executeQueryOne<{ id: number }>('SELECT id FROM organizations WHERE id = ? LIMIT 1', [orgId]);
+            if (!orgExists) {
+              console.warn(`⚠️ [PERMISSION CATEGORIES] organization_id ${orgId} does not exist, setting to NULL`);
+              orgId = null;
+            }
+          } catch (checkError) {
+            console.warn(`⚠️ [PERMISSION CATEGORIES] Failed to verify organization_id ${r.organization_id}:`, checkError);
+            orgId = null;
+          }
+        }
+        
+        queries.push({
+          sql: `INSERT INTO permission_categories (
+            id, name, description, organization_id, created_at
+          ) VALUES (?, ?, ?, ?, ?)
+          ON DUPLICATE KEY UPDATE
+            name=VALUES(name),
+            description=VALUES(description),
+            organization_id=VALUES(organization_id),
+            created_at=VALUES(created_at)`,
+          params: [r.id, r.name, r.description, orgId ?? null, toMySQLTimestamp(r.created_at || new Date())]
+        });
+      }
+      
+      if (queries.length > 0) {
+        await executeTransaction(queries);
+        if (skippedCount > 0) {
+          console.log(`⚠️ [PERMISSION CATEGORIES] Skipped ${skippedCount} categories`);
+        }
+      }
+      return { success: true };
+    } catch (error) {
+      console.error('Error upserting permission categories:', error);
+      return { success: false };
+    }
   });
 
   // Permissions
   ipcMain.handle('localdb-upsert-permissions', async (event, rows: RowArray) => {
-    if (!localDb) return { success: false };
-    const tx = localDb.transaction((data: RowArray) => {
-      const stmt = localDb!.prepare(`INSERT INTO permissions (
-        id, name, description, created_at, category_id, organization_id, status
-      ) VALUES (?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT(id) DO UPDATE SET
-        name=excluded.name,
-        description=excluded.description,
-        created_at=excluded.created_at,
-        category_id=excluded.category_id,
-        organization_id=excluded.organization_id,
-        status=excluded.status`);
-      for (const r of data) {
-        stmt.run(
-          r.id,
-          r.name,
-          r.description,
-          r.created_at,
-          r.category_id,
-          r.organization_id,
-          r.status ?? 'active'
-        );
+    try {
+      const queries: Array<{ sql: string; params?: (string | number | null | boolean)[] }> = [];
+      let skippedCount = 0;
+      
+      for (const r of rows) {
+        let categoryId = typeof r.category_id === 'number' ? r.category_id : null;
+        let orgId = typeof r.organization_id === 'number' ? r.organization_id : null;
+        let businessId = typeof r.business_id === 'number' ? r.business_id : null;
+        
+        // Verify category_id exists if provided (foreign key constraint)
+        if (categoryId) {
+          try {
+            const catExists = await executeQueryOne<{ id: number }>('SELECT id FROM permission_categories WHERE id = ? LIMIT 1', [categoryId]);
+            if (!catExists) {
+              console.warn(`⚠️ [PERMISSIONS] category_id ${categoryId} does not exist, setting to NULL`);
+              categoryId = null;
+            }
+          } catch (checkError) {
+            console.warn(`⚠️ [PERMISSIONS] Failed to verify category_id ${r.category_id}:`, checkError);
+            categoryId = null;
+          }
+        }
+        
+        // Verify organization_id exists if provided
+        if (orgId) {
+          try {
+            const orgExists = await executeQueryOne<{ id: number }>('SELECT id FROM organizations WHERE id = ? LIMIT 1', [orgId]);
+            if (!orgExists) {
+              console.warn(`⚠️ [PERMISSIONS] organization_id ${orgId} does not exist, setting to NULL`);
+              orgId = null;
+            }
+          } catch (checkError) {
+            console.warn(`⚠️ [PERMISSIONS] Failed to verify organization_id ${orgId}:`, checkError);
+            orgId = null;
+          }
+        }
+        
+        // Verify business_id exists if provided
+        if (businessId) {
+          try {
+            const businessExists = await executeQueryOne<{ id: number }>('SELECT id FROM businesses WHERE id = ? LIMIT 1', [businessId]);
+            if (!businessExists) {
+              console.warn(`⚠️ [PERMISSIONS] business_id ${businessId} does not exist, setting to NULL`);
+              businessId = null;
+            }
+          } catch (checkError) {
+            console.warn(`⚠️ [PERMISSIONS] Failed to verify business_id ${businessId}:`, checkError);
+            businessId = null;
+          }
+        }
+        
+        const id = typeof r.id === 'number' ? r.id : (typeof r.id === 'string' ? parseInt(String(r.id), 10) : 0);
+        const name = typeof r.name === 'string' ? r.name : String(r.name ?? '');
+        const description = typeof r.description === 'string' ? r.description : String(r.description ?? '');
+        const status = typeof r.status === 'string' ? r.status : 'active';
+        const createdAt = r.created_at ? (typeof r.created_at === 'number' || typeof r.created_at === 'string' ? r.created_at : new Date()) : new Date();
+        
+        queries.push({
+          sql: `INSERT INTO permissions (
+            id, name, description, category_id, organization_id, business_id, status, created_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+          ON DUPLICATE KEY UPDATE
+            name=VALUES(name),
+            description=VALUES(description),
+            category_id=VALUES(category_id),
+            organization_id=VALUES(organization_id),
+            business_id=VALUES(business_id),
+            status=VALUES(status),
+            created_at=VALUES(created_at)`,
+          params: [
+            id, 
+            name, 
+            description, 
+            categoryId ?? null, 
+            orgId ?? null, 
+            businessId ?? null, 
+            status,
+            toMySQLTimestamp(createdAt)
+          ]
+        });
       }
-    });
-    tx(rows ?? []);
-    return { success: true };
+      
+      if (queries.length > 0) {
+        await executeTransaction(queries);
+        if (skippedCount > 0) {
+          console.log(`⚠️ [PERMISSIONS] Skipped ${skippedCount} permissions`);
+        }
+      }
+      return { success: true };
+    } catch (error) {
+      console.error('Error upserting permissions:', error);
+      return { success: false };
+    }
   });
 
-  ipcMain.handle('localdb-get-permissions', async () => {
-    if (!localDb) return [];
-    const stmt = localDb.prepare('SELECT * FROM permissions ORDER BY name ASC');
-    return stmt.all();
-  });
+  // Permissions (duplicate handler - already migrated above, removing this duplicate)
+  // This handler was already migrated earlier in the file
 
   // Role permissions
   ipcMain.handle('localdb-upsert-role-permissions', async (event, rows: RowArray) => {
-    if (!localDb) return { success: false };
-    const tx = localDb.transaction((data: RowArray) => {
-      localDb!.prepare('DELETE FROM role_permissions').run();
-      const stmt = localDb!.prepare(`INSERT INTO role_permissions (
-        role_id, permission_id
-      ) VALUES (?, ?)
-      ON CONFLICT(role_id, permission_id) DO NOTHING`);
-      for (const r of data) {
-        stmt.run(r.role_id, r.permission_id);
+    try {
+      const queries: Array<{ sql: string; params?: (string | number | null | boolean)[] }> = [];
+      let skippedCount = 0;
+      
+      // Delete all existing role permissions first
+      queries.push({
+        sql: 'DELETE FROM role_permissions',
+        params: []
+      });
+      
+      // Then insert new ones (only if both role_id and permission_id exist)
+      for (const r of rows ?? []) {
+        const roleId = typeof r.role_id === 'number' ? r.role_id : (typeof r.role_id === 'string' ? parseInt(String(r.role_id), 10) : null);
+        const permissionId = typeof r.permission_id === 'number' ? r.permission_id : (typeof r.permission_id === 'string' ? parseInt(String(r.permission_id), 10) : null);
+        
+        // Verify both role_id and permission_id exist
+        if (roleId && permissionId) {
+          try {
+            const roleExists = await executeQueryOne<{ id: number }>('SELECT id FROM roles WHERE id = ? LIMIT 1', [roleId]);
+            const permissionExists = await executeQueryOne<{ id: number }>('SELECT id FROM permissions WHERE id = ? LIMIT 1', [permissionId]);
+            
+            if (!roleExists) {
+              console.warn(`⚠️ [ROLE PERMISSIONS] Skipping: role_id ${roleId} does not exist`);
+              skippedCount++;
+              continue;
+            }
+            
+            if (!permissionExists) {
+              console.warn(`⚠️ [ROLE PERMISSIONS] Skipping: permission_id ${permissionId} does not exist`);
+              skippedCount++;
+              continue;
+            }
+            
+            queries.push({
+              sql: `INSERT INTO role_permissions (
+                role_id, permission_id
+              ) VALUES (?, ?)
+              ON DUPLICATE KEY UPDATE role_id=VALUES(role_id), permission_id=VALUES(permission_id)`,
+              params: [roleId, permissionId]
+            });
+          } catch (checkError) {
+            console.warn(`⚠️ [ROLE PERMISSIONS] Error checking role_id ${roleId} or permission_id ${permissionId}:`, checkError);
+            skippedCount++;
+            continue;
+          }
+        } else {
+          console.warn(`⚠️ [ROLE PERMISSIONS] Skipping: missing role_id or permission_id`);
+          skippedCount++;
+        }
       }
-    });
-    tx(rows ?? []);
-    return { success: true };
+      
+      if (queries.length > 1) { // More than just DELETE
+        await executeTransaction(queries);
+        if (skippedCount > 0) {
+          console.log(`⚠️ [ROLE PERMISSIONS] Skipped ${skippedCount} role-permission mappings due to missing roles/permissions`);
+        }
+      } else {
+        console.warn(`⚠️ [ROLE PERMISSIONS] No valid role-permission mappings to insert (all ${rows.length} skipped)`);
+      }
+      return { success: true };
+    } catch (error) {
+      console.error('Error upserting role permissions:', error);
+      return { success: false };
+    }
   });
 
   ipcMain.handle('localdb-get-role-permissions', async (event, roleId: number) => {
-    if (!localDb) return [];
-    const stmt = localDb.prepare(`
-      SELECT p.id, p.name, p.status
-      FROM role_permissions rp
-      INNER JOIN permissions p ON p.id = rp.permission_id
-      WHERE rp.role_id = ?
-      ORDER BY p.name ASC
-    `);
-    return stmt.all(roleId);
+    try {
+      return await executeQuery(`
+        SELECT p.id, p.name, p.status
+        FROM role_permissions rp
+        INNER JOIN permissions p ON p.id = rp.permission_id
+        WHERE rp.role_id = ?
+        ORDER BY p.name ASC
+      `, [roleId]);
+    } catch (error) {
+      console.error('Error getting role permissions:', error);
+      return [];
+    }
   });
 
   // Aggregated auth helper
-  type LocalDbUser = {
+  type User = {
     id: number;
     email: string;
     password: string | null;
@@ -2841,122 +2342,128 @@ function createWindows(): void {
   };
 
   ipcMain.handle('localdb-get-user-auth', async (event, email: string) => {
-    if (!localDb) return null;
-    const userStmt = localDb.prepare(`
-      SELECT id, email, password, name, role_id, organization_id
-      FROM users
-      WHERE LOWER(email) = LOWER(?)
-      LIMIT 1
-    `);
-    const user = userStmt.get(email) as LocalDbUser | undefined;
+    try {
+      const user = await executeQueryOne<User>(`
+        SELECT id, email, password, name, role_id, organization_id
+        FROM users
+        WHERE LOWER(email) = LOWER(?)
+        LIMIT 1
+      `, [email]);
 
-    if (!user) {
+      if (!user) {
+        return null;
+      }
+
+      let roleName: string | null = null;
+      if (user.role_id !== null && user.role_id !== undefined) {
+        const role = await executeQueryOne<{ name?: string }>('SELECT name FROM roles WHERE id = ? LIMIT 1', [user.role_id]);
+        roleName = role?.name ?? null;
+      }
+
+      const permissionRows = (user.role_id !== null && user.role_id !== undefined)
+        ? await executeQuery<{ name: string }>(`
+            SELECT p.name
+            FROM role_permissions rp
+            INNER JOIN permissions p ON p.id = rp.permission_id
+            WHERE rp.role_id = ?
+            ORDER BY p.name ASC
+          `, [user.role_id])
+        : [];
+
+      return {
+        ...user,
+        role_name: roleName,
+        permissions: Array.isArray(permissionRows) ? permissionRows.map((row) => row.name) : [],
+      };
+    } catch (error) {
+      console.error('Error getting user auth:', error);
       return null;
     }
-
-    let roleName: string | null = null;
-    if (user.role_id !== null && user.role_id !== undefined) {
-      const roleStmt = localDb.prepare('SELECT name FROM roles WHERE id = ? LIMIT 1');
-      const role = roleStmt.get(user.role_id) as { name?: string } | undefined;
-      roleName = role?.name ?? null;
-    }
-
-    const permissionsStmt = localDb.prepare(`
-      SELECT p.name
-      FROM role_permissions rp
-      INNER JOIN permissions p ON p.id = rp.permission_id
-      WHERE rp.role_id = ?
-      ORDER BY p.name ASC
-    `);
-    const permissionRows = (user.role_id !== null && user.role_id !== undefined)
-      ? (permissionsStmt.all(user.role_id) as Array<{ name: string }>)
-      : [];
-
-    return {
-      ...user,
-      role_name: roleName,
-      permissions: Array.isArray(permissionRows) ? permissionRows.map((row) => row.name) : [],
-    };
   });
 
   // Supporting tables
   ipcMain.handle('localdb-upsert-source', async (event, rows: RowArray) => {
-    if (!localDb) return { success: false };
-    const tx = localDb.transaction((data: RowArray) => {
-      const stmt = localDb!.prepare(`INSERT INTO source (id, source_name, created_at, updated_at) 
-        VALUES (?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET
-        source_name=excluded.source_name, created_at=excluded.created_at, updated_at=excluded.updated_at`);
-      for (const r of data) {
-        stmt.run(r.id, r.source_name, r.created_at, Date.now());
-      }
-    });
-    tx(rows);
-    return { success: true };
+    try {
+      const queries = rows.map(r => {
+        const id = typeof r.id === 'number' ? r.id : (typeof r.id === 'string' ? parseInt(String(r.id), 10) : 0);
+        const sourceName = typeof r.source_name === 'string' ? r.source_name : String(r.source_name ?? '');
+        const createdAt = r.created_at ? (typeof r.created_at === 'number' || typeof r.created_at === 'string' ? r.created_at : new Date()) : new Date();
+        return {
+          sql: `INSERT INTO source (id, source_name, created_at) 
+            VALUES (?, ?, ?) ON DUPLICATE KEY UPDATE
+            source_name=VALUES(source_name), created_at=VALUES(created_at)`,
+          params: [id, sourceName, toMySQLTimestamp(createdAt)]
+        };
+      });
+      await executeTransaction(queries);
+      return { success: true };
+    } catch (error) {
+      console.error('Error upserting source:', error);
+      return { success: false };
+    }
   });
 
   ipcMain.handle('localdb-get-source', async () => {
-    if (!localDb) return [];
-    const stmt = localDb.prepare('SELECT * FROM source ORDER BY source_name ASC');
-    return stmt.all();
+    try {
+      return await executeQuery('SELECT * FROM source ORDER BY source_name ASC');
+    } catch (error) {
+      console.error('Error getting source:', error);
+      return [];
+    }
   });
 
   ipcMain.handle('localdb-upsert-pekerjaan', async (event, rows: RowArray) => {
-    if (!localDb) return { success: false };
-    const tx = localDb.transaction((data: RowArray) => {
-      const stmt = localDb!.prepare(`INSERT INTO pekerjaan (id, nama_pekerjaan, created_at, updated_at) 
-        VALUES (?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET
-        nama_pekerjaan=excluded.nama_pekerjaan, created_at=excluded.created_at, updated_at=excluded.updated_at`);
-      for (const r of data) {
-        stmt.run(r.id, r.nama_pekerjaan, r.created_at, Date.now());
-      }
-    });
-    tx(rows);
-    return { success: true };
+    try {
+      const queries = rows.map(r => {
+        const id = typeof r.id === 'number' ? r.id : (typeof r.id === 'string' ? parseInt(String(r.id), 10) : 0);
+        const namaPekerjaan = typeof r.nama_pekerjaan === 'string' ? r.nama_pekerjaan : String(r.nama_pekerjaan ?? '');
+        const createdAt = r.created_at ? (typeof r.created_at === 'number' || typeof r.created_at === 'string' ? r.created_at : new Date()) : new Date();
+        return {
+          sql: `INSERT INTO pekerjaan (id, nama_pekerjaan, created_at) 
+            VALUES (?, ?, ?) ON DUPLICATE KEY UPDATE
+            nama_pekerjaan=VALUES(nama_pekerjaan), created_at=VALUES(created_at)`,
+          params: [id, namaPekerjaan, toMySQLTimestamp(createdAt)]
+        };
+      });
+      await executeTransaction(queries);
+      return { success: true };
+    } catch (error) {
+      console.error('Error upserting pekerjaan:', error);
+      return { success: false };
+    }
   });
 
   ipcMain.handle('localdb-get-pekerjaan', async () => {
-    if (!localDb) return [];
-    const stmt = localDb.prepare('SELECT * FROM pekerjaan ORDER BY nama_pekerjaan ASC');
-    return stmt.all();
+    try {
+      return await executeQuery('SELECT * FROM pekerjaan ORDER BY nama_pekerjaan ASC');
+    } catch (error) {
+      console.error('Error getting pekerjaan:', error);
+      return [];
+    }
   });
 
   // New table handlers for enhanced offline support
 
   // Transactions
   ipcMain.handle('localdb-upsert-transactions', async (event, rows: RowArray) => {
-    if (!localDb) return { success: false };
-    const tx = localDb.transaction((data: RowArray) => {
-      const stmt = localDb!.prepare(`INSERT INTO transactions (
-        id, business_id, user_id, shift_uuid, payment_method, pickup_method, total_amount,
-        voucher_discount, voucher_type, voucher_value, voucher_label, final_amount, amount_received, change_amount, status,
-        created_at, updated_at, synced_at, sync_status, sync_attempts, last_sync_attempt, contact_id, customer_name, customer_unit, note, bank_name,
-        card_number, cl_account_id, cl_account_name, bank_id, receipt_number,
-        transaction_type, payment_method_id
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT(id) DO UPDATE SET
-        business_id=excluded.business_id, user_id=excluded.user_id, shift_uuid=excluded.shift_uuid, payment_method=excluded.payment_method,
-        pickup_method=excluded.pickup_method, total_amount=excluded.total_amount, voucher_discount=excluded.voucher_discount,
-        voucher_type=excluded.voucher_type, voucher_value=excluded.voucher_value, voucher_label=excluded.voucher_label,
-        final_amount=excluded.final_amount, amount_received=excluded.amount_received, change_amount=excluded.change_amount,
-        status=excluded.status, created_at=excluded.created_at, updated_at=excluded.updated_at, synced_at=excluded.synced_at,
-        sync_status=excluded.sync_status, sync_attempts=excluded.sync_attempts, last_sync_attempt=excluded.last_sync_attempt,
-        contact_id=excluded.contact_id, customer_name=excluded.customer_name, customer_unit=excluded.customer_unit, note=excluded.note,
-        bank_name=excluded.bank_name, card_number=excluded.card_number, cl_account_id=excluded.cl_account_id,
-        cl_account_name=excluded.cl_account_name, bank_id=excluded.bank_id, receipt_number=excluded.receipt_number,
-        transaction_type=excluded.transaction_type, payment_method_id=excluded.payment_method_id`);
-      for (const r of data) {
+    try {
+      const queries: Array<{ sql: string; params?: (string | number | null | boolean)[] }> = [];
+
+      for (const r of rows) {
         // Auto-link to active shift if shift_uuid is missing
         let finalShiftUuid = r.shift_uuid;
         if (!finalShiftUuid && r.user_id) {
           try {
-            const shiftStmt = localDb!.prepare(`
+            const activeShift = await executeQueryOne<{ uuid_id: string }>(`
               SELECT uuid_id 
               FROM shifts 
               WHERE user_id = ? AND status = 'active' AND business_id = ?
               ORDER BY shift_start DESC 
               LIMIT 1
-            `);
-            const activeShift = shiftStmt.get(r.user_id, r.business_id ?? 14) as { uuid_id: string } | undefined;
+            `, [
+              typeof r.user_id === 'number' ? r.user_id : (typeof r.user_id === 'string' ? parseInt(String(r.user_id), 10) : 0),
+              typeof r.business_id === 'number' ? r.business_id : (r.business_id ? parseInt(String(r.business_id), 10) : 14)
+            ]);
             if (activeShift) {
               finalShiftUuid = activeShift.uuid_id;
               console.log(`🔗 [UPSERT] Linked transaction ${r.id} to active shift ${finalShiftUuid}`);
@@ -2966,7 +2473,7 @@ function createWindows(): void {
           }
         }
 
-        console.log('🔍 [SQLITE] Inserting transaction data:', {
+        console.log('🔍 [MYSQL] Inserting transaction data:', {
           id: r.id,
           business_id: r.business_id,
           user_id: r.user_id,
@@ -2994,11 +2501,12 @@ function createWindows(): void {
           bank_id: r.bank_id,
           receipt_number: r.receipt_number,
           transaction_type: r.transaction_type,
-          payment_method_id: r.payment_method_id
+          payment_method_id: r.payment_method_id,
+          table_id: r.table_id
         });
 
         const params = [
-          r.id,
+          r.id, // uuid_id - the 19-digit UUID string
           r.business_id,
           r.user_id,
           finalShiftUuid || null,
@@ -3012,11 +2520,12 @@ function createWindows(): void {
           Number(r.final_amount),
           Number(r.amount_received),
           Number(r.change_amount ?? 0.0),
-          r.status ?? 'completed',
-          r.created_at,
-          Date.now(),
-          r.synced_at ?? null, // Keep existing synced_at or NULL for new unsynced transactions
-          r.sync_status ?? 'pending', // Default to 'pending' for new transactions
+          // Preserve 'pending' status, convert 'paid' to 'completed', default to 'completed'
+          r.status === 'pending' ? 'pending' : ((r.status === 'paid' || r.status === 'completed') ? 'completed' : (r.status ?? 'completed')),
+          toMySQLDateTime(r.created_at),
+          toMySQLDateTime(new Date()),
+          r.synced_at ?? null,
+          r.sync_status ?? 'pending',
           r.sync_attempts ?? 0,
           r.last_sync_attempt ?? null,
           r.contact_id ?? null,
@@ -3030,87 +2539,191 @@ function createWindows(): void {
           r.bank_id ? Number(r.bank_id) : null,
           r.receipt_number ?? null,
           r.transaction_type ?? 'drinks',
-          Number(r.payment_method_id)
+          Number(r.payment_method_id),
+          r.table_id ? Number(r.table_id) : null
         ];
 
-        console.log('📝 [SQLITE] Calling stmt.run with params:', params);
-        console.log('📊 [SQLITE] Params count:', params.length);
+        console.log('📝 [MYSQL] Calling executeTransaction with params:', params);
+        console.log('📊 [MYSQL] Params count:', params.length);
 
-        // Debug: Get column names from the prepared statement
-        try {
-          const info = stmt.run(...params);
-          console.log('✅ [SQLITE] Insert successful:', info);
-        } catch (err: unknown) {
-          console.error('❌ [SQLITE] Insert error:', err);
-          if (err && typeof err === 'object' && 'code' in err) {
-            console.error('📝 [SQLITE] Error code:', (err as { code: unknown }).code);
-          }
-          if (err && typeof err === 'object' && 'message' in err) {
-            console.error('📝 [SQLITE] Error message:', (err as { message: unknown }).message);
-          }
-          throw err;
-        }
+        queries.push({
+          sql: `INSERT INTO transactions (
+            uuid_id, business_id, user_id, shift_uuid, payment_method, pickup_method, total_amount,
+            voucher_discount, voucher_type, voucher_value, voucher_label, final_amount, amount_received, change_amount, status,
+            created_at, updated_at, synced_at, sync_status, sync_attempts, last_sync_attempt, contact_id, customer_name, customer_unit, note, bank_name,
+            card_number, cl_account_id, cl_account_name, bank_id, receipt_number,
+            transaction_type, payment_method_id, table_id
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          ON DUPLICATE KEY UPDATE
+            business_id=VALUES(business_id), user_id=VALUES(user_id), shift_uuid=VALUES(shift_uuid), payment_method=VALUES(payment_method),
+            pickup_method=VALUES(pickup_method), total_amount=VALUES(total_amount), voucher_discount=VALUES(voucher_discount),
+            voucher_type=VALUES(voucher_type), voucher_value=VALUES(voucher_value), voucher_label=VALUES(voucher_label),
+            final_amount=VALUES(final_amount), amount_received=VALUES(amount_received), change_amount=VALUES(change_amount),
+            status=VALUES(status), created_at=VALUES(created_at), updated_at=VALUES(updated_at), synced_at=VALUES(synced_at),
+            sync_status=VALUES(sync_status), sync_attempts=VALUES(sync_attempts), last_sync_attempt=VALUES(last_sync_attempt),
+            contact_id=VALUES(contact_id), customer_name=VALUES(customer_name), customer_unit=VALUES(customer_unit), note=VALUES(note),
+            bank_name=VALUES(bank_name), card_number=VALUES(card_number), cl_account_id=VALUES(cl_account_id),
+            cl_account_name=VALUES(cl_account_name), bank_id=VALUES(bank_id), receipt_number=VALUES(receipt_number),
+            transaction_type=VALUES(transaction_type), payment_method_id=VALUES(payment_method_id), table_id=VALUES(table_id)`,
+          params
+        });
       }
-    });
-    tx(rows);
-    return { success: true };
+
+      if (queries.length > 0) {
+        await executeTransaction(queries);
+        console.log('✅ [MYSQL] Transaction upsert successful');
+      }
+      return { success: true };
+    } catch (err: unknown) {
+      console.error('❌ [MYSQL] Transaction upsert error:', err);
+      if (err && typeof err === 'object' && 'code' in err) {
+        console.error('📝 [MYSQL] Error code:', (err as { code: unknown }).code);
+      }
+      if (err && typeof err === 'object' && 'message' in err) {
+        console.error('📝 [MYSQL] Error message:', (err as { message: unknown }).message);
+      }
+      return { success: false };
+    }
   });
 
   ipcMain.handle('localdb-get-transactions', async (event, businessId?: number, limit?: number) => {
-    // Diagnostic logging
-    const diagLogPathTx = path.join(os.homedir(), 'AppData', 'Roaming', 'marviano-pos', 'path-diagnostic.log');
-    try { 
-      const txCount = localDb ? (localDb.prepare('SELECT COUNT(*) as cnt FROM transactions').get() as { cnt: number }).cnt : 'DB NULL';
-      const dbFilePath = path.join(os.homedir(), 'AppData', 'Roaming', 'marviano-pos', 'pos-offline.db');
-      const dbStats = fs.existsSync(dbFilePath) ? fs.statSync(dbFilePath) : null;
-      fs.appendFileSync(diagLogPathTx, `${new Date().toISOString()} [GET-TX] businessId=${businessId}, limit=${limit}, totalTxInDb=${txCount}, dbFileSize=${dbStats?.size || 'N/A'}\n`); 
-    } catch(e) { 
-      try { fs.appendFileSync(diagLogPathTx, `${new Date().toISOString()} [GET-TX] ERROR: ${e}\n`); } catch(e2) {} 
+    try {
+      // Diagnostic logging
+      const diagLogPathTx = path.join(os.homedir(), 'AppData', 'Roaming', 'marviano-pos', 'path-diagnostic.log');
+      try { 
+        const txCountResult = await executeQueryOne<{ cnt: number }>('SELECT COUNT(*) as cnt FROM transactions');
+        const txCount = txCountResult?.cnt || 0;
+        fs.appendFileSync(diagLogPathTx, `${new Date().toISOString()} [GET-TX] businessId=${businessId}, limit=${limit}, totalTxInDb=${txCount}\n`); 
+      } catch(e) { 
+        try { fs.appendFileSync(diagLogPathTx, `${new Date().toISOString()} [GET-TX] ERROR: ${e}\n`); } catch(e2) {} 
+      }
+      
+      let query = `
+        SELECT 
+          t.*,
+          COALESCE(t.uuid_id, t.id) as id,
+          CASE 
+            WHEN t.created_at IS NOT NULL THEN
+              ROW_NUMBER() OVER (
+                PARTITION BY DATE(t.created_at), t.business_id
+                ORDER BY t.created_at ASC
+              )
+            ELSE NULL
+          END as receipt_number,
+          COALESCE(
+            NULLIF(t.refund_total, 0),
+            COALESCE(refund_summary.total_refund, 0)
+          ) as refund_total,
+          COALESCE(
+            NULLIF(t.refund_status, 'none'),
+            NULLIF(t.refund_status, ''),
+            CASE 
+              WHEN COALESCE(refund_summary.total_refund, 0) > 0 THEN
+                CASE 
+                  WHEN COALESCE(refund_summary.total_refund, 0) >= (t.final_amount - 0.01) THEN 'full'
+                  ELSE 'partial'
+                END
+              ELSE 'none'
+            END
+          ) as refund_status
+        FROM transactions t
+        LEFT JOIN (
+          SELECT 
+            transaction_uuid,
+            SUM(refund_amount) as total_refund,
+            COUNT(*) as refund_count,
+            MAX(status) as max_status
+          FROM transaction_refunds
+          WHERE status IN ('pending', 'completed')
+          GROUP BY transaction_uuid
+        ) refund_summary ON t.uuid_id = refund_summary.transaction_uuid
+      `;
+      const params: (string | number | null | boolean)[] = [];
+      const conditions: string[] = [];
+
+      // Exclude archived transactions
+      conditions.push('t.status != \'archived\'');
+
+      if (businessId) {
+        conditions.push('t.business_id = ?');
+        params.push(businessId);
+      }
+
+      if (conditions.length > 0) {
+        query += ' WHERE ' + conditions.join(' AND ');
+      }
+
+      query += ' ORDER BY t.created_at DESC';
+
+      // LIMIT cannot be parameterized with window functions in some MySQL versions
+      // Validate and use string interpolation (safe since we validate it's a number)
+      if (limit && typeof limit === 'number' && limit > 0) {
+        const safeLimit = Math.min(Math.max(limit, 1), 100000); // Cap at 100k for safety
+        query += ` LIMIT ${safeLimit}`;
+      }
+
+      const results = await executeQuery(query, params);
+      
+      // Diagnostic logging
+      try { fs.appendFileSync(diagLogPathTx, `${new Date().toISOString()} [GET-TX] Returned ${results.length} transactions\n`); } catch(e) {}
+      
+      // Debug: Check for specific transaction UUID and verify refunds exist in database
+      const specificTx = results.find((tx: any) => 
+        (tx.id === '0142512271637510001' || tx.uuid_id === '0142512271637510001')
+      );
+      if (specificTx) {
+        // Query refunds directly from database for this transaction
+        try {
+          const refundCheck = await executeQuery(`
+            SELECT 
+              transaction_uuid,
+              SUM(refund_amount) as total_refund,
+              COUNT(*) as refund_count,
+              GROUP_CONCAT(status) as statuses,
+              GROUP_CONCAT(refund_amount) as amounts
+            FROM transaction_refunds
+            WHERE transaction_uuid = ?
+            GROUP BY transaction_uuid
+          `, [specificTx.uuid_id || specificTx.id]);
+          
+          console.log(`🔍 [GET-TX] Debug for transaction 0142512271637510001:`, {
+            id: specificTx.id,
+            uuid_id: specificTx.uuid_id,
+            refund_total_from_query: specificTx.refund_total,
+            refund_status_from_query: specificTx.refund_status,
+            final_amount: specificTx.final_amount,
+            refunds_in_db: refundCheck.length > 0 ? refundCheck[0] : null,
+            refund_total_in_transactions_table: specificTx.refund_total,
+            refund_status_in_transactions_table: specificTx.refund_status
+          });
+        } catch (refundError) {
+          console.error('❌ [GET-TX] Error checking refunds:', refundError);
+        }
+      }
+      
+      // Debug: Log transactions with refunds to verify refund_total is being calculated
+      if (results.length > 0) {
+        const transactionsWithRefunds = results.filter((tx: any) => {
+          const refundTotal = tx.refund_total;
+          return refundTotal && refundTotal > 0;
+        });
+        if (transactionsWithRefunds.length > 0) {
+          console.log(`💰 [GET-TX] Found ${transactionsWithRefunds.length} transaction(s) with refunds:`, 
+            transactionsWithRefunds.slice(0, 3).map((tx: any) => ({
+              id: tx.id || tx.uuid_id,
+              refund_total: tx.refund_total,
+              refund_status: tx.refund_status,
+              final_amount: tx.final_amount
+            }))
+          );
+        }
+      }
+      
+      return results;
+    } catch (error) {
+      console.error('Error getting transactions:', error);
+      return [];
     }
-    
-    if (!localDb) return [];
-    let query = `
-      SELECT 
-        t.*,
-        CASE 
-          WHEN t.created_at IS NOT NULL THEN
-            ROW_NUMBER() OVER (
-              PARTITION BY DATE(t.created_at), t.business_id
-              ORDER BY t.created_at ASC
-            )
-          ELSE NULL
-        END as receipt_number
-      FROM transactions t
-    `;
-    const params: QueryParams = [];
-    const conditions: string[] = [];
-
-    // Exclude archived transactions
-    conditions.push('t.status != \'archived\'');
-
-    if (businessId) {
-      conditions.push('t.business_id = ?');
-      params.push(businessId);
-    }
-
-    if (conditions.length > 0) {
-      query += ' WHERE ' + conditions.join(' AND ');
-    }
-
-    query += ' ORDER BY t.created_at DESC';
-
-    if (limit) {
-      query += ' LIMIT ?';
-      params.push(limit);
-    }
-
-    const stmt = localDb.prepare(query);
-    const results = stmt.all(...params);
-    
-    // Diagnostic logging
-    try { fs.appendFileSync(diagLogPathTx, `${new Date().toISOString()} [GET-TX] Returned ${results.length} transactions\n`); } catch(e) {}
-    
-    return results;
   });
 
   const ensureIsoString = (value?: string | null): string | null => {
@@ -3132,11 +2745,11 @@ function createWindows(): void {
 
     if (startIso) {
       conditions.push(`${prefix}created_at >= ?`);
-      params.push(startIso);
+      params.push(toMySQLDateTime(startIso));
     }
     if (endIso) {
       conditions.push(`${prefix}created_at <= ?`);
-      params.push(endIso);
+      params.push(toMySQLDateTime(endIso));
     }
 
     return { clause: conditions.join(' AND '), params };
@@ -3144,8 +2757,6 @@ function createWindows(): void {
 
   // Archive transactions
   ipcMain.handle('localdb-archive-transactions', async (event, payload: { businessId: number; from?: string | null; to?: string | null }) => {
-    if (!localDb) return 0;
-
     const businessId = payload?.businessId;
     if (!businessId) return 0;
 
@@ -3155,35 +2766,48 @@ function createWindows(): void {
     try {
       const { clause: baseClause, params } = buildTransactionFilter(businessId, startIso, endIso);
       const timestamp = Date.now();
-      const updateStmt = localDb.prepare(`
-        UPDATE transactions 
-        SET status = 'archived', updated_at = ?
-        WHERE ${baseClause} AND status != 'archived'
-      `);
+      
+      const queries: Array<{ sql: string; params?: (string | number | null | boolean)[] }> = [];
+      
+      // Update transactions to archived
+      queries.push({
+        sql: `
+          UPDATE transactions 
+          SET status = 'archived', updated_at = ?
+          WHERE ${baseClause} AND status != 'archived'
+        `,
+        params: [timestamp, ...params]
+      });
 
-      const result = updateStmt.run(timestamp, ...params);
-      console.log(`✅ [ARCHIVE] Archived ${result.changes} transactions`);
+      await executeTransaction(queries);
+      
+      // Get count of archived transactions
+      const archivedClause = `${baseClause} AND status = 'archived'`;
+      const countResult = await executeQueryOne<{ count: number }>(`
+        SELECT COUNT(*) as count FROM transactions WHERE ${archivedClause}
+      `, params);
+      const archivedCount = countResult?.count || 0;
+      
+      console.log(`✅ [ARCHIVE] Archived ${archivedCount} transactions`);
+      
       // Also clear related printer audits for archived transactions
       try {
-        const archivedClause = `${baseClause} AND status = 'archived'`;
-        const delP1 = localDb.prepare(`
+        await executeUpdate(`
           DELETE FROM printer1_audit_log
           WHERE transaction_id IN (
             SELECT id FROM transactions WHERE ${archivedClause}
           )
-        `);
-        delP1.run(...params);
-        const delP2 = localDb.prepare(`
+        `, params);
+        await executeUpdate(`
           DELETE FROM printer2_audit_log
           WHERE transaction_id IN (
             SELECT id FROM transactions WHERE ${archivedClause}
           )
-        `);
-        delP2.run(...params);
+        `, params);
       } catch (e) {
         console.warn('⚠️ [ARCHIVE] Failed to clear printer audits for archived transactions:', e);
       }
-      return result.changes;
+      return archivedCount;
     } catch (error) {
       console.error('❌ [ARCHIVE] Failed to archive transactions:', error);
       throw error;
@@ -3192,8 +2816,6 @@ function createWindows(): void {
 
   // Delete transactions permanently
   ipcMain.handle('localdb-delete-transactions', async (event, payload: { businessId: number; from?: string | null; to?: string | null }) => {
-    if (!localDb) return 0;
-
     const businessId = payload?.businessId;
     if (!businessId) return 0;
 
@@ -3202,30 +2824,48 @@ function createWindows(): void {
 
     try {
       const { clause: baseClause, params } = buildTransactionFilter(businessId, startIso, endIso);
+      
+      const queries: Array<{ sql: string; params?: (string | number | null | boolean)[] }> = [];
+      
       // Delete printer audits first
-      const delP1 = localDb.prepare(`
-        DELETE FROM printer1_audit_log 
-        WHERE transaction_id IN (
-          SELECT id FROM transactions WHERE ${baseClause}
-        )
-      `);
-      delP1.run(...params);
-      const delP2 = localDb.prepare(`
-        DELETE FROM printer2_audit_log 
-        WHERE transaction_id IN (
-          SELECT id FROM transactions WHERE ${baseClause}
-        )
-      `);
-      delP2.run(...params);
+      queries.push({
+        sql: `
+          DELETE FROM printer1_audit_log 
+          WHERE transaction_id IN (
+            SELECT id FROM transactions WHERE ${baseClause}
+          )
+        `,
+        params: [...params]
+      });
+      queries.push({
+        sql: `
+          DELETE FROM printer2_audit_log 
+          WHERE transaction_id IN (
+            SELECT id FROM transactions WHERE ${baseClause}
+          )
+        `,
+        params: [...params]
+      });
+      
+      // Delete transactions
+      queries.push({
+        sql: `
+          DELETE FROM transactions 
+          WHERE ${baseClause}
+        `,
+        params: [...params]
+      });
 
-      const stmt = localDb.prepare(`
-        DELETE FROM transactions 
-        WHERE ${baseClause}
-      `);
-
-      const result = stmt.run(...params);
-      console.log(`🗑️ [DELETE] Deleted ${result.changes} transactions`);
-      return result.changes;
+      await executeTransaction(queries);
+      
+      // Get count of deleted transactions (before deletion, we need to count)
+      const countResult = await executeQueryOne<{ count: number }>(`
+        SELECT COUNT(*) as count FROM transactions WHERE ${baseClause}
+      `, params);
+      const deletedCount = countResult?.count || 0;
+      
+      console.log(`🗑️ [DELETE] Deleted ${deletedCount} transactions`);
+      return deletedCount;
     } catch (error) {
       console.error('❌ [DELETE] Failed to delete transactions:', error);
       throw error;
@@ -3236,8 +2876,6 @@ function createWindows(): void {
 
   // Delete transaction items permanently
   ipcMain.handle('localdb-delete-transaction-items', async (event, payload: { businessId: number; from?: string | null; to?: string | null }) => {
-    if (!localDb) return { success: true };
-
     const businessId = payload?.businessId;
     if (!businessId) return { success: true };
 
@@ -3246,16 +2884,25 @@ function createWindows(): void {
 
     try {
       const { clause: baseClause, params } = buildTransactionFilter(businessId, startIso, endIso);
-      const stmt = localDb.prepare(`
+      
+      // Get count before deletion
+      const countResult = await executeQueryOne<{ count: number }>(`
+        SELECT COUNT(*) as count FROM transaction_items 
+        WHERE transaction_id IN (
+          SELECT id FROM transactions WHERE ${baseClause}
+        )
+      `, params);
+      const deletedCount = countResult?.count || 0;
+      
+      await executeUpdate(`
         DELETE FROM transaction_items 
         WHERE transaction_id IN (
           SELECT id FROM transactions WHERE ${baseClause}
         )
-      `);
+      `, params);
 
-      const result = stmt.run(...params);
-      console.log(`🗑️ [DELETE] Deleted ${result.changes} transaction items`);
-      return { success: true, deleted: result.changes };
+      console.log(`🗑️ [DELETE] Deleted ${deletedCount} transaction items`);
+      return { success: true, deleted: deletedCount };
     } catch (error) {
       console.error('❌ [DELETE] Failed to delete transaction items:', error);
       throw error;
@@ -3264,142 +2911,136 @@ function createWindows(): void {
 
   // Get transactions that are not yet synced to cloud
   ipcMain.handle('localdb-get-unsynced-transactions', async (event, businessId?: number) => {
-    if (!localDb) return [];
+    try {
+      // Return all transactions where sync_status = 'pending'
+      // This indicates they haven't been synced to cloud yet
+      let query = `
+        SELECT 
+          t.*,
+          CASE 
+            WHEN t.created_at IS NOT NULL THEN
+              ROW_NUMBER() OVER (
+                PARTITION BY DATE(t.created_at), t.business_id
+                ORDER BY t.created_at ASC
+              )
+            ELSE NULL
+          END as receipt_number
+        FROM transactions t
+        WHERE t.sync_status = 'pending'
+      `;
+      const params: (string | number | null | boolean)[] = [];
 
-    // Return all transactions where sync_status = 'pending'
-    // This indicates they haven't been synced to cloud yet
-    let query = `
-      SELECT 
-        t.*,
-        CASE 
-          WHEN t.created_at IS NOT NULL THEN
-            ROW_NUMBER() OVER (
-              PARTITION BY DATE(t.created_at), t.business_id
-              ORDER BY t.created_at ASC
-            )
-          ELSE NULL
-        END as receipt_number
-      FROM transactions t
-      WHERE t.sync_status = 'pending'
-    `;
-    const params: QueryParams = [];
-
-    if (businessId) {
-      query += ' AND t.business_id = ?';
-      params.push(businessId);
-    }
-
-    query += ' ORDER BY t.created_at DESC';
-
-    const stmt = localDb.prepare(query);
-    const transactions = stmt.all(...params);
-
-    // ✅ NEW: Fetch transaction items for each transaction
-    if (Array.isArray(transactions) && transactions.length > 0) {
-      const itemsStmt = localDb.prepare('SELECT * FROM transaction_items WHERE transaction_id = ?');
-
-      for (const transaction of transactions as any[]) {
-        const items = itemsStmt.all(transaction.id);
-        transaction.items = items || [];
+      if (businessId) {
+        query += ' AND t.business_id = ?';
+        params.push(businessId);
       }
-    }
 
-    return transactions;
+      query += ' ORDER BY t.created_at DESC';
+
+      const transactions = await executeQuery(query, params);
+
+      // ✅ NEW: Fetch transaction items for each transaction
+      if (Array.isArray(transactions) && transactions.length > 0) {
+        for (const transaction of transactions as any[]) {
+          const items = await executeQuery('SELECT * FROM transaction_items WHERE transaction_id = ?', [transaction.id]);
+          transaction.items = items || [];
+        }
+      }
+
+      return transactions;
+    } catch (error) {
+      console.error('Error getting unsynced transactions:', error);
+      return [];
+    }
   });
 
   // Delete unsynced transactions (data offline yang akan diunggah)
   ipcMain.handle('localdb-delete-unsynced-transactions', async (event, businessId?: number) => {
-    if (!localDb) {
-      console.error('❌ [SYNC] Local database not available');
-      return { success: false, error: 'Local database not available' };
-    }
-
     try {
       console.log(`🗑️ [SYNC] Deleting unsynced transactions, businessId: ${businessId || 'all'}`);
 
-      // Temporarily disable foreign key constraints for deletion
-      localDb.pragma('foreign_keys = OFF');
-
       // Build WHERE clause for filtering
       let whereClause = 'synced_at IS NULL';
-      const params: QueryParams = [];
+      const params: (string | number | null | boolean)[] = [];
       if (businessId) {
         whereClause += ' AND business_id = ?';
         params.push(businessId);
       }
 
+      const queries: Array<{ sql: string; params?: (string | number | null | boolean)[] }> = [];
+
       // Step 1: Delete transaction_item_customization_options (depends on customizations)
-      const deleteOptionsQuery = `
-        DELETE FROM transaction_item_customization_options
-        WHERE transaction_item_customization_id IN (
-          SELECT tic.id FROM transaction_item_customizations tic
-          INNER JOIN transaction_items ti ON tic.transaction_item_id = ti.id
-          INNER JOIN transactions t ON ti.transaction_id = t.id
-          WHERE ${whereClause}
-        )
-      `;
-      const optionsStmt = localDb.prepare(deleteOptionsQuery);
-      const optionsResult = optionsStmt.run(...params);
-      console.log(`🗑️ [SYNC] Deleted ${optionsResult.changes} transaction_item_customization_options`);
+      queries.push({
+        sql: `
+          DELETE FROM transaction_item_customization_options
+          WHERE transaction_item_customization_id IN (
+            SELECT tic.id FROM transaction_item_customizations tic
+            INNER JOIN transaction_items ti ON tic.transaction_item_id = ti.id
+            INNER JOIN transactions t ON ti.transaction_id = t.id
+            WHERE ${whereClause}
+          )
+        `,
+        params: [...params]
+      });
 
       // Step 2: Delete transaction_item_customizations (depends on transaction_items)
-      const deleteCustomizationsQuery = `
-        DELETE FROM transaction_item_customizations
-        WHERE transaction_item_id IN (
-          SELECT id FROM transaction_items
+      queries.push({
+        sql: `
+          DELETE FROM transaction_item_customizations
+          WHERE transaction_item_id IN (
+            SELECT id FROM transaction_items
+            WHERE transaction_id IN (
+              SELECT id FROM transactions WHERE ${whereClause}
+            )
+          )
+        `,
+        params: [...params]
+      });
+
+      // Step 3: Delete transaction_items (depends on transactions)
+      queries.push({
+        sql: `
+          DELETE FROM transaction_items 
           WHERE transaction_id IN (
             SELECT id FROM transactions WHERE ${whereClause}
           )
-        )
-      `;
-      const customizationsStmt = localDb.prepare(deleteCustomizationsQuery);
-      const customizationsResult = customizationsStmt.run(...params);
-      console.log(`🗑️ [SYNC] Deleted ${customizationsResult.changes} transaction_item_customizations`);
-
-      // Step 3: Delete transaction_items (depends on transactions)
-      const deleteItemsQuery = `
-        DELETE FROM transaction_items 
-        WHERE transaction_id IN (
-          SELECT id FROM transactions WHERE ${whereClause}
-        )
-      `;
-      const itemsStmt = localDb.prepare(deleteItemsQuery);
-      const itemsResult = itemsStmt.run(...params);
-      console.log(`🗑️ [SYNC] Deleted ${itemsResult.changes} transaction_items`);
+        `,
+        params: [...params]
+      });
 
       // Step 4: Delete transaction_refunds (uses transaction_uuid, not foreign key but should be deleted)
-      const deleteRefundsQuery = `
-        DELETE FROM transaction_refunds
-        WHERE transaction_uuid IN (
-          SELECT id FROM transactions WHERE ${whereClause}
-        )
-      `;
-      const refundsStmt = localDb.prepare(deleteRefundsQuery);
-      const refundsResult = refundsStmt.run(...params);
-      console.log(`🗑️ [SYNC] Deleted ${refundsResult.changes} transaction_refunds`);
+      queries.push({
+        sql: `
+          DELETE FROM transaction_refunds
+          WHERE transaction_uuid IN (
+            SELECT id FROM transactions WHERE ${whereClause}
+          )
+        `,
+        params: [...params]
+      });
 
       // Step 5: Finally delete transactions
-      const deleteTransactionsQuery = `DELETE FROM transactions WHERE ${whereClause}`;
-      const transactionsStmt = localDb.prepare(deleteTransactionsQuery);
-      const transactionsResult = transactionsStmt.run(...params);
+      queries.push({
+        sql: `DELETE FROM transactions WHERE ${whereClause}`,
+        params: [...params]
+      });
 
-      console.log(`✅ [SYNC] Deleted ${transactionsResult.changes} unsynced transactions`);
+      // Get count before deletion
+      const countResult = await executeQueryOne<{ count: number }>(`
+        SELECT COUNT(*) as count FROM transactions WHERE ${whereClause}
+      `, params);
+      const deletedCount = countResult?.count || 0;
 
-      // Re-enable foreign key constraints
-      localDb.pragma('foreign_keys = ON');
+      // Execute all deletions in a transaction
+      await executeTransaction(queries);
+
+      console.log(`✅ [SYNC] Deleted ${deletedCount} unsynced transactions`);
 
       return {
         success: true,
-        deletedCount: transactionsResult.changes
+        deletedCount
       };
     } catch (error) {
-      // Re-enable foreign key constraints even on error
-      try {
-        localDb.pragma('foreign_keys = ON');
-      } catch (pragmaError) {
-        console.error('❌ [SYNC] Error re-enabling foreign keys:', pragmaError);
-      }
-
       console.error('❌ [SYNC] Error deleting unsynced transactions:', error);
       return {
         success: false,
@@ -3410,20 +3051,43 @@ function createWindows(): void {
 
   // Transaction Items
   ipcMain.handle('localdb-upsert-transaction-items', async (event, rows: RowArray) => {
-    if (!localDb) return { success: false };
-    console.log('🔍 [SQLITE] Inserting transaction items:', rows.length);
-    const tx = localDb.transaction((data: RowArray) => {
-      const stmt = localDb!.prepare(`INSERT INTO transaction_items (
-        id, transaction_id, product_id, quantity, unit_price, total_price,
-        bundle_selections_json, custom_note, created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT(id) DO UPDATE SET
-        transaction_id=excluded.transaction_id, product_id=excluded.product_id, quantity=excluded.quantity,
-        unit_price=excluded.unit_price, total_price=excluded.total_price,
-        bundle_selections_json=excluded.bundle_selections_json,
-        custom_note=excluded.custom_note, created_at=excluded.created_at`);
-      for (const r of data) {
-        console.log('📦 [SQLITE] Item data:', {
+    try {
+      console.log('🔍 [MYSQL] Inserting transaction items:', rows.length);
+      // #region agent log
+      const logData = {
+        location: 'electron/main.ts:3053',
+        message: 'localdb-upsert-transaction-items handler called',
+        data: {
+          rowsCount: Array.isArray(rows) ? rows.length : 0,
+          firstRow: Array.isArray(rows) && rows.length > 0 ? {
+            id: (rows[0] as any)?.id,
+            uuid_id: (rows[0] as any)?.uuid_id,
+            transaction_id: (rows[0] as any)?.transaction_id,
+            uuid_transaction_id: (rows[0] as any)?.uuid_transaction_id,
+            product_id: (rows[0] as any)?.product_id,
+            quantity: (rows[0] as any)?.quantity
+          } : null
+        },
+        timestamp: Date.now(),
+        sessionId: 'debug-session',
+        runId: 'run1',
+        hypothesisId: 'P'
+      };
+      require('http').request({
+        hostname: '127.0.0.1',
+        port: 7242,
+        path: '/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' }
+      }, () => {}).on('error', () => {}).end(JSON.stringify(logData));
+      // #endregion
+      const queries: Array<{ sql: string; params?: (string | number | null | boolean)[] }> = [];
+
+      // Map to store transaction UUID -> INT id lookups
+      const transactionIdMap = new Map<string, number>();
+
+      for (const r of rows) {
+        console.log('📦 [MYSQL] Item data:', {
           id: r.id,
           transaction_id: r.transaction_id,
           product_id: r.product_id,
@@ -3446,21 +3110,185 @@ function createWindows(): void {
           }
         }
 
-        console.log('📝 [SQLITE] Custom note:', r.custom_note);
+        console.log('📝 [MYSQL] Custom note:', r.custom_note);
 
-        stmt.run(r.id, r.transaction_id, r.product_id, r.quantity || 1, r.unit_price, r.total_price,
-          bundleSelectionsJson, r.custom_note, r.created_at);
+        // Use UUID columns: uuid_id (item UUID) and uuid_transaction_id (transaction UUID reference)
+        const itemUuidId = typeof r.id === 'string' ? r.id : String(r.id ?? '');
+        // IMPORTANT: Use uuid_transaction_id field, not transaction_id (which is 0 placeholder)
+        const transactionUuidId = typeof r.uuid_transaction_id === 'string' ? r.uuid_transaction_id : (typeof r.transaction_id === 'string' ? r.transaction_id : String(r.transaction_id ?? ''));
+        
+        // #region agent log
+        const logData2 = {
+          location: 'electron/main.ts:3090',
+          message: 'Processing transaction item',
+          data: {
+            itemUuidId,
+            transactionUuidId,
+            hasUuidTransactionId: typeof (r as any).uuid_transaction_id !== 'undefined',
+            uuidTransactionIdValue: (r as any).uuid_transaction_id,
+            transactionIdValue: (r as any).transaction_id,
+            productId: (r as any).product_id
+          },
+          timestamp: Date.now(),
+          sessionId: 'debug-session',
+          runId: 'run1',
+          hypothesisId: 'Q'
+        };
+        require('http').request({
+          hostname: '127.0.0.1',
+          port: 7242,
+          path: '/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' }
+        }, () => {}).on('error', () => {}).end(JSON.stringify(logData2));
+        // #endregion
+        
+        // Look up transaction INT id from UUID (cache results)
+        let transactionIntId: number;
+        if (transactionIdMap.has(transactionUuidId)) {
+          transactionIntId = transactionIdMap.get(transactionUuidId)!;
+        } else {
+          try {
+            // #region agent log
+            const logData3 = {
+              location: 'electron/main.ts:3100',
+              message: 'Looking up transaction by UUID',
+              data: { transactionUuidId },
+              timestamp: Date.now(),
+              sessionId: 'debug-session',
+              runId: 'run1',
+              hypothesisId: 'R'
+            };
+            require('http').request({
+              hostname: '127.0.0.1',
+              port: 7242,
+              path: '/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' }
+            }, () => {}).on('error', () => {}).end(JSON.stringify(logData3));
+            // #endregion
+            const tx = await executeQueryOne<{ id: number }>(
+              'SELECT id FROM transactions WHERE uuid_id = ? LIMIT 1',
+              [transactionUuidId]
+            );
+            // #region agent log
+            const logData4 = {
+              location: 'electron/main.ts:3110',
+              message: 'Transaction lookup result',
+              data: {
+                transactionUuidId,
+                found: !!tx,
+                transactionIntId: tx?.id,
+                transactionIntIdType: typeof tx?.id
+              },
+              timestamp: Date.now(),
+              sessionId: 'debug-session',
+              runId: 'run1',
+              hypothesisId: 'S'
+            };
+            require('http').request({
+              hostname: '127.0.0.1',
+              port: 7242,
+              path: '/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' }
+            }, () => {}).on('error', () => {}).end(JSON.stringify(logData4));
+            // #endregion
+            if (tx && typeof tx.id === 'number') {
+              transactionIntId = tx.id;
+              transactionIdMap.set(transactionUuidId, transactionIntId);
+            } else {
+              console.warn(`⚠️ Transaction UUID ${transactionUuidId} not found, using 0 as placeholder`);
+              transactionIntId = 0;
+            }
+          } catch (error) {
+            console.error(`❌ Error looking up transaction ID for UUID ${transactionUuidId}:`, error);
+            transactionIntId = 0;
+          }
+        }
+        
+        const productId = typeof r.product_id === 'number' ? r.product_id : (typeof r.product_id === 'string' ? parseInt(String(r.product_id), 10) : 0);
+        const quantity = typeof r.quantity === 'number' ? r.quantity : (typeof r.quantity === 'string' ? parseInt(String(r.quantity), 10) : 1);
+        const unitPrice = typeof r.unit_price === 'number' ? r.unit_price : (typeof r.unit_price === 'string' ? parseFloat(String(r.unit_price)) : 0);
+        const totalPrice = typeof r.total_price === 'number' ? r.total_price : (typeof r.total_price === 'string' ? parseFloat(String(r.total_price)) : 0);
+        const customNote = typeof r.custom_note === 'string' ? r.custom_note : (r.custom_note ? String(r.custom_note) : null);
+        const createdAt = r.created_at ? toMySQLDateTime(r.created_at) : toMySQLDateTime(new Date());
+        
+        queries.push({
+          sql: `INSERT INTO transaction_items (
+            uuid_id, transaction_id, uuid_transaction_id, product_id, quantity, unit_price, total_price,
+            bundle_selections_json, custom_note, created_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          ON DUPLICATE KEY UPDATE
+            transaction_id=VALUES(transaction_id), uuid_transaction_id=VALUES(uuid_transaction_id), product_id=VALUES(product_id), quantity=VALUES(quantity),
+            unit_price=VALUES(unit_price), total_price=VALUES(total_price),
+            bundle_selections_json=VALUES(bundle_selections_json),
+            custom_note=VALUES(custom_note), created_at=VALUES(created_at)`,
+          params: [
+            itemUuidId, transactionIntId, transactionUuidId, productId, quantity, unitPrice, totalPrice,
+            bundleSelectionsJson, customNote, createdAt
+          ]
+        });
+      }
 
+      // Insert all transaction items first
+      if (queries.length > 0) {
+        // #region agent log
+        const logData5 = {
+          location: 'electron/main.ts:3140',
+          message: 'Before executing transaction (INSERT items)',
+          data: {
+            queriesCount: queries.length,
+            firstQueryParams: queries[0]?.params,
+            transactionUuidIds: Array.from(new Set(queries.map((q: any) => q.params?.[2]))).filter(Boolean)
+          },
+          timestamp: Date.now(),
+          sessionId: 'debug-session',
+          runId: 'run1',
+          hypothesisId: 'T'
+        };
+        require('http').request({
+          hostname: '127.0.0.1',
+          port: 7242,
+          path: '/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' }
+        }, () => {}).on('error', () => {}).end(JSON.stringify(logData5));
+        // #endregion
+        await executeTransaction(queries);
+        // #region agent log
+        const logData6 = {
+          location: 'electron/main.ts:3143',
+          message: 'After executing transaction (INSERT items completed)',
+          data: { queriesCount: queries.length },
+          timestamp: Date.now(),
+          sessionId: 'debug-session',
+          runId: 'run1',
+          hypothesisId: 'U'
+        };
+        require('http').request({
+          hostname: '127.0.0.1',
+          port: 7242,
+          path: '/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' }
+        }, () => {}).on('error', () => {}).end(JSON.stringify(logData6));
+        // #endregion
+      }
+
+      // Then save customizations for each item (after items are inserted)
+      for (const r of rows) {
         // Save main product customizations directly to normalized tables (NO JSON)
         if (r.customizations && Array.isArray(r.customizations)) {
           try {
             const customizations = r.customizations as RawCustomization[];
             if (customizations.length > 0) {
-              saveCustomizationsToNormalizedTables(
-                localDb!,
-                r.id as string,
+              const itemId = typeof r.id === 'string' ? r.id : String(r.id ?? '');
+              const createdAt = r.created_at ? (typeof r.created_at === 'number' || typeof r.created_at === 'string' ? r.created_at : new Date()) : new Date();
+              await saveCustomizationsToNormalizedTables(
+                itemId,
                 customizations,
-                r.created_at as string || new Date().toISOString()
+                toMySQLTimestamp(createdAt)
               );
             }
           } catch (error) {
@@ -3469,10 +3297,23 @@ function createWindows(): void {
         }
 
         // Extract and save bundle product customizations to normalized tables (NO JSON)
+        let bundleSelectionsData: RawBundleSelection[] | null = null;
+        if (r.bundle_selections_json) {
+          try {
+            const bundleSelectionsJson = typeof r.bundle_selections_json === 'string'
+              ? r.bundle_selections_json
+              : JSON.stringify(r.bundle_selections_json);
+            bundleSelectionsData = parseJsonArray<RawBundleSelection>(bundleSelectionsJson, 'bundle_selections_json');
+          } catch (error) {
+            console.warn('⚠️ Failed to parse bundle_selections_json:', error);
+          }
+        }
+
         if (bundleSelectionsData && bundleSelectionsData.length > 0) {
           try {
             const transactionItemId = r.id as string;
-            const createdAt = r.created_at as string || new Date().toISOString();
+            const createdAt = r.created_at ? (typeof r.created_at === 'number' || typeof r.created_at === 'string' ? r.created_at : new Date()) : new Date();
+            const createdAtTimestamp = toMySQLTimestamp(createdAt);
 
             for (const bundleSelection of bundleSelectionsData) {
               if (!Array.isArray(bundleSelection.selectedProducts)) continue;
@@ -3485,8 +3326,7 @@ function createWindows(): void {
                   // Save bundle product customizations to normalized tables
                   // Link them to the bundle product ID so we can reconstruct them later
                   const bundleProductId = selectedProduct.product?.id || null;
-                  saveCustomizationsToNormalizedTables(
-                    localDb!,
+                  await saveCustomizationsToNormalizedTables(
                     transactionItemId,
                     bundleProductCustomizations,
                     createdAt,
@@ -3500,102 +3340,317 @@ function createWindows(): void {
           }
         }
       }
-    });
-    tx(rows);
-    console.log('✅ [SQLITE] Transaction items inserted');
-    return { success: true };
+
+      console.log('✅ [MYSQL] Transaction items inserted');
+      return { success: true };
+    } catch (error) {
+      console.error('❌ Error upserting transaction items:', error);
+      return { success: false };
+    }
   });
 
   ipcMain.handle('localdb-get-transaction-items', async (event, transactionId?: number | string) => {
-    if (!localDb) return [];
-
-    // Get transaction items with product name from LEFT JOIN (includes inactive products)
-    let items: Array<Record<string, unknown>> = [];
-    if (transactionId) {
-      const stmt = localDb.prepare(`
-        SELECT ti.*, p.nama as product_name 
-        FROM transaction_items ti
-        LEFT JOIN products p ON ti.product_id = p.id
-        WHERE ti.transaction_id = ? 
-        ORDER BY ti.id ASC
-      `);
-      items = stmt.all(transactionId) as Array<Record<string, unknown>>;
-    } else {
-      const stmt = localDb.prepare(`
-        SELECT ti.*, p.nama as product_name 
-        FROM transaction_items ti
-        LEFT JOIN products p ON ti.product_id = p.id
-        ORDER BY ti.created_at DESC
-      `);
-      items = stmt.all() as Array<Record<string, unknown>>;
-    }
-
-    // For each item, load customizations from normalized tables
-    const itemsWithCustomizations = items.map(item => {
-      const itemId = item.id as string;
-
-      // Read main product customizations from normalized tables (bundle_product_id IS NULL)
-      const customizations = readCustomizationsFromNormalizedTables(localDb!, itemId, null);
-
-      // If item has bundle_selections_json, reconstruct it with customizations from normalized tables
-      let bundleSelections = null;
-      if (item.bundle_selections_json) {
-        try {
-          const bundleSelectionsJson = typeof item.bundle_selections_json === 'string'
-            ? item.bundle_selections_json
-            : JSON.stringify(item.bundle_selections_json);
-
-          bundleSelections = parseJsonArray<RawBundleSelection>(bundleSelectionsJson, 'bundle_selections_json');
-
-          // For each bundle selection, load customizations for each product from normalized tables
-          if (bundleSelections && bundleSelections.length > 0) {
-            bundleSelections = bundleSelections.map(bundleSel => {
-              if (!Array.isArray(bundleSel.selectedProducts)) return bundleSel;
-
-              return {
-                ...bundleSel,
-                selectedProducts: bundleSel.selectedProducts.map(selectedProduct => {
-                  const bundleProductId = selectedProduct.product?.id;
-                  if (!bundleProductId) return selectedProduct;
-
-                  // Read customizations for this specific bundle product from normalized tables
-                  const productCustomizations = readCustomizationsFromNormalizedTables(
-                    localDb!,
-                    itemId,
-                    bundleProductId
-                  );
-
-                  return {
-                    ...selectedProduct,
-                    customizations: productCustomizations || undefined
-                  };
-                })
-              };
-            });
+    try {
+      // #region agent log
+      const logData7 = {
+        location: 'electron/main.ts:3352',
+        message: 'localdb-get-transaction-items handler called',
+        data: {
+          transactionId,
+          transactionIdType: typeof transactionId,
+          transactionIdString: String(transactionId || '')
+        },
+        timestamp: Date.now(),
+        sessionId: 'debug-session',
+        runId: 'run1',
+        hypothesisId: 'V'
+      };
+      require('http').request({
+        hostname: '127.0.0.1',
+        port: 7242,
+        path: '/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' }
+      }, () => {}).on('error', () => {}).end(JSON.stringify(logData7));
+      // #endregion
+      // Get transaction items with product name from LEFT JOIN (includes inactive products)
+      // Support both UUID and numeric ID lookups
+      let items: Array<Record<string, unknown>> = [];
+      if (transactionId) {
+        // Try to match by uuid_transaction_id first (for UUID), then fallback to transaction_id (for numeric)
+        // Check if it's a receipt number format (starts with digits but might have leading zeros)
+        // IMPORTANT: Check receipt number format FIRST, as it's also numeric but needs UUID lookup
+        const isReceiptNumberFormat = typeof transactionId === 'string' && /^0\d{15,}$/.test(String(transactionId).trim());
+        const isNumeric = typeof transactionId === 'number' || (typeof transactionId === 'string' && /^\d+$/.test(String(transactionId).trim()));
+        const isSimpleNumeric = isNumeric && !isReceiptNumberFormat; // Numeric but NOT receipt number format
+        
+        console.log(`[localdb-get-transaction-items] Looking for items with transactionId: ${transactionId} (isNumeric: ${isNumeric}, isReceiptNumberFormat: ${isReceiptNumberFormat}, isSimpleNumeric: ${isSimpleNumeric})`);
+        
+        // #region agent log
+        const logData8 = {
+          location: 'electron/main.ts:3375',
+          message: 'Transaction ID analysis',
+          data: {
+            transactionId,
+            isReceiptNumberFormat,
+            isNumeric,
+            isSimpleNumeric
+          },
+          timestamp: Date.now(),
+          sessionId: 'debug-session',
+          runId: 'run1',
+          hypothesisId: 'W'
+        };
+        require('http').request({
+          hostname: '127.0.0.1',
+          port: 7242,
+          path: '/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' }
+        }, () => {}).on('error', () => {}).end(JSON.stringify(logData8));
+        // #endregion
+        
+        if (isSimpleNumeric) {
+          // Simple numeric ID (not receipt number format) - match by transaction_id
+          items = await executeQuery<Record<string, unknown>>(`
+            SELECT ti.*, p.nama as product_name 
+            FROM transaction_items ti
+            LEFT JOIN products p ON ti.product_id = p.id
+            WHERE ti.transaction_id = ? 
+            ORDER BY ti.id ASC
+          `, [transactionId]);
+        } else {
+          // UUID or receipt number format - try multiple strategies to find items
+          // Strategy 1: Try uuid_transaction_id directly (most direct match)
+          // #region agent log
+          const logData9 = {
+            location: 'electron/main.ts:3425',
+            message: 'Strategy 1: Querying by uuid_transaction_id',
+            data: { transactionId },
+            timestamp: Date.now(),
+            sessionId: 'debug-session',
+            runId: 'run1',
+            hypothesisId: 'X'
+          };
+          require('http').request({
+            hostname: '127.0.0.1',
+            port: 7242,
+            path: '/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' }
+          }, () => {}).on('error', () => {}).end(JSON.stringify(logData9));
+          // #endregion
+          items = await executeQuery<Record<string, unknown>>(`
+            SELECT ti.*, p.nama as product_name 
+            FROM transaction_items ti
+            LEFT JOIN products p ON ti.product_id = p.id
+            WHERE ti.uuid_transaction_id = ? 
+            ORDER BY ti.id ASC
+          `, [transactionId]);
+          // #region agent log
+          const logData10 = {
+            location: 'electron/main.ts:3442',
+            message: 'Strategy 1: Query result',
+            data: {
+              transactionId,
+              itemsFound: items.length,
+              itemsData: items.length > 0 ? items.map((item: any) => ({
+                uuid_id: item.uuid_id,
+                uuid_transaction_id: item.uuid_transaction_id,
+                transaction_id: item.transaction_id,
+                product_id: item.product_id
+              })) : []
+            },
+            timestamp: Date.now(),
+            sessionId: 'debug-session',
+            runId: 'run1',
+            hypothesisId: 'Y'
+          };
+          require('http').request({
+            hostname: '127.0.0.1',
+            port: 7242,
+            path: '/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' }
+          }, () => {}).on('error', () => {}).end(JSON.stringify(logData10));
+          // #endregion
+          
+          // Strategy 2: Join with transactions table to match by UUID or receipt_number
+          if (items.length === 0) {
+            console.log(`[localdb-get-transaction-items] No items found by uuid_transaction_id, trying transaction join with receipt_number`);
+            // Try matching receipt_number as string (for formats like "0142512252257150001")
+            items = await executeQuery<Record<string, unknown>>(`
+              SELECT ti.*, p.nama as product_name 
+              FROM transaction_items ti
+              LEFT JOIN products p ON ti.product_id = p.id
+              INNER JOIN transactions t ON ti.transaction_id = t.id
+              WHERE t.uuid_id = ? 
+                 OR CAST(t.receipt_number AS CHAR) = ?
+                 OR t.receipt_number = ?
+              ORDER BY ti.id ASC
+            `, [transactionId, String(transactionId), transactionId]);
           }
-        } catch (error) {
-          console.warn('⚠️ Error reconstructing bundle selections:', error);
+          
+          // Strategy 3: If still no items, find transaction's numeric ID and match by transaction_id
+          if (items.length === 0) {
+            console.log(`[localdb-get-transaction-items] No items found via join, trying to find by transaction numeric ID`);
+            const transaction = await executeQuery<Record<string, unknown>>(`
+              SELECT id, uuid_id, receipt_number FROM transactions 
+              WHERE uuid_id = ? 
+                 OR CAST(receipt_number AS CHAR) = ?
+                 OR receipt_number = ?
+                 OR id = ?
+              LIMIT 1
+            `, [transactionId, String(transactionId), transactionId, transactionId]);
+            
+            if (transaction && Array.isArray(transaction) && transaction.length > 0) {
+              const tx = transaction[0];
+              console.log(`[localdb-get-transaction-items] Found transaction:`, {
+                id: tx.id,
+                uuid_id: tx.uuid_id,
+                receipt_number: tx.receipt_number
+              });
+              
+              // Try with numeric ID
+              if (tx.id) {
+                const numericId = tx.id;
+                console.log(`[localdb-get-transaction-items] Querying items by transaction_id: ${numericId}`);
+                items = await executeQuery<Record<string, unknown>>(`
+                  SELECT ti.*, p.nama as product_name 
+                  FROM transaction_items ti
+                  LEFT JOIN products p ON ti.product_id = p.id
+                  WHERE ti.transaction_id = ? 
+                  ORDER BY ti.id ASC
+                `, [numericId]);
+              }
+              
+              // If still no items, try with UUID
+              if (items.length === 0 && tx.uuid_id) {
+                console.log(`[localdb-get-transaction-items] Querying items by uuid_transaction_id: ${tx.uuid_id}`);
+                items = await executeQuery<Record<string, unknown>>(`
+                  SELECT ti.*, p.nama as product_name 
+                  FROM transaction_items ti
+                  LEFT JOIN products p ON ti.product_id = p.id
+                  WHERE ti.uuid_transaction_id = ? 
+                  ORDER BY ti.id ASC
+                `, [tx.uuid_id]);
+              }
+            } else {
+              console.log(`[localdb-get-transaction-items] Transaction not found in database for: ${transactionId}`);
+            }
+          }
         }
+        
+        console.log(`[localdb-get-transaction-items] Found ${items.length} items for transactionId: ${transactionId}`);
+        if (items.length > 0) {
+          console.log(`[localdb-get-transaction-items] Sample item:`, {
+            id: items[0].id,
+            product_id: items[0].product_id,
+            product_name: items[0].product_name,
+            transaction_id: items[0].transaction_id,
+            uuid_transaction_id: items[0].uuid_transaction_id
+          });
+        }
+      } else {
+        items = await executeQuery<Record<string, unknown>>(`
+          SELECT ti.*, p.nama as product_name 
+          FROM transaction_items ti
+          LEFT JOIN products p ON ti.product_id = p.id
+          ORDER BY ti.created_at DESC
+        `);
       }
 
-      return {
-        ...item,
-        customizations: customizations || [],  // Main product customizations
-        bundleSelections: bundleSelections || null  // Bundle selections with customizations from normalized tables
-      };
-    });
+      // For each item, load customizations from normalized tables
+      const itemsWithCustomizations = await Promise.all(items.map(async (item) => {
+        // Use uuid_id for reading customizations (function expects UUID, not INT id)
+        const itemUuid = (item.uuid_id || item.id) as string;
 
-    return itemsWithCustomizations;
+        // Read main product customizations from normalized tables (bundle_product_id IS NULL)
+        const customizations = await readCustomizationsFromNormalizedTables(itemUuid, null);
+
+        // If item has bundle_selections_json, reconstruct it with customizations from normalized tables
+        let bundleSelections = null;
+        if (item.bundle_selections_json) {
+          try {
+            const bundleSelectionsJson = typeof item.bundle_selections_json === 'string'
+              ? item.bundle_selections_json
+              : JSON.stringify(item.bundle_selections_json);
+
+            bundleSelections = parseJsonArray<RawBundleSelection>(bundleSelectionsJson, 'bundle_selections_json');
+
+            // For each bundle selection, load customizations for each product from normalized tables
+            if (bundleSelections && bundleSelections.length > 0) {
+              bundleSelections = await Promise.all(bundleSelections.map(async (bundleSel) => {
+                if (!Array.isArray(bundleSel.selectedProducts)) return bundleSel;
+
+                return {
+                  ...bundleSel,
+                  selectedProducts: await Promise.all(bundleSel.selectedProducts.map(async (selectedProduct) => {
+                    const bundleProductId = selectedProduct.product?.id;
+                    if (!bundleProductId) return selectedProduct;
+
+                    // Read customizations for this specific bundle product from normalized tables
+                    const productCustomizations = await readCustomizationsFromNormalizedTables(
+                      itemUuid,
+                      bundleProductId
+                    );
+
+                    return {
+                      ...selectedProduct,
+                      customizations: productCustomizations || undefined
+                    };
+                  }))
+                };
+              }));
+            }
+          } catch (error) {
+            console.warn('⚠️ Error reconstructing bundle selections:', error);
+          }
+        }
+
+        return {
+          ...item,
+          customizations: customizations || [],  // Main product customizations
+          bundleSelections: bundleSelections || null  // Bundle selections with customizations from normalized tables
+        };
+      }));
+
+      return itemsWithCustomizations;
+    } catch (error) {
+      console.error('Error getting transaction items:', error);
+      return [];
+    }
   });
 
   // NEW: Get normalized customizations for transaction items (for sync upload)
   ipcMain.handle('localdb-get-transaction-item-customizations-normalized', async (event, transactionId: string) => {
-    if (!localDb) return { customizations: [], options: [] };
-
     try {
       // Get all transaction items for this transaction
-      const itemsStmt = localDb.prepare('SELECT id FROM transaction_items WHERE transaction_id = ?');
-      const items = itemsStmt.all(transactionId) as Array<{ id: string }>;
+      // Support both UUID and numeric ID lookups (similar to localDbGetTransactionItems)
+      const isReceiptNumberFormat = typeof transactionId === 'string' && /^0\d{15,}$/.test(String(transactionId).trim());
+      const isNumeric = typeof transactionId === 'number' || (typeof transactionId === 'string' && /^\d+$/.test(String(transactionId).trim()));
+      const isSimpleNumeric = isNumeric && !isReceiptNumberFormat;
+      
+      let items: Array<{ id: number }> = [];
+      
+      if (isSimpleNumeric) {
+        // Simple numeric ID - match by transaction_id
+        items = await executeQuery<{ id: number }>('SELECT id FROM transaction_items WHERE transaction_id = ?', [transactionId]);
+      } else {
+        // UUID or receipt number format - match by uuid_transaction_id
+        items = await executeQuery<{ id: number }>('SELECT id FROM transaction_items WHERE uuid_transaction_id = ?', [transactionId]);
+        
+        // If no items found, try joining with transactions table
+        if (items.length === 0) {
+          const tx = await executeQueryOne<{ id: number }>(
+            'SELECT id FROM transactions WHERE uuid_id = ? OR CAST(receipt_number AS CHAR) = ? OR receipt_number = ? LIMIT 1',
+            [transactionId, String(transactionId), transactionId]
+          );
+          if (tx && tx.id) {
+            items = await executeQuery<{ id: number }>('SELECT id FROM transaction_items WHERE transaction_id = ?', [tx.id]);
+          }
+        }
+      }
 
       const allCustomizations: Array<Record<string, unknown>> = [];
       const allOptions: Array<Record<string, unknown>> = [];
@@ -3603,24 +3658,50 @@ function createWindows(): void {
       for (const item of items) {
         const itemId = item.id;
 
-        // Get customizations for this item
-        const customizationsStmt = localDb.prepare(`
-          SELECT 
-            id,
-            transaction_item_id,
-            customization_type_id,
-            bundle_product_id,
-            created_at
-          FROM transaction_item_customizations
-          WHERE transaction_item_id = ?
-        `);
-        const customizations = customizationsStmt.all(itemId) as Array<Record<string, unknown>>;
+        // Get customizations for this item with customization type name from product_customization_types
+        // Use LEFT JOIN - if table doesn't exist, will fall back to NULL and use fallback name
+        let customizations: Array<Record<string, unknown>> = [];
+        try {
+          customizations = await executeQuery<Record<string, unknown>>(`
+            SELECT 
+              tic.id,
+              tic.transaction_item_id,
+              tic.customization_type_id,
+              tic.bundle_product_id,
+              tic.created_at,
+              COALESCE(pct.name, CONCAT('Customization ', tic.customization_type_id)) as customization_type_name
+            FROM transaction_item_customizations tic
+            LEFT JOIN product_customization_types pct ON tic.customization_type_id = pct.id
+            WHERE tic.transaction_item_id = ?
+          `, [itemId]);
+        } catch (error) {
+          // If product_customization_types table doesn't exist, query without JOIN
+          console.warn('⚠️ product_customization_types table not found, using fallback names');
+          customizations = await executeQuery<Record<string, unknown>>(`
+            SELECT 
+              tic.id,
+              tic.transaction_item_id,
+              tic.customization_type_id,
+              tic.bundle_product_id,
+              tic.created_at,
+              CONCAT('Customization ', tic.customization_type_id) as customization_type_name
+            FROM transaction_item_customizations tic
+            WHERE tic.transaction_item_id = ?
+          `, [itemId]);
+        }
 
         for (const customization of customizations) {
           allCustomizations.push(customization);
 
           // Get options for this customization
-          const optionsStmt = localDb.prepare(`
+          const customizationId = typeof customization.id === 'number' ? customization.id : (typeof customization.id === 'string' ? parseInt(String(customization.id), 10) : 0);
+          // #region agent log
+          const logData = JSON.stringify({location:'main.ts:3697',message:'Querying options for customization',data:{customizationId,customizationIdType:typeof customizationId,customizationRawId:customization.id,customizationRawIdType:typeof customization.id,transactionItemId:customization.transaction_item_id,customizationTypeId:customization.customization_type_id},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'M'});
+          try {
+            await fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:logData}).catch(()=>{});
+          } catch {}
+          // #endregion
+          const options = await executeQuery<Record<string, unknown>>(`
             SELECT 
               id,
               transaction_item_customization_id,
@@ -3630,8 +3711,13 @@ function createWindows(): void {
               created_at
             FROM transaction_item_customization_options
             WHERE transaction_item_customization_id = ?
-          `);
-          const options = optionsStmt.all(customization.id) as Array<Record<string, unknown>>;
+          `, [customizationId]);
+          // #region agent log
+          const logData2 = JSON.stringify({location:'main.ts:3708',message:'Options query result',data:{customizationId,optionsFound:options.length,options:options.map((o:any)=>({id:o.id,transaction_item_customization_id:o.transaction_item_customization_id,option_name:o.option_name}))},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'N'});
+          try {
+            await fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:logData2}).catch(()=>{});
+          } catch {}
+          // #endregion
           allOptions.push(...options);
         }
       }
@@ -3648,34 +3734,54 @@ function createWindows(): void {
 
   // Upsert transaction item customizations (for downloading from server)
   ipcMain.handle('localdb-upsert-transaction-item-customizations', async (event, rows: RowArray) => {
-    if (!localDb) return { success: false, error: 'Database not available' };
     if (!Array.isArray(rows) || rows.length === 0) return { success: true, count: 0 };
 
     try {
-      const tx = localDb.transaction((data: RowArray) => {
-        const stmt = localDb!.prepare(`
-          INSERT INTO transaction_item_customizations (
-            id, transaction_item_id, customization_type_id, bundle_product_id, created_at
-          ) VALUES (?, ?, ?, ?, ?)
-          ON CONFLICT(id) DO UPDATE SET
-            transaction_item_id = excluded.transaction_item_id,
-            customization_type_id = excluded.customization_type_id,
-            bundle_product_id = excluded.bundle_product_id,
-            created_at = excluded.created_at
-        `);
-
-        for (const row of data) {
-          stmt.run(
-            row.id,
-            row.transaction_item_id,
-            row.customization_type_id,
-            row.bundle_product_id ?? null,
-            row.created_at
-          );
+      const queries = rows.map(row => {
+        // If id is null/undefined/0, let database auto-generate it
+        const hasId = row.id !== null && row.id !== undefined && row.id !== 0;
+        
+        if (hasId) {
+          return {
+            sql: `
+              INSERT INTO transaction_item_customizations (
+                id, transaction_item_id, customization_type_id, bundle_product_id, created_at
+              ) VALUES (?, ?, ?, ?, ?)
+              ON DUPLICATE KEY UPDATE
+                transaction_item_id = VALUES(transaction_item_id),
+                customization_type_id = VALUES(customization_type_id),
+                bundle_product_id = VALUES(bundle_product_id),
+                created_at = VALUES(created_at)
+            `,
+            params: [
+              row.id,
+              row.transaction_item_id,
+              row.customization_type_id,
+              row.bundle_product_id ?? null,
+              row.created_at ? toMySQLDateTime(row.created_at) : toMySQLDateTime(new Date())
+            ]
+          };
+        } else {
+          // Auto-generate ID
+          // Convert created_at to MySQL datetime format
+          const createdAt = row.created_at ? toMySQLDateTime(row.created_at) : toMySQLDateTime(new Date());
+          return {
+            sql: `
+              INSERT INTO transaction_item_customizations (
+                transaction_item_id, customization_type_id, bundle_product_id, created_at
+              ) VALUES (?, ?, ?, ?)
+            `,
+            params: [
+              row.transaction_item_id,
+              row.customization_type_id,
+              row.bundle_product_id ?? null,
+              createdAt
+            ]
+          };
         }
       });
 
-      tx(rows);
+      await executeTransaction(queries);
       return { success: true, count: rows.length };
     } catch (error) {
       console.error('Error upserting transaction item customizations:', error);
@@ -3685,37 +3791,57 @@ function createWindows(): void {
 
   // Upsert transaction item customization options (for downloading from server)
   ipcMain.handle('localdb-upsert-transaction-item-customization-options', async (event, rows: RowArray) => {
-    if (!localDb) return { success: false, error: 'Database not available' };
     if (!Array.isArray(rows) || rows.length === 0) return { success: true, count: 0 };
 
     try {
-      const tx = localDb.transaction((data: RowArray) => {
-        const stmt = localDb!.prepare(`
-          INSERT INTO transaction_item_customization_options (
-            id, transaction_item_customization_id, customization_option_id, 
-            option_name, price_adjustment, created_at
-          ) VALUES (?, ?, ?, ?, ?, ?)
-          ON CONFLICT(id) DO UPDATE SET
-            transaction_item_customization_id = excluded.transaction_item_customization_id,
-            customization_option_id = excluded.customization_option_id,
-            option_name = excluded.option_name,
-            price_adjustment = excluded.price_adjustment,
-            created_at = excluded.created_at
-        `);
-
-        for (const row of data) {
-          stmt.run(
-            row.id,
-            row.transaction_item_customization_id,
-            row.customization_option_id,
-            row.option_name,
-            row.price_adjustment ?? 0,
-            row.created_at
-          );
+      const queries = rows.map(row => {
+        // If id is null/undefined/0, let database auto-generate it
+        const hasId = row.id !== null && row.id !== undefined && row.id !== 0;
+        
+        if (hasId) {
+          return {
+            sql: `
+              INSERT INTO transaction_item_customization_options (
+                id, transaction_item_customization_id, customization_option_id, 
+                option_name, price_adjustment, created_at
+              ) VALUES (?, ?, ?, ?, ?, ?)
+              ON DUPLICATE KEY UPDATE
+                transaction_item_customization_id = VALUES(transaction_item_customization_id),
+                customization_option_id = VALUES(customization_option_id),
+                option_name = VALUES(option_name),
+                price_adjustment = VALUES(price_adjustment),
+                created_at = VALUES(created_at)
+            `,
+            params: [
+              row.id,
+              row.transaction_item_customization_id,
+              row.customization_option_id,
+              row.option_name,
+              row.price_adjustment ?? 0,
+              row.created_at ? toMySQLDateTime(row.created_at) : toMySQLDateTime(new Date())
+            ]
+          };
+        } else {
+          // Auto-generate ID
+          return {
+            sql: `
+              INSERT INTO transaction_item_customization_options (
+                transaction_item_customization_id, customization_option_id, 
+                option_name, price_adjustment, created_at
+              ) VALUES (?, ?, ?, ?, ?)
+            `,
+            params: [
+              row.transaction_item_customization_id,
+              row.customization_option_id,
+              row.option_name,
+              row.price_adjustment ?? 0,
+              row.created_at ? toMySQLDateTime(row.created_at) : toMySQLDateTime(new Date())
+            ]
+          };
         }
       });
 
-      tx(rows);
+      await executeTransaction(queries);
       return { success: true, count: rows.length };
     } catch (error) {
       console.error('Error upserting transaction item customization options:', error);
@@ -3724,84 +3850,168 @@ function createWindows(): void {
   });
 
   ipcMain.handle('localdb-get-transaction-refunds', async (event, transactionUuid: string) => {
-    if (!localDb) return [];
     try {
-      const stmt = localDb.prepare(`
+      return await executeQuery(`
         SELECT *
         FROM transaction_refunds
         WHERE transaction_uuid = ?
-        ORDER BY datetime(refunded_at) DESC, id DESC
-      `);
-      return stmt.all(transactionUuid);
+        ORDER BY refunded_at DESC, id DESC
+      `, [transactionUuid]);
     } catch (error) {
       console.error('Error getting transaction refunds:', error);
       return [];
     }
   });
 
-  ipcMain.handle('localdb-upsert-transaction-refunds', async (event, rows: RowArray) => {
-    if (!localDb) return { success: false, error: 'Database not available' };
+  ipcMain.handle('localdb-get-shift-refunds', async (event, payload: {
+    userId: number;
+    businessId: number;
+    shiftUuid?: string | null;
+    shiftStart: string;
+    shiftEnd?: string | null;
+  }) => {
     try {
-      const tx = localDb.transaction((data: RowArray) => {
-        const stmt = localDb!.prepare(`
-          INSERT INTO transaction_refunds (
-            uuid_id,
-            transaction_uuid,
-            business_id,
-            shift_uuid,
-            refunded_by,
-            refund_amount,
-            cash_delta,
-            payment_method_id,
+      const { userId, businessId, shiftUuid, shiftStart, shiftEnd } = payload;
+      
+      let query = `
+        SELECT 
+          tr.uuid_id as refund_uuid,
+          tr.transaction_uuid,
+          tr.refund_amount,
+          tr.cash_delta,
+          tr.refunded_at,
+          tr.refunded_by,
+          tr.payment_method_id,
+          tr.reason,
+          tr.note,
+          t.uuid_id as transaction_uuid_id,
+          t.payment_method,
+          t.final_amount,
+          t.created_at as transaction_created_at
+        FROM transaction_refunds tr
+        INNER JOIN transactions t ON tr.transaction_uuid = t.uuid_id
+        WHERE tr.business_id = ?
+        AND tr.status != 'failed'
+      `;
+      const params: (string | number | null | boolean)[] = [businessId];
+      
+      if (shiftUuid) {
+        query += ' AND (tr.shift_uuid = ?';
+        params.push(shiftUuid);
+        
+        query += ' OR (tr.shift_uuid IS NULL';
+        if (userId !== null) {
+          query += ' AND tr.refunded_by = ?';
+          params.push(userId);
+        }
+        query += ' AND tr.refunded_at >= ?';
+        params.push(toMySQLDateTime(shiftStart));
+        if (shiftEnd) {
+          query += ' AND tr.refunded_at <= ?';
+          params.push(toMySQLDateTime(shiftEnd));
+        }
+        query += '))';
+      } else {
+        if (userId !== null) {
+          query += ' AND tr.refunded_by = ?';
+          params.push(userId);
+        }
+        query += ' AND tr.refunded_at >= ?';
+        params.push(toMySQLDateTime(shiftStart));
+        if (shiftEnd) {
+          query += ' AND tr.refunded_at <= ?';
+          params.push(toMySQLDateTime(shiftEnd));
+        }
+      }
+      
+      query += ' ORDER BY tr.refunded_at DESC';
+      
+      return await executeQuery(query, params);
+    } catch (error) {
+      console.error('Error getting shift refunds:', error);
+      return [];
+    }
+  });
+
+  ipcMain.handle('localdb-upsert-transaction-refunds', async (event, rows: RowArray) => {
+    try {
+      const queries = rows.map(r => {
+        const uuidId = typeof r.uuid_id === 'string' ? r.uuid_id : String(r.uuid_id ?? '');
+        const transactionUuid = typeof r.transaction_uuid === 'string' ? r.transaction_uuid : String(r.transaction_uuid ?? '');
+        const businessId = typeof r.business_id === 'number' ? r.business_id : (r.business_id ? Number(r.business_id) : 14);
+        const shiftUuid = typeof r.shift_uuid === 'string' ? r.shift_uuid : (r.shift_uuid ? String(r.shift_uuid) : null);
+        const refundedBy = typeof r.refunded_by === 'number' ? r.refunded_by : (r.refunded_by ? Number(r.refunded_by) : 0);
+        const refundAmount = typeof r.refund_amount === 'number' ? r.refund_amount : (r.refund_amount ? Number(r.refund_amount) : 0);
+        const cashDelta = typeof r.cash_delta === 'number' ? r.cash_delta : (r.cash_delta ? Number(r.cash_delta) : 0);
+        const paymentMethodId = typeof r.payment_method_id === 'number' ? r.payment_method_id : (r.payment_method_id ? Number(r.payment_method_id) : 1);
+        const reason = typeof r.reason === 'string' ? r.reason : (r.reason ? String(r.reason) : null);
+        const note = typeof r.note === 'string' ? r.note : (r.note ? String(r.note) : null);
+        const refundType = typeof r.refund_type === 'string' ? r.refund_type : 'full';
+        const status = typeof r.status === 'string' ? r.status : 'completed';
+        const refundedAt = r.refunded_at ? (typeof r.refunded_at === 'number' || typeof r.refunded_at === 'string' ? r.refunded_at : new Date()) : new Date();
+        const createdAt = r.created_at ? (typeof r.created_at === 'number' || typeof r.created_at === 'string' ? r.created_at : new Date()) : new Date();
+        const updatedAt = r.updated_at ? (typeof r.updated_at === 'number' ? new Date(r.updated_at) : (typeof r.updated_at === 'string' ? r.updated_at : new Date())) : new Date();
+        const syncedAt = r.synced_at ? (typeof r.synced_at === 'number' ? new Date(r.synced_at) : (typeof r.synced_at === 'string' ? r.synced_at : null)) : null;
+        
+        return {
+          sql: `
+            INSERT INTO transaction_refunds (
+              uuid_id,
+              transaction_uuid,
+              business_id,
+              shift_uuid,
+              refunded_by,
+              refund_amount,
+              cash_delta,
+              payment_method_id,
+              reason,
+              note,
+              refund_type,
+              status,
+              refunded_at,
+              created_at,
+              updated_at,
+              synced_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON DUPLICATE KEY UPDATE
+              transaction_uuid = VALUES(transaction_uuid),
+              business_id = VALUES(business_id),
+              shift_uuid = VALUES(shift_uuid),
+              refunded_by = VALUES(refunded_by),
+              refund_amount = VALUES(refund_amount),
+              cash_delta = VALUES(cash_delta),
+              payment_method_id = VALUES(payment_method_id),
+              reason = VALUES(reason),
+              note = VALUES(note),
+              refund_type = VALUES(refund_type),
+              status = VALUES(status),
+              refunded_at = VALUES(refunded_at),
+              created_at = VALUES(created_at),
+              updated_at = VALUES(updated_at),
+              synced_at = VALUES(synced_at)
+          `,
+          params: [
+            uuidId,
+            transactionUuid,
+            businessId,
+            shiftUuid,
+            refundedBy,
+            refundAmount,
+            cashDelta,
+            paymentMethodId,
             reason,
             note,
-            refund_type,
+            refundType,
             status,
-            refunded_at,
-            created_at,
-            updated_at,
-            synced_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-          ON CONFLICT(uuid_id) DO UPDATE SET
-            transaction_uuid = excluded.transaction_uuid,
-            business_id = excluded.business_id,
-            shift_uuid = excluded.shift_uuid,
-            refunded_by = excluded.refunded_by,
-            refund_amount = excluded.refund_amount,
-            cash_delta = excluded.cash_delta,
-            payment_method_id = excluded.payment_method_id,
-            reason = excluded.reason,
-            note = excluded.note,
-            refund_type = excluded.refund_type,
-            status = excluded.status,
-            refunded_at = excluded.refunded_at,
-            created_at = excluded.created_at,
-            updated_at = excluded.updated_at,
-            synced_at = excluded.synced_at
-        `);
-
-        for (const r of data) {
-          stmt.run(
-            r.uuid_id,
-            r.transaction_uuid,
-            Number(r.business_id ?? 14),
-            r.shift_uuid ?? null,
-            Number(r.refunded_by ?? 0),
-            Number(r.refund_amount ?? 0),
-            Number(r.cash_delta ?? 0),
-            Number(r.payment_method_id ?? 1),
-            r.reason ?? null,
-            r.note ?? null,
-            r.refund_type ?? 'full',
-            r.status ?? 'completed',
-            r.refunded_at ?? new Date().toISOString(),
-            r.created_at ?? new Date().toISOString(),
-            typeof r.updated_at === 'number' ? r.updated_at : Date.now(),
-            typeof r.synced_at === 'number' ? r.synced_at : Date.now()
-          );
-        }
+            toMySQLDateTime(refundedAt),
+            toMySQLDateTime(createdAt),
+            toMySQLDateTime(updatedAt),
+            syncedAt ? toMySQLDateTime(syncedAt) : null
+          ]
+        };
       });
-      tx(rows);
+
+      await executeTransaction(queries);
       return { success: true };
     } catch (error) {
       console.error('Error upserting transaction refunds:', error);
@@ -3819,92 +4029,170 @@ function createWindows(): void {
       status?: string | null;
     };
   }) => {
-    if (!localDb) return { success: false, error: 'Database not available' };
     try {
       const { refund, transactionUpdate } = payload || {};
       if (!refund || !refund.uuid_id) {
         return { success: false, error: 'Invalid refund payload' };
       }
 
-      const refundedAt = refund.refunded_at ?? new Date().toISOString();
-      const createdAt = refund.created_at ?? refundedAt;
-      const updatedAt = refund.updated_at ?? Date.now();
-      const syncedAt = refund.synced_at ?? null;
-
-      const stmt = localDb.prepare(`
-        INSERT INTO transaction_refunds (
-          uuid_id,
-          transaction_uuid,
-          business_id,
-          shift_uuid,
-          refunded_by,
-          refund_amount,
-          cash_delta,
-          payment_method_id,
-          reason,
-          note,
-          refund_type,
-          status,
-          refunded_at,
-          created_at,
-          updated_at,
-          synced_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(uuid_id) DO UPDATE SET
-          transaction_uuid = excluded.transaction_uuid,
-          business_id = excluded.business_id,
-          shift_uuid = excluded.shift_uuid,
-          refunded_by = excluded.refunded_by,
-          refund_amount = excluded.refund_amount,
-          cash_delta = excluded.cash_delta,
-          payment_method_id = excluded.payment_method_id,
-          reason = excluded.reason,
-          note = excluded.note,
-          refund_type = excluded.refund_type,
-          status = excluded.status,
-          refunded_at = excluded.refunded_at,
-          created_at = excluded.created_at,
-          updated_at = excluded.updated_at,
-          synced_at = excluded.synced_at
-      `);
-
-      stmt.run(
-        refund.uuid_id,
-        refund.transaction_uuid,
-        Number(refund.business_id ?? 14),
-        refund.shift_uuid ?? null,
-        Number(refund.refunded_by ?? 0),
-        Number(refund.refund_amount ?? 0),
-        Number(refund.cash_delta ?? 0),
-        Number(refund.payment_method_id ?? 1),
-        refund.reason ?? null,
-        refund.note ?? null,
-        refund.refund_type ?? 'full',
-        refund.status ?? 'completed',
-        refundedAt,
-        createdAt,
-        updatedAt,
-        syncedAt
-      );
-
-      if (transactionUpdate?.id) {
-        const txUpdateStmt = localDb.prepare(`
-          UPDATE transactions
-          SET refund_status = COALESCE(?, refund_status),
-              refund_total = COALESCE(?, refund_total),
-              last_refunded_at = COALESCE(?, last_refunded_at),
-              status = COALESCE(?, status)
-          WHERE id = ?
-        `);
-        txUpdateStmt.run(
-          transactionUpdate.refund_status ?? null,
-          typeof transactionUpdate.refund_total === 'number' ? transactionUpdate.refund_total : null,
-          transactionUpdate.last_refunded_at ?? refundedAt,
-          transactionUpdate.status ?? null,
-          transactionUpdate.id
-        );
+      // Auto-link to active shift if shift_uuid is missing
+      let finalShiftUuid = refund.shift_uuid;
+      if (!finalShiftUuid && refund.refunded_by) {
+        try {
+          const activeShift = await executeQueryOne<{ uuid_id: string }>(`
+            SELECT uuid_id 
+            FROM shifts 
+            WHERE user_id = ? AND status = 'active' AND business_id = ?
+            ORDER BY shift_start DESC 
+            LIMIT 1
+          `, [
+            typeof refund.refunded_by === 'number' ? refund.refunded_by : (typeof refund.refunded_by === 'string' ? parseInt(String(refund.refunded_by), 10) : 0),
+            typeof refund.business_id === 'number' ? refund.business_id : (refund.business_id ? parseInt(String(refund.business_id), 10) : 14)
+          ]);
+          if (activeShift) {
+            finalShiftUuid = activeShift.uuid_id;
+            console.log(`🔗 [REFUND] Linked refund ${refund.uuid_id} to active shift ${finalShiftUuid}`);
+          }
+        } catch (e) {
+          console.warn('⚠️ [REFUND] Failed to link refund to active shift:', e);
+        }
       }
 
+      const refundedAt = toMySQLDateTime(refund.refunded_at ?? new Date());
+      const createdAt = toMySQLDateTime(refund.created_at ?? refundedAt);
+      const updatedAt = toMySQLDateTime(refund.updated_at ? (typeof refund.updated_at === 'number' ? new Date(refund.updated_at) : refund.updated_at) : new Date());
+      const syncedAt = refund.synced_at ? toMySQLDateTime(typeof refund.synced_at === 'number' ? new Date(refund.synced_at) : refund.synced_at) : null;
+
+      const queries: Array<{ sql: string; params?: (string | number | null | boolean)[] }> = [];
+
+      // Check if refund with this UUID already exists to prevent duplicates
+      // Since uuid_id doesn't have a UNIQUE constraint, we need to check manually
+      const existingRefund = await executeQueryOne<{ id: number }>(
+        'SELECT id FROM transaction_refunds WHERE uuid_id = ? LIMIT 1',
+        [refund.uuid_id]
+      );
+
+      if (existingRefund) {
+        // Update existing refund record instead of inserting duplicate
+        queries.push({
+          sql: `
+            UPDATE transaction_refunds
+            SET transaction_uuid = ?,
+                business_id = ?,
+                shift_uuid = ?,
+                refunded_by = ?,
+                refund_amount = ?,
+                cash_delta = ?,
+                payment_method_id = ?,
+                reason = ?,
+                note = ?,
+                refund_type = ?,
+                status = ?,
+                refunded_at = ?,
+                updated_at = ?,
+                synced_at = ?
+            WHERE uuid_id = ?
+          `,
+          params: [
+            refund.transaction_uuid,
+            Number(refund.business_id ?? 14),
+            finalShiftUuid ?? null,
+            Number(refund.refunded_by ?? 0),
+            Number(refund.refund_amount ?? 0),
+            Number(refund.cash_delta ?? 0),
+            Number(refund.payment_method_id ?? 1),
+            refund.reason ?? null,
+            refund.note ?? null,
+            refund.refund_type ?? 'full',
+            refund.status ?? 'completed',
+            refundedAt,
+            updatedAt,
+            syncedAt,
+            refund.uuid_id
+          ]
+        });
+      } else {
+        // Insert new refund record
+        queries.push({
+          sql: `
+            INSERT INTO transaction_refunds (
+              uuid_id,
+              transaction_uuid,
+              business_id,
+              shift_uuid,
+              refunded_by,
+              refund_amount,
+              cash_delta,
+              payment_method_id,
+              reason,
+              note,
+              refund_type,
+              status,
+              refunded_at,
+              created_at,
+              updated_at,
+              synced_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          `,
+          params: [
+            refund.uuid_id,
+            refund.transaction_uuid,
+            Number(refund.business_id ?? 14),
+            finalShiftUuid ?? null,
+            Number(refund.refunded_by ?? 0),
+            Number(refund.refund_amount ?? 0),
+            Number(refund.cash_delta ?? 0),
+            Number(refund.payment_method_id ?? 1),
+            refund.reason ?? null,
+            refund.note ?? null,
+            refund.refund_type ?? 'full',
+            refund.status ?? 'completed',
+            refundedAt,
+            createdAt,
+            updatedAt,
+            syncedAt
+          ]
+        });
+      }
+
+      if (transactionUpdate?.id) {
+        // Only update transaction if transactionUpdate fields are explicitly provided (not undefined)
+        // This prevents overwriting transaction data when syncing refunds that were already applied locally
+        const updateFields: string[] = [];
+        const updateParams: (string | number | null)[] = [];
+
+        if (transactionUpdate.refund_status !== undefined) {
+          updateFields.push('refund_status = ?');
+          updateParams.push(transactionUpdate.refund_status ?? null);
+        }
+        if (transactionUpdate.refund_total !== undefined) {
+          updateFields.push('refund_total = ?');
+          updateParams.push(typeof transactionUpdate.refund_total === 'number' ? transactionUpdate.refund_total : null);
+        }
+        if (transactionUpdate.last_refunded_at !== undefined) {
+          updateFields.push('last_refunded_at = ?');
+          updateParams.push(transactionUpdate.last_refunded_at ?? refundedAt);
+        }
+        if (transactionUpdate.status !== undefined) {
+          updateFields.push('status = ?');
+          updateParams.push(transactionUpdate.status ?? null);
+        }
+
+        // Only execute UPDATE if there are fields to update
+        if (updateFields.length > 0) {
+          updateParams.push(transactionUpdate.id);
+          queries.push({
+            sql: `
+              UPDATE transactions
+              SET ${updateFields.join(', ')}
+              WHERE id = ?
+            `,
+            params: updateParams
+          });
+        }
+      }
+
+      await executeTransaction(queries);
       return { success: true };
     } catch (error) {
       console.error('Error applying transaction refund:', error);
@@ -3914,12 +4202,17 @@ function createWindows(): void {
 
   // Mark transactions as synced
   ipcMain.handle('localdb-mark-transactions-synced', async (event, transactionIds: string[]) => {
-    if (!localDb || transactionIds.length === 0) return { success: true };
+    if (transactionIds.length === 0) return { success: true };
 
     try {
-      const now = Date.now();
-      const stmt = localDb.prepare('UPDATE transactions SET synced_at = ?, sync_status = ?, sync_attempts = 0 WHERE id IN (' + transactionIds.map(() => '?').join(',') + ')');
-      stmt.run(now, 'synced', ...transactionIds);
+      const now = toMySQLDateTime(new Date());
+      const placeholders = transactionIds.map(() => '?').join(',');
+      // CRITICAL FIX: Use uuid_id instead of id, because smart sync passes UUID strings
+      await executeUpdate(
+        `UPDATE transactions SET synced_at = ?, sync_status = ?, sync_attempts = 0 WHERE uuid_id IN (${placeholders})`,
+        [now, 'synced', ...transactionIds]
+      );
+      console.log(`✅ [MARK SYNCED] Marked ${transactionIds.length} transaction(s) as synced: ${transactionIds.slice(0, 3).join(', ')}${transactionIds.length > 3 ? '...' : ''}`);
       return { success: true };
     } catch (error) {
       console.error('Error marking transactions as synced:', error);
@@ -3927,14 +4220,12 @@ function createWindows(): void {
     }
   });
 
-  // Reset transaction sync status (set synced_at to NULL)
+  // Reset transaction sync status (set synced_at to NULL and sync_status to 'pending')
   ipcMain.handle('localdb-reset-transaction-sync', async (event, transactionId: string) => {
-    if (!localDb) return { success: false };
-
     try {
-      const stmt = localDb.prepare('UPDATE transactions SET synced_at = NULL WHERE id = ?');
-      stmt.run(transactionId);
-      console.log(`🔄 [RESET SYNC] Transaction ${transactionId} synced_at reset to NULL`);
+      // CRITICAL FIX: Use uuid_id instead of id, and also reset sync_status to 'pending'
+      await executeUpdate('UPDATE transactions SET synced_at = NULL, sync_status = ? WHERE uuid_id = ?', ['pending', transactionId]);
+      console.log(`🔄 [RESET SYNC] Transaction ${transactionId} sync status reset to pending`);
       return { success: true };
     } catch (error) {
       console.error('Error resetting transaction sync status:', error);
@@ -3942,22 +4233,82 @@ function createWindows(): void {
     }
   });
 
+  // Reset transaction sync status by date range (for testing sync feature)
+  // Note: Dates are interpreted as UTC+7 (local timezone), but stored in UTC in database
+  ipcMain.handle('localdb-reset-transactions-sync-by-date', async (event, payload: { businessId: number; fromDate?: string | null; toDate?: string | null }) => {
+    try {
+      const { businessId, fromDate, toDate } = payload;
+      if (!businessId) {
+        return { success: false, error: 'businessId is required' };
+      }
+
+      let query = 'UPDATE transactions SET synced_at = NULL, sync_status = ?, sync_attempts = 0, last_sync_attempt = NULL WHERE business_id = ?';
+      const params: (string | number)[] = ['pending', businessId];
+
+      if (fromDate && toDate) {
+        // Convert UTC+7 date to UTC range for database query
+        // Database stores timestamps in UTC, but user inputs are in UTC+7
+        // UTC+7 2025-12-26 00:00:00 = UTC 2025-12-25 17:00:00 (subtract 7 hours)
+        // UTC+7 2025-12-26 23:59:59 = UTC 2025-12-26 16:59:59 (subtract 7 hours)
+        const fromDateOnly = fromDate.includes(' ') ? fromDate.split(' ')[0] : fromDate;
+        const toDateOnly = toDate.includes(' ') ? toDate.split(' ')[0] : toDate;
+
+        // Helper to convert UTC+7 date/time to UTC
+        const convertUtc7ToUtc = (dateStr: string, isEnd: boolean): string => {
+          const [year, month, day] = dateStr.split('-').map(Number);
+          // Create date in UTC+7 (treat as UTC first, then subtract 7 hours)
+          const utc7Date = new Date(Date.UTC(year, month - 1, day, isEnd ? 23 : 0, isEnd ? 59 : 0, isEnd ? 59 : 0, isEnd ? 999 : 0));
+          // Subtract 7 hours (7 * 60 * 60 * 1000 ms)
+          const utcDate = new Date(utc7Date.getTime() - 7 * 60 * 60 * 1000);
+          return utcDate.toISOString().slice(0, 19).replace('T', ' ');
+        };
+
+        if (fromDateOnly === toDateOnly) {
+          // Single date: UTC+7 date = UTC range from (date-1) 17:00 to (date) 16:59:59
+          const startUTC = convertUtc7ToUtc(fromDateOnly, false); // 00:00:00 UTC+7
+          const endUTC = convertUtc7ToUtc(toDateOnly, true); // 23:59:59 UTC+7
+          
+          query += ' AND created_at >= ? AND created_at <= ?';
+          params.push(startUTC);
+          params.push(endUTC);
+        } else {
+          // Date range
+          if (fromDateOnly) {
+            const startUTC = convertUtc7ToUtc(fromDateOnly, false);
+            query += ' AND created_at >= ?';
+            params.push(startUTC);
+          }
+
+          if (toDateOnly) {
+            const endUTC = convertUtc7ToUtc(toDateOnly, true);
+            query += ' AND created_at <= ?';
+            params.push(endUTC);
+          }
+        }
+      }
+
+      const result = await executeUpdate(query, params);
+      console.log(`🔄 [RESET SYNC BY DATE] Reset ${result} transaction(s) to pending status for business ${businessId}${fromDate ? ` from ${fromDate} (UTC+7)` : ''}${toDate ? ` to ${toDate} (UTC+7)` : ''}`);
+      return { success: true, count: result };
+    } catch (error) {
+      console.error('Error resetting transactions sync status by date:', error);
+      return { success: false, error: String(error) };
+    }
+  });
+
   // ========== SHIFTS IPC HANDLERS ==========
 
   // Get active shift for a business (with ownership flag)
   ipcMain.handle('localdb-get-active-shift', async (event, userId: number, businessId: number = 14) => {
-    if (!localDb) {
-      return { shift: null, isCurrentUserShift: false };
-    }
     try {
-      const stmt = localDb.prepare(`
+      const shift = await executeQueryOne<ShiftRow>(`
         SELECT *
         FROM shifts 
         WHERE business_id = ? AND status = 'active'
         ORDER BY shift_start ASC
         LIMIT 1
-      `);
-      const shift = stmt.get(businessId) as ShiftRow | undefined;
+      `, [businessId]);
+      
       if (!shift) {
         return { shift: null, isCurrentUserShift: false };
       }
@@ -3972,70 +4323,18 @@ function createWindows(): void {
     }
   });
 
-  // Get shifts history
-  ipcMain.handle('localdb-get-shifts', async (event, params: {
-    userId?: number;
-    startDate?: string;
-    endDate?: string;
-    businessId?: number;
-    limit?: number;
-    offset?: number;
-  }) => {
-    if (!localDb) return { shifts: [], total: 0 };
-
-    try {
-      const { userId, startDate, endDate, businessId = 14, limit = 20, offset = 0 } = params;
-      const conditions: string[] = ['business_id = ?'];
-      const queryParams: (string | number)[] = [businessId];
-
-      if (userId) {
-        conditions.push('user_id = ?');
-        queryParams.push(userId);
-      }
-
-      if (startDate) {
-        conditions.push('datetime(shift_start) >= datetime(?)');
-        queryParams.push(startDate);
-      }
-
-      if (endDate) {
-        conditions.push('datetime(shift_start) <= datetime(?)');
-        queryParams.push(endDate);
-      }
-
-      const whereClause = conditions.join(' AND ');
-
-      const countStmt = localDb.prepare(`SELECT COUNT(*) as count FROM shifts WHERE ${whereClause}`);
-      const total = (countStmt.get(...queryParams) as { count: number }).count;
-
-      const query = `
-        SELECT * FROM shifts 
-        WHERE ${whereClause}
-        ORDER BY shift_start DESC
-        LIMIT ? OFFSET ?
-      `;
-
-      const stmt = localDb.prepare(query);
-      const shifts = stmt.all(...queryParams, limit, offset);
-
-      return { shifts, total };
-    } catch (error) {
-      console.error('Error getting shifts history:', error);
-      return { shifts: [], total: 0 };
-    }
-  });
+  // Get shifts history (duplicate handler - already migrated above, removing this duplicate)
+  // This handler was already migrated earlier in the file
 
   // Get all users who have shifts
   ipcMain.handle('localdb-get-shift-users', async (event, businessId: number = 14) => {
-    if (!localDb) return [];
     try {
-      const stmt = localDb.prepare(`
-            SELECT DISTINCT user_id, user_name 
-            FROM shifts 
-            WHERE business_id = ? 
-            ORDER BY user_name
-        `);
-      return stmt.all(businessId);
+      return await executeQuery(`
+        SELECT DISTINCT user_id, user_name 
+        FROM shifts 
+        WHERE business_id = ? 
+        ORDER BY user_name
+      `, [businessId]);
     } catch (error) {
       console.error('Error getting shift users:', error);
       return [];
@@ -4050,11 +4349,9 @@ function createWindows(): void {
     user_name: string;
     modal_awal: number;
   }) => {
-    if (!localDb) return { success: false, error: 'Database not available' };
     try {
       // Validate that business exists (required for foreign key constraint)
-      const businessStmt = localDb.prepare('SELECT id FROM businesses WHERE id = ? LIMIT 1');
-      const business = businessStmt.get(shiftData.business_id) as { id: number } | undefined;
+      const business = await executeQueryOne<{ id: number }>('SELECT id FROM businesses WHERE id = ? LIMIT 1', [shiftData.business_id]);
       if (!business) {
         console.error(`❌ [SHIFTS] Business ID ${shiftData.business_id} not found in local database`);
         return {
@@ -4064,8 +4361,7 @@ function createWindows(): void {
       }
 
       // Validate that user exists (required for foreign key constraint)
-      const userStmt = localDb.prepare('SELECT id FROM users WHERE id = ? LIMIT 1');
-      const user = userStmt.get(shiftData.user_id) as { id: number } | undefined;
+      const user = await executeQueryOne<{ id: number }>('SELECT id FROM users WHERE id = ? LIMIT 1', [shiftData.user_id]);
       if (!user) {
         console.error(`❌ [SHIFTS] User ID ${shiftData.user_id} not found in local database`);
         return {
@@ -4075,37 +4371,35 @@ function createWindows(): void {
       }
 
       // Ensure there is no other active shift for the business
-      const existingStmt = localDb.prepare(`
+      const existingShift = await executeQueryOne<ShiftRow>(`
         SELECT id, user_id, user_name, shift_start
         FROM shifts
         WHERE business_id = ? AND status = 'active'
         ORDER BY shift_start ASC
         LIMIT 1
-      `);
-      const existingShift = existingStmt.get(shiftData.business_id) as ShiftRow | undefined;
+      `, [shiftData.business_id]);
 
       if (existingShift) {
         return { success: false, error: 'ACTIVE_SHIFT_EXISTS', activeShift: existingShift };
       }
 
-      const now = new Date().toISOString();
-      const stmt = localDb.prepare(`
+      const now = new Date();
+      const nowMySQL = toMySQLDateTime(now);
+      await executeUpdate(`
         INSERT INTO shifts (
           uuid_id, business_id, user_id, user_name, shift_start, 
           modal_awal, status, created_at, updated_at, synced_at
         ) VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?, NULL)
-      `);
-
-      stmt.run(
-        shiftData.uuid_id,
-        shiftData.business_id,
-        shiftData.user_id,
-        shiftData.user_name,
-        now,
-        shiftData.modal_awal,
-        now,
+      `, [
+        shiftData.uuid_id ?? null,
+        shiftData.business_id ?? null,
+        shiftData.user_id ?? null,
+        shiftData.user_name ?? null,
+        nowMySQL,
+        shiftData.modal_awal ?? null,
+        nowMySQL,
         Date.now()
-      );
+      ]);
 
       console.log(`✅ [SHIFTS] Created shift ${shiftData.uuid_id} for user ${shiftData.user_id}`);
       return { success: true };
@@ -4113,7 +4407,7 @@ function createWindows(): void {
       console.error('Error creating shift:', error);
       const errorMessage = String(error);
       // Provide more helpful error message for foreign key constraint failures
-      if (errorMessage.includes('FOREIGN KEY constraint failed')) {
+      if (errorMessage.includes('FOREIGN KEY constraint failed') || errorMessage.includes('foreign key constraint')) {
         return {
           success: false,
           error: 'Data business atau user tidak ditemukan di database lokal. Silakan sinkronkan data dari server terlebih dahulu sebelum memulai shift.'
@@ -4125,14 +4419,13 @@ function createWindows(): void {
 
   // End a shift
   ipcMain.handle('localdb-end-shift', async (event, payload: { shiftId: number; kasAkhir?: number | null }) => {
-    if (!localDb) return { success: false, error: 'Database not available' };
     try {
       const { shiftId, kasAkhir } = payload || {};
       if (!shiftId) {
         return { success: false, error: 'Shift ID is required' };
       }
 
-      const shiftRow = localDb.prepare(`SELECT * FROM shifts WHERE id = ?`).get(shiftId) as {
+      const shiftRow = await executeQueryOne<{
         id: number;
         business_id: number;
         user_id: number;
@@ -4140,7 +4433,7 @@ function createWindows(): void {
         modal_awal: number;
         status: string;
         uuid_id?: string;
-      } | undefined;
+      }>(`SELECT * FROM shifts WHERE id = ?`, [shiftId]);
 
       if (!shiftRow) {
         return { success: false, error: 'Shift not found' };
@@ -4150,44 +4443,41 @@ function createWindows(): void {
         return { success: false, error: 'Shift already ended' };
       }
 
-      const now = new Date().toISOString();
-      const cashMethodStmt = localDb.prepare('SELECT id FROM payment_methods WHERE code = ? LIMIT 1');
-      const cashMethod = cashMethodStmt.get('cash') as { id: number } | undefined;
+      const now = toMySQLDateTime(new Date());
+      const cashMethod = await executeQueryOne<{ id: number }>('SELECT id FROM payment_methods WHERE code = ? LIMIT 1', ['cash']);
       const cashMethodId = cashMethod?.id || 1;
 
-      const shiftSalesStmt = localDb.prepare(`
+      const shiftSalesResult = await executeQueryOne<{ cash_total: number }>(`
         SELECT COALESCE(SUM(final_amount), 0) as cash_total
         FROM transactions
         WHERE business_id = ?
           AND user_id = ?
-          AND datetime(created_at) >= datetime(?)
-          AND datetime(created_at) <= datetime(?)
+          AND created_at >= ?
+          AND created_at <= ?
           AND payment_method_id = ?
           AND status = 'completed'
-      `);
-      const shiftSalesResult = shiftSalesStmt.get(
+      `, [
         shiftRow.business_id,
         shiftRow.user_id,
         shiftRow.shift_start,
-        now,
+        toMySQLDateTime(now),
         cashMethodId
-      ) as { cash_total: number };
+      ]);
 
-      const shiftRefundStmt = localDb.prepare(`
-        SELECT COALESCE(SUM(cash_delta), 0) as refund_total
+      const shiftRefundResult = await executeQueryOne<{ refund_total: number }>(`
+        SELECT COALESCE(SUM(refund_amount), 0) as refund_total
         FROM transaction_refunds
         WHERE business_id = ?
           AND refunded_by = ?
-          AND datetime(refunded_at) >= datetime(?)
-          AND datetime(refunded_at) <= datetime(?)
+          AND refunded_at >= ?
+          AND refunded_at <= ?
           AND status != 'failed'
-      `);
-      const shiftRefundResult = shiftRefundStmt.get(
+      `, [
         shiftRow.business_id,
         shiftRow.user_id,
         shiftRow.shift_start,
-        now
-      ) as { refund_total: number };
+        toMySQLDateTime(now)
+      ]);
 
       const cashSalesTotal = shiftSalesResult?.cash_total || 0;
       const cashRefundTotal = shiftRefundResult?.refund_total || 0;
@@ -4210,7 +4500,7 @@ function createWindows(): void {
         }
       }
 
-      const stmt = localDb.prepare(`
+      const affectedRows = await executeUpdate(`
         UPDATE shifts 
         SET shift_end = ?, 
             status = 'completed', 
@@ -4222,9 +4512,7 @@ function createWindows(): void {
             cash_sales_total = ?,
             cash_refund_total = ?
         WHERE id = ? AND status = 'active'
-      `);
-
-      const result = stmt.run(
+      `, [
         now,
         Date.now(),
         kasAkhirValue,
@@ -4234,9 +4522,9 @@ function createWindows(): void {
         cashSalesTotal,
         cashRefundTotal,
         shiftId
-      );
+      ]);
 
-      if (result.changes === 0) {
+      if (affectedRows === 0) {
         return { success: false, error: 'Shift not found or already ended' };
       }
 
@@ -4260,16 +4548,18 @@ function createWindows(): void {
   });
 
   // Get shift statistics
-  ipcMain.handle('localdb-get-shift-statistics', async (event, userId: number, shiftStart: string, shiftEnd: string | null, businessId: number = 14) => {
-    if (!localDb) return {
-      order_count: 0,
-      total_amount: 0,
-      total_discount: 0,
-      voucher_count: 0
-    };
-
+  ipcMain.handle('localdb-get-shift-statistics', async (event, userId: number | null, shiftStart: string, shiftEnd: string | null, businessId: number = 14, shiftUuid?: string | null) => {
     try {
+      // Convert ISO date strings to MySQL datetime format
+      const shiftStartMySQL = toMySQLDateTime(shiftStart);
+      const shiftEndMySQL = shiftEnd ? toMySQLDateTime(shiftEnd) : null;
+      
+      // #region agent log
+      try{fs.appendFileSync('c:\\Code\\marviano-pos\\.cursor\\debug.log',JSON.stringify({location:'main.ts:4081',message:'Shift statistics query entry',data:{userId,businessId,shiftUuid,shiftStart,shiftEnd,shiftStartMySQL,shiftEndMySQL},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'ALL'})+'\n',{flag:'a'});}catch(e){}
+      // #endregion
+      
       // Combined statistics query including voucher metrics
+      // Prioritize shift_uuid filtering when available, as it's more accurate than time-based filtering
       let statsQuery = `
         SELECT 
           COUNT(*) as order_count,
@@ -4277,24 +4567,128 @@ function createWindows(): void {
           COALESCE(SUM(voucher_discount), 0) as total_discount,
           COALESCE(SUM(CASE WHEN voucher_discount IS NOT NULL AND voucher_discount > 0 THEN 1 ELSE 0 END), 0) as voucher_count
         FROM transactions
-        WHERE user_id = ? AND business_id = ?
-        AND datetime(created_at) >= datetime(?)
-        AND status = 'completed'
+        WHERE business_id = ?
+        AND status != 'archived'
       `;
-      const statsParams: QueryParams = [userId, businessId, shiftStart];
-
-      if (shiftEnd) {
-        statsQuery += ' AND datetime(created_at) <= datetime(?)';
-        statsParams.push(shiftEnd);
+      const statsParams: (string | number | null | boolean)[] = [businessId];
+      
+      // Add user_id filter only if userId is not null
+      if (userId !== null) {
+        statsQuery += ' AND user_id = ?';
+        statsParams.push(userId);
+      }
+      
+      // Use shift_uuid if provided, otherwise fall back to time-based filtering
+      if (shiftUuid) {
+        statsQuery += ' AND shift_uuid = ?';
+        statsParams.push(shiftUuid);
+      } else {
+        statsQuery += ' AND created_at >= ?';
+        statsParams.push(shiftStartMySQL);
+        if (shiftEnd) {
+          statsQuery += ' AND created_at <= ?';
+          statsParams.push(shiftEndMySQL);
+        }
       }
 
-      const statsStmt = localDb.prepare(statsQuery);
-      const statsResult = statsStmt.get(...statsParams) as {
+      // #region agent log
+      try{fs.appendFileSync('c:\\Code\\marviano-pos\\.cursor\\debug.log',JSON.stringify({location:'main.ts:4103',message:'Query before execution',data:{statsQuery,statsParams},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'ALL'})+'\n',{flag:'a'});}catch(e){}
+      // #endregion
+
+      const statsResult = await executeQueryOne<{
         order_count: number;
         total_amount: number;
         total_discount: number;
         voucher_count: number;
-      } | undefined;
+      }>(statsQuery, statsParams);
+      
+      // #region agent log
+      try{fs.appendFileSync('c:\\Code\\marviano-pos\\.cursor\\debug.log',JSON.stringify({location:'main.ts:4114',message:'Query result',data:{statsResult},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'ALL'})+'\n',{flag:'a'});}catch(e){}
+      // #endregion
+      
+      // Hypothesis A: Check all transactions with voucher_discount in time range (regardless of shift_uuid)
+      // #region agent log
+      const allVoucherTxns = await executeQuery(`
+        SELECT uuid_id, shift_uuid, status, voucher_discount, total_amount, final_amount, created_at, voucher_label
+        FROM transactions
+        WHERE user_id = ? AND business_id = ?
+        AND created_at >= ? ${shiftEndMySQL ? 'AND created_at <= ?' : ''}
+        AND voucher_discount IS NOT NULL AND voucher_discount > 0
+        ORDER BY created_at DESC
+      `, shiftEndMySQL ? [userId, businessId, shiftStartMySQL, shiftEndMySQL] : [userId, businessId, shiftStartMySQL]).catch(()=>[]);
+      try{fs.appendFileSync('c:\\Code\\marviano-pos\\.cursor\\debug.log',JSON.stringify({location:'main.ts:4125',message:'All voucher transactions in time range',data:{allVoucherTxns},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})+'\n',{flag:'a'});}catch(e){}
+      // #endregion
+      
+      // Hypothesis B: Check transactions with NULL shift_uuid that have voucher_discount
+      // #region agent log
+      const nullShiftVoucherTxns = await executeQuery(`
+        SELECT uuid_id, shift_uuid, status, voucher_discount, total_amount, final_amount, created_at, voucher_label
+        FROM transactions
+        WHERE user_id = ? AND business_id = ?
+        AND created_at >= ? ${shiftEndMySQL ? 'AND created_at <= ?' : ''}
+        AND shift_uuid IS NULL
+        AND voucher_discount IS NOT NULL AND voucher_discount > 0
+        ORDER BY created_at DESC
+      `, shiftEndMySQL ? [userId, businessId, shiftStartMySQL, shiftEndMySQL] : [userId, businessId, shiftStartMySQL]).catch(()=>[]);
+      try{fs.appendFileSync('c:\\Code\\marviano-pos\\.cursor\\debug.log',JSON.stringify({location:'main.ts:4135',message:'Voucher transactions with NULL shift_uuid',data:{nullShiftVoucherTxns},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})+'\n',{flag:'a'});}catch(e){}
+      // #endregion
+      
+      // Hypothesis C: Check transactions with different shift_uuid
+      // #region agent log
+      const differentShiftVoucherTxns = shiftUuid ? await executeQuery(`
+        SELECT uuid_id, shift_uuid, status, voucher_discount, total_amount, final_amount, created_at, voucher_label
+        FROM transactions
+        WHERE user_id = ? AND business_id = ?
+        AND created_at >= ? ${shiftEndMySQL ? 'AND created_at <= ?' : ''}
+        AND shift_uuid IS NOT NULL AND shift_uuid != ?
+        AND voucher_discount IS NOT NULL AND voucher_discount > 0
+        ORDER BY created_at DESC
+      `, shiftEndMySQL ? [userId, businessId, shiftStartMySQL, shiftEndMySQL, shiftUuid] : [userId, businessId, shiftStartMySQL, shiftUuid]).catch(()=>[]) : [];
+      try{fs.appendFileSync('c:\\Code\\marviano-pos\\.cursor\\debug.log',JSON.stringify({location:'main.ts:4145',message:'Voucher transactions with different shift_uuid',data:{differentShiftVoucherTxns,currentShiftUuid:shiftUuid},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})+'\n',{flag:'a'});}catch(e){}
+      // #endregion
+      
+      // Hypothesis D: Check transactions with non-completed status that have voucher_discount
+      // #region agent log
+      const nonCompletedVoucherTxns = await executeQuery(`
+        SELECT uuid_id, shift_uuid, status, voucher_discount, total_amount, final_amount, created_at, voucher_label
+        FROM transactions
+        WHERE user_id = ? AND business_id = ?
+        AND created_at >= ? ${shiftEndMySQL ? 'AND created_at <= ?' : ''}
+        AND status != 'completed'
+        AND voucher_discount IS NOT NULL AND voucher_discount > 0
+        ORDER BY created_at DESC
+      `, shiftEndMySQL ? [userId, businessId, shiftStartMySQL, shiftEndMySQL] : [userId, businessId, shiftStartMySQL]).catch(()=>[]);
+      try{fs.appendFileSync('c:\\Code\\marviano-pos\\.cursor\\debug.log',JSON.stringify({location:'main.ts:4155',message:'Non-completed voucher transactions',data:{nonCompletedVoucherTxns},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'D'})+'\n',{flag:'a'});}catch(e){}
+      // #endregion
+      
+      // Hypothesis E: Check transactions matching the exact query filter
+      // #region agent log
+      let matchingTxnsQuery = `
+        SELECT uuid_id, shift_uuid, status, voucher_discount, total_amount, final_amount, created_at, voucher_label
+        FROM transactions
+        WHERE business_id = ?
+        AND status != 'archived'
+      `;
+      const matchingTxnsParams: (string | number | null | boolean)[] = [businessId];
+      if (userId !== null) {
+        matchingTxnsQuery = matchingTxnsQuery.replace('WHERE business_id = ?', 'WHERE user_id = ? AND business_id = ?');
+        matchingTxnsParams.splice(0, 0, userId);
+      }
+      if (shiftUuid) {
+        matchingTxnsQuery += ' AND shift_uuid = ?';
+        matchingTxnsParams.push(shiftUuid);
+      } else {
+        matchingTxnsQuery += ' AND created_at >= ?';
+        matchingTxnsParams.push(shiftStartMySQL);
+        if (shiftEndMySQL) {
+          matchingTxnsQuery += ' AND created_at <= ?';
+          matchingTxnsParams.push(shiftEndMySQL);
+        }
+      }
+      matchingTxnsQuery += ' AND voucher_discount IS NOT NULL AND voucher_discount > 0 ORDER BY created_at DESC';
+      const matchingTxns = await executeQuery(matchingTxnsQuery, matchingTxnsParams).catch(()=>[]);
+      try{fs.appendFileSync('c:\\Code\\marviano-pos\\.cursor\\debug.log',JSON.stringify({location:'main.ts:4165',message:'Transactions matching exact query filter',data:{matchingTxns},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'E'})+'\n',{flag:'a'});}catch(e){}
+      // #endregion
 
       return {
         order_count: statsResult?.order_count || 0,
@@ -4303,6 +4697,9 @@ function createWindows(): void {
         voucher_count: statsResult?.voucher_count || 0
       };
     } catch (error) {
+      // #region agent log
+      try{fs.appendFileSync('c:\\Code\\marviano-pos\\.cursor\\debug.log',JSON.stringify({location:'main.ts:4150',message:'Error in shift statistics',data:{error:String(error)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'ALL'})+'\n',{flag:'a'});}catch(e){}
+      // #endregion
       console.error('Error getting shift statistics:', error);
       return {
         order_count: 0,
@@ -4314,33 +4711,58 @@ function createWindows(): void {
   });
 
   // Get payment method breakdown
-  ipcMain.handle('localdb-get-payment-breakdown', async (event, userId: number, shiftStart: string, shiftEnd: string | null, businessId: number = 14) => {
-    if (!localDb) return [];
-
+  ipcMain.handle('localdb-get-payment-breakdown', async (event, userId: number | null, shiftStart: string, shiftEnd: string | null, businessId: number = 14) => {
     try {
+      // Convert ISO date strings to MySQL datetime format
+      const shiftStartMySQL = toMySQLDateTime(shiftStart);
+      const shiftEndMySQL = shiftEnd ? toMySQLDateTime(shiftEnd) : null;
+      
       let query = `
         SELECT 
-          pm.name as payment_method_name,
-          pm.code as payment_method_code,
+          COALESCE(pm.name, 'Unknown') as payment_method_name,
+          COALESCE(pm.code, 'unknown') as payment_method_code,
           COUNT(t.id) as transaction_count,
-          SUM(t.final_amount) as total_amount
+          COALESCE(SUM(t.final_amount), 0) as total_amount
         FROM transactions t
         LEFT JOIN payment_methods pm ON t.payment_method_id = pm.id
-        WHERE t.user_id = ? AND t.business_id = ?
-        AND datetime(t.created_at) >= datetime(?)
-        AND t.status = 'completed'
+        WHERE t.business_id = ?
+        AND t.created_at >= ?
+        AND t.status != 'archived'
       `;
-      const params: QueryParams = [userId, businessId, shiftStart];
-
-      if (shiftEnd) {
-        query += ' AND datetime(t.created_at) <= datetime(?)';
-        params.push(shiftEnd);
+      const params: (string | number | null | boolean)[] = [businessId, shiftStartMySQL];
+      
+      // Add user_id filter only if userId is not null
+      if (userId !== null) {
+        query = query.replace('WHERE t.business_id = ?', 'WHERE t.user_id = ? AND t.business_id = ?');
+        params.unshift(userId);
       }
 
-      query += ' GROUP BY pm.id, pm.name, pm.code ORDER BY transaction_count DESC';
+      if (shiftEnd) {
+        query += ' AND t.created_at <= ?';
+        params.push(shiftEndMySQL);
+      }
 
-      const stmt = localDb.prepare(query);
-      const results = stmt.all(...params);
+      query += ' GROUP BY t.payment_method_id, pm.name, pm.code ORDER BY transaction_count DESC';
+      
+      const results = await executeQuery(query, params);
+      
+      // Diagnostic: Check for transactions with NULL payment_method_id
+      let diagnosticQuery = `
+        SELECT 
+          COUNT(*) as total_transactions,
+          COUNT(CASE WHEN payment_method_id IS NULL THEN 1 END) as null_payment_method_count,
+          SUM(CASE WHEN payment_method_id IS NULL THEN final_amount ELSE 0 END) as null_payment_method_amount,
+          SUM(final_amount) as total_final_amount
+        FROM transactions
+        WHERE user_id = ? AND business_id = ?
+        AND created_at >= ?
+        AND status = 'completed'
+      `;
+      const diagnosticParams: (string | number | null | boolean)[] = [userId, businessId, shiftStartMySQL];
+      if (shiftEndMySQL) {
+        diagnosticQuery += ' AND created_at <= ?';
+        diagnosticParams.push(shiftEndMySQL);
+      }
 
       return results;
     } catch (error) {
@@ -4350,39 +4772,56 @@ function createWindows(): void {
   });
 
   // Get Category II breakdown
-  ipcMain.handle('localdb-get-category2-breakdown', async (event, userId: number, shiftStart: string, shiftEnd: string | null, businessId: number = 14) => {
-    if (!localDb) return [];
-
+  ipcMain.handle('localdb-get-category2-breakdown', async (event, userId: number | null, shiftStart: string, shiftEnd: string | null, businessId: number = 14) => {
     try {
+      // #region agent log
+      try{fs.appendFileSync('c:\\Code\\marviano-pos\\.cursor\\debug.log',JSON.stringify({location:'main.ts:4238',message:'Category2 query entry',data:{userId,shiftStart,shiftEnd,businessId},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})+'\n',{flag:'a'});}catch(e){}
+      // #endregion
+      // Convert ISO date strings to MySQL datetime format
+      const shiftStartMySQL = toMySQLDateTime(shiftStart);
+      const shiftEndMySQL = shiftEnd ? toMySQLDateTime(shiftEnd) : null;
+      
       let query = `
         SELECT 
-          COALESCE(c2_by_id.name, c2_by_name.name, p.category2_name, 'Unknown') as category2_name,
-          COALESCE(c2_by_id.id, c2_by_name.id, 0) as category2_id,
+          COALESCE(c2.name, 'Unknown') as category2_name,
+          COALESCE(c2.id, 0) as category2_id,
           COALESCE(SUM(ti.quantity), 0) as total_quantity,
           COALESCE(SUM(ti.total_price), 0) as total_amount
         FROM transaction_items ti
         INNER JOIN transactions t ON ti.transaction_id = t.id
         INNER JOIN products p ON ti.product_id = p.id
-        LEFT JOIN category2 c2_by_id ON p.category2_id = c2_by_id.id
-        LEFT JOIN category2_businesses cb_by_id ON c2_by_id.id = cb_by_id.category2_id AND cb_by_id.business_id = ?
-        LEFT JOIN category2 c2_by_name ON p.category2_name = c2_by_name.name AND (p.category2_id IS NULL OR p.category2_id = 0)
-        LEFT JOIN category2_businesses cb_by_name ON c2_by_name.id = cb_by_name.category2_id AND cb_by_name.business_id = ?
-        WHERE t.user_id = ? AND t.business_id = ?
-        AND datetime(t.created_at) >= datetime(?)
-        AND t.status = 'completed'
-        AND (p.category2_id IS NOT NULL OR (p.category2_name IS NOT NULL AND p.category2_name != ''))
+        LEFT JOIN category2 c2 ON p.category2_id = c2.id
+        WHERE t.business_id = ?
+        AND t.created_at >= ?
+        AND t.status != 'archived'
+        AND p.category2_id IS NOT NULL
+        AND c2.id IS NOT NULL
       `;
-      const params: QueryParams = [businessId, businessId, userId, businessId, shiftStart];
-
-      if (shiftEnd) {
-        query += ' AND datetime(t.created_at) <= datetime(?)';
-        params.push(shiftEnd);
+      const params: (string | number | null | boolean)[] = [businessId, shiftStartMySQL];
+      
+      // Add user_id filter only if userId is not null
+      if (userId !== null) {
+        query = query.replace('WHERE t.business_id = ?', 'WHERE t.user_id = ? AND t.business_id = ?');
+        params.unshift(userId);
       }
 
-      query += ' GROUP BY category2_name ORDER BY total_amount DESC';
+      if (shiftEnd) {
+        query += ' AND t.created_at <= ?';
+        params.push(shiftEndMySQL);
+      }
 
-      const stmt = localDb.prepare(query);
-      const results = stmt.all(...params);
+      query += ' GROUP BY category2_name, c2.id ORDER BY total_amount DESC';
+
+      // #region agent log
+      try{fs.appendFileSync('c:\\Code\\marviano-pos\\.cursor\\debug.log',JSON.stringify({location:'main.ts:4264',message:'Category2 query before execution',data:{query,params,shiftStartMySQL,shiftEndMySQL},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})+'\n',{flag:'a'});}catch(e){}
+      // #endregion
+
+      const results = await executeQuery(query, params);
+      
+      // #region agent log
+      try{fs.appendFileSync('c:\\Code\\marviano-pos\\.cursor\\debug.log',JSON.stringify({location:'main.ts:4271',message:'Category2 query results',data:{resultCount:results.length,results:results.slice(0,5).map((r:any)=>({name:r.category2_name,id:r.category2_id,quantity:r.total_quantity,amount:r.total_amount}))},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})+'\n',{flag:'a'});}catch(e){}
+      // #endregion
+      
       console.log(`[CATEGORY2 BREAKDOWN] Found ${results.length} Category II entries for user ${userId}, shift ${shiftStart} to ${shiftEnd || 'now'}`);
       if (results.length > 0) {
         console.log('[CATEGORY2 BREAKDOWN] Sample result:', results[0]);
@@ -4395,39 +4834,46 @@ function createWindows(): void {
   });
 
   // Get cash summary (shift + whole day)
-  ipcMain.handle('localdb-get-cash-summary', async (event, userId: number, shiftStart: string, shiftEnd: string | null, businessId: number = 14) => {
-    if (!localDb) return {
-      cash_shift: 0,
-      cash_whole_day: 0
-    };
-
+  ipcMain.handle('localdb-get-cash-summary', async (event, userId: number | null, shiftStart: string, shiftEnd: string | null, businessId: number = 14, shiftUuid?: string | null) => {
     try {
       // Get cash payment method ID
-      const cashMethodStmt = localDb.prepare('SELECT id FROM payment_methods WHERE code = ? LIMIT 1');
-      const cashMethod = cashMethodStmt.get('cash') as { id: number } | undefined;
+      const cashMethod = await executeQueryOne<{ id: number }>('SELECT id FROM payment_methods WHERE code = ? LIMIT 1', ['cash']);
 
       if (!cashMethod) {
         return { cash_shift: 0, cash_whole_day: 0 };
       }
 
       // Cash received during shift
+      // Prioritize shift_uuid filtering when available, as it's more accurate than time-based filtering
       let shiftQuery = `
         SELECT COALESCE(SUM(final_amount), 0) as cash_total
         FROM transactions t
-        WHERE t.user_id = ? AND t.business_id = ?
-        AND datetime(t.created_at) >= datetime(?)
+        WHERE t.business_id = ?
         AND t.payment_method_id = ?
-        AND t.status = 'completed'
+        AND t.status != 'archived'
       `;
-      const shiftParams: QueryParams = [userId, businessId, shiftStart, cashMethod.id];
-
-      if (shiftEnd) {
-        shiftQuery += ' AND datetime(t.created_at) <= datetime(?)';
-        shiftParams.push(shiftEnd);
+      const shiftParams: (string | number | null | boolean)[] = [businessId, cashMethod.id];
+      
+      // Add user_id filter only if userId is not null
+      if (userId !== null) {
+        shiftQuery = shiftQuery.replace('WHERE t.business_id = ?', 'WHERE t.user_id = ? AND t.business_id = ?');
+        shiftParams.unshift(userId);
       }
 
-      const shiftStmt = localDb.prepare(shiftQuery);
-      const shiftResult = shiftStmt.get(...shiftParams) as { cash_total: number };
+      // Use shift_uuid if provided, otherwise fall back to time-based filtering
+      if (shiftUuid) {
+        shiftQuery += ' AND t.shift_uuid = ?';
+        shiftParams.push(shiftUuid);
+      } else {
+        shiftQuery += ' AND t.created_at >= ?';
+        shiftParams.push(toMySQLDateTime(shiftStart));
+        if (shiftEnd) {
+          shiftQuery += ' AND t.created_at <= ?';
+          shiftParams.push(toMySQLDateTime(shiftEnd));
+        }
+      }
+
+      const shiftResult = await executeQueryOne<{ cash_total: number }>(shiftQuery, shiftParams);
 
       // Cash received whole day (GMT+7 - extract date from shift_start)
       // shiftStart is in UTC (ISO format)
@@ -4445,59 +4891,177 @@ function createWindows(): void {
       const dayStartGMT7 = new Date(Date.UTC(year, month, day, 0, 0, 0, 0));
       const dayEndGMT7 = new Date(Date.UTC(year, month, day, 23, 59, 59, 999));
 
-      // Convert back to UTC for SQLite queries (subtract GMT+7 offset)
+      // Convert back to UTC for MySQL queries (subtract GMT+7 offset)
       const dayStart = new Date(dayStartGMT7.getTime() - gmt7Offset);
       const dayEnd = new Date(dayEndGMT7.getTime() - gmt7Offset);
 
-      const wholeDayStmt = localDb.prepare(`
+      const wholeDayResult = await executeQueryOne<{ cash_total: number }>(`
         SELECT COALESCE(SUM(final_amount), 0) as cash_total
         FROM transactions t
         WHERE t.business_id = ?
-        AND datetime(t.created_at) >= datetime(?)
-        AND datetime(t.created_at) <= datetime(?)
+        AND t.created_at >= ?
+        AND t.created_at <= ?
         AND t.payment_method_id = ?
-        AND t.status = 'completed'
-      `);
-
-      const wholeDayResult = wholeDayStmt.get(
+        AND t.status != 'archived'
+      `, [
         businessId,
-        dayStart.toISOString(),
-        dayEnd.toISOString(),
+        toMySQLDateTime(dayStart),
+        toMySQLDateTime(dayEnd),
         cashMethod.id
-      ) as { cash_total: number };
+      ]);
 
-      let refundShiftQuery = `
-        SELECT COALESCE(SUM(cash_delta), 0) as refund_total
-        FROM transaction_refunds
-        WHERE refunded_by = ? AND business_id = ?
-        AND datetime(refunded_at) >= datetime(?)
-        AND status != 'failed'
-      `;
-      const refundShiftParams: QueryParams = [userId, businessId, shiftStart];
-      if (shiftEnd) {
-        refundShiftQuery += ' AND datetime(refunded_at) <= datetime(?)';
-        refundShiftParams.push(shiftEnd);
+      // Refund query - include all refunds for the shift
+      // When shift_uuid is provided, include:
+      // 1. Refunds with matching shift_uuid
+      // 2. Refunds without shift_uuid but matching time range and user (for printer 1 transactions)
+      
+      // #region agent log
+      try{fs.appendFileSync('c:\\Code\\marviano-pos\\.cursor\\debug.log',JSON.stringify({location:'main.ts:4466',message:'Cash summary refund query entry',data:{userId,businessId,shiftUuid,shiftStart,shiftEnd},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})+'\n',{flag:'a'});}catch(e){}
+      // #endregion
+      
+      // First, get all refunds in the time range for debugging
+      // #region agent log
+      try {
+        const allRefundsDebug = await executeQuery(`
+          SELECT uuid_id, transaction_uuid, shift_uuid, refunded_by, refunded_at, cash_delta, status, business_id
+          FROM transaction_refunds
+          WHERE business_id = ?
+          AND refunded_at >= ?
+          ${shiftEnd ? 'AND refunded_at <= ?' : ''}
+          AND status != 'failed'
+          ORDER BY refunded_at DESC
+        `, shiftEnd ? [businessId, toMySQLDateTime(shiftStart), toMySQLDateTime(shiftEnd)] : [businessId, toMySQLDateTime(shiftStart)]);
+        fs.appendFileSync('c:\\Code\\marviano-pos\\.cursor\\debug.log',JSON.stringify({location:'main.ts:4475',message:'All refunds in time range',data:{refunds:allRefundsDebug.map((r:any)=>({uuid:r.uuid_id,transaction_uuid:r.transaction_uuid,shift_uuid:r.shift_uuid,refunded_by:r.refunded_by,refunded_at:r.refunded_at,cash_delta:r.cash_delta,status:r.status})),count:allRefundsDebug.length,shiftUuid,userId,shiftStart,shiftEnd},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})+'\n',{flag:'a'});
+        
+        // Also get ALL refunds for this business (no time filter) to see if the 100 refund exists
+        const allRefundsNoTimeFilter = await executeQuery(`
+          SELECT uuid_id, transaction_uuid, shift_uuid, refunded_by, refunded_at, refund_amount, cash_delta, payment_method_id, status, business_id
+          FROM transaction_refunds
+          WHERE business_id = ?
+          AND status != 'failed'
+          ORDER BY refunded_at DESC
+          LIMIT 50
+        `, [businessId]);
+        fs.appendFileSync('c:\\Code\\marviano-pos\\.cursor\\debug.log',JSON.stringify({location:'main.ts:4485',message:'All refunds no time filter',data:{refunds:allRefundsNoTimeFilter.map((r:any)=>({uuid:r.uuid_id,transaction_uuid:r.transaction_uuid,shift_uuid:r.shift_uuid,refunded_by:r.refunded_by,refunded_at:r.refunded_at,refund_amount:r.refund_amount,cash_delta:r.cash_delta,payment_method_id:r.payment_method_id,status:r.status})),count:allRefundsNoTimeFilter.length},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'F'})+'\n',{flag:'a'});
+        
+        // Check specifically for refunds with refund_amount = 100
+        const refundsWithAmount100 = await executeQuery(`
+          SELECT uuid_id, transaction_uuid, shift_uuid, refunded_by, refunded_at, refund_amount, cash_delta, payment_method_id, status
+          FROM transaction_refunds
+          WHERE business_id = ?
+          AND refund_amount = 100
+          AND status != 'failed'
+          ORDER BY refunded_at DESC
+        `, [businessId]);
+        fs.appendFileSync('c:\\Code\\marviano-pos\\.cursor\\debug.log',JSON.stringify({location:'main.ts:4495',message:'Refunds with amount 100',data:{refunds:refundsWithAmount100.map((r:any)=>({uuid:r.uuid_id,transaction_uuid:r.transaction_uuid,shift_uuid:r.shift_uuid,refunded_by:r.refunded_by,refunded_at:r.refunded_at,refund_amount:r.refund_amount,cash_delta:r.cash_delta,payment_method_id:r.payment_method_id})),count:refundsWithAmount100.length},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'G'})+'\n',{flag:'a'});
+        
+        // Check the original transaction for the 100 refund to see if it was cash
+        if (refundsWithAmount100.length > 0) {
+          const refund100 = refundsWithAmount100.find((r:any) => r.shift_uuid === shiftUuid);
+          if (refund100) {
+            const originalTransaction = await executeQueryOne(`
+              SELECT uuid_id, payment_method_id, payment_method, final_amount, status
+              FROM transactions
+              WHERE uuid_id = ?
+            `, [refund100.transaction_uuid]);
+            fs.appendFileSync('c:\\Code\\marviano-pos\\.cursor\\debug.log',JSON.stringify({location:'main.ts:4505',message:'Original transaction for 100 refund',data:{refund:{uuid:refund100.uuid_id,transaction_uuid:refund100.transaction_uuid,refund_amount:refund100.refund_amount,cash_delta:refund100.cash_delta,payment_method_id:refund100.payment_method_id},transaction:originalTransaction},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'H'})+'\n',{flag:'a'});
+          }
+        }
+      } catch(e) {
+        fs.appendFileSync('c:\\Code\\marviano-pos\\.cursor\\debug.log',JSON.stringify({location:'main.ts:4490',message:'Error getting debug refunds',data:{error:String(e)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})+'\n',{flag:'a'});
       }
-      const refundShiftStmt = localDb.prepare(refundShiftQuery);
-      const refundShiftResult = refundShiftStmt.get(...refundShiftParams) as { refund_total: number };
-
-      const dayRefundStmt = localDb.prepare(`
-        SELECT COALESCE(SUM(cash_delta), 0) as refund_total
+      // #endregion
+      
+      let refundShiftQuery = `
+        SELECT COALESCE(SUM(refund_amount), 0) as refund_total
         FROM transaction_refunds
         WHERE business_id = ?
-        AND datetime(refunded_at) >= datetime(?)
-        AND datetime(refunded_at) <= datetime(?)
         AND status != 'failed'
-      `);
-      const dayRefundResult = dayRefundStmt.get(
-        businessId,
-        dayStart.toISOString(),
-        dayEnd.toISOString()
-      ) as { refund_total: number };
+      `;
+      const refundShiftParams: (string | number | null | boolean)[] = [businessId];
+      
+      // Use shift_uuid if provided, but also include refunds without shift_uuid in the time range
+      if (shiftUuid) {
+        // Include refunds with matching shift_uuid OR refunds without shift_uuid in the time range
+        refundShiftQuery += ' AND (shift_uuid = ?';
+        refundShiftParams.push(shiftUuid);
+        
+        // Also include refunds without shift_uuid that match the time range and user
+        refundShiftQuery += ' OR (shift_uuid IS NULL';
+        if (userId !== null) {
+          refundShiftQuery += ' AND refunded_by = ?';
+          refundShiftParams.push(userId);
+        }
+        refundShiftQuery += ' AND refunded_at >= ?';
+        refundShiftParams.push(toMySQLDateTime(shiftStart));
+        if (shiftEnd) {
+          refundShiftQuery += ' AND refunded_at <= ?';
+          refundShiftParams.push(toMySQLDateTime(shiftEnd));
+        }
+        refundShiftQuery += '))';
+      } else {
+        if (userId !== null) {
+          refundShiftQuery += ' AND refunded_by = ?';
+          refundShiftParams.push(userId);
+        }
+        refundShiftQuery += ' AND refunded_at >= ?';
+        refundShiftParams.push(toMySQLDateTime(shiftStart));
+        if (shiftEnd) {
+          refundShiftQuery += ' AND refunded_at <= ?';
+          refundShiftParams.push(toMySQLDateTime(shiftEnd));
+        }
+      }
+      
+      // #region agent log
+      try{fs.appendFileSync('c:\\Code\\marviano-pos\\.cursor\\debug.log',JSON.stringify({location:'main.ts:4510',message:'Refund query before execution',data:{query:refundShiftQuery,params:refundShiftParams},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})+'\n',{flag:'a'});}catch(e){}
+      // #endregion
+      
+      const refundShiftResult = await executeQueryOne<{ refund_total: number }>(refundShiftQuery, refundShiftParams);
+      
+      // #region agent log
+      try{fs.appendFileSync('c:\\Code\\marviano-pos\\.cursor\\debug.log',JSON.stringify({location:'main.ts:4515',message:'Refund query result',data:{refund_total:refundShiftResult?.refund_total,result:refundShiftResult},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'D'})+'\n',{flag:'a'});}catch(e){}
+      // #endregion
+      
+      // Debug: Check refunds matching each condition separately
+      // #region agent log
+      if (shiftUuid) {
+        try {
+          const matchingShiftUuid = await executeQuery(`
+            SELECT uuid_id, transaction_uuid, shift_uuid, refunded_by, refunded_at, cash_delta
+            FROM transaction_refunds
+            WHERE business_id = ? AND status != 'failed' AND shift_uuid = ?
+          `, [businessId, shiftUuid]);
+          const nullShiftUuid = await executeQuery(`
+            SELECT uuid_id, transaction_uuid, shift_uuid, refunded_by, refunded_at, cash_delta
+            FROM transaction_refunds
+            WHERE business_id = ? AND status != 'failed' AND shift_uuid IS NULL
+            ${userId !== null ? 'AND refunded_by = ?' : ''}
+            AND refunded_at >= ?
+            ${shiftEnd ? 'AND refunded_at <= ?' : ''}
+          `, userId !== null ? (shiftEnd ? [businessId, userId, toMySQLDateTime(shiftStart), toMySQLDateTime(shiftEnd)] : [businessId, userId, toMySQLDateTime(shiftStart)]) : (shiftEnd ? [businessId, toMySQLDateTime(shiftStart), toMySQLDateTime(shiftEnd)] : [businessId, toMySQLDateTime(shiftStart)]));
+          fs.appendFileSync('c:\\Code\\marviano-pos\\.cursor\\debug.log',JSON.stringify({location:'main.ts:4530',message:'Refunds by condition',data:{matchingShiftUuid:matchingShiftUuid.map((r:any)=>({uuid:r.uuid_id,cash_delta:r.cash_delta,shift_uuid:r.shift_uuid})),nullShiftUuid:nullShiftUuid.map((r:any)=>({uuid:r.uuid_id,cash_delta:r.cash_delta,refunded_by:r.refunded_by,refunded_at:r.refunded_at})),matchingTotal:matchingShiftUuid.reduce((s:number,r:any)=>s+(r.cash_delta||0),0),nullTotal:nullShiftUuid.reduce((s:number,r:any)=>s+(r.cash_delta||0),0)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'E'})+'\n',{flag:'a'});
+        } catch(e) {
+          fs.appendFileSync('c:\\Code\\marviano-pos\\.cursor\\debug.log',JSON.stringify({location:'main.ts:4535',message:'Error checking refunds by condition',data:{error:String(e)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'E'})+'\n',{flag:'a'});
+        }
+      }
+      // #endregion
 
-      const shiftSales = shiftResult.cash_total || 0;
+      const dayRefundResult = await executeQueryOne<{ refund_total: number }>(`
+        SELECT COALESCE(SUM(refund_amount), 0) as refund_total
+        FROM transaction_refunds
+        WHERE business_id = ?
+        AND refunded_at >= ?
+        AND refunded_at <= ?
+        AND status != 'failed'
+      `, [
+        businessId,
+        toMySQLDateTime(dayStart),
+        toMySQLDateTime(dayEnd)
+      ]);
+
+      const shiftSales = shiftResult?.cash_total || 0;
       const shiftRefunds = refundShiftResult?.refund_total || 0;
-      const daySales = wholeDayResult.cash_total || 0;
+      const daySales = wholeDayResult?.cash_total || 0;
       const dayRefunds = dayRefundResult?.refund_total || 0;
 
       return {
@@ -4517,20 +5081,71 @@ function createWindows(): void {
     }
   });
 
-  // Get shifts with filtering - REMOVED DUPLICATE HANDLER
-  // The new handler is defined above with pagination support
-  /* 
+  // Get shifts with filtering
   ipcMain.handle('localdb-get-shifts', async (event, filters: { businessId?: number; startDate?: string; endDate?: string; userId?: number; limit?: number } = {}) => {
-    // ... implementation ...
+    try {
+      // Select only needed columns for better performance
+      let query = 'SELECT id, uuid_id, business_id, user_id, user_name, shift_start, shift_end, modal_awal, kas_akhir, kas_expected, kas_selisih, kas_selisih_label, cash_sales_total, cash_refund_total, status, created_at, updated_at, synced_at FROM shifts WHERE 1=1';
+      const params: (string | number | null | boolean)[] = [];
+
+      if (filters.businessId) {
+        query += ' AND business_id = ?';
+        params.push(filters.businessId);
+      }
+
+      if (filters.userId) {
+        query += ' AND user_id = ?';
+        params.push(filters.userId);
+      }
+
+      if (filters.startDate) {
+        query += ' AND shift_start >= ?';
+        // Check if already in MySQL format (YYYY-MM-DD HH:MM:SS), otherwise convert
+        const dateStr = filters.startDate;
+        if (dateStr.includes('T') || dateStr.includes('Z')) {
+          params.push(toMySQLDateTime(dateStr));
+        } else {
+          // Already in MySQL format
+          params.push(dateStr);
+        }
+      }
+
+      if (filters.endDate) {
+        query += ' AND shift_start <= ?';
+        // Check if already in MySQL format (YYYY-MM-DD HH:MM:SS), otherwise convert
+        const dateStr = filters.endDate;
+        if (dateStr.includes('T') || dateStr.includes('Z')) {
+          params.push(toMySQLDateTime(dateStr));
+        } else {
+          // Already in MySQL format
+          params.push(dateStr);
+        }
+      }
+
+      query += ' ORDER BY shift_start DESC';
+
+      // LIMIT must be a number, not a parameter in some MySQL configurations
+      // Use string interpolation for safety (limit is always a number from our code)
+      if (filters.limit && filters.limit > 0) {
+        const limitValue = Math.floor(Number(filters.limit));
+        if (limitValue > 0 && limitValue <= 10000) { // Sanity check
+          query += ` LIMIT ${limitValue}`;
+        }
+      }
+
+      const shifts = await executeQuery(query, params);
+      return { shifts: shifts || [], count: Array.isArray(shifts) ? shifts.length : 0 };
+    } catch (error) {
+      console.error('Error getting shifts:', error);
+      return { shifts: [], count: 0 };
+    }
   });
-  */
 
   // Get unsynced shifts
   ipcMain.handle('localdb-get-unsynced-shifts', async (event, businessId?: number) => {
-    if (!localDb) return [];
     try {
       let query = 'SELECT * FROM shifts WHERE synced_at IS NULL';
-      const params: QueryParams = [];
+      const params: (string | number | null | boolean)[] = [];
 
       if (businessId) {
         query += ' AND business_id = ?';
@@ -4539,8 +5154,7 @@ function createWindows(): void {
 
       query += ' ORDER BY created_at ASC';
 
-      const stmt = localDb.prepare(query);
-      return stmt.all(...params);
+      return await executeQuery(query, params);
     } catch (error) {
       console.error('Error getting unsynced shifts:', error);
       return [];
@@ -4549,11 +5163,11 @@ function createWindows(): void {
 
   // Mark shifts as synced
   ipcMain.handle('localdb-mark-shifts-synced', async (event, shiftIds: number[]) => {
-    if (!localDb || shiftIds.length === 0) return { success: true };
+    if (shiftIds.length === 0) return { success: true };
     try {
       const placeholders = shiftIds.map(() => '?').join(',');
-      const stmt = localDb.prepare(`UPDATE shifts SET synced_at = ? WHERE id IN (${placeholders})`);
-      stmt.run(Date.now(), ...shiftIds);
+      // synced_at is BIGINT (timestamp in milliseconds), not DATETIME
+      await executeUpdate(`UPDATE shifts SET synced_at = ? WHERE id IN (${placeholders})`, [Date.now(), ...shiftIds]);
       return { success: true };
     } catch (error) {
       console.error('Error marking shifts as synced:', error);
@@ -4563,62 +5177,80 @@ function createWindows(): void {
 
   // Upsert shifts (for downloading from server)
   ipcMain.handle('localdb-upsert-shifts', async (event, rows: RowArray) => {
-    if (!localDb) return { success: false, error: 'Database not available' };
     if (!Array.isArray(rows) || rows.length === 0) return { success: true, count: 0 };
 
     try {
-      const tx = localDb.transaction((data: RowArray) => {
-        const stmt = localDb!.prepare(`
-          INSERT INTO shifts (
-            id, uuid_id, business_id, user_id, user_name, shift_start, shift_end,
-            modal_awal, kas_akhir, kas_expected, kas_selisih, kas_selisih_label,
-            cash_sales_total, cash_refund_total, status, created_at, updated_at, synced_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-          ON CONFLICT(uuid_id) DO UPDATE SET
-            id = excluded.id,
-            business_id = excluded.business_id,
-            user_id = excluded.user_id,
-            user_name = excluded.user_name,
-            shift_start = excluded.shift_start,
-            shift_end = excluded.shift_end,
-            modal_awal = excluded.modal_awal,
-            kas_akhir = excluded.kas_akhir,
-            kas_expected = excluded.kas_expected,
-            kas_selisih = excluded.kas_selisih,
-            kas_selisih_label = excluded.kas_selisih_label,
-            cash_sales_total = excluded.cash_sales_total,
-            cash_refund_total = excluded.cash_refund_total,
-            status = excluded.status,
-            created_at = excluded.created_at,
-            updated_at = excluded.updated_at,
-            synced_at = excluded.synced_at
-        `);
-
-        for (const row of data) {
-          stmt.run(
-            row.id ?? null,
-            row.uuid_id,
-            row.business_id,
-            row.user_id,
-            row.user_name,
-            row.shift_start,
-            row.shift_end ?? null,
-            row.modal_awal ?? 0,
-            row.kas_akhir ?? null,
-            row.kas_expected ?? null,
-            row.kas_selisih ?? null,
-            row.kas_selisih_label ?? 'balanced',
-            row.cash_sales_total ?? null,
-            row.cash_refund_total ?? null,
-            row.status ?? 'active',
-            row.created_at,
-            row.updated_at ?? null,
-            row.synced_at ?? Date.now()
-          );
-        }
+      const queries = rows.map(row => {
+        const id = typeof row.id === 'number' ? row.id : (row.id ? parseInt(String(row.id), 10) : null);
+        const uuidId = typeof row.uuid_id === 'string' ? row.uuid_id : String(row.uuid_id ?? '');
+        const businessId = typeof row.business_id === 'number' ? row.business_id : (row.business_id ? Number(row.business_id) : 0);
+        const userId = typeof row.user_id === 'number' ? row.user_id : (row.user_id ? Number(row.user_id) : 0);
+        const userName = typeof row.user_name === 'string' ? row.user_name : String(row.user_name ?? '');
+        const shiftStart = row.shift_start ? (typeof row.shift_start === 'number' || typeof row.shift_start === 'string' ? row.shift_start : new Date()) : new Date();
+        const shiftEnd = row.shift_end ? (typeof row.shift_end === 'number' || typeof row.shift_end === 'string' ? row.shift_end : null) : null;
+        const modalAwal = typeof row.modal_awal === 'number' ? row.modal_awal : (row.modal_awal ? Number(row.modal_awal) : 0);
+        const kasAkhir = typeof row.kas_akhir === 'number' ? row.kas_akhir : (row.kas_akhir ? Number(row.kas_akhir) : null);
+        const kasExpected = typeof row.kas_expected === 'number' ? row.kas_expected : (row.kas_expected ? Number(row.kas_expected) : null);
+        const kasSelisih = typeof row.kas_selisih === 'number' ? row.kas_selisih : (row.kas_selisih ? Number(row.kas_selisih) : null);
+        const kasSelisihLabel = typeof row.kas_selisih_label === 'string' ? row.kas_selisih_label : 'balanced';
+        const cashSalesTotal = typeof row.cash_sales_total === 'number' ? row.cash_sales_total : (row.cash_sales_total ? Number(row.cash_sales_total) : null);
+        const cashRefundTotal = typeof row.cash_refund_total === 'number' ? row.cash_refund_total : (row.cash_refund_total ? Number(row.cash_refund_total) : null);
+        const status = typeof row.status === 'string' ? row.status : 'active';
+        const createdAt = row.created_at ? (typeof row.created_at === 'number' || typeof row.created_at === 'string' ? row.created_at : new Date()) : new Date();
+        // updated_at and synced_at are BIGINT (timestamp in milliseconds), not DATETIME
+        const updatedAt = row.updated_at ? (typeof row.updated_at === 'number' ? row.updated_at : (typeof row.updated_at === 'string' ? parseInt(row.updated_at, 10) : Date.now())) : null;
+        const syncedAt = row.synced_at ? (typeof row.synced_at === 'number' ? row.synced_at : (typeof row.synced_at === 'string' ? parseInt(row.synced_at, 10) : Date.now())) : null;
+        
+        return {
+          sql: `
+            INSERT INTO shifts (
+              id, uuid_id, business_id, user_id, user_name, shift_start, shift_end,
+              modal_awal, kas_akhir, kas_expected, kas_selisih, kas_selisih_label,
+              cash_sales_total, cash_refund_total, status, created_at, updated_at, synced_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON DUPLICATE KEY UPDATE
+              id = VALUES(id),
+              business_id = VALUES(business_id),
+              user_id = VALUES(user_id),
+              user_name = VALUES(user_name),
+              shift_start = VALUES(shift_start),
+              shift_end = VALUES(shift_end),
+              modal_awal = VALUES(modal_awal),
+              kas_akhir = VALUES(kas_akhir),
+              kas_expected = VALUES(kas_expected),
+              kas_selisih = VALUES(kas_selisih),
+              kas_selisih_label = VALUES(kas_selisih_label),
+              cash_sales_total = VALUES(cash_sales_total),
+              cash_refund_total = VALUES(cash_refund_total),
+              status = VALUES(status),
+              created_at = VALUES(created_at),
+              updated_at = VALUES(updated_at),
+              synced_at = VALUES(synced_at)
+          `,
+          params: [
+            id,
+            uuidId,
+            businessId,
+            userId,
+            userName,
+            toMySQLDateTime(shiftStart),
+            shiftEnd ? toMySQLDateTime(shiftEnd) : null,
+            modalAwal,
+            kasAkhir,
+            kasExpected,
+            kasSelisih,
+            kasSelisihLabel,
+            cashSalesTotal,
+            cashRefundTotal,
+            status,
+            toMySQLDateTime(createdAt),
+            updatedAt, // BIGINT timestamp
+            syncedAt  // BIGINT timestamp
+          ]
+        };
       });
 
-      tx(rows);
+      await executeTransaction(queries);
       return { success: true, count: rows.length };
     } catch (error) {
       console.error('Error upserting shifts:', error);
@@ -4628,8 +5260,6 @@ function createWindows(): void {
 
   // Check for transactions before shift start (today)
   ipcMain.handle('localdb-check-today-transactions', async (event, userId: number, shiftStart: string, businessId: number = 14) => {
-    if (!localDb) return { hasTransactions: false, count: 0, earliestTime: null };
-
     try {
       // Get start of day in GMT+7
       const shiftDate = new Date(shiftStart);
@@ -4644,23 +5274,21 @@ function createWindows(): void {
 
       // Check for transactions before shift_start but on the same day
       // AND ensure they are not already linked to another shift
-      const checkStmt = localDb.prepare(`
+      const result = await executeQueryOne<{ count: number; earliest_time: string | null }>(`
         SELECT COUNT(*) as count, MIN(created_at) as earliest_time
         FROM transactions
         WHERE user_id = ? 
         AND business_id = ?
-        AND datetime(created_at) >= datetime(?)
-        AND datetime(created_at) < datetime(?)
+        AND created_at >= ?
+        AND created_at < ?
         AND status = 'completed'
         AND (shift_uuid IS NULL OR shift_uuid = '')
-      `);
-
-      const result = checkStmt.get(userId, businessId, dayStart.toISOString(), shiftStart) as { count: number; earliest_time: string | null };
+      `, [userId, businessId, toMySQLDateTime(dayStart), toMySQLDateTime(shiftStart)]);
 
       return {
-        hasTransactions: (result.count || 0) > 0,
-        count: result.count || 0,
-        earliestTime: result.earliest_time
+        hasTransactions: (result?.count || 0) > 0,
+        count: result?.count || 0,
+        earliestTime: result?.earliest_time || null
       };
     } catch (error) {
       console.error('Error checking today transactions:', error);
@@ -4670,43 +5298,50 @@ function createWindows(): void {
 
   // Update shift start time to include earlier transactions
   ipcMain.handle('localdb-update-shift-start', async (event, shiftId: number, newStartTime: string) => {
-    if (!localDb) return { success: false, error: 'Database not available' };
-
     try {
       // 1. Get shift details first to have the UUID and User ID
-      const getShiftStmt = localDb.prepare('SELECT uuid_id, user_id FROM shifts WHERE id = ?');
-      const shift = getShiftStmt.get(shiftId) as { uuid_id: string, user_id: number } | undefined;
+      const shift = await executeQueryOne<{ uuid_id: string, user_id: number }>('SELECT uuid_id, user_id FROM shifts WHERE id = ?', [shiftId]);
 
       if (!shift) {
         return { success: false, error: 'Shift not found' };
       }
 
+      const queries: Array<{ sql: string; params?: (string | number | null | boolean)[] }> = [];
+
       // 2. Update the shift start time
-      const stmt = localDb.prepare(`
-        UPDATE shifts 
-        SET shift_start = ?, updated_at = ?
-        WHERE id = ? AND status = 'active'
-      `);
-
-      const result = stmt.run(newStartTime, Date.now(), shiftId);
-
-      if (result.changes === 0) {
-        return { success: false, error: 'Shift not found or not active' };
-      }
+      queries.push({
+        sql: `
+          UPDATE shifts 
+          SET shift_start = ?, updated_at = ?
+          WHERE id = ? AND status = 'active'
+        `,
+        params: [toMySQLDateTime(newStartTime), Date.now(), shiftId]
+      });
 
       // 3. Link the transactions in the new time range to this shift
-      const linkStmt = localDb.prepare(`
-        UPDATE transactions
-        SET shift_uuid = ?
-        WHERE user_id = ? 
-        AND datetime(created_at) >= datetime(?)
-        AND (shift_uuid IS NULL OR shift_uuid = '')
-      `);
+      queries.push({
+        sql: `
+          UPDATE transactions
+          SET shift_uuid = ?
+          WHERE user_id = ? 
+          AND created_at >= ?
+          AND (shift_uuid IS NULL OR shift_uuid = '')
+        `,
+        params: [shift.uuid_id, shift.user_id, newStartTime]
+      });
 
-      const linkResult = linkStmt.run(shift.uuid_id, shift.user_id, newStartTime);
+      await executeTransaction(queries);
+
+      // Get count of linked transactions
+      const linkCountResult = await executeQueryOne<{ count: number }>(`
+        SELECT COUNT(*) as count FROM transactions
+        WHERE user_id = ? 
+        AND created_at >= ?
+        AND shift_uuid = ?
+      `, [shift.user_id, newStartTime, shift.uuid_id]);
 
       console.log(`✅ [SHIFTS] Updated shift ${shiftId} start time to ${newStartTime}`);
-      console.log(`🔗 [SHIFTS] Linked ${linkResult.changes} transactions to shift ${shift.uuid_id}`);
+      console.log(`🔗 [SHIFTS] Linked ${linkCountResult?.count || 0} transactions to shift ${shift.uuid_id}`);
 
       return { success: true };
     } catch (error) {
@@ -4716,13 +5351,15 @@ function createWindows(): void {
   });
 
   // Get product sales breakdown for shift
-  ipcMain.handle('localdb-get-product-sales', async (event, userId: number, shiftStart: string, shiftEnd: string | null, businessId: number = 14) => {
-    if (!localDb) return { products: [], customizations: [] };
-
+  ipcMain.handle('localdb-get-product-sales', async (event, userId: number | null, shiftStart: string, shiftEnd: string | null, businessId: number = 14) => {
     try {
+      // Convert ISO date strings to MySQL datetime format
+      const shiftStartMySQL = toMySQLDateTime(shiftStart);
+      const shiftEndMySQL = shiftEnd ? toMySQLDateTime(shiftEnd) : null;
+      
       let query = `
         SELECT 
-          ti.id,
+          ti.uuid_id as id,
           p.id as product_id,
           p.nama as product_name,
           p.menu_code as product_code,
@@ -4743,20 +5380,24 @@ function createWindows(): void {
         INNER JOIN transactions t ON ti.transaction_id = t.id
         LEFT JOIN payment_methods pm ON t.payment_method_id = pm.id
         INNER JOIN products p ON ti.product_id = p.id
-        WHERE t.user_id = ?
-        AND t.business_id = ?
-        AND datetime(t.created_at) >= datetime(?)
-        AND t.status = 'completed'
+        WHERE t.business_id = ?
+        AND t.created_at >= ?
+        AND t.status != 'archived'
       `;
-      const params: QueryParams = [userId, businessId, shiftStart];
-
-      if (shiftEnd) {
-        query += ' AND datetime(t.created_at) <= datetime(?)';
-        params.push(shiftEnd);
+      const params: (string | number | null | boolean)[] = [businessId, shiftStartMySQL];
+      
+      // Add user_id filter only if userId is not null
+      if (userId !== null) {
+        query = query.replace('WHERE t.business_id = ?', 'WHERE t.user_id = ? AND t.business_id = ?');
+        params.unshift(userId);
       }
 
-      const stmt = localDb.prepare(query);
-      const rows = stmt.all(...params) as TransactionItemRow[];
+      if (shiftEnd) {
+        query += ' AND t.created_at <= ?';
+        params.push(toMySQLDateTime(shiftEnd));
+      }
+
+      const rows = await executeQuery<TransactionItemRow>(query, params);
 
       type ProductAccumulator = {
         product_id: number;
@@ -4785,11 +5426,17 @@ function createWindows(): void {
       const customizationAggregate = new Map<number, CustomizationAccumulator>();
       const OFFLINE_METHODS = new Set(['cash', 'debit', 'qr', 'ewallet', 'cl', 'voucher', 'offline']);
 
-      const sumCustomizationForRow = (row: TransactionItemRow, unitQuantity: number): number => {
+      const sumCustomizationForRow = async (row: TransactionItemRow, unitQuantity: number): Promise<number> => {
         let customizationTotal = 0;
 
         // Read from normalized tables instead of JSON
-        const customizations = readCustomizationsFromNormalizedTables(localDb!, row.id as string, null);
+        // row.id should be the uuid_id (UUID string) from the SELECT clause
+        const itemUuid = row.id ? String(row.id) : '';
+        if (!itemUuid) {
+          console.warn('⚠️ TransactionItemRow missing id (uuid_id), skipping customizations');
+          return 0;
+        }
+        const customizations = await readCustomizationsFromNormalizedTables(itemUuid, null);
         if (!customizations || customizations.length === 0) return 0;
         for (const customization of customizations) {
           if (!Array.isArray(customization?.selected_options)) continue;
@@ -4928,7 +5575,7 @@ function createWindows(): void {
         const quantity = Number(row.quantity || 0);
         const totalPrice = Number(row.total_price || 0);
         const unitPrice = Number(row.unit_price || 0);
-        const customizationSubtotal = sumCustomizationForRow(row, quantity);
+        const customizationSubtotal = await sumCustomizationForRow(row, quantity);
         let baseSubtotal = totalPrice - customizationSubtotal;
 
         if (baseSubtotal < 0) {
@@ -5020,227 +5667,486 @@ function createWindows(): void {
 
   // Payment Methods
   ipcMain.handle('localdb-upsert-payment-methods', async (event, rows: RowArray) => {
-    if (!localDb) return { success: false };
-    const tx = localDb.transaction((data: RowArray) => {
-      const stmt = localDb!.prepare(`INSERT INTO payment_methods (
-        id, name, code, description, is_active, requires_additional_info, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT(id) DO UPDATE SET
-        name=excluded.name, code=excluded.code, description=excluded.description,
-        is_active=excluded.is_active, requires_additional_info=excluded.requires_additional_info,
-        created_at=excluded.created_at, updated_at=excluded.updated_at`);
-      for (const r of data) {
-        stmt.run(r.id, r.name, r.code, r.description, r.is_active || 1, r.requires_additional_info || 0, r.created_at, Date.now());
-      }
-    });
-    tx(rows);
-    return { success: true };
+    try {
+      const queries = rows.map(r => {
+        const id = typeof r.id === 'number' ? r.id : (r.id ? parseInt(String(r.id), 10) : null);
+        const name = typeof r.name === 'string' ? r.name : (r.name ? String(r.name) : null);
+        const code = typeof r.code === 'string' ? r.code : (r.code ? String(r.code) : null);
+        const description = typeof r.description === 'string' ? r.description : (r.description ? String(r.description) : null);
+        const isActive = typeof r.is_active === 'number' ? r.is_active : (r.is_active ? 1 : 0);
+        const requiresAdditionalInfo = typeof r.requires_additional_info === 'number' ? r.requires_additional_info : (r.requires_additional_info ? 1 : 0);
+        const createdAt = r.created_at ? (typeof r.created_at === 'number' || typeof r.created_at === 'string' ? r.created_at : new Date()) : new Date();
+        
+        return {
+          sql: `INSERT INTO payment_methods (
+            id, name, code, description, is_active, requires_additional_info, created_at, updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+          ON DUPLICATE KEY UPDATE
+            name=VALUES(name), code=VALUES(code), description=VALUES(description),
+            is_active=VALUES(is_active), requires_additional_info=VALUES(requires_additional_info),
+            created_at=VALUES(created_at), updated_at=VALUES(updated_at)`,
+          params: [id, name, code, description, isActive, requiresAdditionalInfo, toMySQLTimestamp(createdAt), toMySQLTimestamp(Date.now())]
+        };
+      });
+      await executeTransaction(queries);
+      return { success: true };
+    } catch (error) {
+      console.error('Error upserting payment methods:', error);
+      return { success: false };
+    }
   });
 
   ipcMain.handle('localdb-get-payment-methods', async () => {
-    if (!localDb) return [];
-    const stmt = localDb.prepare('SELECT * FROM payment_methods WHERE is_active = 1 ORDER BY name ASC');
-    return stmt.all();
+    try {
+      return await executeQuery('SELECT * FROM payment_methods WHERE is_active = 1 ORDER BY name ASC');
+    } catch (error) {
+      console.error('Error getting payment methods:', error);
+      return [];
+    }
   });
 
   // Banks
   ipcMain.handle('localdb-upsert-banks', async (event, rows: RowArray) => {
-    if (!localDb) return { success: false };
-    const tx = localDb.transaction((data: RowArray) => {
-      const stmt = localDb!.prepare(`INSERT INTO banks (
-        id, bank_code, bank_name, is_popular, is_active, created_at
-      ) VALUES (?, ?, ?, ?, ?, ?)
-      ON CONFLICT(id) DO UPDATE SET
-        bank_code=excluded.bank_code, bank_name=excluded.bank_name, is_popular=excluded.is_popular,
-        is_active=excluded.is_active, created_at=excluded.created_at`);
-      for (const r of data) {
-        stmt.run(r.id, r.bank_code, r.bank_name, r.is_popular || 0, r.is_active || 1, r.created_at);
-      }
-    });
-    tx(rows);
-    return { success: true };
-  });
-
-  ipcMain.handle('localdb-get-banks', async () => {
-    if (!localDb) return [];
-    const stmt = localDb.prepare('SELECT * FROM banks WHERE is_active = 1 ORDER BY is_popular DESC, bank_name ASC');
-    return stmt.all();
+    try {
+      const queries = rows.map(r => ({
+        sql: `
+          INSERT INTO banks (id, bank_code, bank_name, is_popular, is_active, created_at)
+          VALUES (?, ?, ?, ?, ?, ?)
+          ON DUPLICATE KEY UPDATE
+            bank_code=VALUES(bank_code),
+            bank_name=VALUES(bank_name),
+            is_popular=VALUES(is_popular),
+            is_active=VALUES(is_active),
+            created_at=VALUES(created_at)
+        `,
+        params: [
+          r.id ?? null,
+          r.bank_code ?? null,
+          r.bank_name ?? null,
+          r.is_popular ?? 0,
+          r.is_active !== undefined ? r.is_active : 1,
+          toMySQLTimestamp(r.created_at || new Date())
+        ]
+      }));
+      await executeTransaction(queries);
+      return { success: true };
+    } catch (error) {
+      console.error('Error upserting banks:', error);
+      return { success: false, error: String(error) };
+    }
   });
 
   // Organizations
-  ipcMain.handle('localdb-upsert-organizations', async (event, rows: RowArray) => {
-    if (!localDb) return { success: false };
-    const tx = localDb.transaction((data: RowArray) => {
-      const stmt = localDb!.prepare(`INSERT INTO organizations (
-        id, name, slug, owner_user_id, subscription_status, subscription_plan,
-        trial_ends_at, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT(id) DO UPDATE SET
-        name=excluded.name, slug=excluded.slug, owner_user_id=excluded.owner_user_id,
-        subscription_status=excluded.subscription_status, subscription_plan=excluded.subscription_plan,
-        trial_ends_at=excluded.trial_ends_at, created_at=excluded.created_at, updated_at=excluded.updated_at`);
-      for (const r of data) {
-        stmt.run(r.id, r.name, r.slug, r.owner_user_id, r.subscription_status || 'trial',
-          r.subscription_plan || 'basic', r.trial_ends_at, r.created_at, Date.now());
+  ipcMain.handle('localdb-upsert-organizations', async (event, rows: RowArray, skipOwnerValidation: boolean = false) => {
+    try {
+      // #region agent log
+      fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'main.ts:4211',message:'localdb-upsert-organizations called',data:{totalRows:Array.isArray(rows)?rows.length:0,orgIds:Array.isArray(rows)?rows.map((r:any)=>r?.id).filter(Boolean):[],org3InRows:Array.isArray(rows)?rows.some((r:any)=>r?.id===3):false,skipOwnerValidation:skipOwnerValidation},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'L'})}).catch(()=>{});
+      // #endregion
+      const queries: Array<{ sql: string; params?: (string | number | null | boolean)[] }> = [];
+      let skippedCount = 0;
+
+      for (const r of rows) {
+        // #region agent log
+        if (r.id === 3 || r.id === 4) {
+          fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'main.ts:4219',message:'Processing organization',data:{orgId:r.id,ownerUserId:r.owner_user_id,skipOwnerValidation:skipOwnerValidation},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'M'})}).catch(()=>{});
+        }
+        // #endregion
+        // Skip if owner_user_id is null or invalid
+        if (!r.owner_user_id) {
+          skippedCount++;
+          continue;
+        }
+
+        // Verify user exists before inserting organization - SKIP on first pass to break circular dependency
+        if (!skipOwnerValidation) {
+          try {
+            const userExists = await executeQueryOne<{ id: number }>('SELECT id FROM users WHERE id = ? LIMIT 1', [r.owner_user_id]);
+            // #region agent log
+            if (r.id === 3 || r.id === 4) {
+              fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'main.ts:4233',message:'Organization owner user check',data:{orgId:r.id,ownerUserId:r.owner_user_id,userExists:!!userExists},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'N'})}).catch(()=>{});
+            }
+            // #endregion
+            if (!userExists) {
+              console.warn(`⚠️ [ORGANIZATIONS] Skipping organization ${r.id}: owner_user_id ${r.owner_user_id} does not exist`);
+              // #region agent log
+              if (r.id === 3 || r.id === 4) {
+                fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'main.ts:4239',message:'Organization skipped - owner user missing',data:{orgId:r.id,ownerUserId:r.owner_user_id},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'O'})}).catch(()=>{});
+              }
+              // #endregion
+              skippedCount++;
+              continue;
+            }
+          } catch (checkError) {
+            // #region agent log
+            if (r.id === 3 || r.id === 4) {
+              fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'main.ts:4249',message:'Organization owner user check error',data:{orgId:r.id,ownerUserId:r.owner_user_id,error:String(checkError)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'P'})}).catch(()=>{});
+            }
+            // #endregion
+            console.warn(`⚠️ [ORGANIZATIONS] Error checking user ${r.owner_user_id} for organization ${r.id}:`, checkError);
+            skippedCount++;
+            continue;
+          }
+        } else {
+          // #region agent log
+          if (r.id === 3 || r.id === 4) {
+            fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'main.ts:4256',message:'Organization skipping owner validation (first pass)',data:{orgId:r.id,ownerUserId:r.owner_user_id},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'AE'})}).catch(()=>{});
+          }
+          // #endregion
+          console.log(`ℹ️ [ORGANIZATIONS] Skipping owner validation for organization ${r.id} (first pass - breaking circular dependency)`);
+        }
+
+        const id = typeof r.id === 'number' ? r.id : (typeof r.id === 'string' ? parseInt(String(r.id), 10) : 0);
+        const name = typeof r.name === 'string' ? r.name : String(r.name ?? '');
+        const slug = typeof r.slug === 'string' ? r.slug : String(r.slug ?? '');
+        const ownerUserId = typeof r.owner_user_id === 'number' ? r.owner_user_id : (r.owner_user_id ? Number(r.owner_user_id) : 0);
+        const subscriptionStatus = typeof r.subscription_status === 'string' ? r.subscription_status : 'trial';
+        const subscriptionPlan = typeof r.subscription_plan === 'string' ? r.subscription_plan : 'basic';
+        const trialEndsAt = r.trial_ends_at ? (typeof r.trial_ends_at === 'number' || typeof r.trial_ends_at === 'string' ? r.trial_ends_at : null) : null;
+        const createdAt = r.created_at ? (typeof r.created_at === 'number' || typeof r.created_at === 'string' ? r.created_at : new Date()) : new Date();
+        const updatedAt = r.updated_at ? (typeof r.updated_at === 'number' || typeof r.updated_at === 'string' ? r.updated_at : Date.now()) : Date.now();
+        
+        queries.push({
+          sql: `INSERT INTO organizations (
+            id, name, slug, owner_user_id, subscription_status, subscription_plan,
+            trial_ends_at, created_at, updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+          ON DUPLICATE KEY UPDATE
+            name=VALUES(name), slug=VALUES(slug), owner_user_id=VALUES(owner_user_id),
+            subscription_status=VALUES(subscription_status), subscription_plan=VALUES(subscription_plan),
+            trial_ends_at=VALUES(trial_ends_at), created_at=VALUES(created_at), updated_at=VALUES(updated_at)`,
+          params: [
+            id, name, slug, ownerUserId, subscriptionStatus,
+            subscriptionPlan, trialEndsAt ? toMySQLTimestamp(trialEndsAt) : null, toMySQLTimestamp(createdAt), toMySQLTimestamp(updatedAt)
+          ]
+        });
       }
-    });
-    tx(rows);
-    return { success: true };
+
+      if (queries.length > 0) {
+        if (skipOwnerValidation) {
+          // On first pass: Insert organizations one by one to handle foreign key errors individually
+          let successCount = 0;
+          let failCount = 0;
+          for (const query of queries) {
+            try {
+              await executeUpdate(query.sql, query.params || []);
+              successCount++;
+              // #region agent log
+              if (query.params?.[0] === 3 || query.params?.[0] === 4) {
+                fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'main.ts:4288',message:'Organization inserted successfully (first pass)',data:{orgId:query.params?.[0]},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'AF'})}).catch(()=>{});
+              }
+              // #endregion
+            } catch (insertError: unknown) {
+              const err = insertError as { code?: string; errno?: number; message?: string };
+              if (err.code === 'ER_NO_REFERENCED_ROW_2' || err.errno === 1452) {
+                // Foreign key constraint - expected on first pass, will retry later
+                failCount++;
+                // #region agent log
+                if (query.params?.[0] === 3 || query.params?.[0] === 4) {
+                  fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'main.ts:4296',message:'Organization insert failed (expected - will retry)',data:{orgId:query.params?.[0],error:String(err)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'AG'})}).catch(()=>{});
+                }
+                // #endregion
+                console.log(`ℹ️ [ORGANIZATIONS] Organization ${query.params?.[0]} insert failed (foreign key - will retry later): ${err.message}`);
+              } else {
+                // Unexpected error - log and continue
+                failCount++;
+                console.warn(`⚠️ [ORGANIZATIONS] Organization ${query.params?.[0]} insert failed: ${err.message}`);
+              }
+            }
+          }
+          // #region agent log
+          fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'main.ts:4304',message:'Organization transaction completed (first pass)',data:{successCount:successCount,failCount:failCount,total:queries.length},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'AH'})}).catch(()=>{});
+          // #endregion
+          console.log(`ℹ️ [ORGANIZATIONS] First pass: ${successCount} inserted, ${failCount} failed (will retry later)`);
+        } else {
+          // On retry pass: Use transaction for better performance
+          await executeTransaction(queries);
+          if (skippedCount > 0) {
+            console.log(`⚠️ [ORGANIZATIONS] Skipped ${skippedCount} organizations due to missing owner users`);
+          }
+        }
+      } else {
+        console.warn(`⚠️ [ORGANIZATIONS] No valid organizations to insert (all ${rows.length} skipped)`);
+      }
+      return { success: true };
+    } catch (error) {
+      console.error('Error upserting organizations:', error);
+      return { success: false };
+    }
   });
 
   ipcMain.handle('localdb-get-organizations', async () => {
-    if (!localDb) return [];
-    const stmt = localDb.prepare('SELECT * FROM organizations ORDER BY name ASC');
-    return stmt.all();
+    try {
+      return await executeQuery('SELECT * FROM organizations ORDER BY name ASC');
+    } catch (error) {
+      console.error('Error getting organizations:', error);
+      return [];
+    }
   });
 
   // Management Groups
   ipcMain.handle('localdb-upsert-management-groups', async (event, rows: RowArray) => {
-    if (!localDb) return { success: false };
-    const tx = localDb.transaction((data: RowArray) => {
-      const stmt = localDb!.prepare(`INSERT INTO management_groups (
-        id, name, permission_name, description, organization_id, manager_user_id, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT(id) DO UPDATE SET
-        name=excluded.name, permission_name=excluded.permission_name, description=excluded.description,
-        organization_id=excluded.organization_id, manager_user_id=excluded.manager_user_id,
-        created_at=excluded.created_at, updated_at=excluded.updated_at`);
-      for (const r of data) {
-        stmt.run(r.id, r.name, r.permission_name, r.description, r.organization_id, r.manager_user_id, r.created_at, Date.now());
+    try {
+      const queries: Array<{ sql: string; params?: (string | number | null | boolean)[] }> = [];
+      let skippedCount = 0;
+      
+      for (const r of rows) {
+        // Verify organization_id exists before inserting (foreign key constraint)
+        if (r.organization_id) {
+          try {
+            const orgExists = await executeQueryOne<{ id: number }>('SELECT id FROM organizations WHERE id = ? LIMIT 1', [r.organization_id]);
+            if (!orgExists) {
+              console.warn(`⚠️ [MANAGEMENT GROUPS] Skipping management group ${r.id}: organization_id ${r.organization_id} does not exist`);
+              skippedCount++;
+              continue;
+            }
+          } catch (checkError) {
+            console.warn(`⚠️ [MANAGEMENT GROUPS] Failed to verify organization_id ${r.organization_id}:`, checkError);
+            skippedCount++;
+            continue;
+          }
+        }
+        
+        const id = typeof r.id === 'number' ? r.id : (typeof r.id === 'string' ? parseInt(String(r.id), 10) : 0);
+        const name = typeof r.name === 'string' ? r.name : String(r.name ?? '');
+        const permissionName = typeof r.permission_name === 'string' ? r.permission_name : String(r.permission_name ?? '');
+        const description = typeof r.description === 'string' ? r.description : String(r.description ?? '');
+        const organizationId = typeof r.organization_id === 'number' ? r.organization_id : (r.organization_id ? Number(r.organization_id) : null);
+        const managerUserId = typeof r.manager_user_id === 'number' ? r.manager_user_id : (r.manager_user_id ? Number(r.manager_user_id) : null);
+        const createdAt = r.created_at ? (typeof r.created_at === 'number' || typeof r.created_at === 'string' ? r.created_at : new Date()) : new Date();
+        const updatedAt = r.updated_at ? (typeof r.updated_at === 'number' || typeof r.updated_at === 'string' ? r.updated_at : Date.now()) : Date.now();
+        
+        queries.push({
+          sql: `INSERT INTO management_groups (
+            id, name, permission_name, description, organization_id, manager_user_id, created_at, updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+          ON DUPLICATE KEY UPDATE
+            name=VALUES(name), permission_name=VALUES(permission_name), description=VALUES(description),
+            organization_id=VALUES(organization_id), manager_user_id=VALUES(manager_user_id),
+            created_at=VALUES(created_at), updated_at=VALUES(updated_at)`,
+          params: [
+            id, 
+            name, 
+            permissionName, 
+            description, 
+            organizationId, 
+            managerUserId, 
+            toMySQLTimestamp(createdAt), 
+            toMySQLTimestamp(updatedAt)
+          ]
+        });
       }
-    });
-    tx(rows);
-    return { success: true };
+      
+      if (queries.length > 0) {
+        await executeTransaction(queries);
+        if (skippedCount > 0) {
+          console.log(`⚠️ [MANAGEMENT GROUPS] Skipped ${skippedCount} management groups due to missing organizations`);
+        }
+      } else {
+        console.warn(`⚠️ [MANAGEMENT GROUPS] No valid management groups to insert (all ${rows.length} skipped)`);
+      }
+      return { success: true };
+    } catch (error) {
+      console.error('Error upserting management groups:', error);
+      return { success: false };
+    }
   });
 
   ipcMain.handle('localdb-get-management-groups', async () => {
-    if (!localDb) return [];
-    const stmt = localDb.prepare('SELECT * FROM management_groups ORDER BY name ASC');
-    return stmt.all();
+    try {
+      return await executeQuery('SELECT * FROM management_groups ORDER BY name ASC');
+    } catch (error) {
+      console.error('Error getting management groups:', error);
+      return [];
+    }
   });
 
   ipcMain.handle('localdb-check-exists', async () => {
-    try {
-      const dbPath = getLocalDbPath();
-      const exists = fs.existsSync(dbPath);
-      return { exists, path: dbPath };
-    } catch (error) {
-      console.error('Error checking local DB existence:', error);
-      return { exists: false, error: String(error) };
-    }
+    // MySQL database is always available via connection pool
+    return { exists: true, path: 'MySQL connection pool' };
   });
 
   // Category1
   ipcMain.handle('localdb-upsert-category1', async (event, rows: RowArray) => {
-    if (!localDb) return { success: false };
-    const tx = localDb.transaction((data: RowArray) => {
-      const stmt = localDb!.prepare(`INSERT INTO category1 (
-        id, name, description, display_order, is_active, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT(id) DO UPDATE SET
-        name=excluded.name, description=excluded.description, display_order=excluded.display_order,
-        is_active=excluded.is_active, created_at=excluded.created_at, updated_at=excluded.updated_at`);
-      for (const r of data) {
-        stmt.run(r.id, r.name, r.description, r.display_order || 0, r.is_active || 1, r.created_at, Date.now());
-      }
-    });
-    tx(rows);
-    return { success: true };
+    try {
+      const queries = rows.map(r => {
+        const id = typeof r.id === 'number' ? r.id : (typeof r.id === 'string' ? parseInt(String(r.id), 10) : 0);
+        const name = typeof r.name === 'string' ? r.name : String(r.name ?? '');
+        const description = typeof r.description === 'string' ? r.description : (r.description ? String(r.description) : null);
+        const displayOrder = typeof r.display_order === 'number' ? r.display_order : 0;
+        const isActive = typeof r.is_active === 'number' ? r.is_active : (r.is_active ? 1 : 0);
+        const createdAt = r.created_at ? (typeof r.created_at === 'number' || typeof r.created_at === 'string' ? r.created_at : new Date()) : new Date();
+        
+        return {
+          sql: `INSERT INTO category1 (
+            id, name, description, display_order, is_active, created_at, updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?)
+          ON DUPLICATE KEY UPDATE
+            name=VALUES(name), description=VALUES(description), display_order=VALUES(display_order),
+            is_active=VALUES(is_active), created_at=VALUES(created_at), updated_at=VALUES(updated_at)`,
+          params: [
+            id, name, description, displayOrder, isActive,
+            toMySQLTimestamp(createdAt),
+            toMySQLTimestamp(Date.now())
+          ]
+        };
+      });
+      await executeTransaction(queries);
+      return { success: true };
+    } catch (error) {
+      console.error('Error upserting category1:', error);
+      return { success: false };
+    }
   });
 
   ipcMain.handle('localdb-get-category1', async () => {
-    if (!localDb) return [];
-    const stmt = localDb.prepare('SELECT * FROM category1 WHERE is_active = 1 ORDER BY display_order ASC, name ASC');
-    return stmt.all();
+    try {
+      return await executeQuery('SELECT * FROM category1 WHERE is_active = 1 ORDER BY display_order ASC, name ASC');
+    } catch (error) {
+      console.error('Error getting category1:', error);
+      return [];
+    }
   });
 
   // Category2
   ipcMain.handle('localdb-upsert-category2', async (event, rows: RowArray, junctionTableData?: Array<{ category2_id: number; business_id: number }>) => {
-    if (!localDb) return { success: false };
-    const db = localDb; // Capture in const for TypeScript
-    const tx = db.transaction((data: RowArray, junctionData?: Array<{ category2_id: number; business_id: number }>) => {
-      // Upsert category2 records (business_id column removed - using junction table only)
-      const stmt = db.prepare(`INSERT INTO category2 (
-        id, name, description, display_order, is_active, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT(id) DO UPDATE SET
-        name=excluded.name, description=excluded.description,
-        display_order=excluded.display_order, is_active=excluded.is_active,
-        created_at=excluded.created_at, updated_at=excluded.updated_at`);
-      for (const r of data) {
-        stmt.run(r.id, r.name, r.description, r.display_order || 0, r.is_active || 1, r.created_at, Date.now());
-      }
+    try {
+      const queries: Array<{ sql: string; params?: (string | number | null | boolean)[] }> = [];
+      
+      // Upsert category2 records
+      const category2Queries = rows.map(r => ({
+        sql: `INSERT INTO category2 (
+          id, name, description, display_order, is_active, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+        ON DUPLICATE KEY UPDATE
+          name=VALUES(name), description=VALUES(description),
+          display_order=VALUES(display_order), is_active=VALUES(is_active),
+          created_at=VALUES(created_at), updated_at=VALUES(updated_at)`,
+        params: [
+          typeof r.id === 'number' ? r.id : (typeof r.id === 'string' ? parseInt(String(r.id), 10) : 0),
+          typeof r.name === 'string' ? r.name : String(r.name ?? ''),
+          typeof r.description === 'string' ? r.description : String(r.description ?? ''),
+          typeof r.display_order === 'number' ? r.display_order : 0,
+          typeof r.is_active === 'number' ? r.is_active : (r.is_active ? 1 : 0),
+          toMySQLTimestamp(r.created_at ? (typeof r.created_at === 'number' || typeof r.created_at === 'string' ? r.created_at : new Date()) : new Date()),
+          toMySQLTimestamp(Date.now())
+        ]
+      }));
+      queries.push(...category2Queries);
 
       // Upsert junction table relationships (REQUIRED - no fallback)
-      if (junctionData && junctionData.length > 0) {
-        const junctionStmt = db.prepare(`
-          INSERT OR REPLACE INTO category2_businesses (category2_id, business_id, created_at)
-          VALUES (?, ?, ?)
-        `);
-        for (const rel of junctionData) {
-          // Use created_at from data if available, otherwise use current timestamp or NULL
-          const createdAt = (rel as { created_at?: string | null }).created_at || new Date().toISOString();
-          junctionStmt.run(rel.category2_id, rel.business_id, createdAt);
+      if (junctionTableData && junctionTableData.length > 0) {
+        const validJunctionData: Array<{ category2_id: number; business_id: number; created_at?: string | null }> = [];
+        
+        // Verify business_id exists before inserting (foreign key constraint)
+        for (const rel of junctionTableData) {
+          try {
+            const businessExists = await executeQueryOne<{ id: number }>('SELECT id FROM businesses WHERE id = ? LIMIT 1', [rel.business_id]);
+            if (!businessExists) {
+              console.warn(`⚠️ [CATEGORY2 UPSERT] Skipping junction: business_id ${rel.business_id} does not exist`);
+              continue;
+            }
+            validJunctionData.push(rel);
+          } catch (checkError) {
+            console.warn(`⚠️ [CATEGORY2 UPSERT] Error checking business_id ${rel.business_id}:`, checkError);
+            continue;
+          }
         }
-        console.log(`✅ [CATEGORY2 UPSERT] Stored ${junctionData.length} category2-business relationships`);
+        
+        if (validJunctionData.length > 0) {
+          const junctionQueries = validJunctionData.map(rel => ({
+            sql: `
+              INSERT INTO category2_businesses (category2_id, business_id, created_at)
+              VALUES (?, ?, ?)
+              ON DUPLICATE KEY UPDATE created_at=VALUES(created_at)
+            `,
+            params: [
+              typeof rel.category2_id === 'number' ? rel.category2_id : (rel.category2_id ? Number(rel.category2_id) : 0),
+              typeof rel.business_id === 'number' ? rel.business_id : (rel.business_id ? Number(rel.business_id) : 0),
+              toMySQLTimestamp(rel.created_at ? (typeof rel.created_at === 'number' || typeof rel.created_at === 'string' ? rel.created_at : new Date()) : new Date())
+            ]
+          }));
+          queries.push(...junctionQueries);
+          console.log(`✅ [CATEGORY2 UPSERT] Stored ${validJunctionData.length} category2-business relationships (${junctionTableData.length - validJunctionData.length} skipped due to missing businesses)`);
+        } else {
+          console.warn(`⚠️ [CATEGORY2 UPSERT] No valid junction table data (all ${junctionTableData.length} skipped due to missing businesses)`);
+        }
       } else {
         console.warn(`⚠️ [CATEGORY2 UPSERT] No junction table data provided - category2 records will not be associated with any business`);
       }
-    });
-    tx(rows, junctionTableData);
-    return { success: true };
+      
+      await executeTransaction(queries);
+      return { success: true };
+    } catch (error) {
+      console.error('Error upserting category2:', error);
+      return { success: false };
+    }
   });
 
   ipcMain.handle('localdb-get-category2', async (event, businessId?: number) => {
-    if (!localDb) return [];
-    if (businessId) {
-      // Use junction table for multi-business support (junction table only - no fallback)
-      const stmt = localDb.prepare(`
-        SELECT DISTINCT c2.*
-        FROM category2 c2
-        INNER JOIN category2_businesses cb ON c2.id = cb.category2_id
-        WHERE c2.is_active = 1 
-          AND cb.business_id = ?
-        ORDER BY c2.display_order ASC, c2.name ASC
-      `);
-      return stmt.all(businessId);
-    } else {
-      const stmt = localDb.prepare('SELECT * FROM category2 WHERE is_active = 1 ORDER BY display_order ASC, name ASC');
-      return stmt.all();
+    try {
+      if (businessId) {
+        // Use junction table for multi-business support (junction table only - no fallback)
+        return await executeQuery(`
+          SELECT DISTINCT c2.*
+          FROM category2 c2
+          INNER JOIN category2_businesses cb ON c2.id = cb.category2_id
+          WHERE c2.is_active = 1 
+            AND cb.business_id = ?
+          ORDER BY c2.display_order ASC, c2.name ASC
+        `, [businessId]);
+      } else {
+        return await executeQuery('SELECT * FROM category2 WHERE is_active = 1 ORDER BY display_order ASC, name ASC');
+      }
+    } catch (error) {
+      console.error('Error getting category2:', error);
+      return [];
     }
   });
 
   // CL Accounts
   ipcMain.handle('localdb-upsert-cl-accounts', async (event, rows: RowArray) => {
-    if (!localDb) return { success: false };
-    const tx = localDb.transaction((data: RowArray) => {
-      const stmt = localDb!.prepare(`INSERT INTO cl_accounts (
-        id, account_code, account_name, contact_info, credit_limit, current_balance,
-        is_active, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT(id) DO UPDATE SET
-        account_code=excluded.account_code, account_name=excluded.account_name, contact_info=excluded.contact_info,
-        credit_limit=excluded.credit_limit, current_balance=excluded.current_balance,
-        is_active=excluded.is_active, created_at=excluded.created_at, updated_at=excluded.updated_at`);
-      for (const r of data) {
-        stmt.run(r.id, r.account_code, r.account_name, r.contact_info, r.credit_limit || 0.0,
-          r.current_balance || 0.0, r.is_active || 1, r.created_at, Date.now());
-      }
-    });
-    tx(rows);
-    return { success: true };
+    try {
+      const queries = rows.map(r => ({
+        sql: `INSERT INTO cl_accounts (
+          id, account_code, account_name, contact_info, credit_limit, current_balance,
+          is_active, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON DUPLICATE KEY UPDATE
+          account_code=VALUES(account_code), account_name=VALUES(account_name), contact_info=VALUES(contact_info),
+          credit_limit=VALUES(credit_limit), current_balance=VALUES(current_balance),
+          is_active=VALUES(is_active), created_at=VALUES(created_at), updated_at=VALUES(updated_at)`,
+        params: [
+          r.id, 
+          r.account_code, 
+          r.account_name, 
+          r.contact_info, 
+          r.credit_limit || 0.0,
+          r.current_balance || 0.0, 
+          r.is_active || 1, 
+          toMySQLTimestamp(r.created_at || new Date()), 
+          toMySQLTimestamp(r.updated_at || Date.now())
+        ]
+      }));
+      await executeTransaction(queries);
+      return { success: true };
+    } catch (error) {
+      console.error('Error upserting CL accounts:', error);
+      return { success: false };
+    }
   });
 
   ipcMain.handle('localdb-get-cl-accounts', async () => {
-    if (!localDb) return [];
-    const stmt = localDb.prepare('SELECT * FROM cl_accounts WHERE is_active = 1 ORDER BY account_name ASC');
-    return stmt.all();
+    try {
+      return await executeQuery('SELECT * FROM cl_accounts WHERE is_active = 1 ORDER BY account_name ASC');
+    } catch (error) {
+      console.error('Error getting CL accounts:', error);
+      return [];
+    }
   });
 
 
   // Printer configuration handlers
   ipcMain.handle('localdb-save-printer-config', async (event, printerType: string, systemPrinterName: string, extraSettings?: UnknownRecord | string | null) => {
-    if (!localDb) return { success: false };
     try {
       let extraSettingsJson: string | null = null;
       if (extraSettings !== undefined && extraSettings !== null) {
@@ -5256,13 +6162,16 @@ function createWindows(): void {
         }
       }
 
-      const stmt = localDb.prepare(`INSERT INTO printer_configs (id, printer_type, system_printer_name, extra_settings, created_at, updated_at) 
-        VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET 
-        system_printer_name=excluded.system_printer_name,
-        extra_settings=excluded.extra_settings,
-        updated_at=excluded.updated_at`);
-      const now = Date.now();
-      stmt.run(printerType, printerType, systemPrinterName, extraSettingsJson, now, now);
+      const now = toMySQLTimestamp(Date.now());
+      await executeUpsert(
+        `INSERT INTO printer_configs (id, printer_type, system_printer_name, extra_settings, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?)
+         ON DUPLICATE KEY UPDATE
+           system_printer_name = VALUES(system_printer_name),
+           extra_settings = VALUES(extra_settings),
+           updated_at = VALUES(updated_at)`,
+        [printerType, printerType, systemPrinterName, extraSettingsJson, now, now]
+      );
       return { success: true };
     } catch (error) {
       console.error('Error saving printer config:', error);
@@ -5271,10 +6180,8 @@ function createWindows(): void {
   });
 
   ipcMain.handle('localdb-get-printer-configs', async () => {
-    if (!localDb) return [];
     try {
-      const stmt = localDb.prepare('SELECT * FROM printer_configs ORDER BY printer_type ASC');
-      return stmt.all();
+      return await executeQuery('SELECT * FROM printer_configs ORDER BY printer_type ASC');
     } catch (error) {
       console.error('Error getting printer configs:', error);
       return [];
@@ -5287,7 +6194,7 @@ function createWindows(): void {
   ipcMain.handle('generate-numeric-uuid', async (event, businessId: number) => {
     if (!printerService) return { success: false, error: 'Printer service not available' };
     try {
-      const uuid = printerService.generateNumericUUID(businessId);
+      const uuid = await printerService.generateNumericUUID(businessId);
       return { success: true, uuid };
     } catch (error) {
       return { success: false, error: String(error) };
@@ -5301,7 +6208,7 @@ function createWindows(): void {
       return { success: false, counter: 0 };
     }
     try {
-      const counter = printerService.getPrinterCounter(printerType, businessId, increment);
+      const counter = await printerService.getPrinterCounter(printerType, businessId, increment);
       console.log(`📊 [IPC] getPrinterCounter returned: ${counter} (${printerType}, businessId: ${businessId}, increment: ${increment})`);
       return { success: true, counter };
     } catch (error) {
@@ -5348,7 +6255,7 @@ function createWindows(): void {
   // Log Printer 2 print
   ipcMain.handle('log-printer2-print', async (event, transactionId: string, printer2ReceiptNumber: number, mode: 'auto' | 'manual', cycleNumber?: number, globalCounter?: number, isReprint?: boolean, reprintCount?: number) => {
     if (!printerService) return { success: false };
-    const result = printerService.logPrinter2Print(transactionId, printer2ReceiptNumber, mode, cycleNumber, globalCounter, isReprint, reprintCount);
+    const result = await printerService.logPrinter2Print(transactionId, printer2ReceiptNumber, mode, cycleNumber, globalCounter, isReprint, reprintCount);
     return { success: result };
   });
 
@@ -5359,7 +6266,7 @@ function createWindows(): void {
       console.log('❌ [IPC] printerService is null!');
       return { success: false, entries: [] };
     }
-    const entries = printerService.getPrinter2AuditLog(fromDate, toDate, limit || 100);
+    const entries = await printerService.getPrinter2AuditLog(fromDate, toDate, limit || 100);
     console.log(`📋 [IPC] get-printer2-audit-log returning ${entries.length} entries`);
     return { success: true, entries };
   });
@@ -5367,57 +6274,41 @@ function createWindows(): void {
   // Log Printer 1 print
   ipcMain.handle('log-printer1-print', async (event, transactionId: string, printer1ReceiptNumber: number, globalCounter?: number, isReprint?: boolean, reprintCount?: number) => {
     if (!printerService) return { success: false };
-    const result = printerService.logPrinter1Print(transactionId, printer1ReceiptNumber, globalCounter, isReprint, reprintCount);
+    const result = await printerService.logPrinter1Print(transactionId, printer1ReceiptNumber, globalCounter, isReprint, reprintCount);
     return { success: result };
   });
 
   // Queue transaction for System POS sync (when printed to Printer 2)
-  // DISABLED: system_pos database has been dropped on VPS
+  // Queue transaction for System POS sync (printer 2 transactions to local system_pos database)
   ipcMain.handle('queue-transaction-for-system-pos', async (event, transactionId: string) => {
-    console.log('⚠️ [SYSTEM POS] queue-transaction-for-system-pos called but service is DISABLED - system_pos database has been dropped');
-    return { success: false, error: 'System POS sync is disabled - database has been dropped' };
-    // Original code disabled below:
-    // if (!localDb) {
-    //   console.error('❌ [SYSTEM POS] Local database not available');
-    //   return { success: false, error: 'Local database not available' };
-    // }
-    // try {
-    //   const existing = localDb.prepare('SELECT id, synced_at FROM system_pos_queue WHERE transaction_id = ?').get(transactionId) as { id: number; synced_at: number | null } | undefined;
-    //   if (existing) {
-    //     if (existing.synced_at) {
-    //       console.log(`✅ [SYSTEM POS] Transaction ${transactionId} already synced`);
-    //       return { success: true, alreadySynced: true };
-    //     } else {
-    //       console.log(`⚠️ [SYSTEM POS] Transaction ${transactionId} already queued`);
-    //       return { success: true, alreadyQueued: true };
-    //     }
-    //   }
-    //   const now = Date.now();
-    //   localDb.prepare('INSERT INTO system_pos_queue (transaction_id, queued_at) VALUES (?, ?)').run(transactionId, now);
-    //   console.log(`✅ [SYSTEM POS] Queued transaction ${transactionId} for System POS sync`);
-    //   return { success: true };
-    // } catch (error) {
-    //   console.error('❌ [SYSTEM POS] Error queueing transaction:', error);
-    //   return { success: false, error: String(error) };
-    // }
+    try {
+      const now = Date.now();
+      await executeSystemPosTransaction([
+        {
+          sql: 'INSERT IGNORE INTO system_pos_queue (transaction_id, queued_at) VALUES (?, ?)',
+          params: [transactionId, now]
+        }
+      ]);
+      console.log(`✅ [SYSTEM POS] Queued transaction ${transactionId} for System POS sync`);
+      return { success: true };
+    } catch (error) {
+      console.error('❌ [SYSTEM POS] Error queueing transaction:', error);
+      return { success: false, error: String(error) };
+    }
   });
 
   // Get queued transactions for System POS sync
   ipcMain.handle('get-system-pos-queue', async () => {
-    if (!localDb) {
-      return { success: false, queue: [] };
-    }
-
     try {
       // Get ALL queue entries (not just pending) for status checking
-      const allQueue = localDb.prepare('SELECT id, transaction_id, queued_at, synced_at, retry_count, last_error FROM system_pos_queue ORDER BY queued_at DESC').all() as Array<{
+      const allQueue = await executeSystemPosQuery<{
         id: number;
         transaction_id: string;
         queued_at: number;
         synced_at: number | null;
         retry_count: number;
         last_error: string | null;
-      }>;
+      }>('SELECT id, transaction_id, queued_at, synced_at, retry_count, last_error FROM system_pos_queue ORDER BY queued_at DESC');
       return { success: true, queue: allQueue };
     } catch (error) {
       console.error('❌ [SYSTEM POS] Error getting queue:', error);
@@ -5427,13 +6318,9 @@ function createWindows(): void {
 
   // Mark transaction as synced in System POS queue
   ipcMain.handle('mark-system-pos-synced', async (event, transactionId: string) => {
-    if (!localDb) {
-      return { success: false };
-    }
-
     try {
       const now = Date.now();
-      localDb.prepare('UPDATE system_pos_queue SET synced_at = ? WHERE transaction_id = ?').run(now, transactionId);
+      await executeSystemPosUpdate('UPDATE system_pos_queue SET synced_at = ? WHERE transaction_id = ?', [now, transactionId]);
       console.log(`✅ [SYSTEM POS] Marked transaction ${transactionId} as synced`);
       return { success: true };
     } catch (error) {
@@ -5444,12 +6331,8 @@ function createWindows(): void {
 
   // Mark transaction sync failed (increment retry count)
   ipcMain.handle('mark-system-pos-failed', async (event, transactionId: string, error: string) => {
-    if (!localDb) {
-      return { success: false };
-    }
-
     try {
-      localDb.prepare('UPDATE system_pos_queue SET retry_count = retry_count + 1, last_error = ? WHERE transaction_id = ?').run(error.substring(0, 500), transactionId);
+      await executeSystemPosUpdate('UPDATE system_pos_queue SET retry_count = retry_count + 1, last_error = ? WHERE transaction_id = ?', [error.substring(0, 500), transactionId]);
       console.log(`⚠️ [SYSTEM POS] Marked transaction ${transactionId} sync as failed (retry count incremented)`);
       return { success: true };
     } catch (error) {
@@ -5460,22 +6343,18 @@ function createWindows(): void {
 
   // Reset retry count for system-pos transactions (for retrying failed transactions)
   ipcMain.handle('reset-system-pos-retry-count', async (event, transactionIds?: string[]) => {
-    if (!localDb) {
-      return { success: false };
-    }
-
     try {
       if (transactionIds && transactionIds.length > 0) {
         // Reset specific transactions
         const placeholders = transactionIds.map(() => '?').join(',');
-        const result = localDb.prepare(`UPDATE system_pos_queue SET retry_count = 0, last_error = NULL WHERE transaction_id IN (${placeholders})`).run(...transactionIds);
-        console.log(`🔄 [SYSTEM POS] Reset retry count for ${result.changes} transaction(s)`);
-        return { success: true, count: result.changes };
+        const affectedRows = await executeSystemPosUpdate(`UPDATE system_pos_queue SET retry_count = 0, last_error = NULL WHERE transaction_id IN (${placeholders})`, transactionIds);
+        console.log(`🔄 [SYSTEM POS] Reset retry count for ${affectedRows} transaction(s)`);
+        return { success: true, count: affectedRows };
       } else {
         // Reset all failed transactions (retry_count >= 5)
-        const result = localDb.prepare('UPDATE system_pos_queue SET retry_count = 0, last_error = NULL WHERE retry_count >= 5').run();
-        console.log(`🔄 [SYSTEM POS] Reset retry count for ${result.changes} failed transaction(s)`);
-        return { success: true, count: result.changes };
+        const affectedRows = await executeSystemPosUpdate('UPDATE system_pos_queue SET retry_count = 0, last_error = NULL WHERE retry_count >= 5', []);
+        console.log(`🔄 [SYSTEM POS] Reset retry count for ${affectedRows} failed transaction(s)`);
+        return { success: true, count: affectedRows };
       }
     } catch (error) {
       console.error('❌ [SYSTEM POS] Error resetting retry count:', error);
@@ -5485,35 +6364,31 @@ function createWindows(): void {
 
   // Debug: Check transaction sync status for System POS
   ipcMain.handle('debug-system-pos-transaction', async (event, transactionId: string) => {
-    if (!localDb) {
-      return { success: false, error: 'Local database not available' };
-    }
-
     try {
       // Check if transaction exists in local DB
-      const transaction = localDb.prepare('SELECT id, business_id, user_id, created_at, synced_at FROM transactions WHERE id = ?').get(transactionId) as {
+      const transaction = await executeQueryOne<{
         id: string;
         business_id: number;
         user_id: number;
         created_at: string;
         synced_at: number | null;
-      } | undefined;
+      }>('SELECT id, business_id, user_id, created_at, synced_at FROM transactions WHERE id = ?', [transactionId]);
 
-      // Check queue status
-      const queueEntry = localDb.prepare('SELECT id, transaction_id, queued_at, synced_at, retry_count, last_error FROM system_pos_queue WHERE transaction_id = ?').get(transactionId) as {
+      // Check queue status (in system_pos database)
+      const queueEntry = await executeSystemPosQueryOne<{
         id: number;
         transaction_id: string;
         queued_at: number;
         synced_at: number | null;
         retry_count: number;
         last_error: string | null;
-      } | undefined;
+      }>('SELECT id, transaction_id, queued_at, synced_at, retry_count, last_error FROM system_pos_queue WHERE transaction_id = ?', [transactionId]);
 
       return {
         success: true,
         transaction: transaction || null,
         queue: queueEntry || null,
-        existsInLocalDb: !!transaction,
+        existsInDatabase: !!transaction,
         isQueued: !!queueEntry,
         isSynced: queueEntry?.synced_at !== null,
         retryCount: queueEntry?.retry_count || 0,
@@ -5527,25 +6402,21 @@ function createWindows(): void {
 
   // Repopulate System POS queue (Force Resync)
   ipcMain.handle('repopulate-system-pos-queue', async (event, options: { days?: number } = {}) => {
-    if (!localDb) {
-      return { success: false, error: 'Local database not available' };
-    }
-
     try {
       const { days } = options;
       console.log(`🔄 [SYSTEM POS] Repopulating queue (days: ${days || 'ALL'})...`);
 
       let query = 'SELECT id, created_at FROM transactions';
-      const params: any[] = [];
+      const params: (string | number | null | boolean)[] = [];
 
       if (days && days > 0) {
         const cutoffDate = new Date();
         cutoffDate.setDate(cutoffDate.getDate() - days);
         query += ' WHERE created_at >= ?';
-        params.push(cutoffDate.toISOString()); // Assuming ISO string storage
+        params.push(toMySQLDateTime(cutoffDate));
       }
 
-      const transactions = localDb.prepare(query).all(...params) as Array<{ id: string; created_at: string }>;
+      const transactions = await executeQuery<{ id: string; created_at: string }>(query, params);
 
       if (transactions.length === 0) {
         return { success: true, count: 0, message: 'No transactions found in the specified period' };
@@ -5554,26 +6425,25 @@ function createWindows(): void {
       console.log(`🔄 [SYSTEM POS] Found ${transactions.length} transactions to process`);
 
       const now = Date.now();
-      let queuedCount = 0;
+      const queries: Array<{ sql: string; params?: (string | number | null | boolean)[] }> = [];
 
-      const insertStmt = localDb.prepare('INSERT OR IGNORE INTO system_pos_queue (transaction_id, queued_at) VALUES (?, ?)');
-      // If it exists, we want to reset it so it syncs again.
-      // We'll update regardless of whether it was inserted or not, to be safe and ensure sync.
-      const updateStmt = localDb.prepare('UPDATE system_pos_queue SET synced_at = NULL, retry_count = 0, last_error = NULL WHERE transaction_id = ?');
+      for (const tx of transactions) {
+        // Insert or ignore
+        queries.push({
+          sql: 'INSERT IGNORE INTO system_pos_queue (transaction_id, queued_at) VALUES (?, ?)',
+          params: [tx.id, now]
+        });
+        // Always reset status to ensure partial syncs are fixed
+        queries.push({
+          sql: 'UPDATE system_pos_queue SET synced_at = NULL, retry_count = 0, last_error = NULL WHERE transaction_id = ?',
+          params: [tx.id]
+        });
+      }
 
-      const queueTransaction = localDb.transaction((txs: Array<{ id: string }>) => {
-        for (const tx of txs) {
-          insertStmt.run(tx.id, now);
-          // Always reset status to ensure partial syncs are fixed
-          updateStmt.run(tx.id);
-          queuedCount++;
-        }
-      });
+      await executeSystemPosTransaction(queries);
 
-      queueTransaction(transactions);
-
-      console.log(`✅ [SYSTEM POS] Successfully queued/reset ${queuedCount} transactions`);
-      return { success: true, count: queuedCount };
+      console.log(`✅ [SYSTEM POS] Successfully queued/reset ${transactions.length} transactions`);
+      return { success: true, count: transactions.length };
     } catch (error) {
       console.error('❌ [SYSTEM POS] Error repopulating queue:', error);
       return { success: false, error: String(error) };
@@ -5587,42 +6457,62 @@ function createWindows(): void {
       console.log('❌ [IPC] printerService is null!');
       return { success: false, entries: [] };
     }
-    const entries = printerService.getPrinter1AuditLog(fromDate, toDate, limit || 100);
+    const entries = await printerService.getPrinter1AuditLog(fromDate, toDate, limit || 100);
     console.log(`📋 [IPC] get-printer1-audit-log returning ${entries.length} entries`);
     return { success: true, entries };
   });
 
   // Get unsynced printer audits (both tables)
   ipcMain.handle('localdb-get-unsynced-printer-audits', async () => {
-    if (!localDb) return { p1: [], p2: [] };
     try {
-      // Fetch ALL columns from printer audit logs (including reprint_count, is_reprint for MySQL compatibility)
-      // Note: business_id and printed_by_user_id don't exist in SQLite printer2_audit_log table, only in MySQL
-      const p1 = localDb.prepare('SELECT id, transaction_id, printer1_receipt_number, global_counter, printed_at, printed_at_epoch, reprint_count, is_reprint FROM printer1_audit_log WHERE synced_at IS NULL ORDER BY printed_at_epoch ASC LIMIT 1000').all();
-      const p2 = localDb.prepare('SELECT id, transaction_id, printer2_receipt_number, print_mode, cycle_number, global_counter, printed_at, printed_at_epoch, reprint_count, is_reprint FROM printer2_audit_log WHERE synced_at IS NULL ORDER BY printed_at_epoch ASC LIMIT 1000').all();
-      return { p1, p2 };
+      // Get unsynced printer1 audits (where synced_at IS NULL)
+      const p1Audits = await executeQuery<unknown[]>(`
+        SELECT * FROM printer1_audit_log 
+        WHERE synced_at IS NULL 
+        ORDER BY printed_at_epoch ASC
+        LIMIT 100
+      `);
+
+      // Get unsynced printer2 audits (where synced_at IS NULL)
+      const p2Audits = await executeQuery<unknown[]>(`
+        SELECT * FROM printer2_audit_log 
+        WHERE synced_at IS NULL 
+        ORDER BY printed_at_epoch ASC
+        LIMIT 100
+      `);
+
+      return { p1: p1Audits, p2: p2Audits };
     } catch (error) {
-      console.error('Error fetching unsynced printer audits:', error);
+      console.error('Error getting unsynced printer audits:', error);
       return { p1: [], p2: [] };
     }
   });
 
 
 
-
-
   // Mark printer audits as synced
   ipcMain.handle('localdb-mark-printer-audits-synced', async (event, ids: { p1Ids: number[]; p2Ids: number[] }) => {
-    if (!localDb) return { success: false };
     try {
       const now = Date.now();
+      const queries: Array<{ sql: string; params?: (string | number | null | boolean)[] }> = [];
+      
       if (ids?.p1Ids?.length) {
         const placeholders = ids.p1Ids.map(() => '?').join(',');
-        localDb.prepare(`UPDATE printer1_audit_log SET synced_at = ? WHERE id IN (${placeholders})`).run(now, ...ids.p1Ids);
+        queries.push({
+          sql: `UPDATE printer1_audit_log SET synced_at = ? WHERE id IN (${placeholders})`,
+          params: [toMySQLDateTime(now), ...ids.p1Ids]
+        });
       }
       if (ids?.p2Ids?.length) {
         const placeholders = ids.p2Ids.map(() => '?').join(',');
-        localDb.prepare(`UPDATE printer2_audit_log SET synced_at = ? WHERE id IN (${placeholders})`).run(now, ...ids.p2Ids);
+        queries.push({
+          sql: `UPDATE printer2_audit_log SET synced_at = ? WHERE id IN (${placeholders})`,
+          params: [toMySQLDateTime(now), ...ids.p2Ids]
+        });
+      }
+      
+      if (queries.length > 0) {
+        await executeTransaction(queries);
       }
       return { success: true };
     } catch (error) {
@@ -5633,84 +6523,93 @@ function createWindows(): void {
 
   // Upsert printer audit logs downloaded from cloud
   ipcMain.handle('localdb-upsert-printer-audits', async (event, payload: { printerType: 'receipt' | 'receiptize'; rows: RowArray }) => {
-    if (!localDb) return { success: false };
     if (!payload?.rows?.length) return { success: true, count: 0 };
 
     const now = Date.now();
     const { printerType, rows } = payload;
 
     try {
-      const tx = localDb.transaction((data: RowArray) => {
-        if (printerType === 'receipt') {
-          const deleteStmt = localDb!.prepare('DELETE FROM printer1_audit_log WHERE transaction_id = ? AND printer1_receipt_number = ? AND printed_at_epoch = ?');
-          const insertStmt = localDb!.prepare(`
-            INSERT INTO printer1_audit_log (transaction_id, printer1_receipt_number, global_counter, printed_at, printed_at_epoch, synced_at)
-            VALUES (?, ?, ?, ?, ?, ?)
-          `);
-          for (const row of data) {
-            const transactionId = String(row.transaction_id);
-            const receiptNumber = Number(row.printer1_receipt_number);
-            const parsePrintedAt = (value: unknown): number => {
-              if (typeof value === 'string' || typeof value === 'number') {
-                const date = new Date(value);
-                if (!Number.isNaN(date.getTime())) {
-                  return date.getTime();
-                }
-              }
-              return 0;
-            };
-            const printedAtEpoch = Number(row.printed_at_epoch ?? parsePrintedAt(row.printed_at));
-            if (!transactionId || Number.isNaN(receiptNumber) || Number.isNaN(printedAtEpoch)) {
-              continue;
-            }
-            deleteStmt.run(transactionId, receiptNumber, printedAtEpoch);
-            insertStmt.run(
-              transactionId,
-              receiptNumber,
-              typeof row.global_counter === 'number' ? row.global_counter : null,
-              row.printed_at ?? new Date(printedAtEpoch).toISOString(),
-              printedAtEpoch,
-              now
-            );
-          }
-        } else {
-          const deleteStmt = localDb!.prepare('DELETE FROM printer2_audit_log WHERE transaction_id = ? AND printer2_receipt_number = ? AND printed_at_epoch = ?');
-          const insertStmt = localDb!.prepare(`
-            INSERT INTO printer2_audit_log (transaction_id, printer2_receipt_number, print_mode, cycle_number, global_counter, printed_at, printed_at_epoch, synced_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-          `);
-          for (const row of data) {
-            const transactionId = String(row.transaction_id);
-            const receiptNumber = Number(row.printer2_receipt_number);
-            const parsePrintedAt = (value: unknown): number => {
-              if (typeof value === 'string' || typeof value === 'number') {
-                const date = new Date(value);
-                if (!Number.isNaN(date.getTime())) {
-                  return date.getTime();
-                }
-              }
-              return 0;
-            };
-            const printedAtEpoch = Number(row.printed_at_epoch ?? parsePrintedAt(row.printed_at));
-            if (!transactionId || Number.isNaN(receiptNumber) || Number.isNaN(printedAtEpoch)) {
-              continue;
-            }
-            deleteStmt.run(transactionId, receiptNumber, printedAtEpoch);
-            insertStmt.run(
-              transactionId,
-              receiptNumber,
-              row.print_mode ?? 'manual',
-              row.cycle_number ?? null,
-              typeof row.global_counter === 'number' ? row.global_counter : null,
-              row.printed_at ?? new Date(printedAtEpoch).toISOString(),
-              printedAtEpoch,
-              now
-            );
+      const queries: Array<{ sql: string; params?: (string | number | null | boolean)[] }> = [];
+      
+      const parsePrintedAt = (value: unknown): number => {
+        if (typeof value === 'string' || typeof value === 'number') {
+          const date = new Date(value);
+          if (!Number.isNaN(date.getTime())) {
+            return date.getTime();
           }
         }
-      });
+        return 0;
+      };
 
-      tx(rows);
+      if (printerType === 'receipt') {
+        for (const row of rows) {
+          const transactionId = String(row.transaction_id);
+          const receiptNumber = Number(row.printer1_receipt_number);
+          const printedAtEpoch = Number(row.printed_at_epoch ?? parsePrintedAt(row.printed_at));
+          if (!transactionId || Number.isNaN(receiptNumber) || Number.isNaN(printedAtEpoch)) {
+            continue;
+          }
+          
+          // Delete existing record
+          queries.push({
+            sql: 'DELETE FROM printer1_audit_log WHERE transaction_id = ? AND printer1_receipt_number = ? AND printed_at_epoch = ?',
+            params: [transactionId, receiptNumber, printedAtEpoch]
+          });
+          
+          // Insert new record
+          queries.push({
+            sql: `
+              INSERT INTO printer1_audit_log (transaction_id, printer1_receipt_number, global_counter, printed_at, printed_at_epoch, synced_at)
+              VALUES (?, ?, ?, ?, ?, ?)
+            `,
+            params: [
+              transactionId,
+              receiptNumber,
+              typeof row.global_counter === 'number' ? row.global_counter : null,
+              row.printed_at ? toMySQLDateTime(typeof row.printed_at === 'number' || typeof row.printed_at === 'string' ? row.printed_at : new Date(printedAtEpoch)) : toMySQLDateTime(new Date(printedAtEpoch)),
+              printedAtEpoch,
+              now
+            ]
+          });
+        }
+      } else {
+        for (const row of rows) {
+          const transactionId = String(row.transaction_id);
+          const receiptNumber = Number(row.printer2_receipt_number);
+          const printedAtEpoch = Number(row.printed_at_epoch ?? parsePrintedAt(row.printed_at));
+          if (!transactionId || Number.isNaN(receiptNumber) || Number.isNaN(printedAtEpoch)) {
+            continue;
+          }
+          
+          // Delete existing record
+          queries.push({
+            sql: 'DELETE FROM printer2_audit_log WHERE transaction_id = ? AND printer2_receipt_number = ? AND printed_at_epoch = ?',
+            params: [transactionId, receiptNumber, printedAtEpoch]
+          });
+          
+          // Insert new record
+          queries.push({
+            sql: `
+              INSERT INTO printer2_audit_log (transaction_id, printer2_receipt_number, print_mode, cycle_number, global_counter, printed_at, printed_at_epoch, synced_at)
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            `,
+            params: [
+              transactionId,
+              receiptNumber,
+              typeof row.print_mode === 'string' ? row.print_mode : 'manual',
+              typeof row.cycle_number === 'number' ? row.cycle_number : null,
+              typeof row.global_counter === 'number' ? row.global_counter : null,
+              row.printed_at ? toMySQLDateTime(typeof row.printed_at === 'number' || typeof row.printed_at === 'string' ? row.printed_at : new Date(printedAtEpoch)) : toMySQLDateTime(new Date(printedAtEpoch)),
+              printedAtEpoch,
+              now
+            ]
+          });
+        }
+      }
+
+      if (queries.length > 0) {
+        await executeTransaction(queries);
+      }
       return { success: true, count: rows.length };
     } catch (error) {
       console.error('Error upserting printer audits:', error);
@@ -5720,10 +6619,8 @@ function createWindows(): void {
 
   // Get all printer daily counters
   ipcMain.handle('localdb-get-all-printer-daily-counters', async () => {
-    if (!localDb) return [];
     try {
-      const stmt = localDb.prepare('SELECT printer_type, business_id, date, counter FROM printer_daily_counters ORDER BY business_id, printer_type, date');
-      return stmt.all() as Array<{ printer_type: string; business_id: number; date: string; counter: number }>;
+      return await executeQuery<{ printer_type: string; business_id: number; date: string; counter: number }>('SELECT printer_type, business_id, date, counter FROM printer_daily_counters ORDER BY business_id, printer_type, date');
     } catch (error) {
       console.error('Error getting printer daily counters:', error);
       return [];
@@ -5734,29 +6631,32 @@ function createWindows(): void {
 
 
   ipcMain.handle('localdb-upsert-printer-daily-counters', async (event, counters: Array<{ printer_type: string; business_id: number; date: string; counter: number }>) => {
-    if (!localDb) return { success: false };
     if (!Array.isArray(counters) || counters.length === 0) {
       return { success: true, count: 0 };
     }
 
     try {
-      const tx = localDb.transaction((rows: Array<{ printer_type: string; business_id: number; date: string; counter: number }>) => {
-        const stmt = localDb!.prepare(`
-          INSERT INTO printer_daily_counters (printer_type, business_id, date, counter, last_reset_at)
-          VALUES (?, ?, ?, ?, ?)
-          ON CONFLICT(printer_type, business_id, date)
-          DO UPDATE SET counter = excluded.counter, last_reset_at = excluded.last_reset_at
-        `);
+      const now = Date.now();
+      const queries = counters
+        .filter(row => row?.printer_type && row?.date)
+        .map(row => ({
+          sql: `
+            INSERT INTO printer_daily_counters (printer_type, business_id, date, counter, last_reset_at)
+            VALUES (?, ?, ?, ?, ?)
+            ON DUPLICATE KEY UPDATE counter = VALUES(counter), last_reset_at = VALUES(last_reset_at)
+          `,
+          params: [
+            row.printer_type,
+            Number(row.business_id ?? 0),
+            row.date,
+            Number(row.counter ?? 0),
+            now
+          ]
+        }));
 
-        const now = Date.now();
-        for (const row of rows) {
-          if (!row?.printer_type || !row?.date) continue;
-          const counterValue = Number(row.counter ?? 0);
-          stmt.run(row.printer_type, Number(row.business_id ?? 0), row.date, counterValue, now);
-        }
-      });
-
-      tx(counters);
+      if (queries.length > 0) {
+        await executeTransaction(queries);
+      }
       return { success: true, count: counters.length };
     } catch (error) {
       console.error('Error upserting printer counters:', error);
@@ -5765,13 +6665,11 @@ function createWindows(): void {
   });
 
   ipcMain.handle('localdb-reset-printer-daily-counters', async (event, businessId: number) => {
-    if (!localDb) return { success: false };
     try {
-      const stmt = localDb.prepare(`
+      await executeUpdate(`
         DELETE FROM printer_daily_counters
         WHERE business_id = ?
-      `);
-      stmt.run(businessId);
+      `, [businessId]);
       console.log(`🧹 [RESET] Cleared printer_daily_counters for business ${businessId}`);
       return { success: true };
     } catch (error) {
@@ -5782,15 +6680,15 @@ function createWindows(): void {
 
   // Mark transaction as failed (for transactions table)
   ipcMain.handle('localdb-mark-transaction-failed', async (event, transactionId: string) => {
-    if (!localDb) return { success: false };
     try {
       const now = Date.now();
-      const stmt = localDb.prepare(`
+      // CRITICAL FIX: Use uuid_id instead of id, because smart sync passes UUID strings
+      await executeUpdate(`
         UPDATE transactions 
         SET sync_status = 'failed', sync_attempts = sync_attempts + 1, last_sync_attempt = ?
-        WHERE id = ?
-      `);
-      stmt.run(now, transactionId);
+        WHERE uuid_id = ?
+      `, [now, transactionId]);
+      console.log(`⚠️ [MARK FAILED] Marked transaction ${transactionId} as failed`);
       return { success: true };
     } catch (error) {
       console.error('Error marking transaction as failed:', error);
@@ -5799,14 +6697,19 @@ function createWindows(): void {
   });
 
   ipcMain.handle('localdb-queue-offline-refund', async (event, refundData: UnknownRecord) => {
-    if (!localDb) return { success: false, error: 'Database not available' };
     try {
-      const stmt = localDb.prepare(`
-        INSERT INTO offline_refunds (refund_data, created_at, sync_status, sync_attempts)
-        VALUES (?, ?, 'pending', 0)
-      `);
-      const result = stmt.run(JSON.stringify(refundData), Date.now());
-      return { success: true, offlineRefundId: Number(result.lastInsertRowid) };
+      const connection = await getConnection();
+      try {
+        // Convert timestamp to MySQL DATETIME format (YYYY-MM-DD HH:MM:SS)
+        const mysqlDateTime = new Date().toISOString().slice(0, 19).replace('T', ' ');
+        const [result] = await connection.query(`
+          INSERT INTO offline_refunds (refund_data, created_at, sync_status, sync_attempts)
+          VALUES (?, ?, 'pending', 0)
+        `, [JSON.stringify(refundData), mysqlDateTime]) as any;
+        return { success: true, offlineRefundId: result.insertId };
+      } finally {
+        connection.release();
+      }
     } catch (error) {
       console.error('Error queueing offline refund:', error);
       return { success: false, error: String(error) };
@@ -5814,31 +6717,35 @@ function createWindows(): void {
   });
 
   ipcMain.handle('localdb-get-pending-refunds', async () => {
-    if (!localDb) return [];
     try {
-      const stmt = localDb.prepare(`
+      return await executeQuery(`
         SELECT id, refund_data, created_at, sync_attempts, last_sync_attempt
         FROM offline_refunds
         WHERE sync_status = 'pending'
         ORDER BY created_at ASC
         LIMIT 50
       `);
-      return stmt.all();
     } catch (error) {
+      // Table doesn't exist - return empty array instead of error
+      const err = error as { code?: string; errno?: number };
+      if (err.code === 'ER_NO_SUCH_TABLE' || err.errno === 1146) {
+        console.warn('⚠️ [REFUNDS] offline_refunds table does not exist - returning empty array');
+        return [];
+      }
       console.error('Error getting pending refunds:', error);
       return [];
     }
   });
 
   ipcMain.handle('localdb-mark-refund-synced', async (event, offlineRefundId: number) => {
-    if (!localDb) return { success: false };
     try {
-      const stmt = localDb.prepare(`
+      // Convert timestamp to MySQL DATETIME format (YYYY-MM-DD HH:MM:SS)
+      const mysqlDateTime = new Date().toISOString().slice(0, 19).replace('T', ' ');
+      await executeUpdate(`
         UPDATE offline_refunds
         SET sync_status = 'synced', last_sync_attempt = ?
         WHERE id = ?
-      `);
-      stmt.run(Date.now(), offlineRefundId);
+      `, [mysqlDateTime, offlineRefundId]);
       return { success: true };
     } catch (error) {
       console.error('Error marking refund as synced:', error);
@@ -5847,14 +6754,14 @@ function createWindows(): void {
   });
 
   ipcMain.handle('localdb-mark-refund-failed', async (event, offlineRefundId: number) => {
-    if (!localDb) return { success: false };
     try {
-      const stmt = localDb.prepare(`
+      // Convert timestamp to MySQL DATETIME format (YYYY-MM-DD HH:MM:SS)
+      const mysqlDateTime = new Date().toISOString().slice(0, 19).replace('T', ' ');
+      await executeUpdate(`
         UPDATE offline_refunds
         SET sync_attempts = sync_attempts + 1, last_sync_attempt = ?
         WHERE id = ?
-      `);
-      stmt.run(Date.now(), offlineRefundId);
+      `, [mysqlDateTime, offlineRefundId]);
       return { success: true };
     } catch (error) {
       console.error('Error marking refund as failed:', error);
@@ -6066,14 +6973,16 @@ ipcMain.handle('print-receipt', async (event, data: ReceiptPrintData) => {
         : undefined;
     let printerConfig: PrinterConfigRow | null = null;
 
-    if (data.printerType && localDb) {
+    if (data.printerType) {
       console.log('🔍 Resolving printer configuration for type:', data.printerType);
       try {
-        const allConfigs = localDb.prepare('SELECT * FROM printer_configs').all() as PrinterConfigRow[];
+        const allConfigs = await executeQuery<PrinterConfigRow>('SELECT * FROM printer_configs');
         console.log('📋 All printer configs in database:', allConfigs);
 
-        printerConfig = (localDb.prepare('SELECT * FROM printer_configs WHERE printer_type = ?')
-          .get(data.printerType) as PrinterConfigRow | undefined) ?? null;
+        printerConfig = await executeQueryOne<PrinterConfigRow>(
+          'SELECT * FROM printer_configs WHERE printer_type = ?',
+          [data.printerType]
+        ) ?? null;
         console.log('📋 Printer config query result for type', data.printerType, ':', printerConfig);
 
         if (!printerName && printerConfig && printerConfig.system_printer_name) {
@@ -6154,9 +7063,12 @@ ipcMain.handle('print-receipt', async (event, data: ReceiptPrintData) => {
 
     // Fetch business name from database if business_id is provided
     let businessName = 'MARVIANO MADIUN 1'; // Default fallback
-    if (data.business_id && localDb) {
+    if (data.business_id) {
       try {
-        const business = localDb.prepare('SELECT name FROM businesses WHERE id = ?').get(data.business_id) as { name: string } | undefined;
+        const business = await executeQueryOne<{ name: string }>(
+          'SELECT name FROM businesses WHERE id = ?',
+          [data.business_id]
+        );
         if (business) {
           businessName = business.name;
           console.log('✅ Fetched business name:', businessName, 'for business_id:', data.business_id);
@@ -6241,10 +7153,10 @@ ipcMain.handle('print-receipt', async (event, data: ReceiptPrintData) => {
   }
 });
 
-// IPC handler for printing labels
-ipcMain.handle('print-label', async (event, data: LabelPrintData) => {
+// Execute single label print (used by queue)
+async function executeLabelPrint(data: LabelPrintData): Promise<{ success: boolean; error?: string }> {
   try {
-    console.log('🏷️ Printing label - Full data received:', JSON.stringify(data, null, 2));
+    console.log('🏷️ [EXECUTE] Printing label - Full data received:', JSON.stringify(data, null, 2));
 
     let printerName = data.printerName;
 
@@ -6255,24 +7167,10 @@ ipcMain.handle('print-label', async (event, data: LabelPrintData) => {
         return { success: false, error: 'No printer specified.' };
       }
 
-      if (!localDb) {
-        console.error('❌ Local database not available!');
-        return { success: false, error: 'Database not available.' };
-      }
-
       console.log('🔍 No printer name specified, fetching from saved config for printer type:', data.printerType);
 
-      // First, list all available configs for debugging
       try {
-        const allConfigs = localDb.prepare('SELECT * FROM printer_configs').all() as PrinterConfigRow[];
-        console.log('📋 All printer configs in database:', JSON.stringify(allConfigs, null, 2));
-      } catch (e) {
-        console.error('Failed to list all configs:', e);
-      }
-
-      try {
-        const config = localDb.prepare('SELECT * FROM printer_configs WHERE printer_type = ?').get(data.printerType) as PrinterConfigRow | undefined;
-        console.log('📋 Printer config query result for type', data.printerType, ':', JSON.stringify(config, null, 2));
+        const config = await executeQueryOne<PrinterConfigRow>('SELECT * FROM printer_configs WHERE printer_type = ?', [data.printerType]);
 
         if (!config) {
           console.log('⚠️ No saved printer config found for type:', data.printerType);
@@ -6297,13 +7195,8 @@ ipcMain.handle('print-label', async (event, data: LabelPrintData) => {
       return { success: false, error: 'No printer specified.' };
     }
 
-    // Close existing print window if any
-    if (printWindow) {
-      printWindow.close();
-    }
-
-    // Create new print window
-    printWindow = new BrowserWindow({
+    // Create a new print window for this job (don't reuse global)
+    const jobPrintWindow = new BrowserWindow({
       width: 400,
       height: 600,
       show: false,
@@ -6316,7 +7209,7 @@ ipcMain.handle('print-label', async (event, data: LabelPrintData) => {
     // Generate label HTML
     const htmlContent = generateLabelHTML(data);
 
-    await printWindow.loadURL(`data:text/html,${encodeURIComponent(htmlContent)}`);
+    await jobPrintWindow.loadURL(`data:text/html,${encodeURIComponent(htmlContent)}`);
 
     const printOptions = {
       silent: true,
@@ -6325,16 +7218,15 @@ ipcMain.handle('print-label', async (event, data: LabelPrintData) => {
     };
 
     return new Promise((resolve) => {
-      const currentWindow = printWindow;
       setTimeout(() => {
         try {
-          if (!currentWindow || currentWindow.isDestroyed()) {
+          if (!jobPrintWindow || jobPrintWindow.isDestroyed()) {
             console.error('❌ Print window not available when attempting to print label');
             resolve({ success: false, error: 'Print window unavailable' });
             return;
           }
 
-          currentWindow.webContents.print(printOptions, (success: boolean, errorType: string) => {
+          jobPrintWindow.webContents.print(printOptions, (success: boolean, errorType: string) => {
             if (success) {
               console.log('✅ Label sent successfully');
               resolve({ success: true });
@@ -6343,38 +7235,30 @@ ipcMain.handle('print-label', async (event, data: LabelPrintData) => {
               resolve({ success: false, error: errorType });
             }
             setTimeout(() => {
-              if (currentWindow && !currentWindow.isDestroyed()) {
-                currentWindow.close();
-              }
-              if (printWindow === currentWindow) {
-                printWindow = null;
+              if (jobPrintWindow && !jobPrintWindow.isDestroyed()) {
+                jobPrintWindow.close();
               }
             }, 5000);
           });
         } catch (err) {
           console.error('❌ Exception during webContents.print:', err);
           resolve({ success: false, error: String(err) });
-          setTimeout(() => {
-            if (currentWindow && !currentWindow.isDestroyed()) {
-              currentWindow.close();
-            }
-            if (printWindow === currentWindow) {
-              printWindow = null;
-            }
-          }, 5000);
+          if (jobPrintWindow && !jobPrintWindow.isDestroyed()) {
+            jobPrintWindow.close();
+          }
         }
       }, 500);
     });
   } catch (error) {
-    console.error('❌ Error in print-label handler:', error);
+    console.error('❌ Error in executeLabelPrint:', error);
     return { success: false, error: String(error) };
   }
-});
+}
 
-// IPC handler for batch printing labels (multiple labels in one print job)
-ipcMain.handle('print-labels-batch', async (event, data: { labels: LabelPrintData[]; printerName?: string; printerType?: string }) => {
+// Execute batch labels print (used by queue)
+async function executeLabelsBatchPrint(data: { labels: LabelPrintData[]; printerName?: string; printerType?: string }): Promise<{ success: boolean; error?: string }> {
   try {
-    console.log('🏷️ Printing labels batch - Count:', data.labels?.length || 0);
+    console.log('🏷️ [EXECUTE] Printing labels batch - Count:', data.labels?.length || 0);
 
     if (!data.labels || !Array.isArray(data.labels) || data.labels.length === 0) {
       console.error('❌ No labels provided for batch printing');
@@ -6390,16 +7274,10 @@ ipcMain.handle('print-labels-batch', async (event, data: { labels: LabelPrintDat
         return { success: false, error: 'No printer specified.' };
       }
 
-      if (!localDb) {
-        console.error('❌ Local database not available!');
-        return { success: false, error: 'Database not available.' };
-      }
-
       console.log('🔍 No printer name specified, fetching from saved config for printer type:', data.printerType);
 
       try {
-        const config = localDb.prepare('SELECT * FROM printer_configs WHERE printer_type = ?').get(data.printerType) as PrinterConfigRow | undefined;
-        console.log('📋 Printer config query result for type', data.printerType, ':', JSON.stringify(config, null, 2));
+        const config = await executeQueryOne<PrinterConfigRow>('SELECT * FROM printer_configs WHERE printer_type = ?', [data.printerType]);
 
         if (!config) {
           console.log('⚠️ No saved printer config found for type:', data.printerType);
@@ -6424,13 +7302,8 @@ ipcMain.handle('print-labels-batch', async (event, data: { labels: LabelPrintDat
       return { success: false, error: 'No printer specified.' };
     }
 
-    // Close existing print window if any
-    if (printWindow) {
-      printWindow.close();
-    }
-
-    // Create new print window
-    printWindow = new BrowserWindow({
+    // Create a new print window for this job (don't reuse global)
+    const jobPrintWindow = new BrowserWindow({
       width: 400,
       height: 600,
       show: false,
@@ -6443,7 +7316,7 @@ ipcMain.handle('print-labels-batch', async (event, data: { labels: LabelPrintDat
     // Generate batch label HTML
     const htmlContent = generateMultipleLabelsHTML(data.labels);
 
-    await printWindow.loadURL(`data:text/html,${encodeURIComponent(htmlContent)}`);
+    await jobPrintWindow.loadURL(`data:text/html,${encodeURIComponent(htmlContent)}`);
 
     const printOptions = {
       silent: true,
@@ -6452,16 +7325,15 @@ ipcMain.handle('print-labels-batch', async (event, data: { labels: LabelPrintDat
     };
 
     return new Promise((resolve) => {
-      const currentWindow = printWindow;
       setTimeout(() => {
         try {
-          if (!currentWindow || currentWindow.isDestroyed()) {
+          if (!jobPrintWindow || jobPrintWindow.isDestroyed()) {
             console.error('❌ Print window not available when attempting to print labels batch');
             resolve({ success: false, error: 'Print window unavailable' });
             return;
           }
 
-          currentWindow.webContents.print(printOptions, (success: boolean, errorType: string) => {
+          jobPrintWindow.webContents.print(printOptions, (success: boolean, errorType: string) => {
             if (success) {
               console.log(`✅ Batch labels (${data.labels.length} labels) sent successfully`);
               resolve({ success: true });
@@ -6470,32 +7342,64 @@ ipcMain.handle('print-labels-batch', async (event, data: { labels: LabelPrintDat
               resolve({ success: false, error: errorType });
             }
             setTimeout(() => {
-              if (currentWindow && !currentWindow.isDestroyed()) {
-                currentWindow.close();
-              }
-              if (printWindow === currentWindow) {
-                printWindow = null;
+              if (jobPrintWindow && !jobPrintWindow.isDestroyed()) {
+                jobPrintWindow.close();
               }
             }, 5000);
           });
         } catch (err) {
           console.error('❌ Exception during webContents.print:', err);
           resolve({ success: false, error: String(err) });
-          setTimeout(() => {
-            if (currentWindow && !currentWindow.isDestroyed()) {
-              currentWindow.close();
-            }
-            if (printWindow === currentWindow) {
-              printWindow = null;
-            }
-          }, 5000);
+          if (jobPrintWindow && !jobPrintWindow.isDestroyed()) {
+            jobPrintWindow.close();
+          }
         }
       }, 500);
     });
   } catch (error) {
-    console.error('❌ Error in print-labels-batch handler:', error);
+    console.error('❌ Error in executeLabelsBatchPrint:', error);
     return { success: false, error: String(error) };
   }
+}
+
+// IPC handler for printing labels (queued)
+ipcMain.handle('print-label', async (event, data: LabelPrintData) => {
+  return new Promise((resolve, reject) => {
+    console.log('📋 [PRINT QUEUE] Adding label print job to queue');
+    printQueue.push({
+      type: 'label',
+      data,
+      resolve,
+      reject
+    });
+    // Start processing queue if not already processing
+    processPrintQueue().catch(err => {
+      console.error('❌ [PRINT QUEUE] Error processing queue:', err);
+    });
+  });
+});
+
+// IPC handler for batch printing labels (queued)
+ipcMain.handle('print-labels-batch', async (event, data: { labels: LabelPrintData[]; printerName?: string; printerType?: string }) => {
+  // Validate input first (before queuing)
+  if (!data.labels || !Array.isArray(data.labels) || data.labels.length === 0) {
+    console.error('❌ No labels provided for batch printing');
+    return { success: false, error: 'No labels provided for batch printing.' };
+  }
+
+  return new Promise((resolve, reject) => {
+    console.log('📋 [PRINT QUEUE] Adding labels batch print job to queue');
+    printQueue.push({
+      type: 'labels-batch',
+      data,
+      resolve,
+      reject
+    });
+    // Start processing queue if not already processing
+    processPrintQueue().catch(err => {
+      console.error('❌ [PRINT QUEUE] Error processing queue:', err);
+    });
+  });
 });
 
 // Get logo as base64 for embedding in receipt
@@ -7350,8 +8254,8 @@ function generateShiftBreakdownHTML(
           <div style="font-size: 7pt; color: #555;">${transactionLabel} · ${platformLabel}</div>
         </td>
         <td style="text-align: right; padding: 0.3mm 0;">${quantity}</td>
-        <td style="text-align: right; padding: 0.3mm 0;">${isBundleItem ? '-' : (isNaN(unitPrice) ? '0' : unitPrice.toLocaleString('id-ID'))}</td>
-        <td style="text-align: right; padding: 0.3mm 0;">${isBundleItem ? '-' : (isNaN(baseSubtotal) ? '0' : baseSubtotal.toLocaleString('id-ID'))}</td>
+        <td style="text-align: right; padding: 0.3mm 0;">${isBundleItem ? '-' : (isNaN(unitPrice) ? '0' : Number(unitPrice).toLocaleString('id-ID'))}</td>
+        <td style="text-align: right; padding: 0.3mm 0;">${isBundleItem ? '-' : (isNaN(baseSubtotal) ? '0' : Number(baseSubtotal).toLocaleString('id-ID'))}</td>
       </tr>
       `;
       } catch (productError) {
@@ -7361,8 +8265,11 @@ function generateShiftBreakdownHTML(
     }).join('');
 
     const regularProducts = report.productSales.filter((p) => !p.is_bundle_item);
-    const totalProductQty = report.productSales.reduce((sum, p) => sum + p.total_quantity, 0);
-    const totalProductBaseSubtotal = regularProducts.reduce((sum, p) => sum + (p.base_subtotal ?? (p.total_subtotal - p.customization_subtotal)), 0);
+    const totalProductQty = report.productSales.reduce((sum, p) => sum + Number(p.total_quantity || 0), 0);
+    const totalProductBaseSubtotal = regularProducts.reduce((sum, p) => {
+      const baseSubtotal = p.base_subtotal ?? (Number(p.total_subtotal || 0) - Number(p.customization_subtotal || 0));
+      return sum + Number(baseSubtotal || 0);
+    }, 0);
 
     const customizationRows = report.customizationSales.map(item => {
       try {
@@ -7382,7 +8289,7 @@ function generateShiftBreakdownHTML(
           <div style="font-size: 7pt; color: #555;">${item.customization_name || 'N/A'}</div>
         </td>
         <td style="text-align: right; padding: 0.3mm 0;">${isNaN(quantity) ? '0' : quantity}</td>
-        <td style="text-align: right; padding: 0.3mm 0;">${isNaN(revenue) ? '0' : revenue.toLocaleString('id-ID')}</td>
+        <td style="text-align: right; padding: 0.3mm 0;">${isNaN(revenue) ? '0' : Number(revenue).toLocaleString('id-ID')}</td>
       </tr>
     `;
       } catch (customizationError) {
@@ -7391,30 +8298,59 @@ function generateShiftBreakdownHTML(
       }
     }).join('');
 
-    const totalCustomizationUnits = report.customizationSales.reduce((sum, item) => sum + item.total_quantity, 0);
-    const totalCustomizationRevenue = report.customizationSales.reduce((sum, item) => sum + item.total_revenue, 0);
+    const totalCustomizationUnits = report.customizationSales.reduce((sum, item) => sum + Number(item.total_quantity || 0), 0);
+    const totalCustomizationRevenue = report.customizationSales.reduce((sum, item) => sum + Number(item.total_revenue || 0), 0);
 
-    const paymentRows = report.paymentBreakdown.map(payment => `
+    const paymentRows = report.paymentBreakdown.map(payment => {
+      const amount = Number(payment.total_amount || 0);
+      const count = Number(payment.transaction_count || 0);
+      return `
       <tr>
         <td style="text-align: left; padding: 0.3mm 0;">${payment.payment_method_name || 'N/A'}</td>
-        <td style="text-align: right; padding: 0.3mm 0;">${payment.transaction_count}</td>
-        <td style="text-align: right; padding: 0.3mm 0;">${(payment.total_amount || 0).toLocaleString('id-ID')}</td>
+        <td style="text-align: right; padding: 0.3mm 0;">${count}</td>
+        <td style="text-align: right; padding: 0.3mm 0;">${amount.toLocaleString('id-ID')}</td>
       </tr>
-    `).join('');
+    `;
+    }).join('');
 
-    const totalPaymentCount = report.paymentBreakdown.reduce((sum: number, p) => sum + p.transaction_count, 0);
-    const totalPaymentAmount = report.paymentBreakdown.reduce((sum: number, p) => sum + (p.total_amount || 0), 0);
+    const totalPaymentCount = report.paymentBreakdown.reduce((sum: number, p) => sum + Number(p.transaction_count || 0), 0);
+    const totalPaymentAmount = report.paymentBreakdown.reduce((sum: number, p) => sum + Number(p.total_amount || 0), 0);
+    
+    // #region agent log
+    try{fs.appendFileSync('c:\\Code\\marviano-pos\\.cursor\\debug.log',JSON.stringify({location:'main.ts:7567',message:'Payment total calculated in template',data:{totalPaymentAmount,statisticsTotalAmount:report.statistics.total_amount,paymentBreakdownCount:report.paymentBreakdown.length,paymentBreakdown:report.paymentBreakdown.map((p:any)=>({name:p.payment_method_name,count:p.transaction_count,amount:p.total_amount}))},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'F'})+'\n',{flag:'a'});}catch(e){}
+    // #endregion
 
-    const category2Rows = (report.category2Breakdown || []).map((category2: { category2_name: string; total_quantity: number; total_amount: number }) => `
+    const category2Data = report.category2Breakdown || [];
+    // #region agent log
+    try{fs.appendFileSync('c:\\Code\\marviano-pos\\.cursor\\debug.log',JSON.stringify({location:'main.ts:7633',message:'Category2 in template',data:{category2Length:category2Data.length,category2Data:category2Data.slice(0,3).map((c:any)=>({name:c.category2_name,quantity:c.total_quantity,amount:c.total_amount}))},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'F'})+'\n',{flag:'a'});}catch(e){}
+    // #endregion
+    
+    const category2Rows = category2Data.map((category2: { category2_name: string; total_quantity: number; total_amount: number }) => {
+      const quantity = Number(category2.total_quantity || 0);
+      const amount = Number(category2.total_amount || 0);
+      // #region agent log
+      try{fs.appendFileSync('c:\\Code\\marviano-pos\\.cursor\\debug.log',JSON.stringify({location:'main.ts:7640',message:'Category2 row mapping',data:{category2Name:category2.category2_name,quantity,amount,rawQuantity:category2.total_quantity,rawAmount:category2.total_amount},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'I'})+'\n',{flag:'a'});}catch(e){}
+      // #endregion
+      return `
       <tr>
         <td style="text-align: left; padding: 0.3mm 0;">${category2.category2_name || 'N/A'}</td>
-        <td style="text-align: right; padding: 0.3mm 0;">${category2.total_quantity || 0}</td>
-        <td style="text-align: right; padding: 0.3mm 0;">${(category2.total_amount || 0).toLocaleString('id-ID')}</td>
+        <td style="text-align: right; padding: 0.3mm 0;">${quantity}</td>
+        <td style="text-align: right; padding: 0.3mm 0;">${amount.toLocaleString('id-ID')}</td>
       </tr>
-    `).join('');
+    `;
+    }).join('');
+    
+    // #region agent log
+    try{fs.appendFileSync('c:\\Code\\marviano-pos\\.cursor\\debug.log',JSON.stringify({location:'main.ts:7650',message:'Category2 rows generated',data:{category2RowsLength:category2Rows.length,category2RowsPreview:category2Rows.substring(0,200),isEmpty:!category2Rows},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'J'})+'\n',{flag:'a'});}catch(e){}
+    // #endregion
 
-    const totalCategory2Quantity = (report.category2Breakdown || []).reduce((sum: number, c: { total_quantity: number }) => sum + (c.total_quantity || 0), 0);
-    const totalCategory2Amount = (report.category2Breakdown || []).reduce((sum: number, c: { total_amount: number }) => sum + (c.total_amount || 0), 0);
+    const totalCategory2Quantity = (report.category2Breakdown || []).reduce((sum: number, c: { total_quantity: number }) => sum + Number(c.total_quantity || 0), 0);
+    const totalCategory2Amount = (report.category2Breakdown || []).reduce((sum: number, c: { total_amount: number }) => sum + Number(c.total_amount || 0), 0);
+    
+    // #region agent log
+    try{fs.appendFileSync('c:\\Code\\marviano-pos\\.cursor\\debug.log',JSON.stringify({location:'main.ts:7623',message:'Category2 total calculated in template',data:{totalCategory2Amount,statisticsTotalAmount:report.statistics.total_amount,category2BreakdownCount:(report.category2Breakdown||[]).length},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'F'})+'\n',{flag:'a'});}catch(e){}
+    // #endregion
+    
     const formattedTotalDiscount = report.statistics.total_discount > 0
       ? formatCurrency(-Math.abs(report.statistics.total_discount))
       : formatCurrency(0);
@@ -7503,7 +8439,7 @@ function generateShiftBreakdownHTML(
             <td>TOTAL</td>
             <td class="right">${totalProductQty}</td>
             <td class="right">-</td>
-            <td class="right">${totalProductBaseSubtotal.toLocaleString('id-ID')}</td>
+            <td class="right">${Number(totalProductBaseSubtotal).toLocaleString('id-ID')}</td>
           </tr>
         </tbody>
       </table>
@@ -7524,7 +8460,7 @@ function generateShiftBreakdownHTML(
           <tr class="total-row">
             <td>TOTAL</td>
             <td class="right">${totalPaymentCount}</td>
-            <td class="right">${totalPaymentAmount.toLocaleString('id-ID')}</td>
+            <td class="right">${Number(totalPaymentAmount).toLocaleString('id-ID')}</td>
           </tr>
         </tbody>
       </table>
@@ -7545,7 +8481,7 @@ function generateShiftBreakdownHTML(
           <tr class="total-row">
             <td>TOTAL</td>
             <td class="right">${totalCategory2Quantity}</td>
-            <td class="right">${totalCategory2Amount.toLocaleString('id-ID')}</td>
+            <td class="right">${Number(totalCategory2Amount).toLocaleString('id-ID')}</td>
           </tr>
         </tbody>
       </table>
@@ -7566,7 +8502,7 @@ function generateShiftBreakdownHTML(
           <tr class="total-row">
             <td>TOTAL</td>
             <td class="right">${totalCustomizationUnits}</td>
-            <td class="right">${totalCustomizationRevenue.toLocaleString('id-ID')}</td>
+            <td class="right">${Number(totalCustomizationRevenue).toLocaleString('id-ID')}</td>
           </tr>
         </tbody>
       </table>
@@ -7596,11 +8532,7 @@ function generateShiftBreakdownHTML(
         </div>
         <div class="summary-line">
           <span class="summary-label">Total Transaksi:</span>
-          <span class="summary-value">${report.statistics.total_amount.toLocaleString('id-ID')}</span>
-        </div>
-        <div class="summary-line">
-          <span class="summary-label">Topping Units:</span>
-          <span class="summary-value">${totalCustomizationUnits}</span>
+          <span class="summary-value">${Number(report.statistics.total_amount || 0).toLocaleString('id-ID')}</span>
         </div>
         <div class="summary-line">
           <span class="summary-label">Total Topping:</span>
@@ -7865,46 +8797,44 @@ ipcMain.handle('print-shift-breakdown', async (event, data: PrintableShiftReport
     console.log('🔍 [SHIFT PRINT] Looking up printer config for type:', printerType);
 
     // Get printer name from config
-    if (localDb) {
-      try {
-        // First, list ALL printer configs for debugging
-        const allConfigs = localDb.prepare('SELECT * FROM printer_configs').all() as PrinterConfigRow[];
-        console.log('📋 [SHIFT PRINT] All printer configs in database:');
-        allConfigs.forEach((cfg: PrinterConfigRow) => {
-          console.log(`   - Type: ${cfg.printer_type}, Name: "${cfg.system_printer_name}"`);
-        });
+    try {
+      // First, list ALL printer configs for debugging
+      const allConfigs = await executeQuery<PrinterConfigRow>('SELECT * FROM printer_configs');
+      console.log('📋 [SHIFT PRINT] All printer configs in database:');
+      allConfigs.forEach((cfg: PrinterConfigRow) => {
+        console.log(`   - Type: ${cfg.printer_type}, Name: "${cfg.system_printer_name}"`);
+      });
 
-        const config = localDb.prepare('SELECT * FROM printer_configs WHERE printer_type = ?').get(printerType) as PrinterConfigRow | undefined;
-        console.log('📋 [SHIFT PRINT] Printer config query result:', config ? JSON.stringify(config) : 'null');
+      const config = await executeQueryOne<PrinterConfigRow>(
+        'SELECT * FROM printer_configs WHERE printer_type = ?',
+        [printerType]
+      );
+      console.log('📋 [SHIFT PRINT] Printer config query result:', config ? JSON.stringify(config) : 'null');
 
-        if (config && config.system_printer_name) {
-          printerName = config.system_printer_name.trim();
-          console.log('✅ [SHIFT PRINT] Found printer config:', printerName);
+      if (config && config.system_printer_name) {
+        printerName = config.system_printer_name.trim();
+        console.log('✅ [SHIFT PRINT] Found printer config:', printerName);
 
-          // Validate printer name is not empty after trim
-          if (!printerName || printerName.length === 0) {
-            console.error('❌ [SHIFT PRINT] Printer name is empty after trim');
-            return {
-              success: false,
-              error: 'Printer name is empty. Please reconfigure your printer in Settings → Printer Selector.'
-            };
-          }
-        } else {
-          console.error('❌ [SHIFT PRINT] No printer config found or system_printer_name is null');
-          console.log('   - Config exists:', !!config);
-          console.log('   - system_printer_name:', config?.system_printer_name);
+        // Validate printer name is not empty after trim
+        if (!printerName || printerName.length === 0) {
+          console.error('❌ [SHIFT PRINT] Printer name is empty after trim');
           return {
             success: false,
-            error: `Receipt Printer not configured. Please configure it in Settings → Printer Selector.`
+            error: 'Printer name is empty. Please reconfigure your printer in Settings → Printer Selector.'
           };
         }
-      } catch (error) {
-        console.error('❌ [SHIFT PRINT] Error fetching printer config:', error);
-        return { success: false, error: 'Failed to fetch printer configuration' };
+      } else {
+        console.error('❌ [SHIFT PRINT] No printer config found or system_printer_name is null');
+        console.log('   - Config exists:', !!config);
+        console.log('   - system_printer_name:', config?.system_printer_name);
+        return {
+          success: false,
+          error: `Receipt Printer not configured. Please configure it in Settings → Printer Selector.`
+        };
       }
-    } else {
-      console.error('❌ [SHIFT PRINT] Local database not available');
-      return { success: false, error: 'Database not available' };
+    } catch (error) {
+      console.error('❌ [SHIFT PRINT] Error fetching printer config:', error);
+      return { success: false, error: 'Failed to fetch printer configuration' };
     }
 
     // Double-check printer name is valid before proceeding
@@ -7947,9 +8877,12 @@ ipcMain.handle('print-shift-breakdown', async (event, data: PrintableShiftReport
 
     // Fetch business name
     let businessName = 'Momoyo Bakery Kalimantan';
-    if (data.business_id && localDb) {
+    if (data.business_id) {
       try {
-        const business = localDb.prepare('SELECT name FROM businesses WHERE id = ?').get(data.business_id) as { name: string } | undefined;
+        const business = await executeQueryOne<{ name: string }>(
+          'SELECT name FROM businesses WHERE id = ?',
+          [data.business_id]
+        );
         if (business) {
           businessName = business.name;
         }
@@ -8163,90 +9096,6 @@ ipcMain.handle('open-cash-drawer', async () => {
   console.log('Opening cash drawer');
   // Implement actual cash drawer logic here
   return { success: true };
-});
-
-// Open production display (kitchen/barista) in fullscreen window
-ipcMain.handle('open-production-display', async (event, displayType: 'kitchen' | 'barista') => {
-  try {
-    // #region agent log - H1: Log entry and parameters
-    console.log(`🖥️ [DEBUG] Opening ${displayType} display in fullscreen...`);
-    console.log(`🖥️ [DEBUG] mainWindow exists: ${!!mainWindow}`);
-    console.log(`🖥️ [DEBUG] mainWindow.webContents exists: ${!!(mainWindow?.webContents)}`);
-    // #endregion
-    
-    const { screen } = require('electron');
-    const primaryDisplay = screen.getPrimaryDisplay();
-    const { width, height } = primaryDisplay.workAreaSize;
-    
-    const displayWindow = new BrowserWindow({
-      width: width,
-      height: height,
-      x: 0,
-      y: 0,
-      fullscreen: true,
-      title: `Marviano POS - ${displayType === 'kitchen' ? 'Dapur' : 'Barista'} Display`,
-      webPreferences: {
-        nodeIntegration: false,
-        contextIsolation: true,
-        preload: path.join(__dirname, 'preload.js')
-      }
-    });
-    
-    // #region agent log - H6: Log window creation
-    console.log(`🖥️ [DEBUG] Created displayWindow with id: ${displayWindow.id}`);
-    console.log(`🖥️ [DEBUG] displayWindow.webContents.id: ${displayWindow.webContents.id}`);
-    // #endregion
-
-    // Load the display page - handle dev vs production differently
-    if (isDev) {
-      // Development: use HTTP localhost with port detection
-      const preferredPort = Number(process.env.PORT ?? '');
-      const fallbackPorts = [3000, 3001, 3002];
-      const ports = preferredPort ? [preferredPort, ...fallbackPorts] : fallbackPorts;
-      
-      let loaded = false;
-      for (const port of ports) {
-        try {
-          const devUrl = `http://localhost:${port}/${displayType}`;
-          console.log(`🖥️ [DEBUG] Trying dev URL: ${devUrl}`);
-          await displayWindow.loadURL(devUrl);
-          console.log(`✅ Successfully loaded ${displayType} display on port ${port}`);
-          loaded = true;
-          break;
-        } catch (error) {
-          console.log(`❌ Failed to load on port ${port}:`, error);
-        }
-      }
-      
-      if (!loaded) {
-        throw new Error(`Failed to load ${displayType} display on any port`);
-      }
-    } else {
-      // Production: Next.js static export creates kitchen.html and barista.html directly
-      const routeHtmlPath = path.join(__dirname, '../../out', `${displayType}.html`);
-      
-      console.log(`🖥️ [DEBUG] Production mode - loading: ${routeHtmlPath}`);
-      
-      if (fs.existsSync(routeHtmlPath)) {
-        await displayWindow.loadFile(routeHtmlPath);
-        console.log(`✅ Successfully loaded ${displayType} display`);
-      } else {
-        throw new Error(`Display file not found: ${routeHtmlPath}`);
-      }
-    }
-
-    // Allow exiting fullscreen with Escape
-    displayWindow.webContents.on('before-input-event', (event, input) => {
-      if (input.key === 'Escape') {
-        displayWindow.close();
-      }
-    });
-
-    return { success: true, displayType };
-  } catch (error) {
-    console.error(`❌ Failed to open ${displayType} display:`, error);
-    return { success: false, error: String(error) };
-  }
 });
 
 ipcMain.handle('play-sound', async (event, soundType) => {
@@ -8524,9 +9373,8 @@ ipcMain.handle('delete-slideshow-image', async (event, filename: string) => {
 
 // Get Shift by UUID
 ipcMain.handle('localDbGetShiftByUuid', async (event, shiftUuid: string) => {
-  if (!localDb) return null;
   try {
-    const shift = localDb.prepare('SELECT * FROM shifts WHERE uuid_id = ?').get(shiftUuid);
+    const shift = await executeQueryOne('SELECT * FROM shifts WHERE uuid_id = ?', [shiftUuid]);
     return shift || null;
   } catch (error) {
     console.error('❌ Error fetching shift by UUID:', error);
@@ -8536,12 +9384,9 @@ ipcMain.handle('localDbGetShiftByUuid', async (event, shiftUuid: string) => {
 
 // Get Printer Audits by Transaction ID
 ipcMain.handle('localDbGetPrinterAuditsByTransactionId', async (event, transactionId: string) => {
-  if (!localDb) {
-    return { printer1: [], printer2: [] };
-  }
   try {
-    const printer1 = localDb.prepare('SELECT * FROM printer1_audit_log WHERE transaction_id = ?').all(transactionId);
-    const printer2 = localDb.prepare('SELECT * FROM printer2_audit_log WHERE transaction_id = ?').all(transactionId);
+    const printer1 = await executeQuery('SELECT * FROM printer1_audit_log WHERE transaction_id = ?', [transactionId]);
+    const printer2 = await executeQuery('SELECT * FROM printer2_audit_log WHERE transaction_id = ?', [transactionId]);
     return { printer1, printer2 };
   } catch (error) {
     console.error('❌ Error fetching printer audits:', error);
@@ -8556,18 +9401,11 @@ ipcMain.handle('localDbGetPrinterAuditsByTransactionId', async (event, transacti
 
 /**
  * Delete all transactions made by marviano.austin@gmail.com or where user_id is NULL
- * Manually deletes from all related tables due to SQLite foreign key constraints
+ * Manually deletes from all related tables
  */
 ipcMain.handle('localdb-delete-transactions-by-role', async () => {
-  if (!localDb) {
-    return {
-      success: false,
-      error: 'Local database not available'
-    };
-  }
-
   const details = {
-    database: 'Offline SQLite',
+    database: 'MySQL',
     targetUserIds: [] as number[],
     printer1_audit_log: 0,
     printer2_audit_log: 0,
@@ -8578,20 +9416,21 @@ ipcMain.handle('localdb-delete-transactions-by-role', async () => {
   };
 
   try {
-    console.log('[CLEANUP] [Offline SQLite] Starting transaction cleanup for marviano.austin@gmail.com and NULL user_id');
+    console.log('[CLEANUP] [MySQL] Starting transaction cleanup for marviano.austin@gmail.com and NULL user_id');
 
     // Find user ID for marviano.austin@gmail.com
-    const targetUsers = localDb.prepare(
-      'SELECT id FROM users WHERE email = ?'
-    ).all('marviano.austin@gmail.com') as Array<{ id: number }>;
+    const targetUsers = await executeQuery<{ id: number }>(
+      'SELECT id FROM users WHERE email = ?',
+      ['marviano.austin@gmail.com']
+    );
 
     const targetUserIds = targetUsers.map(u => u.id);
     details.targetUserIds = targetUserIds;
-    console.log(`[CLEANUP] [Offline SQLite] Target user IDs: ${targetUserIds.join(', ')}`);
+    console.log(`[CLEANUP] [MySQL] Target user IDs: ${targetUserIds.join(', ')}`);
 
     // Build WHERE clause for transactions
     let whereClause = 'WHERE user_id IS NULL';
-    const params: any[] = [];
+    const params: (string | number | null | boolean)[] = [];
 
     if (targetUserIds.length > 0) {
       whereClause += ` OR user_id IN (${targetUserIds.map(() => '?').join(',')})`;
@@ -8599,16 +9438,17 @@ ipcMain.handle('localdb-delete-transactions-by-role', async () => {
     }
 
     // Get transaction IDs to delete
-    const transactionsToDelete = localDb.prepare(
-      `SELECT id FROM transactions ${whereClause}`
-    ).all(...params) as Array<{ id: string }>;
+    const transactionsToDelete = await executeQuery<{ id: string }>(
+      `SELECT id FROM transactions ${whereClause}`,
+      params
+    );
 
     const transactionIds = transactionsToDelete.map(t => t.id);
-    console.log(`[CLEANUP] [Offline SQLite] Found ${transactionIds.length} transactions to delete`);
+    console.log(`[CLEANUP] [MySQL] Found ${transactionIds.length} transactions to delete`);
 
     if (transactionIds.length === 0) {
       details.success = true;
-      console.log(`✅ [CLEANUP] [Offline SQLite] No transactions to delete`);
+      console.log(`✅ [CLEANUP] [MySQL] No transactions to delete`);
       return {
         success: true,
         message: 'No transactions found to delete',
@@ -8618,99 +9458,99 @@ ipcMain.handle('localdb-delete-transactions-by-role', async () => {
       };
     }
 
-    // Begin transaction for atomic deletion
-    localDb.prepare('BEGIN TRANSACTION').run();
+    const queries: Array<{ sql: string; params?: (string | number | null | boolean)[] }> = [];
+    const placeholders = transactionIds.map(() => '?').join(',');
 
-    try {
-      // Manual deletion in correct order (child to parent)
-      const placeholders = transactionIds.map(() => '?').join(',');
+    // 1. Delete transaction_item_customization_options
+    // First get customization IDs
+    const customizationIds = await executeQuery<{ id: number }>(`
+      SELECT DISTINCT tic.id 
+      FROM transaction_item_customizations tic
+      JOIN transaction_items ti ON tic.transaction_item_id = ti.id
+      WHERE ti.transaction_id IN (${placeholders})
+    `, transactionIds);
 
-      // 1. Delete transaction_item_customization_options
-      // First get customization IDs
-      const customizationIds = localDb.prepare(`
-        SELECT DISTINCT tic.id 
-        FROM transaction_item_customizations tic
-        JOIN transaction_items ti ON tic.transaction_item_id = ti.id
-        WHERE ti.transaction_id IN (${placeholders})
-      `).all(...transactionIds) as Array<{ id: number }>;
-
-      if (customizationIds.length > 0) {
-        const customizationPlaceholders = customizationIds.map(() => '?').join(',');
-        const customizationIdValues = customizationIds.map(c => c.id);
-
-        const optionsResult = localDb.prepare(`
+    if (customizationIds.length > 0) {
+      const customizationPlaceholders = customizationIds.map(() => '?').join(',');
+      const customizationIdValues = customizationIds.map(c => c.id);
+      queries.push({
+        sql: `
           DELETE FROM transaction_item_customization_options 
           WHERE transaction_item_customization_id IN (${customizationPlaceholders})
-        `).run(...customizationIdValues);
-        console.log(`[CLEANUP] [Offline SQLite] Deleted ${optionsResult.changes} customization options`);
-      }
+        `,
+        params: customizationIdValues
+      });
+    }
 
-      // 2. Delete transaction_item_customizations
-      const customizationsResult = localDb.prepare(`
+    // 2. Delete transaction_item_customizations
+    queries.push({
+      sql: `
         DELETE FROM transaction_item_customizations 
         WHERE transaction_item_id IN (
           SELECT id FROM transaction_items WHERE transaction_id IN (${placeholders})
         )
-      `).run(...transactionIds);
-      console.log(`[CLEANUP] [Offline SQLite] Deleted ${customizationsResult.changes} customizations`);
+      `,
+      params: [...transactionIds]
+    });
 
-      // 3. Delete transaction_items
-      const itemsResult = localDb.prepare(`
-        DELETE FROM transaction_items WHERE transaction_id IN (${placeholders})
-      `).run(...transactionIds);
-      details.transaction_items = itemsResult.changes;
-      console.log(`[CLEANUP] [Offline SQLite] Deleted ${details.transaction_items} rows from transaction_items`);
+    // 3. Delete transaction_items
+    queries.push({
+      sql: `DELETE FROM transaction_items WHERE transaction_id IN (${placeholders})`,
+      params: [...transactionIds]
+    });
 
-      // 4. Delete transaction_refunds
-      const refundsResult = localDb.prepare(`
-        DELETE FROM transaction_refunds WHERE transaction_uuid IN (${placeholders})
-      `).run(...transactionIds);
-      console.log(`[CLEANUP] [Offline SQLite] Deleted ${refundsResult.changes} refunds`);
+    // 4. Delete transaction_refunds
+    queries.push({
+      sql: `DELETE FROM transaction_refunds WHERE transaction_uuid IN (${placeholders})`,
+      params: [...transactionIds]
+    });
 
-      // 5. Delete printer1_audit_log
-      const printer1Result = localDb.prepare(`
-        DELETE FROM printer1_audit_log WHERE transaction_id IN (${placeholders})
-      `).run(...transactionIds);
-      details.printer1_audit_log = printer1Result.changes;
-      console.log(`[CLEANUP] [Offline SQLite] Deleted ${details.printer1_audit_log} rows from printer1_audit_log`);
+    // 5. Delete printer1_audit_log
+    queries.push({
+      sql: `DELETE FROM printer1_audit_log WHERE transaction_id IN (${placeholders})`,
+      params: [...transactionIds]
+    });
 
-      // 6. Delete printer2_audit_log
-      const printer2Result = localDb.prepare(`
-        DELETE FROM printer2_audit_log WHERE transaction_id IN (${placeholders})
-      `).run(...transactionIds);
-      details.printer2_audit_log = printer2Result.changes;
-      console.log(`[CLEANUP] [Offline SQLite] Deleted ${details.printer2_audit_log} rows from printer2_audit_log`);
+    // 6. Delete printer2_audit_log
+    queries.push({
+      sql: `DELETE FROM printer2_audit_log WHERE transaction_id IN (${placeholders})`,
+      params: [...transactionIds]
+    });
 
-      // 7. Finally delete transactions
-      const transactionsResult = localDb.prepare(`
-        DELETE FROM transactions ${whereClause}
-      `).run(...params);
-      details.transactions = transactionsResult.changes;
-      console.log(`[CLEANUP] [Offline SQLite] Deleted ${details.transactions} rows from transactions`);
+    // 7. Finally delete transactions
+    queries.push({
+      sql: `DELETE FROM transactions ${whereClause}`,
+      params: [...params]
+    });
 
-      // Commit transaction
-      localDb.prepare('COMMIT').run();
+    // Execute all deletions in a transaction
+    await executeTransaction(queries);
 
-      details.success = true;
-      console.log(`✅ [CLEANUP] [Offline SQLite] Completed successfully`);
+    // Get counts for reporting
+    const itemsCountResult = await executeQueryOne<{ count: number }>(`
+      SELECT COUNT(*) as count FROM transaction_items WHERE transaction_id IN (${placeholders})
+    `, transactionIds);
+    details.transaction_items = itemsCountResult?.count || 0;
 
-      return {
-        success: true,
-        message: 'Transactions deleted successfully',
-        deleted: transactionsResult.changes,
-        deletedItems: itemsResult.changes,
-        details
-      };
+    const transactionsCountResult = await executeQueryOne<{ count: number }>(`
+      SELECT COUNT(*) as count FROM transactions ${whereClause}
+    `, params);
+    details.transactions = transactionsCountResult?.count || 0;
 
-    } catch (error) {
-      // Rollback on error
-      localDb.prepare('ROLLBACK').run();
-      throw error;
-    }
+    details.success = true;
+    console.log(`✅ [CLEANUP] [MySQL] Completed successfully`);
+
+    return {
+      success: true,
+      message: 'Transactions deleted successfully',
+      deleted: details.transactions,
+      deletedItems: details.transaction_items,
+      details
+    };
 
   } catch (error: any) {
     details.error = error.message || 'Failed to cleanup transactions';
-    console.error(`❌ [CLEANUP] [Offline SQLite] Failed:`, error);
+    console.error(`❌ [CLEANUP] [MySQL] Failed:`, error);
     return {
       success: false,
       deleted: 0,
@@ -8875,14 +9715,6 @@ ipcMain.handle('restore-from-server', async (event, options: {
   apiUrl: string;
   includeTransactions?: boolean;
 }) => {
-  if (!localDb) {
-    return {
-      success: false,
-      error: 'Local database not available',
-      stats: {}
-    };
-  }
-
   const { businessId, apiUrl, includeTransactions = true } = options;
   const stats: Record<string, number> = {};
 
@@ -8906,23 +9738,33 @@ ipcMain.handle('restore-from-server', async (event, options: {
     // Step 2: Restore Master Data (order matters due to foreign keys!)
     console.log('💾 [RESTORE] Step 2: Restoring master data...');
 
+    const allQueries: Array<{ sql: string; params?: (string | number | null | boolean)[] }> = [];
+
     // 2.1 Businesses
     if (Array.isArray(data.businesses) && data.businesses.length > 0) {
-      const stmt = localDb.prepare(`
-        INSERT OR REPLACE INTO businesses (id, name, permission_name, organization_id, management_group_id, image_url, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-      `);
       for (const biz of data.businesses) {
-        stmt.run(
-          biz.id,
-          biz.name,
-          biz.permission_name || biz.name || 'business',
-          biz.organization_id || null,
-          biz.management_group_id || null,
-          biz.image_url || null,
-          biz.created_at || new Date().toISOString(),
-          Date.now()
-        );
+        allQueries.push({
+          sql: `
+            INSERT INTO businesses (id, name, permission_name, organization_id, management_group_id, image_url, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON DUPLICATE KEY UPDATE
+              name=VALUES(name),
+              permission_name=VALUES(permission_name),
+              organization_id=VALUES(organization_id),
+              management_group_id=VALUES(management_group_id),
+              image_url=VALUES(image_url),
+              created_at=VALUES(created_at)
+          `,
+          params: [
+            biz.id,
+            biz.name,
+            biz.permission_name || biz.name || 'business',
+            biz.organization_id || null,
+            biz.management_group_id || null,
+            biz.image_url || null,
+            toMySQLTimestamp(biz.created_at || new Date())
+          ]
+        });
       }
       stats.businesses = data.businesses.length;
       console.log(`✅ [RESTORE] ${data.businesses.length} businesses restored`);
@@ -8930,22 +9772,31 @@ ipcMain.handle('restore-from-server', async (event, options: {
 
     // 2.2 Users
     if (Array.isArray(data.users) && data.users.length > 0) {
-      const stmt = localDb.prepare(`
-        INSERT OR REPLACE INTO users (id, email, password, name, googleId, createdAt, role_id, organization_id, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `);
       for (const usr of data.users) {
-        stmt.run(
-          usr.id,
-          usr.email,
-          usr.password || null,
-          usr.name,
-          usr.googleId || null,
-          usr.created_at || usr.createdAt || new Date().toISOString(),
-          usr.role_id || null,
-          usr.organization_id || null,
-          Date.now()
-        );
+        allQueries.push({
+          sql: `
+            INSERT INTO users (id, email, password, name, googleId, createdAt, role_id, organization_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON DUPLICATE KEY UPDATE
+              email=VALUES(email),
+              password=VALUES(password),
+              name=VALUES(name),
+              googleId=VALUES(googleId),
+              createdAt=VALUES(createdAt),
+              role_id=VALUES(role_id),
+              organization_id=VALUES(organization_id)
+          `,
+          params: [
+            usr.id,
+            usr.email,
+            usr.password || null,
+            usr.name,
+            usr.googleId || null,
+            toMySQLTimestamp(usr.created_at || usr.createdAt || new Date()),
+            usr.role_id || null,
+            usr.organization_id || null
+          ]
+        });
       }
       stats.users = data.users.length;
       console.log(`✅ [RESTORE] ${data.users.length} users restored`);
@@ -8953,50 +9804,71 @@ ipcMain.handle('restore-from-server', async (event, options: {
 
     // 2.3 Categories
     if (Array.isArray(data.category1) && data.category1.length > 0) {
-      const stmt = localDb.prepare(`
-        INSERT OR REPLACE INTO category1 (id, name, description, display_order, is_active, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-      `);
       for (const cat of data.category1) {
-        stmt.run(
-          cat.id,
-          cat.name,
-          cat.description || null,
-          cat.display_order || 0,
-          cat.is_active !== undefined ? cat.is_active : 1,
-          cat.created_at || new Date().toISOString(),
-          Date.now()
-        );
+        allQueries.push({
+          sql: `
+            INSERT INTO category1 (id, name, description, display_order, is_active, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON DUPLICATE KEY UPDATE
+              name=VALUES(name),
+              description=VALUES(description),
+              display_order=VALUES(display_order),
+              is_active=VALUES(is_active),
+              created_at=VALUES(created_at),
+              updated_at=VALUES(updated_at)
+          `,
+          params: [
+            cat.id,
+            cat.name,
+            cat.description || null,
+            cat.display_order || 0,
+            cat.is_active !== undefined ? cat.is_active : 1,
+            toMySQLTimestamp(cat.created_at || new Date()),
+            toMySQLTimestamp(Date.now())
+          ]
+        });
       }
       stats.category1 = data.category1.length;
       console.log(`✅ [RESTORE] ${data.category1.length} category1 restored`);
     }
 
     if (Array.isArray(data.category2) && data.category2.length > 0) {
-      const stmt = localDb.prepare(`
-        INSERT OR REPLACE INTO category2 (id, name, description, display_order, is_active, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-      `);
       for (const cat of data.category2) {
-        stmt.run(
-          cat.id,
-          cat.name,
-          cat.description || null,
-          cat.display_order || 0,
-          cat.is_active !== undefined ? cat.is_active : 1,
-          cat.created_at || new Date().toISOString(),
-          Date.now()
-        );
+        allQueries.push({
+          sql: `
+            INSERT INTO category2 (id, name, description, display_order, is_active, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON DUPLICATE KEY UPDATE
+              name=VALUES(name),
+              description=VALUES(description),
+              display_order=VALUES(display_order),
+              is_active=VALUES(is_active),
+              created_at=VALUES(created_at),
+              updated_at=VALUES(updated_at)
+          `,
+          params: [
+            cat.id ?? null,
+            cat.name ?? null,
+            cat.description ?? null,
+            cat.display_order ?? 0,
+            cat.is_active !== undefined ? cat.is_active : 1,
+            toMySQLTimestamp(cat.created_at || new Date()),
+            toMySQLTimestamp(Date.now())
+          ]
+        });
       }
 
       // Store junction table relationships (REQUIRED - no fallback)
       if (Array.isArray(data.category2Businesses) && data.category2Businesses.length > 0) {
-        const junctionStmt = localDb!.prepare(`
-          INSERT OR REPLACE INTO category2_businesses (category2_id, business_id)
-          VALUES (?, ?)
-        `);
         for (const rel of data.category2Businesses) {
-          junctionStmt.run(rel.category2_id, rel.business_id);
+          allQueries.push({
+            sql: `
+              INSERT INTO category2_businesses (category2_id, business_id, created_at)
+              VALUES (?, ?, ?)
+              ON DUPLICATE KEY UPDATE created_at=VALUES(created_at)
+            `,
+            params: [rel.category2_id, rel.business_id, toMySQLTimestamp(new Date())]
+          });
         }
         console.log(`✅ [RESTORE] ${data.category2Businesses.length} category2-business relationships restored`);
       } else {
@@ -9008,45 +9880,73 @@ ipcMain.handle('restore-from-server', async (event, options: {
 
     // 2.4 Products (matching local schema: nama, harga_jual, kategori, etc.)
     if (Array.isArray(data.products) && data.products.length > 0) {
-      const stmt = localDb.prepare(`
-        INSERT OR REPLACE INTO products (
-          id, business_id, menu_code, nama, satuan, kategori, jenis, 
-          category2_id, category2_name, keterangan, harga_beli, ppn, 
-          harga_jual, harga_khusus, harga_online, harga_qpon, harga_gofood, 
-          harga_grabfood, harga_shopeefood, harga_tiktok, fee_kerja, 
-          status, created_at, updated_at, has_customization, is_bundle
-        )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `);
       for (const prod of data.products) {
-        stmt.run(
-          prod.id,
-          prod.business_id || businessId,
-          prod.menu_code || prod.code || null,
-          prod.nama || prod.name || 'Unknown',
-          prod.satuan || 'pcs',
-          prod.kategori || prod.category2_name || 'Other',
-          prod.jenis || null,
-          prod.category2_id || null,
-          prod.category2_name || null,
-          prod.keterangan || prod.description || null,
-          prod.harga_beli || 0,
-          prod.ppn || 0,
-          prod.harga_jual || prod.price || 0,
-          prod.harga_khusus || null,
-          prod.harga_online || null,
-          prod.harga_qpon || null,
-          prod.harga_gofood || null,
-          prod.harga_grabfood || null,
-          prod.harga_shopeefood || null,
-          prod.harga_tiktok || null,
-          prod.fee_kerja || null,
-          prod.status || 'active',
-          prod.created_at || new Date().toISOString(),
-          Date.now(),
-          prod.has_customization || 0,
-          prod.is_bundle || 0
-        );
+        allQueries.push({
+          sql: `
+            INSERT INTO products (
+              id, business_id, menu_code, nama, satuan, kategori, jenis, 
+              category2_id, category2_name, keterangan, harga_beli, ppn, 
+              harga_jual, harga_khusus, harga_online, harga_qpon, harga_gofood, 
+              harga_grabfood, harga_shopeefood, harga_tiktok, fee_kerja, 
+              status, created_at, updated_at, has_customization, is_bundle
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON DUPLICATE KEY UPDATE
+              business_id=VALUES(business_id),
+              menu_code=VALUES(menu_code),
+              nama=VALUES(nama),
+              satuan=VALUES(satuan),
+              kategori=VALUES(kategori),
+              jenis=VALUES(jenis),
+              category2_id=VALUES(category2_id),
+              category2_name=VALUES(category2_name),
+              keterangan=VALUES(keterangan),
+              harga_beli=VALUES(harga_beli),
+              ppn=VALUES(ppn),
+              harga_jual=VALUES(harga_jual),
+              harga_khusus=VALUES(harga_khusus),
+              harga_online=VALUES(harga_online),
+              harga_qpon=VALUES(harga_qpon),
+              harga_gofood=VALUES(harga_gofood),
+              harga_grabfood=VALUES(harga_grabfood),
+              harga_shopeefood=VALUES(harga_shopeefood),
+              harga_tiktok=VALUES(harga_tiktok),
+              fee_kerja=VALUES(fee_kerja),
+              status=VALUES(status),
+              created_at=VALUES(created_at),
+              updated_at=VALUES(updated_at),
+              has_customization=VALUES(has_customization),
+              is_bundle=VALUES(is_bundle)
+          `,
+          params: [
+            prod.id,
+            prod.business_id || businessId,
+            prod.menu_code || prod.code || null,
+            prod.nama || prod.name || 'Unknown',
+            prod.satuan || 'pcs',
+            prod.kategori || prod.category2_name || 'Other',
+            prod.jenis || null,
+            prod.category2_id || null,
+            prod.category2_name || null,
+            prod.keterangan || prod.description || null,
+            prod.harga_beli || 0,
+            prod.ppn || 0,
+            prod.harga_jual || prod.price || 0,
+            prod.harga_khusus || null,
+            prod.harga_online || null,
+            prod.harga_qpon || null,
+            prod.harga_gofood || null,
+            prod.harga_grabfood || null,
+            prod.harga_shopeefood || null,
+            prod.harga_tiktok || null,
+            prod.fee_kerja || null,
+            prod.status || 'active',
+            toMySQLTimestamp(prod.created_at || new Date()),
+            toMySQLTimestamp(Date.now()),
+            prod.has_customization || 0,
+            prod.is_bundle || 0
+          ]
+        });
       }
       stats.products = data.products.length;
       console.log(`✅ [RESTORE] ${data.products.length} products restored`);
@@ -9054,16 +9954,17 @@ ipcMain.handle('restore-from-server', async (event, options: {
 
     // 2.5 Customization Types
     if (Array.isArray(data.customizationTypes) && data.customizationTypes.length > 0) {
-      const stmt = localDb.prepare(`
-        INSERT OR REPLACE INTO product_customization_types (id, name, selection_mode)
-        VALUES (?, ?, ?)
-      `);
       for (const type of data.customizationTypes) {
-        stmt.run(
-          type.id,
-          type.name,
-          type.selection_mode || 'single'
-        );
+        allQueries.push({
+          sql: `
+            INSERT INTO product_customization_types (id, name, selection_mode)
+            VALUES (?, ?, ?)
+            ON DUPLICATE KEY UPDATE
+              name=VALUES(name),
+              selection_mode=VALUES(selection_mode)
+          `,
+          params: [type.id, type.name, type.selection_mode || 'single']
+        });
       }
       stats.customizationTypes = data.customizationTypes.length;
       console.log(`✅ [RESTORE] ${data.customizationTypes.length} customization types restored`);
@@ -9071,18 +9972,25 @@ ipcMain.handle('restore-from-server', async (event, options: {
 
     // 2.6 Customization Options
     if (Array.isArray(data.customizationOptions) && data.customizationOptions.length > 0) {
-      const stmt = localDb.prepare(`
-        INSERT OR REPLACE INTO product_customization_options (id, type_id, name, price_adjustment, display_order)
-        VALUES (?, ?, ?, ?, ?)
-      `);
       for (const opt of data.customizationOptions) {
-        stmt.run(
-          opt.id,
-          opt.type_id,
-          opt.name,
-          opt.price_adjustment || 0,
-          opt.display_order || 0
-        );
+        allQueries.push({
+          sql: `
+            INSERT INTO product_customization_options (id, type_id, name, price_adjustment, display_order)
+            VALUES (?, ?, ?, ?, ?)
+            ON DUPLICATE KEY UPDATE
+              type_id=VALUES(type_id),
+              name=VALUES(name),
+              price_adjustment=VALUES(price_adjustment),
+              display_order=VALUES(display_order)
+          `,
+          params: [
+            opt.id,
+            opt.type_id,
+            opt.name,
+            opt.price_adjustment || 0,
+            opt.display_order || 0
+          ]
+        });
       }
       stats.customizationOptions = data.customizationOptions.length;
       console.log(`✅ [RESTORE] ${data.customizationOptions.length} customization options restored`);
@@ -9090,16 +9998,17 @@ ipcMain.handle('restore-from-server', async (event, options: {
 
     // 2.7 Product Customizations
     if (Array.isArray(data.productCustomizations) && data.productCustomizations.length > 0) {
-      const stmt = localDb.prepare(`
-        INSERT OR REPLACE INTO product_customizations (id, product_id, customization_type_id)
-        VALUES (?, ?, ?)
-      `);
       for (const pc of data.productCustomizations) {
-        stmt.run(
-          pc.id,
-          pc.product_id,
-          pc.customization_type_id
-        );
+        allQueries.push({
+          sql: `
+            INSERT INTO product_customizations (id, product_id, customization_type_id)
+            VALUES (?, ?, ?)
+            ON DUPLICATE KEY UPDATE
+              product_id=VALUES(product_id),
+              customization_type_id=VALUES(customization_type_id)
+          `,
+          params: [pc.id, pc.product_id, pc.customization_type_id]
+        });
       }
       stats.productCustomizations = data.productCustomizations.length;
       console.log(`✅ [RESTORE] ${data.productCustomizations.length} product customizations restored`);
@@ -9107,18 +10016,25 @@ ipcMain.handle('restore-from-server', async (event, options: {
 
     // 2.8 Bundle Items
     if (Array.isArray(data.bundleItems) && data.bundleItems.length > 0) {
-      const stmt = localDb.prepare(`
-        INSERT OR REPLACE INTO bundle_items (id, bundle_product_id, category2_id, required_quantity, display_order)
-        VALUES (?, ?, ?, ?, ?)
-      `);
       for (const bundle of data.bundleItems) {
-        stmt.run(
-          bundle.id,
-          bundle.bundle_product_id,
-          bundle.category2_id,
-          bundle.required_quantity || 1,
-          bundle.display_order || 0
-        );
+        allQueries.push({
+          sql: `
+            INSERT INTO bundle_items (id, bundle_product_id, category2_id, required_quantity, display_order)
+            VALUES (?, ?, ?, ?, ?)
+            ON DUPLICATE KEY UPDATE
+              bundle_product_id=VALUES(bundle_product_id),
+              category2_id=VALUES(category2_id),
+              required_quantity=VALUES(required_quantity),
+              display_order=VALUES(display_order)
+          `,
+          params: [
+            bundle.id,
+            bundle.bundle_product_id,
+            bundle.category2_id,
+            bundle.required_quantity || 1,
+            bundle.display_order || 0
+          ]
+        });
       }
       stats.bundleItems = data.bundleItems.length;
       console.log(`✅ [RESTORE] ${data.bundleItems.length} bundle items restored`);
@@ -9126,21 +10042,31 @@ ipcMain.handle('restore-from-server', async (event, options: {
 
     // 2.9 Payment Methods
     if (Array.isArray(data.paymentMethods) && data.paymentMethods.length > 0) {
-      const stmt = localDb.prepare(`
-        INSERT OR REPLACE INTO payment_methods (id, name, code, description, is_active, requires_additional_info, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-      `);
       for (const pm of data.paymentMethods) {
-        stmt.run(
-          pm.id,
-          pm.name,
-          pm.code,
-          pm.description || null,
-          pm.is_active !== undefined ? pm.is_active : 1,
-          pm.requires_additional_info || 0,
-          pm.created_at || new Date().toISOString(),
-          Date.now()
-        );
+        allQueries.push({
+          sql: `
+            INSERT INTO payment_methods (id, name, code, description, is_active, requires_additional_info, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON DUPLICATE KEY UPDATE
+              name=VALUES(name),
+              code=VALUES(code),
+              description=VALUES(description),
+              is_active=VALUES(is_active),
+              requires_additional_info=VALUES(requires_additional_info),
+              created_at=VALUES(created_at),
+              updated_at=VALUES(updated_at)
+          `,
+          params: [
+            pm.id ?? null,
+            pm.name ?? null,
+            pm.code ?? null,
+            pm.description ?? null,
+            pm.is_active !== undefined ? pm.is_active : 1,
+            pm.requires_additional_info ?? 0,
+            toMySQLTimestamp(pm.created_at || new Date()),
+            toMySQLTimestamp(Date.now())
+          ]
+        });
       }
       stats.paymentMethods = data.paymentMethods.length;
       console.log(`✅ [RESTORE] ${data.paymentMethods.length} payment methods restored`);
@@ -9148,19 +10074,27 @@ ipcMain.handle('restore-from-server', async (event, options: {
 
     // 2.10 Banks
     if (Array.isArray(data.banks) && data.banks.length > 0) {
-      const stmt = localDb.prepare(`
-        INSERT OR REPLACE INTO banks (id, bank_code, bank_name, is_popular, is_active, created_at)
-        VALUES (?, ?, ?, ?, ?, ?)
-      `);
       for (const bank of data.banks) {
-        stmt.run(
-          bank.id,
-          bank.bank_code,
-          bank.bank_name,
-          bank.is_popular || 0,
-          bank.is_active !== undefined ? bank.is_active : 1,
-          bank.created_at || new Date().toISOString()
-        );
+        allQueries.push({
+          sql: `
+            INSERT INTO banks (id, bank_code, bank_name, is_popular, is_active, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON DUPLICATE KEY UPDATE
+              bank_code=VALUES(bank_code),
+              bank_name=VALUES(bank_name),
+              is_popular=VALUES(is_popular),
+              is_active=VALUES(is_active),
+              created_at=VALUES(created_at)
+          `,
+          params: [
+            bank.id,
+            bank.bank_code,
+            bank.bank_name,
+            bank.is_popular || 0,
+            bank.is_active !== undefined ? bank.is_active : 1,
+            toMySQLTimestamp(bank.created_at || new Date())
+          ]
+        });
       }
       stats.banks = data.banks.length;
       console.log(`✅ [RESTORE] ${data.banks.length} banks restored`);
@@ -9168,25 +10102,42 @@ ipcMain.handle('restore-from-server', async (event, options: {
 
     // 2.11 CL Accounts
     if (Array.isArray(data.clAccounts) && data.clAccounts.length > 0) {
-      const stmt = localDb.prepare(`
-        INSERT OR REPLACE INTO cl_accounts (id, account_code, account_name, contact_info, credit_limit, current_balance, is_active, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `);
       for (const cl of data.clAccounts) {
-        stmt.run(
-          cl.id,
-          cl.account_code,
-          cl.account_name,
-          cl.contact_info || null,
-          cl.credit_limit || 0,
-          cl.current_balance || 0,
-          cl.is_active !== undefined ? cl.is_active : 1,
-          cl.created_at || new Date().toISOString(),
-          Date.now()
-        );
+        allQueries.push({
+          sql: `
+            INSERT INTO cl_accounts (id, account_code, account_name, contact_info, credit_limit, current_balance, is_active, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON DUPLICATE KEY UPDATE
+              account_code=VALUES(account_code),
+              account_name=VALUES(account_name),
+              contact_info=VALUES(contact_info),
+              credit_limit=VALUES(credit_limit),
+              current_balance=VALUES(current_balance),
+              is_active=VALUES(is_active),
+              created_at=VALUES(created_at),
+              updated_at=VALUES(updated_at)
+          `,
+          params: [
+            cl.id,
+            cl.account_code,
+            cl.account_name,
+            cl.contact_info || null,
+            cl.credit_limit || 0,
+            cl.current_balance || 0,
+            cl.is_active !== undefined ? cl.is_active : 1,
+            toMySQLTimestamp(cl.created_at || new Date()),
+            toMySQLTimestamp(Date.now())
+          ]
+        });
       }
       stats.clAccounts = data.clAccounts.length;
       console.log(`✅ [RESTORE] ${data.clAccounts.length} CL accounts restored`);
+    }
+
+    // Execute all master data queries in a transaction
+    if (allQueries.length > 0) {
+      await executeTransaction(allQueries);
+      console.log(`✅ [RESTORE] Executed ${allQueries.length} master data queries`);
     }
 
     // Step 3: Download and Restore Transactions (if requested)
@@ -9203,45 +10154,70 @@ ipcMain.handle('restore-from-server', async (event, options: {
 
         if (transactions.length > 0) {
           console.log(`💾 [RESTORE] Restoring ${transactions.length} transactions...`);
-          const txStmt = localDb.prepare(`
-            INSERT OR REPLACE INTO transactions (
-              id, business_id, user_id, payment_method, payment_method_id,
-              pickup_method, total_amount, final_amount, amount_received, change_amount,
-              customer_name, status, created_at, updated_at, voucher_discount,
-              voucher_type, voucher_value, transaction_type, receipt_number, shift_uuid,
-              synced_at
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-          `);
-
+          const txQueries: Array<{ sql: string; params?: (string | number | null)[] }> = [];
           const now = Date.now();
+          
           for (const tx of transactions) {
             const txId = tx.uuid_id || tx.id;
-            txStmt.run(
-              txId,
-              tx.business_id || businessId,
-              tx.user_id,
-              tx.payment_method,
-              tx.payment_method_id || null,
-              tx.pickup_method,
-              tx.total_amount || 0,
-              tx.final_amount || 0,
-              tx.amount_received || 0,
-              tx.change_amount || 0,
-              tx.customer_name || null,
-              tx.status || 'completed',
-              tx.created_at || new Date().toISOString(),
-              Date.now(),
-              tx.voucher_discount || 0,
-              tx.voucher_type || null,
-              tx.voucher_value || null,
-              tx.transaction_type || 'drinks',
-              tx.receipt_number || null,
-              tx.shift_uuid || null,
-              now // Set synced_at to mark as already synced (downloaded from server)
-            );
+            txQueries.push({
+              sql: `
+                INSERT INTO transactions (
+                  id, business_id, user_id, payment_method, payment_method_id,
+                  pickup_method, total_amount, final_amount, amount_received, change_amount,
+                  customer_name, status, created_at, updated_at, voucher_discount,
+                  voucher_type, voucher_value, transaction_type, receipt_number, shift_uuid,
+                  synced_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON DUPLICATE KEY UPDATE
+                  business_id=VALUES(business_id),
+                  user_id=VALUES(user_id),
+                  payment_method=VALUES(payment_method),
+                  payment_method_id=VALUES(payment_method_id),
+                  pickup_method=VALUES(pickup_method),
+                  total_amount=VALUES(total_amount),
+                  final_amount=VALUES(final_amount),
+                  amount_received=VALUES(amount_received),
+                  change_amount=VALUES(change_amount),
+                  customer_name=VALUES(customer_name),
+                  status=VALUES(status),
+                  created_at=VALUES(created_at),
+                  updated_at=VALUES(updated_at),
+                  voucher_discount=VALUES(voucher_discount),
+                  voucher_type=VALUES(voucher_type),
+                  voucher_value=VALUES(voucher_value),
+                  transaction_type=VALUES(transaction_type),
+                  receipt_number=VALUES(receipt_number),
+                  shift_uuid=VALUES(shift_uuid),
+                  synced_at=VALUES(synced_at)
+              `,
+              params: [
+                txId,
+                tx.business_id || businessId,
+                tx.user_id,
+                tx.payment_method,
+                tx.payment_method_id || null,
+                tx.pickup_method,
+                tx.total_amount || 0,
+                tx.final_amount || 0,
+                tx.amount_received || 0,
+                tx.change_amount || 0,
+                tx.customer_name || null,
+                tx.status || 'completed',
+                toMySQLTimestamp(tx.created_at || new Date()),
+                toMySQLTimestamp(Date.now()),
+                tx.voucher_discount || 0,
+                tx.voucher_type || null,
+                tx.voucher_value || null,
+                tx.transaction_type || 'drinks',
+                tx.receipt_number || null,
+                tx.shift_uuid || null,
+                now // Set synced_at to mark as already synced (downloaded from server)
+              ]
+            });
           }
 
+          await executeTransaction(txQueries);
           stats.transactions = transactions.length;
           console.log(`✅ [RESTORE] ${transactions.length} transactions restored`);
         }
@@ -9266,13 +10242,7 @@ ipcMain.handle('restore-from-server', async (event, options: {
 
           if (items.length > 0) {
             console.log(`💾 [RESTORE] Restoring ${items.length} transaction items...`);
-            const itemStmt = localDb.prepare(`
-            INSERT OR REPLACE INTO transaction_items (
-              id, transaction_id, product_id, quantity, unit_price, total_price,
-              custom_note, bundle_selections_json, created_at
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-          `);
+            const itemQueries: Array<{ sql: string; params?: (string | number | null)[] }> = [];
 
             for (const item of items) {
               const itemId = item.uuid_id || item.id;
@@ -9286,19 +10256,38 @@ ipcMain.handle('restore-from-server', async (event, options: {
                   : JSON.stringify(item.bundle_selections_json);
               }
 
-              itemStmt.run(
-                itemId,
-                transactionId,
-                item.product_id,
-                item.quantity || 1,
-                item.unit_price || 0,
-                item.total_price || 0,
-                item.custom_note || null,
-                bundleSelectionsStr,
-                item.created_at || new Date().toISOString()
-              );
+              itemQueries.push({
+                sql: `
+                  INSERT INTO transaction_items (
+                    id, transaction_id, product_id, quantity, unit_price, total_price,
+                    custom_note, bundle_selections_json, created_at
+                  )
+                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                  ON DUPLICATE KEY UPDATE
+                    transaction_id=VALUES(transaction_id),
+                    product_id=VALUES(product_id),
+                    quantity=VALUES(quantity),
+                    unit_price=VALUES(unit_price),
+                    total_price=VALUES(total_price),
+                    custom_note=VALUES(custom_note),
+                    bundle_selections_json=VALUES(bundle_selections_json),
+                    created_at=VALUES(created_at)
+                `,
+                params: [
+                  itemId,
+                  transactionId,
+                  item.product_id,
+                  item.quantity || 1,
+                  item.unit_price || 0,
+                  item.total_price || 0,
+                  item.custom_note || null,
+                  bundleSelectionsStr,
+                  toMySQLTimestamp(item.created_at || new Date())
+                ]
+              });
             }
 
+            await executeTransaction(itemQueries);
             stats.transactionItems = items.length;
             console.log(`✅ [RESTORE] ${items.length} transaction items restored`);
           } else {
@@ -9312,20 +10301,29 @@ ipcMain.handle('restore-from-server', async (event, options: {
       // Step 5: Restore Transaction Item Customizations (from /api/sync)
       console.log('💾 [RESTORE] Step 5: Restoring transaction item customizations...');
       if (Array.isArray(data.transactionItemCustomizations) && data.transactionItemCustomizations.length > 0) {
-        const ticStmt = localDb.prepare(`
-          INSERT OR REPLACE INTO transaction_item_customizations (
-            id, transaction_item_id, customization_type_id, bundle_product_id, created_at
-          ) VALUES (?, ?, ?, ?, ?)
-        `);
+        const ticQueries: Array<{ sql: string; params?: (string | number | null)[] }> = [];
         for (const tic of data.transactionItemCustomizations) {
-          ticStmt.run(
-            tic.id,
-            tic.transaction_item_id,
-            tic.customization_type_id,
-            tic.bundle_product_id || null,
-            tic.created_at || new Date().toISOString()
-          );
+          ticQueries.push({
+            sql: `
+              INSERT INTO transaction_item_customizations (
+                id, transaction_item_id, customization_type_id, bundle_product_id, created_at
+              ) VALUES (?, ?, ?, ?, ?)
+              ON DUPLICATE KEY UPDATE
+                transaction_item_id=VALUES(transaction_item_id),
+                customization_type_id=VALUES(customization_type_id),
+                bundle_product_id=VALUES(bundle_product_id),
+                created_at=VALUES(created_at)
+            `,
+            params: [
+              tic.id,
+              tic.transaction_item_id,
+              tic.customization_type_id,
+              tic.bundle_product_id || null,
+              toMySQLTimestamp(tic.created_at || new Date())
+            ]
+          });
         }
+        await executeTransaction(ticQueries);
         stats.transactionItemCustomizations = data.transactionItemCustomizations.length;
         console.log(`✅ [RESTORE] ${data.transactionItemCustomizations.length} transaction item customizations restored`);
       }
@@ -9333,21 +10331,31 @@ ipcMain.handle('restore-from-server', async (event, options: {
       // Step 6: Restore Transaction Item Customization Options (from /api/sync)
       console.log('💾 [RESTORE] Step 6: Restoring transaction item customization options...');
       if (Array.isArray(data.transactionItemCustomizationOptions) && data.transactionItemCustomizationOptions.length > 0) {
-        const ticoStmt = localDb.prepare(`
-          INSERT OR REPLACE INTO transaction_item_customization_options (
-            id, transaction_item_customization_id, customization_option_id, option_name, price_adjustment, created_at
-          ) VALUES (?, ?, ?, ?, ?, ?)
-        `);
+        const ticoQueries: Array<{ sql: string; params?: (string | number | null)[] }> = [];
         for (const tico of data.transactionItemCustomizationOptions) {
-          ticoStmt.run(
-            tico.id,
-            tico.transaction_item_customization_id,
-            tico.customization_option_id,
-            tico.option_name,
-            tico.price_adjustment || 0,
-            tico.created_at || new Date().toISOString()
-          );
+          ticoQueries.push({
+            sql: `
+              INSERT INTO transaction_item_customization_options (
+                id, transaction_item_customization_id, customization_option_id, option_name, price_adjustment, created_at
+              ) VALUES (?, ?, ?, ?, ?, ?)
+              ON DUPLICATE KEY UPDATE
+                transaction_item_customization_id=VALUES(transaction_item_customization_id),
+                customization_option_id=VALUES(customization_option_id),
+                option_name=VALUES(option_name),
+                price_adjustment=VALUES(price_adjustment),
+                created_at=VALUES(created_at)
+            `,
+            params: [
+              tico.id,
+              tico.transaction_item_customization_id,
+              tico.customization_option_id,
+              tico.option_name,
+              tico.price_adjustment || 0,
+              toMySQLTimestamp(tico.created_at || new Date())
+            ]
+          });
         }
+        await executeTransaction(ticoQueries);
         stats.transactionItemCustomizationOptions = data.transactionItemCustomizationOptions.length;
         console.log(`✅ [RESTORE] ${data.transactionItemCustomizationOptions.length} transaction item customization options restored`);
       }
@@ -9355,35 +10363,56 @@ ipcMain.handle('restore-from-server', async (event, options: {
       // Step 7: Restore Shifts (from /api/sync)
       console.log('💾 [RESTORE] Step 7: Restoring shifts...');
       if (Array.isArray(data.shifts) && data.shifts.length > 0) {
-        const shiftStmt = localDb.prepare(`
-          INSERT OR REPLACE INTO shifts (
-            id, uuid_id, business_id, user_id, user_name, shift_start, shift_end,
-            modal_awal, kas_akhir, kas_expected, kas_selisih, kas_selisih_label,
-            cash_sales_total, cash_refund_total, status, created_at, updated_at, synced_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        `);
+        const shiftQueries: Array<{ sql: string; params?: (string | number | null)[] }> = [];
         for (const shift of data.shifts) {
-          shiftStmt.run(
-            shift.id || null,
-            shift.uuid_id,
-            shift.business_id,
-            shift.user_id,
-            shift.user_name,
-            shift.shift_start,
-            shift.shift_end || null,
-            shift.modal_awal || 0,
-            shift.kas_akhir || null,
-            shift.kas_expected || null,
-            shift.kas_selisih || null,
-            shift.kas_selisih_label || 'balanced',
-            shift.cash_sales_total || null,
-            shift.cash_refund_total || null,
-            shift.status || 'active',
-            shift.created_at || new Date().toISOString(),
-            shift.updated_at || null,
-            shift.synced_at || Date.now()
-          );
+          shiftQueries.push({
+            sql: `
+              INSERT INTO shifts (
+                id, uuid_id, business_id, user_id, user_name, shift_start, shift_end,
+                modal_awal, kas_akhir, kas_expected, kas_selisih, kas_selisih_label,
+                cash_sales_total, cash_refund_total, status, created_at, updated_at, synced_at
+              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+              ON DUPLICATE KEY UPDATE
+                business_id=VALUES(business_id),
+                user_id=VALUES(user_id),
+                user_name=VALUES(user_name),
+                shift_start=VALUES(shift_start),
+                shift_end=VALUES(shift_end),
+                modal_awal=VALUES(modal_awal),
+                kas_akhir=VALUES(kas_akhir),
+                kas_expected=VALUES(kas_expected),
+                kas_selisih=VALUES(kas_selisih),
+                kas_selisih_label=VALUES(kas_selisih_label),
+                cash_sales_total=VALUES(cash_sales_total),
+                cash_refund_total=VALUES(cash_refund_total),
+                status=VALUES(status),
+                created_at=VALUES(created_at),
+                updated_at=VALUES(updated_at),
+                synced_at=VALUES(synced_at)
+            `,
+            params: [
+              shift.id || null,
+              shift.uuid_id,
+              shift.business_id,
+              shift.user_id,
+              shift.user_name,
+              toMySQLDateTime(shift.shift_start),
+              shift.shift_end ? toMySQLDateTime(shift.shift_end) : null,
+              shift.modal_awal || 0,
+              shift.kas_akhir || null,
+              shift.kas_expected || null,
+              shift.kas_selisih || null,
+              shift.kas_selisih_label || 'balanced',
+              shift.cash_sales_total || null,
+              shift.cash_refund_total || null,
+              shift.status || 'active',
+              toMySQLDateTime(shift.created_at || new Date()),
+              shift.updated_at ? (typeof shift.updated_at === 'number' ? shift.updated_at : parseInt(String(shift.updated_at), 10)) : null,
+              shift.synced_at ? (typeof shift.synced_at === 'number' ? shift.synced_at : parseInt(String(shift.synced_at), 10)) : null
+            ]
+          });
         }
+        await executeTransaction(shiftQueries);
         stats.shifts = data.shifts.length;
         console.log(`✅ [RESTORE] ${data.shifts.length} shifts restored`);
       }
@@ -9391,34 +10420,54 @@ ipcMain.handle('restore-from-server', async (event, options: {
       // Step 8: Restore Transaction Refunds (from /api/sync)
       console.log('💾 [RESTORE] Step 8: Restoring transaction refunds...');
       if (Array.isArray(data.transactionRefunds) && data.transactionRefunds.length > 0) {
-        const refundStmt = localDb.prepare(`
-          INSERT OR REPLACE INTO transaction_refunds (
-            id, uuid_id, transaction_uuid, business_id, shift_uuid, refunded_by,
-            refund_amount, cash_delta, payment_method_id, reason, note, refund_type,
-            status, refunded_at, created_at, updated_at, synced_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        `);
+        const refundQueries: Array<{ sql: string; params?: (string | number | null)[] }> = [];
         for (const refund of data.transactionRefunds) {
-          refundStmt.run(
-            refund.id || null,
-            refund.uuid_id,
-            refund.transaction_uuid,
-            refund.business_id,
-            refund.shift_uuid || null,
-            refund.refunded_by,
-            refund.refund_amount,
-            refund.cash_delta || 0,
-            refund.payment_method_id || null,
-            refund.reason || null,
-            refund.note || null,
-            refund.refund_type || 'full',
-            refund.status || 'completed',
-            refund.refunded_at,
-            refund.created_at || new Date().toISOString(),
-            refund.updated_at || null,
-            refund.synced_at || Date.now()
-          );
+          refundQueries.push({
+            sql: `
+              INSERT INTO transaction_refunds (
+                id, uuid_id, transaction_uuid, business_id, shift_uuid, refunded_by,
+                refund_amount, cash_delta, payment_method_id, reason, note, refund_type,
+                status, refunded_at, created_at, updated_at, synced_at
+              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+              ON DUPLICATE KEY UPDATE
+                transaction_uuid=VALUES(transaction_uuid),
+                business_id=VALUES(business_id),
+                shift_uuid=VALUES(shift_uuid),
+                refunded_by=VALUES(refunded_by),
+                refund_amount=VALUES(refund_amount),
+                cash_delta=VALUES(cash_delta),
+                payment_method_id=VALUES(payment_method_id),
+                reason=VALUES(reason),
+                note=VALUES(note),
+                refund_type=VALUES(refund_type),
+                status=VALUES(status),
+                refunded_at=VALUES(refunded_at),
+                created_at=VALUES(created_at),
+                updated_at=VALUES(updated_at),
+                synced_at=VALUES(synced_at)
+            `,
+            params: [
+              refund.id || null,
+              refund.uuid_id,
+              refund.transaction_uuid,
+              refund.business_id,
+              refund.shift_uuid || null,
+              refund.refunded_by,
+              refund.refund_amount,
+              refund.cash_delta || 0,
+              refund.payment_method_id || null,
+              refund.reason || null,
+              refund.note || null,
+              refund.refund_type || 'full',
+              refund.status || 'completed',
+              refund.refunded_at,
+              toMySQLDateTime(refund.created_at || new Date()),
+              refund.updated_at ? toMySQLDateTime(typeof refund.updated_at === 'number' ? new Date(refund.updated_at) : refund.updated_at) : null,
+              refund.synced_at ? toMySQLDateTime(typeof refund.synced_at === 'number' ? new Date(refund.synced_at) : refund.synced_at) : null
+            ]
+          });
         }
+        await executeTransaction(refundQueries);
         stats.transactionRefunds = data.transactionRefunds.length;
         console.log(`✅ [RESTORE] ${data.transactionRefunds.length} transaction refunds restored`);
       }
@@ -9426,25 +10475,38 @@ ipcMain.handle('restore-from-server', async (event, options: {
       // Step 9: Restore Printer 1 Audit Logs (from /api/sync)
       console.log('💾 [RESTORE] Step 9: Restoring printer 1 audit logs...');
       if (Array.isArray(data.printer1AuditLog) && data.printer1AuditLog.length > 0) {
-        const p1Stmt = localDb.prepare(`
-          INSERT OR REPLACE INTO printer1_audit_log (
-            id, transaction_id, printer1_receipt_number, global_counter,
-            printed_at, printed_at_epoch, is_reprint, reprint_count, synced_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        `);
+        const p1Queries: Array<{ sql: string; params?: (string | number | null)[] }> = [];
         for (const p1 of data.printer1AuditLog) {
-          p1Stmt.run(
-            p1.id || null,
-            p1.transaction_id,
-            p1.printer1_receipt_number,
-            p1.global_counter || null,
-            p1.printed_at,
-            p1.printed_at_epoch,
-            p1.is_reprint || 0,
-            p1.reprint_count || 0,
-            p1.synced_at || Date.now()
-          );
+          p1Queries.push({
+            sql: `
+              INSERT INTO printer1_audit_log (
+                id, transaction_id, printer1_receipt_number, global_counter,
+                printed_at, printed_at_epoch, is_reprint, reprint_count, synced_at
+              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+              ON DUPLICATE KEY UPDATE
+                transaction_id=VALUES(transaction_id),
+                printer1_receipt_number=VALUES(printer1_receipt_number),
+                global_counter=VALUES(global_counter),
+                printed_at=VALUES(printed_at),
+                printed_at_epoch=VALUES(printed_at_epoch),
+                is_reprint=VALUES(is_reprint),
+                reprint_count=VALUES(reprint_count),
+                synced_at=VALUES(synced_at)
+            `,
+            params: [
+              p1.id || null,
+              p1.transaction_id,
+              p1.printer1_receipt_number,
+              p1.global_counter || null,
+              p1.printed_at,
+              p1.printed_at_epoch,
+              p1.is_reprint || 0,
+              p1.reprint_count || 0,
+              p1.synced_at || Date.now()
+            ]
+          });
         }
+        await executeTransaction(p1Queries);
         stats.printer1AuditLog = data.printer1AuditLog.length;
         console.log(`✅ [RESTORE] ${data.printer1AuditLog.length} printer 1 audit logs restored`);
       }
@@ -9452,27 +10514,42 @@ ipcMain.handle('restore-from-server', async (event, options: {
       // Step 10: Restore Printer 2 Audit Logs (from /api/sync)
       console.log('💾 [RESTORE] Step 10: Restoring printer 2 audit logs...');
       if (Array.isArray(data.printer2AuditLog) && data.printer2AuditLog.length > 0) {
-        const p2Stmt = localDb.prepare(`
-          INSERT OR REPLACE INTO printer2_audit_log (
-            id, transaction_id, printer2_receipt_number, print_mode, cycle_number,
-            global_counter, printed_at, printed_at_epoch, is_reprint, reprint_count, synced_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        `);
+        const p2Queries: Array<{ sql: string; params?: (string | number | null)[] }> = [];
         for (const p2 of data.printer2AuditLog) {
-          p2Stmt.run(
-            p2.id || null,
-            p2.transaction_id,
-            p2.printer2_receipt_number,
-            p2.print_mode || 'auto',
-            p2.cycle_number || null,
-            p2.global_counter || null,
-            p2.printed_at,
-            p2.printed_at_epoch,
-            p2.is_reprint || 0,
-            p2.reprint_count || 0,
-            p2.synced_at || Date.now()
-          );
+          p2Queries.push({
+            sql: `
+              INSERT INTO printer2_audit_log (
+                id, transaction_id, printer2_receipt_number, print_mode, cycle_number,
+                global_counter, printed_at, printed_at_epoch, is_reprint, reprint_count, synced_at
+              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+              ON DUPLICATE KEY UPDATE
+                transaction_id=VALUES(transaction_id),
+                printer2_receipt_number=VALUES(printer2_receipt_number),
+                print_mode=VALUES(print_mode),
+                cycle_number=VALUES(cycle_number),
+                global_counter=VALUES(global_counter),
+                printed_at=VALUES(printed_at),
+                printed_at_epoch=VALUES(printed_at_epoch),
+                is_reprint=VALUES(is_reprint),
+                reprint_count=VALUES(reprint_count),
+                synced_at=VALUES(synced_at)
+            `,
+            params: [
+              p2.id || null,
+              p2.transaction_id,
+              p2.printer2_receipt_number,
+              p2.print_mode || 'auto',
+              p2.cycle_number || null,
+              p2.global_counter || null,
+              p2.printed_at,
+              p2.printed_at_epoch,
+              p2.is_reprint || 0,
+              p2.reprint_count || 0,
+              p2.synced_at || Date.now()
+            ]
+          });
         }
+        await executeTransaction(p2Queries);
         stats.printer2AuditLog = data.printer2AuditLog.length;
         console.log(`✅ [RESTORE] ${data.printer2AuditLog.length} printer 2 audit logs restored`);
       }
@@ -9494,6 +10571,292 @@ ipcMain.handle('restore-from-server', async (event, options: {
       error: error instanceof Error ? error.message : 'Unknown error during restore',
       stats
     };
+  }
+});
+
+// IPC handlers for Restaurant Table Layout
+ipcMain.handle('get-restaurant-rooms', async (event, businessId: number) => {
+  try {
+    // #region agent log - Check if table exists
+    try {
+      const tableCheck = await executeQueryOne<{ table_name: string }>('SELECT TABLE_NAME FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ?', ['restaurant_rooms']);
+      console.log('[IPC] restaurant_rooms table exists:', !!tableCheck);
+    } catch (checkError) {
+      console.error('[IPC] Error checking restaurant_rooms table:', checkError);
+    }
+    // #endregion
+    
+    const query = `
+      SELECT 
+        rr.id,
+        rr.business_id,
+        rr.name,
+        rr.canvas_width,
+        rr.canvas_height,
+        rr.font_size_multiplier,
+        rr.created_at,
+        rr.updated_at,
+        COUNT(rt.id) as table_count
+      FROM restaurant_rooms rr
+      LEFT JOIN restaurant_tables rt ON rr.id = rt.room_id
+      WHERE rr.business_id = ?
+      GROUP BY rr.id, rr.business_id, rr.name, rr.canvas_width, rr.canvas_height, rr.font_size_multiplier, rr.created_at, rr.updated_at
+      ORDER BY rr.name ASC
+    `;
+    const result = await executeQuery<RowArray>(query, [businessId]);
+    // #region agent log - Query result
+    console.log('[IPC] get-restaurant-rooms query result:', { businessId, resultCount: Array.isArray(result) ? result.length : 'not array', result });
+    // #endregion
+    return result;
+  } catch (error) {
+    console.error('Error getting restaurant rooms:', error);
+    // #region agent log - Error details
+    console.error('[IPC] get-restaurant-rooms error details:', { businessId, error: error instanceof Error ? error.message : String(error), stack: error instanceof Error ? error.stack : undefined });
+    // #endregion
+    return [];
+  }
+});
+
+ipcMain.handle('get-restaurant-tables', async (event, roomId: number) => {
+  try {
+    const query = `
+      SELECT * FROM restaurant_tables
+      WHERE room_id = ?
+      ORDER BY table_number ASC
+    `;
+    return await executeQuery<RowArray>(query, [roomId]);
+  } catch (error) {
+    console.error('Error getting restaurant tables:', error);
+    return [];
+  }
+});
+
+ipcMain.handle('get-restaurant-layout-elements', async (event, roomId: number) => {
+  try {
+    const query = `
+      SELECT * FROM restaurant_layout_elements
+      WHERE room_id = ?
+      ORDER BY label ASC
+    `;
+    return await executeQuery<RowArray>(query, [roomId]);
+  } catch (error) {
+    console.error('Error getting restaurant layout elements:', error);
+    return [];
+  }
+});
+
+// IPC handlers for syncing restaurant table layout data
+ipcMain.handle('localdb-upsert-restaurant-rooms', async (event, rows: RowArray) => {
+  try {
+    // #region agent log - Handler called
+    console.log('[IPC] localdb-upsert-restaurant-rooms called:', { rowCount: Array.isArray(rows) ? rows.length : 'not array', sampleRow: Array.isArray(rows) && rows.length > 0 ? rows[0] : null });
+    // #endregion
+    const queries: Array<{ sql: string; params?: (string | number | null | boolean)[] }> = [];
+    let skippedCount = 0;
+    
+    for (const r of rows) {
+      const businessId = r.business_id;
+      
+      // Verify business_id exists before inserting (foreign key constraint)
+      if (businessId) {
+        try {
+          const businessExists = await executeQueryOne<{ id: number }>('SELECT id FROM businesses WHERE id = ? LIMIT 1', [businessId]);
+          if (!businessExists) {
+            console.warn(`⚠️ [RESTAURANT ROOMS] Skipping room ${r.id}: business_id ${businessId} does not exist`);
+            skippedCount++;
+            continue;
+          }
+        } catch (checkError) {
+          console.warn(`⚠️ [RESTAURANT ROOMS] Failed to verify business_id ${businessId}:`, checkError);
+          skippedCount++;
+          continue;
+        }
+      }
+      
+      queries.push({
+        sql: `INSERT INTO restaurant_rooms (
+          id, business_id, name, canvas_width, canvas_height, font_size_multiplier, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ON DUPLICATE KEY UPDATE
+          business_id=VALUES(business_id),
+          name=VALUES(name),
+          canvas_width=VALUES(canvas_width),
+          canvas_height=VALUES(canvas_height),
+          font_size_multiplier=VALUES(font_size_multiplier),
+          created_at=VALUES(created_at),
+          updated_at=VALUES(updated_at)`,
+        params: [
+          r.id ?? null,
+          businessId ?? null,
+          r.name ?? null,
+          r.canvas_width ? Number(r.canvas_width) : null,
+          r.canvas_height ? Number(r.canvas_height) : null,
+          r.font_size_multiplier !== undefined && r.font_size_multiplier !== null ? Number(r.font_size_multiplier) : 1.0,
+          toMySQLDateTime(r.created_at || new Date()),
+          toMySQLDateTime(r.updated_at || new Date())
+        ]
+      });
+    }
+    
+    if (queries.length > 0) {
+      await executeTransaction(queries);
+      // #region agent log - Transaction completed
+      console.log('[IPC] localdb-upsert-restaurant-rooms transaction completed:', { queriesExecuted: queries.length, skippedCount, totalRows: Array.isArray(rows) ? rows.length : 0 });
+      // #endregion
+      if (skippedCount > 0) {
+        console.log(`⚠️ [RESTAURANT ROOMS] Skipped ${skippedCount} rooms due to missing businesses`);
+      }
+    } else {
+      console.warn(`⚠️ [RESTAURANT ROOMS] No valid rooms to insert (all ${rows.length} skipped)`);
+    }
+    return { success: true };
+  } catch (error) {
+    console.error('Error upserting restaurant rooms:', error);
+    // #region agent log - Error details
+    console.error('[IPC] localdb-upsert-restaurant-rooms error details:', { error: error instanceof Error ? error.message : String(error), stack: error instanceof Error ? error.stack : undefined, rowCount: Array.isArray(rows) ? rows.length : 'not array' });
+    // #endregion
+    return { success: false };
+  }
+});
+
+ipcMain.handle('localdb-upsert-restaurant-tables', async (event, rows: RowArray) => {
+  try {
+    const queries: Array<{ sql: string; params?: (string | number | null | boolean)[] }> = [];
+    let skippedCount = 0;
+    
+    for (const r of rows) {
+      const roomId = r.room_id;
+      
+      // Verify room_id exists before inserting (foreign key constraint)
+      if (roomId) {
+        try {
+          const roomExists = await executeQueryOne<{ id: number }>('SELECT id FROM restaurant_rooms WHERE id = ? LIMIT 1', [roomId]);
+          if (!roomExists) {
+            console.warn(`⚠️ [RESTAURANT TABLES] Skipping table ${r.id}: room_id ${roomId} does not exist`);
+            skippedCount++;
+            continue;
+          }
+        } catch (checkError) {
+          console.warn(`⚠️ [RESTAURANT TABLES] Failed to verify room_id ${roomId}:`, checkError);
+          skippedCount++;
+          continue;
+        }
+      }
+      
+      queries.push({
+        sql: `INSERT INTO restaurant_tables (
+          id, room_id, table_number, position_x, position_y, width, height, capacity, shape, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON DUPLICATE KEY UPDATE
+          room_id=VALUES(room_id),
+          table_number=VALUES(table_number),
+          position_x=VALUES(position_x),
+          position_y=VALUES(position_y),
+          width=VALUES(width),
+          height=VALUES(height),
+          capacity=VALUES(capacity),
+          shape=VALUES(shape),
+          created_at=VALUES(created_at),
+          updated_at=VALUES(updated_at)`,
+        params: [
+          r.id ?? null,
+          roomId ?? null,
+          r.table_number ?? null,
+          r.position_x ?? 0.0,
+          r.position_y ?? 0.0,
+          r.width ?? 5.0,
+          r.height ?? 5.0,
+          r.capacity ?? 4,
+          r.shape ?? 'circle',
+          toMySQLDateTime(r.created_at || new Date()),
+          toMySQLDateTime(r.updated_at || new Date())
+        ]
+      });
+    }
+    
+    if (queries.length > 0) {
+      await executeTransaction(queries);
+      if (skippedCount > 0) {
+        console.log(`⚠️ [RESTAURANT TABLES] Skipped ${skippedCount} tables due to missing rooms`);
+      }
+    } else {
+      console.warn(`⚠️ [RESTAURANT TABLES] No valid tables to insert (all ${rows.length} skipped)`);
+    }
+    return { success: true };
+  } catch (error) {
+    console.error('Error upserting restaurant tables:', error);
+    return { success: false };
+  }
+});
+
+ipcMain.handle('localdb-upsert-restaurant-layout-elements', async (event, rows: RowArray) => {
+  try {
+    const queries: Array<{ sql: string; params?: (string | number | null | boolean)[] }> = [];
+    let skippedCount = 0;
+    
+    for (const r of rows) {
+      const roomId = r.room_id;
+      
+      // Verify room_id exists before inserting (foreign key constraint)
+      if (roomId) {
+        try {
+          const roomExists = await executeQueryOne<{ id: number }>('SELECT id FROM restaurant_rooms WHERE id = ? LIMIT 1', [roomId]);
+          if (!roomExists) {
+            console.warn(`⚠️ [RESTAURANT LAYOUT ELEMENTS] Skipping element ${r.id}: room_id ${roomId} does not exist`);
+            skippedCount++;
+            continue;
+          }
+        } catch (checkError) {
+          console.warn(`⚠️ [RESTAURANT LAYOUT ELEMENTS] Failed to verify room_id ${roomId}:`, checkError);
+          skippedCount++;
+          continue;
+        }
+      }
+      
+      queries.push({
+        sql: `INSERT INTO restaurant_layout_elements (
+          id, room_id, label, position_x, position_y, width, height, element_type, color, text_color, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON DUPLICATE KEY UPDATE
+          room_id=VALUES(room_id),
+          label=VALUES(label),
+          position_x=VALUES(position_x),
+          position_y=VALUES(position_y),
+          width=VALUES(width),
+          height=VALUES(height),
+          element_type=VALUES(element_type),
+          color=VALUES(color),
+          text_color=VALUES(text_color),
+          created_at=VALUES(created_at),
+          updated_at=VALUES(updated_at)`,
+        params: [
+          r.id ?? null,
+          roomId ?? null,
+          r.label ?? null,
+          r.position_x ?? 0.0,
+          r.position_y ?? 0.0,
+          r.width ?? 4.0,
+          r.height ?? 4.0,
+          r.element_type ?? 'custom',
+          r.color ?? '#9CA3AF',
+          r.text_color ?? '#000000',
+          toMySQLDateTime(r.created_at || new Date()),
+          toMySQLDateTime(r.updated_at || new Date())
+        ]
+      });
+    }
+
+    if (queries.length === 0) {
+      console.log('[IPC] localdb-upsert-restaurant-layout-elements: No valid queries to execute');
+      return { success: true, skipped: skippedCount };
+    }
+
+    await executeTransaction(queries);
+    console.log('[IPC] localdb-upsert-restaurant-layout-elements transaction completed:', { queriesExecuted: queries.length, skippedCount, totalRows: Array.isArray(rows) ? rows.length : 0 });
+    return { success: true, skipped: skippedCount };
+  } catch (error) {
+    console.error('[IPC] localdb-upsert-restaurant-layout-elements error details:', { error: error instanceof Error ? error.message : String(error), stack: error instanceof Error ? error.stack : undefined, rowCount: Array.isArray(rows) ? rows.length : 'not array' });
+    return { success: false, error: error instanceof Error ? error.message : String(error) };
   }
 });
 
@@ -9538,31 +10901,3 @@ ipcMain.handle('websocket-server-status', async () => {
   }
 });
 
-ipcMain.handle('websocket-broadcast-order', async (event, order: any) => {
-  try {
-    const result = websocketServer.broadcastOrder(order);
-    return result;
-  } catch (error) {
-    console.error('[IPC] Error broadcasting order:', error);
-    return {
-      success: false,
-      sentTo: [],
-      sentToKitchen: 0,
-      sentToBarista: 0
-    };
-  }
-});
-
-
-ipcMain.handle('websocket-broadcast-status', async (event, update: any) => {
-  try {
-    const result = websocketServer.broadcastStatusUpdate(update);
-    return result;
-  } catch (error) {
-    console.error('[IPC] Error broadcasting status update:', error);
-    return {
-      success: false,
-      sentTo: []
-    };
-  }
-});

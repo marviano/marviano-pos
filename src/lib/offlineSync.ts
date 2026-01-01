@@ -10,7 +10,7 @@ const getElectronAPI = (): ElectronAPI | undefined =>
 
 /**
  * Offline Sync Service
- * Handles data synchronization between online MySQL and offline SQLite database
+ * Handles data synchronization between online MySQL and local MySQL database
  */
 
 export interface ConnectionDetails {
@@ -252,7 +252,7 @@ class OfflineSyncService {
   }
 
   /**
-   * Sync data from online MySQL to local SQLite - COMPREHENSIVE SYNC
+   * Sync data from online MySQL to local MySQL - COMPREHENSIVE SYNC
    * Downloads ALL POS tables for complete offline functionality
    * Uses smart sync to prevent server overload
    */
@@ -282,11 +282,14 @@ class OfflineSyncService {
       const syncResponse = await fetch(getApiUrl('/api/sync'));
       if (syncResponse.ok) {
         const syncData = await syncResponse.json();
+        // #region agent log
+        fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'offlineSync.ts:282',message:'Sync API response received',data:{success:syncData.success,hasData:!!syncData.data,dataKeys:syncData.data?Object.keys(syncData.data):[],hasProductBusinesses:!!syncData.data?.productBusinesses,productBusinessesCount:Array.isArray(syncData.data?.productBusinesses)?syncData.data.productBusinesses.length:0,hasProduct298:Array.isArray(syncData.data?.productBusinesses)?syncData.data.productBusinesses.some((pb:any)=>pb.product_id===298):false},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'E'})}).catch(()=>{});
+        // #endregion
         if (syncData.success && syncData.data) {
           const { data } = syncData;
           // const targetBusinessId = Number(syncData.businessId ?? 14);
 
-          const totalSteps = 26;
+          const totalSteps = 28;
           let completedSteps = 0;
           const advanceProgress = () => {
             completedSteps = Math.min(totalSteps, completedSteps + 1);
@@ -294,13 +297,74 @@ class OfflineSyncService {
             this.notifyProgress(percent);
           };
 
-          // Cache all tables to local SQLite
-          if (Array.isArray(data.users) && data.users.length > 0) {
-            await (electronAPI.localDbUpsertUsers as (rows: unknown[]) => Promise<{ success: boolean }>)?.(data.users);
-            // console.log(`✅ ${data.users.length} users synced to local database`);
+          // CRITICAL: Sync order matters due to foreign key constraints
+          // Handle circular dependency: Organizations <-> Users <-> Roles
+          // Strategy: Sync in multiple passes, allowing partial data
+          
+          // #region agent log
+          fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'offlineSync.ts:297',message:'Starting multi-pass sync',data:{hasUsers:Array.isArray(data.users)&&data.users.length>0,hasOrgs:Array.isArray(data.organizations)&&data.organizations.length>0,hasRoles:Array.isArray(data.roles)&&data.roles.length>0,userCount:Array.isArray(data.users)?data.users.length:0,orgCount:Array.isArray(data.organizations)?data.organizations.length:0,roleCount:Array.isArray(data.roles)?data.roles.length:0},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'Q'})}).catch(()=>{});
+          // #endregion
+          // Pass 1: Try to sync organizations (may skip if owner_user_id doesn't exist)
+          if (Array.isArray(data.organizations) && data.organizations.length > 0) {
+            // #region agent log
+            fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'offlineSync.ts:300',message:'Pass 1: Syncing organizations',data:{orgCount:data.organizations.length},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'R'})}).catch(()=>{});
+            // #endregion
+            await (electronAPI.localDbUpsertOrganizations as (rows: unknown[]) => Promise<{ success: boolean }>)?.(data.organizations);
           }
           advanceProgress();
 
+          // Pass 2: Permission Categories (needed by permissions)
+          if (Array.isArray(data.permissionCategories) && data.permissionCategories.length > 0) {
+            await (electronAPI.localDbUpsertPermissionCategories as (rows: unknown[]) => Promise<{ success: boolean }>)?.(data.permissionCategories);
+          }
+          advanceProgress();
+
+          // Pass 3: Roles (needs organizations - may skip if org doesn't exist)
+          if (Array.isArray(data.roles)) {
+            // #region agent log
+            fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'offlineSync.ts:312',message:'Pass 3: Syncing roles',data:{roleCount:data.roles.length},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'S'})}).catch(()=>{});
+            // #endregion
+            await (electronAPI.localDbUpsertRoles as (rows: unknown[]) => Promise<{ success: boolean }>)?.(data.roles);
+          }
+          advanceProgress();
+
+          // Pass 4: Users (FIRST PASS - skip role validation to break circular dependency)
+          if (Array.isArray(data.users) && data.users.length > 0) {
+            // #region agent log
+            fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'offlineSync.ts:319',message:'Pass 4: Syncing users (first pass - skip validation)',data:{userCount:data.users.length},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'T'})}).catch(()=>{});
+            // #endregion
+            await (electronAPI.localDbUpsertUsers as (rows: unknown[], skipValidation?: boolean) => Promise<{ success: boolean }>)?.(data.users, true);
+          }
+          advanceProgress();
+
+          // Pass 5: Retry organizations now that users might exist (WITH validation)
+          if (Array.isArray(data.organizations) && data.organizations.length > 0) {
+            // #region agent log
+            fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'offlineSync.ts:326',message:'Pass 5: Retrying organizations (with validation)',data:{orgCount:data.organizations.length},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'U'})}).catch(()=>{});
+            // #endregion
+            await (electronAPI.localDbUpsertOrganizations as (rows: unknown[], skipValidation?: boolean) => Promise<{ success: boolean }>)?.(data.organizations, false);
+          }
+          advanceProgress();
+
+          // Pass 6: Retry roles now that organizations might exist
+          if (Array.isArray(data.roles)) {
+            // #region agent log
+            fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'offlineSync.ts:332',message:'Pass 6: Retrying roles',data:{roleCount:data.roles.length},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'V'})}).catch(()=>{});
+            // #endregion
+            await (electronAPI.localDbUpsertRoles as (rows: unknown[]) => Promise<{ success: boolean }>)?.(data.roles);
+          }
+          advanceProgress();
+
+          // Pass 7: Retry users now that roles might exist (WITH validation)
+          if (Array.isArray(data.users) && data.users.length > 0) {
+            // #region agent log
+            fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'offlineSync.ts:338',message:'Pass 7: Retrying users (with validation)',data:{userCount:data.users.length},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'W'})}).catch(()=>{});
+            // #endregion
+            await (electronAPI.localDbUpsertUsers as (rows: unknown[], skipValidation?: boolean) => Promise<{ success: boolean }>)?.(data.users, false);
+          }
+          advanceProgress();
+
+          // 6. Businesses (needs organizations)
           if (Array.isArray(data.businesses) && data.businesses.length > 0) {
             await (electronAPI.localDbUpsertBusinesses as (rows: unknown[]) => Promise<{ success: boolean }>)?.(data.businesses);
             // console.log(`✅ ${data.businesses.length} businesses synced to local database`);
@@ -338,15 +402,8 @@ class OfflineSyncService {
           }
           advanceProgress();
 
-          if (Array.isArray(data.categories) && data.categories.length > 0) {
-            await (electronAPI.localDbUpsertCategories as (rows: unknown[]) => Promise<{ success: boolean }>)?.(
-              data.categories.map((cat: UnknownRecord) => ({
-                category2_name: cat.jenis || cat.category2_name,
-                updated_at: Date.now(),
-              }))
-            );
-            // console.log(`✅ ${data.categories.length} categories synced to local database`);
-          }
+          // Skip legacy 'categories' table - it doesn't exist in MySQL schema
+          // Category2 table is the source of truth
           advanceProgress();
 
           if (Array.isArray(data.products)) {
@@ -354,9 +411,43 @@ class OfflineSyncService {
             if (data.products.length > 0) {
               await (electronAPI.localDbUpsertProducts as (rows: unknown[]) => Promise<{ success: boolean }>)?.(data.products);
               // console.log(`✅ ${data.products.length} products synced to local database`);
+              
+              // Cleanup orphaned products (products that exist locally but not in sync data)
+              const businessId = syncData.businessId || 14; // Default to 14 if not provided
+              const syncedProductIds = data.products.map((p: any) => p.id).filter((id: any): id is number => typeof id === 'number');
+              if (syncedProductIds.length > 0 && electronAPI.localDbCleanupOrphanedProducts) {
+                try {
+                  const cleanupResult = await electronAPI.localDbCleanupOrphanedProducts(businessId, syncedProductIds);
+                  if (cleanupResult.success && cleanupResult.deletedCount && cleanupResult.deletedCount > 0) {
+                    console.log(`🧹 [SYNC] Cleaned up ${cleanupResult.deletedCount} orphaned products`);
+                  }
+                } catch (cleanupError) {
+                  console.warn('⚠️ [SYNC] Failed to cleanup orphaned products:', cleanupError);
+                }
+              }
             }
           } else {
             console.warn('⚠️ [SYNC] Products data is missing or not an array');
+          }
+          
+          // Sync product_businesses junction table (REQUIRED for product filtering)
+          // #region agent log
+          fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'offlineSync.ts:416',message:'Checking productBusinesses data',data:{hasProductBusinesses:!!data.productBusinesses,isArray:Array.isArray(data.productBusinesses),length:Array.isArray(data.productBusinesses)?data.productBusinesses.length:0,hasProduct298:Array.isArray(data.productBusinesses)?data.productBusinesses.some((pb:any)=>pb.product_id===298):false,allKeys:Object.keys(data)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
+          // #endregion
+          if (Array.isArray(data.productBusinesses) && data.productBusinesses.length > 0) {
+            // #region agent log
+            fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'offlineSync.ts:418',message:'Calling localDbUpsertProductBusinesses',data:{count:data.productBusinesses.length,hasProduct298:data.productBusinesses.some((pb:any)=>pb.product_id===298),sampleData:data.productBusinesses.slice(0,3)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
+            // #endregion
+            await (electronAPI.localDbUpsertProductBusinesses as (rows: Array<{ product_id: number; business_id: number }>) => Promise<{ success: boolean }>)?.(data.productBusinesses);
+            console.log(`✅ [SYNC] ${data.productBusinesses.length} product-business relationships synced to local database`);
+            // #region agent log
+            fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'offlineSync.ts:420',message:'localDbUpsertProductBusinesses completed',data:{count:data.productBusinesses.length},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})}).catch(()=>{});
+            // #endregion
+          } else {
+            console.warn('⚠️ [SYNC] product_businesses data is missing or empty - products may not appear correctly');
+            // #region agent log
+            fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'offlineSync.ts:421',message:'product_businesses data missing',data:{hasProductBusinesses:!!data.productBusinesses,isArray:Array.isArray(data.productBusinesses),type:typeof data.productBusinesses,allKeys:Object.keys(data)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'D'})}).catch(()=>{});
+            // #endregion
           }
           advanceProgress();
 
@@ -390,12 +481,7 @@ class OfflineSyncService {
           }
           advanceProgress();
 
-          if (Array.isArray(data.roles)) {
-            await (electronAPI.localDbUpsertRoles as (rows: unknown[]) => Promise<{ success: boolean }>)?.(data.roles);
-            // console.log(`✅ ${data.roles.length} roles synced to local database`);
-          }
-          advanceProgress();
-
+          // Permissions (needs permission_categories)
           if (Array.isArray(data.permissions)) {
             await (electronAPI.localDbUpsertPermissions as (rows: unknown[]) => Promise<{ success: boolean }>)?.(data.permissions);
             // console.log(`✅ ${data.permissions.length} permissions synced to local database`);
@@ -464,6 +550,19 @@ class OfflineSyncService {
           if (Array.isArray(data.clAccounts) && data.clAccounts.length > 0) {
             await (electronAPI.localDbUpsertClAccounts as (rows: unknown[]) => Promise<{ success: boolean }>)?.(data.clAccounts);
             // console.log(`✅ ${data.clAccounts.length} CL accounts synced to local database`);
+          }
+          advanceProgress();
+
+          // Restaurant Table Layout (rooms first, then tables due to foreign key)
+          if (Array.isArray(data.restaurantRooms) && data.restaurantRooms.length > 0) {
+            await (electronAPI.localDbUpsertRestaurantRooms as (rows: unknown[]) => Promise<{ success: boolean }>)?.(data.restaurantRooms);
+            // console.log(`✅ ${data.restaurantRooms.length} restaurant rooms synced to local database`);
+          }
+          advanceProgress();
+
+          if (Array.isArray(data.restaurantTables) && data.restaurantTables.length > 0) {
+            await (electronAPI.localDbUpsertRestaurantTables as (rows: unknown[]) => Promise<{ success: boolean }>)?.(data.restaurantTables);
+            // console.log(`✅ ${data.restaurantTables.length} restaurant tables synced to local database`);
           }
           advanceProgress();
 

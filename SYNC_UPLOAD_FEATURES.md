@@ -34,12 +34,12 @@
 - ✅ `transaction_item_customization_options` - Customization options
 
 **Data Flow**:
-1. Reads from SQLite: `offline_transactions` table
+1. Reads from local MySQL: `transactions` table
 2. Validates NOT NULL fields
 3. Converts dates to MySQL format
 4. Validates ENUM values
 5. Uploads to MySQL via `/api/transactions`
-6. Marks as synced in SQLite
+6. Marks as synced in local MySQL
 
 **Overwrite Behavior**: 
 - Creates new transactions in MySQL
@@ -63,12 +63,12 @@
 - ✅ `shifts` - Cashier shift records
 
 **Data Flow**:
-1. Reads from SQLite: `shifts` table (unsynced shifts)
+1. Reads from local MySQL: `shifts` table (unsynced shifts)
 2. Validates NOT NULL fields
 3. Converts dates to MySQL format
 4. Validates ENUM values (`kas_selisih_label`)
 5. Uploads to MySQL via `/api/shifts`
-6. Marks as synced in SQLite
+6. Marks as synced in local MySQL
 
 **Overwrite Behavior**: 
 - Creates new shifts in MySQL
@@ -93,12 +93,12 @@
 - ✅ `transactions` - Updates transaction refund status
 
 **Data Flow**:
-1. Reads from SQLite: `offline_refunds` table
+1. Reads from local MySQL: `offline_refunds` table
 2. Validates NOT NULL fields
 3. Converts dates to MySQL format
 4. Validates ENUM values (`refund_type`, `status`)
 5. Uploads to MySQL via `/api/transactions/{uuid}/refund`
-6. Marks as synced in SQLite
+6. Marks as synced in local MySQL
 
 **Overwrite Behavior**: 
 - Creates new refund records in MySQL
@@ -122,7 +122,7 @@
 - ✅ `products` - Product master data
 
 **Data Flow**:
-1. Reads from SQLite: `products` table (all products)
+1. Reads from local MySQL: `products` table (all products)
 2. Formats products for import
 3. Uploads to MySQL via `/api/products` with import action
 4. Requires `X-POS-API-Key` header
@@ -151,7 +151,7 @@
 - ✅ `printer_daily_counters` - Daily printer counter records
 
 **Data Flow**:
-1. Reads from SQLite: `printer_daily_counters` table (all counters)
+1. Reads from local MySQL: `printer_daily_counters` table (all counters)
 2. Uploads to MySQL via `/api/printer-daily-counters`
 3. Server handles upsert logic
 
@@ -183,13 +183,13 @@
 - ✅ `printer2_audit_log` - Printer 2 audit logs
 
 **Data Flow**:
-1. Reads from SQLite: `system_pos_queue` table
+1. Reads from local MySQL: `system_pos_queue` table
 2. **FILTER**: Only syncs if `printer2_audit_log` exists for transaction
 3. Fetches complete transaction data (including shift and audits)
 4. Converts dates to MySQL format
 5. Validates ENUM values
 6. Uploads to System POS (Receiptize) via multiple endpoints
-7. Marks as synced in SQLite
+7. Marks as synced in local MySQL
 
 **Overwrite Behavior**: 
 - Creates new records in System POS database
@@ -219,9 +219,9 @@
 - ✅ `printer_audits` - General printer audit records (if exists in MySQL)
 
 **Data Flow**:
-1. Reads from SQLite: `printer1_audit_log` and `printer2_audit_log` tables (unsynced)
+1. Reads from local MySQL: `printer1_audit_log` and `printer2_audit_log` tables (unsynced)
 2. Uploads to MySQL via `/api/printer-audits`
-3. Marks as synced in SQLite
+3. Marks as synced in local MySQL
 
 **Overwrite Behavior**: 
 - Creates new audit log records

@@ -66,7 +66,6 @@ declare global {
       maximizeWindow: () => Promise<unknown>;
       navigateTo: (path: string) => Promise<unknown>;
       focusWindow: () => Promise<{ success: boolean; error?: string }>;
-      openProductionDisplay: (displayType: 'kitchen' | 'barista') => Promise<{ success: boolean; displayType?: string; error?: string }>;
 
       // Authentication events
       notifyLoginSuccess: () => Promise<unknown>;
@@ -139,6 +138,7 @@ declare global {
       localDbUpsertCategories?: (rows: { category2_name: string; updated_at?: number }[]) => Promise<{ success: boolean }>;
       localDbGetCategories?: () => Promise<{ category2_name: string; updated_at: number }[]>;
       localDbUpsertProducts?: (rows: unknown[]) => Promise<{ success: boolean }>;
+      localDbCleanupOrphanedProducts?: (businessId: number, syncedProductIds: number[]) => Promise<{ success: boolean; deletedCount?: number; deletedProductIds?: number[]; error?: string }>;
       localDbGetProductsByJenis?: (jenis: string) => Promise<unknown[]>;
       localDbGetProductsByCategory2?: (category2Name: string) => Promise<unknown[]>;
       localDbGetAllProducts?: () => Promise<unknown[]>;
@@ -153,6 +153,45 @@ declare global {
       localDbGetPendingRefunds?: () => Promise<unknown[]>;
       localDbMarkRefundSynced?: (offlineRefundId: number) => Promise<{ success: boolean }>;
       localDbMarkRefundFailed?: (offlineRefundId: number) => Promise<{ success: boolean }>;
+
+      // Restaurant Table Layout
+      getRestaurantRooms?: (businessId: number) => Promise<Array<{
+        canvas_width?: number | null;
+        canvas_height?: number | null;
+        font_size_multiplier?: number | null;
+        id: number;
+        business_id: number;
+        name: string;
+        created_at: string;
+        updated_at: string;
+        table_count: number;
+      }>>;
+      getRestaurantTables?: (roomId: number) => Promise<Array<{
+        id: number;
+        room_id: number;
+        table_number: string;
+        position_x: number | string;
+        position_y: number | string;
+        width: number | string;
+        height: number | string;
+        capacity: number;
+        shape: 'circle' | 'rectangle';
+      }>>;
+      getRestaurantLayoutElements?: (roomId: number) => Promise<Array<{
+        id: number;
+        room_id: number;
+        label: string;
+        position_x: number | string;
+        position_y: number | string;
+        width: number | string;
+        height: number | string;
+        element_type: string;
+        color: string;
+        text_color: string;
+      }>>;
+      localDbUpsertRestaurantRooms?: (rows: unknown[]) => Promise<{ success: boolean }>;
+      localDbUpsertRestaurantTables?: (rows: unknown[]) => Promise<{ success: boolean }>;
+      localDbUpsertRestaurantLayoutElements?: (rows: unknown[]) => Promise<{ success: boolean }>;
 
       // Transaction operations
       localDbGetTransactions?: (businessId?: number, limit?: number) => Promise<unknown[]>;
@@ -179,12 +218,32 @@ declare global {
       localDbUpsertTransactionItemCustomizations?: (rows: unknown[]) => Promise<{ success: boolean; count: number; error?: string }>;
       localDbUpsertTransactionItemCustomizationOptions?: (rows: unknown[]) => Promise<{ success: boolean; count: number; error?: string }>;
       localDbGetTransactionRefunds?: (transactionUuid: string) => Promise<unknown[]>;
+      localDbGetShiftRefunds?: (payload: {
+        userId: number;
+        businessId: number;
+        shiftUuid?: string | null;
+        shiftStart: string;
+        shiftEnd?: string | null;
+      }) => Promise<Array<{
+        refund_uuid: string;
+        transaction_uuid: string;
+        transaction_uuid_id: string;
+        refund_amount: number;
+        cash_delta: number;
+        refunded_at: string;
+        refunded_by: number;
+        payment_method_id: number;
+        payment_method: string;
+        final_amount: number;
+        transaction_created_at: string;
+      }>>;
       localDbUpsertTransactionRefunds?: (rows: unknown[]) => Promise<{ success: boolean; error?: string }>;
       localDbApplyTransactionRefund?: (payload: unknown) => Promise<{ success: boolean; error?: string }>;
       localDbGetUnsyncedTransactions?: (businessId?: number) => Promise<unknown[]>;
       localDbDeleteUnsyncedTransactions?: (businessId?: number) => Promise<{ success: boolean; deletedCount?: number; error?: string }>;
       localDbMarkTransactionsSynced?: (transactionIds: string[]) => Promise<unknown>;
-      localDbResetTransactionSync?: (transactionId: string | number) => Promise<{ success: boolean }>;
+      localDbResetTransactionSync?: (transactionId: string | number) => Promise<{ success: boolean; error?: string; affectedRows?: number }>;
+      localDbResetTransactionsSyncByDate?: (payload: { businessId: number; fromDate?: string | null; toDate?: string | null }) => Promise<{ success: boolean; count?: number; error?: string }>;
       localDbMarkTransactionsSyncedByIds?: (transactionIds: number[]) => Promise<{ success: boolean }>;
       localDbArchiveTransactions?: (payload: { businessId: number; from?: string | null; to?: string | null }) => Promise<number>;
       localDbDeleteTransactions?: (payload: { businessId: number; from?: string | null; to?: string | null }) => Promise<number>;
@@ -192,7 +251,7 @@ declare global {
 
       // Comprehensive POS table operations
       // Users
-      localDbUpsertUsers?: (rows: unknown[]) => Promise<{ success: boolean }>;
+      localDbUpsertUsers?: (rows: unknown[], skipRoleValidation?: boolean) => Promise<{ success: boolean }>;
       localDbGetUsers?: () => Promise<unknown[]>;
 
       // Businesses
@@ -249,7 +308,7 @@ declare global {
       localDbGetPaymentMethods?: () => Promise<unknown[]>;
 
       // Organizations
-      localDbUpsertOrganizations?: (rows: unknown[]) => Promise<unknown>;
+      localDbUpsertOrganizations?: (rows: unknown[], skipOwnerValidation?: boolean) => Promise<{ success: boolean }>;
       localDbGetOrganizations?: () => Promise<unknown[]>;
 
       // Management Groups
@@ -260,6 +319,7 @@ declare global {
       localDbUpsertCategory1?: (rows: unknown[]) => Promise<unknown>;
       localDbGetCategory1?: () => Promise<unknown[]>;
       localDbUpsertCategory2?: (rows: unknown[], junctionData?: Array<{ category2_id: number; business_id: number }>) => Promise<unknown>;
+      localDbUpsertProductBusinesses?: (rows: Array<{ product_id: number; business_id: number }>) => Promise<{ success: boolean }>;
       localDbGetCategory2?: () => Promise<unknown[]>;
 
       // CL Accounts
@@ -325,25 +385,25 @@ declare global {
           variance_label: 'balanced' | 'plus' | 'minus';
         };
       }>;
-      localDbGetShiftStatistics?: (userId: number, shiftStart: string, shiftEnd: string | null, businessId?: number) => Promise<{
+      localDbGetShiftStatistics?: (userId: number | null, shiftStart: string, shiftEnd: string | null, businessId?: number, shiftUuid?: string | null) => Promise<{
         order_count: number;
         total_amount: number;
         total_discount: number;
         voucher_count: number;
       }>;
-      localDbGetPaymentBreakdown?: (userId: number, shiftStart: string, shiftEnd: string | null, businessId?: number) => Promise<Array<{
+      localDbGetPaymentBreakdown?: (userId: number | null, shiftStart: string, shiftEnd: string | null, businessId?: number) => Promise<Array<{
         payment_method_name: string;
         payment_method_code: string;
         transaction_count: number;
         total_amount: number;
       }>>;
-      localDbGetCategory2Breakdown?: (userId: number, shiftStart: string, shiftEnd: string | null, businessId?: number) => Promise<Array<{
+      localDbGetCategory2Breakdown?: (userId: number | null, shiftStart: string, shiftEnd: string | null, businessId?: number) => Promise<Array<{
         category2_name: string;
         category2_id: number;
         total_quantity: number;
         total_amount: number;
       }>>;
-      localDbGetCashSummary?: (userId: number, shiftStart: string, shiftEnd: string | null, businessId?: number) => Promise<{
+      localDbGetCashSummary?: (userId: number | null, shiftStart: string, shiftEnd: string | null, businessId?: number, shiftUuid?: string | null) => Promise<{
         cash_shift: number;
         cash_shift_sales: number;
         cash_shift_refunds: number;
@@ -362,7 +422,7 @@ declare global {
         earliestTime: string | null;
       }>;
       localDbUpdateShiftStart?: (shiftId: number, newStartTime: string) => Promise<{ success: boolean; error?: string }>;
-      localDbGetProductSales?: (userId: number, shiftStart: string, shiftEnd: string | null, businessId?: number) => Promise<{
+      localDbGetProductSales?: (userId: number | null, shiftStart: string, shiftEnd: string | null, businessId?: number) => Promise<{
         products: Array<{
           product_id: number;
           product_name: string;
@@ -466,65 +526,13 @@ declare global {
         isRunning: boolean;
         port: number;
         clientCount: number;
-        clients: Array<{ id: string; type: 'pos' | 'kitchen' | 'barista'; connectedAt: number }>;
+        clients: Array<{ id: string; type: 'pos'; connectedAt: number }>;
       }>;
-      websocketBroadcastOrder?: (order: {
-        transactionId: string;
-        receiptNumber: number;
-        businessId: number;
-        items: Array<{
-          itemId: string;
-          productId: number;
-          productName: string;
-          category1_id: number;
-          quantity: number;
-          unitPrice: number;
-          totalPrice: number;
-          customNote?: string;
-          bundleSelections?: Array<{
-            category2_id: number;
-            category2_name: string;
-            selectedProducts: Array<{
-              product: {
-                id: number;
-                nama: string;
-              };
-              quantity?: number;
-              customizations?: Array<{
-                customization_id: number;
-                customization_name: string;
-                selected_options: Array<{
-                  option_id: number;
-                  option_name: string;
-                  price_adjustment: number;
-                }>;
-              }>;
-              customNote?: string;
-            }>;
-            requiredQuantity: number;
-          }>;
-          customizations?: Array<{
-            customization_id: number;
-            customization_name: string;
-            selected_options: Array<{
-              option_id: number;
-              option_name: string;
-              price_adjustment: number;
-            }>;
-          }>;
-          status: 'preparing' | 'finished';
-        }>;
-        createdAt: string;
-        customerName?: string;
-        customerUnit?: number;
-        pickupMethod: 'dine-in' | 'take-away';
-      }) => Promise<{ success: boolean; sentTo: string[]; sentToKitchen: number; sentToBarista: number }>;
-      websocketBroadcastStatus?: (update: {
-        transactionId: string;
-        itemId: string;
-        status: 'preparing' | 'finished';
-        preparedBy?: string;
-      }) => Promise<{ success: boolean; sentTo: string[] }>;
+
+      // Configuration Management
+      getAppConfig?: () => Promise<{ success: boolean; config: { serverHost?: string; apiUrl?: string; dbUser?: string; dbPassword?: string; dbName?: string; dbPort?: number } | null; error?: string }>;
+      saveAppConfig?: (config: { serverHost?: string; apiUrl?: string; dbUser?: string; dbPassword?: string; dbName?: string; dbPort?: number }) => Promise<{ success: boolean; error?: string }>;
+      resetAppConfig?: () => Promise<{ success: boolean; error?: string }>;
     };
   }
 }
