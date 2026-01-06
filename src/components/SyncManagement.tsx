@@ -1673,10 +1673,9 @@ export default function SyncManagement() {
   // Cleanup test transactions (hardcoded: marviano.austin@gmail.com OR user_id IS NULL)
   const cleanupTestTransactions = async () => {
     const confirmed = window.confirm(
-      `⚠️ WARNING: This will PERMANENTLY DELETE ALL transactions from all 3 databases:\n\n` +
+      `⚠️ WARNING: This will PERMANENTLY DELETE ALL transactions from all 2 databases:\n\n` +
       `1. Local MySQL (local POS)\n` +
-      `2. SalesPulse MySQL (online)\n` +
-      `3. System-POS MySQL (online)\n\n` +
+      `2. SalesPulse MySQL (online)\n\n` +
       `Target: marviano.austin@gmail.com OR user_id IS NULL\n\n` +
       `This action CANNOT be undone!\n\n` +
       `Are you absolutely sure you want to proceed?`
@@ -1704,8 +1703,8 @@ export default function SyncManagement() {
       // ============================================
       // DATABASE 1: LOCAL MYSQL
       // ============================================
-      console.log('[CLEANUP] 📦 [Database 1/3] Local MySQL - Starting deletion...');
-      addLog('info', '📦 [Database 1/3] Local MySQL - Starting deletion...');
+      console.log('[CLEANUP] 📦 [Database 1/2] Local MySQL - Starting deletion...');
+      addLog('info', '📦 [Database 1/2] Local MySQL - Starting deletion...');
       const offlineResult = await electronAPI.localDbDeleteTransactionsByRole();
       console.log('[CLEANUP] [Local MySQL] Result:', offlineResult);
 
@@ -1730,10 +1729,10 @@ export default function SyncManagement() {
       }
 
       // ============================================
-      // DATABASE 2 & 3: SALESPULSE & SYSTEM-POS MYSQL
+      // DATABASE 2: SALESPULSE MYSQL
       // ============================================
-      console.log('[CLEANUP] 🌐 [Database 2-3/3] Online MySQL (SalesPulse + System-POS) - Starting deletion...');
-      addLog('info', '🌐 [Database 2-3/3] Online MySQL (SalesPulse + System-POS) - Starting deletion...');
+      console.log('[CLEANUP] 🌐 [Database 2/2] Online MySQL (SalesPulse) - Starting deletion...');
+      addLog('info', '🌐 [Database 2/2] Online MySQL (SalesPulse) - Starting deletion...');
       try {
         const apiUrl = getApiUrl('/api/admin/transactions/cleanup');
         const apiKey = process.env.NEXT_PUBLIC_POS_SYNC_API_KEY || '';
@@ -1755,11 +1754,12 @@ export default function SyncManagement() {
           console.log('[CLEANUP] Online response data:', data);
 
           // Check if new detailed format is available
-          if (data.details && data.details.salespulse && data.details.systemPos) {
+          if (data.details && data.details.salespulse) {
             // New format with detailed breakdown
             // SalesPulse MySQL
             const sp = data.details.salespulse;
             console.log(`[CLEANUP] [SalesPulse MySQL] Target User IDs: ${sp.targetUserIds?.join(', ') || 'NULL'}`);
+            console.log(`[CLEANUP] [SalesPulse MySQL] printer_audit_log: ${sp.printer_audit_log || 0} rows`);
             console.log(`[CLEANUP] [SalesPulse MySQL] printer1_audit_log: ${sp.printer1_audit_log} rows`);
             console.log(`[CLEANUP] [SalesPulse MySQL] printer_audits: ${sp.printer_audits} rows`);
             console.log(`[CLEANUP] [SalesPulse MySQL] printer2_audit_log: ${sp.printer2_audit_log} rows`);
@@ -1768,6 +1768,9 @@ export default function SyncManagement() {
 
             if (sp.success) {
               addLog('success', `✅ [SalesPulse MySQL] Target User IDs: ${sp.targetUserIds?.join(', ') || 'NULL'}`);
+              if (sp.printer_audit_log) {
+                addLog('info', `   └─ printer_audit_log: ${sp.printer_audit_log} rows deleted`);
+              }
               addLog('info', `   └─ printer1_audit_log: ${sp.printer1_audit_log} rows deleted`);
               addLog('info', `   └─ printer_audits: ${sp.printer_audits} rows deleted`);
               addLog('info', `   └─ printer2_audit_log: ${sp.printer2_audit_log} rows deleted`);
@@ -1777,25 +1780,6 @@ export default function SyncManagement() {
             } else {
               addLog('error', `❌ [SalesPulse MySQL] Failed: ${sp.error || 'Unknown error'}`);
             }
-
-            // System-POS MySQL
-            const sys = data.details.systemPos;
-            console.log(`[CLEANUP] [System-POS MySQL] Target User IDs: ${sys.targetUserIds?.join(', ') || 'NULL'}`);
-            console.log(`[CLEANUP] [System-POS MySQL] printer1_audit_log: ${sys.printer1_audit_log} rows`);
-            console.log(`[CLEANUP] [System-POS MySQL] printer2_audit_log: ${sys.printer2_audit_log} rows`);
-            console.log(`[CLEANUP] [System-POS MySQL] transaction_items: ${sys.transaction_items} rows`);
-            console.log(`[CLEANUP] [System-POS MySQL] transactions: ${sys.transactions} rows`);
-
-            if (sys.success) {
-              addLog('success', `✅ [System-POS MySQL] Target User IDs: ${sys.targetUserIds?.join(', ') || 'NULL'}`);
-              addLog('info', `   └─ printer1_audit_log: ${sys.printer1_audit_log} rows deleted`);
-              addLog('info', `   └─ printer2_audit_log: ${sys.printer2_audit_log} rows deleted`);
-              addLog('info', `   └─ transaction_items: ${sys.transaction_items} rows deleted`);
-              addLog('info', `   └─ transactions: ${sys.transactions} rows deleted`);
-              addLog('success', `✅ [System-POS MySQL] Completed: ${sys.transactions} transactions, ${sys.transaction_items} items`);
-            } else {
-              addLog('error', `❌ [System-POS MySQL] Failed: ${sys.error || 'Unknown error'}`);
-            }
           } else {
             // Old format (backward compatibility) - API not yet updated
             console.warn('[CLEANUP] ⚠️ Backend API returned old format. Detailed breakdown not available.');
@@ -1803,7 +1787,6 @@ export default function SyncManagement() {
             addLog('warning', '⚠️ Backend API returned old format. Detailed breakdown not available.');
             if (data.results) {
               addLog('info', `   └─ SalesPulse: ${data.results.salespulse?.deleted || 0} transactions`);
-              addLog('info', `   └─ System-POS: ${data.results.systemPos?.deleted || 0} transactions`);
             }
             addLog('warning', '⚠️ Please redeploy backend API to get detailed per-database breakdown');
           }
@@ -2984,7 +2967,7 @@ WHERE ${baseWhere};`;
                     <h4 className="font-semibold text-gray-900 text-lg">Cleanup Test Transactions</h4>
                   </div>
                   <p className="text-sm text-gray-700 mb-4">
-                    Permanently delete ALL test transactions from all 3 databases (Local MySQL, SalesPulse MySQL, System-POS MySQL).
+                    Permanently delete ALL test transactions from all 2 databases (Local MySQL, SalesPulse MySQL).
                   </p>
                   <div className="bg-red-100 border border-red-300 rounded-lg p-3 mb-4">
                     <p className="text-xs text-red-800 font-medium mb-1">

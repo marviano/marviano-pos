@@ -295,5 +295,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getAppConfig: () => ipcRenderer.invoke('get-app-config'),
   saveAppConfig: (config: { serverHost?: string; apiUrl?: string; dbUser?: string; dbPassword?: string; dbName?: string; dbPort?: number }) => ipcRenderer.invoke('save-app-config', config),
   resetAppConfig: () => ipcRenderer.invoke('reset-app-config'),
+  testDbConnection: (config: { serverHost?: string; dbUser?: string; dbPassword?: string; dbName?: string; dbPort?: number }) => ipcRenderer.invoke('test-db-connection', config),
 });
 

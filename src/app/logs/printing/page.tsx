@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState, Fragment, useCallback, useRef } from 'react';
 import { useRouter } from 'next/navigation';
 import { useAuth } from '@/hooks/useAuth';
+import { getApiUrl } from '@/lib/api';
 
 // Transaction type from API
 type Transaction = {

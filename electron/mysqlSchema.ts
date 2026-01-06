@@ -371,7 +371,7 @@ export async function initializeMySQLSchema(): Promise<void> {
       created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
       bundle_selections_json JSON DEFAULT NULL,
       production_started_at TIMESTAMP NULL DEFAULT NULL,
-      production_status ENUM('preparing','finished') DEFAULT NULL,
+      production_status ENUM('preparing','finished','cancelled') DEFAULT NULL,
       production_finished_at TIMESTAMP NULL DEFAULT NULL,
       PRIMARY KEY (id),
       UNIQUE KEY uuid_id (uuid_id),

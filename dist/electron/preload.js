@@ -213,4 +213,5 @@ electron_1.contextBridge.exposeInMainWorld('electronAPI', {
     getAppConfig: () => electron_1.ipcRenderer.invoke('get-app-config'),
     saveAppConfig: (config) => electron_1.ipcRenderer.invoke('save-app-config', config),
     resetAppConfig: () => electron_1.ipcRenderer.invoke('reset-app-config'),
+    testDbConnection: (config) => electron_1.ipcRenderer.invoke('test-db-connection', config),
 });

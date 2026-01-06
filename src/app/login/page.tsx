@@ -105,9 +105,10 @@ export default function Login() {
         }
 
         await offlineSyncService.syncFromOnline();
-        setSyncStatus('Sinkronisasi Knowledge Base PoS selesai.');
+        setSyncStatus('✅ Sinkronisasi Knowledge Base PoS selesai!');
         setSyncProgress(100);
         setHasOfflineDb(true);
+        setSyncError(null); // Clear any previous errors
 
         // Re-check to confirm DB now exists
         try {
@@ -122,9 +123,19 @@ export default function Login() {
         }
         return true;
       } catch (error) {
-        const message = error instanceof Error ? error.message : 'Sinkronisasi gagal dijalankan.';
-        console.error('Sinkronisasi lengkap gagal:', error);
+        let message = 'Sinkronisasi gagal dijalankan.';
+        if (error instanceof Error) {
+          message = error.message;
+          // Add more context for common errors
+          if (error.message.includes('API URL')) {
+            message = error.message + '\n\nPastikan URL API sudah diisi dengan format: http://IP:PORT (contoh: http://192.168.1.16:3000)';
+          } else if (error.message.includes('Failed to fetch') || error.message.includes('NetworkError')) {
+            message = error.message + '\n\nPeriksa apakah API server berjalan dan dapat diakses.';
+          }
+        }
+        console.error('❌ Sinkronisasi lengkap gagal:', error);
         setSyncError(message);
+        setSyncStatus(null); // Clear status to show error
         return false;
       } finally {
         if (unsubscribe) {

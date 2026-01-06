@@ -35,3 +35,6 @@ CREATE TABLE IF NOT EXISTS transaction_item_removals (
   CONSTRAINT fk_tir_table FOREIGN KEY (table_id) REFERENCES restaurant_tables(id) ON DELETE SET NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
+
+
+

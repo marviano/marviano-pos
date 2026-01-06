@@ -52,6 +52,7 @@ exports.executeSystemPosQuery = executeSystemPosQuery;
 exports.executeSystemPosQueryOne = executeSystemPosQueryOne;
 exports.executeSystemPosUpdate = executeSystemPosUpdate;
 exports.executeSystemPosTransaction = executeSystemPosTransaction;
+exports.testDatabaseConnection = testDatabaseConnection;
 exports.closeMySQLPool = closeMySQLPool;
 const promise_1 = __importDefault(require("mysql2/promise"));
 const path = __importStar(require("path"));
@@ -222,14 +223,35 @@ async function executeTransaction(queries) {
     const connection = await pool.getConnection();
     try {
         await connection.beginTransaction();
-        for (const { sql, params = [] } of queries) {
-            await connection.execute(sql, params);
+        console.log(`🔄 [TRANSACTION] Started transaction with ${queries.length} queries`);
+        for (let i = 0; i < queries.length; i++) {
+            const { sql, params = [] } = queries[i];
+            try {
+                const [result] = await connection.execute(sql, params);
+                if (i < 5 || i === queries.length - 1) {
+                    // Log first 5 and last query for debugging
+                    console.log(`  ✓ Query ${i + 1}/${queries.length}: ${result.affectedRows} rows affected`);
+                }
+            }
+            catch (queryError) {
+                console.error(`❌ [TRANSACTION] Query ${i + 1} failed:`, queryError);
+                console.error(`  SQL: ${sql.substring(0, 200)}...`);
+                throw queryError;
+            }
         }
         await connection.commit();
+        console.log(`✅ [TRANSACTION] Committed successfully - ${queries.length} queries executed`);
     }
     catch (error) {
         await connection.rollback();
-        console.error('❌ MySQL transaction error:', error);
+        console.error('❌ [TRANSACTION] Error occurred, rolling back:', error);
+        console.error('❌ [TRANSACTION] Error details:', {
+            message: error instanceof Error ? error.message : String(error),
+            code: error?.code,
+            errno: error?.errno,
+            sqlState: error?.sqlState,
+            queryCount: queries.length
+        });
         throw error;
     }
     finally {
@@ -384,6 +406,102 @@ async function executeSystemPosTransaction(queries) {
     }
     finally {
         connection.release();
+    }
+}
+/**
+ * Test database connection with provided config
+ */
+async function testDatabaseConnection(config) {
+    const host = config.serverHost || 'localhost';
+    const user = config.dbUser || 'root';
+    const password = config.dbPassword || '';
+    const database = config.dbName || 'salespulse';
+    const port = config.dbPort || 3306;
+    let testConnection = null;
+    try {
+        // Create a temporary connection pool for testing
+        const testPool = promise_1.default.createPool({
+            host,
+            user,
+            password,
+            database,
+            port,
+            waitForConnections: true,
+            connectionLimit: 1,
+            queueLimit: 0,
+            connectTimeout: 5000, // 5 second timeout
+        });
+        // Try to get a connection
+        testConnection = await testPool.getConnection();
+        // Test with a simple query
+        await testConnection.query('SELECT 1');
+        // Clean up
+        testConnection.release();
+        await testPool.end();
+        return {
+            success: true,
+            message: `Berhasil terhubung ke database ${database} di ${host}:${port}`
+        };
+    }
+    catch (error) {
+        // Clean up on error
+        if (testConnection) {
+            try {
+                testConnection.release();
+            }
+            catch (e) {
+                // Ignore cleanup errors
+            }
+        }
+        let errorMessage = 'Gagal terhubung ke database';
+        if (error.code === 'ECONNREFUSED') {
+            errorMessage = `Tidak dapat terhubung ke server ${host}:${port}. Pastikan server MySQL berjalan dan dapat diakses.`;
+        }
+        else if (error.code === 'ER_ACCESS_DENIED_ERROR' || error.code === 'ER_NOT_SUPPORTED_AUTH_MODE') {
+            // Check if it's a network connection issue
+            const isNetworkConnection = host !== 'localhost' && host !== '127.0.0.1';
+            if (isNetworkConnection) {
+                errorMessage = `Username atau password salah untuk koneksi jaringan ke ${host}.\n\n` +
+                    `Kemungkinan penyebab:\n` +
+                    `1. User '${user}' belum dibuat untuk koneksi dari IP ${host}\n` +
+                    `2. Password berbeda untuk user network vs localhost\n\n` +
+                    `Solusi: Di MySQL server, jalankan:\n` +
+                    `CREATE USER '${user}'@'${host}' IDENTIFIED BY 'password_yang_sama';\n` +
+                    `GRANT ALL PRIVILEGES ON ${database}.* TO '${user}'@'${host}';\n` +
+                    `FLUSH PRIVILEGES;\n\n` +
+                    `Atau untuk seluruh subnet:\n` +
+                    `CREATE USER '${user}'@'192.168.1.%' IDENTIFIED BY 'password_yang_sama';\n` +
+                    `GRANT ALL PRIVILEGES ON ${database}.* TO '${user}'@'192.168.1.%';\n` +
+                    `FLUSH PRIVILEGES;`;
+            }
+            else {
+                errorMessage = 'Username atau password salah. Periksa kredensial database.';
+            }
+        }
+        else if (error.code === 'ER_BAD_DB_ERROR') {
+            errorMessage = `Database "${database}" tidak ditemukan. Pastikan database sudah dibuat.`;
+        }
+        else if (error.code === 'ETIMEDOUT' || error.code === 'ENOTFOUND') {
+            errorMessage = `Tidak dapat mencapai server ${host}. Periksa alamat server dan koneksi jaringan.`;
+        }
+        else if (error.message && error.message.includes('is not allowed to connect')) {
+            // MySQL host not allowed error
+            const hostMatch = error.message.match(/Host '([^']+)' is not allowed/);
+            const blockedHost = hostMatch ? hostMatch[1] : 'hostname/IP Anda';
+            errorMessage = `Host '${blockedHost}' tidak diizinkan untuk terhubung ke MySQL server.\n\n` +
+                `Solusi: Jalankan perintah berikut di MySQL sebagai root:\n` +
+                `CREATE USER '${user}'@'${blockedHost}' IDENTIFIED BY 'password';\n` +
+                `GRANT ALL PRIVILEGES ON ${database}.* TO '${user}'@'${blockedHost}';\n` +
+                `FLUSH PRIVILEGES;\n\n` +
+                `Atau gunakan IP address (${host}) sebagai ganti hostname.`;
+        }
+        else if (error.message) {
+            errorMessage = error.message;
+        }
+        return {
+            success: false,
+            error: errorMessage
+        };
     }
 }
 /**

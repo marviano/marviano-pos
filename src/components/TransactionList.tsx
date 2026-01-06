@@ -108,6 +108,7 @@ interface ElectronTransactionItem {
   unit_price: number;
   total_price: number;
   custom_note?: string;
+  production_status?: string | null; // Production status (e.g., 'cancelled', 'pending', 'completed')
   customizations?: Array<{
     customization_id: number;
     customization_name: string;
@@ -204,11 +205,7 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
   const hasConflictingPermissions = !isSuperAdmin(user) && canViewUserDataOnly && canViewAllData;
 
   // Fetch transaction details with offline fallback
-  const fetchTransactionDetail = async (transactionId: string) => {
-    // #region agent log
-    fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'TransactionList.tsx:207',message:'fetchTransactionDetail called',data:{transactionId},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
-    // #endregion
-    console.log('🔍 [TransactionList] fetchTransactionDetail called with ID:', transactionId);
+  const fetchTransactionDetail = async (transactionId: string) => {console.log('🔍 [TransactionList] fetchTransactionDetail called with ID:', transactionId);
     setIsLoadingDetail(true);
     try {
       const response = await offlineSyncService.fetchWithFallback<TransactionDetail>(
@@ -226,11 +223,7 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
             });
             throw new Error('Failed to fetch transaction details');
           }
-          const data = await response.json();
-          // #region agent log
-          fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'TransactionList.tsx:226',message:'API response received',data:{success:data.success,itemCount:data.transaction?.items?.length||0,firstItemHasProductName:!!data.transaction?.items?.[0]?.product_name,firstItemHasCustomizations:!!data.transaction?.items?.[0]?.customizations,firstItemCustomizationsCount:Array.isArray(data.transaction?.items?.[0]?.customizations)?data.transaction.items[0].customizations.length:0},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
-          // #endregion
-          console.log('🌐 [TransactionList] API response received:', {
+          const data = await response.json();console.log('🌐 [TransactionList] API response received:', {
             success: data.success,
             transactionId: data.transaction?.id || data.transaction?.uuid_id,
             itemCount: data.transaction?.items?.length || 0
@@ -249,9 +242,15 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
                   // Fetch items with customizations from local DB
                   const localItems: ElectronTransactionItem[] = await (window as { electronAPI: ElectronAPI }).electronAPI.localDbGetTransactionItems(transactionId);
                   
+                  // Filter out cancelled items - they should not appear in transaction details
+                  const activeLocalItems = localItems.filter(item => {
+                    const productionStatus = typeof item.production_status === 'string' ? item.production_status : null;
+                    return productionStatus !== 'cancelled';
+                  });
+                  
                   // Merge customizations from local DB into API response
                   transaction.items = transaction.items.map((apiItem: { id?: string; customizations?: unknown; custom_note?: string }) => {
-                    const localItem = localItems.find(li => String(li.id) === String(apiItem.id));
+                    const localItem = activeLocalItems.find(li => String(li.id) === String(apiItem.id));
                     if (localItem && localItem.customizations && Array.isArray(localItem.customizations) && localItem.customizations.length > 0) {
                       return {
                         ...apiItem,
@@ -268,11 +267,7 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
             }
             
             // Ensure all items have product_name, customizations, and custom_note
-            if (transaction && transaction.items && Array.isArray(transaction.items)) {
-              // #region agent log
-              fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'TransactionList.tsx:265',message:'Before processing items',data:{itemCount:transaction.items.length,itemsBeforeProcessing:transaction.items.map((i:any)=>({id:i.id,product_name:i.product_name,product_id:i.product_id,hasCustomizations:!!i.customizations,customizationsCount:Array.isArray(i.customizations)?i.customizations.length:0}))},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})}).catch(()=>{});
-              // #endregion
-              // If any item is missing product_name, try to get it from local DB as fallback
+            if (transaction && transaction.items && Array.isArray(transaction.items)) {// If any item is missing product_name, try to get it from local DB as fallback
               const needsProductName = transaction.items.some((item: { product_name?: string; product_id?: number }) =>
                 !item.product_name && item.product_id
               );
@@ -313,15 +308,7 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
                   customizations: item.customizations || [],
                   custom_note: item.custom_note || undefined
                 }));
-              }
-              // #region agent log
-              fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'TransactionList.tsx:308',message:'After processing items',data:{itemCount:transaction.items.length,itemsAfterProcessing:transaction.items.map((i:any)=>({id:i.id,product_name:i.product_name,product_id:i.product_id,hasCustomizations:!!i.customizations,customizationsCount:Array.isArray(i.customizations)?i.customizations.length:0}))},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'D'})}).catch(()=>{});
-              // #endregion
-            }
-            // #region agent log
-            fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'TransactionList.tsx:309',message:'Returning transaction',data:{hasTransaction:!!transaction,itemCount:transaction?.items?.length||0},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'E'})}).catch(()=>{});
-            // #endregion
-            return transaction;
+              }}return transaction;
           } else {
             throw new Error(data.message || 'Failed to fetch transaction details');
           }
@@ -371,20 +358,19 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
 
           // Get transaction items using the transaction's UUID (not the receipt number)
           console.log('💾 [TransactionList] Fetching transaction items for UUID:', transactionUuid);
-          const items: ElectronTransactionItem[] = await (window as { electronAPI: ElectronAPI }).electronAPI.localDbGetTransactionItems(transactionUuid);
-          console.log('💾 [TransactionList] Found', items.length, 'transaction items:', items.map(i => ({
+          const allItems: ElectronTransactionItem[] = await (window as { electronAPI: ElectronAPI }).electronAPI.localDbGetTransactionItems(transactionUuid);
+          // Filter out cancelled items - they should not appear in transaction details
+          const items: ElectronTransactionItem[] = allItems.filter(item => {
+            const productionStatus = typeof item.production_status === 'string' ? item.production_status : null;
+            return productionStatus !== 'cancelled';
+          });
+          console.log('💾 [TransactionList] Found', items.length, 'active transaction items (excluding cancelled):', items.map(i => ({
             id: i.id,
             product_id: i.product_id,
             product_name: i.product_name,
             quantity: i.quantity,
             hasCustomizations: !!i.customizations && Array.isArray(i.customizations) && i.customizations.length > 0
-          })));
-          
-          // #region agent log
-          fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'TransactionList.tsx:375',message:'Offline items query result',data:{transactionId,transactionUuid,receiptNumber:transaction.receipt_number,itemCount:items.length,firstItem:items.length>0?{id:items[0].id,product_id:items[0].product_id,product_name:items[0].product_name}:null},timestamp:Date.now(),sessionId:'debug-session',runId:'run2',hypothesisId:'I'})}).catch(()=>{});
-          // #endregion
-
-          // Products fetch as fallback in case product_name wasn't in JOIN result
+          })));// Products fetch as fallback in case product_name wasn't in JOIN result
           const products: ElectronProduct[] = await (window as { electronAPI: ElectronAPI }).electronAPI.localDbGetAllProducts();
           console.log('💾 [TransactionList] Fetched', products.length, 'products for fallback');
 
@@ -460,12 +446,7 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
             refund_status: refundStatusValue
           } as TransactionDetail;
         }
-      );
-
-      // #region agent log
-      fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'TransactionList.tsx:439',message:'Setting selectedTransaction',data:{hasResponse:!!response,itemCount:response?.items?.length||0,firstItemProductName:response?.items?.[0]?.product_name,firstItemHasCustomizations:!!response?.items?.[0]?.customizations},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'F'})}).catch(()=>{});
-      // #endregion
-      setSelectedTransaction(response);
+      );setSelectedTransaction(response);
       setIsDetailModalOpen(true);
     } catch (error: unknown) {
       console.error('Error fetching transaction details:', error);
@@ -1208,12 +1189,7 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
   const totalRevenue = filteredTransactions.reduce((sum, t) => {
     const amount = typeof t.final_amount === 'string' ? parseFloat(t.final_amount) : t.final_amount;
     return sum + (isNaN(amount) ? 0 : amount);
-  }, 0);
-  
-  // #region agent log
-  fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'TransactionList.tsx:1211',message:'Total revenue calculated',data:{totalRevenue,transactionCount:filteredTransactions.length,fromDate,toDate,businessId,statuses:filteredTransactions.map(t=>({id:t.id,status:t.status,final_amount:t.final_amount}))},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
-  // #endregion
-  const totalRefund = filteredTransactions.reduce((sum, t) => {
+  }, 0);const totalRefund = filteredTransactions.reduce((sum, t) => {
     const amount = typeof t.refund_total === 'string' ? parseFloat(t.refund_total) : (t.refund_total || 0);
     return sum + (isNaN(amount) ? 0 : amount);
   }, 0);

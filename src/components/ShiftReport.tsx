@@ -229,13 +229,7 @@ export default function ShiftReport() {
         electronAPI.localDbGetCategory2Breakdown?.(shiftOwnerId, shiftStart, shiftEnd, businessId),
         electronAPI.localDbGetCashSummary?.(shiftOwnerId, shiftStart, shiftEnd, businessId),
         electronAPI.localDbGetProductSales?.(shiftOwnerId, shiftStart, shiftEnd, businessId)
-      ]);
-
-      // #region agent log
-      fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'ShiftReport.tsx:218',message:'Category2 fetch result',data:{status:category2Result.status,valueLength:category2Result.status==='fulfilled'?(category2Result.value?.length||0):0,value:category2Result.status==='fulfilled'?category2Result.value?.slice(0,3):null,shiftOwnerId,shiftStart,shiftEnd,businessId},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'G'})}).catch(()=>{});
-      // #endregion
-
-      if (statsResult.status === 'fulfilled' && statsResult.value) setStatistics(statsResult.value);
+      ]);if (statsResult.status === 'fulfilled' && statsResult.value) setStatistics(statsResult.value);
       if (breakdownResult.status === 'fulfilled' && breakdownResult.value) setPaymentBreakdown(breakdownResult.value);
       if (category2Result.status === 'fulfilled' && category2Result.value) setCategory2Breakdown(category2Result.value);
       if (cashResult.status === 'fulfilled' && cashResult.value) setCashSummary(cashResult.value);
@@ -296,11 +290,7 @@ export default function ShiftReport() {
           })),
           customizationSales: customizationSales,
           paymentBreakdown,
-          category2Breakdown: (() => {
-            // #region agent log
-            fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'ShiftReport.tsx:285',message:'Category2 before print',data:{category2Length:category2Breakdown.length,category2Data:category2Breakdown.slice(0,3),shiftId:selectedShift.id},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'H'})}).catch(()=>{});
-            // #endregion
-            return category2Breakdown;
+          category2Breakdown: (() => {return category2Breakdown;
           })(),
           cashSummary: {
             cash_shift: cashSummary.cash_shift,

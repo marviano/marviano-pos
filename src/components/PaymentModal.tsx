@@ -102,6 +102,12 @@ interface PaymentModalProps {
   isOnline?: boolean;
   selectedOnlinePlatform?: 'qpon' | 'gofood' | 'grabfood' | 'shopeefood' | 'tiktok' | null;
   initialCustomerName?: string;
+  loadedTransactionInfo?: {
+    transactionId: string;
+    tableName: string | null;
+    roomName: string | null;
+    customerName: string | null;
+  } | null;
 }
 
 type PaymentMethod = 'cash' | 'debit' | 'qr' | 'ewallet' | 'cl' | 'voucher' | 'qpon' | 'gofood' | 'grabfood' | 'shopeefood' | 'tiktok';
@@ -116,7 +122,8 @@ export default function PaymentModal({
   transactionType,
   isOnline = false,
   selectedOnlinePlatform = null,
-  initialCustomerName = ''
+  initialCustomerName = '',
+  loadedTransactionInfo = null
 }: PaymentModalProps) {
   const { user } = useAuth();
 
@@ -126,7 +133,7 @@ export default function PaymentModal({
   const [selectedPickupMethod, setSelectedPickupMethod] = useState<PickupMethod>('dine-in');
   const [amountReceived, setAmountReceived] = useState<string>('');
   const [customVoucherAmount, setCustomVoucherAmount] = useState<string>('');
-  const [customerName, setCustomerName] = useState<string>(initialCustomerName);
+  const [customerName, setCustomerName] = useState<string>('');
   const [customerUnit, setCustomerUnit] = useState<string>('1');
   const [promotionSelection, setPromotionSelection] = useState<PromotionSelection>('none');
   const [activeInput, setActiveInput] = useState<'amount' | 'voucher' | 'customer' | 'customerUnit'>('amount');
@@ -186,11 +193,17 @@ export default function PaymentModal({
     }
   }, [isOpen, isOnline, selectedOnlinePlatform]);
 
-  // Initialize customer name when modal opens
+  // Initialize customer name when modal opens or when initialCustomerName changes
   useEffect(() => {
-    if (isOpen && initialCustomerName) {
-      setCustomerName(initialCustomerName);
-    } else if (isOpen && !initialCustomerName) {
+    if (isOpen) {
+      // Always sync customerName with initialCustomerName when modal is open
+      // Use a small timeout to ensure prop value is current
+      const timeoutId = setTimeout(() => {
+        setCustomerName(initialCustomerName || '');
+      }, 0);
+      return () => clearTimeout(timeoutId);
+    } else {
+      // Reset when modal closes
       setCustomerName('');
     }
   }, [isOpen, initialCustomerName]);
@@ -585,20 +598,27 @@ export default function PaymentModal({
               : null;
       const voucherLabelForPayload = promotionLabel || null;
 
-      // Generate 19-digit numeric UUID instead of random UUID
+      // Use existing transaction ID if in "lihat" mode, otherwise generate new one
       let transactionId = '';
-      if (window.electronAPI?.generateNumericUuid) {
-        const uuidResult = await window.electronAPI.generateNumericUuid(businessId);
-        if (uuidResult?.success && uuidResult?.uuid) {
-          transactionId = uuidResult.uuid;
-        } else {
-          // Fallback to old UUID if generation fails
-          transactionId = generateTransactionId();
-          console.warn('⚠️ Failed to generate numeric UUID, using fallback');
-        }
+      if (loadedTransactionInfo?.transactionId) {
+        // "Lihat" mode: use existing transaction ID
+        transactionId = loadedTransactionInfo.transactionId;
+        console.log('📝 [PAYMENT] Using existing transaction ID from "lihat" mode:', transactionId);
       } else {
-        transactionId = generateTransactionId();
-        console.warn('⚠️ Numeric UUID generation not available, using fallback');
+        // New order: generate 19-digit numeric UUID
+        if (window.electronAPI?.generateNumericUuid) {
+          const uuidResult = await window.electronAPI.generateNumericUuid(businessId);
+          if (uuidResult?.success && uuidResult?.uuid) {
+            transactionId = uuidResult.uuid;
+          } else {
+            // Fallback to old UUID if generation fails
+            transactionId = generateTransactionId();
+            console.warn('⚠️ Failed to generate numeric UUID, using fallback');
+          }
+        } else {
+          transactionId = generateTransactionId();
+          console.warn('⚠️ Numeric UUID generation not available, using fallback');
+        }
       }
 
       const transactionData = {
@@ -649,11 +669,45 @@ export default function PaymentModal({
           console.error('❌ Failed to get payment methods from local DB:', error);
         }
 
-        // Map transaction data
-        const localTransactionData = {
-          ...transactionData,
-          receipt_number: null // Initial local save has no receipt number yet
-        };
+        // For existing transactions (lihat mode), fetch and update existing transaction
+        let localTransactionData;
+        if (loadedTransactionInfo?.transactionId) {
+          // Fetch existing transaction to preserve existing data
+          const allTransactions = await electronAPI.localDbGetTransactions?.(businessId, 10000);
+          const transactionsArray = Array.isArray(allTransactions) ? allTransactions as Record<string, unknown>[] : [];
+          const existingTransaction = transactionsArray.find((tx) => 
+            tx.uuid_id === loadedTransactionInfo.transactionId || tx.id === loadedTransactionInfo.transactionId
+          ) as Record<string, unknown> | undefined;
+
+          if (existingTransaction) {
+            // Update existing transaction with payment info
+            localTransactionData = {
+              ...existingTransaction,
+              ...transactionData,
+              id: loadedTransactionInfo.transactionId, // Preserve original ID
+              uuid_id: loadedTransactionInfo.transactionId, // Preserve original UUID
+              status: 'completed', // Update status to completed (removes from active orders)
+              updated_at: new Date().toISOString(),
+            };
+            console.log('📝 [PAYMENT] Updating existing transaction:', loadedTransactionInfo.transactionId);
+          } else {
+            // Fallback: create new transaction if existing not found
+            localTransactionData = {
+              ...transactionData,
+              receipt_number: null
+            };
+            console.warn('⚠️ [PAYMENT] Existing transaction not found, creating new one');
+          }
+        } else {
+          // New transaction
+          localTransactionData = {
+            ...transactionData,
+            receipt_number: null // Initial local save has no receipt number yet
+          };
+        }
+
+        // Note: For existing transactions, we don't need to save items again (they're already saved)
+        // Only save items for new transactions
 
         const transactionItems = cartItems.map(item => {
           // Determine base price depending on platform when online
@@ -707,10 +761,17 @@ export default function PaymentModal({
         });
         console.log('\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
 
-        // Save transaction and items to local database (Blocking but fast)
+        // Save transaction to local database (Blocking but fast)
         // sync_status will be set to 'pending' by default in the database
         await electronAPI.localDbUpsertTransactions?.([localTransactionData]);
-        await electronAPI.localDbUpsertTransactionItems?.(transactionItems);
+        
+        // Only save items for new transactions (not for existing transactions from "lihat" mode)
+        // Items are already saved when transaction was created or when new items were added
+        if (!loadedTransactionInfo?.transactionId) {
+          await electronAPI.localDbUpsertTransactionItems?.(transactionItems);
+        } else {
+          console.log('📝 [PAYMENT] Skipping item save - using existing transaction items');
+        }
 
         // ============================================
         // DEBUG LOG: Confirmation After Database Save

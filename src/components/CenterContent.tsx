@@ -11,6 +11,8 @@ import BundleSelectionModal from './BundleSelectionModal';
 import TableSelectionModal from './TableSelectionModal';
 import { offlineSyncService } from '@/lib/offlineSync';
 import { getApiUrl } from '@/lib/api';
+import { useAuth } from '@/hooks/useAuth';
+import { generateUUID } from '@/lib/uuid';
 
 interface BundleItem {
   id: number;
@@ -147,9 +149,14 @@ interface CenterContentProps {
     roomName: string | null;
     customerName: string | null;
   } | null;
+  onReloadTransaction?: (transactionId: string) => void;
+  onClearLoadedTransaction?: () => void;
+  onUnsavedChangesChange?: (hasUnsavedChanges: boolean) => void;
 }
 
-export default function CenterContent({ products, cartItems, setCartItems, transactionType, isLoadingProducts = false, isOnline = false, selectedOnlinePlatform = null, searchQuery = '', setSearchQuery, loadedTransactionInfo = null }: CenterContentProps) {
+export default function CenterContent({ products, cartItems, setCartItems, transactionType, isLoadingProducts = false, isOnline = false, selectedOnlinePlatform = null, searchQuery = '', setSearchQuery, loadedTransactionInfo = null, onReloadTransaction, onClearLoadedTransaction, onUnsavedChangesChange }: CenterContentProps) {
+  const { user } = useAuth();
+  const businessId = user?.selectedBusinessId ?? 14;
   const [showCustomizationModal, setShowCustomizationModal] = useState(false);
   const [showCustomNoteModal, setShowCustomNoteModal] = useState(false);
   const [showEditModal, setShowEditModal] = useState(false);
@@ -161,6 +168,9 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
   const [showTableSelectionModal, setShowTableSelectionModal] = useState(false);
   const [bundleItems, setBundleItems] = useState<BundleItem[]>([]);
   const [customerName, setCustomerName] = useState<string>('');
+  const [showPasswordModal, setShowPasswordModal] = useState(false);
+  const [passwordInput, setPasswordInput] = useState('');
+  const [pendingLockedItemAction, setPendingLockedItemAction] = useState<{ item: CartItem; action: 'reduce' | 'delete' } | null>(null);
 
   // Column count state - load from localStorage, default to 5
   const [columnCount, setColumnCount] = useState<number>(() => {
@@ -182,6 +192,20 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
       localStorage.setItem('product-grid-columns', columnCount.toString());
     }
   }, [columnCount]);
+
+  // Track unsaved changes in "lihat" mode (items that are not locked)
+  const hasUnsavedChanges = useMemo(() => {
+    if (!loadedTransactionInfo) return false;
+    // Check if there are any items that are not locked (new items added but not saved)
+    return cartItems.some(item => !item.isLocked);
+  }, [cartItems, loadedTransactionInfo]);
+
+  // Notify parent about unsaved changes
+  useEffect(() => {
+    if (onUnsavedChangesChange) {
+      onUnsavedChangesChange(hasUnsavedChanges);
+    }
+  }, [hasUnsavedChanges, onUnsavedChangesChange]);
 
   // Populate customer name when transaction is loaded
   useEffect(() => {
@@ -259,13 +283,7 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
     if (!customizations || customizations.length === 0) return 0;
     return customizations.reduce((sum, customization) => {
       const optionTotal = customization.selected_options.reduce((optionSum, option) => {
-        const priceAdj = typeof option.price_adjustment === 'number' ? option.price_adjustment : (typeof option.price_adjustment === 'string' ? parseFloat(option.price_adjustment) || 0 : 0);
-        // #region agent log
-        if (isNaN(priceAdj) || priceAdj !== option.price_adjustment) {
-          fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'CenterContent.tsx:244',message:'Price adjustment type issue',data:{priceAdjustment:option.price_adjustment,priceAdjustmentType:typeof option.price_adjustment,parsedPriceAdj:priceAdj,optionName:option.option_name},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'T'})}).catch(()=>{});
-        }
-        // #endregion
-        return optionSum + priceAdj;
+        const priceAdj = typeof option.price_adjustment === 'number' ? option.price_adjustment : (typeof option.price_adjustment === 'string' ? parseFloat(option.price_adjustment) || 0 : 0);return optionSum + priceAdj;
       }, 0);
       return sum + optionTotal;
     }, 0);
@@ -440,6 +458,24 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
   };
 
   const addToCart = (product: Product, customizations?: SelectedCustomization[], quantity: number = 1, customNote?: string, bundleSelections?: BundleSelection[]) => {
+    // If in "lihat" mode (loadedTransactionInfo exists), always create separate entries
+    // This prevents merging with locked items that are already sent to production
+    if (loadedTransactionInfo) {
+      const newCartItems = [...cartItems, {
+        id: Date.now(),
+        product,
+        quantity,
+        customizations: customizations || [],
+        customNote: customNote || undefined,
+        bundleSelections: bundleSelections || undefined,
+        isLocked: false, // New items start as unlocked
+      }];
+      setCartItems(newCartItems);
+      sendCartUpdate(newCartItems);
+      return;
+    }
+
+    // Normal mode: merge items if they match
     // Check if this is a basic product (no customizations, no custom note, no bundle)
     const hasCustomizations = customizations && customizations.length > 0;
     const hasCustomNote = customNote && customNote.trim() !== '';
@@ -533,6 +569,247 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
     // Clear cart immediately after payment completion (receipt printed)
     setCartItems([]);
     sendCartUpdate([]);
+    
+    // Clear loaded transaction info if in "lihat" mode
+    // This removes the yellow "opening" indicator
+    if (loadedTransactionInfo && onClearLoadedTransaction) {
+      onClearLoadedTransaction();
+    }
+  };
+
+  // Log activity to activity_logs
+  const logActivity = async (action: string, details: string) => {
+    try {
+      const userId = user?.id ? parseInt(String(user.id)) : null;
+      if (!userId) {
+        console.warn('Cannot log activity: user ID not available');
+        return;
+      }
+
+      // The API uses session auth, but we'll try to call it
+      // If it fails due to auth, we'll log to console as fallback
+      const response = await fetch(getApiUrl('/api/activity-logs'), {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        credentials: 'include', // Include cookies for session
+        body: JSON.stringify({
+          action,
+          business_id: businessId,
+          details,
+        }),
+      });
+
+      if (!response.ok) {
+        // If API call fails, log to console as fallback
+        console.warn('Failed to log activity to server, logging locally:', {
+          user_id: userId,
+          action,
+          business_id: businessId,
+          details,
+        });
+      }
+    } catch (error) {
+      // Log to console as fallback if API is unavailable
+      console.warn('Error logging activity (API unavailable), logging locally:', {
+        user_id: user?.id,
+        action,
+        business_id: businessId,
+        details,
+      });
+      // Don't throw - activity logging failure shouldn't block the action
+    }
+  };
+
+  // Handle password verification for locked items
+  const handlePasswordSubmit = async () => {
+    if (passwordInput === 'KONFIRMASI') {
+      setShowPasswordModal(false);
+      
+      if (pendingLockedItemAction) {
+        const { item, action } = pendingLockedItemAction;
+        const electronAPI = typeof window !== 'undefined' ? window.electronAPI : undefined;
+        
+        try {
+          // Perform the action
+          if (action === 'delete') {
+            // For locked items, update production_status to 'cancelled' instead of hard delete
+            if (item.transactionItemId && item.transactionId && electronAPI?.localDbGetTransactionItems && electronAPI?.localDbUpsertTransactionItems) {
+              // Fetch the full transaction item data
+              const transactionItems = await electronAPI.localDbGetTransactionItems(item.transactionId);
+              const itemsArray = Array.isArray(transactionItems) ? transactionItems as Record<string, unknown>[] : [];
+              const transactionItem = itemsArray.find((ti) => {
+                const tiId = typeof ti.id === 'number' ? ti.id : (typeof ti.id === 'string' ? parseInt(ti.id, 10) : null);
+                return tiId === item.transactionItemId;
+              });
+
+              if (transactionItem) {
+                // Prepare the item data with production_status set to 'cancelled'
+                const itemUuidId = typeof transactionItem.uuid_id === 'string' ? transactionItem.uuid_id : String(transactionItem.uuid_id || '');
+                const transactionIntId = typeof transactionItem.transaction_id === 'number' ? transactionItem.transaction_id : (typeof transactionItem.transaction_id === 'string' ? parseInt(transactionItem.transaction_id, 10) : 0);
+                const transactionUuidId = typeof transactionItem.uuid_transaction_id === 'string' ? transactionItem.uuid_transaction_id : String(transactionItem.uuid_transaction_id || '');
+                const productId = typeof transactionItem.product_id === 'number' ? transactionItem.product_id : (typeof transactionItem.product_id === 'string' ? parseInt(transactionItem.product_id, 10) : 0);
+                const quantity = typeof transactionItem.quantity === 'number' ? transactionItem.quantity : (typeof transactionItem.quantity === 'string' ? parseInt(transactionItem.quantity, 10) : 1);
+                const unitPrice = typeof transactionItem.unit_price === 'number' ? transactionItem.unit_price : (typeof transactionItem.unit_price === 'string' ? parseFloat(String(transactionItem.unit_price)) : 0);
+                const totalPrice = typeof transactionItem.total_price === 'number' ? transactionItem.total_price : (typeof transactionItem.total_price === 'string' ? parseFloat(String(transactionItem.total_price)) : 0);
+                const customNote = typeof transactionItem.custom_note === 'string' ? transactionItem.custom_note : null;
+                const bundleSelectionsJson = typeof transactionItem.bundle_selections_json === 'string' ? transactionItem.bundle_selections_json : (transactionItem.bundle_selections_json ? JSON.stringify(transactionItem.bundle_selections_json) : null);
+                
+                // Get created_at - preserve original timestamp
+                const createdAt = transactionItem.created_at ? String(transactionItem.created_at) : new Date().toISOString();
+                
+                // Set production_status to 'cancelled'
+                const productionStatus = 'cancelled';
+                const productionStartedAt = transactionItem.production_started_at ? String(transactionItem.production_started_at) : null;
+                const productionFinishedAt = transactionItem.production_finished_at ? String(transactionItem.production_finished_at) : null;
+
+                // Update the transaction item in database
+                await electronAPI.localDbUpsertTransactionItems([{
+                  id: item.transactionItemId,
+                  uuid_id: itemUuidId,
+                  transaction_id: transactionIntId,
+                  uuid_transaction_id: transactionUuidId,
+                  product_id: productId,
+                  quantity: quantity,
+                  unit_price: unitPrice,
+                  total_price: totalPrice,
+                  custom_note: customNote,
+                  bundle_selections_json: bundleSelectionsJson,
+                  created_at: createdAt,
+                  production_status: productionStatus,
+                  production_started_at: productionStartedAt,
+                  production_finished_at: productionFinishedAt,
+                }]);
+              } else {
+                console.warn('Transaction item not found in database');
+              }
+            }
+            
+            // Remove from cart UI
+            const newCartItems = cartItems.filter(cartItem => cartItem.id !== item.id);
+            setCartItems(newCartItems);
+            sendCartUpdate(newCartItems);
+            
+            // Log activity
+            await logActivity(
+              'delete_locked_cart_item',
+              JSON.stringify({
+                product_name: item.product.nama,
+                product_id: item.product.id,
+                quantity: item.quantity,
+                transaction_id: item.transactionId || null,
+                transaction_item_id: item.transactionItemId || null,
+              })
+            );
+          } else if (action === 'reduce') {
+            // For reduce, create a separate cancelled record (Option B - production quality)
+            if (item.transactionItemId && item.transactionId && electronAPI?.localDbGetTransactionItems && electronAPI?.localDbUpsertTransactionItems) {
+              // Fetch the full transaction item data
+              const transactionItems = await electronAPI.localDbGetTransactionItems(item.transactionId);
+              const itemsArray = Array.isArray(transactionItems) ? transactionItems as Record<string, unknown>[] : [];
+              const transactionItem = itemsArray.find((ti) => {
+                const tiId = typeof ti.id === 'number' ? ti.id : (typeof ti.id === 'string' ? parseInt(ti.id, 10) : null);
+                return tiId === item.transactionItemId;
+              });
+
+              if (transactionItem) {
+                const cancelledQuantity = 1; // Always cancel 1 item when reducing
+                const remainingQuantity = item.quantity - cancelledQuantity;
+                
+                // Extract common fields
+                const transactionIntId = typeof transactionItem.transaction_id === 'number' ? transactionItem.transaction_id : (typeof transactionItem.transaction_id === 'string' ? parseInt(transactionItem.transaction_id, 10) : 0);
+                const transactionUuidId = typeof transactionItem.uuid_transaction_id === 'string' ? transactionItem.uuid_transaction_id : String(transactionItem.uuid_transaction_id || '');
+                const productId = typeof transactionItem.product_id === 'number' ? transactionItem.product_id : (typeof transactionItem.product_id === 'string' ? parseInt(transactionItem.product_id, 10) : 0);
+                const unitPrice = typeof transactionItem.unit_price === 'number' ? transactionItem.unit_price : (typeof transactionItem.unit_price === 'string' ? parseFloat(String(transactionItem.unit_price)) : 0);
+                const customNote = typeof transactionItem.custom_note === 'string' ? transactionItem.custom_note : null;
+                const bundleSelectionsJson = typeof transactionItem.bundle_selections_json === 'string' ? transactionItem.bundle_selections_json : (transactionItem.bundle_selections_json ? JSON.stringify(transactionItem.bundle_selections_json) : null);
+                const createdAt = transactionItem.created_at ? String(transactionItem.created_at) : new Date().toISOString();
+                
+                // Preserve production_status for original record
+                const productionStatus = typeof transactionItem.production_status === 'string' ? transactionItem.production_status : null;
+                const productionStartedAt = transactionItem.production_started_at ? String(transactionItem.production_started_at) : null;
+                const productionFinishedAt = transactionItem.production_finished_at ? String(transactionItem.production_finished_at) : null;
+
+                // 1. Update original record: reduce quantity to remaining items, keep production_status
+                const itemUuidId = typeof transactionItem.uuid_id === 'string' ? transactionItem.uuid_id : String(transactionItem.uuid_id || '');
+                const remainingTotalPrice = unitPrice * remainingQuantity;
+                
+                await electronAPI.localDbUpsertTransactionItems([{
+                  id: item.transactionItemId,
+                  uuid_id: itemUuidId,
+                  transaction_id: transactionIntId,
+                  uuid_transaction_id: transactionUuidId,
+                  product_id: productId,
+                  quantity: remainingQuantity,
+                  unit_price: unitPrice,
+                  total_price: remainingTotalPrice,
+                  custom_note: customNote,
+                  bundle_selections_json: bundleSelectionsJson,
+                  created_at: createdAt,
+                  production_status: productionStatus,
+                  production_started_at: productionStartedAt,
+                  production_finished_at: productionFinishedAt,
+                }]);
+
+                // 2. Create new cancelled record: quantity 1, production_status 'cancelled'
+                const cancelledUuidId = generateUUID();
+                const cancelledTotalPrice = unitPrice * cancelledQuantity;
+                
+                await electronAPI.localDbUpsertTransactionItems([{
+                  uuid_id: cancelledUuidId,
+                  transaction_id: transactionIntId,
+                  uuid_transaction_id: transactionUuidId,
+                  product_id: productId,
+                  quantity: cancelledQuantity,
+                  unit_price: unitPrice,
+                  total_price: cancelledTotalPrice,
+                  custom_note: customNote,
+                  bundle_selections_json: bundleSelectionsJson,
+                  created_at: new Date().toISOString(), // Current timestamp for cancelled record
+                  production_status: 'cancelled',
+                  production_started_at: null,
+                  production_finished_at: null,
+                }]);
+              } else {
+                console.warn('Transaction item not found in database');
+              }
+            }
+            
+            // Update cart UI
+            const newCartItems = cartItems.map(cartItem =>
+              cartItem.id === item.id
+                ? { ...cartItem, quantity: cartItem.quantity - 1 }
+                : cartItem
+            );
+            setCartItems(newCartItems);
+            sendCartUpdate(newCartItems);
+            
+            // Log activity
+            await logActivity(
+              'reduce_locked_cart_item',
+              JSON.stringify({
+                product_name: item.product.nama,
+                product_id: item.product.id,
+                old_quantity: item.quantity,
+                new_quantity: item.quantity - 1,
+                transaction_id: item.transactionId || null,
+                transaction_item_id: item.transactionItemId || null,
+              })
+            );
+          }
+        } catch (error) {
+          console.error('Error updating transaction item:', error);
+          alert('Gagal memperbarui item. Silakan coba lagi.');
+        }
+        
+        setPendingLockedItemAction(null);
+        setPasswordInput('');
+      }
+    } else {
+      alert('Password salah. Silakan coba lagi.');
+      setPasswordInput('');
+    }
   };
 
   const formatPrice = (price: number) => {
@@ -584,35 +861,6 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
           </div>
         )}
         <div className="flex-1 p-4 flex flex-col overflow-hidden">
-        {/* Top Navigation - Only show when not in lihat mode */}
-        {!loadedTransactionInfo && (
-          <div className="flex items-center justify-between mb-6 flex-shrink-0">
-            <div className="flex space-x-2">
-              <button className="px-3 py-1 bg-gray-200 text-gray-700 rounded text-sm font-medium">
-                Masuk
-              </button>
-              <button disabled className="px-3 py-1 text-gray-400 text-sm font-medium cursor-not-allowed opacity-50">
-                <span className="line-through">Mendaftar</span>
-              </button>
-            </div>
-            <button
-              onClick={() => {
-                if (cartItems.length > 0) {
-                  if (confirm('Are you sure you want to clear all items from the cart?')) {
-                    setCartItems([]);
-                    sendCartUpdate([]);
-                  }
-                }
-              }}
-              className="p-2 text-gray-600 hover:text-gray-800 hover:bg-red-50 rounded-lg transition-colors"
-              title="Clear Cart"
-            >
-              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-              </svg>
-            </button>
-          </div>
-        )}
 
         {/* Customer Name Input - Only show when no transaction is loaded */}
         {!loadedTransactionInfo && (
@@ -645,16 +893,24 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
           {/* Cart Items List */}
           {cartItems.length > 0 && (
             <div className="space-y-2">
-              {cartItems.map((item) => (
+              {cartItems.map((item) => {
+                const isLocked = item.isLocked === true;
+                return (
                 <div
                   key={item.id}
-                  onClick={() => handleEditItem(item)}
-                  className="bg-white rounded-lg border border-gray-200 p-3 cursor-pointer hover:border-blue-300 hover:shadow-sm transition-all duration-200"
-                  title="Click to edit item"
+                  onClick={() => !isLocked && handleEditItem(item)}
+                  className={`rounded-lg border p-3 transition-all duration-200 ${
+                    isLocked 
+                      ? 'bg-gray-100 border-gray-300 cursor-not-allowed' 
+                      : 'bg-white border-gray-200 cursor-pointer hover:border-blue-300 hover:shadow-sm'
+                  }`}
+                  title={isLocked ? 'Item terkunci - sudah dikirim ke kitchen/barista' : 'Click to edit item'}
                 >
                   <div className="flex justify-between items-start">
                     <div className="flex-1">
-                      <h4 className="font-medium text-gray-800 text-sm">{item.product.nama}</h4>
+                      <h4 className={`font-medium text-sm ${isLocked ? 'text-gray-800' : 'text-gray-800'}`}>
+                        {item.product.nama}
+                      </h4>
                       {effectiveProductPrice(item.product) !== null && (
                         <p className="text-gray-600 text-xs">
                           {formatPrice(effectiveProductPrice(item.product)!)} each
@@ -662,11 +918,7 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
                       )}
 
                       {/* Customizations */}
-                      {item.customizations && item.customizations.length > 0 && (() => {
-                        // #region agent log
-                        fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'CenterContent.tsx:605',message:'Rendering customizations in cart',data:{itemId:item.id,productName:item.product.nama,customizationsCount:item.customizations.length,customizations:item.customizations.map((c:any)=>({customization_id:c.customization_id,customization_name:c.customization_name,selected_options_count:c.selected_options?.length||0,selected_options:c.selected_options?.map((o:any)=>({option_id:o.option_id,option_name:o.option_name,hasOptionName:!!o.option_name}))||[],selected_options_type:typeof c.selected_options})),firstCustomization:item.customizations[0]?{name:item.customizations[0].customization_name,options:item.customizations[0].selected_options}:null},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'K'})}).catch(()=>{});
-                        // #endregion
-                        return (
+                      {item.customizations && item.customizations.length > 0 && (() => {return (
                         <div className="mt-1 space-y-1">
                           {item.customizations.map((customization) => (
                             <div key={customization.customization_id} className="text-xs">
@@ -684,14 +936,7 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
                                       )}
                                     </div>
                                   ))
-                                ) : (
-                                  // #region agent log
-                                  (() => {
-                                    fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'CenterContent.tsx:611',message:'Customization has no selected_options',data:{customization_id:customization.customization_id,customization_name:customization.customization_name,selected_options:customization.selected_options,selected_options_type:typeof customization.selected_options,selected_options_length:Array.isArray(customization.selected_options)?customization.selected_options.length:'not_array'},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'L'})}).catch(()=>{});
-                                    return null;
-                                  })()
-                                  // #endregion
-                                )}
+                                ) : null}
                               </div>
                             </div>
                           ))}
@@ -763,6 +1008,18 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
                       <button
                         onClick={(e) => {
                           e.stopPropagation(); // Prevent opening edit modal
+                          if (isLocked) {
+                            // For locked items, show password modal
+                            if (item.quantity > 1) {
+                              setPendingLockedItemAction({ item, action: 'reduce' });
+                            } else {
+                              setPendingLockedItemAction({ item, action: 'delete' });
+                            }
+                            setShowPasswordModal(true);
+                            return;
+                          }
+                          
+                          // Normal flow for unlocked items
                           if (item.quantity > 1) {
                             const newCartItems = cartItems.map(cartItem =>
                               cartItem.id === item.id
@@ -777,14 +1034,22 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
                             sendCartUpdate(newCartItems);
                           }
                         }}
-                        className="w-6 h-6 bg-red-500 hover:bg-red-600 rounded-full flex items-center justify-center text-xs text-white"
+                        className={`w-6 h-6 rounded-full flex items-center justify-center text-xs ${
+                          isLocked
+                            ? 'bg-red-500 hover:bg-red-600 text-white'
+                            : 'bg-red-500 hover:bg-red-600 text-white'
+                        }`}
+                        title={isLocked ? 'Kurangi jumlah (memerlukan password)' : 'Kurangi jumlah'}
                       >
                         -
                       </button>
-                      <span className="text-sm font-medium w-8 text-center text-black">{item.quantity}</span>
+                      <span className={`text-sm font-medium w-8 text-center ${isLocked ? 'text-gray-500' : 'text-black'}`}>
+                        {item.quantity}
+                      </span>
                       <button
                         onClick={(e) => {
                           e.stopPropagation(); // Prevent opening edit modal
+                          if (isLocked) return; // Prevent action on locked items
                           const newCartItems = cartItems.map(cartItem =>
                             cartItem.id === item.id
                               ? { ...cartItem, quantity: cartItem.quantity + 1 }
@@ -793,7 +1058,13 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
                           setCartItems(newCartItems);
                           sendCartUpdate(newCartItems);
                         }}
-                        className="w-6 h-6 bg-green-500 hover:bg-green-600 text-white rounded-full flex items-center justify-center text-xs"
+                        disabled={isLocked}
+                        className={`w-6 h-6 rounded-full flex items-center justify-center text-xs ${
+                          isLocked
+                            ? 'bg-gray-300 text-gray-500 cursor-not-allowed'
+                            : 'bg-green-500 hover:bg-green-600 text-white'
+                        }`}
+                        title={isLocked ? 'Item terkunci - tidak dapat diubah' : 'Tambah jumlah'}
                       >
                         +
                       </button>
@@ -802,44 +1073,20 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
                   <div className="mt-2 flex justify-between items-center">
                     <span className="text-xs text-gray-500">Subtotal</span>
                     <span className="font-semibold text-green-600">
-                      {(() => {
-                        // #region agent log
-                        const logData = {location:'CenterContent.tsx:746',message:'Calculating subtotal',data:{itemId:item.id,productId:item.product.id,productName:item.product.nama,hasCustomizations:!!item.customizations,customizationsCount:item.customizations?.length||0,hasBundleSelections:!!item.bundleSelections,quantity:item.quantity,quantityType:typeof item.quantity},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'O'};
-                        fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(logData)}).catch(()=>{});
-                        // #endregion
-                        let itemPrice = effectiveProductPrice(item.product);
-                        // #region agent log
-                        const logData2 = {location:'CenterContent.tsx:747',message:'After effectiveProductPrice',data:{itemId:item.id,itemPrice,itemPriceType:typeof itemPrice,isNull:itemPrice===null,isNaN:Number.isNaN(itemPrice)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'P'};
-                        fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(logData2)}).catch(()=>{});
-                        // #endregion
-                        if (itemPrice === null) return 'N/A';
+                      {(() => {let itemPrice = effectiveProductPrice(item.product);if (itemPrice === null) return 'N/A';
                         if (item.customizations) {
-                          const customizationPrice = sumCustomizationPrice(item.customizations);
-                          // #region agent log
-                          const logData3 = {location:'CenterContent.tsx:749',message:'After sumCustomizationPrice',data:{itemId:item.id,customizationPrice,customizationPriceType:typeof customizationPrice,isNaN:Number.isNaN(customizationPrice),itemPriceBefore:itemPrice,itemPriceAfter:itemPrice+customizationPrice},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'Q'};
-                          fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(logData3)}).catch(()=>{});
-                          // #endregion
-                          itemPrice += customizationPrice;
+                          const customizationPrice = sumCustomizationPrice(item.customizations);itemPrice += customizationPrice;
                         }
                         if (item.bundleSelections) {
-                          const bundleCharge = calculateBundleCustomizationCharge(item.bundleSelections);
-                          // #region agent log
-                          const logData4 = {location:'CenterContent.tsx:752',message:'After calculateBundleCustomizationCharge',data:{itemId:item.id,bundleCharge,bundleChargeType:typeof bundleCharge,isNaN:Number.isNaN(bundleCharge),itemPriceBefore:itemPrice,itemPriceAfter:itemPrice+bundleCharge},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'R'};
-                          fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(logData4)}).catch(()=>{});
-                          // #endregion
-                          itemPrice += bundleCharge;
+                          const bundleCharge = calculateBundleCustomizationCharge(item.bundleSelections);itemPrice += bundleCharge;
                         }
-                        const finalPrice = itemPrice * item.quantity;
-                        // #region agent log
-                        const logData5 = {location:'CenterContent.tsx:754',message:'Final calculation',data:{itemId:item.id,itemPrice,quantity:item.quantity,quantityType:typeof item.quantity,finalPrice,finalPriceType:typeof finalPrice,isNaN:Number.isNaN(finalPrice)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'S'};
-                        fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(logData5)}).catch(()=>{});
-                        // #endregion
-                        return formatPrice(finalPrice);
+                        const finalPrice = itemPrice * item.quantity;return formatPrice(finalPrice);
                       })()}
                     </span>
                   </div>
                 </div>
-              ))}
+              );
+              })}
             </div>
           )}
         </div>
@@ -871,8 +1118,9 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
             </button>
             <button
               onClick={() => setShowPaymentModal(true)}
-              disabled={cartItems.length === 0}
+              disabled={cartItems.length === 0 || hasUnsavedChanges}
               className="flex-1 bg-green-500 hover:bg-green-600 disabled:bg-gray-400 disabled:cursor-not-allowed text-white py-1.5 px-3 rounded-lg transition-colors text-sm"
+              title={hasUnsavedChanges ? 'Simpan perubahan terlebih dahulu sebelum melakukan pembayaran' : 'Bayar'}
             >
               Bayar
             </button>
@@ -1182,6 +1430,7 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
         isOpen={showPaymentModal}
         onClose={() => setShowPaymentModal(false)}
         initialCustomerName={customerName}
+        loadedTransactionInfo={loadedTransactionInfo}
         cartItems={cartItems as unknown as Array<{
           id: number;
           product: {
@@ -1222,6 +1471,17 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
         isOpen={showTableSelectionModal}
         onClose={() => setShowTableSelectionModal(false)}
         customerName={customerName}
+        loadedTransactionInfo={loadedTransactionInfo}
+        onItemsLocked={(itemIds) => {
+          // Mark items as locked after saving
+          const newCartItems = cartItems.map(item =>
+            itemIds.includes(item.id) ? { ...item, isLocked: true } : item
+          );
+          setCartItems(newCartItems);
+          sendCartUpdate(newCartItems);
+          // After saving, unsaved changes flag will be cleared automatically
+          // (hasUnsavedChanges checks for items with !isLocked, and now all items are locked)
+        }}
         cartItems={cartItems as unknown as Array<{
           id: number;
           product: {
@@ -1248,9 +1508,18 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
         }>}
         transactionType={transactionType}
         onSuccess={() => {
-          // Clear cart after successful save
-          setCartItems([]);
-          sendCartUpdate([]);
+          // Only clear cart for new orders, not for "lihat" mode
+          if (!loadedTransactionInfo) {
+            // New order: clear cart after successful save
+            setCartItems([]);
+            sendCartUpdate([]);
+          } else {
+            // "Lihat" mode: reload transaction to get updated items with correct transactionItemId
+            // After reload, all items will be locked, so unsaved changes flag will be cleared automatically
+            if (onReloadTransaction && loadedTransactionInfo.transactionId) {
+              onReloadTransaction(loadedTransactionInfo.transactionId);
+            }
+          }
         }}
       />
 
@@ -1316,10 +1585,53 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
           bundleProduct={{
             id: selectedProduct.id,
             nama: selectedProduct.nama,
-            harga_jual: selectedProduct.harga_jual
+            harga_jual: selectedProduct.harga_jual ?? 0
           }}
           bundleItems={bundleItems}
         />
+      )}
+
+      {/* Password Modal for Locked Items */}
+      {showPasswordModal && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+          <div className="bg-white rounded-lg shadow-xl w-full max-w-md p-6">
+            <h2 className="text-xl font-bold text-gray-900 mb-4">Verifikasi Password</h2>
+            <p className="text-sm text-gray-600 mb-4">
+              Item ini sudah dikirim ke kitchen/barista. Masukkan password untuk melanjutkan.
+            </p>
+            <input
+              type="password"
+              value={passwordInput}
+              onChange={(e) => setPasswordInput(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') {
+                  handlePasswordSubmit();
+                }
+              }}
+              placeholder="ketik KONFIRMASI"
+              className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm text-black placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent mb-4"
+              autoFocus
+            />
+            <div className="flex justify-end gap-3">
+              <button
+                onClick={() => {
+                  setShowPasswordModal(false);
+                  setPasswordInput('');
+                  setPendingLockedItemAction(null);
+                }}
+                className="px-4 py-2 text-gray-700 bg-white border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors"
+              >
+                Batal
+              </button>
+              <button
+                onClick={handlePasswordSubmit}
+                className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors"
+              >
+                Verifikasi
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );

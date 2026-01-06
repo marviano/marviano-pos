@@ -351,8 +351,14 @@ export default function TransactionsReport() {
         return;
       }
 
-      const items = await electronAPI.localDbGetTransactionItems(transaction.id);
-      setSelectedTransactionItems(Array.isArray(items) ? items as TransactionItem[] : []);
+      const allItems = await electronAPI.localDbGetTransactionItems(transaction.id);
+      const itemsArray = Array.isArray(allItems) ? allItems : [];
+      // Filter out cancelled items - they should not appear in transaction details
+      const activeItems = (itemsArray as Array<{ production_status?: string | null }>).filter((item) => {
+        const productionStatus = typeof item.production_status === 'string' ? item.production_status : null;
+        return productionStatus !== 'cancelled';
+      });
+      setSelectedTransactionItems(activeItems as TransactionItem[]);
       setSelectedTransaction(transaction);
       setViewMode('detail');
     } catch (error) {

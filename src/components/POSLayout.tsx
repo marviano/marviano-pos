@@ -85,7 +85,18 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
   // Use external state if provided, otherwise use internal state
   const [internalActiveMenuItem, setInternalActiveMenuItem] = useState('Kasir');
   const activeMenuItem = externalActiveMenuItem ?? internalActiveMenuItem;
-  const setActiveMenuItem = externalSetActiveMenuItem ?? setInternalActiveMenuItem;
+  
+  // Wrapper for setActiveMenuItem with unsaved changes check
+  const setActiveMenuItemWithCheck = (item: string) => {
+    // If trying to change page and there are unsaved changes, show confirmation
+    if (activeMenuItem !== item && activeMenuItem === 'Kasir' && !checkUnsavedChanges()) {
+      return; // Don't change page if user cancels
+    }
+    const setter = externalSetActiveMenuItem ?? setInternalActiveMenuItem;
+    setter(item);
+  };
+  
+  const setActiveMenuItem = setActiveMenuItemWithCheck;
 
   // NEW STRUCTURE: 6 carts total - 1 offline + 5 online platforms
   // Each cart can contain both drinks AND bakery items
@@ -107,6 +118,20 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
     roomName: string | null;
     customerName: string | null;
   } | null>(null);
+  const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false);
+  
+  // Helper function to check and prompt for unsaved changes
+  const checkUnsavedChanges = (): boolean => {
+    if (hasUnsavedChanges) {
+      const confirmed = window.confirm('Ada perubahan yang belum disimpan pada cart, apakah anda yakin untuk berpindah halaman?');
+      if (!confirmed) {
+        return false; // User cancelled, don't proceed
+      }
+      setHasUnsavedChanges(false); // Clear flag if user confirms
+    }
+    return true; // Proceed with action
+  };
+  
   const [categories, setCategories] = useState<LocalCategory[]>([]); // Start with empty array
   const [isLoadingCategories, setIsLoadingCategories] = useState(true);
   const [products, setProducts] = useState<Product[]>([]); // Start with empty array
@@ -479,20 +504,26 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
       };
 
       fetchPendingCount();
+      
+      // Listen for immediate refresh when transaction is saved
+      const handlePendingTransactionSaved = () => {
+        fetchPendingCount();
+      };
+      window.addEventListener('pendingTransactionSaved', handlePendingTransactionSaved);
+      
       // Refresh count every 5 seconds
       const interval = setInterval(fetchPendingCount, 5000);
-      return () => clearInterval(interval);
+      return () => {
+        clearInterval(interval);
+        window.removeEventListener('pendingTransactionSaved', handlePendingTransactionSaved);
+      };
     } else {
       setPendingOrdersCount(0);
     }
   }, [activeMenuItem, businessId]);
 
   // Load transaction into cart function
-  const loadTransactionIntoCart = async (transactionId: string) => {
-    // #region agent log
-    fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'POSLayout.tsx:468',message:'loadTransactionIntoCart called',data:{transactionId,transactionIdType:typeof transactionId,transactionIdLength:transactionId?.length},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'F'})}).catch(()=>{});
-    // #endregion
-    console.log('🔄 Loading transaction into cart:', transactionId);
+  const loadTransactionIntoCart = async (transactionId: string) => {console.log('🔄 Loading transaction into cart:', transactionId);
     try {
       const electronAPI = getElectronAPI();
       if (!electronAPI) {
@@ -503,18 +534,9 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
 
       // Fetch transaction
       const transactions = await electronAPI.localDbGetTransactions?.(businessId, 10000);
-      const transactionsArray = Array.isArray(transactions) ? transactions : [];
-      // #region agent log
-      fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'POSLayout.tsx:481',message:'Fetched all transactions',data:{transactionId,totalTransactions:transactionsArray.length,sampleTx:transactionsArray.length>0?{uuid_id:transactionsArray[0].uuid_id,id:transactionsArray[0].id,uuid_idType:typeof transactionsArray[0].uuid_id,idType:typeof transactionsArray[0].id}:null},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'G'})}).catch(()=>{});
-      // #endregion
-      const transaction = transactionsArray.find((tx: any) => 
+      const transactionsArray = Array.isArray(transactions) ? transactions as Record<string, unknown>[] : [];const transaction = transactionsArray.find((tx) => 
         tx.uuid_id === transactionId || tx.id === transactionId
-      ) as any;
-      // #region agent log
-      fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'POSLayout.tsx:486',message:'Transaction lookup result',data:{transactionId,found:!!transaction,transactionUuidId:transaction?.uuid_id,transactionId:transaction?.id,matchByUuid:transaction?.uuid_id===transactionId,matchById:transaction?.id===transactionId},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'H'})}).catch(()=>{});
-      // #endregion
-
-      if (!transaction) {
+      ) as Record<string, unknown> | undefined;if (!transaction) {
         alert('Transaksi tidak ditemukan');
         return;
       }
@@ -522,7 +544,7 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
       // Fetch table and room info if table_id exists
       let tableName: string | null = null;
       let roomName: string | null = null;
-      if (transaction.table_id && electronAPI.getRestaurantTables) {
+      if (transaction.table_id && electronAPI.getRestaurantTables && electronAPI.getRestaurantRooms) {
         try {
           // Get all rooms first
           const rooms = await electronAPI.getRestaurantRooms(businessId);
@@ -555,14 +577,8 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
       }
 
       // Fetch transaction items
-      // #region agent log
-      fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'POSLayout.tsx:495',message:'Before fetching transaction items',data:{transactionId,transactionUuidId:transaction.uuid_id,transactionIdField:transaction.id},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'I'})}).catch(()=>{});
-      // #endregion
       const transactionItems = await electronAPI.localDbGetTransactionItems?.(transactionId);
-      const itemsArray = Array.isArray(transactionItems) ? transactionItems : [];
-      // #region agent log
-      fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'POSLayout.tsx:499',message:'Transaction items fetched',data:{transactionId,itemsCount:itemsArray.length,firstItem:itemsArray.length>0?{uuid_transaction_id:itemsArray[0].uuid_transaction_id,transaction_id:itemsArray[0].transaction_id,product_id:itemsArray[0].product_id,uuid_transaction_idType:typeof itemsArray[0].uuid_transaction_id,transaction_idType:typeof itemsArray[0].transaction_id}:null,allItemsUuidTransactionIds:itemsArray.map((i:any)=>i.uuid_transaction_id)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'J'})}).catch(()=>{});
-      // #endregion
+      const itemsArray = Array.isArray(transactionItems) ? transactionItems as Record<string, unknown>[] : [];
       console.log('📦 Transaction items fetched:', itemsArray.length);
 
       if (itemsArray.length === 0) {
@@ -571,15 +587,9 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
       }
 
       // Fetch customizations for this transaction
-      // #region agent log
-      fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'POSLayout.tsx:516',message:'Before fetching customizations',data:{transactionId,transactionIdType:typeof transactionId,itemsCount:itemsArray.length,itemIds:itemsArray.map((item:any)=>item.id)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'AB'})}).catch(()=>{});
-      // #endregion
       const customizationsData = await electronAPI.localDbGetTransactionItemCustomizationsNormalized?.(transactionId);
-      const customizations = customizationsData?.customizations || [];
+      const customizations = Array.isArray(customizationsData?.customizations) ? customizationsData.customizations as Record<string, unknown>[] : [];
       const customizationOptions = customizationsData?.options || [];
-      // #region agent log
-      fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'POSLayout.tsx:521',message:'After fetching customizations',data:{transactionId,customizationsCount:customizations.length,optionsCount:customizationOptions.length,customizationsData:customizations.length>0?customizations.map((c:any)=>({id:c.id,transaction_item_id:c.transaction_item_id,customization_type_id:c.customization_type_id,customization_type_name:c.customization_type_name})):[],optionsData:customizationOptions.length>0?customizationOptions.map((o:any)=>({id:o.id,transaction_item_customization_id:o.transaction_item_customization_id,option_name:o.option_name})):[]},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'AC'})}).catch(()=>{});
-      // #endregion
       console.log('🎨 Customizations fetched:', customizations.length, 'customizations,', customizationOptions.length, 'options');
 
       // Create a map of transaction_item_id -> customizations
@@ -594,29 +604,21 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
       }>>();
 
       // Create a map of item database ID -> item for quick lookup
-      const itemsByIdMap = new Map<number, any>();
-      itemsArray.forEach((item: any) => {
-        if (item.id) {
-          itemsByIdMap.set(item.id, item);
+      const itemsByIdMap = new Map<number, Record<string, unknown>>();
+      itemsArray.forEach((item) => {
+        const id = typeof item.id === 'number' ? item.id : (typeof item.id === 'string' ? parseInt(item.id, 10) : null);
+        if (id) {
+          itemsByIdMap.set(id, item);
         }
       });
 
       // Group customizations by transaction_item_id (can be string or number)
-      customizations.forEach((cust: any) => {
-        // #region agent log
-        fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'POSLayout.tsx:547',message:'Processing customization',data:{custId:cust.id,transactionItemId:cust.transaction_item_id,transactionItemIdType:typeof cust.transaction_item_id,customizationTypeId:cust.customization_type_id,customizationTypeName:cust.customization_type_name,itemsByIdMapHasItem:itemsByIdMap.has(typeof cust.transaction_item_id==='string'?parseInt(cust.transaction_item_id,10):cust.transaction_item_id)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'D'})}).catch(()=>{});
-        // #endregion
+      customizations.forEach((cust) => {
         // transaction_item_id might be string or number, convert to number for matching
-        const itemId = typeof cust.transaction_item_id === 'string' 
-          ? parseInt(cust.transaction_item_id, 10) 
-          : cust.transaction_item_id;
-        
-        // Skip if item not found
-        if (!itemsByIdMap.has(itemId)) {
-          // #region agent log
-          fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'POSLayout.tsx:554',message:'Skipping customization - item not found',data:{itemId,itemsByIdMapKeys:Array.from(itemsByIdMap.keys())},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'E'})}).catch(()=>{});
-          // #endregion
-          return;
+        const itemId = typeof cust.transaction_item_id === 'number' 
+          ? cust.transaction_item_id 
+          : (typeof cust.transaction_item_id === 'string' ? parseInt(cust.transaction_item_id, 10) : null);// Skip if item not found
+        if (!itemId || !itemsByIdMap.has(itemId)) {return;
         }
 
         if (!customizationsMap.has(itemId)) {
@@ -624,119 +626,135 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
         }
 
         // Find options for this customization
-        const options = customizationOptions.filter((opt: any) => 
+        const options = customizationOptions.filter((opt) => 
           opt.transaction_item_customization_id === cust.id
-        ).map((opt: any) => {
+        ).map((opt) => {
           // Ensure price_adjustment is a number (database might return string)
           const priceAdj = typeof opt.price_adjustment === 'number' 
             ? opt.price_adjustment 
             : (typeof opt.price_adjustment === 'string' ? parseFloat(opt.price_adjustment) || 0 : 0);
+          const optionId = typeof opt.customization_option_id === 'number' 
+            ? opt.customization_option_id 
+            : (typeof opt.customization_option_id === 'string' ? parseInt(opt.customization_option_id, 10) : 0);
+          const optionName = typeof opt.option_name === 'string' ? opt.option_name : String(opt.option_name || '');
           return {
-            option_id: opt.customization_option_id,
-            option_name: opt.option_name,
+            option_id: optionId,
+            option_name: optionName,
             price_adjustment: priceAdj,
           };
-        });
-        // #region agent log
-        fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'POSLayout.tsx:563',message:'Found options for customization',data:{custId:cust.id,customizationTypeId:cust.customization_type_id,optionsCount:options.length,options:options.map((o:any)=>({option_id:o.option_id,option_name:o.option_name,price_adjustment:o.price_adjustment})),allOptionsCount:customizationOptions.length,matchingOptions:customizationOptions.filter((opt:any)=>opt.transaction_item_customization_id===cust.id).map((o:any)=>({id:o.id,transaction_item_customization_id:o.transaction_item_customization_id,option_name:o.option_name}))},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'F'})}).catch(()=>{});
-        // #endregion
-
-        // Find or create customization type entry
-        const custTypeId = cust.customization_type_id;
+        });// Find or create customization type entry
+        const custTypeId = typeof cust.customization_type_id === 'number' 
+          ? cust.customization_type_id 
+          : (typeof cust.customization_type_id === 'string' ? parseInt(cust.customization_type_id, 10) : 0);
         const existingCust = customizationsMap.get(itemId)!.find(c => 
           c.customization_id === custTypeId
         );
 
         if (existingCust) {
-          existingCust.selected_options.push(...options);
-          // #region agent log
-          fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'POSLayout.tsx:577',message:'Added options to existing customization',data:{itemId,custTypeId,existingCustOptionsCount:existingCust.selected_options.length,addedOptionsCount:options.length},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'G'})}).catch(()=>{});
-          // #endregion
-        } else {
+          existingCust.selected_options.push(...options);} else {
           // Use customization_type_name from the query result (already fetched via JOIN)
           const customizationName = (cust.customization_type_name as string) || `Customization ${custTypeId}`;
           customizationsMap.get(itemId)!.push({
             customization_id: custTypeId,
             customization_name: customizationName,
             selected_options: options,
-          });
-          // #region agent log
-          fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'POSLayout.tsx:582',message:'Created new customization entry',data:{itemId,custTypeId,customizationName,optionsCount:options.length,options:options.map((o:any)=>({option_id:o.option_id,option_name:o.option_name}))},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'H'})}).catch(()=>{});
-          // #endregion
-        }
+          });}
       });
 
       // Fetch all products to get product details
       const allProducts = await electronAPI.localDbGetAllProducts?.();
-      const productsArray = Array.isArray(allProducts) ? allProducts : [];
-      const productsMap = new Map<number, any>();
-      productsArray.forEach((p: any) => {
-        if (p.id) {
-          productsMap.set(p.id, p);
+      const productsArray = Array.isArray(allProducts) ? allProducts as Record<string, unknown>[] : [];
+      const productsMap = new Map<number, Record<string, unknown>>();
+      productsArray.forEach((p) => {
+        const id = typeof p.id === 'number' ? p.id : (typeof p.id === 'string' ? parseInt(p.id, 10) : null);
+        if (id) {
+          productsMap.set(id, p);
         }
       });
 
       // Convert transaction items to cart items
-      const cartItems: CartItem[] = itemsArray.map((item: any) => {
-        const product = productsMap.get(item.product_id);
+      // Filter out cancelled items - they should not be loaded into cart
+      const activeItems = itemsArray.filter((item) => {
+        const productionStatus = typeof item.production_status === 'string' ? item.production_status : null;
+        return productionStatus !== 'cancelled';
+      });
+      
+      const cartItems = activeItems.map((item) => {
+        const productId = typeof item.product_id === 'number' ? item.product_id : (typeof item.product_id === 'string' ? parseInt(item.product_id, 10) : null);
+        if (!productId) return null;
+        
+        const product = productsMap.get(productId);
         if (!product) {
-          console.warn(`Product ${item.product_id} not found`);
+          console.warn(`Product ${productId} not found`);
           return null;
         }
 
         // Get customizations for this item
-        const itemCustomizations = customizationsMap.get(item.id) || [];
-        // #region agent log
-        fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'POSLayout.tsx:609',message:'Creating cart item with customizations',data:{itemId:item.id,productId:item.product_id,productName:product.nama,itemCustomizationsCount:itemCustomizations.length,itemCustomizations:itemCustomizations.map((c:any)=>({customization_id:c.customization_id,customization_name:c.customization_name,selected_options_count:c.selected_options?.length||0,selected_options:c.selected_options?.map((o:any)=>({option_id:o.option_id,option_name:o.option_name}))||[]}))},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'I'})}).catch(()=>{});
-        // #endregion
+        const itemId = typeof item.id === 'number' ? item.id : (typeof item.id === 'string' ? parseInt(item.id, 10) : null);
+        const itemCustomizations: Array<{
+          customization_id: number;
+          customization_name: string;
+          selected_options: Array<{
+            option_id: number;
+            option_name: string;
+            price_adjustment: number;
+          }>;
+        }> = itemId ? (customizationsMap.get(itemId) || []) : [];const productIdValue = typeof product.id === 'number' ? product.id : (typeof product.id === 'string' ? parseInt(product.id, 10) : 0);
+        const itemQuantity = typeof item.quantity === 'number' ? item.quantity : (typeof item.quantity === 'string' ? parseInt(item.quantity, 10) : 1);
+        const itemCustomNote = typeof item.custom_note === 'string' ? item.custom_note : undefined;
+        const itemBundleSelections = typeof item.bundle_selections_json === 'string' ? item.bundle_selections_json : undefined;
+        const transactionTableId = typeof transaction.table_id === 'number' ? transaction.table_id : (typeof transaction.table_id === 'string' ? parseInt(transaction.table_id, 10) : null);
+        
+        // Check production_status to determine if item should be locked
+        // Items with production_status IS NULL or 'preparing' are visible on kitchen/barista and should be locked
+        const productionStatus = typeof item.production_status === 'string' ? item.production_status : (item.production_status === null ? null : String(item.production_status || ''));
+        const isItemLocked = productionStatus === null || productionStatus === 'preparing';
 
         return {
           id: Date.now() + Math.random(), // Generate unique ID for cart
           product: {
-            id: product.id,
-            menu_code: product.menu_code || '',
-            nama: product.nama || '',
-            satuan: product.satuan || '',
-            category1_id: product.category1_id,
-            category2_id: product.category2_id,
-            category1_name: product.category1_name,
-            category2_name: product.category2_name,
-            harga_jual: product.harga_jual || 0,
-            harga_qpon: product.harga_qpon,
-            harga_gofood: product.harga_gofood,
-            harga_grabfood: product.harga_grabfood,
-            harga_shopeefood: product.harga_shopeefood,
-            harga_tiktok: product.harga_tiktok,
-            image_url: product.image_url,
-            status: product.status || 'active',
+            id: productIdValue,
+            menu_code: typeof product.menu_code === 'string' ? product.menu_code : '',
+            nama: typeof product.nama === 'string' ? product.nama : '',
+            satuan: typeof product.satuan === 'string' ? product.satuan : '',
+            category1_id: typeof product.category1_id === 'number' ? product.category1_id : undefined,
+            category2_id: typeof product.category2_id === 'number' ? product.category2_id : undefined,
+            category1_name: typeof product.category1_name === 'string' ? product.category1_name : undefined,
+            category2_name: typeof product.category2_name === 'string' ? product.category2_name : undefined,
+            harga_jual: typeof product.harga_jual === 'number' ? product.harga_jual : 0,
+            harga_qpon: typeof product.harga_qpon === 'number' ? product.harga_qpon : undefined,
+            harga_gofood: typeof product.harga_gofood === 'number' ? product.harga_gofood : undefined,
+            harga_grabfood: typeof product.harga_grabfood === 'number' ? product.harga_grabfood : undefined,
+            harga_shopeefood: typeof product.harga_shopeefood === 'number' ? product.harga_shopeefood : undefined,
+            harga_tiktok: typeof product.harga_tiktok === 'number' ? product.harga_tiktok : undefined,
+            image_url: typeof product.image_url === 'string' ? product.image_url : undefined,
+            status: typeof product.status === 'string' ? product.status : 'active',
           },
-          quantity: item.quantity || 1,
+          quantity: itemQuantity,
           customizations: itemCustomizations.length > 0 ? itemCustomizations : undefined,
-          customNote: item.custom_note || undefined,
-          bundleSelections: item.bundle_selections_json 
-            ? JSON.parse(item.bundle_selections_json) 
+          customNote: itemCustomNote,
+          bundleSelections: itemBundleSelections 
+            ? JSON.parse(itemBundleSelections) 
             : undefined,
-          isLocked: true, // Mark as locked
-          transactionItemId: item.id, // Database transaction_item ID
+          isLocked: isItemLocked, // Lock items that are visible on kitchen/barista (production_status IS NULL or 'preparing')
+          transactionItemId: itemId || 0, // Database transaction_item ID
           transactionId: transactionId, // Transaction UUID
-          tableId: transaction.table_id || null,
+          tableId: transactionTableId,
         };
-      }).filter((item): item is CartItem => item !== null);
+      }).filter((item) => item !== null) as CartItem[];
 
       // Load into cart (use offline cart since we're loading a pending transaction)
-      // #region agent log
-      fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'POSLayout.tsx:645',message:'Setting offline cart',data:{cartItemsCount:cartItems.length,firstItem:cartItems.length>0?{productName:cartItems[0].product.nama,hasCustomizations:!!cartItems[0].customizations,customizationsCount:cartItems[0].customizations?.length||0,firstCustomization:cartItems[0].customizations?.[0]?{name:cartItems[0].customizations[0].customization_name,optionsCount:cartItems[0].customizations[0].selected_options?.length||0,options:cartItems[0].customizations[0].selected_options?.map((o:any)=>({name:o.option_name}))||[]}:null}:null},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'J'})}).catch(()=>{});
-      // #endregion
       setOfflineCart(cartItems);
       setIsOnlineTab(false);
       setSelectedOnlinePlatform(null);
       
       // Set loaded transaction info for display
+      const customerName = typeof transaction.customer_name === 'string' ? transaction.customer_name : null;
       setLoadedTransactionInfo({
         transactionId: transactionId,
         tableName,
         roomName,
-        customerName: transaction.customer_name || null,
+        customerName,
       });
 
       // Switch to Kasir page if not already there
@@ -765,7 +783,12 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
                 <div className="flex space-x-2 flex-wrap items-center">
                   {/* Offline Tab */}
                   <button
-                    onClick={() => { setIsOnlineTab(false); setSelectedOnlinePlatform(null); setShowActiveOrders(false); }}
+                    onClick={() => {
+                      if (!checkUnsavedChanges()) return;
+                      setIsOnlineTab(false);
+                      setSelectedOnlinePlatform(null);
+                      setShowActiveOrders(false);
+                    }}
                     className={`px-6 py-2 rounded-lg font-medium transition-colors ${!isOnlineTab && !showActiveOrders
                       ? 'bg-blue-600 text-white'
                       : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
@@ -786,7 +809,12 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
 
                     <div className="flex h-full">
                       <button
-                        onClick={() => { setSelectedOnlinePlatform('gofood'); setIsOnlineTab(true); setShowActiveOrders(false); }}
+                        onClick={() => {
+                          if (!checkUnsavedChanges()) return;
+                          setSelectedOnlinePlatform('gofood');
+                          setIsOnlineTab(true);
+                          setShowActiveOrders(false);
+                        }}
                         className={`px-3 py-1 text-sm font-medium transition-colors h-full ${selectedOnlinePlatform === 'gofood' && isOnlineTab && !showActiveOrders
                           ? 'bg-green-600 text-white'
                           : isOnlineTab && !showActiveOrders ? 'text-white hover:bg-blue-700' : 'text-gray-700 hover:bg-gray-200'
@@ -795,7 +823,12 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
                         GoFood
                       </button>
                       <button
-                        onClick={() => { setSelectedOnlinePlatform('grabfood'); setIsOnlineTab(true); setShowActiveOrders(false); }}
+                        onClick={() => {
+                          if (!checkUnsavedChanges()) return;
+                          setSelectedOnlinePlatform('grabfood');
+                          setIsOnlineTab(true);
+                          setShowActiveOrders(false);
+                        }}
                         className={`px-3 py-1 text-sm font-medium transition-colors h-full ${selectedOnlinePlatform === 'grabfood' && isOnlineTab && !showActiveOrders
                           ? 'bg-green-600 text-white'
                           : isOnlineTab && !showActiveOrders ? 'text-white hover:bg-blue-700' : 'text-gray-700 hover:bg-gray-200'
@@ -804,7 +837,12 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
                         Grab
                       </button>
                       <button
-                        onClick={() => { setSelectedOnlinePlatform('shopeefood'); setIsOnlineTab(true); setShowActiveOrders(false); }}
+                        onClick={() => {
+                          if (!checkUnsavedChanges()) return;
+                          setSelectedOnlinePlatform('shopeefood');
+                          setIsOnlineTab(true);
+                          setShowActiveOrders(false);
+                        }}
                         className={`px-3 py-1 text-sm font-medium transition-colors h-full ${selectedOnlinePlatform === 'shopeefood' && isOnlineTab && !showActiveOrders
                           ? 'bg-green-600 text-white'
                           : isOnlineTab && !showActiveOrders ? 'text-white hover:bg-blue-700' : 'text-gray-700 hover:bg-gray-200'
@@ -813,7 +851,12 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
                         Shopee
                       </button>
                       <button
-                        onClick={() => { setSelectedOnlinePlatform('qpon'); setIsOnlineTab(true); setShowActiveOrders(false); }}
+                        onClick={() => {
+                          if (!checkUnsavedChanges()) return;
+                          setSelectedOnlinePlatform('qpon');
+                          setIsOnlineTab(true);
+                          setShowActiveOrders(false);
+                        }}
                         className={`px-3 py-1 text-sm font-medium transition-colors h-full ${selectedOnlinePlatform === 'qpon' && isOnlineTab && !showActiveOrders
                           ? 'bg-green-600 text-white'
                           : isOnlineTab && !showActiveOrders ? 'text-white hover:bg-blue-700' : 'text-gray-700 hover:bg-gray-200'
@@ -822,7 +865,12 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
                         Qpon
                       </button>
                       <button
-                        onClick={() => { setSelectedOnlinePlatform('tiktok'); setIsOnlineTab(true); setShowActiveOrders(false); }}
+                        onClick={() => {
+                          if (!checkUnsavedChanges()) return;
+                          setSelectedOnlinePlatform('tiktok');
+                          setIsOnlineTab(true);
+                          setShowActiveOrders(false);
+                        }}
                         className={`px-3 py-1 text-sm font-medium transition-colors h-full rounded-r-lg ${selectedOnlinePlatform === 'tiktok' && isOnlineTab && !showActiveOrders
                           ? 'bg-green-600 text-white'
                           : isOnlineTab && !showActiveOrders ? 'text-white hover:bg-blue-700' : 'text-gray-700 hover:bg-gray-200'
@@ -848,6 +896,10 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
                   {/* Active Orders Tab Button */}
                   <button
                     onClick={() => {
+                      // If trying to close Active Orders and there are unsaved changes, show confirmation
+                      if (showActiveOrders && !checkUnsavedChanges()) {
+                        return; // Don't close if user cancels
+                      }
                       setShowActiveOrders(!showActiveOrders);
                       if (!showActiveOrders) {
                         setIsOnlineTab(false);
@@ -896,6 +948,12 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
                     searchQuery={searchQuery}
                     setSearchQuery={setSearchQuery}
                     loadedTransactionInfo={loadedTransactionInfo}
+                    onReloadTransaction={loadTransactionIntoCart}
+                    onClearLoadedTransaction={() => {
+                      setLoadedTransactionInfo(null);
+                      setHasUnsavedChanges(false);
+                    }}
+                    onUnsavedChangesChange={setHasUnsavedChanges}
                   />
 
                   {/* Right Sidebar - Categories from database */}
@@ -1029,7 +1087,7 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
       <LeftSidebar
         menuItems={mockMenuItems}
         activeMenuItem={activeMenuItem}
-        onMenuItemClick={setActiveMenuItem}
+        onMenuItemClick={setActiveMenuItemWithCheck}
       />
 
       {/* Main Content Area - Blurred when shift modal is shown on Kasir page */}

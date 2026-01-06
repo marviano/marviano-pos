@@ -4,7 +4,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import { PrinterManagementService } from './printerManagement';
 import { websocketServer } from './websocketServer';
-import { initializeMySQLPool, getMySQLPool, executeQuery, executeQueryOne, executeUpdate, executeUpsert, executeTransaction, getConnection, initializeSystemPosPool, executeSystemPosQuery, executeSystemPosQueryOne, executeSystemPosUpdate, executeSystemPosTransaction, toMySQLDateTime, toMySQLTimestamp } from './mysqlDb';
+import { initializeMySQLPool, getMySQLPool, executeQuery, executeQueryOne, executeUpdate, executeUpsert, executeTransaction, getConnection, initializeSystemPosPool, executeSystemPosQuery, executeSystemPosQueryOne, executeSystemPosUpdate, executeSystemPosTransaction, toMySQLDateTime, toMySQLTimestamp, testDatabaseConnection } from './mysqlDb';
 import { initializeMySQLSchema } from './mysqlSchema';
 import { readConfig, writeConfig, resetConfig, getDbConfig, type AppConfig } from './configManager';
 
@@ -14,6 +14,28 @@ const originalConsoleLog = console.log.bind(console);
 const originalConsoleError = console.error.bind(console);
 const originalConsoleInfo = console.info.bind(console);
 const originalConsoleDebug = console.debug.bind(console);
+
+// Helper function to safely write to debug.log (ensures directory exists)
+function writeDebugLog(data: string): void {
+  try {
+    const debugLogPath = path.join(__dirname, '..', '.cursor', 'debug.log');
+    const debugLogDir = path.dirname(debugLogPath);
+    
+    // Ensure directory exists
+    if (!fs.existsSync(debugLogDir)) {
+      fs.mkdirSync(debugLogDir, { recursive: true });
+    }
+    
+    // Append to log file
+    fs.appendFileSync(debugLogPath, data + '\n');
+  } catch (error) {
+    // Silently fail - debug logging should not break the application
+    // Only log to console if it's a critical error
+    if (error instanceof Error && !error.message.includes('ENOENT')) {
+      console.warn('Failed to write to debug.log:', error.message);
+    }
+  }
+}
 
 // MySQL pool will be initialized in createWindow
 
@@ -790,6 +812,16 @@ function createWindows(): void {
     }
   });
 
+  ipcMain.handle('test-db-connection', async (event, config: AppConfig) => {
+    try {
+      const result = await testDatabaseConnection(config);
+      return result;
+    } catch (error) {
+      console.error('❌ Failed to test database connection:', error);
+      return { success: false, error: String(error) };
+    }
+  });
+
   // Listen for logout via IPC
   ipcMain.handle('logout', async () => {
     console.log('🔍 Logout - resizing back to login size');
@@ -845,12 +877,7 @@ function createWindows(): void {
     }
   });
   ipcMain.handle('localdb-upsert-product-businesses', async (event, rows: Array<{ product_id: number; business_id: number }>) => {
-    try {
-      // #region agent log
-      const logDataEntry = JSON.stringify({location:'main.ts:731',message:'localdb-upsert-product-businesses called',data:{totalRows:Array.isArray(rows)?rows.length:0,hasProduct298:Array.isArray(rows)?rows.some((r:any)=>r.product_id===298):false,product298Data:Array.isArray(rows)?rows.find((r:any)=>r.product_id===298):null},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'});
-      require('fs').appendFileSync('c:\\Code\\marviano-pos\\.cursor\\debug.log', logDataEntry + '\n');
-      // #endregion
-      const queries: Array<{ sql: string; params?: (string | number | null | boolean)[] }> = [];
+    try {const queries: Array<{ sql: string; params?: (string | number | null | boolean)[] }> = [];
       
       // Verify business_id and product_id exist before inserting (foreign key constraints)
       const validJunctionData: Array<{ product_id: number; business_id: number }> = [];
@@ -885,12 +912,7 @@ function createWindows(): void {
           `,
           params: [rel.product_id, rel.business_id]
         }));
-        queries.push(...junctionQueries);
-        // #region agent log
-        const logDataSuccess = JSON.stringify({location:'main.ts:760',message:'product_businesses upsert success',data:{totalRows:rows.length,validRows:validJunctionData.length,skippedRows:rows.length-validJunctionData.length,hasProduct298:validJunctionData.some((r:any)=>r.product_id===298)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'});
-        require('fs').appendFileSync('c:\\Code\\marviano-pos\\.cursor\\debug.log', logDataSuccess + '\n');
-        // #endregion
-        console.log(`✅ [PRODUCT BUSINESSES UPSERT] Stored ${validJunctionData.length} product-business relationships (${rows.length - validJunctionData.length} skipped)`);
+        queries.push(...junctionQueries);console.log(`✅ [PRODUCT BUSINESSES UPSERT] Stored ${validJunctionData.length} product-business relationships (${rows.length - validJunctionData.length} skipped)`);
       } else {
         console.warn(`⚠️ [PRODUCT BUSINESSES UPSERT] No valid junction table data (all ${rows.length} skipped)`);
       }
@@ -900,12 +922,7 @@ function createWindows(): void {
       }
       return { success: true };
     } catch (error) {
-      console.error('Error upserting product_businesses:', error);
-      // #region agent log
-      const logDataError = JSON.stringify({location:'main.ts:775',message:'product_businesses upsert error',data:{error:String(error)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'});
-      require('fs').appendFileSync('c:\\Code\\marviano-pos\\.cursor\\debug.log', logDataError + '\n');
-      // #endregion
-      return { success: false };
+      console.error('Error upserting product_businesses:', error);return { success: false };
     }
   });
 
@@ -918,6 +935,25 @@ function createWindows(): void {
 
     for (const r of rows) {
       try {
+        // Type-safe property accessors
+        const getId = () => (typeof r.id === 'number' || typeof r.id === 'string') ? Number(r.id) : null;
+        const getString = (key: string) => (typeof r[key] === 'string' ? r[key] as string : '');
+        const getNumber = (key: string) => {
+          const val = r[key];
+          if (typeof val === 'number') return val;
+          if (typeof val === 'string') {
+            const num = Number(val);
+            return isNaN(num) ? null : num;
+          }
+          return null;
+        };
+        const getDate = (key: string) => {
+          const val = r[key];
+          if (val instanceof Date) return val;
+          if (typeof val === 'string' || typeof val === 'number') return val;
+          return null;
+        };
+
         // Check if product has any platform prices (for online tabs)
         const hasPlatformPrice =
           (r.harga_shopeefood != null && r.harga_shopeefood !== undefined) ||
@@ -929,22 +965,25 @@ function createWindows(): void {
 
         // Skip products with NULL harga_jual ONLY if they also have no platform prices
         // If they have platform prices, we'll use harga_jual = 0 as fallback so they show in online tabs
-        if ((r.harga_jual == null || r.harga_jual === undefined) && !hasPlatformPrice) {
-          console.log(`⏭️ [PRODUCTS UPSERT] Skipping product ${r.id} (${r.nama}) - harga_jual is NULL and no platform prices`);
+        const hargaJualRaw = getNumber('harga_jual');
+        if ((hargaJualRaw == null) && !hasPlatformPrice) {
+          const productId = getId();
+          const productName = getString('nama');
+          console.log(`⏭️ [PRODUCTS UPSERT] Skipping product ${productId} (${productName}) - harga_jual is NULL and no platform prices`);
           continue;
         }
 
         // Use 0 as fallback for harga_jual if NULL but product has platform prices
-        const hargaJual = (r.harga_jual != null && r.harga_jual !== undefined) ? r.harga_jual : 0;
+        const hargaJual = hargaJualRaw ?? 0;
 
         // Map MySQL columns
-        const kategori = r.kategori || r.category1_name || '';
-        let category1Id = r.category1_id ? Number(r.category1_id) : null;
-        let category2Id = r.category2_id ? Number(r.category2_id) : null;
-        const category2Name = r.category2_name || r.jenis || '';
+        const kategori = (typeof r.kategori === 'string' ? r.kategori : '') || (typeof r.category1_name === 'string' ? r.category1_name : '') || '';
+        let category1Id = getNumber('category1_id');
+        let category2Id = getNumber('category2_id');
+        const category2Name = (typeof r.category2_name === 'string' ? r.category2_name : '') || (typeof r.jenis === 'string' ? r.jenis : '') || '';
 
         // If category1_id is missing but category1_name/kategori exists, try to map it
-        if (!category1Id && (r.category1_name || r.kategori)) {
+        if (!category1Id && (typeof r.category1_name === 'string' || typeof r.kategori === 'string')) {
           const categoryName = String(r.category1_name || r.kategori || '').toLowerCase().trim();
           if (categoryName === 'makanan' || categoryName === 'food') {
             category1Id = 1;
@@ -997,7 +1036,28 @@ function createWindows(): void {
           }
         }
 
-        const isBundle = r.is_bundle === 1 || r.is_bundle === true ? 1 : 0;
+        const isBundle = (r.is_bundle === 1 || r.is_bundle === true) ? 1 : 0;
+        const hasCustomization = (r.has_customization === 1 || r.has_customization === true) ? 1 : 0;
+
+        const productId = getId();
+        const menuCode = typeof r.menu_code === 'string' ? r.menu_code : (typeof r.menu_code === 'number' ? String(r.menu_code) : null);
+        const nama = getString('nama');
+        const satuan = getString('satuan') || '';
+        const keterangan = typeof r.keterangan === 'string' ? r.keterangan : null;
+        const hargaBeli = getNumber('harga_beli');
+        const ppn = getNumber('ppn');
+        const hargaKhusus = getNumber('harga_khusus');
+        const hargaOnline = getNumber('harga_online');
+        const hargaQpon = getNumber('harga_qpon');
+        const hargaGofood = getNumber('harga_gofood');
+        const hargaGrabfood = getNumber('harga_grabfood');
+        const hargaShopeefood = getNumber('harga_shopeefood');
+        const hargaTiktok = getNumber('harga_tiktok');
+        const feeKerja = getNumber('fee_kerja');
+        const imageUrl = typeof r.image_url === 'string' ? r.image_url : null;
+        const status = typeof r.status === 'string' ? r.status : (typeof r.status === 'number' ? String(r.status) : null);
+        const createdAt = getDate('created_at');
+        const createdTimestamp = createdAt ? toMySQLTimestamp(createdAt as string | number | Date) : toMySQLTimestamp(new Date());
 
         queries.push({
           sql: `INSERT INTO products (
@@ -1028,29 +1088,39 @@ function createWindows(): void {
             is_bundle=VALUES(is_bundle),
             updated_at=VALUES(updated_at)`,
           params: [
-            r.id, r.menu_code, r.nama, r.satuan || '', category1Id, category2Id, r.keterangan || null,
-            r.harga_beli || null, r.ppn || null, hargaJual, r.harga_khusus || null,
-            r.harga_online ?? null, r.harga_qpon ?? null, r.harga_gofood ?? null, r.harga_grabfood ?? null, r.harga_shopeefood ?? null, r.harga_tiktok ?? null,
-            r.fee_kerja || null, r.image_url || null, r.status, (r.has_customization ? 1 : 0), isBundle, 
-            toMySQLTimestamp(r.created_at || new Date()), toMySQLTimestamp(Date.now())
+            productId, menuCode, nama, satuan, category1Id, category2Id, keterangan,
+            hargaBeli, ppn, hargaJual, hargaKhusus, hargaOnline, hargaQpon, hargaGofood, hargaGrabfood, hargaShopeefood, hargaTiktok,
+            feeKerja, imageUrl, status, hasCustomization, isBundle,
+            createdTimestamp, toMySQLTimestamp(Date.now())
           ]
         });
         successCount++;
       } catch (error) {
         errorCount++;
-        console.warn(`⚠️ [PRODUCTS UPSERT] Skipping product ${r.id} (${r.nama}) due to error:`, error);
+        const productId = (typeof r.id === 'number' || typeof r.id === 'string') ? Number(r.id) : 'unknown';
+        const productName = typeof r.nama === 'string' ? r.nama : 'unknown';
+        console.warn(`⚠️ [PRODUCTS UPSERT] Skipping product ${productId} (${productName}) due to error:`, error);
       }
     }
 
     try {
       if (queries.length > 0) {
+        console.log(`🔄 [PRODUCTS UPSERT] Executing transaction with ${queries.length} queries...`);
         await executeTransaction(queries);
+        console.log(`✅ [PRODUCTS UPSERT] Transaction committed successfully`);
+      } else {
+        console.warn('⚠️ [PRODUCTS UPSERT] No queries to execute (all products were skipped)');
       }
       console.log(`✅ [PRODUCTS UPSERT] Completed: ${successCount} success, ${errorCount} errors`);
-      return { success: true };
+      return { success: true, inserted: successCount, errors: errorCount };
     } catch (error) {
       console.error('❌ [PRODUCTS UPSERT] Transaction failed:', error);
-      return { success: false };
+      console.error('❌ [PRODUCTS UPSERT] Error details:', {
+        message: error instanceof Error ? error.message : String(error),
+        stack: error instanceof Error ? error.stack : undefined,
+        queryCount: queries.length
+      });
+      return { success: false, error: error instanceof Error ? error.message : String(error) };
     }
   });
   ipcMain.handle('localdb-cleanup-orphaned-products', async (event, businessId: number, syncedProductIds: number[]) => {
@@ -1158,12 +1228,7 @@ function createWindows(): void {
 
   // Add the missing method for category2 filtering
   ipcMain.handle('localdb-get-products-by-category2', async (event, category2Name: string, businessId?: number) => {
-    try {
-      // #region agent log
-      const logDataEntry = JSON.stringify({location:'main.ts:912',message:'localdb-get-products-by-category2 called',data:{category2Name,businessId},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'});
-      require('fs').appendFileSync('c:\\Code\\marviano-pos\\.cursor\\debug.log', logDataEntry + '\n');
-      // #endregion
-      let query = `SELECT 
+    try {let query = `SELECT 
         p.id, p.menu_code, p.nama, p.satuan, 
         c2.name AS category2_name, c1.name AS category1_name,
         p.keterangan, p.harga_beli, p.ppn, p.harga_jual, p.harga_khusus, 
@@ -1183,19 +1248,9 @@ function createWindows(): void {
         try {
           const pbCheck = await executeQuery('SELECT COUNT(*) as count FROM product_businesses WHERE business_id = ?', [businessId]);
           const pbCount = Array.isArray(pbCheck) && pbCheck.length > 0 ? (pbCheck[0] as any).count : 0;
-          useBusinessFilter = pbCount > 0;
-          // #region agent log
-          const logDataPb = JSON.stringify({location:'main.ts:932',message:'product_businesses check',data:{businessId,productBusinessesCount:pbCount,useBusinessFilter},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'});
-          require('fs').appendFileSync('c:\\Code\\marviano-pos\\.cursor\\debug.log', logDataPb + '\n');
-          // #endregion
-        } catch (e) {
+          useBusinessFilter = pbCount > 0;} catch (e) {
           // If check fails, don't use business filter (fallback to all products)
-          useBusinessFilter = false;
-          // #region agent log
-          const logDataError = JSON.stringify({location:'main.ts:936',message:'product_businesses check error',data:{businessId,error:String(e)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'});
-          require('fs').appendFileSync('c:\\Code\\marviano-pos\\.cursor\\debug.log', logDataError + '\n');
-          // #endregion
-        }
+          useBusinessFilter = false;}
       }
       
       if (businessId && useBusinessFilter) {
@@ -1211,21 +1266,7 @@ function createWindows(): void {
         params.push(businessId);
       }
       
-      query += ` ORDER BY p.nama ASC`;
-      
-      // #region agent log
-      const logDataQuery = JSON.stringify({location:'main.ts:953',message:'Executing query',data:{query,params,useBusinessFilter},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'D'});
-      require('fs').appendFileSync('c:\\Code\\marviano-pos\\.cursor\\debug.log', logDataQuery + '\n');
-      // #endregion
-      
-      const result = await executeQuery(query, params);
-      
-      // #region agent log
-      const logDataResult = JSON.stringify({location:'main.ts:956',message:'Query result',data:{resultCount:Array.isArray(result)?result.length:0,productIds:Array.isArray(result)?result.map((r:any)=>r.id):[],hasProduct298:Array.isArray(result)?result.some((r:any)=>r.id===298):false},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'E'});
-      require('fs').appendFileSync('c:\\Code\\marviano-pos\\.cursor\\debug.log', logDataResult + '\n');
-      // #endregion
-      
-      return result;
+      query += ` ORDER BY p.nama ASC`;const result = await executeQuery(query, params);return result;
     } catch (error) {
       console.error('Error getting products by category2:', error);
       return [];
@@ -1253,12 +1294,7 @@ function createWindows(): void {
         try {
           const pbCheck = await executeQuery('SELECT COUNT(*) as count FROM product_businesses WHERE business_id = ?', [businessId]);
           const pbCount = Array.isArray(pbCheck) && pbCheck.length > 0 ? (pbCheck[0] as any).count : 0;
-          const totalProducts = await executeQuery('SELECT COUNT(*) as count FROM products WHERE status = ?', ['active']);
-          // #region agent log
-          const logDataPb = JSON.stringify({location:'main.ts:962',message:'product_businesses check',data:{businessId,productBusinessesCount:pbCount,totalActiveProducts:Array.isArray(totalProducts)&&totalProducts.length>0?(totalProducts[0] as any).count:0,willUseBusinessFilter:pbCount>0},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'H'});
-          require('fs').appendFileSync('c:\\Code\\marviano-pos\\.cursor\\debug.log', logDataPb + '\n');
-          // #endregion
-          useBusinessFilter = pbCount > 0;
+          const totalProducts = await executeQuery('SELECT COUNT(*) as count FROM products WHERE status = ?', ['active']);useBusinessFilter = pbCount > 0;
         } catch (e) {
           // If check fails, don't use business filter (fallback to all products)
           useBusinessFilter = false;
@@ -1277,43 +1313,50 @@ function createWindows(): void {
         params.push(businessId);
       }
       
-      query += ` ORDER BY p.nama ASC`;
-      
-      // #region agent log
-      const logData = JSON.stringify({location:'main.ts:947',message:'localdb-get-all-products query',data:{businessId,useBusinessFilter,query,params},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'});
-      require('fs').appendFileSync('c:\\Code\\marviano-pos\\.cursor\\debug.log', logData + '\n');
-      // #endregion
-      
-      const result = await executeQuery(query, params);
-      
-      // #region agent log
-      const logData2 = JSON.stringify({location:'main.ts:975',message:'localdb-get-all-products result',data:{businessId,resultCount:Array.isArray(result)?result.length:0,firstProduct:Array.isArray(result)&&result.length>0?result[0]:null,productIds:Array.isArray(result)?result.slice(0,10).map((r:any)=>r.id):[]},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'});
-      require('fs').appendFileSync('c:\\Code\\marviano-pos\\.cursor\\debug.log', logData2 + '\n');
-      // #endregion
-      
-      return result;
+      query += ` ORDER BY p.nama ASC`;const result = await executeQuery(query, params);return result;
     } catch (error) {
-      console.error('Error getting all products:', error);
-      // #region agent log
-      const logData3 = JSON.stringify({location:'main.ts:982',message:'localdb-get-all-products error',data:{businessId,error:String(error)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'G'});
-      require('fs').appendFileSync('c:\\Code\\marviano-pos\\.cursor\\debug.log', logData3 + '\n');
-      // #endregion
-      return [];
+      console.error('Error getting all products:', error);return [];
     }
   });
 
   // Customization handlers
   ipcMain.handle('localdb-upsert-customization-types', async (event, rows: RowArray) => {
     try {
-      const queries = rows.map(r => ({
-        sql: `INSERT INTO product_customization_types (
-          id, name, selection_mode, display_order
-        ) VALUES (?, ?, ?, ?)
-        ON DUPLICATE KEY UPDATE
-          name=VALUES(name), selection_mode=VALUES(selection_mode),
-          display_order=VALUES(display_order)`,
-        params: [r.id ?? null, r.name ?? null, r.selection_mode ?? null, r.display_order ?? 0]
-      }));
+      const queries = rows.map(r => {
+        const getId = () => {
+          const val = r.id;
+          if (typeof val === 'number') return val;
+          if (typeof val === 'string') {
+            const num = Number(val);
+            return isNaN(num) ? null : num;
+          }
+          return null;
+        };
+        const getString = (key: string) => (typeof r[key] === 'string' ? r[key] as string : null);
+        const getNumber = (key: string) => {
+          const val = r[key];
+          if (typeof val === 'number') return val;
+          if (typeof val === 'string') {
+            const num = Number(val);
+            return isNaN(num) ? null : num;
+          }
+          return null;
+        };
+        return {
+          sql: `INSERT INTO product_customization_types (
+            id, name, selection_mode, display_order
+          ) VALUES (?, ?, ?, ?)
+          ON DUPLICATE KEY UPDATE
+            name=VALUES(name), selection_mode=VALUES(selection_mode),
+            display_order=VALUES(display_order)`,
+          params: [
+            getId(),
+            getString('name'),
+            getString('selection_mode'),
+            getNumber('display_order') ?? 0
+          ]
+        };
+      });
       await executeTransaction(queries);
       return { success: true };
     } catch (error) {
@@ -1324,15 +1367,43 @@ function createWindows(): void {
 
   ipcMain.handle('localdb-upsert-customization-options', async (event, rows: RowArray) => {
     try {
-      const queries = rows.map(r => ({
-        sql: `INSERT INTO product_customization_options (
-          id, type_id, name, price_adjustment, display_order, status
-        ) VALUES (?, ?, ?, ?, ?, ?)
-        ON DUPLICATE KEY UPDATE
-          type_id=VALUES(type_id), name=VALUES(name), price_adjustment=VALUES(price_adjustment),
-          display_order=VALUES(display_order), status=VALUES(status)`,
-        params: [r.id ?? null, r.type_id ?? null, r.name ?? null, r.price_adjustment || 0.0, r.display_order || 0, r.status || 'active']
-      }));
+      const queries = rows.map(r => {
+        const getId = () => {
+          const val = r.id;
+          if (typeof val === 'number') return val;
+          if (typeof val === 'string') {
+            const num = Number(val);
+            return isNaN(num) ? null : num;
+          }
+          return null;
+        };
+        const getString = (key: string) => (typeof r[key] === 'string' ? r[key] as string : null);
+        const getNumber = (key: string) => {
+          const val = r[key];
+          if (typeof val === 'number') return val;
+          if (typeof val === 'string') {
+            const num = Number(val);
+            return isNaN(num) ? null : num;
+          }
+          return null;
+        };
+        return {
+          sql: `INSERT INTO product_customization_options (
+            id, type_id, name, price_adjustment, display_order, status
+          ) VALUES (?, ?, ?, ?, ?, ?)
+          ON DUPLICATE KEY UPDATE
+            type_id=VALUES(type_id), name=VALUES(name), price_adjustment=VALUES(price_adjustment),
+            display_order=VALUES(display_order), status=VALUES(status)`,
+          params: [
+            getId(),
+            getNumber('type_id'),
+            getString('name'),
+            getNumber('price_adjustment') ?? 0.0,
+            getNumber('display_order') ?? 0,
+            getString('status') || 'active'
+          ]
+        };
+      });
       await executeTransaction(queries);
       return { success: true };
     } catch (error) {
@@ -1346,16 +1417,39 @@ function createWindows(): void {
       const queries: Array<{ sql: string; params?: (string | number | null | boolean)[] }> = [];
       for (const r of rows) {
         try {
+          const getId = () => {
+            const val = r.id;
+            if (typeof val === 'number') return val;
+            if (typeof val === 'string') {
+              const num = Number(val);
+              return isNaN(num) ? null : num;
+            }
+            return null;
+          };
+          const getNumber = (key: string) => {
+            const val = r[key];
+            if (typeof val === 'number') return val;
+            if (typeof val === 'string') {
+              const num = Number(val);
+              return isNaN(num) ? null : num;
+            }
+            return null;
+          };
           queries.push({
             sql: `INSERT INTO product_customizations (
               id, product_id, customization_type_id
             ) VALUES (?, ?, ?)
             ON DUPLICATE KEY UPDATE
               product_id=VALUES(product_id), customization_type_id=VALUES(customization_type_id)`,
-            params: [r.id ?? null, r.product_id ?? null, r.customization_type_id ?? null]
+            params: [
+              getId(),
+              getNumber('product_id'),
+              getNumber('customization_type_id')
+            ]
           });
         } catch (error) {
-          console.warn(`⚠️ [PRODUCT CUSTOMIZATION UPSERT] Skipping row ${r.id} due to error:`, error);
+          const rowId = typeof r.id === 'number' ? r.id : (typeof r.id === 'string' ? r.id : 'unknown');
+          console.warn(`⚠️ [PRODUCT CUSTOMIZATION UPSERT] Skipping row ${rowId} due to error:`, error);
         }
       }
       if (queries.length > 0) {
@@ -1442,51 +1536,83 @@ function createWindows(): void {
 
       for (const r of rows) {
         try {
+          const getId = () => {
+            const val = r.id;
+            if (typeof val === 'number') return val;
+            if (typeof val === 'string') {
+              const num = Number(val);
+              return isNaN(num) ? null : num;
+            }
+            return null;
+          };
+          const getNumber = (key: string) => {
+            const val = r[key];
+            if (typeof val === 'number') return val;
+            if (typeof val === 'string') {
+              const num = Number(val);
+              return isNaN(num) ? null : num;
+            }
+            return null;
+          };
+          const getDate = (key: string) => {
+            const val = r[key];
+            if (val instanceof Date) return val;
+            if (typeof val === 'string' || typeof val === 'number') return val;
+            return null;
+          };
+
+          const bundleProductId = getNumber('bundle_product_id');
+          const rowId = getId();
+
           // Skip if bundle_product_id is null or invalid
-          if (!r.bundle_product_id) {
+          if (!bundleProductId) {
             errorCount++;
-            console.warn(`⚠️ [BUNDLE ITEMS UPSERT] Skipping row ${r.id}: bundle_product_id is null`);
+            console.warn(`⚠️ [BUNDLE ITEMS UPSERT] Skipping row ${rowId}: bundle_product_id is null`);
             continue;
           }
 
           // Verify product exists before inserting bundle item
           try {
-            const productExists = await executeQueryOne<{ id: number }>('SELECT id FROM products WHERE id = ? LIMIT 1', [r.bundle_product_id]);
+            const productExists = await executeQueryOne<{ id: number }>('SELECT id FROM products WHERE id = ? LIMIT 1', [bundleProductId]);
             if (!productExists) {
-              console.warn(`⚠️ [BUNDLE ITEMS UPSERT] Skipping row ${r.id}: bundle_product_id ${r.bundle_product_id} does not exist`);
+              console.warn(`⚠️ [BUNDLE ITEMS UPSERT] Skipping row ${rowId}: bundle_product_id ${bundleProductId} does not exist`);
               errorCount++;
               continue;
             }
           } catch (checkError) {
-            console.warn(`⚠️ [BUNDLE ITEMS UPSERT] Error checking product ${r.bundle_product_id} for bundle item ${r.id}:`, checkError);
+            console.warn(`⚠️ [BUNDLE ITEMS UPSERT] Error checking product ${bundleProductId} for bundle item ${rowId}:`, checkError);
             errorCount++;
             continue;
           }
 
           // Verify category2_id exists before inserting (foreign key constraint)
           // category2_id is NOT NULL in schema, so skip if it doesn't exist
-          let category2Id = r.category2_id;
+          let category2Id = getNumber('category2_id');
           if (category2Id) {
             try {
               const category2Exists = await executeQueryOne<{ id: number }>('SELECT id FROM category2 WHERE id = ? LIMIT 1', [category2Id]);
               if (!category2Exists) {
-                console.warn(`⚠️ [BUNDLE ITEMS UPSERT] Skipping row ${r.id}: category2_id ${category2Id} does not exist (required, cannot be NULL)`);
+                console.warn(`⚠️ [BUNDLE ITEMS UPSERT] Skipping row ${rowId}: category2_id ${category2Id} does not exist (required, cannot be NULL)`);
                 errorCount++;
                 continue;
               }
             } catch (checkError) {
-              console.warn(`⚠️ [BUNDLE ITEMS UPSERT] Error checking category2_id ${r.category2_id} for bundle item ${r.id}:`, checkError);
+              const category2IdRaw = getNumber('category2_id');
+              console.warn(`⚠️ [BUNDLE ITEMS UPSERT] Error checking category2_id ${category2IdRaw} for bundle item ${rowId}:`, checkError);
               errorCount++;
               continue;
             }
           } else {
-            console.warn(`⚠️ [BUNDLE ITEMS UPSERT] Skipping row ${r.id}: category2_id is null (required)`);
+            console.warn(`⚠️ [BUNDLE ITEMS UPSERT] Skipping row ${rowId}: category2_id is null (required)`);
             errorCount++;
             continue;
           }
 
-          const createdAt = toMySQLTimestamp(r.created_at || new Date());
-          const updatedAt = toMySQLTimestamp(r.updated_at || Date.now());
+          const createdAtRaw = getDate('created_at');
+          const updatedAtRaw = getDate('updated_at');
+          const createdAt = createdAtRaw ? toMySQLTimestamp(createdAtRaw as string | number | Date) : toMySQLTimestamp(new Date());
+          const updatedAt = updatedAtRaw ? toMySQLTimestamp(updatedAtRaw as string | number | Date) : toMySQLTimestamp(Date.now());
+          
           queries.push({
             sql: `
               INSERT INTO bundle_items (
@@ -1500,11 +1626,11 @@ function createWindows(): void {
                 updated_at = VALUES(updated_at)
             `,
             params: [
-              r.id ?? null,
-              r.bundle_product_id ?? null,
-              category2Id ?? null,
-              r.required_quantity ?? null,
-              r.display_order ?? null,
+              rowId,
+              bundleProductId,
+              category2Id,
+              getNumber('required_quantity'),
+              getNumber('display_order'),
               createdAt,
               updatedAt
             ]
@@ -1512,10 +1638,11 @@ function createWindows(): void {
           successCount++;
         } catch (rowError: unknown) {
           errorCount++;
+          const rowId = typeof r.id === 'number' ? r.id : (typeof r.id === 'string' ? r.id : 'unknown');
           const rowErrorMessage = (rowError && typeof rowError === 'object' && 'message' in rowError)
             ? String((rowError as { message: unknown }).message)
             : String(rowError);
-          console.warn(`⚠️ [BUNDLE ITEMS UPSERT] Skipping row ${r.id}: ${rowErrorMessage}`);
+          console.warn(`⚠️ [BUNDLE ITEMS UPSERT] Skipping row ${rowId}: ${rowErrorMessage}`);
         }
       }
 
@@ -1652,58 +1779,51 @@ function createWindows(): void {
   // Comprehensive IPC handlers for all POS tables
   // Users
   ipcMain.handle('localdb-upsert-users', async (event, rows: RowArray, skipRoleValidation: boolean = false) => {
-    try {
-      // #region agent log
-      fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'main.ts:1331',message:'localdb-upsert-users called',data:{totalRows:Array.isArray(rows)?rows.length:0,userIds:Array.isArray(rows)?rows.map((r:any)=>r?.id).filter(Boolean):[],user1InRows:Array.isArray(rows)?rows.some((r:any)=>r?.id===1):false,skipRoleValidation:skipRoleValidation},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})}).catch(()=>{});
-      // #endregion
-      const queries: Array<{ sql: string; params?: (string | number | null | boolean)[] }> = [];
+    try {const queries: Array<{ sql: string; params?: (string | number | null | boolean)[] }> = [];
       let skippedCount = 0;
       
       for (const r of rows) {
-        // #region agent log
-        if (r.id === 1) {
-          fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'main.ts:1336',message:'Processing user 1',data:{userId:r.id,roleId:r.role_id,orgId:r.organization_id,skipRoleValidation:skipRoleValidation},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'D'})}).catch(()=>{});
-        }
-        // #endregion
-        let roleId = r.role_id;
-        let orgId = r.organization_id;
+        const getId = () => {
+          const val = r.id;
+          if (typeof val === 'number') return val;
+          if (typeof val === 'string') {
+            const num = Number(val);
+            return isNaN(num) ? null : num;
+          }
+          return null;
+        };
+        const getNumber = (key: string) => {
+          const val = r[key];
+          if (typeof val === 'number') return val;
+          if (typeof val === 'string') {
+            const num = Number(val);
+            return isNaN(num) ? null : num;
+          }
+          return null;
+        };
+        const getString = (key: string) => (typeof r[key] === 'string' ? r[key] as string : null);
+        const getDate = (key: string) => {
+          const val = r[key];
+          if (val instanceof Date) return val;
+          if (typeof val === 'string' || typeof val === 'number') return val;
+          return null;
+        };
+
+        const userId = getId();let roleId = getNumber('role_id');
+        let orgId = getNumber('organization_id');
         
         // Verify role_id exists before inserting (foreign key constraint) - SKIP on first pass to break circular dependency
         if (roleId && !skipRoleValidation) {
           try {
-            const roleExists = await executeQueryOne<{ id: number }>('SELECT id FROM roles WHERE id = ? LIMIT 1', [roleId]);
-            // #region agent log
-            if (r.id === 1) {
-              fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'main.ts:1343',message:'User 1 role check result',data:{userId:r.id,roleId:roleId,roleExists:!!roleExists},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'E'})}).catch(()=>{});
-            }
-            // #endregion
-            if (!roleExists) {
-              console.warn(`⚠️ [USERS] Skipping user ${r.id}: role_id ${roleId} does not exist`);
-              // #region agent log
-              if (r.id === 1) {
-                fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'main.ts:1345',message:'User 1 skipped - role missing',data:{userId:r.id,roleId:roleId},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'F'})}).catch(()=>{});
-              }
-              // #endregion
-              skippedCount++;
+            const roleExists = await executeQueryOne<{ id: number }>('SELECT id FROM roles WHERE id = ? LIMIT 1', [roleId]);if (!roleExists) {
+              console.warn(`⚠️ [USERS] Skipping user ${userId}: role_id ${roleId} does not exist`);skippedCount++;
               continue;
             }
-          } catch (checkError) {
-            // #region agent log
-            if (r.id === 1) {
-              fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'main.ts:1350',message:'User 1 role check error',data:{userId:r.id,roleId:roleId,error:String(checkError)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'G'})}).catch(()=>{});
-            }
-            // #endregion
-            console.warn(`⚠️ [USERS] Failed to verify role_id ${roleId}:`, checkError);
+          } catch (checkError) {console.warn(`⚠️ [USERS] Failed to verify role_id ${roleId}:`, checkError);
             skippedCount++;
             continue;
           }
-        } else if (roleId && skipRoleValidation) {
-          // #region agent log
-          if (r.id === 1) {
-            fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'main.ts:1355',message:'User 1 skipping role validation (first pass)',data:{userId:r.id,roleId:roleId},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'X'})}).catch(()=>{});
-          }
-          // #endregion
-          console.log(`ℹ️ [USERS] Skipping role validation for user ${r.id} (first pass - breaking circular dependency)`);
+        } else if (roleId && skipRoleValidation) {console.log(`ℹ️ [USERS] Skipping role validation for user ${userId} (first pass - breaking circular dependency)`);
         }
         
         // Verify organization_id exists before inserting (foreign key constraint) - SKIP on first pass
@@ -1711,7 +1831,7 @@ function createWindows(): void {
           try {
             const orgExists = await executeQueryOne<{ id: number }>('SELECT id FROM organizations WHERE id = ? LIMIT 1', [orgId]);
             if (!orgExists) {
-              console.warn(`⚠️ [USERS] Skipping user ${r.id}: organization_id ${orgId} does not exist`);
+              console.warn(`⚠️ [USERS] Skipping user ${userId}: organization_id ${orgId} does not exist`);
               skippedCount++;
               continue;
             }
@@ -1720,14 +1840,11 @@ function createWindows(): void {
             skippedCount++;
             continue;
           }
-        } else if (orgId && skipRoleValidation) {
-          // #region agent log
-          if (r.id === 1) {
-            fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'main.ts:1370',message:'User 1 skipping org validation (first pass)',data:{userId:r.id,orgId:orgId},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'Y'})}).catch(()=>{});
-          }
-          // #endregion
-          console.log(`ℹ️ [USERS] Skipping organization validation for user ${r.id} (first pass - breaking circular dependency)`);
+        } else if (orgId && skipRoleValidation) {console.log(`ℹ️ [USERS] Skipping organization validation for user ${userId} (first pass - breaking circular dependency)`);
         }
+        
+        const createdAtRaw = getDate('createdAt');
+        const createdAt = createdAtRaw ? toMySQLTimestamp(createdAtRaw as string | number | Date) : toMySQLTimestamp(new Date());
         
         queries.push({
           sql: `INSERT INTO users (
@@ -1737,78 +1854,49 @@ function createWindows(): void {
             email=VALUES(email), password=VALUES(password), name=VALUES(name),
             googleId=VALUES(googleId), createdAt=VALUES(createdAt), role_id=VALUES(role_id),
             organization_id=VALUES(organization_id)`,
-          params: [r.id ?? null, r.email ?? null, r.password ?? null, r.name ?? null, r.googleId ?? null, toMySQLTimestamp(r.createdAt || new Date()), roleId ?? null, orgId ?? null]
-        });
-        // #region agent log
-        if (r.id === 1) {
-          fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'main.ts:1409',message:'User 1 added to queries',data:{userId:r.id,roleId:roleId,orgId:orgId},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'H'})}).catch(()=>{});
-        }
-        // #endregion
-      }
+          params: [
+            userId,
+            getString('email'),
+            getString('password'),
+            getString('name'),
+            getString('googleId'),
+            createdAt,
+            roleId,
+            orgId
+          ]
+        });}
       
-      if (queries.length > 0) {
-        // #region agent log
-        fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'main.ts:1426',message:'Executing user transaction',data:{queryCount:queries.length,skippedCount:skippedCount,user1InQueries:queries.some((q:any)=>q.params?.[0]===1),skipRoleValidation:skipRoleValidation},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'I'})}).catch(()=>{});
-        // #endregion
-        if (skipRoleValidation) {
+      if (queries.length > 0) {if (skipRoleValidation) {
           // On first pass: Insert users one by one to handle foreign key errors individually
           let successCount = 0;
           let failCount = 0;
           for (const query of queries) {
             try {
               await executeUpdate(query.sql, query.params || []);
-              successCount++;
-              // #region agent log
-              if (query.params?.[0] === 1) {
-                fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'main.ts:1433',message:'User 1 inserted successfully (first pass)',data:{userId:query.params?.[0]},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'AB'})}).catch(()=>{});
-              }
-              // #endregion
-            } catch (insertError: unknown) {
+              successCount++;} catch (insertError: unknown) {
               const err = insertError as { code?: string; errno?: number; message?: string };
               if (err.code === 'ER_NO_REFERENCED_ROW_2' || err.errno === 1452) {
                 // Foreign key constraint - expected on first pass, will retry later
-                failCount++;
-                // #region agent log
-                if (query.params?.[0] === 1) {
-                  fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'main.ts:1441',message:'User 1 insert failed (expected - will retry)',data:{userId:query.params?.[0],error:String(err)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'AC'})}).catch(()=>{});
-                }
-                // #endregion
-                console.log(`ℹ️ [USERS] User ${query.params?.[0]} insert failed (foreign key - will retry later): ${err.message}`);
+                failCount++;console.log(`ℹ️ [USERS] User ${query.params?.[0]} insert failed (foreign key - will retry later): ${err.message}`);
               } else {
                 // Unexpected error - log and continue
                 failCount++;
                 console.warn(`⚠️ [USERS] User ${query.params?.[0]} insert failed: ${err.message}`);
               }
             }
-          }
-          // #region agent log
-          fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'main.ts:1449',message:'User transaction completed (first pass)',data:{successCount:successCount,failCount:failCount,total:queries.length},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'AD'})}).catch(()=>{});
-          // #endregion
-          console.log(`ℹ️ [USERS] First pass: ${successCount} inserted, ${failCount} failed (will retry later)`);
+          }console.log(`ℹ️ [USERS] First pass: ${successCount} inserted, ${failCount} failed (will retry later)`);
         } else {
           // On retry pass: Use transaction for better performance
           try {
-            await executeTransaction(queries);
-            // #region agent log
-            fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'main.ts:1455',message:'User transaction completed (retry pass)',data:{success:true},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'J'})}).catch(()=>{});
-            // #endregion
-            if (skippedCount > 0) {
+            await executeTransaction(queries);if (skippedCount > 0) {
               console.log(`⚠️ [USERS] Skipped ${skippedCount} users due to missing roles/organizations`);
             }
           } catch (transactionError: unknown) {
-            const err = transactionError as { code?: string; errno?: number; message?: string };
-            // #region agent log
-            fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'main.ts:1461',message:'User transaction failed (retry pass)',data:{error:String(err)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'AA'})}).catch(()=>{});
-            // #endregion
-            console.error(`❌ [USERS] Transaction error:`, transactionError);
+            const err = transactionError as { code?: string; errno?: number; message?: string };console.error(`❌ [USERS] Transaction error:`, transactionError);
             throw transactionError;
           }
         }
-      } else {
-        // #region agent log
-        fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'main.ts:1387',message:'No valid users to insert',data:{totalRows:rows.length,skippedCount:skippedCount},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'K'})}).catch(()=>{});
-        // #endregion
-        console.warn(`⚠️ [USERS] No valid users to insert (all ${rows.length} skipped)`);
+      } else {console.warn(`⚠️ [USERS] No valid users to insert (all ${rows.length} skipped)`);
       }
       return { success: true };
     } catch (error) {
@@ -1833,15 +1921,42 @@ function createWindows(): void {
       let skippedCount = 0;
       
       for (const r of rows) {
-        let orgId = r.organization_id;
-        let mgmtGroupId = r.management_group_id;
+        const getId = () => {
+          const val = r.id;
+          if (typeof val === 'number') return val;
+          if (typeof val === 'string') {
+            const num = Number(val);
+            return isNaN(num) ? null : num;
+          }
+          return null;
+        };
+        const getNumber = (key: string) => {
+          const val = r[key];
+          if (typeof val === 'number') return val;
+          if (typeof val === 'string') {
+            const num = Number(val);
+            return isNaN(num) ? null : num;
+          }
+          return null;
+        };
+        const getString = (key: string) => (typeof r[key] === 'string' ? r[key] as string : null);
+        const getDate = (key: string) => {
+          const val = r[key];
+          if (val instanceof Date) return val;
+          if (typeof val === 'string' || typeof val === 'number') return val;
+          return null;
+        };
+
+        const businessId = getId();
+        let orgId = getNumber('organization_id');
+        let mgmtGroupId = getNumber('management_group_id');
         
         // Verify organization_id exists before inserting (foreign key constraint)
         if (orgId) {
           try {
             const orgExists = await executeQueryOne<{ id: number }>('SELECT id FROM organizations WHERE id = ? LIMIT 1', [orgId]);
             if (!orgExists) {
-              console.warn(`⚠️ [BUSINESSES] Skipping business ${r.id}: organization_id ${orgId} does not exist`);
+              console.warn(`⚠️ [BUSINESSES] Skipping business ${businessId}: organization_id ${orgId} does not exist`);
               skippedCount++;
               continue;
             }
@@ -1866,6 +1981,10 @@ function createWindows(): void {
           }
         }
         
+        const status = getString('status') || 'active';
+        const createdAtRaw = getDate('created_at');
+        const createdAt = createdAtRaw ? toMySQLTimestamp(createdAtRaw as string | number | Date) : toMySQLTimestamp(new Date());
+        
         queries.push({
           sql: `INSERT INTO businesses (
             id, name, permission_name, organization_id, status, management_group_id, image_url, created_at
@@ -1874,7 +1993,16 @@ function createWindows(): void {
             name=VALUES(name), permission_name=VALUES(permission_name), organization_id=VALUES(organization_id),
             status=VALUES(status), management_group_id=VALUES(management_group_id), image_url=VALUES(image_url),
             created_at=VALUES(created_at)`,
-          params: [r.id ?? null, r.name ?? null, r.permission_name ?? null, orgId ?? null, r.status || 'active', mgmtGroupId ?? null, r.image_url ?? null, toMySQLTimestamp(r.created_at || new Date())]
+          params: [
+            businessId,
+            getString('name'),
+            getString('permission_name'),
+            orgId,
+            status,
+            mgmtGroupId,
+            getString('image_url'),
+            createdAt
+          ]
         });
       }
       
@@ -1905,19 +2033,52 @@ function createWindows(): void {
   // Ingredients
   ipcMain.handle('localdb-upsert-ingredients', async (event, rows: RowArray) => {
     try {
-      const queries = rows.map(r => ({
-        sql: `INSERT INTO ingredients (
-          id, ingredient_code, nama, kategori, satuan_beli, isi_satuan_beli, satuan_keluar,
-          harga_beli, stok_min, status, business_id, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ON DUPLICATE KEY UPDATE
-          ingredient_code=VALUES(ingredient_code), nama=VALUES(nama), kategori=VALUES(kategori),
-          satuan_beli=VALUES(satuan_beli), isi_satuan_beli=VALUES(isi_satuan_beli), satuan_keluar=VALUES(satuan_keluar),
-          harga_beli=VALUES(harga_beli), stok_min=VALUES(stok_min), status=VALUES(status),
-          business_id=VALUES(business_id), created_at=VALUES(created_at), updated_at=VALUES(updated_at)`,
-        params: [r.id ?? null, r.ingredient_code ?? null, r.nama ?? null, r.kategori ?? null, r.satuan_beli ?? null, r.isi_satuan_beli ?? null, r.satuan_keluar ?? null,
-          r.harga_beli ?? null, r.stok_min ?? null, r.status ?? null, r.business_id ?? null, toMySQLTimestamp(r.created_at || new Date()), toMySQLTimestamp(Date.now())]
-      }));
+      const queries = rows.map(r => {
+        const getId = () => {
+          const val = r.id;
+          if (typeof val === 'number') return val;
+          if (typeof val === 'string') {
+            const num = Number(val);
+            return isNaN(num) ? null : num;
+          }
+          return null;
+        };
+        const getString = (key: string) => (typeof r[key] === 'string' ? r[key] as string : null);
+        const getNumber = (key: string) => {
+          const val = r[key];
+          if (typeof val === 'number') return val;
+          if (typeof val === 'string') {
+            const num = Number(val);
+            return isNaN(num) ? null : num;
+          }
+          return null;
+        };
+        const getDate = (key: string) => {
+          const val = r[key];
+          if (val instanceof Date) return val;
+          if (typeof val === 'string' || typeof val === 'number') return val;
+          return null;
+        };
+        const createdAtRaw = getDate('created_at');
+        const createdAt = createdAtRaw ? toMySQLTimestamp(createdAtRaw as string | number | Date) : toMySQLTimestamp(new Date());
+        return {
+          sql: `INSERT INTO ingredients (
+            id, ingredient_code, nama, kategori, satuan_beli, isi_satuan_beli, satuan_keluar,
+            harga_beli, stok_min, status, business_id, created_at, updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          ON DUPLICATE KEY UPDATE
+            ingredient_code=VALUES(ingredient_code), nama=VALUES(nama), kategori=VALUES(kategori),
+            satuan_beli=VALUES(satuan_beli), isi_satuan_beli=VALUES(isi_satuan_beli), satuan_keluar=VALUES(satuan_keluar),
+            harga_beli=VALUES(harga_beli), stok_min=VALUES(stok_min), status=VALUES(status),
+            business_id=VALUES(business_id), created_at=VALUES(created_at), updated_at=VALUES(updated_at)`,
+          params: [
+            getId(), getString('ingredient_code'), getString('nama'), getString('kategori'),
+            getString('satuan_beli'), getNumber('isi_satuan_beli'), getString('satuan_keluar'),
+            getNumber('harga_beli'), getNumber('stok_min'), getString('status'), getNumber('business_id'),
+            createdAt, toMySQLTimestamp(Date.now())
+          ]
+        };
+      });
       await executeTransaction(queries);
       return { success: true };
     } catch (error) {
@@ -1942,15 +2103,51 @@ function createWindows(): void {
   // COGS
   ipcMain.handle('localdb-upsert-cogs', async (event, rows: RowArray) => {
     try {
-      const queries = rows.map(r => ({
-        sql: `INSERT INTO cogs (
-          id, menu_code, ingredient_code, amount, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?)
-        ON DUPLICATE KEY UPDATE
-          menu_code=VALUES(menu_code), ingredient_code=VALUES(ingredient_code),
-          amount=VALUES(amount), created_at=VALUES(created_at), updated_at=VALUES(updated_at)`,
-        params: [r.id, r.menu_code, r.ingredient_code, r.amount, toMySQLTimestamp(r.created_at || new Date()), toMySQLTimestamp(Date.now())]
-      }));
+      const queries = rows.map(r => {
+        const getId = () => {
+          const val = r.id;
+          if (typeof val === 'number') return val;
+          if (typeof val === 'string') {
+            const num = Number(val);
+            return isNaN(num) ? null : num;
+          }
+          return null;
+        };
+        const getString = (key: string) => (typeof r[key] === 'string' ? r[key] as string : null);
+        const getNumber = (key: string) => {
+          const val = r[key];
+          if (typeof val === 'number') return val;
+          if (typeof val === 'string') {
+            const num = Number(val);
+            return isNaN(num) ? null : num;
+          }
+          return null;
+        };
+        const getDate = (key: string) => {
+          const val = r[key];
+          if (val instanceof Date) return val;
+          if (typeof val === 'string' || typeof val === 'number') return val;
+          return null;
+        };
+        const createdAtRaw = getDate('created_at');
+        const createdAt = createdAtRaw ? toMySQLTimestamp(createdAtRaw as string | number | Date) : toMySQLTimestamp(new Date());
+        return {
+          sql: `INSERT INTO cogs (
+            id, menu_code, ingredient_code, amount, created_at, updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?)
+          ON DUPLICATE KEY UPDATE
+            menu_code=VALUES(menu_code), ingredient_code=VALUES(ingredient_code),
+            amount=VALUES(amount), created_at=VALUES(created_at), updated_at=VALUES(updated_at)`,
+          params: [
+            getId(),
+            getString('menu_code'),
+            getString('ingredient_code'),
+            getNumber('amount'),
+            createdAt,
+            toMySQLTimestamp(Date.now())
+          ]
+        };
+      });
       await executeTransaction(queries);
       return { success: true };
     } catch (error) {
@@ -1974,7 +2171,40 @@ function createWindows(): void {
       const queries: Array<{ sql: string; params?: (string | number | null | boolean)[] }> = [];
       
       for (const r of rows) {
-        let sourceId = r.source_id;
+        const getId = () => {
+          const val = r.id;
+          if (typeof val === 'number') return val;
+          if (typeof val === 'string') {
+            const num = Number(val);
+            return isNaN(num) ? null : num;
+          }
+          return null;
+        };
+        const getString = (key: string) => (typeof r[key] === 'string' ? r[key] as string : null);
+        const getNumber = (key: string) => {
+          const val = r[key];
+          if (typeof val === 'number') return val;
+          if (typeof val === 'string') {
+            const num = Number(val);
+            return isNaN(num) ? null : num;
+          }
+          return null;
+        };
+        const getBoolean = (key: string) => {
+          const val = r[key];
+          if (typeof val === 'boolean') return val;
+          if (typeof val === 'number') return val === 1;
+          if (typeof val === 'string') return val === 'true' || val === '1';
+          return null;
+        };
+        const getDate = (key: string) => {
+          const val = r[key];
+          if (val instanceof Date) return val;
+          if (typeof val === 'string' || typeof val === 'number') return val;
+          return null;
+        };
+
+        let sourceId = getNumber('source_id');
         
         // Verify source_id exists before inserting (foreign key constraint)
         if (sourceId) {
@@ -1985,10 +2215,13 @@ function createWindows(): void {
               sourceId = null;
             }
           } catch (checkError) {
-            console.warn(`⚠️ [CONTACTS] Failed to verify source_id ${r.source_id}:`, checkError);
+            console.warn(`⚠️ [CONTACTS] Failed to verify source_id ${sourceId}:`, checkError);
             sourceId = null;
           }
         }
+        
+        const createdAtRaw = getDate('created_at');
+        const createdAt = createdAtRaw ? toMySQLTimestamp(createdAtRaw as string | number | Date) : toMySQLTimestamp(new Date());
         
         queries.push({
           sql: `INSERT INTO contacts (
@@ -2004,9 +2237,11 @@ function createWindows(): void {
             pekerjaan_id=VALUES(pekerjaan_id), source_lainnya=VALUES(source_lainnya),
             alamat=VALUES(alamat), team_id=VALUES(team_id)`,
           params: [
-            r.id, r.no_ktp, r.nama, r.phone_number, r.tgl_lahir, r.no_kk, toMySQLTimestamp(r.created_at || new Date()), toMySQLTimestamp(Date.now()),
-            r.is_active, r.jenis_kelamin, r.kota, r.kecamatan, sourceId, r.pekerjaan_id,
-            r.source_lainnya, r.alamat, r.team_id
+            getId(), getString('no_ktp'), getString('nama'), getString('phone_number'),
+            getString('tgl_lahir'), getString('no_kk'), createdAt, toMySQLTimestamp(Date.now()),
+            getBoolean('is_active'), getString('jenis_kelamin'), getString('kota'), getString('kecamatan'),
+            sourceId, getNumber('pekerjaan_id'),
+            getString('source_lainnya'), getString('alamat'), getNumber('team_id')
           ]
         });
       }
@@ -2044,14 +2279,41 @@ function createWindows(): void {
       let skippedCount = 0;
       
       for (const r of rows) {
-        let orgId = r.organization_id;
+        const getId = () => {
+          const val = r.id;
+          if (typeof val === 'number') return val;
+          if (typeof val === 'string') {
+            const num = Number(val);
+            return isNaN(num) ? null : num;
+          }
+          return null;
+        };
+        const getString = (key: string) => (typeof r[key] === 'string' ? r[key] as string : null);
+        const getNumber = (key: string) => {
+          const val = r[key];
+          if (typeof val === 'number') return val;
+          if (typeof val === 'string') {
+            const num = Number(val);
+            return isNaN(num) ? null : num;
+          }
+          return null;
+        };
+        const getDate = (key: string) => {
+          const val = r[key];
+          if (val instanceof Date) return val;
+          if (typeof val === 'string' || typeof val === 'number') return val;
+          return null;
+        };
+
+        const roleId = getId();
+        let orgId = getNumber('organization_id');
         
         // Verify organization_id exists before inserting (foreign key constraint)
         if (orgId) {
           try {
             const orgExists = await executeQueryOne<{ id: number }>('SELECT id FROM organizations WHERE id = ? LIMIT 1', [orgId]);
             if (!orgExists) {
-              console.warn(`⚠️ [ROLES] Skipping role ${r.id}: organization_id ${orgId} does not exist`);
+              console.warn(`⚠️ [ROLES] Skipping role ${roleId}: organization_id ${orgId} does not exist`);
               skippedCount++;
               continue;
             }
@@ -2062,6 +2324,9 @@ function createWindows(): void {
           }
         }
         
+        const createdAtRaw = getDate('created_at');
+        const createdAt = createdAtRaw ? toMySQLTimestamp(createdAtRaw as string | number | Date) : toMySQLTimestamp(new Date());
+        
         queries.push({
           sql: `INSERT INTO roles (
             id, name, description, organization_id, created_at
@@ -2071,7 +2336,13 @@ function createWindows(): void {
             description=VALUES(description),
             organization_id=VALUES(organization_id),
             created_at=VALUES(created_at)`,
-          params: [r.id, r.name, r.description, orgId ?? null, toMySQLTimestamp(r.created_at || new Date())]
+          params: [
+            roleId,
+            getString('name'),
+            getString('description'),
+            orgId,
+            createdAt
+          ]
         });
       }
       
@@ -2106,7 +2377,33 @@ function createWindows(): void {
       let skippedCount = 0;
       
       for (const r of rows) {
-        let orgId = r.organization_id;
+        const getId = () => {
+          const val = r.id;
+          if (typeof val === 'number') return val;
+          if (typeof val === 'string') {
+            const num = Number(val);
+            return isNaN(num) ? null : num;
+          }
+          return null;
+        };
+        const getString = (key: string) => (typeof r[key] === 'string' ? r[key] as string : null);
+        const getNumber = (key: string) => {
+          const val = r[key];
+          if (typeof val === 'number') return val;
+          if (typeof val === 'string') {
+            const num = Number(val);
+            return isNaN(num) ? null : num;
+          }
+          return null;
+        };
+        const getDate = (key: string) => {
+          const val = r[key];
+          if (val instanceof Date) return val;
+          if (typeof val === 'string' || typeof val === 'number') return val;
+          return null;
+        };
+
+        let orgId = getNumber('organization_id');
         
         // Verify organization_id exists if provided
         if (orgId) {
@@ -2117,10 +2414,13 @@ function createWindows(): void {
               orgId = null;
             }
           } catch (checkError) {
-            console.warn(`⚠️ [PERMISSION CATEGORIES] Failed to verify organization_id ${r.organization_id}:`, checkError);
+            console.warn(`⚠️ [PERMISSION CATEGORIES] Failed to verify organization_id ${orgId}:`, checkError);
             orgId = null;
           }
         }
+        
+        const createdAtRaw = getDate('created_at');
+        const createdAt = createdAtRaw ? toMySQLTimestamp(createdAtRaw as string | number | Date) : toMySQLTimestamp(new Date());
         
         queries.push({
           sql: `INSERT INTO permission_categories (
@@ -2131,7 +2431,13 @@ function createWindows(): void {
             description=VALUES(description),
             organization_id=VALUES(organization_id),
             created_at=VALUES(created_at)`,
-          params: [r.id, r.name, r.description, orgId ?? null, toMySQLTimestamp(r.created_at || new Date())]
+          params: [
+            getId(),
+            getString('name'),
+            getString('description'),
+            orgId,
+            createdAt
+          ]
         });
       }
       
@@ -2505,42 +2811,67 @@ function createWindows(): void {
           table_id: r.table_id
         });
 
-        const params = [
-          r.id, // uuid_id - the 19-digit UUID string
-          r.business_id,
-          r.user_id,
-          finalShiftUuid || null,
-          r.payment_method,
-          r.pickup_method,
-          Number(r.total_amount),
-          Number(r.voucher_discount ?? 0.0),
-          r.voucher_type ?? 'none',
-          r.voucher_value !== undefined && r.voucher_value !== null ? Number(r.voucher_value) : null,
-          r.voucher_label ?? null,
-          Number(r.final_amount),
-          Number(r.amount_received),
-          Number(r.change_amount ?? 0.0),
+        const getString = (key: string) => (typeof r[key] === 'string' ? r[key] as string : null);
+        const getNumber = (key: string) => {
+          const val = r[key];
+          if (typeof val === 'number') return val;
+          if (typeof val === 'string') {
+            const num = Number(val);
+            return isNaN(num) ? null : num;
+          }
+          return null;
+        };
+        const getDate = (key: string) => {
+          const val = r[key];
+          if (val instanceof Date) return val;
+          if (typeof val === 'string' || typeof val === 'number') return val;
+          return null;
+        };
+        const getStatus = () => {
+          const status = typeof r.status === 'string' ? r.status : null;
           // Preserve 'pending' status, convert 'paid' to 'completed', default to 'completed'
-          r.status === 'pending' ? 'pending' : ((r.status === 'paid' || r.status === 'completed') ? 'completed' : (r.status ?? 'completed')),
-          toMySQLDateTime(r.created_at),
+          return status === 'pending' ? 'pending' : ((status === 'paid' || status === 'completed') ? 'completed' : (status ?? 'completed'));
+        };
+        const createdDate = getDate('created_at');
+        const createdAt = createdDate ? toMySQLDateTime(createdDate as string | number | Date) : toMySQLDateTime(new Date());
+        const syncedDate = getDate('synced_at');
+        const lastSyncDate = getDate('last_sync_attempt');
+
+        const params: (string | number | null | boolean)[] = [
+          typeof r.id === 'string' ? r.id : (typeof r.id === 'number' ? String(r.id) : null), // uuid_id - the 19-digit UUID string
+          getNumber('business_id'),
+          getNumber('user_id'),
+          typeof finalShiftUuid === 'string' ? finalShiftUuid : null,
+          getString('payment_method'),
+          getString('pickup_method'),
+          getNumber('total_amount') ?? 0,
+          getNumber('voucher_discount') ?? 0.0,
+          getString('voucher_type') ?? 'none',
+          getNumber('voucher_value'),
+          getString('voucher_label'),
+          getNumber('final_amount') ?? 0,
+          getNumber('amount_received') ?? 0,
+          getNumber('change_amount') ?? 0.0,
+          getStatus(),
+          createdAt,
           toMySQLDateTime(new Date()),
-          r.synced_at ?? null,
-          r.sync_status ?? 'pending',
-          r.sync_attempts ?? 0,
-          r.last_sync_attempt ?? null,
-          r.contact_id ?? null,
-          r.customer_name ?? null,
-          typeof r.customer_unit === 'number' ? r.customer_unit : (r.customer_unit ? Number(r.customer_unit) : null),
-          r.note ?? null,
-          r.bank_name ?? null,
-          r.card_number ?? null,
-          r.cl_account_id ?? null,
-          r.cl_account_name ?? null,
-          r.bank_id ? Number(r.bank_id) : null,
-          r.receipt_number ?? null,
-          r.transaction_type ?? 'drinks',
-          Number(r.payment_method_id),
-          r.table_id ? Number(r.table_id) : null
+          syncedDate ? toMySQLDateTime(syncedDate as string | number | Date) : null,
+          getString('sync_status') ?? 'pending',
+          getNumber('sync_attempts') ?? 0,
+          lastSyncDate ? toMySQLDateTime(lastSyncDate as string | number | Date) : null,
+          getNumber('contact_id'),
+          getString('customer_name'),
+          getNumber('customer_unit'),
+          getString('note'),
+          getString('bank_name'),
+          getString('card_number'),
+          getString('cl_account_id'),
+          getString('cl_account_name'),
+          getNumber('bank_id'),
+          getString('receipt_number'),
+          getString('transaction_type') ?? 'drinks',
+          getNumber('payment_method_id') ?? 0,
+          getNumber('table_id')
         ];
 
         console.log('📝 [MYSQL] Calling executeTransaction with params:', params);
@@ -2668,12 +2999,19 @@ function createWindows(): void {
       try { fs.appendFileSync(diagLogPathTx, `${new Date().toISOString()} [GET-TX] Returned ${results.length} transactions\n`); } catch(e) {}
       
       // Debug: Check for specific transaction UUID and verify refunds exist in database
-      const specificTx = results.find((tx: any) => 
-        (tx.id === '0142512271637510001' || tx.uuid_id === '0142512271637510001')
-      );
+      const specificTx = (results as unknown[]).find((tx: unknown): tx is Record<string, unknown> => {
+        if (typeof tx === 'object' && tx !== null) {
+          const txRecord = tx as Record<string, unknown>;
+          const txId = typeof txRecord.id === 'string' ? txRecord.id : (typeof txRecord.id === 'number' ? String(txRecord.id) : '');
+          const txUuidId = typeof txRecord.uuid_id === 'string' ? txRecord.uuid_id : '';
+          return (txId === '0142512271637510001' || txUuidId === '0142512271637510001');
+        }
+        return false;
+      });
       if (specificTx) {
         // Query refunds directly from database for this transaction
         try {
+          const txUuidId = typeof specificTx.uuid_id === 'string' ? specificTx.uuid_id : (typeof specificTx.id === 'string' ? specificTx.id : (typeof specificTx.id === 'number' ? String(specificTx.id) : ''));
           const refundCheck = await executeQuery(`
             SELECT 
               transaction_uuid,
@@ -2684,7 +3022,7 @@ function createWindows(): void {
             FROM transaction_refunds
             WHERE transaction_uuid = ?
             GROUP BY transaction_uuid
-          `, [specificTx.uuid_id || specificTx.id]);
+          `, [txUuidId]);
           
           console.log(`🔍 [GET-TX] Debug for transaction 0142512271637510001:`, {
             id: specificTx.id,
@@ -3052,36 +3390,7 @@ function createWindows(): void {
   // Transaction Items
   ipcMain.handle('localdb-upsert-transaction-items', async (event, rows: RowArray) => {
     try {
-      console.log('🔍 [MYSQL] Inserting transaction items:', rows.length);
-      // #region agent log
-      const logData = {
-        location: 'electron/main.ts:3053',
-        message: 'localdb-upsert-transaction-items handler called',
-        data: {
-          rowsCount: Array.isArray(rows) ? rows.length : 0,
-          firstRow: Array.isArray(rows) && rows.length > 0 ? {
-            id: (rows[0] as any)?.id,
-            uuid_id: (rows[0] as any)?.uuid_id,
-            transaction_id: (rows[0] as any)?.transaction_id,
-            uuid_transaction_id: (rows[0] as any)?.uuid_transaction_id,
-            product_id: (rows[0] as any)?.product_id,
-            quantity: (rows[0] as any)?.quantity
-          } : null
-        },
-        timestamp: Date.now(),
-        sessionId: 'debug-session',
-        runId: 'run1',
-        hypothesisId: 'P'
-      };
-      require('http').request({
-        hostname: '127.0.0.1',
-        port: 7242,
-        path: '/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' }
-      }, () => {}).on('error', () => {}).end(JSON.stringify(logData));
-      // #endregion
-      const queries: Array<{ sql: string; params?: (string | number | null | boolean)[] }> = [];
+      console.log('🔍 [MYSQL] Inserting transaction items:', rows.length);const queries: Array<{ sql: string; params?: (string | number | null | boolean)[] }> = [];
 
       // Map to store transaction UUID -> INT id lookups
       const transactionIdMap = new Map<string, number>();
@@ -3113,88 +3422,20 @@ function createWindows(): void {
         console.log('📝 [MYSQL] Custom note:', r.custom_note);
 
         // Use UUID columns: uuid_id (item UUID) and uuid_transaction_id (transaction UUID reference)
-        const itemUuidId = typeof r.id === 'string' ? r.id : String(r.id ?? '');
+        // IMPORTANT: Use r.uuid_id if available, otherwise fall back to r.id as string
+        const itemUuidId = typeof (r as any).uuid_id === 'string' && (r as any).uuid_id 
+          ? (r as any).uuid_id 
+          : (typeof r.id === 'string' ? r.id : String(r.id ?? ''));
         // IMPORTANT: Use uuid_transaction_id field, not transaction_id (which is 0 placeholder)
-        const transactionUuidId = typeof r.uuid_transaction_id === 'string' ? r.uuid_transaction_id : (typeof r.transaction_id === 'string' ? r.transaction_id : String(r.transaction_id ?? ''));
-        
-        // #region agent log
-        const logData2 = {
-          location: 'electron/main.ts:3090',
-          message: 'Processing transaction item',
-          data: {
-            itemUuidId,
-            transactionUuidId,
-            hasUuidTransactionId: typeof (r as any).uuid_transaction_id !== 'undefined',
-            uuidTransactionIdValue: (r as any).uuid_transaction_id,
-            transactionIdValue: (r as any).transaction_id,
-            productId: (r as any).product_id
-          },
-          timestamp: Date.now(),
-          sessionId: 'debug-session',
-          runId: 'run1',
-          hypothesisId: 'Q'
-        };
-        require('http').request({
-          hostname: '127.0.0.1',
-          port: 7242,
-          path: '/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' }
-        }, () => {}).on('error', () => {}).end(JSON.stringify(logData2));
-        // #endregion
-        
-        // Look up transaction INT id from UUID (cache results)
+        const transactionUuidId = typeof r.uuid_transaction_id === 'string' ? r.uuid_transaction_id : (typeof r.transaction_id === 'string' ? r.transaction_id : String(r.transaction_id ?? ''));// Look up transaction INT id from UUID (cache results)
         let transactionIntId: number;
         if (transactionIdMap.has(transactionUuidId)) {
           transactionIntId = transactionIdMap.get(transactionUuidId)!;
         } else {
-          try {
-            // #region agent log
-            const logData3 = {
-              location: 'electron/main.ts:3100',
-              message: 'Looking up transaction by UUID',
-              data: { transactionUuidId },
-              timestamp: Date.now(),
-              sessionId: 'debug-session',
-              runId: 'run1',
-              hypothesisId: 'R'
-            };
-            require('http').request({
-              hostname: '127.0.0.1',
-              port: 7242,
-              path: '/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' }
-            }, () => {}).on('error', () => {}).end(JSON.stringify(logData3));
-            // #endregion
-            const tx = await executeQueryOne<{ id: number }>(
+          try {const tx = await executeQueryOne<{ id: number }>(
               'SELECT id FROM transactions WHERE uuid_id = ? LIMIT 1',
               [transactionUuidId]
-            );
-            // #region agent log
-            const logData4 = {
-              location: 'electron/main.ts:3110',
-              message: 'Transaction lookup result',
-              data: {
-                transactionUuidId,
-                found: !!tx,
-                transactionIntId: tx?.id,
-                transactionIntIdType: typeof tx?.id
-              },
-              timestamp: Date.now(),
-              sessionId: 'debug-session',
-              runId: 'run1',
-              hypothesisId: 'S'
-            };
-            require('http').request({
-              hostname: '127.0.0.1',
-              port: 7242,
-              path: '/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' }
-            }, () => {}).on('error', () => {}).end(JSON.stringify(logData4));
-            // #endregion
-            if (tx && typeof tx.id === 'number') {
+            );if (tx && typeof tx.id === 'number') {
               transactionIntId = tx.id;
               transactionIdMap.set(transactionUuidId, transactionIntId);
             } else {
@@ -3212,69 +3453,53 @@ function createWindows(): void {
         const unitPrice = typeof r.unit_price === 'number' ? r.unit_price : (typeof r.unit_price === 'string' ? parseFloat(String(r.unit_price)) : 0);
         const totalPrice = typeof r.total_price === 'number' ? r.total_price : (typeof r.total_price === 'string' ? parseFloat(String(r.total_price)) : 0);
         const customNote = typeof r.custom_note === 'string' ? r.custom_note : (r.custom_note ? String(r.custom_note) : null);
-        const createdAt = r.created_at ? toMySQLDateTime(r.created_at) : toMySQLDateTime(new Date());
+        
+        const getDate = (key: string) => {
+          const val = r[key];
+          if (val instanceof Date) return val;
+          if (typeof val === 'string' || typeof val === 'number') return val;
+          return null;
+        };
+        const createdDate = getDate('created_at');
+        const createdAt = createdDate ? toMySQLDateTime(createdDate as string | number | Date) : toMySQLDateTime(new Date());
+        
+        // Handle production status fields
+        const productionStatus = typeof r.production_status === 'string' ? r.production_status : (r.production_status ? String(r.production_status) : null);
+        const productionStartedDate = getDate('production_started_at');
+        const productionStartedAt = productionStartedDate ? toMySQLDateTime(productionStartedDate as string | number | Date) : null;
+        const productionFinishedDate = getDate('production_finished_at');
+        const productionFinishedAt = productionFinishedDate ? toMySQLDateTime(productionFinishedDate as string | number | Date) : null;
+        
+        console.log('🔧 [MYSQL] Production status update:', {
+          itemId: r.id,
+          itemUuidId,
+          productionStatus,
+          productionStartedAt,
+          productionFinishedAt
+        });
         
         queries.push({
           sql: `INSERT INTO transaction_items (
             uuid_id, transaction_id, uuid_transaction_id, product_id, quantity, unit_price, total_price,
-            bundle_selections_json, custom_note, created_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            bundle_selections_json, custom_note, created_at,
+            production_status, production_started_at, production_finished_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
           ON DUPLICATE KEY UPDATE
             transaction_id=VALUES(transaction_id), uuid_transaction_id=VALUES(uuid_transaction_id), product_id=VALUES(product_id), quantity=VALUES(quantity),
             unit_price=VALUES(unit_price), total_price=VALUES(total_price),
             bundle_selections_json=VALUES(bundle_selections_json),
-            custom_note=VALUES(custom_note), created_at=VALUES(created_at)`,
+            custom_note=VALUES(custom_note), created_at=VALUES(created_at),
+            production_status=VALUES(production_status), production_started_at=VALUES(production_started_at), production_finished_at=VALUES(production_finished_at)`,
           params: [
             itemUuidId, transactionIntId, transactionUuidId, productId, quantity, unitPrice, totalPrice,
-            bundleSelectionsJson, customNote, createdAt
+            bundleSelectionsJson, customNote, createdAt,
+            productionStatus, productionStartedAt, productionFinishedAt
           ]
         });
       }
 
       // Insert all transaction items first
-      if (queries.length > 0) {
-        // #region agent log
-        const logData5 = {
-          location: 'electron/main.ts:3140',
-          message: 'Before executing transaction (INSERT items)',
-          data: {
-            queriesCount: queries.length,
-            firstQueryParams: queries[0]?.params,
-            transactionUuidIds: Array.from(new Set(queries.map((q: any) => q.params?.[2]))).filter(Boolean)
-          },
-          timestamp: Date.now(),
-          sessionId: 'debug-session',
-          runId: 'run1',
-          hypothesisId: 'T'
-        };
-        require('http').request({
-          hostname: '127.0.0.1',
-          port: 7242,
-          path: '/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' }
-        }, () => {}).on('error', () => {}).end(JSON.stringify(logData5));
-        // #endregion
-        await executeTransaction(queries);
-        // #region agent log
-        const logData6 = {
-          location: 'electron/main.ts:3143',
-          message: 'After executing transaction (INSERT items completed)',
-          data: { queriesCount: queries.length },
-          timestamp: Date.now(),
-          sessionId: 'debug-session',
-          runId: 'run1',
-          hypothesisId: 'U'
-        };
-        require('http').request({
-          hostname: '127.0.0.1',
-          port: 7242,
-          path: '/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' }
-        }, () => {}).on('error', () => {}).end(JSON.stringify(logData6));
-        // #endregion
-      }
+      if (queries.length > 0) {await executeTransaction(queries);}
 
       // Then save customizations for each item (after items are inserted)
       for (const r of rows) {
@@ -3285,11 +3510,14 @@ function createWindows(): void {
             if (customizations.length > 0) {
               const itemId = typeof r.id === 'string' ? r.id : String(r.id ?? '');
               const createdAt = r.created_at ? (typeof r.created_at === 'number' || typeof r.created_at === 'string' ? r.created_at : new Date()) : new Date();
-              await saveCustomizationsToNormalizedTables(
-                itemId,
-                customizations,
-                toMySQLTimestamp(createdAt)
-              );
+              const createdAtStr = typeof createdAt === 'string' ? createdAt : (createdAt instanceof Date ? toMySQLTimestamp(createdAt) : toMySQLTimestamp(new Date()));
+              if (createdAtStr) {
+                await saveCustomizationsToNormalizedTables(
+                  itemId,
+                  customizations,
+                  createdAtStr
+                );
+              }
             }
           } catch (error) {
             console.error('❌ Error saving main product customizations to normalized tables:', error);
@@ -3326,12 +3554,15 @@ function createWindows(): void {
                   // Save bundle product customizations to normalized tables
                   // Link them to the bundle product ID so we can reconstruct them later
                   const bundleProductId = selectedProduct.product?.id || null;
-                  await saveCustomizationsToNormalizedTables(
-                    transactionItemId,
-                    bundleProductCustomizations,
-                    createdAt,
-                    bundleProductId
-                  );
+                  const createdAtStr = typeof createdAt === 'string' ? createdAt : (createdAt instanceof Date ? toMySQLTimestamp(createdAt) : toMySQLTimestamp(new Date()));
+                  if (createdAtStr) {
+                    await saveCustomizationsToNormalizedTables(
+                      transactionItemId,
+                      bundleProductCustomizations,
+                      createdAtStr,
+                      bundleProductId
+                    );
+                  }
                 }
               }
             }
@@ -3350,30 +3581,7 @@ function createWindows(): void {
   });
 
   ipcMain.handle('localdb-get-transaction-items', async (event, transactionId?: number | string) => {
-    try {
-      // #region agent log
-      const logData7 = {
-        location: 'electron/main.ts:3352',
-        message: 'localdb-get-transaction-items handler called',
-        data: {
-          transactionId,
-          transactionIdType: typeof transactionId,
-          transactionIdString: String(transactionId || '')
-        },
-        timestamp: Date.now(),
-        sessionId: 'debug-session',
-        runId: 'run1',
-        hypothesisId: 'V'
-      };
-      require('http').request({
-        hostname: '127.0.0.1',
-        port: 7242,
-        path: '/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' }
-      }, () => {}).on('error', () => {}).end(JSON.stringify(logData7));
-      // #endregion
-      // Get transaction items with product name from LEFT JOIN (includes inactive products)
+    try {// Get transaction items with product name from LEFT JOIN (includes inactive products)
       // Support both UUID and numeric ID lookups
       let items: Array<Record<string, unknown>> = [];
       if (transactionId) {
@@ -3384,33 +3592,7 @@ function createWindows(): void {
         const isNumeric = typeof transactionId === 'number' || (typeof transactionId === 'string' && /^\d+$/.test(String(transactionId).trim()));
         const isSimpleNumeric = isNumeric && !isReceiptNumberFormat; // Numeric but NOT receipt number format
         
-        console.log(`[localdb-get-transaction-items] Looking for items with transactionId: ${transactionId} (isNumeric: ${isNumeric}, isReceiptNumberFormat: ${isReceiptNumberFormat}, isSimpleNumeric: ${isSimpleNumeric})`);
-        
-        // #region agent log
-        const logData8 = {
-          location: 'electron/main.ts:3375',
-          message: 'Transaction ID analysis',
-          data: {
-            transactionId,
-            isReceiptNumberFormat,
-            isNumeric,
-            isSimpleNumeric
-          },
-          timestamp: Date.now(),
-          sessionId: 'debug-session',
-          runId: 'run1',
-          hypothesisId: 'W'
-        };
-        require('http').request({
-          hostname: '127.0.0.1',
-          port: 7242,
-          path: '/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' }
-        }, () => {}).on('error', () => {}).end(JSON.stringify(logData8));
-        // #endregion
-        
-        if (isSimpleNumeric) {
+        console.log(`[localdb-get-transaction-items] Looking for items with transactionId: ${transactionId} (isNumeric: ${isNumeric}, isReceiptNumberFormat: ${isReceiptNumberFormat}, isSimpleNumeric: ${isSimpleNumeric})`);if (isSimpleNumeric) {
           // Simple numeric ID (not receipt number format) - match by transaction_id
           items = await executeQuery<Record<string, unknown>>(`
             SELECT ti.*, p.nama as product_name 
@@ -3422,24 +3604,6 @@ function createWindows(): void {
         } else {
           // UUID or receipt number format - try multiple strategies to find items
           // Strategy 1: Try uuid_transaction_id directly (most direct match)
-          // #region agent log
-          const logData9 = {
-            location: 'electron/main.ts:3425',
-            message: 'Strategy 1: Querying by uuid_transaction_id',
-            data: { transactionId },
-            timestamp: Date.now(),
-            sessionId: 'debug-session',
-            runId: 'run1',
-            hypothesisId: 'X'
-          };
-          require('http').request({
-            hostname: '127.0.0.1',
-            port: 7242,
-            path: '/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' }
-          }, () => {}).on('error', () => {}).end(JSON.stringify(logData9));
-          // #endregion
           items = await executeQuery<Record<string, unknown>>(`
             SELECT ti.*, p.nama as product_name 
             FROM transaction_items ti
@@ -3447,34 +3611,6 @@ function createWindows(): void {
             WHERE ti.uuid_transaction_id = ? 
             ORDER BY ti.id ASC
           `, [transactionId]);
-          // #region agent log
-          const logData10 = {
-            location: 'electron/main.ts:3442',
-            message: 'Strategy 1: Query result',
-            data: {
-              transactionId,
-              itemsFound: items.length,
-              itemsData: items.length > 0 ? items.map((item: any) => ({
-                uuid_id: item.uuid_id,
-                uuid_transaction_id: item.uuid_transaction_id,
-                transaction_id: item.transaction_id,
-                product_id: item.product_id
-              })) : []
-            },
-            timestamp: Date.now(),
-            sessionId: 'debug-session',
-            runId: 'run1',
-            hypothesisId: 'Y'
-          };
-          require('http').request({
-            hostname: '127.0.0.1',
-            port: 7242,
-            path: '/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' }
-          }, () => {}).on('error', () => {}).end(JSON.stringify(logData10));
-          // #endregion
-          
           // Strategy 2: Join with transactions table to match by UUID or receipt_number
           if (items.length === 0) {
             console.log(`[localdb-get-transaction-items] No items found by uuid_transaction_id, trying transaction join with receipt_number`);
@@ -3504,7 +3640,9 @@ function createWindows(): void {
             `, [transactionId, String(transactionId), transactionId, transactionId]);
             
             if (transaction && Array.isArray(transaction) && transaction.length > 0) {
-              const tx = transaction[0];
+              const tx = transaction[0] as Record<string, unknown>;
+              const txId = typeof tx.id === 'number' ? tx.id : (typeof tx.id === 'string' ? Number(tx.id) : null);
+              const txUuidId = typeof tx.uuid_id === 'string' ? tx.uuid_id : null;
               console.log(`[localdb-get-transaction-items] Found transaction:`, {
                 id: tx.id,
                 uuid_id: tx.uuid_id,
@@ -3512,8 +3650,8 @@ function createWindows(): void {
               });
               
               // Try with numeric ID
-              if (tx.id) {
-                const numericId = tx.id;
+              if (txId !== null && !isNaN(txId)) {
+                const numericId: number = txId;
                 console.log(`[localdb-get-transaction-items] Querying items by transaction_id: ${numericId}`);
                 items = await executeQuery<Record<string, unknown>>(`
                   SELECT ti.*, p.nama as product_name 
@@ -3525,15 +3663,15 @@ function createWindows(): void {
               }
               
               // If still no items, try with UUID
-              if (items.length === 0 && tx.uuid_id) {
-                console.log(`[localdb-get-transaction-items] Querying items by uuid_transaction_id: ${tx.uuid_id}`);
+              if (items.length === 0 && txUuidId) {
+                console.log(`[localdb-get-transaction-items] Querying items by uuid_transaction_id: ${txUuidId}`);
                 items = await executeQuery<Record<string, unknown>>(`
                   SELECT ti.*, p.nama as product_name 
                   FROM transaction_items ti
                   LEFT JOIN products p ON ti.product_id = p.id
                   WHERE ti.uuid_transaction_id = ? 
                   ORDER BY ti.id ASC
-                `, [tx.uuid_id]);
+                `, [txUuidId]);
               }
             } else {
               console.log(`[localdb-get-transaction-items] Transaction not found in database for: ${transactionId}`);
@@ -3694,14 +3832,7 @@ function createWindows(): void {
           allCustomizations.push(customization);
 
           // Get options for this customization
-          const customizationId = typeof customization.id === 'number' ? customization.id : (typeof customization.id === 'string' ? parseInt(String(customization.id), 10) : 0);
-          // #region agent log
-          const logData = JSON.stringify({location:'main.ts:3697',message:'Querying options for customization',data:{customizationId,customizationIdType:typeof customizationId,customizationRawId:customization.id,customizationRawIdType:typeof customization.id,transactionItemId:customization.transaction_item_id,customizationTypeId:customization.customization_type_id},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'M'});
-          try {
-            await fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:logData}).catch(()=>{});
-          } catch {}
-          // #endregion
-          const options = await executeQuery<Record<string, unknown>>(`
+          const customizationId = typeof customization.id === 'number' ? customization.id : (typeof customization.id === 'string' ? parseInt(String(customization.id), 10) : 0);const options = await executeQuery<Record<string, unknown>>(`
             SELECT 
               id,
               transaction_item_customization_id,
@@ -3711,14 +3842,7 @@ function createWindows(): void {
               created_at
             FROM transaction_item_customization_options
             WHERE transaction_item_customization_id = ?
-          `, [customizationId]);
-          // #region agent log
-          const logData2 = JSON.stringify({location:'main.ts:3708',message:'Options query result',data:{customizationId,optionsFound:options.length,options:options.map((o:any)=>({id:o.id,transaction_item_customization_id:o.transaction_item_customization_id,option_name:o.option_name}))},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'N'});
-          try {
-            await fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:logData2}).catch(()=>{});
-          } catch {}
-          // #endregion
-          allOptions.push(...options);
+          `, [customizationId]);allOptions.push(...options);
         }
       }
 
@@ -3738,8 +3862,41 @@ function createWindows(): void {
 
     try {
       const queries = rows.map(row => {
+        const getId = () => {
+          const val = row.id;
+          if (typeof val === 'number') return val;
+          if (typeof val === 'string') {
+            const num = Number(val);
+            return isNaN(num) ? null : num;
+          }
+          return null;
+        };
+        const getNumber = (key: string) => {
+          const val = row[key];
+          if (typeof val === 'number') return val;
+          if (typeof val === 'string') {
+            const num = Number(val);
+            return isNaN(num) ? null : num;
+          }
+          return null;
+        };
+        const getString = (key: string) => (typeof row[key] === 'string' ? row[key] as string : null);
+        const getDate = (key: string) => {
+          const val = row[key];
+          if (val instanceof Date) return val;
+          if (typeof val === 'string' || typeof val === 'number') return val;
+          return null;
+        };
+
         // If id is null/undefined/0, let database auto-generate it
-        const hasId = row.id !== null && row.id !== undefined && row.id !== 0;
+        const rowId = getId();
+        const hasId = rowId !== null && rowId !== 0;
+        
+        const transactionItemId = getString('transaction_item_id');
+        const customizationTypeId = getNumber('customization_type_id');
+        const bundleProductId = getNumber('bundle_product_id');
+        const createdDate = getDate('created_at');
+        const createdAt = createdDate ? toMySQLDateTime(createdDate as string | number | Date) : toMySQLDateTime(new Date());
         
         if (hasId) {
           return {
@@ -3754,17 +3911,15 @@ function createWindows(): void {
                 created_at = VALUES(created_at)
             `,
             params: [
-              row.id,
-              row.transaction_item_id,
-              row.customization_type_id,
-              row.bundle_product_id ?? null,
-              row.created_at ? toMySQLDateTime(row.created_at) : toMySQLDateTime(new Date())
-            ]
+              rowId,
+              transactionItemId,
+              customizationTypeId,
+              bundleProductId,
+              createdAt
+            ] as (string | number | null | boolean)[]
           };
         } else {
           // Auto-generate ID
-          // Convert created_at to MySQL datetime format
-          const createdAt = row.created_at ? toMySQLDateTime(row.created_at) : toMySQLDateTime(new Date());
           return {
             sql: `
               INSERT INTO transaction_item_customizations (
@@ -3772,11 +3927,11 @@ function createWindows(): void {
               ) VALUES (?, ?, ?, ?)
             `,
             params: [
-              row.transaction_item_id,
-              row.customization_type_id,
-              row.bundle_product_id ?? null,
+              transactionItemId,
+              customizationTypeId,
+              bundleProductId,
               createdAt
-            ]
+            ] as (string | number | null | boolean)[]
           };
         }
       });
@@ -3795,8 +3950,42 @@ function createWindows(): void {
 
     try {
       const queries = rows.map(row => {
+        const getId = () => {
+          const val = row.id;
+          if (typeof val === 'number') return val;
+          if (typeof val === 'string') {
+            const num = Number(val);
+            return isNaN(num) ? null : num;
+          }
+          return null;
+        };
+        const getNumber = (key: string) => {
+          const val = row[key];
+          if (typeof val === 'number') return val;
+          if (typeof val === 'string') {
+            const num = Number(val);
+            return isNaN(num) ? null : num;
+          }
+          return null;
+        };
+        const getString = (key: string) => (typeof row[key] === 'string' ? row[key] as string : null);
+        const getDate = (key: string) => {
+          const val = row[key];
+          if (val instanceof Date) return val;
+          if (typeof val === 'string' || typeof val === 'number') return val;
+          return null;
+        };
+
         // If id is null/undefined/0, let database auto-generate it
-        const hasId = row.id !== null && row.id !== undefined && row.id !== 0;
+        const rowId = getId();
+        const hasId = rowId !== null && rowId !== 0;
+        
+        const transactionItemCustomizationId = getNumber('transaction_item_customization_id');
+        const customizationOptionId = getNumber('customization_option_id');
+        const optionName = getString('option_name');
+        const priceAdjustment = getNumber('price_adjustment') ?? 0;
+        const createdDate = getDate('created_at');
+        const createdAt = createdDate ? toMySQLDateTime(createdDate as string | number | Date) : toMySQLDateTime(new Date());
         
         if (hasId) {
           return {
@@ -3813,13 +4002,13 @@ function createWindows(): void {
                 created_at = VALUES(created_at)
             `,
             params: [
-              row.id,
-              row.transaction_item_customization_id,
-              row.customization_option_id,
-              row.option_name,
-              row.price_adjustment ?? 0,
-              row.created_at ? toMySQLDateTime(row.created_at) : toMySQLDateTime(new Date())
-            ]
+              rowId,
+              transactionItemCustomizationId,
+              customizationOptionId,
+              optionName,
+              priceAdjustment,
+              createdAt
+            ] as (string | number | null | boolean)[]
           };
         } else {
           // Auto-generate ID
@@ -3831,12 +4020,12 @@ function createWindows(): void {
               ) VALUES (?, ?, ?, ?, ?)
             `,
             params: [
-              row.transaction_item_customization_id,
-              row.customization_option_id,
-              row.option_name,
-              row.price_adjustment ?? 0,
-              row.created_at ? toMySQLDateTime(row.created_at) : toMySQLDateTime(new Date())
-            ]
+              transactionItemCustomizationId,
+              customizationOptionId,
+              optionName,
+              priceAdjustment,
+              createdAt
+            ] as (string | number | null | boolean)[]
           };
         }
       });
@@ -4552,20 +4741,24 @@ function createWindows(): void {
     try {
       // Convert ISO date strings to MySQL datetime format
       const shiftStartMySQL = toMySQLDateTime(shiftStart);
-      const shiftEndMySQL = shiftEnd ? toMySQLDateTime(shiftEnd) : null;
-      
-      // #region agent log
-      try{fs.appendFileSync('c:\\Code\\marviano-pos\\.cursor\\debug.log',JSON.stringify({location:'main.ts:4081',message:'Shift statistics query entry',data:{userId,businessId,shiftUuid,shiftStart,shiftEnd,shiftStartMySQL,shiftEndMySQL},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'ALL'})+'\n',{flag:'a'});}catch(e){}
-      // #endregion
-      
-      // Combined statistics query including voucher metrics
+      const shiftEndMySQL = shiftEnd ? toMySQLDateTime(shiftEnd) : null;// Combined statistics query including voucher metrics
       // Prioritize shift_uuid filtering when available, as it's more accurate than time-based filtering
       let statsQuery = `
         SELECT 
           COUNT(*) as order_count,
           COALESCE(SUM(final_amount), 0) as total_amount,
-          COALESCE(SUM(voucher_discount), 0) as total_discount,
-          COALESCE(SUM(CASE WHEN voucher_discount IS NOT NULL AND voucher_discount > 0 THEN 1 ELSE 0 END), 0) as voucher_count
+          COALESCE(SUM(
+            CASE 
+              WHEN voucher_type = 'free' THEN total_amount
+              ELSE COALESCE(voucher_discount, 0)
+            END
+          ), 0) as total_discount,
+          COALESCE(SUM(
+            CASE 
+              WHEN (voucher_discount IS NOT NULL AND voucher_discount > 0) OR voucher_type = 'free' THEN 1 
+              ELSE 0 
+            END
+          ), 0) as voucher_count
         FROM transactions
         WHERE business_id = ?
         AND status != 'archived'
@@ -4590,11 +4783,7 @@ function createWindows(): void {
           statsParams.push(shiftEndMySQL);
         }
       }
-
-      // #region agent log
-      try{fs.appendFileSync('c:\\Code\\marviano-pos\\.cursor\\debug.log',JSON.stringify({location:'main.ts:4103',message:'Query before execution',data:{statsQuery,statsParams},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'ALL'})+'\n',{flag:'a'});}catch(e){}
-      // #endregion
-
+      
       const statsResult = await executeQueryOne<{
         order_count: number;
         total_amount: number;
@@ -4602,94 +4791,6 @@ function createWindows(): void {
         voucher_count: number;
       }>(statsQuery, statsParams);
       
-      // #region agent log
-      try{fs.appendFileSync('c:\\Code\\marviano-pos\\.cursor\\debug.log',JSON.stringify({location:'main.ts:4114',message:'Query result',data:{statsResult},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'ALL'})+'\n',{flag:'a'});}catch(e){}
-      // #endregion
-      
-      // Hypothesis A: Check all transactions with voucher_discount in time range (regardless of shift_uuid)
-      // #region agent log
-      const allVoucherTxns = await executeQuery(`
-        SELECT uuid_id, shift_uuid, status, voucher_discount, total_amount, final_amount, created_at, voucher_label
-        FROM transactions
-        WHERE user_id = ? AND business_id = ?
-        AND created_at >= ? ${shiftEndMySQL ? 'AND created_at <= ?' : ''}
-        AND voucher_discount IS NOT NULL AND voucher_discount > 0
-        ORDER BY created_at DESC
-      `, shiftEndMySQL ? [userId, businessId, shiftStartMySQL, shiftEndMySQL] : [userId, businessId, shiftStartMySQL]).catch(()=>[]);
-      try{fs.appendFileSync('c:\\Code\\marviano-pos\\.cursor\\debug.log',JSON.stringify({location:'main.ts:4125',message:'All voucher transactions in time range',data:{allVoucherTxns},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})+'\n',{flag:'a'});}catch(e){}
-      // #endregion
-      
-      // Hypothesis B: Check transactions with NULL shift_uuid that have voucher_discount
-      // #region agent log
-      const nullShiftVoucherTxns = await executeQuery(`
-        SELECT uuid_id, shift_uuid, status, voucher_discount, total_amount, final_amount, created_at, voucher_label
-        FROM transactions
-        WHERE user_id = ? AND business_id = ?
-        AND created_at >= ? ${shiftEndMySQL ? 'AND created_at <= ?' : ''}
-        AND shift_uuid IS NULL
-        AND voucher_discount IS NOT NULL AND voucher_discount > 0
-        ORDER BY created_at DESC
-      `, shiftEndMySQL ? [userId, businessId, shiftStartMySQL, shiftEndMySQL] : [userId, businessId, shiftStartMySQL]).catch(()=>[]);
-      try{fs.appendFileSync('c:\\Code\\marviano-pos\\.cursor\\debug.log',JSON.stringify({location:'main.ts:4135',message:'Voucher transactions with NULL shift_uuid',data:{nullShiftVoucherTxns},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})+'\n',{flag:'a'});}catch(e){}
-      // #endregion
-      
-      // Hypothesis C: Check transactions with different shift_uuid
-      // #region agent log
-      const differentShiftVoucherTxns = shiftUuid ? await executeQuery(`
-        SELECT uuid_id, shift_uuid, status, voucher_discount, total_amount, final_amount, created_at, voucher_label
-        FROM transactions
-        WHERE user_id = ? AND business_id = ?
-        AND created_at >= ? ${shiftEndMySQL ? 'AND created_at <= ?' : ''}
-        AND shift_uuid IS NOT NULL AND shift_uuid != ?
-        AND voucher_discount IS NOT NULL AND voucher_discount > 0
-        ORDER BY created_at DESC
-      `, shiftEndMySQL ? [userId, businessId, shiftStartMySQL, shiftEndMySQL, shiftUuid] : [userId, businessId, shiftStartMySQL, shiftUuid]).catch(()=>[]) : [];
-      try{fs.appendFileSync('c:\\Code\\marviano-pos\\.cursor\\debug.log',JSON.stringify({location:'main.ts:4145',message:'Voucher transactions with different shift_uuid',data:{differentShiftVoucherTxns,currentShiftUuid:shiftUuid},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})+'\n',{flag:'a'});}catch(e){}
-      // #endregion
-      
-      // Hypothesis D: Check transactions with non-completed status that have voucher_discount
-      // #region agent log
-      const nonCompletedVoucherTxns = await executeQuery(`
-        SELECT uuid_id, shift_uuid, status, voucher_discount, total_amount, final_amount, created_at, voucher_label
-        FROM transactions
-        WHERE user_id = ? AND business_id = ?
-        AND created_at >= ? ${shiftEndMySQL ? 'AND created_at <= ?' : ''}
-        AND status != 'completed'
-        AND voucher_discount IS NOT NULL AND voucher_discount > 0
-        ORDER BY created_at DESC
-      `, shiftEndMySQL ? [userId, businessId, shiftStartMySQL, shiftEndMySQL] : [userId, businessId, shiftStartMySQL]).catch(()=>[]);
-      try{fs.appendFileSync('c:\\Code\\marviano-pos\\.cursor\\debug.log',JSON.stringify({location:'main.ts:4155',message:'Non-completed voucher transactions',data:{nonCompletedVoucherTxns},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'D'})+'\n',{flag:'a'});}catch(e){}
-      // #endregion
-      
-      // Hypothesis E: Check transactions matching the exact query filter
-      // #region agent log
-      let matchingTxnsQuery = `
-        SELECT uuid_id, shift_uuid, status, voucher_discount, total_amount, final_amount, created_at, voucher_label
-        FROM transactions
-        WHERE business_id = ?
-        AND status != 'archived'
-      `;
-      const matchingTxnsParams: (string | number | null | boolean)[] = [businessId];
-      if (userId !== null) {
-        matchingTxnsQuery = matchingTxnsQuery.replace('WHERE business_id = ?', 'WHERE user_id = ? AND business_id = ?');
-        matchingTxnsParams.splice(0, 0, userId);
-      }
-      if (shiftUuid) {
-        matchingTxnsQuery += ' AND shift_uuid = ?';
-        matchingTxnsParams.push(shiftUuid);
-      } else {
-        matchingTxnsQuery += ' AND created_at >= ?';
-        matchingTxnsParams.push(shiftStartMySQL);
-        if (shiftEndMySQL) {
-          matchingTxnsQuery += ' AND created_at <= ?';
-          matchingTxnsParams.push(shiftEndMySQL);
-        }
-      }
-      matchingTxnsQuery += ' AND voucher_discount IS NOT NULL AND voucher_discount > 0 ORDER BY created_at DESC';
-      const matchingTxns = await executeQuery(matchingTxnsQuery, matchingTxnsParams).catch(()=>[]);
-      try{fs.appendFileSync('c:\\Code\\marviano-pos\\.cursor\\debug.log',JSON.stringify({location:'main.ts:4165',message:'Transactions matching exact query filter',data:{matchingTxns},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'E'})+'\n',{flag:'a'});}catch(e){}
-      // #endregion
-
       return {
         order_count: statsResult?.order_count || 0,
         total_amount: statsResult?.total_amount || 0,
@@ -4697,9 +4798,6 @@ function createWindows(): void {
         voucher_count: statsResult?.voucher_count || 0
       };
     } catch (error) {
-      // #region agent log
-      try{fs.appendFileSync('c:\\Code\\marviano-pos\\.cursor\\debug.log',JSON.stringify({location:'main.ts:4150',message:'Error in shift statistics',data:{error:String(error)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'ALL'})+'\n',{flag:'a'});}catch(e){}
-      // #endregion
       console.error('Error getting shift statistics:', error);
       return {
         order_count: 0,
@@ -4773,11 +4871,7 @@ function createWindows(): void {
 
   // Get Category II breakdown
   ipcMain.handle('localdb-get-category2-breakdown', async (event, userId: number | null, shiftStart: string, shiftEnd: string | null, businessId: number = 14) => {
-    try {
-      // #region agent log
-      try{fs.appendFileSync('c:\\Code\\marviano-pos\\.cursor\\debug.log',JSON.stringify({location:'main.ts:4238',message:'Category2 query entry',data:{userId,shiftStart,shiftEnd,businessId},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})+'\n',{flag:'a'});}catch(e){}
-      // #endregion
-      // Convert ISO date strings to MySQL datetime format
+    try {// Convert ISO date strings to MySQL datetime format
       const shiftStartMySQL = toMySQLDateTime(shiftStart);
       const shiftEndMySQL = shiftEnd ? toMySQLDateTime(shiftEnd) : null;
       
@@ -4810,19 +4904,7 @@ function createWindows(): void {
         params.push(shiftEndMySQL);
       }
 
-      query += ' GROUP BY category2_name, c2.id ORDER BY total_amount DESC';
-
-      // #region agent log
-      try{fs.appendFileSync('c:\\Code\\marviano-pos\\.cursor\\debug.log',JSON.stringify({location:'main.ts:4264',message:'Category2 query before execution',data:{query,params,shiftStartMySQL,shiftEndMySQL},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})+'\n',{flag:'a'});}catch(e){}
-      // #endregion
-
-      const results = await executeQuery(query, params);
-      
-      // #region agent log
-      try{fs.appendFileSync('c:\\Code\\marviano-pos\\.cursor\\debug.log',JSON.stringify({location:'main.ts:4271',message:'Category2 query results',data:{resultCount:results.length,results:results.slice(0,5).map((r:any)=>({name:r.category2_name,id:r.category2_id,quantity:r.total_quantity,amount:r.total_amount}))},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})+'\n',{flag:'a'});}catch(e){}
-      // #endregion
-      
-      console.log(`[CATEGORY2 BREAKDOWN] Found ${results.length} Category II entries for user ${userId}, shift ${shiftStart} to ${shiftEnd || 'now'}`);
+      query += ' GROUP BY category2_name, c2.id ORDER BY total_amount DESC';const results = await executeQuery(query, params);console.log(`[CATEGORY2 BREAKDOWN] Found ${results.length} Category II entries for user ${userId}, shift ${shiftStart} to ${shiftEnd || 'now'}`);
       if (results.length > 0) {
         console.log('[CATEGORY2 BREAKDOWN] Sample result:', results[0]);
       }
@@ -4914,64 +4996,7 @@ function createWindows(): void {
       // When shift_uuid is provided, include:
       // 1. Refunds with matching shift_uuid
       // 2. Refunds without shift_uuid but matching time range and user (for printer 1 transactions)
-      
-      // #region agent log
-      try{fs.appendFileSync('c:\\Code\\marviano-pos\\.cursor\\debug.log',JSON.stringify({location:'main.ts:4466',message:'Cash summary refund query entry',data:{userId,businessId,shiftUuid,shiftStart,shiftEnd},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})+'\n',{flag:'a'});}catch(e){}
-      // #endregion
-      
       // First, get all refunds in the time range for debugging
-      // #region agent log
-      try {
-        const allRefundsDebug = await executeQuery(`
-          SELECT uuid_id, transaction_uuid, shift_uuid, refunded_by, refunded_at, cash_delta, status, business_id
-          FROM transaction_refunds
-          WHERE business_id = ?
-          AND refunded_at >= ?
-          ${shiftEnd ? 'AND refunded_at <= ?' : ''}
-          AND status != 'failed'
-          ORDER BY refunded_at DESC
-        `, shiftEnd ? [businessId, toMySQLDateTime(shiftStart), toMySQLDateTime(shiftEnd)] : [businessId, toMySQLDateTime(shiftStart)]);
-        fs.appendFileSync('c:\\Code\\marviano-pos\\.cursor\\debug.log',JSON.stringify({location:'main.ts:4475',message:'All refunds in time range',data:{refunds:allRefundsDebug.map((r:any)=>({uuid:r.uuid_id,transaction_uuid:r.transaction_uuid,shift_uuid:r.shift_uuid,refunded_by:r.refunded_by,refunded_at:r.refunded_at,cash_delta:r.cash_delta,status:r.status})),count:allRefundsDebug.length,shiftUuid,userId,shiftStart,shiftEnd},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})+'\n',{flag:'a'});
-        
-        // Also get ALL refunds for this business (no time filter) to see if the 100 refund exists
-        const allRefundsNoTimeFilter = await executeQuery(`
-          SELECT uuid_id, transaction_uuid, shift_uuid, refunded_by, refunded_at, refund_amount, cash_delta, payment_method_id, status, business_id
-          FROM transaction_refunds
-          WHERE business_id = ?
-          AND status != 'failed'
-          ORDER BY refunded_at DESC
-          LIMIT 50
-        `, [businessId]);
-        fs.appendFileSync('c:\\Code\\marviano-pos\\.cursor\\debug.log',JSON.stringify({location:'main.ts:4485',message:'All refunds no time filter',data:{refunds:allRefundsNoTimeFilter.map((r:any)=>({uuid:r.uuid_id,transaction_uuid:r.transaction_uuid,shift_uuid:r.shift_uuid,refunded_by:r.refunded_by,refunded_at:r.refunded_at,refund_amount:r.refund_amount,cash_delta:r.cash_delta,payment_method_id:r.payment_method_id,status:r.status})),count:allRefundsNoTimeFilter.length},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'F'})+'\n',{flag:'a'});
-        
-        // Check specifically for refunds with refund_amount = 100
-        const refundsWithAmount100 = await executeQuery(`
-          SELECT uuid_id, transaction_uuid, shift_uuid, refunded_by, refunded_at, refund_amount, cash_delta, payment_method_id, status
-          FROM transaction_refunds
-          WHERE business_id = ?
-          AND refund_amount = 100
-          AND status != 'failed'
-          ORDER BY refunded_at DESC
-        `, [businessId]);
-        fs.appendFileSync('c:\\Code\\marviano-pos\\.cursor\\debug.log',JSON.stringify({location:'main.ts:4495',message:'Refunds with amount 100',data:{refunds:refundsWithAmount100.map((r:any)=>({uuid:r.uuid_id,transaction_uuid:r.transaction_uuid,shift_uuid:r.shift_uuid,refunded_by:r.refunded_by,refunded_at:r.refunded_at,refund_amount:r.refund_amount,cash_delta:r.cash_delta,payment_method_id:r.payment_method_id})),count:refundsWithAmount100.length},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'G'})+'\n',{flag:'a'});
-        
-        // Check the original transaction for the 100 refund to see if it was cash
-        if (refundsWithAmount100.length > 0) {
-          const refund100 = refundsWithAmount100.find((r:any) => r.shift_uuid === shiftUuid);
-          if (refund100) {
-            const originalTransaction = await executeQueryOne(`
-              SELECT uuid_id, payment_method_id, payment_method, final_amount, status
-              FROM transactions
-              WHERE uuid_id = ?
-            `, [refund100.transaction_uuid]);
-            fs.appendFileSync('c:\\Code\\marviano-pos\\.cursor\\debug.log',JSON.stringify({location:'main.ts:4505',message:'Original transaction for 100 refund',data:{refund:{uuid:refund100.uuid_id,transaction_uuid:refund100.transaction_uuid,refund_amount:refund100.refund_amount,cash_delta:refund100.cash_delta,payment_method_id:refund100.payment_method_id},transaction:originalTransaction},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'H'})+'\n',{flag:'a'});
-          }
-        }
-      } catch(e) {
-        fs.appendFileSync('c:\\Code\\marviano-pos\\.cursor\\debug.log',JSON.stringify({location:'main.ts:4490',message:'Error getting debug refunds',data:{error:String(e)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})+'\n',{flag:'a'});
-      }
-      // #endregion
-      
       let refundShiftQuery = `
         SELECT COALESCE(SUM(refund_amount), 0) as refund_total
         FROM transaction_refunds
@@ -5011,41 +5036,8 @@ function createWindows(): void {
           refundShiftParams.push(toMySQLDateTime(shiftEnd));
         }
       }
-      
-      // #region agent log
-      try{fs.appendFileSync('c:\\Code\\marviano-pos\\.cursor\\debug.log',JSON.stringify({location:'main.ts:4510',message:'Refund query before execution',data:{query:refundShiftQuery,params:refundShiftParams},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})+'\n',{flag:'a'});}catch(e){}
-      // #endregion
-      
       const refundShiftResult = await executeQueryOne<{ refund_total: number }>(refundShiftQuery, refundShiftParams);
-      
-      // #region agent log
-      try{fs.appendFileSync('c:\\Code\\marviano-pos\\.cursor\\debug.log',JSON.stringify({location:'main.ts:4515',message:'Refund query result',data:{refund_total:refundShiftResult?.refund_total,result:refundShiftResult},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'D'})+'\n',{flag:'a'});}catch(e){}
-      // #endregion
-      
       // Debug: Check refunds matching each condition separately
-      // #region agent log
-      if (shiftUuid) {
-        try {
-          const matchingShiftUuid = await executeQuery(`
-            SELECT uuid_id, transaction_uuid, shift_uuid, refunded_by, refunded_at, cash_delta
-            FROM transaction_refunds
-            WHERE business_id = ? AND status != 'failed' AND shift_uuid = ?
-          `, [businessId, shiftUuid]);
-          const nullShiftUuid = await executeQuery(`
-            SELECT uuid_id, transaction_uuid, shift_uuid, refunded_by, refunded_at, cash_delta
-            FROM transaction_refunds
-            WHERE business_id = ? AND status != 'failed' AND shift_uuid IS NULL
-            ${userId !== null ? 'AND refunded_by = ?' : ''}
-            AND refunded_at >= ?
-            ${shiftEnd ? 'AND refunded_at <= ?' : ''}
-          `, userId !== null ? (shiftEnd ? [businessId, userId, toMySQLDateTime(shiftStart), toMySQLDateTime(shiftEnd)] : [businessId, userId, toMySQLDateTime(shiftStart)]) : (shiftEnd ? [businessId, toMySQLDateTime(shiftStart), toMySQLDateTime(shiftEnd)] : [businessId, toMySQLDateTime(shiftStart)]));
-          fs.appendFileSync('c:\\Code\\marviano-pos\\.cursor\\debug.log',JSON.stringify({location:'main.ts:4530',message:'Refunds by condition',data:{matchingShiftUuid:matchingShiftUuid.map((r:any)=>({uuid:r.uuid_id,cash_delta:r.cash_delta,shift_uuid:r.shift_uuid})),nullShiftUuid:nullShiftUuid.map((r:any)=>({uuid:r.uuid_id,cash_delta:r.cash_delta,refunded_by:r.refunded_by,refunded_at:r.refunded_at})),matchingTotal:matchingShiftUuid.reduce((s:number,r:any)=>s+(r.cash_delta||0),0),nullTotal:nullShiftUuid.reduce((s:number,r:any)=>s+(r.cash_delta||0),0)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'E'})+'\n',{flag:'a'});
-        } catch(e) {
-          fs.appendFileSync('c:\\Code\\marviano-pos\\.cursor\\debug.log',JSON.stringify({location:'main.ts:4535',message:'Error checking refunds by condition',data:{error:String(e)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'E'})+'\n',{flag:'a'});
-        }
-      }
-      // #endregion
-
       const dayRefundResult = await executeQueryOne<{ refund_total: number }>(`
         SELECT COALESCE(SUM(refund_amount), 0) as refund_total
         FROM transaction_refunds
@@ -5708,26 +5700,62 @@ function createWindows(): void {
   // Banks
   ipcMain.handle('localdb-upsert-banks', async (event, rows: RowArray) => {
     try {
-      const queries = rows.map(r => ({
-        sql: `
-          INSERT INTO banks (id, bank_code, bank_name, is_popular, is_active, created_at)
-          VALUES (?, ?, ?, ?, ?, ?)
-          ON DUPLICATE KEY UPDATE
-            bank_code=VALUES(bank_code),
-            bank_name=VALUES(bank_name),
-            is_popular=VALUES(is_popular),
-            is_active=VALUES(is_active),
-            created_at=VALUES(created_at)
-        `,
-        params: [
-          r.id ?? null,
-          r.bank_code ?? null,
-          r.bank_name ?? null,
-          r.is_popular ?? 0,
-          r.is_active !== undefined ? r.is_active : 1,
-          toMySQLTimestamp(r.created_at || new Date())
-        ]
-      }));
+      const queries = rows.map(r => {
+        const getId = () => {
+          const val = r.id;
+          if (typeof val === 'number') return val;
+          if (typeof val === 'string') {
+            const num = Number(val);
+            return isNaN(num) ? null : num;
+          }
+          return null;
+        };
+        const getString = (key: string) => (typeof r[key] === 'string' ? r[key] as string : null);
+        const getNumber = (key: string) => {
+          const val = r[key];
+          if (typeof val === 'number') return val;
+          if (typeof val === 'string') {
+            const num = Number(val);
+            return isNaN(num) ? null : num;
+          }
+          return null;
+        };
+        const getBoolean = (key: string) => {
+          const val = r[key];
+          if (typeof val === 'boolean') return val;
+          if (typeof val === 'number') return val === 1;
+          if (typeof val === 'string') return val === 'true' || val === '1';
+          return null;
+        };
+        const getDate = (key: string) => {
+          const val = r[key];
+          if (val instanceof Date) return val;
+          if (typeof val === 'string' || typeof val === 'number') return val;
+          return null;
+        };
+        const createdDate = getDate('created_at');
+        const createdAt = createdDate ? toMySQLTimestamp(createdDate as string | number | Date) : toMySQLTimestamp(new Date());
+        return {
+          sql: `
+            INSERT INTO banks (id, bank_code, bank_name, is_popular, is_active, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON DUPLICATE KEY UPDATE
+              bank_code=VALUES(bank_code),
+              bank_name=VALUES(bank_name),
+              is_popular=VALUES(is_popular),
+              is_active=VALUES(is_active),
+              created_at=VALUES(created_at)
+          `,
+          params: [
+            getId(),
+            getString('bank_code'),
+            getString('bank_name'),
+            getNumber('is_popular') ?? 0,
+            getBoolean('is_active') !== null ? (getBoolean('is_active') ? 1 : 0) : 1,
+            createdAt
+          ] as (string | number | null | boolean)[]
+        };
+      });
       await executeTransaction(queries);
       return { success: true };
     } catch (error) {
@@ -5738,21 +5766,31 @@ function createWindows(): void {
 
   // Organizations
   ipcMain.handle('localdb-upsert-organizations', async (event, rows: RowArray, skipOwnerValidation: boolean = false) => {
-    try {
-      // #region agent log
-      fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'main.ts:4211',message:'localdb-upsert-organizations called',data:{totalRows:Array.isArray(rows)?rows.length:0,orgIds:Array.isArray(rows)?rows.map((r:any)=>r?.id).filter(Boolean):[],org3InRows:Array.isArray(rows)?rows.some((r:any)=>r?.id===3):false,skipOwnerValidation:skipOwnerValidation},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'L'})}).catch(()=>{});
-      // #endregion
-      const queries: Array<{ sql: string; params?: (string | number | null | boolean)[] }> = [];
+    try {const queries: Array<{ sql: string; params?: (string | number | null | boolean)[] }> = [];
       let skippedCount = 0;
 
       for (const r of rows) {
-        // #region agent log
-        if (r.id === 3 || r.id === 4) {
-          fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'main.ts:4219',message:'Processing organization',data:{orgId:r.id,ownerUserId:r.owner_user_id,skipOwnerValidation:skipOwnerValidation},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'M'})}).catch(()=>{});
-        }
-        // #endregion
-        // Skip if owner_user_id is null or invalid
-        if (!r.owner_user_id) {
+        const getId = () => {
+          const val = r.id;
+          if (typeof val === 'number') return val;
+          if (typeof val === 'string') {
+            const num = Number(val);
+            return isNaN(num) ? null : num;
+          }
+          return null;
+        };
+        const getNumber = (key: string) => {
+          const val = r[key];
+          if (typeof val === 'number') return val;
+          if (typeof val === 'string') {
+            const num = Number(val);
+            return isNaN(num) ? null : num;
+          }
+          return null;
+        };
+        const orgId = getId();
+        const ownerUserId = getNumber('owner_user_id');// Skip if owner_user_id is null or invalid
+        if (!ownerUserId) {
           skippedCount++;
           continue;
         }
@@ -5760,50 +5798,34 @@ function createWindows(): void {
         // Verify user exists before inserting organization - SKIP on first pass to break circular dependency
         if (!skipOwnerValidation) {
           try {
-            const userExists = await executeQueryOne<{ id: number }>('SELECT id FROM users WHERE id = ? LIMIT 1', [r.owner_user_id]);
-            // #region agent log
-            if (r.id === 3 || r.id === 4) {
-              fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'main.ts:4233',message:'Organization owner user check',data:{orgId:r.id,ownerUserId:r.owner_user_id,userExists:!!userExists},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'N'})}).catch(()=>{});
-            }
-            // #endregion
-            if (!userExists) {
-              console.warn(`⚠️ [ORGANIZATIONS] Skipping organization ${r.id}: owner_user_id ${r.owner_user_id} does not exist`);
-              // #region agent log
-              if (r.id === 3 || r.id === 4) {
-                fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'main.ts:4239',message:'Organization skipped - owner user missing',data:{orgId:r.id,ownerUserId:r.owner_user_id},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'O'})}).catch(()=>{});
-              }
-              // #endregion
-              skippedCount++;
+            const userExists = await executeQueryOne<{ id: number }>('SELECT id FROM users WHERE id = ? LIMIT 1', [ownerUserId]);if (!userExists) {
+              console.warn(`⚠️ [ORGANIZATIONS] Skipping organization ${orgId}: owner_user_id ${ownerUserId} does not exist`);skippedCount++;
               continue;
             }
-          } catch (checkError) {
-            // #region agent log
-            if (r.id === 3 || r.id === 4) {
-              fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'main.ts:4249',message:'Organization owner user check error',data:{orgId:r.id,ownerUserId:r.owner_user_id,error:String(checkError)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'P'})}).catch(()=>{});
-            }
-            // #endregion
-            console.warn(`⚠️ [ORGANIZATIONS] Error checking user ${r.owner_user_id} for organization ${r.id}:`, checkError);
+          } catch (checkError) {console.warn(`⚠️ [ORGANIZATIONS] Error checking user ${ownerUserId} for organization ${orgId}:`, checkError);
             skippedCount++;
             continue;
           }
-        } else {
-          // #region agent log
-          if (r.id === 3 || r.id === 4) {
-            fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'main.ts:4256',message:'Organization skipping owner validation (first pass)',data:{orgId:r.id,ownerUserId:r.owner_user_id},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'AE'})}).catch(()=>{});
-          }
-          // #endregion
-          console.log(`ℹ️ [ORGANIZATIONS] Skipping owner validation for organization ${r.id} (first pass - breaking circular dependency)`);
+        } else {console.log(`ℹ️ [ORGANIZATIONS] Skipping owner validation for organization ${orgId} (first pass - breaking circular dependency)`);
         }
 
-        const id = typeof r.id === 'number' ? r.id : (typeof r.id === 'string' ? parseInt(String(r.id), 10) : 0);
-        const name = typeof r.name === 'string' ? r.name : String(r.name ?? '');
-        const slug = typeof r.slug === 'string' ? r.slug : String(r.slug ?? '');
-        const ownerUserId = typeof r.owner_user_id === 'number' ? r.owner_user_id : (r.owner_user_id ? Number(r.owner_user_id) : 0);
-        const subscriptionStatus = typeof r.subscription_status === 'string' ? r.subscription_status : 'trial';
-        const subscriptionPlan = typeof r.subscription_plan === 'string' ? r.subscription_plan : 'basic';
-        const trialEndsAt = r.trial_ends_at ? (typeof r.trial_ends_at === 'number' || typeof r.trial_ends_at === 'string' ? r.trial_ends_at : null) : null;
-        const createdAt = r.created_at ? (typeof r.created_at === 'number' || typeof r.created_at === 'string' ? r.created_at : new Date()) : new Date();
-        const updatedAt = r.updated_at ? (typeof r.updated_at === 'number' || typeof r.updated_at === 'string' ? r.updated_at : Date.now()) : Date.now();
+        const getString = (key: string) => (typeof r[key] === 'string' ? r[key] as string : null);
+        const getDate = (key: string) => {
+          const val = r[key];
+          if (val instanceof Date) return val;
+          if (typeof val === 'string' || typeof val === 'number') return val;
+          return null;
+        };
+        const name = getString('name') ?? '';
+        const slug = getString('slug') ?? '';
+        const subscriptionStatus = getString('subscription_status') ?? 'trial';
+        const subscriptionPlan = getString('subscription_plan') ?? 'basic';
+        const trialEndsDate = getDate('trial_ends_at');
+        const trialEndsAt = trialEndsDate ? toMySQLTimestamp(trialEndsDate as string | number | Date) : null;
+        const createdDate = getDate('created_at');
+        const updatedDate = getDate('updated_at');
+        const createdAt = createdDate ? toMySQLTimestamp(createdDate as string | number | Date) : toMySQLTimestamp(new Date());
+        const updatedAt = updatedDate ? toMySQLTimestamp(updatedDate as string | number | Date) : toMySQLTimestamp(Date.now());
         
         queries.push({
           sql: `INSERT INTO organizations (
@@ -5815,8 +5837,8 @@ function createWindows(): void {
             subscription_status=VALUES(subscription_status), subscription_plan=VALUES(subscription_plan),
             trial_ends_at=VALUES(trial_ends_at), created_at=VALUES(created_at), updated_at=VALUES(updated_at)`,
           params: [
-            id, name, slug, ownerUserId, subscriptionStatus,
-            subscriptionPlan, trialEndsAt ? toMySQLTimestamp(trialEndsAt) : null, toMySQLTimestamp(createdAt), toMySQLTimestamp(updatedAt)
+            orgId, name, slug, ownerUserId, subscriptionStatus,
+            subscriptionPlan, trialEndsAt, createdAt, updatedAt
           ]
         });
       }
@@ -5829,34 +5851,18 @@ function createWindows(): void {
           for (const query of queries) {
             try {
               await executeUpdate(query.sql, query.params || []);
-              successCount++;
-              // #region agent log
-              if (query.params?.[0] === 3 || query.params?.[0] === 4) {
-                fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'main.ts:4288',message:'Organization inserted successfully (first pass)',data:{orgId:query.params?.[0]},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'AF'})}).catch(()=>{});
-              }
-              // #endregion
-            } catch (insertError: unknown) {
+              successCount++;} catch (insertError: unknown) {
               const err = insertError as { code?: string; errno?: number; message?: string };
               if (err.code === 'ER_NO_REFERENCED_ROW_2' || err.errno === 1452) {
                 // Foreign key constraint - expected on first pass, will retry later
-                failCount++;
-                // #region agent log
-                if (query.params?.[0] === 3 || query.params?.[0] === 4) {
-                  fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'main.ts:4296',message:'Organization insert failed (expected - will retry)',data:{orgId:query.params?.[0],error:String(err)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'AG'})}).catch(()=>{});
-                }
-                // #endregion
-                console.log(`ℹ️ [ORGANIZATIONS] Organization ${query.params?.[0]} insert failed (foreign key - will retry later): ${err.message}`);
+                failCount++;console.log(`ℹ️ [ORGANIZATIONS] Organization ${query.params?.[0]} insert failed (foreign key - will retry later): ${err.message}`);
               } else {
                 // Unexpected error - log and continue
                 failCount++;
                 console.warn(`⚠️ [ORGANIZATIONS] Organization ${query.params?.[0]} insert failed: ${err.message}`);
               }
             }
-          }
-          // #region agent log
-          fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'main.ts:4304',message:'Organization transaction completed (first pass)',data:{successCount:successCount,failCount:failCount,total:queries.length},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'AH'})}).catch(()=>{});
-          // #endregion
-          console.log(`ℹ️ [ORGANIZATIONS] First pass: ${successCount} inserted, ${failCount} failed (will retry later)`);
+          }console.log(`ℹ️ [ORGANIZATIONS] First pass: ${successCount} inserted, ${failCount} failed (will retry later)`);
         } else {
           // On retry pass: Use transaction for better performance
           await executeTransaction(queries);
@@ -5890,30 +5896,59 @@ function createWindows(): void {
       let skippedCount = 0;
       
       for (const r of rows) {
+        const getId = () => {
+          const val = r.id;
+          if (typeof val === 'number') return val;
+          if (typeof val === 'string') {
+            const num = Number(val);
+            return isNaN(num) ? null : num;
+          }
+          return null;
+        };
+        const getNumber = (key: string) => {
+          const val = r[key];
+          if (typeof val === 'number') return val;
+          if (typeof val === 'string') {
+            const num = Number(val);
+            return isNaN(num) ? null : num;
+          }
+          return null;
+        };
+        const getString = (key: string) => (typeof r[key] === 'string' ? r[key] as string : null);
+        const getDate = (key: string) => {
+          const val = r[key];
+          if (val instanceof Date) return val;
+          if (typeof val === 'string' || typeof val === 'number') return val;
+          return null;
+        };
+
+        const mgmtGroupId = getId();
+        const organizationId = getNumber('organization_id');
+        
         // Verify organization_id exists before inserting (foreign key constraint)
-        if (r.organization_id) {
+        if (organizationId) {
           try {
-            const orgExists = await executeQueryOne<{ id: number }>('SELECT id FROM organizations WHERE id = ? LIMIT 1', [r.organization_id]);
+            const orgExists = await executeQueryOne<{ id: number }>('SELECT id FROM organizations WHERE id = ? LIMIT 1', [organizationId]);
             if (!orgExists) {
-              console.warn(`⚠️ [MANAGEMENT GROUPS] Skipping management group ${r.id}: organization_id ${r.organization_id} does not exist`);
+              console.warn(`⚠️ [MANAGEMENT GROUPS] Skipping management group ${mgmtGroupId}: organization_id ${organizationId} does not exist`);
               skippedCount++;
               continue;
             }
           } catch (checkError) {
-            console.warn(`⚠️ [MANAGEMENT GROUPS] Failed to verify organization_id ${r.organization_id}:`, checkError);
+            console.warn(`⚠️ [MANAGEMENT GROUPS] Failed to verify organization_id ${organizationId}:`, checkError);
             skippedCount++;
             continue;
           }
         }
         
-        const id = typeof r.id === 'number' ? r.id : (typeof r.id === 'string' ? parseInt(String(r.id), 10) : 0);
-        const name = typeof r.name === 'string' ? r.name : String(r.name ?? '');
-        const permissionName = typeof r.permission_name === 'string' ? r.permission_name : String(r.permission_name ?? '');
-        const description = typeof r.description === 'string' ? r.description : String(r.description ?? '');
-        const organizationId = typeof r.organization_id === 'number' ? r.organization_id : (r.organization_id ? Number(r.organization_id) : null);
-        const managerUserId = typeof r.manager_user_id === 'number' ? r.manager_user_id : (r.manager_user_id ? Number(r.manager_user_id) : null);
-        const createdAt = r.created_at ? (typeof r.created_at === 'number' || typeof r.created_at === 'string' ? r.created_at : new Date()) : new Date();
-        const updatedAt = r.updated_at ? (typeof r.updated_at === 'number' || typeof r.updated_at === 'string' ? r.updated_at : Date.now()) : Date.now();
+        const name = getString('name') ?? '';
+        const permissionName = getString('permission_name') ?? '';
+        const description = getString('description') ?? '';
+        const managerUserId = getNumber('manager_user_id');
+        const createdDate = getDate('created_at');
+        const updatedDate = getDate('updated_at');
+        const createdAt = createdDate ? toMySQLTimestamp(createdDate as string | number | Date) : toMySQLTimestamp(new Date());
+        const updatedAt = updatedDate ? toMySQLTimestamp(updatedDate as string | number | Date) : toMySQLTimestamp(Date.now());
         
         queries.push({
           sql: `INSERT INTO management_groups (
@@ -5924,14 +5959,14 @@ function createWindows(): void {
             organization_id=VALUES(organization_id), manager_user_id=VALUES(manager_user_id),
             created_at=VALUES(created_at), updated_at=VALUES(updated_at)`,
           params: [
-            id, 
+            mgmtGroupId, 
             name, 
             permissionName, 
             description, 
             organizationId, 
             managerUserId, 
-            toMySQLTimestamp(createdAt), 
-            toMySQLTimestamp(updatedAt)
+            createdAt, 
+            updatedAt
           ]
         });
       }
@@ -6106,27 +6141,65 @@ function createWindows(): void {
   // CL Accounts
   ipcMain.handle('localdb-upsert-cl-accounts', async (event, rows: RowArray) => {
     try {
-      const queries = rows.map(r => ({
-        sql: `INSERT INTO cl_accounts (
-          id, account_code, account_name, contact_info, credit_limit, current_balance,
-          is_active, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ON DUPLICATE KEY UPDATE
-          account_code=VALUES(account_code), account_name=VALUES(account_name), contact_info=VALUES(contact_info),
-          credit_limit=VALUES(credit_limit), current_balance=VALUES(current_balance),
-          is_active=VALUES(is_active), created_at=VALUES(created_at), updated_at=VALUES(updated_at)`,
-        params: [
-          r.id, 
-          r.account_code, 
-          r.account_name, 
-          r.contact_info, 
-          r.credit_limit || 0.0,
-          r.current_balance || 0.0, 
-          r.is_active || 1, 
-          toMySQLTimestamp(r.created_at || new Date()), 
-          toMySQLTimestamp(r.updated_at || Date.now())
-        ]
-      }));
+      const queries = rows.map(r => {
+        const getId = () => {
+          const val = r.id;
+          if (typeof val === 'number') return val;
+          if (typeof val === 'string') {
+            const num = Number(val);
+            return isNaN(num) ? null : num;
+          }
+          return null;
+        };
+        const getString = (key: string) => (typeof r[key] === 'string' ? r[key] as string : null);
+        const getNumber = (key: string) => {
+          const val = r[key];
+          if (typeof val === 'number') return val;
+          if (typeof val === 'string') {
+            const num = Number(val);
+            return isNaN(num) ? null : num;
+          }
+          return null;
+        };
+        const getBoolean = (key: string) => {
+          const val = r[key];
+          if (typeof val === 'boolean') return val;
+          if (typeof val === 'number') return val === 1;
+          if (typeof val === 'string') return val === 'true' || val === '1';
+          return null;
+        };
+        const getDate = (key: string) => {
+          const val = r[key];
+          if (val instanceof Date) return val;
+          if (typeof val === 'string' || typeof val === 'number') return val;
+          return null;
+        };
+        const createdDate = getDate('created_at');
+        const updatedDate = getDate('updated_at');
+        const createdAt = createdDate ? toMySQLTimestamp(createdDate as string | number | Date) : toMySQLTimestamp(new Date());
+        const updatedAt = updatedDate ? toMySQLTimestamp(updatedDate as string | number | Date) : toMySQLTimestamp(Date.now());
+        return {
+          sql: `INSERT INTO cl_accounts (
+            id, account_code, account_name, contact_info, credit_limit, current_balance,
+            is_active, created_at, updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+          ON DUPLICATE KEY UPDATE
+            account_code=VALUES(account_code), account_name=VALUES(account_name), contact_info=VALUES(contact_info),
+            credit_limit=VALUES(credit_limit), current_balance=VALUES(current_balance),
+            is_active=VALUES(is_active), created_at=VALUES(created_at), updated_at=VALUES(updated_at)`,
+          params: [
+            getId(), 
+            getString('account_code'), 
+            getString('account_name'), 
+            getString('contact_info'), 
+            getNumber('credit_limit') ?? 0.0,
+            getNumber('current_balance') ?? 0.0, 
+            getBoolean('is_active') ? 1 : 0, 
+            createdAt, 
+            updatedAt
+          ] as (string | number | null | boolean)[]
+        };
+      });
       await executeTransaction(queries);
       return { success: true };
     } catch (error) {
@@ -6348,16 +6421,16 @@ function createWindows(): void {
         // Reset specific transactions
         const placeholders = transactionIds.map(() => '?').join(',');
         const affectedRows = await executeSystemPosUpdate(`UPDATE system_pos_queue SET retry_count = 0, last_error = NULL WHERE transaction_id IN (${placeholders})`, transactionIds);
-        console.log(`🔄 [SYSTEM POS] Reset retry count for ${affectedRows} transaction(s)`);
+        console.log(`[SYSTEM POS] Reset retry count for ${affectedRows} transaction(s)`);
         return { success: true, count: affectedRows };
       } else {
         // Reset all failed transactions (retry_count >= 5)
         const affectedRows = await executeSystemPosUpdate('UPDATE system_pos_queue SET retry_count = 0, last_error = NULL WHERE retry_count >= 5', []);
-        console.log(`🔄 [SYSTEM POS] Reset retry count for ${affectedRows} failed transaction(s)`);
+        console.log(`[SYSTEM POS] Reset retry count for ${affectedRows} failed transaction(s)`);
         return { success: true, count: affectedRows };
       }
     } catch (error) {
-      console.error('❌ [SYSTEM POS] Error resetting retry count:', error);
+      console.error('[SYSTEM POS] Error resetting retry count:', error);
       return { success: false };
     }
   });
@@ -6404,7 +6477,7 @@ function createWindows(): void {
   ipcMain.handle('repopulate-system-pos-queue', async (event, options: { days?: number } = {}) => {
     try {
       const { days } = options;
-      console.log(`🔄 [SYSTEM POS] Repopulating queue (days: ${days || 'ALL'})...`);
+      console.log(`[SYSTEM POS] Repopulating queue (days: ${days || 'ALL'})...`);
 
       let query = 'SELECT id, created_at FROM transactions';
       const params: (string | number | null | boolean)[] = [];
@@ -6422,7 +6495,7 @@ function createWindows(): void {
         return { success: true, count: 0, message: 'No transactions found in the specified period' };
       }
 
-      console.log(`🔄 [SYSTEM POS] Found ${transactions.length} transactions to process`);
+      console.log(`[SYSTEM POS] Found ${transactions.length} transactions to process`);
 
       const now = Date.now();
       const queries: Array<{ sql: string; params?: (string | number | null | boolean)[] }> = [];
@@ -6442,23 +6515,23 @@ function createWindows(): void {
 
       await executeSystemPosTransaction(queries);
 
-      console.log(`✅ [SYSTEM POS] Successfully queued/reset ${transactions.length} transactions`);
+      console.log(`[SYSTEM POS] Successfully queued/reset ${transactions.length} transactions`);
       return { success: true, count: transactions.length };
     } catch (error) {
-      console.error('❌ [SYSTEM POS] Error repopulating queue:', error);
+      console.error('[SYSTEM POS] Error repopulating queue:', error);
       return { success: false, error: String(error) };
     }
   });
 
   // Get Printer 1 audit log
   ipcMain.handle('get-printer1-audit-log', async (event, fromDate?: string, toDate?: string, limit?: number) => {
-    console.log(`📋 [IPC] get-printer1-audit-log called: fromDate=${fromDate}, toDate=${toDate}, limit=${limit}, printerService=${!!printerService}`);
+    console.log(`[IPC] get-printer1-audit-log called: fromDate=${fromDate}, toDate=${toDate}, limit=${limit}, printerService=${!!printerService}`);
     if (!printerService) {
-      console.log('❌ [IPC] printerService is null!');
+      console.log('[IPC] printerService is null!');
       return { success: false, entries: [] };
     }
     const entries = await printerService.getPrinter1AuditLog(fromDate, toDate, limit || 100);
-    console.log(`📋 [IPC] get-printer1-audit-log returning ${entries.length} entries`);
+    console.log(`[IPC] get-printer1-audit-log returning ${entries.length} entries`);
     return { success: true, entries };
   });
 
@@ -6670,10 +6743,10 @@ function createWindows(): void {
         DELETE FROM printer_daily_counters
         WHERE business_id = ?
       `, [businessId]);
-      console.log(`🧹 [RESET] Cleared printer_daily_counters for business ${businessId}`);
+      console.log(`[RESET] Cleared printer_daily_counters for business ${businessId}`);
       return { success: true };
     } catch (error) {
-      console.error('❌ [RESET] Failed to clear printer_daily_counters:', error);
+      console.error('[RESET] Failed to clear printer_daily_counters:', error);
       return { success: false, error: String(error) };
     }
   });
@@ -6688,7 +6761,7 @@ function createWindows(): void {
         SET sync_status = 'failed', sync_attempts = sync_attempts + 1, last_sync_attempt = ?
         WHERE uuid_id = ?
       `, [now, transactionId]);
-      console.log(`⚠️ [MARK FAILED] Marked transaction ${transactionId} as failed`);
+      console.log(`[MARK FAILED] Marked transaction ${transactionId} as failed`);
       return { success: true };
     } catch (error) {
       console.error('Error marking transaction as failed:', error);
@@ -6780,10 +6853,10 @@ function createWindows(): void {
       const tryLoadURL = async (port: number) => {
         try {
           await mainWindow!.loadURL(`http://localhost:${port}/login`);
-          console.log(`✅ Successfully loaded login page on port ${port}`);
+          console.log(`Successfully loaded login page on port ${port}`);
           return true;
         } catch (error) {
-          console.log(`❌ Failed to load on port ${port}:`, error);
+          console.log(`Failed to load on port ${port}:`, error);
           return false;
         }
       };
@@ -6804,7 +6877,7 @@ function createWindows(): void {
       }
 
       if (!loaded) {
-        console.error('❌ Failed to load on any port');
+        console.error('Failed to load on any port');
       }
     }, 5000); // Wait longer for Next.js to be ready
   } else {
@@ -8314,44 +8387,17 @@ function generateShiftBreakdownHTML(
     }).join('');
 
     const totalPaymentCount = report.paymentBreakdown.reduce((sum: number, p) => sum + Number(p.transaction_count || 0), 0);
-    const totalPaymentAmount = report.paymentBreakdown.reduce((sum: number, p) => sum + Number(p.total_amount || 0), 0);
-    
-    // #region agent log
-    try{fs.appendFileSync('c:\\Code\\marviano-pos\\.cursor\\debug.log',JSON.stringify({location:'main.ts:7567',message:'Payment total calculated in template',data:{totalPaymentAmount,statisticsTotalAmount:report.statistics.total_amount,paymentBreakdownCount:report.paymentBreakdown.length,paymentBreakdown:report.paymentBreakdown.map((p:any)=>({name:p.payment_method_name,count:p.transaction_count,amount:p.total_amount}))},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'F'})+'\n',{flag:'a'});}catch(e){}
-    // #endregion
-
-    const category2Data = report.category2Breakdown || [];
-    // #region agent log
-    try{fs.appendFileSync('c:\\Code\\marviano-pos\\.cursor\\debug.log',JSON.stringify({location:'main.ts:7633',message:'Category2 in template',data:{category2Length:category2Data.length,category2Data:category2Data.slice(0,3).map((c:any)=>({name:c.category2_name,quantity:c.total_quantity,amount:c.total_amount}))},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'F'})+'\n',{flag:'a'});}catch(e){}
-    // #endregion
-    
-    const category2Rows = category2Data.map((category2: { category2_name: string; total_quantity: number; total_amount: number }) => {
+    const totalPaymentAmount = report.paymentBreakdown.reduce((sum: number, p) => sum + Number(p.total_amount || 0), 0);const category2Data = report.category2Breakdown || [];const category2Rows = category2Data.map((category2: { category2_name: string; total_quantity: number; total_amount: number }) => {
       const quantity = Number(category2.total_quantity || 0);
-      const amount = Number(category2.total_amount || 0);
-      // #region agent log
-      try{fs.appendFileSync('c:\\Code\\marviano-pos\\.cursor\\debug.log',JSON.stringify({location:'main.ts:7640',message:'Category2 row mapping',data:{category2Name:category2.category2_name,quantity,amount,rawQuantity:category2.total_quantity,rawAmount:category2.total_amount},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'I'})+'\n',{flag:'a'});}catch(e){}
-      // #endregion
-      return `
+      const amount = Number(category2.total_amount || 0);return `
       <tr>
         <td style="text-align: left; padding: 0.3mm 0;">${category2.category2_name || 'N/A'}</td>
         <td style="text-align: right; padding: 0.3mm 0;">${quantity}</td>
         <td style="text-align: right; padding: 0.3mm 0;">${amount.toLocaleString('id-ID')}</td>
       </tr>
     `;
-    }).join('');
-    
-    // #region agent log
-    try{fs.appendFileSync('c:\\Code\\marviano-pos\\.cursor\\debug.log',JSON.stringify({location:'main.ts:7650',message:'Category2 rows generated',data:{category2RowsLength:category2Rows.length,category2RowsPreview:category2Rows.substring(0,200),isEmpty:!category2Rows},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'J'})+'\n',{flag:'a'});}catch(e){}
-    // #endregion
-
-    const totalCategory2Quantity = (report.category2Breakdown || []).reduce((sum: number, c: { total_quantity: number }) => sum + Number(c.total_quantity || 0), 0);
-    const totalCategory2Amount = (report.category2Breakdown || []).reduce((sum: number, c: { total_amount: number }) => sum + Number(c.total_amount || 0), 0);
-    
-    // #region agent log
-    try{fs.appendFileSync('c:\\Code\\marviano-pos\\.cursor\\debug.log',JSON.stringify({location:'main.ts:7623',message:'Category2 total calculated in template',data:{totalCategory2Amount,statisticsTotalAmount:report.statistics.total_amount,category2BreakdownCount:(report.category2Breakdown||[]).length},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'F'})+'\n',{flag:'a'});}catch(e){}
-    // #endregion
-    
-    const formattedTotalDiscount = report.statistics.total_discount > 0
+    }).join('');const totalCategory2Quantity = (report.category2Breakdown || []).reduce((sum: number, c: { total_quantity: number }) => sum + Number(c.total_quantity || 0), 0);
+    const totalCategory2Amount = (report.category2Breakdown || []).reduce((sum: number, c: { total_amount: number }) => sum + Number(c.total_amount || 0), 0);const formattedTotalDiscount = report.statistics.total_discount > 0
       ? formatCurrency(-Math.abs(report.statistics.total_discount))
       : formatCurrency(0);
     const cashSummaryData = report.cashSummary;
@@ -9407,6 +9453,7 @@ ipcMain.handle('localdb-delete-transactions-by-role', async () => {
   const details = {
     database: 'MySQL',
     targetUserIds: [] as number[],
+    printer_audit_log: 0,
     printer1_audit_log: 0,
     printer2_audit_log: 0,
     transaction_items: 0,
@@ -9437,13 +9484,14 @@ ipcMain.handle('localdb-delete-transactions-by-role', async () => {
       params.push(...targetUserIds);
     }
 
-    // Get transaction IDs to delete
-    const transactionsToDelete = await executeQuery<{ id: string }>(
-      `SELECT id FROM transactions ${whereClause}`,
+    // Get transaction IDs and UUIDs to delete
+    const transactionsToDelete = await executeQuery<{ id: number; uuid_id: string }>(
+      `SELECT id, uuid_id FROM transactions ${whereClause}`,
       params
     );
 
     const transactionIds = transactionsToDelete.map(t => t.id);
+    const transactionUuids = transactionsToDelete.map(t => t.uuid_id);
     console.log(`[CLEANUP] [MySQL] Found ${transactionIds.length} transactions to delete`);
 
     if (transactionIds.length === 0) {
@@ -9460,6 +9508,7 @@ ipcMain.handle('localdb-delete-transactions-by-role', async () => {
 
     const queries: Array<{ sql: string; params?: (string | number | null | boolean)[] }> = [];
     const placeholders = transactionIds.map(() => '?').join(',');
+    const uuidPlaceholders = transactionUuids.map(() => '?').join(',');
 
     // 1. Delete transaction_item_customization_options
     // First get customization IDs
@@ -9499,25 +9548,25 @@ ipcMain.handle('localdb-delete-transactions-by-role', async () => {
       params: [...transactionIds]
     });
 
-    // 4. Delete transaction_refunds
+    // 4. Delete transaction_refunds (uses transaction_uuid, not transaction_id)
     queries.push({
-      sql: `DELETE FROM transaction_refunds WHERE transaction_uuid IN (${placeholders})`,
-      params: [...transactionIds]
+      sql: `DELETE FROM transaction_refunds WHERE transaction_uuid IN (${uuidPlaceholders})`,
+      params: [...transactionUuids]
     });
 
-    // 5. Delete printer1_audit_log
+    // 5. Delete printer1_audit_log (uses transaction_id VARCHAR(32))
     queries.push({
-      sql: `DELETE FROM printer1_audit_log WHERE transaction_id IN (${placeholders})`,
-      params: [...transactionIds]
+      sql: `DELETE FROM printer1_audit_log WHERE transaction_id IN (${uuidPlaceholders})`,
+      params: [...transactionUuids]
     });
 
-    // 6. Delete printer2_audit_log
+    // 6. Delete printer2_audit_log (uses transaction_id VARCHAR(36) that references transactions.uuid_id)
     queries.push({
-      sql: `DELETE FROM printer2_audit_log WHERE transaction_id IN (${placeholders})`,
-      params: [...transactionIds]
+      sql: `DELETE FROM printer2_audit_log WHERE transaction_id IN (${uuidPlaceholders})`,
+      params: [...transactionUuids]
     });
 
-    // 7. Finally delete transactions
+    // 8. Finally delete transactions
     queries.push({
       sql: `DELETE FROM transactions ${whereClause}`,
       params: [...params]
@@ -10576,17 +10625,7 @@ ipcMain.handle('restore-from-server', async (event, options: {
 
 // IPC handlers for Restaurant Table Layout
 ipcMain.handle('get-restaurant-rooms', async (event, businessId: number) => {
-  try {
-    // #region agent log - Check if table exists
-    try {
-      const tableCheck = await executeQueryOne<{ table_name: string }>('SELECT TABLE_NAME FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ?', ['restaurant_rooms']);
-      console.log('[IPC] restaurant_rooms table exists:', !!tableCheck);
-    } catch (checkError) {
-      console.error('[IPC] Error checking restaurant_rooms table:', checkError);
-    }
-    // #endregion
-    
-    const query = `
+  try {const query = `
       SELECT 
         rr.id,
         rr.business_id,
@@ -10603,17 +10642,9 @@ ipcMain.handle('get-restaurant-rooms', async (event, businessId: number) => {
       GROUP BY rr.id, rr.business_id, rr.name, rr.canvas_width, rr.canvas_height, rr.font_size_multiplier, rr.created_at, rr.updated_at
       ORDER BY rr.name ASC
     `;
-    const result = await executeQuery<RowArray>(query, [businessId]);
-    // #region agent log - Query result
-    console.log('[IPC] get-restaurant-rooms query result:', { businessId, resultCount: Array.isArray(result) ? result.length : 'not array', result });
-    // #endregion
-    return result;
+    const result = await executeQuery<RowArray>(query, [businessId]);return result;
   } catch (error) {
-    console.error('Error getting restaurant rooms:', error);
-    // #region agent log - Error details
-    console.error('[IPC] get-restaurant-rooms error details:', { businessId, error: error instanceof Error ? error.message : String(error), stack: error instanceof Error ? error.stack : undefined });
-    // #endregion
-    return [];
+    console.error('Error getting restaurant rooms:', error);return [];
   }
 });
 
@@ -10647,22 +10678,45 @@ ipcMain.handle('get-restaurant-layout-elements', async (event, roomId: number) =
 
 // IPC handlers for syncing restaurant table layout data
 ipcMain.handle('localdb-upsert-restaurant-rooms', async (event, rows: RowArray) => {
-  try {
-    // #region agent log - Handler called
-    console.log('[IPC] localdb-upsert-restaurant-rooms called:', { rowCount: Array.isArray(rows) ? rows.length : 'not array', sampleRow: Array.isArray(rows) && rows.length > 0 ? rows[0] : null });
-    // #endregion
-    const queries: Array<{ sql: string; params?: (string | number | null | boolean)[] }> = [];
+  try {const queries: Array<{ sql: string; params?: (string | number | null | boolean)[] }> = [];
     let skippedCount = 0;
     
     for (const r of rows) {
-      const businessId = r.business_id;
+      const getId = () => {
+        const val = r.id;
+        if (typeof val === 'number') return val;
+        if (typeof val === 'string') {
+          const num = Number(val);
+          return isNaN(num) ? null : num;
+        }
+        return null;
+      };
+      const getNumber = (key: string) => {
+        const val = r[key];
+        if (typeof val === 'number') return val;
+        if (typeof val === 'string') {
+          const num = Number(val);
+          return isNaN(num) ? null : num;
+        }
+        return null;
+      };
+      const getString = (key: string) => (typeof r[key] === 'string' ? r[key] as string : null);
+      const getDate = (key: string) => {
+        const val = r[key];
+        if (val instanceof Date) return val;
+        if (typeof val === 'string' || typeof val === 'number') return val;
+        return null;
+      };
+
+      const roomId = getId();
+      const businessId = getNumber('business_id');
       
       // Verify business_id exists before inserting (foreign key constraint)
       if (businessId) {
         try {
           const businessExists = await executeQueryOne<{ id: number }>('SELECT id FROM businesses WHERE id = ? LIMIT 1', [businessId]);
           if (!businessExists) {
-            console.warn(`⚠️ [RESTAURANT ROOMS] Skipping room ${r.id}: business_id ${businessId} does not exist`);
+            console.warn(`⚠️ [RESTAURANT ROOMS] Skipping room ${roomId}: business_id ${businessId} does not exist`);
             skippedCount++;
             continue;
           }
@@ -10672,6 +10726,11 @@ ipcMain.handle('localdb-upsert-restaurant-rooms', async (event, rows: RowArray) 
           continue;
         }
       }
+      
+      const createdDate = getDate('created_at');
+      const updatedDate = getDate('updated_at');
+      const createdAt = createdDate ? toMySQLDateTime(createdDate as string | number | Date) : toMySQLDateTime(new Date());
+      const updatedAt = updatedDate ? toMySQLDateTime(updatedDate as string | number | Date) : toMySQLDateTime(new Date());
       
       queries.push({
         sql: `INSERT INTO restaurant_rooms (
@@ -10686,24 +10745,20 @@ ipcMain.handle('localdb-upsert-restaurant-rooms', async (event, rows: RowArray) 
           created_at=VALUES(created_at),
           updated_at=VALUES(updated_at)`,
         params: [
-          r.id ?? null,
-          businessId ?? null,
-          r.name ?? null,
-          r.canvas_width ? Number(r.canvas_width) : null,
-          r.canvas_height ? Number(r.canvas_height) : null,
-          r.font_size_multiplier !== undefined && r.font_size_multiplier !== null ? Number(r.font_size_multiplier) : 1.0,
-          toMySQLDateTime(r.created_at || new Date()),
-          toMySQLDateTime(r.updated_at || new Date())
+          roomId,
+          businessId,
+          getString('name'),
+          getNumber('canvas_width'),
+          getNumber('canvas_height'),
+          getNumber('font_size_multiplier') ?? 1.0,
+          createdAt,
+          updatedAt
         ]
       });
     }
     
     if (queries.length > 0) {
-      await executeTransaction(queries);
-      // #region agent log - Transaction completed
-      console.log('[IPC] localdb-upsert-restaurant-rooms transaction completed:', { queriesExecuted: queries.length, skippedCount, totalRows: Array.isArray(rows) ? rows.length : 0 });
-      // #endregion
-      if (skippedCount > 0) {
+      await executeTransaction(queries);if (skippedCount > 0) {
         console.log(`⚠️ [RESTAURANT ROOMS] Skipped ${skippedCount} rooms due to missing businesses`);
       }
     } else {
@@ -10711,11 +10766,7 @@ ipcMain.handle('localdb-upsert-restaurant-rooms', async (event, rows: RowArray) 
     }
     return { success: true };
   } catch (error) {
-    console.error('Error upserting restaurant rooms:', error);
-    // #region agent log - Error details
-    console.error('[IPC] localdb-upsert-restaurant-rooms error details:', { error: error instanceof Error ? error.message : String(error), stack: error instanceof Error ? error.stack : undefined, rowCount: Array.isArray(rows) ? rows.length : 'not array' });
-    // #endregion
-    return { success: false };
+    console.error('Error upserting restaurant rooms:', error);return { success: false };
   }
 });
 
@@ -10725,14 +10776,41 @@ ipcMain.handle('localdb-upsert-restaurant-tables', async (event, rows: RowArray)
     let skippedCount = 0;
     
     for (const r of rows) {
-      const roomId = r.room_id;
+      const getId = () => {
+        const val = r.id;
+        if (typeof val === 'number') return val;
+        if (typeof val === 'string') {
+          const num = Number(val);
+          return isNaN(num) ? null : num;
+        }
+        return null;
+      };
+      const getNumber = (key: string) => {
+        const val = r[key];
+        if (typeof val === 'number') return val;
+        if (typeof val === 'string') {
+          const num = Number(val);
+          return isNaN(num) ? null : num;
+        }
+        return null;
+      };
+      const getString = (key: string) => (typeof r[key] === 'string' ? r[key] as string : null);
+      const getDate = (key: string) => {
+        const val = r[key];
+        if (val instanceof Date) return val;
+        if (typeof val === 'string' || typeof val === 'number') return val;
+        return null;
+      };
+
+      const tableId = getId();
+      const roomId = getNumber('room_id');
       
       // Verify room_id exists before inserting (foreign key constraint)
       if (roomId) {
         try {
           const roomExists = await executeQueryOne<{ id: number }>('SELECT id FROM restaurant_rooms WHERE id = ? LIMIT 1', [roomId]);
           if (!roomExists) {
-            console.warn(`⚠️ [RESTAURANT TABLES] Skipping table ${r.id}: room_id ${roomId} does not exist`);
+            console.warn(`⚠️ [RESTAURANT TABLES] Skipping table ${tableId}: room_id ${roomId} does not exist`);
             skippedCount++;
             continue;
           }
@@ -10742,6 +10820,11 @@ ipcMain.handle('localdb-upsert-restaurant-tables', async (event, rows: RowArray)
           continue;
         }
       }
+      
+      const createdDate = getDate('created_at');
+      const updatedDate = getDate('updated_at');
+      const createdAt = createdDate ? toMySQLDateTime(createdDate as string | number | Date) : toMySQLDateTime(new Date());
+      const updatedAt = updatedDate ? toMySQLDateTime(updatedDate as string | number | Date) : toMySQLDateTime(new Date());
       
       queries.push({
         sql: `INSERT INTO restaurant_tables (
@@ -10759,17 +10842,17 @@ ipcMain.handle('localdb-upsert-restaurant-tables', async (event, rows: RowArray)
           created_at=VALUES(created_at),
           updated_at=VALUES(updated_at)`,
         params: [
-          r.id ?? null,
-          roomId ?? null,
-          r.table_number ?? null,
-          r.position_x ?? 0.0,
-          r.position_y ?? 0.0,
-          r.width ?? 5.0,
-          r.height ?? 5.0,
-          r.capacity ?? 4,
-          r.shape ?? 'circle',
-          toMySQLDateTime(r.created_at || new Date()),
-          toMySQLDateTime(r.updated_at || new Date())
+          tableId,
+          roomId,
+          getString('table_number'),
+          getNumber('position_x') ?? 0.0,
+          getNumber('position_y') ?? 0.0,
+          getNumber('width') ?? 5.0,
+          getNumber('height') ?? 5.0,
+          getNumber('capacity') ?? 4,
+          getString('shape') ?? 'circle',
+          createdAt,
+          updatedAt
         ]
       });
     }
@@ -10795,14 +10878,41 @@ ipcMain.handle('localdb-upsert-restaurant-layout-elements', async (event, rows: 
     let skippedCount = 0;
     
     for (const r of rows) {
-      const roomId = r.room_id;
+      const getId = () => {
+        const val = r.id;
+        if (typeof val === 'number') return val;
+        if (typeof val === 'string') {
+          const num = Number(val);
+          return isNaN(num) ? null : num;
+        }
+        return null;
+      };
+      const getNumber = (key: string) => {
+        const val = r[key];
+        if (typeof val === 'number') return val;
+        if (typeof val === 'string') {
+          const num = Number(val);
+          return isNaN(num) ? null : num;
+        }
+        return null;
+      };
+      const getString = (key: string) => (typeof r[key] === 'string' ? r[key] as string : null);
+      const getDate = (key: string) => {
+        const val = r[key];
+        if (val instanceof Date) return val;
+        if (typeof val === 'string' || typeof val === 'number') return val;
+        return null;
+      };
+
+      const elementId = getId();
+      const roomId = getNumber('room_id');
       
       // Verify room_id exists before inserting (foreign key constraint)
       if (roomId) {
         try {
           const roomExists = await executeQueryOne<{ id: number }>('SELECT id FROM restaurant_rooms WHERE id = ? LIMIT 1', [roomId]);
           if (!roomExists) {
-            console.warn(`⚠️ [RESTAURANT LAYOUT ELEMENTS] Skipping element ${r.id}: room_id ${roomId} does not exist`);
+            console.warn(`⚠️ [RESTAURANT LAYOUT ELEMENTS] Skipping element ${elementId}: room_id ${roomId} does not exist`);
             skippedCount++;
             continue;
           }
@@ -10812,6 +10922,11 @@ ipcMain.handle('localdb-upsert-restaurant-layout-elements', async (event, rows: 
           continue;
         }
       }
+      
+      const createdDate = getDate('created_at');
+      const updatedDate = getDate('updated_at');
+      const createdAt = createdDate ? toMySQLDateTime(createdDate as string | number | Date) : toMySQLDateTime(new Date());
+      const updatedAt = updatedDate ? toMySQLDateTime(updatedDate as string | number | Date) : toMySQLDateTime(new Date());
       
       queries.push({
         sql: `INSERT INTO restaurant_layout_elements (
@@ -10830,18 +10945,18 @@ ipcMain.handle('localdb-upsert-restaurant-layout-elements', async (event, rows: 
           created_at=VALUES(created_at),
           updated_at=VALUES(updated_at)`,
         params: [
-          r.id ?? null,
-          roomId ?? null,
-          r.label ?? null,
-          r.position_x ?? 0.0,
-          r.position_y ?? 0.0,
-          r.width ?? 4.0,
-          r.height ?? 4.0,
-          r.element_type ?? 'custom',
-          r.color ?? '#9CA3AF',
-          r.text_color ?? '#000000',
-          toMySQLDateTime(r.created_at || new Date()),
-          toMySQLDateTime(r.updated_at || new Date())
+          elementId,
+          roomId,
+          getString('label'),
+          getNumber('position_x') ?? 0.0,
+          getNumber('position_y') ?? 0.0,
+          getNumber('width') ?? 4.0,
+          getNumber('height') ?? 4.0,
+          getString('element_type') ?? 'custom',
+          getString('color') ?? '#9CA3AF',
+          getString('text_color') ?? '#000000',
+          createdAt,
+          updatedAt
         ]
       });
     }

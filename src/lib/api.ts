@@ -81,12 +81,17 @@ export const getApiUrl = (path: string): string => {
   }
 
   // Remove trailing slash from base URL if present
-  const normalizedBaseUrl = baseUrl.endsWith('/') ? baseUrl.slice(0, -1) : baseUrl;
+  let normalizedBaseUrl = baseUrl.endsWith('/') ? baseUrl.slice(0, -1) : baseUrl;
+
+  // Auto-add port 3000 if missing for HTTP URLs (common default)
+  // HTTPS URLs default to port 443, so we don't need to add a port for those
+  if (normalizedBaseUrl.startsWith('http://') && !normalizedBaseUrl.match(/:\d+(\/|$)/)) {
+    console.warn('⚠️ [API URL] URL tidak memiliki port number. Menambahkan port default :3000. Pastikan format: http://IP:PORT (contoh: http://192.168.1.16:3000)');
+    normalizedBaseUrl = `${normalizedBaseUrl}:3000`;
+  }
+  // Note: HTTPS URLs without explicit port will use default port 443, which is fine
 
   const finalUrl = `${normalizedBaseUrl}${normalizedPath}`;
-  // #region agent log
-  fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'api.ts:32',message:'getApiUrl result',data:{path,baseUrl,normalizedBaseUrl,finalUrl,envApiUrl:process.env.NEXT_PUBLIC_API_URL,hostname:typeof window!=='undefined'?window.location.hostname:undefined},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
-  // #endregion
   return finalUrl;
 };
 

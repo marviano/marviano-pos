@@ -31,3 +31,6 @@ ON transactions(table_id, status);
 -- HAVING COUNT(*) > 1;
 -- This should return 0 rows if data is clean.
 
+
+
+

@@ -467,14 +467,6 @@ export default function CustomerDisplay() {
       <div className="w-[40%] bg-gray-100 flex flex-col">
         {/* Top Navigation */}
         <div className="flex items-center justify-between p-4 bg-white border-b border-gray-200">
-          <div className="flex space-x-2">
-            <button className="px-3 py-1 bg-gray-200 text-gray-700 rounded text-sm font-medium">
-              Masuk
-            </button>
-            <button disabled className="px-3 py-1 text-gray-400 text-sm font-medium cursor-not-allowed opacity-50">
-              <span className="line-through">Mendaftar</span>
-            </button>
-          </div>
           {/* Active Tab Indicator */}
           <div className="flex items-center space-x-2">
             <div className={`px-2 py-1 rounded text-xs font-medium ${

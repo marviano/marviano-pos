@@ -25,6 +25,19 @@ interface Table {
   shape: 'circle' | 'rectangle';
 }
 
+interface LayoutElement {
+  id: number;
+  room_id: number;
+  label: string;
+  position_x: number | string;
+  position_y: number | string;
+  width: number | string;
+  height: number | string;
+  element_type: string;
+  color: string;
+  text_color: string;
+}
+
 export default function TableLayout() {
   const { user } = useAuth();
   const businessId = user?.selectedBusinessId ?? 14;
@@ -39,7 +52,7 @@ export default function TableLayout() {
   const canvasRef = useRef<HTMLDivElement>(null);
   const canvasContainerRef = useRef<HTMLDivElement>(null);
   const [canvasSize, setCanvasSize] = useState({ width: 0, height: 0 });
-  const [canvasScale, setCanvasScale] = useState(1);
+  // const [canvasScale, setCanvasScale] = useState(1);
 
   // Update canvas size
   useEffect(() => {
@@ -71,8 +84,6 @@ export default function TableLayout() {
           }
           return prev;
         });
-        
-        setCanvasScale(scale);
       }
     };
 
@@ -474,7 +485,6 @@ function TableDisplay({
             className="bg-black/40 px-2 py-0.5 rounded text-white font-mono whitespace-nowrap"
             style={{
               WebkitTextStroke: '0.8px rgba(0, 0, 0, 0.9)',
-              textStroke: '0.8px rgba(0, 0, 0, 0.9)',
               textShadow: '0 0 3px rgba(0, 0, 0, 0.6), 0 1px 2px rgba(0, 0, 0, 0.4)',
               letterSpacing: '0.5px'
             }}

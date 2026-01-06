@@ -67,7 +67,7 @@ export default function ActiveOrdersTab({ businessId, isOpen, onLoadTransaction 
       // Fetch tables and rooms to get table numbers and room names
       const tablesMap = new Map<number, { table_number: string; room_id: number }>();
       const roomsMap = new Map<number, string>();
-      if (electronAPI.getRestaurantTables) {
+      if (electronAPI.getRestaurantTables && electronAPI.getRestaurantRooms) {
         // Get all rooms first
         const rooms = await electronAPI.getRestaurantRooms(businessId);
         const roomsArray = Array.isArray(rooms) ? rooms : [];
@@ -160,7 +160,9 @@ export default function ActiveOrdersTab({ businessId, isOpen, onLoadTransaction 
   };
 
   const formatPrice = (price: number): string => {
-    return `Rp ${price.toLocaleString('id-ID')}`;
+    // Round to integer and format with Indonesian locale (dots as thousand separators, no decimals)
+    const roundedPrice = Math.round(price);
+    return `Rp ${roundedPrice.toLocaleString('id-ID', { minimumFractionDigits: 0, maximumFractionDigits: 0 })}`;
   };
 
   if (!isOpen) return null;

@@ -189,22 +189,14 @@ class SmartSyncService {
    * Sync pending transactions with intelligent batching
    * Returns sync result with count of synced transactions
    */
-  private async syncPendingTransactions(): Promise<{ success: boolean; syncedCount: number; message: string }> {
-    // #region agent log
-    fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'smartSync.ts:191',message:'syncPendingTransactions entry',data:{isElectron,isSyncing:this.isSyncing,isOnline:this.isOnline},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})}).catch(()=>{});
-    // #endregion
-    console.log('🚀 [SMART SYNC] ===== STARTING SYNC =====', {
+  private async syncPendingTransactions(): Promise<{ success: boolean; syncedCount: number; message: string }> {console.log('🚀 [SMART SYNC] ===== STARTING SYNC =====', {
       isElectron,
       isSyncing: this.isSyncing,
       isOnline: this.isOnline,
       timestamp: new Date().toISOString()
     });
 
-    if (!isElectron || this.isSyncing || !this.isOnline) {
-      // #region agent log
-      fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'smartSync.ts:199',message:'Sync skipped early return',data:{reason:!isElectron?'Not Electron':this.isSyncing?'Already syncing':'Offline',isElectron,isSyncing:this.isSyncing,isOnline:this.isOnline},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
-      // #endregion
-      console.log('⏸️ [SMART SYNC] Sync skipped:', {
+    if (!isElectron || this.isSyncing || !this.isOnline) {console.log('⏸️ [SMART SYNC] Sync skipped:', {
         reason: !isElectron ? 'Not Electron' : this.isSyncing ? 'Already syncing' : 'Offline',
         isElectron,
         isSyncing: this.isSyncing,
@@ -218,15 +210,7 @@ class SmartSyncService {
 
     try {
       // Check if the method is available
-      const electronAPI = typeof window !== 'undefined' ? (window as { electronAPI?: UnknownRecord }).electronAPI : undefined;
-      // #region agent log
-      fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'smartSync.ts:214',message:'Electron API check',data:{hasElectronAPI:!!electronAPI,hasLocalDbGetUnsyncedTransactions:!!electronAPI?.localDbGetUnsyncedTransactions},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})}).catch(()=>{});
-      // #endregion
-      if (!electronAPI?.localDbGetUnsyncedTransactions) {
-        // #region agent log
-        fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'smartSync.ts:216',message:'Electron API missing',data:{electronAPI:!!electronAPI,hasLocalDbGetUnsyncedTransactions:!!electronAPI?.localDbGetUnsyncedTransactions},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})}).catch(()=>{});
-        // #endregion
-        console.error('❌ [SMART SYNC] localDbGetUnsyncedTransactions not available - Electron may need restart', {
+      const electronAPI = typeof window !== 'undefined' ? (window as { electronAPI?: UnknownRecord }).electronAPI : undefined;if (!electronAPI?.localDbGetUnsyncedTransactions) {console.error('❌ [SMART SYNC] localDbGetUnsyncedTransactions not available - Electron may need restart', {
           electronAPI: !!electronAPI,
           hasLocalDbGetUnsyncedTransactions: !!electronAPI?.localDbGetUnsyncedTransactions
         });
@@ -235,12 +219,7 @@ class SmartSyncService {
 
       console.log('🔍 [SMART SYNC] Fetching pending transactions...');
       // Get pending transactions (sync_status = 'pending')
-      const pendingTransactions = await (electronAPI.localDbGetUnsyncedTransactions as (businessId?: number) => Promise<PendingTransaction[]>)();
-      // #region agent log
-      fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'smartSync.ts:225',message:'Pending transactions fetched',data:{count:pendingTransactions.length,firstIds:pendingTransactions.slice(0,5).map(t=>t.id)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'D'})}).catch(()=>{});
-      // #endregion
-
-      console.log(`📦 [SMART SYNC] Found ${pendingTransactions.length} pending transactions`, {
+      const pendingTransactions = await (electronAPI.localDbGetUnsyncedTransactions as (businessId?: number) => Promise<PendingTransaction[]>)();console.log(`📦 [SMART SYNC] Found ${pendingTransactions.length} pending transactions`, {
         count: pendingTransactions.length,
         transactionIds: pendingTransactions.slice(0, 10).map(t => t.id) // Show first 10 IDs
       });
@@ -331,11 +310,7 @@ class SmartSyncService {
       return { success: true, syncedCount: syncedTransactionCount, message };
 
     } catch (error) {
-      const syncDuration = Date.now() - syncStartTime;
-      // #region agent log
-      fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'smartSync.ts:325',message:'Sync error caught',data:{error:error instanceof Error?error.message:String(error),stack:error instanceof Error?error.stack:undefined,duration:syncDuration},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'E'})}).catch(()=>{});
-      // #endregion
-      console.error('❌ [SMART SYNC] ===== SYNC FAILED =====', {
+      const syncDuration = Date.now() - syncStartTime;console.error('❌ [SMART SYNC] ===== SYNC FAILED =====', {
         error: error instanceof Error ? error.message : String(error),
         stack: error instanceof Error ? error.stack : undefined,
         errorObject: error,
@@ -386,6 +361,22 @@ class SmartSyncService {
         // Use transaction data directly from transactions table
         let transactionData = transaction as UnknownRecord;
 
+        // Ensure all important columns are included (even if they're null/undefined)
+        // Add missing columns that might not be in the transaction object
+        if (!transactionData.uuid_id && transactionData.id) {
+          // uuid_id might be the same as id if id is UUID string
+          transactionData.uuid_id = typeof transactionData.id === 'string' ? transactionData.id : transactionData.uuid_id;
+        }
+        
+        // Ensure these columns are included (they might be null/undefined, which is fine)
+        if (transactionData.shift_uuid === undefined) transactionData.shift_uuid = null;
+        if (transactionData.refund_status === undefined) transactionData.refund_status = 'none';
+        if (transactionData.refund_total === undefined) transactionData.refund_total = 0;
+        if (transactionData.last_refunded_at === undefined) transactionData.last_refunded_at = null;
+        if (transactionData.contact_id === undefined) transactionData.contact_id = null;
+        if (transactionData.receipt_number === undefined) transactionData.receipt_number = null;
+        if (transactionData.table_id === undefined) transactionData.table_id = null;
+
         // Ensure items array exists (even if empty)
         if (!Array.isArray(transactionData.items)) {
           transactionData.items = [];
@@ -423,18 +414,8 @@ class SmartSyncService {
             await (electronAPI.localDbMarkTransactionFailed as (id: string) => Promise<void>)(String(transaction.id));
           }
           continue;
-        }
-
-        // #region agent log
-        fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'smartSync.ts:335',message:'Before date conversion',data:{transactionId:transaction.id,created_at:transactionData.created_at,updated_at:transactionData.updated_at},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})}).catch(()=>{});
-        // #endregion
-        // Phase 2: Convert all date fields to MySQL format
-        transactionData = convertTransactionDatesForMySQL(transactionData);
-        // #region agent log
-        fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'smartSync.ts:336',message:'After date conversion',data:{transactionId:transaction.id,created_at:transactionData.created_at,updated_at:transactionData.updated_at},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})}).catch(()=>{});
-        // #endregion
-        
-        // Ensure created_at exists (required by MySQL)
+        }// Phase 2: Convert all date fields to MySQL format
+        transactionData = convertTransactionDatesForMySQL(transactionData);// Ensure created_at exists (required by MySQL)
         if (!transactionData.created_at) {
           transactionData.created_at = new Date().toISOString().slice(0, 19).replace('T', ' ');
         }
@@ -497,13 +478,7 @@ class SmartSyncService {
         }
 
         // Phase 2: Enhanced validation with NOT NULL constraints
-        // #region agent log
-        fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'smartSync.ts:391',message:'Before validation',data:{transactionId:transaction.id,created_at:transactionData.created_at,updated_at:transactionData.updated_at},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})}).catch(()=>{});
-        // #endregion
         const validation = conflictResolutionService.validateData(transactionData, transactionRequiredFields);
-        // #region agent log
-        fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'smartSync.ts:392',message:'Validation result',data:{transactionId:transaction.id,isValid:validation.isValid,errors:validation.errors},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
-        // #endregion
         if (!validation.isValid) {
           console.warn(`⚠️ [SMART SYNC] Transaction ${transaction.id} validation failed:`, validation.errors);
           const electronAPI = typeof window !== 'undefined' ? (window as { electronAPI?: UnknownRecord }).electronAPI : undefined;
@@ -516,20 +491,30 @@ class SmartSyncService {
         // Log transaction data being sent (for debugging)
         console.log(`📤 [SMART SYNC] Sending transaction ${transaction.id}:`, {
           id: transactionData.id,
+          uuid_id: transactionData.uuid_id,
           business_id: transactionData.business_id,
           user_id: transactionData.user_id,
+          shift_uuid: transactionData.shift_uuid,
           items_count: Array.isArray(transactionData.items) ? transactionData.items.length : 0,
           total_amount: transactionData.total_amount,
           final_amount: transactionData.final_amount,
           payment_method: transactionData.payment_method,
           payment_method_id: transactionData.payment_method_id,
           pickup_method: transactionData.pickup_method,
+          refund_status: transactionData.refund_status,
+          refund_total: transactionData.refund_total,
+          contact_id: transactionData.contact_id,
+          receipt_number: transactionData.receipt_number,
+          table_id: transactionData.table_id,
           created_at: transactionData.created_at,
           customizations_count: Array.isArray(transactionData.transaction_item_customizations) 
             ? transactionData.transaction_item_customizations.length 
             : 0,
           options_count: Array.isArray(transactionData.transaction_item_customization_options) 
             ? transactionData.transaction_item_customization_options.length 
+            : 0,
+          activity_logs_count: Array.isArray(transactionData.activity_logs) 
+            ? transactionData.activity_logs.length 
             : 0,
         });
 
@@ -584,13 +569,29 @@ class SmartSyncService {
             if (Array.isArray(rawItems) && rawItems.length > 0) {
               transactionData.items = rawItems.map(item => {
                 const itemData: UnknownRecord = {
-                  id: item.id as string, // UUID
+                  // All required and important columns
+                  id: item.id as string | number, // Numeric ID
+                  uuid_id: item.uuid_id as string | undefined, // UUID
+                  transaction_id: item.transaction_id as number | undefined, // Numeric transaction ID
+                  uuid_transaction_id: item.uuid_transaction_id as string | undefined, // UUID transaction ID
                   product_id: item.product_id as number,
                   quantity: item.quantity as number,
                   unit_price: item.unit_price as number,
                   total_price: item.total_price as number,
                   custom_note: item.custom_note as string | undefined,
                   bundle_selections_json: item.bundle_selections_json as unknown | undefined,
+                  // Production status columns (CRITICAL - updated by Kitchen/Barista)
+                  production_status: item.production_status as string | null | undefined,
+                  production_started_at: item.production_started_at ? (
+                    typeof item.production_started_at === 'string' 
+                      ? item.production_started_at.replace('T', ' ').slice(0, 19) 
+                      : item.production_started_at
+                  ) : null,
+                  production_finished_at: item.production_finished_at ? (
+                    typeof item.production_finished_at === 'string' 
+                      ? item.production_finished_at.replace('T', ' ').slice(0, 19) 
+                      : item.production_finished_at
+                  ) : null,
                 };
 
                 // Add created_at if it exists (convert to MySQL format)
@@ -635,13 +636,13 @@ class SmartSyncService {
             if (normalizedCustomizations.customizations.length > 0) {
               const customizationDetails = normalizedCustomizations.customizations.map(cust => {
                 const optionsForCust = normalizedCustomizations.options.filter(
-                  (opt: any) => opt.transaction_item_customization_id === cust.id
+                  (opt: Record<string, unknown>) => opt.transaction_item_customization_id === cust.id
                 );
                 return {
                   customization_id: cust.id,
                   customization_type_id: cust.customization_type_id,
                   options_count: optionsForCust.length,
-                  option_names: optionsForCust.map((opt: any) => opt.option_name).slice(0, 5) // First 5 option names
+                  option_names: optionsForCust.map((opt: Record<string, unknown>) => opt.option_name as string).slice(0, 5) // First 5 option names
                 };
               });
               console.log(`🔍 [SMART SYNC] Customization details:`, JSON.stringify(customizationDetails, null, 2));
@@ -662,13 +663,99 @@ class SmartSyncService {
           }
         }
 
+        // Fetch activity_logs related to this transaction
+        // Activity logs might reference transaction_id in the details JSON
+        // Reuse electronAPI from outer scope or get it if not available
+        const activityLogsElectronAPI = typeof window !== 'undefined' ? (window as { electronAPI?: UnknownRecord }).electronAPI : undefined;
+        if (activityLogsElectronAPI?.localDbGetActivityLogsByTransactionId && transactionData.id) {
+          try {
+            const activityLogs = await (activityLogsElectronAPI.localDbGetActivityLogsByTransactionId as (transactionId: string) => Promise<Array<UnknownRecord>>)(String(transactionData.id));
+            if (Array.isArray(activityLogs) && activityLogs.length > 0) {
+              // Convert dates to MySQL format
+              const formattedActivityLogs = activityLogs.map((log: UnknownRecord) => {
+                const formattedLog: UnknownRecord = {
+                  id: log.id,
+                  user_id: log.user_id,
+                  action: log.action,
+                  business_id: log.business_id,
+                  details: log.details,
+                };
+                
+                // Format created_at
+                if (log.created_at) {
+                  formattedLog.created_at = typeof log.created_at === 'string' 
+                    ? log.created_at.replace('T', ' ').slice(0, 19) 
+                    : log.created_at;
+                }
+                
+                return formattedLog;
+              });
+              
+              transactionData.activity_logs = formattedActivityLogs;
+              console.log(`✅ [SMART SYNC] Added ${formattedActivityLogs.length} activity log(s) for transaction ${transactionData.id}`);
+            }
+          } catch (error) {
+            console.warn(`⚠️ [SMART SYNC] Failed to fetch activity logs for transaction ${transactionData.id}:`, error);
+            // Continue without activity logs if fetch fails
+          }
+        } else {
+          // If API doesn't exist, try to fetch all activity logs and filter by transaction_id in details
+          // This is a fallback approach
+          if (activityLogsElectronAPI?.localDbGetActivityLogs) {
+            try {
+              const allActivityLogs = await (activityLogsElectronAPI.localDbGetActivityLogs as (businessId?: number) => Promise<Array<UnknownRecord>>)(transactionData.business_id as number);
+              if (Array.isArray(allActivityLogs)) {
+                const transactionIdStr = String(transactionData.id);
+                const relatedLogs = allActivityLogs.filter((log: UnknownRecord) => {
+                  // Check if details JSON contains transaction_id
+                  if (log.details) {
+                    try {
+                      const details = typeof log.details === 'string' ? JSON.parse(log.details) : log.details;
+                      return details.transaction_id === transactionIdStr || 
+                             details.transaction_id === transactionData.uuid_id ||
+                             String(details.transaction_id) === transactionIdStr;
+                    } catch {
+                      // If details is not JSON, check if it contains transaction ID as string
+                      const detailsStr = String(log.details);
+                      return detailsStr.includes(transactionIdStr) || 
+                             (transactionData.uuid_id && detailsStr.includes(String(transactionData.uuid_id)));
+                    }
+                  }
+                  return false;
+                });
+                
+                if (relatedLogs.length > 0) {
+                  const formattedActivityLogs = relatedLogs.map((log: UnknownRecord) => {
+                    const formattedLog: UnknownRecord = {
+                      id: log.id,
+                      user_id: log.user_id,
+                      action: log.action,
+                      business_id: log.business_id,
+                      details: log.details,
+                    };
+                    
+                    if (log.created_at) {
+                      formattedLog.created_at = typeof log.created_at === 'string' 
+                        ? log.created_at.replace('T', ' ').slice(0, 19) 
+                        : log.created_at;
+                    }
+                    
+                    return formattedLog;
+                  });
+                  
+                  transactionData.activity_logs = formattedActivityLogs;
+                  console.log(`✅ [SMART SYNC] Added ${formattedActivityLogs.length} activity log(s) for transaction ${transactionData.id} (via fallback method)`);
+                }
+              }
+            } catch (error) {
+              console.warn(`⚠️ [SMART SYNC] Failed to fetch activity logs via fallback for transaction ${transactionData.id}:`, error);
+            }
+          }
+        }
+
         // Send to server
         const startTime = Date.now();
-        const apiUrl = getApiUrl('/api/transactions');
-        // #region agent log
-        fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'smartSync.ts:567',message:'Before fetch transaction',data:{apiUrl,transactionId:transaction.id,uuidId:transactionData.uuid_id||transactionData.id,businessId:transactionData.business_id,envApiUrl:process.env.NEXT_PUBLIC_API_URL,hasItems:Array.isArray(transactionData.items),itemsCount:Array.isArray(transactionData.items)?transactionData.items.length:0,transactionKeys:Object.keys(transactionData).slice(0,20)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
-        // #endregion
-        console.log(`🌐 [SMART SYNC] Sending transaction ${transaction.id} to server:`, {
+        const apiUrl = getApiUrl('/api/transactions');console.log(`🌐 [SMART SYNC] Sending transaction ${transaction.id} to server:`, {
           url: apiUrl,
           transactionId: transaction.id,
           businessId: transactionData.business_id,
@@ -681,12 +768,7 @@ class SmartSyncService {
             'Content-Type': 'application/json',
           },
           body: JSON.stringify(transactionData),
-        });
-        // #region agent log
-        fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'smartSync.ts:580',message:'Fetch response received',data:{status:response.status,statusText:response.statusText,ok:response.ok,transactionId:transaction.id,uuidId:transactionData.uuid_id||transactionData.id,responseHeaders:Object.fromEntries(response.headers.entries())},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'E'})}).catch(()=>{});
-        // #endregion
-
-        const responseTime = Date.now() - startTime;
+        });const responseTime = Date.now() - startTime;
         this.serverLoadHistory.push(responseTime);
 
         console.log(`📥 [SMART SYNC] Server response for transaction ${transaction.id}:`, {
@@ -697,11 +779,7 @@ class SmartSyncService {
         });
 
         if (response.ok) {
-          const result = await response.json();
-          // #region agent log
-          fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'smartSync.ts:632',message:'Response OK - parsing result',data:{transactionId:transaction.id,uuidId:transactionData.uuid_id||transactionData.id,resultSuccess:result.success,resultMessage:result.message,resultKeys:Object.keys(result),fullResult:JSON.stringify(result).substring(0,500)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
-          // #endregion
-          console.log(`✅ [SMART SYNC] Transaction ${transaction.id} synced successfully`, {
+          const result = await response.json();console.log(`✅ [SMART SYNC] Transaction ${transaction.id} synced successfully`, {
             responseTime: `${responseTime}ms`,
             resultKeys: Object.keys(result),
             resultSummary: {
@@ -734,23 +812,12 @@ class SmartSyncService {
           // Ensure we have the UUID - use uuid_id if available, otherwise use id (which should be the UUID string from the database)
           const electronAPI = typeof window !== 'undefined' ? (window as { electronAPI?: UnknownRecord }).electronAPI : undefined;
           const transactionUuid = transactionData.uuid_id || transactionData.id || transaction.id;
-          
-          // #region agent log
-          fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'smartSync.ts:640',message:'Before marking as synced',data:{transactionId:transaction.id,uuidId:transactionUuid,hasUuidId:!!transactionUuid,hasElectronAPI:!!electronAPI,hasMarkFunction:!!electronAPI?.localDbMarkTransactionsSynced,transactionDataUuidId:transactionData.uuid_id,transactionDataId:transactionData.id},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
-          // #endregion
-          
           if (transactionUuid && electronAPI?.localDbMarkTransactionsSynced) {
             try {
               await (electronAPI.localDbMarkTransactionsSynced as (ids: string[]) => Promise<void>)([String(transactionUuid)]);
-              // #region agent log
-              fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'smartSync.ts:644',message:'Marked as synced successfully',data:{transactionId:transaction.id,uuidId:transactionUuid},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
-              // #endregion
               console.log(`✅ [SMART SYNC] Marked transaction ${transaction.id} (uuid: ${transactionUuid}) as synced in local database`);
               syncedCount++;
             } catch (markError) {
-              // #region agent log
-              fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'smartSync.ts:648',message:'Failed to mark as synced',data:{transactionId:transaction.id,uuidId:transactionUuid,error:markError instanceof Error?markError.message:String(markError)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
-              // #endregion
               console.error(`❌ [SMART SYNC] Failed to mark transaction ${transaction.id} (uuid: ${transactionUuid}) as synced:`, {
                 error: markError instanceof Error ? markError.message : String(markError),
                 stack: markError instanceof Error ? markError.stack : undefined,
@@ -758,9 +825,6 @@ class SmartSyncService {
               });
             }
           } else {
-            // #region agent log
-            fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'smartSync.ts:655',message:'Cannot mark as synced - missing requirements',data:{transactionId:transaction.id,transactionUuid,hasUuidId:!!transactionUuid,hasElectronAPI:!!electronAPI,hasMarkFunction:!!electronAPI?.localDbMarkTransactionsSynced},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
-            // #endregion
             console.warn(`⚠️ [SMART SYNC] Cannot mark transaction as synced:`, {
               transactionUuid,
               hasUuidId: !!transactionUuid,
@@ -923,34 +987,17 @@ class SmartSyncService {
    * Force immediate sync (for manual trigger)
    * Returns sync result with count of synced transactions
    */
-  async forceSync(): Promise<{ success: boolean; syncedCount: number; message: string }> {
-    // #region agent log
-    fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'smartSync.ts:792',message:'forceSync entry',data:{isOnline:this.isOnline,isSyncing:this.isSyncing,navigatorOnLine:typeof navigator!=='undefined'?navigator.onLine:undefined},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
-    // #endregion
-    console.log('🔘 [SMART SYNC] forceSync() called manually', {
+  async forceSync(): Promise<{ success: boolean; syncedCount: number; message: string }> {console.log('🔘 [SMART SYNC] forceSync() called manually', {
       isOnline: this.isOnline,
       isSyncing: this.isSyncing,
       timestamp: new Date().toISOString()
     });
 
-    if (!this.isOnline) {
-      // #region agent log
-      fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'smartSync.ts:802',message:'forceSync skipped offline',data:{isOnline:this.isOnline},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
-      // #endregion
-      return { success: false, syncedCount: 0, message: 'Offline - cannot sync' };
+    if (!this.isOnline) {return { success: false, syncedCount: 0, message: 'Offline - cannot sync' };
     }
 
-    if (this.isSyncing) {
-      // #region agent log
-      fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'smartSync.ts:807',message:'forceSync skipped already syncing',data:{isSyncing:this.isSyncing},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
-      // #endregion
-      return { success: false, syncedCount: 0, message: 'Sync already in progress' };
-    }
-
-    // #region agent log
-    fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'smartSync.ts:812',message:'Calling syncPendingTransactions',data:{timestamp:Date.now()},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
-    // #endregion
-    const result = await this.syncPendingTransactions();
+    if (this.isSyncing) {return { success: false, syncedCount: 0, message: 'Sync already in progress' };
+    }const result = await this.syncPendingTransactions();
     return result;
   }
 
@@ -1274,6 +1321,7 @@ class SmartSyncService {
         const refund = pendingRefunds[i];
         console.log(`🔄 [SMART SYNC] Processing refund ${i + 1}/${pendingRefunds.length}: ${refund.id}`);
         
+        let transactionUuid: string = '';
         try {
           const payload = typeof refund.refund_data === 'string'
             ? JSON.parse(refund.refund_data) as UnknownRecord
@@ -1294,7 +1342,7 @@ class SmartSyncService {
             continue;
           }
 
-          const transactionUuid = String(
+          transactionUuid = String(
             payload.transaction_uuid ??
             payload.transactionId ??
             payload.id ??
@@ -1384,7 +1432,9 @@ class SmartSyncService {
             resultSummary: {
               success: result.success,
               message: result.message,
-              refundId: result.refund?.id,
+              refundId: result.refund && typeof result.refund === 'object' && 'id' in result.refund 
+                ? (result.refund as { id: unknown }).id 
+                : undefined,
             },
             fullResult: result,
           });

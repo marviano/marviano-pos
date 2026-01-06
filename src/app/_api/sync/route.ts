@@ -19,18 +19,10 @@ export async function GET(request: NextRequest) {
         SELECT id, email, password, name, googleId, createdAt, role_id, organization_id 
         FROM users 
         ORDER BY name ASC
-      `);
-      // #region agent log
-      fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'sync/route.ts:18',message:'Users fetched from VPS',data:{totalUsers:Array.isArray(users)?users.length:0,userIds:Array.isArray(users)?users.map((u:any)=>u?.id).filter(Boolean):[],user1Exists:Array.isArray(users)?users.some((u:any)=>u?.id===1):false,user1Data:Array.isArray(users)?users.find((u:any)=>u?.id===1):null},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
-      // #endregion
-      syncResults.users = users || [];
+      `);syncResults.users = users || [];
       counts.users = Array.isArray(users) ? users.length : 0;
       console.log(`✅ Synced ${counts.users} users`);
-    } catch (error: unknown) {
-      // #region agent log
-      fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'sync/route.ts:27',message:'Failed to fetch users from VPS',data:{error:String(error)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
-      // #endregion
-      console.warn('⚠️ Failed to sync users:', error);
+    } catch (error: unknown) {console.warn('⚠️ Failed to sync users:', error);
       syncResults.users = [];
       counts.users = 0;
     }
@@ -100,12 +92,12 @@ export async function GET(request: NextRequest) {
         WHERE business_id = ?
         ORDER BY product_id ASC, business_id ASC
       `, [BUSINESS_ID] as (string | number)[]);
-      const productBusinessesArray = Array.isArray(productBusinesses) ? productBusinesses : [];
+      const productBusinessesArray = Array.isArray(productBusinesses) ? productBusinesses as Record<string, unknown>[] : [];
       syncResults.productBusinesses = productBusinessesArray;
       counts.productBusinesses = productBusinessesArray.length;
       console.log(`✅ Synced ${productBusinessesArray.length} product-business relationships`);
       if (productBusinessesArray.length > 0) {
-        const hasProduct298 = productBusinessesArray.some((pb: any) => pb?.product_id === 298);
+        const hasProduct298 = productBusinessesArray.some((pb) => pb?.product_id === 298);
         console.log(`   ${hasProduct298 ? '✅' : '❌'} Product 298 ${hasProduct298 ? 'found' : 'NOT found'} in product_businesses`);
       }
     } catch (error: unknown) {

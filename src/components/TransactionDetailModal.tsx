@@ -126,16 +126,7 @@ const TransactionDetailModal: React.FC<TransactionDetailModalProps> = ({
   isLoading = false,
   // canRefund prop is unused
   onTransactionUpdated
-}) => {
-  // #region agent log
-  React.useEffect(() => {
-    if (isOpen && transaction) {
-      fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'TransactionDetailModal.tsx:129',message:'Modal received transaction',data:{hasTransaction:!!transaction,itemCount:transaction?.items?.length||0,firstItemProductName:transaction?.items?.[0]?.product_name,firstItemHasCustomizations:!!transaction?.items?.[0]?.customizations,firstItemCustomizationsCount:Array.isArray(transaction?.items?.[0]?.customizations)?transaction.items[0].customizations.length:0},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'G'})}).catch(()=>{});
-    }
-  }, [isOpen, transaction]);
-  // #endregion
-
-  // Fetch users to display refund creator names
+}) => {// Fetch users to display refund creator names
   useEffect(() => {
     const fetchUsers = async () => {
       if (!isOpen) return;
@@ -901,13 +892,7 @@ const TransactionDetailModal: React.FC<TransactionDetailModalProps> = ({
                     </tr>
                   </thead>
                   <tbody>
-                    {transaction.items.map((item, index) => {
-                      // #region agent log
-                      if (index === 0) {
-                        fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'TransactionDetailModal.tsx:862',message:'Rendering first item',data:{itemId:item.id,productName:item.product_name,hasCustomizations:!!item.customizations,customizationsCount:Array.isArray(item.customizations)?item.customizations.length:0,customizationsType:typeof item.customizations},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'H'})}).catch(()=>{});
-                      }
-                      // #endregion
-                      return (
+                    {transaction.items.map((item, index) => {return (
                       <tr key={item.id} className={`border-b border-gray-100 ${index % 2 === 0 ? 'bg-gray-50' : 'bg-white'}`}>
                         <td className="py-3 px-3">
                           <div>

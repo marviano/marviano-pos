@@ -6,7 +6,7 @@ import {
   Heart,
   PieChart,
   Settings,
-  Grid3X3,
+  // Grid3X3,
   Wifi,
   Minimize2,
   Receipt,

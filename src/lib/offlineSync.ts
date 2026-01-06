@@ -1,7 +1,4 @@
-import { smartSyncService } from './smartSync';
 import { getApiUrl } from '@/lib/api';
-
-type UnknownRecord = Record<string, unknown>;
 
 type ElectronAPI = typeof window extends { electronAPI: infer T } ? T : never;
 
@@ -268,25 +265,75 @@ class OfflineSyncService {
     this.notifyListeners();
     this.notifyProgress(0);
 
-    // Also trigger smart sync for pending transactions (this will also upload printer audits)
-    try {
-      await smartSyncService.forceSync();
-    } catch (error) {
-      console.warn('⚠️ Smart sync failed:', error);
-    }
+    // NOTE: Smart Sync handles uploads automatically in the background
+    // No need to trigger it here - this function only downloads master data
 
-    // NOTE: Printer audits are uploaded by Smart Sync, not here (to avoid redundancy)
-
+    let apiUrl: string = 'URL tidak diketahui';
     try {
       // Use the comprehensive sync endpoint
-      const syncResponse = await fetch(getApiUrl('/api/sync'));
-      if (syncResponse.ok) {
-        const syncData = await syncResponse.json();
-        // #region agent log
-        fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'offlineSync.ts:282',message:'Sync API response received',data:{success:syncData.success,hasData:!!syncData.data,dataKeys:syncData.data?Object.keys(syncData.data):[],hasProductBusinesses:!!syncData.data?.productBusinesses,productBusinessesCount:Array.isArray(syncData.data?.productBusinesses)?syncData.data.productBusinesses.length:0,hasProduct298:Array.isArray(syncData.data?.productBusinesses)?syncData.data.productBusinesses.some((pb:any)=>pb.product_id===298):false},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'E'})}).catch(()=>{});
-        // #endregion
-        if (syncData.success && syncData.data) {
-          const { data } = syncData;
+      try {
+        apiUrl = getApiUrl('/api/sync');
+      } catch (urlError) {
+        const errorMsg = urlError instanceof Error ? urlError.message : 'API URL tidak dikonfigurasi';
+        throw new Error(`Gagal mendapatkan URL API: ${errorMsg}. Pastikan URL API sudah diisi di Settings.`);
+      }
+      
+      console.log('🔄 [SYNC] Fetching from:', apiUrl);
+      const syncResponse = await fetch(apiUrl);
+      
+      if (!syncResponse.ok) {
+        const errorText = await syncResponse.text().catch(() => 'Unknown error');
+        throw new Error(`Server mengembalikan error ${syncResponse.status}: ${errorText}. Pastikan API server berjalan di ${apiUrl}`);
+      }
+      
+      const syncData = await syncResponse.json();
+      
+      // Log what we received
+      console.log('📥 [SYNC] API Response:', {
+        success: syncData.success,
+        businessId: syncData.businessId || 'not provided',
+        hasData: !!syncData.data,
+        dataKeys: syncData.data ? Object.keys(syncData.data) : [],
+        productCount: Array.isArray(syncData.data?.products) ? syncData.data.products.length : 0,
+        categoryCount: Array.isArray(syncData.data?.category2) ? syncData.data.category2.length : 0,
+        category1Count: Array.isArray(syncData.data?.category1) ? syncData.data.category1.length : 0,
+        businessCount: Array.isArray(syncData.data?.businesses) ? syncData.data.businesses.length : 0,
+        userCount: Array.isArray(syncData.data?.users) ? syncData.data.users.length : 0,
+        counts: syncData.counts || {},
+      });
+      
+      // Warn if no data received
+      if (syncData.data) {
+        const totalItems = Object.values(syncData.data).reduce((sum: number, arr: unknown) => {
+          return sum + (Array.isArray(arr) ? arr.length : 0);
+        }, 0);
+        
+        if (totalItems === 0) {
+          console.warn('⚠️ [SYNC] API returned success but all data arrays are empty!');
+          console.warn('⚠️ [SYNC] This usually means:');
+          console.warn('   1. The API is using businessId=14 (hardcoded)');
+          console.warn('   2. Your database has no data for business_id=14');
+          console.warn('   3. Check if you need to update the API endpoint to use your business_id');
+        } else {
+          console.log(`✅ [SYNC] Received ${totalItems} total items from API`);
+        }
+      }
+      
+        if (!syncData.success) {
+          throw new Error(`API mengembalikan success=false. Pesan: ${syncData.message || syncData.error || 'Tidak ada pesan error'}`);
+        }
+        
+        if (!syncData.data) {
+          throw new Error('API tidak mengembalikan data. Response tidak memiliki field "data".');
+        }
+        
+        const { data } = syncData;
+        
+        // Check if we have any data at all
+        const hasAnyData = Object.values(data).some(value => Array.isArray(value) && value.length > 0);
+        if (!hasAnyData) {
+          console.warn('⚠️ [SYNC] API returned data object but all arrays are empty');
+        }
           // const targetBusinessId = Number(syncData.businessId ?? 14);
 
           const totalSteps = 28;
@@ -301,80 +348,86 @@ class OfflineSyncService {
           // Handle circular dependency: Organizations <-> Users <-> Roles
           // Strategy: Sync in multiple passes, allowing partial data
           
-          // #region agent log
-          fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'offlineSync.ts:297',message:'Starting multi-pass sync',data:{hasUsers:Array.isArray(data.users)&&data.users.length>0,hasOrgs:Array.isArray(data.organizations)&&data.organizations.length>0,hasRoles:Array.isArray(data.roles)&&data.roles.length>0,userCount:Array.isArray(data.users)?data.users.length:0,orgCount:Array.isArray(data.organizations)?data.organizations.length:0,roleCount:Array.isArray(data.roles)?data.roles.length:0},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'Q'})}).catch(()=>{});
-          // #endregion
           // Pass 1: Try to sync organizations (may skip if owner_user_id doesn't exist)
           if (Array.isArray(data.organizations) && data.organizations.length > 0) {
-            // #region agent log
-            fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'offlineSync.ts:300',message:'Pass 1: Syncing organizations',data:{orgCount:data.organizations.length},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'R'})}).catch(()=>{});
-            // #endregion
-            await (electronAPI.localDbUpsertOrganizations as (rows: unknown[]) => Promise<{ success: boolean }>)?.(data.organizations);
+            try {
+              const result = await (electronAPI.localDbUpsertOrganizations as (rows: unknown[]) => Promise<{ success: boolean }>)?.(data.organizations);
+              if (result && !result.success) {
+                console.warn('⚠️ [SYNC] Organizations upsert returned success=false');
+              }
+            } catch (err) {
+              console.error('❌ [SYNC] Failed to upsert organizations:', err);
+              throw new Error(`Gagal menyinkronkan organizations: ${err instanceof Error ? err.message : String(err)}`);
+            }
           }
           advanceProgress();
 
           // Pass 2: Permission Categories (needed by permissions)
-          if (Array.isArray(data.permissionCategories) && data.permissionCategories.length > 0) {
-            await (electronAPI.localDbUpsertPermissionCategories as (rows: unknown[]) => Promise<{ success: boolean }>)?.(data.permissionCategories);
-          }
+          // Note: localDbUpsertPermissionCategories method doesn't exist in electronAPI
+          // if (Array.isArray(data.permissionCategories) && data.permissionCategories.length > 0) {
+          //   await (electronAPI.localDbUpsertPermissionCategories as (rows: unknown[]) => Promise<{ success: boolean }>)?.(data.permissionCategories);
+          // }
           advanceProgress();
 
           // Pass 3: Roles (needs organizations - may skip if org doesn't exist)
           if (Array.isArray(data.roles)) {
-            // #region agent log
-            fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'offlineSync.ts:312',message:'Pass 3: Syncing roles',data:{roleCount:data.roles.length},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'S'})}).catch(()=>{});
-            // #endregion
             await (electronAPI.localDbUpsertRoles as (rows: unknown[]) => Promise<{ success: boolean }>)?.(data.roles);
           }
           advanceProgress();
 
           // Pass 4: Users (FIRST PASS - skip role validation to break circular dependency)
           if (Array.isArray(data.users) && data.users.length > 0) {
-            // #region agent log
-            fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'offlineSync.ts:319',message:'Pass 4: Syncing users (first pass - skip validation)',data:{userCount:data.users.length},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'T'})}).catch(()=>{});
-            // #endregion
             await (electronAPI.localDbUpsertUsers as (rows: unknown[], skipValidation?: boolean) => Promise<{ success: boolean }>)?.(data.users, true);
           }
           advanceProgress();
 
           // Pass 5: Retry organizations now that users might exist (WITH validation)
           if (Array.isArray(data.organizations) && data.organizations.length > 0) {
-            // #region agent log
-            fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'offlineSync.ts:326',message:'Pass 5: Retrying organizations (with validation)',data:{orgCount:data.organizations.length},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'U'})}).catch(()=>{});
-            // #endregion
             await (electronAPI.localDbUpsertOrganizations as (rows: unknown[], skipValidation?: boolean) => Promise<{ success: boolean }>)?.(data.organizations, false);
           }
           advanceProgress();
 
           // Pass 6: Retry roles now that organizations might exist
           if (Array.isArray(data.roles)) {
-            // #region agent log
-            fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'offlineSync.ts:332',message:'Pass 6: Retrying roles',data:{roleCount:data.roles.length},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'V'})}).catch(()=>{});
-            // #endregion
             await (electronAPI.localDbUpsertRoles as (rows: unknown[]) => Promise<{ success: boolean }>)?.(data.roles);
           }
           advanceProgress();
 
           // Pass 7: Retry users now that roles might exist (WITH validation)
           if (Array.isArray(data.users) && data.users.length > 0) {
-            // #region agent log
-            fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'offlineSync.ts:338',message:'Pass 7: Retrying users (with validation)',data:{userCount:data.users.length},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'W'})}).catch(()=>{});
-            // #endregion
             await (electronAPI.localDbUpsertUsers as (rows: unknown[], skipValidation?: boolean) => Promise<{ success: boolean }>)?.(data.users, false);
           }
           advanceProgress();
 
           // 6. Businesses (needs organizations)
           if (Array.isArray(data.businesses) && data.businesses.length > 0) {
-            await (electronAPI.localDbUpsertBusinesses as (rows: unknown[]) => Promise<{ success: boolean }>)?.(data.businesses);
-            // console.log(`✅ ${data.businesses.length} businesses synced to local database`);
+            try {
+              const result = await (electronAPI.localDbUpsertBusinesses as (rows: unknown[]) => Promise<{ success: boolean }>)?.(data.businesses);
+              if (result && !result.success) {
+                console.warn('⚠️ [SYNC] Businesses upsert returned success=false');
+              } else {
+                console.log(`✅ [SYNC] ${data.businesses.length} businesses synced`);
+              }
+            } catch (err) {
+              console.error('❌ [SYNC] Failed to upsert businesses:', err);
+              throw new Error(`Gagal menyinkronkan businesses: ${err instanceof Error ? err.message : String(err)}`);
+            }
           }
           advanceProgress();
 
           // PRIORITIZE DEPENDENCIES: Category1, Category2, Types, Options
           if (Array.isArray(data.category1) && data.category1.length > 0) {
-            await (electronAPI.localDbUpsertCategory1 as (rows: unknown[]) => Promise<{ success: boolean }>)?.(data.category1);
-            // console.log(`✅ ${data.category1.length} category1 records synced to local database`);
+            try {
+              const result = await (electronAPI.localDbUpsertCategory1 as (rows: unknown[]) => Promise<{ success: boolean }>)?.(data.category1);
+              if (result && !result.success) {
+                console.warn('⚠️ [SYNC] Category1 upsert returned success=false');
+              } else {
+                console.log(`✅ [SYNC] ${data.category1.length} category1 records synced`);
+              }
+            } catch (err) {
+              console.error('❌ [SYNC] Failed to upsert category1:', err);
+              throw new Error(`Gagal menyinkronkan category1: ${err instanceof Error ? err.message : String(err)}`);
+            }
           }
           advanceProgress();
 
@@ -409,12 +462,31 @@ class OfflineSyncService {
           if (Array.isArray(data.products)) {
             console.log(`📦 [SYNC] Received ${data.products.length} products from API`);
             if (data.products.length > 0) {
-              await (electronAPI.localDbUpsertProducts as (rows: unknown[]) => Promise<{ success: boolean }>)?.(data.products);
-              // console.log(`✅ ${data.products.length} products synced to local database`);
+              try {
+                console.log(`🔄 [SYNC] Calling localDbUpsertProducts with ${data.products.length} products...`);
+                const result = await (electronAPI.localDbUpsertProducts as (rows: unknown[]) => Promise<{ success: boolean; inserted?: number; errors?: number; error?: string }>)?.(data.products);
+                console.log(`📥 [SYNC] localDbUpsertProducts result:`, result);
+                if (!result) {
+                  console.error('❌ [SYNC] Products upsert returned null/undefined');
+                  throw new Error('Gagal menyimpan products - tidak ada response dari database');
+                } else if (!result.success) {
+                  console.error('❌ [SYNC] Products upsert returned success=false');
+                  console.error('❌ [SYNC] Error details:', result.error || 'Unknown error');
+                  throw new Error(`Gagal menyimpan products ke database lokal: ${result.error || 'Unknown error'}`);
+                } else {
+                  console.log(`✅ [SYNC] ${data.products.length} products synced to local database`);
+                  if (result.inserted !== undefined) {
+                    console.log(`📊 [SYNC] Products inserted: ${result.inserted}, errors: ${result.errors || 0}`);
+                  }
+                }
+              } catch (err) {
+                console.error('❌ [SYNC] Failed to upsert products:', err);
+                throw new Error(`Gagal menyinkronkan products: ${err instanceof Error ? err.message : String(err)}`);
+              }
               
               // Cleanup orphaned products (products that exist locally but not in sync data)
               const businessId = syncData.businessId || 14; // Default to 14 if not provided
-              const syncedProductIds = data.products.map((p: any) => p.id).filter((id: any): id is number => typeof id === 'number');
+              const syncedProductIds = data.products.map((p: Record<string, unknown>) => p.id).filter((id: unknown): id is number => typeof id === 'number');
               if (syncedProductIds.length > 0 && electronAPI.localDbCleanupOrphanedProducts) {
                 try {
                   const cleanupResult = await electronAPI.localDbCleanupOrphanedProducts(businessId, syncedProductIds);
@@ -431,23 +503,21 @@ class OfflineSyncService {
           }
           
           // Sync product_businesses junction table (REQUIRED for product filtering)
-          // #region agent log
-          fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'offlineSync.ts:416',message:'Checking productBusinesses data',data:{hasProductBusinesses:!!data.productBusinesses,isArray:Array.isArray(data.productBusinesses),length:Array.isArray(data.productBusinesses)?data.productBusinesses.length:0,hasProduct298:Array.isArray(data.productBusinesses)?data.productBusinesses.some((pb:any)=>pb.product_id===298):false,allKeys:Object.keys(data)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
-          // #endregion
           if (Array.isArray(data.productBusinesses) && data.productBusinesses.length > 0) {
-            // #region agent log
-            fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'offlineSync.ts:418',message:'Calling localDbUpsertProductBusinesses',data:{count:data.productBusinesses.length,hasProduct298:data.productBusinesses.some((pb:any)=>pb.product_id===298),sampleData:data.productBusinesses.slice(0,3)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
-            // #endregion
-            await (electronAPI.localDbUpsertProductBusinesses as (rows: Array<{ product_id: number; business_id: number }>) => Promise<{ success: boolean }>)?.(data.productBusinesses);
-            console.log(`✅ [SYNC] ${data.productBusinesses.length} product-business relationships synced to local database`);
-            // #region agent log
-            fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'offlineSync.ts:420',message:'localDbUpsertProductBusinesses completed',data:{count:data.productBusinesses.length},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})}).catch(()=>{});
-            // #endregion
+            try {
+              const result = await (electronAPI.localDbUpsertProductBusinesses as (rows: Array<{ product_id: number; business_id: number }>) => Promise<{ success: boolean }>)?.(data.productBusinesses);
+              if (result && !result.success) {
+                console.error('❌ [SYNC] ProductBusinesses upsert returned success=false');
+                throw new Error('Gagal menyimpan product-business relationships ke database lokal');
+              } else {
+                console.log(`✅ [SYNC] ${data.productBusinesses.length} product-business relationships synced to local database`);
+              }
+            } catch (err) {
+              console.error('❌ [SYNC] Failed to upsert productBusinesses:', err);
+              throw new Error(`Gagal menyinkronkan product-business relationships: ${err instanceof Error ? err.message : String(err)}`);
+            }
           } else {
             console.warn('⚠️ [SYNC] product_businesses data is missing or empty - products may not appear correctly');
-            // #region agent log
-            fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'offlineSync.ts:421',message:'product_businesses data missing',data:{hasProductBusinesses:!!data.productBusinesses,isArray:Array.isArray(data.productBusinesses),type:typeof data.productBusinesses,allKeys:Object.keys(data)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'D'})}).catch(()=>{});
-            // #endregion
           }
           advanceProgress();
 
@@ -580,24 +650,56 @@ class OfflineSyncService {
           );
           this.notifyProgress(100);
 
-          // console.log('✅ Comprehensive sync completed successfully');
-          // console.log('✅ All POS tables now available offline!');
-          // console.log(`📊 Summary: ${syncData.summary}`);
-        } else {
-          throw new Error('Invalid sync response format');
-        }
-      } else {
-        throw new Error(`Sync request failed: ${syncResponse.status}`);
-      }
+          console.log('✅ [SYNC] Comprehensive sync completed successfully!');
+          console.log('✅ [SYNC] All POS tables now available offline!');
+          console.log(`📊 [SYNC] Summary: ${Object.keys(data).length} tables synced`);
+          
+          // Log summary of what was synced
+          const summary: Record<string, number> = {};
+          Object.entries(data).forEach(([key, value]) => {
+            if (Array.isArray(value)) {
+              summary[key] = value.length;
+            }
+          });
+          console.log('📊 [SYNC] Data synced:', summary);
+          
+          // Verify data was actually written by checking a few key tables
+          try {
+            if (electronAPI.localDbGetAllProducts) {
+              const verifyProducts = await electronAPI.localDbGetAllProducts();
+              const productCount = Array.isArray(verifyProducts) ? verifyProducts.length : 0;
+              console.log(`🔍 [SYNC] Verification: Found ${productCount} products in local database after sync`);
+              if (productCount === 0 && data.products && Array.isArray(data.products) && data.products.length > 0) {
+                console.error('⚠️ [SYNC] WARNING: Products were synced but database is empty!');
+                console.error('⚠️ [SYNC] This suggests the data was not actually written to the database.');
+                console.error('⚠️ [SYNC] Check the Electron terminal/console for transaction errors.');
+              }
+            }
+          } catch (verifyError) {
+            console.warn('⚠️ [SYNC] Could not verify sync results:', verifyError);
+          }
     } catch (error) {
       console.error('❌ Comprehensive sync failed:', error);
       this.notifyProgress(null);
-      if (electronAPI) {
-        await (electronAPI.localDbUpdateSyncStatus as (key: string, status: string) => Promise<{ success: boolean }>)?.(
-          'last_full_sync',
-          'failed'
-        );
+      
+      // Create a more user-friendly error message
+      let errorMessage = 'Sinkronisasi gagal';
+      if (error instanceof Error) {
+        if (error.message.includes('Failed to fetch') || error.message.includes('NetworkError')) {
+          errorMessage = `Tidak dapat terhubung ke API server. Periksa:\n` +
+            `1. URL API sudah benar (contoh: http://192.168.1.16:3000)\n` +
+            `2. API server berjalan di ${apiUrl || 'URL yang dikonfigurasi'}\n` +
+            `3. Firewall tidak memblokir koneksi\n` +
+            `4. Server dapat diakses dari komputer ini`;
+        } else if (error.message.includes('API URL')) {
+          errorMessage = error.message;
+        } else {
+          errorMessage = error.message;
+        }
       }
+      
+      // Re-throw the error so it can be caught by the caller
+      throw new Error(errorMessage);
     } finally {
       this.syncStatus.syncInProgress = false;
       this.notifyListeners();

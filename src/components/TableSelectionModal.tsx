@@ -1,9 +1,10 @@
 'use client';
 
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import { X } from 'lucide-react';
 import { useAuth } from '@/hooks/useAuth';
 import { generateTransactionId, generateTransactionItemId } from '@/lib/uuid';
+import NewItemsConfirmationModal from './NewItemsConfirmationModal';
 
 interface Room {
   id: number;
@@ -51,12 +52,14 @@ interface CartItem {
   id: number;
   product: {
     id: number;
+    nama?: string; // Product name (optional to match different contexts)
     harga_jual: number;
     harga_qpon?: number;
     harga_gofood?: number;
     harga_grabfood?: number;
     harga_shopeefood?: number;
     harga_tiktok?: number;
+    [key: string]: unknown; // Allow other product properties
   };
   quantity: number;
   customizations?: {
@@ -70,6 +73,10 @@ interface CartItem {
   }[];
   customNote?: string;
   bundleSelections?: unknown[];
+  isLocked?: boolean;
+  transactionItemId?: number;
+  transactionId?: string;
+  tableId?: number | null;
 }
 
 interface TableSelectionModalProps {
@@ -79,6 +86,13 @@ interface TableSelectionModalProps {
   transactionType: 'drinks' | 'bakery';
   onSuccess: () => void;
   customerName?: string;
+  loadedTransactionInfo?: {
+    transactionId: string;
+    tableName: string | null;
+    roomName: string | null;
+    customerName: string | null;
+  } | null;
+  onItemsLocked?: (itemIds: number[]) => void;
 }
 
 const getElectronAPI = () => (typeof window !== 'undefined' ? window.electronAPI : undefined);
@@ -90,6 +104,8 @@ export default function TableSelectionModal({
   transactionType,
   onSuccess,
   customerName = '',
+  loadedTransactionInfo = null,
+  onItemsLocked,
 }: TableSelectionModalProps) {
   const { user } = useAuth();
   const businessId = user?.selectedBusinessId ?? 14;
@@ -101,13 +117,17 @@ export default function TableSelectionModal({
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [pendingTransactions, setPendingTransactions] = useState<PendingTransaction[]>([]);
-  const [selectedTableId, setSelectedTableId] = useState<number | null>(null);
+  // const [selectedTableId, setSelectedTableId] = useState<number | null>(null);
   const [isSaving, setIsSaving] = useState(false);
+  const [showConfirmationModal, setShowConfirmationModal] = useState(false);
+  const [newItemsToSave, setNewItemsToSave] = useState<CartItem[]>([]);
+  const [pendingTableId, setPendingTableId] = useState<number | null>(null);
+  const hasCheckedLihatMode = useRef(false);
 
   const canvasRef = useRef<HTMLDivElement>(null);
   const canvasContainerRef = useRef<HTMLDivElement>(null);
   const [canvasSize, setCanvasSize] = useState({ width: 0, height: 0 });
-  const [canvasScale, setCanvasScale] = useState(1);
+  // const [canvasScale, setCanvasScale] = useState(1);
 
   // Update canvas size
   useEffect(() => {
@@ -139,8 +159,6 @@ export default function TableSelectionModal({
           }
           return prev;
         });
-        
-        setCanvasScale(scale);
       }
     };
 
@@ -170,15 +188,57 @@ export default function TableSelectionModal({
     if (isOpen && businessId && businessId > 0) {
       fetchRooms();
       fetchPendingTransactions();
+      
+      // If in "lihat" mode, automatically show confirmation for new items
+      // Only check once when modal opens
+      if (loadedTransactionInfo && !hasCheckedLihatMode.current) {
+        hasCheckedLihatMode.current = true;
+        const newItems = cartItems.filter(item => !item.isLocked);
+        if (newItems.length > 0) {
+          // Fetch transaction to get table_id
+          const fetchTableId = async () => {
+            try {
+              const electronAPI = getElectronAPI();
+              if (!electronAPI) return;
+              
+              const transactions = await electronAPI.localDbGetTransactions?.(businessId, 10000);
+              const transactionsArray = Array.isArray(transactions) ? transactions as Record<string, unknown>[] : [];
+              const transaction = transactionsArray.find((tx) => 
+                tx.uuid_id === loadedTransactionInfo.transactionId || tx.id === loadedTransactionInfo.transactionId
+              ) as Record<string, unknown> | undefined;
+              
+              if (transaction) {
+                const tableId = typeof transaction.table_id === 'number' 
+                  ? transaction.table_id 
+                  : (typeof transaction.table_id === 'string' ? parseInt(transaction.table_id, 10) : null);
+                
+                if (tableId) {
+                  setNewItemsToSave(newItems);
+                  setPendingTableId(tableId);
+                  setShowConfirmationModal(true);
+                }
+              }
+            } catch (error) {
+              console.error('Error fetching transaction for table ID:', error);
+            }
+          };
+          
+          fetchTableId();
+        } else {
+          // No new items to add, close modal and show message
+          alert('Tidak ada item baru untuk ditambahkan.');
+          onClose();
+        }
+      }
+    } else if (!isOpen) {
+      // Reset flag when modal closes
+      hasCheckedLihatMode.current = false;
     }
-  }, [isOpen, businessId]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isOpen, businessId, loadedTransactionInfo?.transactionId]);
 
   // Fetch tables and elements when room is selected
-  useEffect(() => {
-    // #region agent log
-    fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'TableSelectionModal.tsx:149',message:'Room selection useEffect triggered',data:{selectedRoom,isOpen,willFetch:!!(selectedRoom&&isOpen),currentTableCount:tables.length},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
-    // #endregion
-    if (selectedRoom && isOpen) {
+  useEffect(() => {if (selectedRoom && isOpen) {
       // Clear tables first to ensure clean state
       setTables([]);
       setLayoutElements([]);
@@ -223,12 +283,7 @@ export default function TableSelectionModal({
   };
 
   const fetchTables = async () => {
-    if (!selectedRoom) return;
-
-    // #region agent log
-    fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'TableSelectionModal.tsx:196',message:'Fetching tables for room',data:{selectedRoom},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
-    // #endregion
-    try {
+    if (!selectedRoom) return;try {
       const electronAPI = window.electronAPI;
       if (!electronAPI?.getRestaurantTables) {
         console.error('getRestaurantTables not available');
@@ -236,17 +291,9 @@ export default function TableSelectionModal({
       }
 
       const tablesData = await electronAPI.getRestaurantTables(selectedRoom);
-      const tablesArray = Array.isArray(tablesData) ? tablesData : [];
-      // #region agent log
-      fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'TableSelectionModal.tsx:201',message:'Tables fetched',data:{selectedRoom,tableCount:tablesArray.length},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
-      // #endregion
-      setTables(tablesArray);
+      const tablesArray = Array.isArray(tablesData) ? tablesData : [];setTables(tablesArray);
     } catch (error) {
-      console.error('Error fetching tables:', error);
-      // #region agent log
-      fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'TableSelectionModal.tsx:203',message:'Error fetching tables',data:{selectedRoom,error:error instanceof Error?error.message:String(error)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
-      // #endregion
-    }
+      console.error('Error fetching tables:', error);}
   };
 
   const fetchLayoutElements = async () => {
@@ -275,21 +322,11 @@ export default function TableSelectionModal({
       }
 
       // Fetch all transactions and filter for pending ones with table_id
-      const allTransactions = await electronAPI.localDbGetTransactions(businessId, 10000);
-      // #region agent log
-      fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'TableSelectionModal.tsx:234',message:'All transactions fetched',data:{totalCount:Array.isArray(allTransactions)?allTransactions.length:0,sampleTx:Array.isArray(allTransactions)&&allTransactions.length>0?{id:(allTransactions[0]as any)?.id||(allTransactions[0]as any)?.uuid_id,status:(allTransactions[0]as any)?.status,table_id:(allTransactions[0]as any)?.table_id}:null},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
-      // #endregion
-      const pending = (Array.isArray(allTransactions) ? allTransactions : [])
+      const allTransactions = await electronAPI.localDbGetTransactions(businessId, 10000);const pending = (Array.isArray(allTransactions) ? allTransactions : [])
         .filter((tx: unknown) => {
           if (tx && typeof tx === 'object' && 'status' in tx && 'table_id' in tx) {
             const transaction = tx as { status: string; table_id: number | null; uuid_id?: string; id?: string };
-            const isPending = transaction.status === 'pending' && transaction.table_id !== null;
-            // #region agent log
-            if (transaction.status === 'pending') {
-              fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'TableSelectionModal.tsx:239',message:'Checking pending transaction',data:{txId:transaction.uuid_id||transaction.id,status:transaction.status,table_id:transaction.table_id,isPending},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
-            }
-            // #endregion
-            return isPending;
+            const isPending = transaction.status === 'pending' && transaction.table_id !== null;return isPending;
           }
           return false;
         })
@@ -302,18 +339,9 @@ export default function TableSelectionModal({
             status: t.status,
             created_at: t.created_at || new Date().toISOString(),
           };
-        });
-
-      // #region agent log
-      fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'TableSelectionModal.tsx:253',message:'Pending transactions fetched',data:{pendingCount:pending.length,pendingTransactions:pending.map(tx=>({id:tx.id,table_id:tx.table_id,created_at:tx.created_at,createdAtType:typeof tx.created_at}))},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
-      // #endregion
-      setPendingTransactions(pending);
+        });setPendingTransactions(pending);
     } catch (error) {
-      console.error('Error fetching pending transactions:', error);
-      // #region agent log
-      fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'TableSelectionModal.tsx:255',message:'Error fetching pending transactions',data:{error:error instanceof Error?error.message:String(error)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
-      // #endregion
-    }
+      console.error('Error fetching pending transactions:', error);}
   };
 
   const checkTableHasPendingOrder = (tableId: number): boolean => {
@@ -321,15 +349,28 @@ export default function TableSelectionModal({
   };
 
   const getPendingTransactionForTable = (tableId: number): PendingTransaction | null => {
-    const result = pendingTransactions.find(tx => tx.table_id === tableId) || null;
-    // #region agent log
-    fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'TableSelectionModal.tsx:263',message:'Getting pending transaction for table',data:{tableId,found:!!result,orderCreatedAt:result?.created_at||null,hasPendingOrder:!!result},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
-    // #endregion
-    return result;
+    const result = pendingTransactions.find(tx => tx.table_id === tableId) || null;return result;
   };
 
   const handleTableClick = async (tableId: number) => {
-    // Check if table has pending order
+    // If in "lihat" mode, skip table selection and show confirmation modal for new items only
+    if (loadedTransactionInfo) {
+      // Filter only new items (unlocked items)
+      const newItems = cartItems.filter(item => !item.isLocked);
+      
+      if (newItems.length === 0) {
+        alert('Tidak ada item baru untuk ditambahkan.');
+        return;
+      }
+
+      // Store new items and table ID for confirmation
+      setNewItemsToSave(newItems);
+      setPendingTableId(tableId);
+      setShowConfirmationModal(true);
+      return;
+    }
+
+    // Normal mode: check if table has pending order
     if (checkTableHasPendingOrder(tableId)) {
       alert(`Meja ${tables.find(t => t.id === tableId)?.table_number || tableId} sudah memiliki pesanan aktif. Silakan pilih meja lain.`);
       return;
@@ -341,7 +382,6 @@ export default function TableSelectionModal({
       return;
     }
 
-    setSelectedTableId(tableId);
     await savePendingTransaction(tableId);
   };
 
@@ -356,23 +396,14 @@ export default function TableSelectionModal({
       // Generate transaction ID
       let transactionId = '';
       if (window.electronAPI?.generateNumericUuid) {
-        const uuidResult = await window.electronAPI.generateNumericUuid(businessId);
-        // #region agent log
-        fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'TableSelectionModal.tsx:356',message:'generateNumericUuid result',data:{success:uuidResult?.success,uuid:uuidResult?.uuid,uuidType:typeof uuidResult?.uuid,uuidLength:uuidResult?.uuid?.length},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'K'})}).catch(()=>{});
-        // #endregion
-        if (uuidResult?.success && uuidResult?.uuid) {
+        const uuidResult = await window.electronAPI.generateNumericUuid(businessId);if (uuidResult?.success && uuidResult?.uuid) {
           transactionId = uuidResult.uuid;
         } else {
           transactionId = generateTransactionId();
         }
       } else {
         transactionId = generateTransactionId();
-      }
-      // #region agent log
-      fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'TableSelectionModal.tsx:365',message:'Final transactionId generated',data:{transactionId,transactionIdType:typeof transactionId,transactionIdLength:transactionId.length,isNumeric:!/[^0-9]/.test(transactionId)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'L'})}).catch(()=>{});
-      // #endregion
-
-      // Calculate totals
+      }// Calculate totals
       const orderTotal = cartItems.reduce((sum, item) => {
         let itemPrice = item.product.harga_jual || 0;
         // Add customization prices
@@ -438,7 +469,7 @@ export default function TableSelectionModal({
       // Prepare transaction items (store UUIDs for matching later)
       const transactionItemUuids: string[] = [];
       const transactionItems = cartItems.map(item => {
-        let basePrice = item.product.harga_jual || 0;
+        const basePrice = item.product.harga_jual || 0;
         let itemPrice = basePrice;
 
         // Add customization prices
@@ -470,36 +501,12 @@ export default function TableSelectionModal({
           production_finished_at: null,
         };
       });
-      // #region agent log
-      fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'TableSelectionModal.tsx:471',message:'Transaction items prepared',data:{transactionId,itemsCount:transactionItems.length,firstItem:transactionItems.length>0?{uuid_transaction_id:transactionItems[0].uuid_transaction_id,product_id:transactionItems[0].product_id,quantity:transactionItems[0].quantity}:null},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
-      // #endregion
-
-      // #region agent log
-      fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'TableSelectionModal.tsx:407',message:'Before saving transaction',data:{transactionId,tableId,status:transactionData.status,table_id:transactionData.table_id,created_at:transactionData.created_at,transactionDataKeys:Object.keys(transactionData),itemsCount:transactionItems.length,itemsSample:transactionItems.length>0?{uuid_transaction_id:transactionItems[0].uuid_transaction_id,product_id:transactionItems[0].product_id,quantity:transactionItems[0].quantity}:null},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
-      // #endregion
       // Save transaction and items to local database
       await electronAPI.localDbUpsertTransactions?.([transactionData]);
-      // #region agent log
-      fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'TableSelectionModal.tsx:471',message:'After saving transaction, before saving items',data:{transactionId,itemsToSave:transactionItems.length,firstItemUuidTransactionId:transactionItems[0]?.uuid_transaction_id,firstItemId:transactionItems[0]?.id},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
-      // #endregion
-      // #region agent log
-      fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'TableSelectionModal.tsx:483',message:'Calling localDbUpsertTransactionItems',data:{transactionId,itemsToSave:transactionItems.length,itemsData:transactionItems.map((item:any)=>({uuid_id:item.uuid_id,uuid_transaction_id:item.uuid_transaction_id,transaction_id:item.transaction_id,product_id:item.product_id,quantity:item.quantity}))},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'M'})}).catch(()=>{});
-      // #endregion
       await electronAPI.localDbUpsertTransactionItems?.(transactionItems);
-      // #region agent log
-      fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'TableSelectionModal.tsx:486',message:'After saving items (await completed)',data:{transactionId,itemsSaved:transactionItems.length},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})}).catch(()=>{});
-      // #endregion
-
       // Fetch saved transaction items to get their database IDs for saving customizations
-      // #region agent log
-      fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'TableSelectionModal.tsx:490',message:'Before fetching saved items to verify',data:{transactionId,transactionIdType:typeof transactionId},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'N'})}).catch(()=>{});
-      // #endregion
       const savedTransactionItems = await electronAPI.localDbGetTransactionItems?.(transactionId);
-      const savedItemsArray = Array.isArray(savedTransactionItems) ? savedTransactionItems : [];
-      // #region agent log
-      fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'TableSelectionModal.tsx:493',message:'After fetching saved items to verify',data:{transactionId,itemsFound:savedItemsArray.length,itemsData:savedItemsArray.length>0?savedItemsArray.map((item:any)=>({uuid_id:item.uuid_id,uuid_transaction_id:item.uuid_transaction_id,transaction_id:item.transaction_id,product_id:item.product_id})):[],rawResult:Array.isArray(savedTransactionItems)?'array':typeof savedTransactionItems},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'O'})}).catch(()=>{});
-      // #endregion
-
+      const savedItemsArray = Array.isArray(savedTransactionItems) ? savedTransactionItems as Record<string, unknown>[] : [];
       // Prepare customizations and customization options
       // We need to save customizations first to get their database-generated IDs,
       // then use those IDs when saving options
@@ -520,7 +527,7 @@ export default function TableSelectionModal({
         // Find the corresponding saved transaction item by matching UUID (most reliable)
         // Fallback to product_id + transaction_id if UUID matching fails
         const itemUuid = transactionItemUuids[cartIndex];
-        const savedItem = savedItemsArray.find((item: any) => 
+        const savedItem = savedItemsArray.find((item: Record<string, unknown>) => 
           item.uuid_id === itemUuid || item.id === itemUuid
         ) as { id: number; uuid_id?: string } | undefined;
 
@@ -561,27 +568,12 @@ export default function TableSelectionModal({
         }
       });
 
-      // Save customizations will be done after we verify the transaction
-
-      // #region agent log
-      fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'TableSelectionModal.tsx:611',message:'After saving transaction and customizations',data:{transactionId,tableId,itemsCount:transactionItems.length,customizationsCount:customizationData.length},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
-      // #endregion
-      
-      // Immediately verify the saved transaction and items
+      // Save customizations will be done after we verify the transaction// Immediately verify the saved transaction and items
       const verifyTransactions = await electronAPI.localDbGetTransactions?.(businessId, 100);
-      const savedTx = Array.isArray(verifyTransactions) ? verifyTransactions.find((tx: any) => (tx.uuid_id === transactionId || tx.id === transactionId)) : null;
-      // #region agent log
-      fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'TableSelectionModal.tsx:479',message:'Verifying saved transaction',data:{transactionId,found:!!savedTx,savedTableId:savedTx?.table_id,savedStatus:savedTx?.status,hasTableId:!!savedTx?.table_id},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'D'})}).catch(()=>{});
-      // #endregion
-      
-      // Verify items were saved
+      const verifyTransactionsArray = Array.isArray(verifyTransactions) ? verifyTransactions as Record<string, unknown>[] : [];
+      const savedTx = verifyTransactionsArray.find((tx) => (tx.uuid_id === transactionId || tx.id === transactionId)) || null;// Verify items were saved
       const verifyItems = await electronAPI.localDbGetTransactionItems?.(transactionId);
-      const verifyItemsArray = Array.isArray(verifyItems) ? verifyItems : [];
-      // #region agent log
-      fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'TableSelectionModal.tsx:485',message:'Verifying saved items',data:{transactionId,itemsFound:verifyItemsArray.length,itemsExpected:transactionItems.length,firstItem:verifyItemsArray.length>0?{uuid_transaction_id:verifyItemsArray[0].uuid_transaction_id,transaction_id:verifyItemsArray[0].transaction_id,product_id:verifyItemsArray[0].product_id}:null},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'E'})}).catch(()=>{});
-      // #endregion
-      
-      // Save customizations now that we have the saved transaction
+      const verifyItemsArray = Array.isArray(verifyItems) ? verifyItems as Record<string, unknown>[] : [];// Save customizations now that we have the saved transaction
       if (customizationData.length > 0 && savedTx) {
         const transactionItemCustomizations = customizationData.map(customization => ({
           id: null, // Let database auto-generate
@@ -595,17 +587,12 @@ export default function TableSelectionModal({
         console.log(`✅ Saved ${transactionItemCustomizations.length} customization(s)`);
 
         // Now fetch the saved customizations to get their database-generated IDs
-        let savedCustomizationsArray: any[] = [];
+        let savedCustomizationsArray: Array<Record<string, unknown>> = [];
         try {
           // Try both UUID and numeric ID
-          const numericTransactionId = savedTx.id || savedTx.transaction_id;
-          const uuidTransactionId = savedTx.uuid_id || transactionId;
-          
-          // #region agent log
-          fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'TableSelectionModal.tsx:599',message:'Before fetching customizations',data:{transactionId,uuidTransactionId,numericTransactionId,savedItemIds:savedItemsArray.map((item:any)=>item.id)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'Z'})}).catch(()=>{});
-          // #endregion
-          
-          // Try UUID first (more reliable)
+          const numericTransactionId = (typeof savedTx.id === 'string' || typeof savedTx.id === 'number') ? savedTx.id : 
+                                       (typeof savedTx.transaction_id === 'string' || typeof savedTx.transaction_id === 'number') ? savedTx.transaction_id : null;
+          const uuidTransactionId = typeof savedTx.uuid_id === 'string' ? savedTx.uuid_id : transactionId;// Try UUID first (more reliable)
           let customizationsResult = await electronAPI.localDbGetTransactionItemCustomizationsNormalized?.(uuidTransactionId);
           
           // If no results, try numeric ID
@@ -617,15 +604,10 @@ export default function TableSelectionModal({
           
           if (customizationsResult && customizationsResult.customizations && Array.isArray(customizationsResult.customizations)) {
             // Filter to only the transaction items we just saved
-            const savedItemIds = new Set(savedItemsArray.map((item: any) => item.id));
-            savedCustomizationsArray = customizationsResult.customizations.filter((c: any) => 
-              savedItemIds.has(c.transaction_item_id)
-            );
-            
-            // #region agent log
-            fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'TableSelectionModal.tsx:616',message:'After fetching customizations',data:{totalCustomizations:customizationsResult.customizations.length,filteredCustomizations:savedCustomizationsArray.length,savedItemIds:Array.from(savedItemIds),foundCustomizations:savedCustomizationsArray.map((c:any)=>({id:c.id,transaction_item_id:c.transaction_item_id,customization_type_id:c.customization_type_id}))},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'AA'})}).catch(()=>{});
-            // #endregion
-          } else {
+            const savedItemIds = new Set(savedItemsArray.map((item: Record<string, unknown>) => item.id));
+            savedCustomizationsArray = customizationsResult.customizations.filter((c: Record<string, unknown>) => 
+              savedItemIds.has(c.transaction_item_id as number)
+            );} else {
             console.warn('⚠️ No customizations found in query result');
           }
         } catch (error) {
@@ -645,7 +627,7 @@ export default function TableSelectionModal({
         // Match saved customizations with our customization data
         for (const customization of customizationData) {
           // Find the saved customization that matches this one
-          const savedCustomization = savedCustomizationsArray.find((sc: any) => 
+          const savedCustomization = savedCustomizationsArray.find((sc: Record<string, unknown>) => 
             sc.transaction_item_id === customization.transaction_item_id &&
             sc.customization_type_id === customization.customization_type_id
           ) as { id: number } | undefined;
@@ -679,10 +661,12 @@ export default function TableSelectionModal({
 
       // Refresh pending transactions list
       await fetchPendingTransactions();
-      // #region agent log
-      fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'TableSelectionModal.tsx:419',message:'After refresh pending transactions',data:{pendingCount:pendingTransactions.length},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
-      // #endregion
-
+      
+      // Dispatch custom event to immediately refresh pending orders count in POSLayout
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(new CustomEvent('pendingTransactionSaved'));
+      }
+      
       // Call success callback and close modal
       onSuccess();
       onClose();
@@ -692,6 +676,259 @@ export default function TableSelectionModal({
     } finally {
       setIsSaving(false);
     }
+  };
+
+  const saveNewItemsToExistingTransaction = async (itemsToSave: CartItem[]) => {
+    setIsSaving(true);
+    try {
+      const electronAPI = getElectronAPI();
+      if (!electronAPI || !loadedTransactionInfo) {
+        throw new Error('Electron API not available or transaction info missing');
+      }
+
+      const transactionId = loadedTransactionInfo.transactionId;
+
+      // Fetch existing transaction to update totals
+      const transactions = await electronAPI.localDbGetTransactions?.(businessId, 10000);
+      const transactionsArray = Array.isArray(transactions) ? transactions as Record<string, unknown>[] : [];
+      const existingTransaction = transactionsArray.find((tx) => 
+        tx.uuid_id === transactionId || tx.id === transactionId
+      ) as Record<string, unknown> | undefined;
+
+      if (!existingTransaction) {
+        throw new Error('Existing transaction not found');
+      }
+
+      // Calculate totals for new items
+      const newItemsTotal = itemsToSave.reduce((sum, item) => {
+        let itemPrice = item.product.harga_jual || 0;
+        // Add customization prices
+        if (item.customizations) {
+          item.customizations.forEach(customization => {
+            customization.selected_options.forEach(option => {
+              itemPrice += option.price_adjustment || 0;
+            });
+          });
+        }
+        return sum + (itemPrice * item.quantity);
+      }, 0);
+
+      // Update transaction totals
+      const existingTotal = typeof existingTransaction.total_amount === 'number' 
+        ? existingTransaction.total_amount 
+        : (typeof existingTransaction.total_amount === 'string' ? parseFloat(existingTransaction.total_amount) : 0);
+      const existingFinal = typeof existingTransaction.final_amount === 'number' 
+        ? existingTransaction.final_amount 
+        : (typeof existingTransaction.final_amount === 'string' ? parseFloat(existingTransaction.final_amount) : 0);
+
+      const updatedTransactionData = {
+        ...existingTransaction,
+        total_amount: existingTotal + newItemsTotal,
+        final_amount: existingFinal + newItemsTotal,
+        updated_at: new Date().toISOString(),
+      };
+
+      // Prepare transaction items for new items only
+      const transactionItemUuids: string[] = [];
+      const transactionItems = itemsToSave.map(item => {
+        const basePrice = item.product.harga_jual || 0;
+        let itemPrice = basePrice;
+
+        // Add customization prices
+        if (item.customizations) {
+          item.customizations.forEach(customization => {
+            customization.selected_options.forEach(option => {
+              itemPrice += option.price_adjustment || 0;
+            });
+          });
+        }
+
+        const itemUuid = generateTransactionItemId();
+        transactionItemUuids.push(itemUuid);
+
+        return {
+          uuid_id: itemUuid,
+          id: itemUuid,
+          transaction_id: 0,
+          uuid_transaction_id: transactionId,
+          product_id: item.product.id,
+          quantity: item.quantity,
+          unit_price: itemPrice,
+          total_price: itemPrice * item.quantity,
+          custom_note: item.customNote || null,
+          bundle_selections_json: item.bundleSelections ? JSON.stringify(item.bundleSelections) : null,
+          created_at: new Date().toISOString(),
+          production_status: null,
+          production_started_at: null,
+          production_finished_at: null,
+        };
+      });
+
+      // Save updated transaction and new items
+      await electronAPI.localDbUpsertTransactions?.([updatedTransactionData]);
+      await electronAPI.localDbUpsertTransactionItems?.(transactionItems);
+
+      // Fetch saved transaction items to get their database IDs for saving customizations
+      const savedTransactionItems = await electronAPI.localDbGetTransactionItems?.(transactionId);
+      const savedItemsArray = Array.isArray(savedTransactionItems) ? savedTransactionItems as Record<string, unknown>[] : [];
+
+      // Prepare customizations for new items
+      const customizationData: Array<{
+        transaction_item_id: number;
+        customization_type_id: number;
+        bundle_product_id: number | null;
+        created_at: string;
+        options: Array<{
+          customization_option_id: number;
+          option_name: string;
+          price_adjustment: number;
+        }>;
+      }> = [];
+
+      // Match saved transaction items with cart items and build customization data
+      itemsToSave.forEach((cartItem, cartIndex) => {
+        const itemUuid = transactionItemUuids[cartIndex];
+        const savedItem = savedItemsArray.find((item: Record<string, unknown>) => 
+          item.uuid_id === itemUuid || item.id === itemUuid
+        ) as { id: number; uuid_id?: string } | undefined;
+
+        if (!savedItem || !savedItem.id || savedItem.id === 0) {
+          console.warn(`⚠️ Could not find saved transaction item for product ${cartItem.product.id}`, {
+            itemUuid,
+            savedItemsCount: savedItemsArray.length,
+            savedItemIds: savedItemsArray.map((item: Record<string, unknown>) => ({ 
+              id: item.id, 
+              uuid_id: item.uuid_id,
+              product_id: item.product_id 
+            })).slice(0, 5)
+          });
+          return;
+        }
+
+        // Process customizations for this item
+        if (cartItem.customizations && cartItem.customizations.length > 0) {
+          cartItem.customizations.forEach((customization) => {
+            const options: Array<{
+              customization_option_id: number;
+              option_name: string;
+              price_adjustment: number;
+            }> = [];
+
+            if (customization.selected_options && customization.selected_options.length > 0) {
+              customization.selected_options.forEach((option) => {
+                options.push({
+                  customization_option_id: option.option_id,
+                  option_name: option.option_name,
+                  price_adjustment: option.price_adjustment || 0,
+                });
+              });
+            }
+
+            customizationData.push({
+              transaction_item_id: savedItem.id,
+              customization_type_id: customization.customization_id,
+              bundle_product_id: null,
+              created_at: new Date().toISOString(),
+              options,
+            });
+          });
+        }
+      });
+
+      // Save customizations
+      if (customizationData.length > 0) {
+        const transactionItemCustomizations = customizationData.map(customization => ({
+          id: null,
+          transaction_item_id: customization.transaction_item_id,
+          customization_type_id: customization.customization_type_id,
+          bundle_product_id: customization.bundle_product_id,
+          created_at: customization.created_at,
+        }));
+
+        await electronAPI.localDbUpsertTransactionItemCustomizations?.(transactionItemCustomizations);
+
+        // Fetch saved customizations to get their database-generated IDs
+        let savedCustomizationsArray: Array<Record<string, unknown>> = [];
+        try {
+          const customizationsResult = await electronAPI.localDbGetTransactionItemCustomizationsNormalized?.(transactionId);
+          
+          if (customizationsResult && customizationsResult.customizations && Array.isArray(customizationsResult.customizations)) {
+            const savedItemIds = new Set(savedItemsArray.map((item: Record<string, unknown>) => item.id));
+            savedCustomizationsArray = customizationsResult.customizations.filter((c: Record<string, unknown>) => 
+              savedItemIds.has(c.transaction_item_id as number)
+            );
+          }
+        } catch (error) {
+          console.warn('⚠️ Could not fetch saved customizations:', error);
+        }
+
+        // Build options array with correct customization IDs
+        const transactionItemCustomizationOptions: Array<{
+          id: number | null;
+          transaction_item_customization_id: number;
+          customization_option_id: number;
+          option_name: string;
+          price_adjustment: number;
+          created_at: string;
+        }> = [];
+
+        for (const customization of customizationData) {
+          const savedCustomization = savedCustomizationsArray.find((sc: Record<string, unknown>) => 
+            sc.transaction_item_id === customization.transaction_item_id &&
+            sc.customization_type_id === customization.customization_type_id
+          ) as { id: number } | undefined;
+
+          if (savedCustomization && savedCustomization.id) {
+            customization.options.forEach((option) => {
+              transactionItemCustomizationOptions.push({
+                id: null,
+                transaction_item_customization_id: savedCustomization.id,
+                customization_option_id: option.customization_option_id,
+                option_name: option.option_name,
+                price_adjustment: option.price_adjustment,
+                created_at: customization.created_at,
+              });
+            });
+          }
+        }
+
+        if (transactionItemCustomizationOptions.length > 0) {
+          await electronAPI.localDbUpsertTransactionItemCustomizationOptions?.(transactionItemCustomizationOptions);
+        }
+      }
+
+      console.log('✅ New items saved to existing transaction:', transactionId);
+      console.log('✅ New items saved:', transactionItems.length);
+
+      // Mark new items as locked by calling callback
+      if (onItemsLocked) {
+        const newItemIds = itemsToSave.map(item => item.id);
+        onItemsLocked(newItemIds);
+      }
+
+      // Refresh pending transactions list
+      await fetchPendingTransactions();
+      
+      // Dispatch custom event to immediately refresh pending orders count in POSLayout
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(new CustomEvent('pendingTransactionSaved'));
+      }
+
+      // Call success callback and close modal
+      onSuccess();
+      onClose();
+    } catch (error) {
+      console.error('Error saving new items to existing transaction:', error);
+      alert('Gagal menyimpan item baru. Silakan coba lagi.');
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  const handleConfirmNewItems = async () => {
+    if (newItemsToSave.length === 0 || !pendingTableId) return;
+    setShowConfirmationModal(false);
+    await saveNewItemsToExistingTransaction(newItemsToSave);
   };
 
   if (!isOpen) return null;
@@ -710,11 +947,7 @@ export default function TableSelectionModal({
                 {rooms.map((room) => (
                   <button
                     key={room.id}
-                    onClick={() => {
-                      // #region agent log
-                      fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'TableSelectionModal.tsx:520',message:'Room button clicked',data:{roomId:room.id,roomName:room.name,currentSelectedRoom:selectedRoom},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
-                      // #endregion
-                      setSelectedRoom(room.id);
+                    onClick={() => {setSelectedRoom(room.id);
                     }}
                     disabled={isSaving}
                     className={`px-3 py-1.5 text-sm rounded-md transition-colors disabled:opacity-50 whitespace-nowrap ${
@@ -873,12 +1106,6 @@ export default function TableSelectionModal({
                     })()}
 
                     {/* Tables */}
-                    {/* #region agent log */}
-                    {(() => {
-                      fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'TableSelectionModal.tsx:580',message:'Rendering tables list',data:{selectedRoom,tableCount:tables.length,tableIds:tables.map(t=>t.id),canvasWidth:canvasSize.width,canvasHeight:canvasSize.height,hasCanvasSize:canvasSize.width>0&&canvasSize.height>0},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
-                      return null;
-                    })()}
-                    {/* #endregion */}
                     {(() => {
                       const selectedRoomData = rooms.find(r => r.id === selectedRoom);
                       const fontSizeMultiplier = selectedRoomData?.font_size_multiplier ?? 1.0;
@@ -907,13 +1134,7 @@ export default function TableSelectionModal({
 
                       const hasPendingOrder = checkTableHasPendingOrder(table.id);
                       const pendingTransaction = getPendingTransactionForTable(table.id);
-                      const orderCreatedAt = pendingTransaction?.created_at || null;
-                      
-                      // #region agent log
-                      fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'TableSelectionModal.tsx:570',message:'Rendering table',data:{tableId:table.id,tableNumber:table.table_number,hasPendingOrder,orderCreatedAt,orderCreatedAtType:typeof orderCreatedAt},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
-                      // #endregion
-
-                      return (
+                      const orderCreatedAt = pendingTransaction?.created_at || null;return (
                         <TableDisplay
                           key={table.id}
                           table={table}
@@ -946,6 +1167,28 @@ export default function TableSelectionModal({
           )}
         </div>
       </div>
+
+      {/* New Items Confirmation Modal */}
+      <NewItemsConfirmationModal
+        isOpen={showConfirmationModal}
+        onClose={() => setShowConfirmationModal(false)}
+        onConfirm={handleConfirmNewItems}
+        newItems={newItemsToSave.map(item => ({
+          ...item,
+          product: {
+            id: item.product.id,
+            nama: (item.product as { nama?: string }).nama || `Product ${item.product.id}`,
+            harga_jual: item.product.harga_jual,
+            harga_qpon: item.product.harga_qpon,
+            harga_gofood: item.product.harga_gofood,
+            harga_grabfood: item.product.harga_grabfood,
+            harga_shopeefood: item.product.harga_shopeefood,
+            harga_tiktok: item.product.harga_tiktok,
+          }
+        }))}
+        tableName={loadedTransactionInfo?.tableName || null}
+        roomName={loadedTransactionInfo?.roomName || null}
+      />
     </div>
   );
 }
@@ -976,11 +1219,7 @@ function TableDisplay({
 }) {
   const [timer, setTimer] = useState<string>('--:--');
 
-  useEffect(() => {
-    // #region agent log
-    fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'TableDisplay.tsx:684',message:'Timer useEffect triggered',data:{tableNumber:table.table_number,orderCreatedAt,orderCreatedAtType:typeof orderCreatedAt,hasOrderCreatedAt:!!orderCreatedAt},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
-    // #endregion
-    const updateTimer = () => {
+  useEffect(() => {const updateTimer = () => {
       if (orderCreatedAt) {
         // Calculate elapsed time since order was created
         const now = new Date();
@@ -993,19 +1232,11 @@ function TableDisplay({
         const seconds = totalSeconds % 60;
         
         // Format as "MM:SS" (e.g., "15:30" = 15 minutes 30 seconds)
-        const timerValue = `${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
-        // #region agent log
-        fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'TableDisplay.tsx:697',message:'Calculating elapsed timer',data:{tableNumber:table.table_number,orderCreatedAt,now:now.toISOString(),created:created.toISOString(),diffMs,totalSeconds,minutes,seconds,timerValue},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
-        // #endregion
-        setTimer(timerValue);
+        const timerValue = `${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;setTimer(timerValue);
       } else {
         // No pending order, show "--:--" instead of current time
         // Timer should only show elapsed time for pending orders
-        const timerValue = '--:--';
-        // #region agent log
-        fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'TableDisplay.tsx:705',message:'No order - showing placeholder',data:{tableNumber:table.table_number,orderCreatedAt,timerValue},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
-        // #endregion
-        setTimer(timerValue);
+        const timerValue = '--:--';setTimer(timerValue);
       }
     };
 
@@ -1062,7 +1293,6 @@ function TableDisplay({
             className="bg-black/40 px-2 py-0.5 rounded text-white font-mono whitespace-nowrap"
             style={{
               WebkitTextStroke: '0.8px rgba(0, 0, 0, 0.9)',
-              textStroke: '0.8px rgba(0, 0, 0, 0.9)',
               textShadow: '0 0 3px rgba(0, 0, 0, 0.6), 0 1px 2px rgba(0, 0, 0, 0.4)',
               letterSpacing: '0.5px'
             }}

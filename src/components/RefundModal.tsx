@@ -261,8 +261,7 @@ const RefundModal: React.FC<RefundModalProps> = ({
                   // Pass undefined to avoid updating transaction - it's already been updated
                   refund_total: undefined,
                   refund_status: undefined,
-                  status: undefined,
-                  last_refunded_at: undefined
+                  status: undefined
                 });
                 console.log('[RefundModal] Refund synced to server successfully');
               } else {

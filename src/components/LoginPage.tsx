@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useRef, useState } from 'react';
-import { X, Eye, EyeOff, ChevronDown, Settings, Loader2, RefreshCw, ChevronLeft } from 'lucide-react';
+import { X, Eye, EyeOff, ChevronDown, Settings, Loader2, RefreshCw, ChevronLeft, CheckCircle2, XCircle } from 'lucide-react';
 import Image from 'next/image';
 import { getMostRecentEmail, getSavedEmails } from '@/lib/savedLoginEmails';
 
@@ -47,6 +47,8 @@ export default function LoginPage({
   }>({});
   const [isLoadingConfig, setIsLoadingConfig] = useState(true);
   const [isSavingConfig, setIsSavingConfig] = useState(false);
+  const [isTestingConnection, setIsTestingConnection] = useState(false);
+  const [connectionTestResult, setConnectionTestResult] = useState<{ success: boolean; message?: string; error?: string } | null>(null);
 
   useEffect(() => {
     const emails = getSavedEmails();
@@ -195,86 +197,189 @@ export default function LoginPage({
           )}
 
           {isSettingsView ? (
-            <div className="flex flex-col justify-between h-full space-y-6" style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}>
-              <div className="space-y-6 overflow-y-auto pr-2">
+            <div className="flex flex-col justify-between h-full space-y-3" style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}>
+              <div className="space-y-3 overflow-y-auto pr-2">
                 {/* Database & API Configuration */}
-                <div className="space-y-4 pt-4">
+                <div className="space-y-2 pt-2">
                   <div>
-                    <h3 className="text-sm font-semibold text-gray-700 mb-3">Database & API</h3>
+                    <h3 className="text-xs font-semibold text-gray-700 mb-2">Database & API</h3>
                     
                     {isLoadingConfig ? (
-                      <div className="text-center py-4 text-sm text-gray-500">Memuat konfigurasi...</div>
+                      <div className="text-center py-2 text-xs text-gray-500">Memuat konfigurasi...</div>
                     ) : (
-                      <div className="space-y-3">
-                        <div>
-                          <label className="block text-xs font-medium text-gray-700 mb-1">
-                            Alamat Server Database (IP/Hostname)
-                          </label>
-                          <input
-                            type="text"
-                            value={appConfig.serverHost || ''}
-                            onChange={(e) => setAppConfig(prev => ({ ...prev, serverHost: e.target.value }))}
-                            placeholder="192.168.1.100 atau hostname"
-                            className="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 text-gray-900 placeholder:opacity-50"
-                          />
-                        </div>
-                        
-                        <div>
-                          <label className="block text-xs font-medium text-gray-700 mb-1">
-                            URL API
+                      <div className="space-y-2">
+                        <div className="mb-4">
+                          <label className="block text-[10px] font-medium text-gray-700 mb-0.5">
+                            API URL
                           </label>
                           <input
                             type="text"
                             value={appConfig.apiUrl || ''}
                             onChange={(e) => setAppConfig(prev => ({ ...prev, apiUrl: e.target.value }))}
                             placeholder="http://192.168.1.100:3000 atau https://salespulse.cc"
-                            className="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 text-gray-900 placeholder:opacity-50"
-                          />
-                          <p className="mt-1 text-xs text-gray-500">
-                            contoh: http://192.168.1.100:3000
-                          </p>
-                        </div>
-                        
-                        <div>
-                          <label className="block text-xs font-medium text-gray-700 mb-1">
-                            Username Database
-                          </label>
-                          <input
-                            type="text"
-                            value={appConfig.dbUser || ''}
-                            onChange={(e) => setAppConfig(prev => ({ ...prev, dbUser: e.target.value }))}
-                            placeholder="root"
-                            className="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 text-gray-900 placeholder:opacity-50"
+                            className="w-full px-2 py-1.5 text-xs border border-gray-300 rounded focus:ring-1 focus:ring-blue-500 focus:border-blue-500 text-gray-900 placeholder:opacity-50"
                           />
                         </div>
                         
-                        <div>
-                          <label className="block text-xs font-medium text-gray-700 mb-1">
-                            Password Database
-                          </label>
-                          <input
-                            type="password"
-                            value={appConfig.dbPassword || ''}
-                            onChange={(e) => setAppConfig(prev => ({ ...prev, dbPassword: e.target.value }))}
-                            placeholder="Password MySQL"
-                            className="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 text-gray-900 placeholder:opacity-50"
-                          />
+                        {/* Database Configuration Grid */}
+                        <div className="relative border border-gray-300 rounded p-2.5 pt-3.5">
+                          <div className="absolute -top-2 left-3 bg-white px-1.5">
+                            <span className="text-[10px] font-medium text-gray-700">Setup DB MySQL</span>
+                          </div>
+                          <div className="grid grid-cols-2 gap-2">
+                            {/* Row 1: IP Database */}
+                            <div>
+                              <label className="block text-[9px] font-medium text-gray-700 mb-0.5">
+                                IP Database
+                              </label>
+                              <input
+                                type="text"
+                                value={appConfig.serverHost || ''}
+                                onChange={(e) => {
+                                  setAppConfig(prev => ({ ...prev, serverHost: e.target.value }));
+                                  setConnectionTestResult(null);
+                                }}
+                                placeholder="192.168.1.100"
+                                className="w-full px-2 py-1.5 text-xs border border-gray-300 rounded focus:ring-1 focus:ring-blue-500 focus:border-blue-500 text-gray-900 placeholder:opacity-50"
+                              />
+                            </div>
+                            
+                            {/* Row 1: Nama Database */}
+                            <div>
+                              <label className="block text-[9px] font-medium text-gray-700 mb-0.5">
+                                Nama Database
+                              </label>
+                              <input
+                                type="text"
+                                value={appConfig.dbName || ''}
+                                onChange={(e) => {
+                                  setAppConfig(prev => ({ ...prev, dbName: e.target.value }));
+                                  setConnectionTestResult(null);
+                                }}
+                                placeholder="salespulse"
+                                className="w-full px-2 py-1.5 text-xs border border-gray-300 rounded focus:ring-1 focus:ring-blue-500 focus:border-blue-500 text-gray-900 placeholder:opacity-50"
+                              />
+                            </div>
+                            
+                            {/* Row 2: Username Database */}
+                            <div>
+                              <label className="block text-[9px] font-medium text-gray-700 mb-0.5">
+                                Username Database
+                              </label>
+                              <input
+                                type="text"
+                                value={appConfig.dbUser || ''}
+                                onChange={(e) => {
+                                  setAppConfig(prev => ({ ...prev, dbUser: e.target.value }));
+                                  setConnectionTestResult(null);
+                                }}
+                                placeholder="root"
+                                className="w-full px-2 py-1.5 text-xs border border-gray-300 rounded focus:ring-1 focus:ring-blue-500 focus:border-blue-500 text-gray-900 placeholder:opacity-50"
+                              />
+                            </div>
+                            
+                            {/* Row 2: Password Database */}
+                            <div>
+                              <label className="block text-[9px] font-medium text-gray-700 mb-0.5">
+                                Password Database
+                              </label>
+                              <input
+                                type="password"
+                                value={appConfig.dbPassword || ''}
+                                onChange={(e) => {
+                                  setAppConfig(prev => ({ ...prev, dbPassword: e.target.value }));
+                                  setConnectionTestResult(null);
+                                }}
+                                placeholder="Password MySQL"
+                                className="w-full px-2 py-1.5 text-xs border border-gray-300 rounded focus:ring-1 focus:ring-blue-500 focus:border-blue-500 text-gray-900 placeholder:opacity-50"
+                              />
+                            </div>
+                          </div>
                         </div>
                         
-                        <div>
-                          <label className="block text-xs font-medium text-gray-700 mb-1">
-                            Nama Database
-                          </label>
-                          <input
-                            type="text"
-                            value={appConfig.dbName || ''}
-                            onChange={(e) => setAppConfig(prev => ({ ...prev, dbName: e.target.value }))}
-                            placeholder="salespulse"
-                            className="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 text-gray-900 placeholder:opacity-50"
-                          />
-                        </div>
+                        {/* Connection Test Result */}
+                        {connectionTestResult && (
+                          <div className={`p-2 rounded text-[10px] flex items-start gap-1.5 ${
+                            connectionTestResult.success 
+                              ? 'bg-green-50 border border-green-200 text-green-700' 
+                              : 'bg-red-50 border border-red-200 text-red-700'
+                          }`}>
+                            {connectionTestResult.success ? (
+                              <CheckCircle2 className="w-3 h-3 mt-0.5 flex-shrink-0" />
+                            ) : (
+                              <XCircle className="w-3 h-3 mt-0.5 flex-shrink-0" />
+                            )}
+                            <div className="flex-1">
+                              {connectionTestResult.success ? (
+                                <div className="font-medium">{connectionTestResult.message}</div>
+                              ) : (
+                                <div>
+                                  <div className="font-medium mb-0.5">Gagal terhubung</div>
+                                  <div className="text-[9px] opacity-90">{connectionTestResult.error}</div>
+                                </div>
+                              )}
+                            </div>
+                          </div>
+                        )}
                         
-                        <div className="flex gap-2">
+                        <div className="flex gap-1.5">
+                          <button
+                            type="button"
+                            onClick={async () => {
+                              // Check if we're in Electron and API is available
+                              if (typeof window === 'undefined') {
+                                alert('Fitur ini hanya tersedia di Electron');
+                                return;
+                              }
+                              
+                              if (!window.electronAPI) {
+                                alert('Electron API tidak tersedia. Pastikan aplikasi berjalan di Electron.');
+                                console.error('window.electronAPI is not defined');
+                                return;
+                              }
+                              
+                              if (!window.electronAPI.testDbConnection) {
+                                alert('Fitur test koneksi database tidak tersedia. Pastikan aplikasi menggunakan versi terbaru.');
+                                console.error('window.electronAPI.testDbConnection is not defined');
+                                console.log('Available methods:', Object.keys(window.electronAPI || {}));
+                                return;
+                              }
+                              
+                              setIsTestingConnection(true);
+                              setConnectionTestResult(null);
+                              
+                              try {
+                                const result = await window.electronAPI.testDbConnection({
+                                  serverHost: appConfig.serverHost,
+                                  dbUser: appConfig.dbUser,
+                                  dbPassword: appConfig.dbPassword,
+                                  dbName: appConfig.dbName,
+                                  dbPort: appConfig.dbPort,
+                                });
+                                
+                                setConnectionTestResult(result);
+                              } catch (error) {
+                                console.error('Test connection error:', error);
+                                setConnectionTestResult({
+                                  success: false,
+                                  error: error instanceof Error ? error.message : 'Gagal menguji koneksi'
+                                });
+                              } finally {
+                                setIsTestingConnection(false);
+                              }
+                            }}
+                            disabled={isTestingConnection || isSavingConfig}
+                            className="flex-1 px-2 py-1.5 bg-blue-600 hover:bg-blue-700 text-white text-[10px] font-semibold rounded transition-colors disabled:bg-blue-300 disabled:cursor-not-allowed flex items-center justify-center gap-1"
+                          >
+                            {isTestingConnection ? (
+                              <>
+                                <Loader2 className="w-3 h-3 animate-spin" />
+                                Menguji...
+                              </>
+                            ) : (
+                              'Test Koneksi Database'
+                            )}
+                          </button>
                           <button
                             type="button"
                             onClick={async () => {
@@ -289,10 +394,15 @@ export default function LoginPage({
                               
                               setIsSavingConfig(true);
                               try {
-                                const result = await window.electronAPI.resetAppConfig();
+                                const electronAPI = window.electronAPI;
+                                if (!electronAPI?.resetAppConfig || !electronAPI?.getAppConfig) {
+                                  alert('Electron API tidak tersedia');
+                                  return;
+                                }
+                                const result = await electronAPI.resetAppConfig();
                                 if (result?.success) {
                                   // Reload config to show .env defaults
-                                  const configResult = await window.electronAPI.getAppConfig();
+                                  const configResult = await electronAPI.getAppConfig();
                                   if (configResult?.success) {
                                     setAppConfig(configResult.config || {});
                                   }
@@ -308,7 +418,7 @@ export default function LoginPage({
                               }
                             }}
                             disabled={isSavingConfig}
-                            className="px-4 py-2 bg-gray-600 hover:bg-gray-700 text-white text-sm font-semibold rounded-lg transition-colors disabled:bg-gray-300 disabled:cursor-not-allowed"
+                            className="px-2 py-1.5 bg-gray-600 hover:bg-gray-700 text-white text-[10px] font-semibold rounded transition-colors disabled:bg-gray-300 disabled:cursor-not-allowed"
                           >
                             Reset
                           </button>
@@ -342,9 +452,9 @@ export default function LoginPage({
                               }
                             }}
                             disabled={isSavingConfig}
-                            className="flex-1 bg-green-600 hover:bg-green-700 text-white text-sm font-semibold px-4 py-2 rounded-lg transition-colors disabled:bg-green-300 disabled:cursor-not-allowed"
+                            className="flex-1 bg-green-600 hover:bg-green-700 text-white text-[10px] font-semibold px-2 py-1.5 rounded transition-colors disabled:bg-green-300 disabled:cursor-not-allowed"
                           >
-                            {isSavingConfig ? 'Menyimpan...' : 'Simpan Pengaturan Database & API'}
+                            {isSavingConfig ? 'Menyimpan...' : 'Simpan'}
                           </button>
                         </div>
                       </div>
@@ -353,27 +463,27 @@ export default function LoginPage({
                 </div>
                 
                 {/* Sync Settings */}
-                <div className="space-y-4 border-t border-gray-200 pt-4">
+                <div className="space-y-2 border-t border-gray-200 pt-2">
                   <div>
-                    <h3 className="text-sm font-semibold text-gray-700 mb-3">Sinkronisasi Data</h3>
+                    <h3 className="text-xs font-semibold text-gray-700 mb-2">Sinkronisasi Data</h3>
                   </div>
                   {syncStatus && (
-                    <p className="text-xs text-blue-600 bg-blue-50 border border-blue-100 rounded px-2 py-2">
+                    <p className="text-[10px] text-blue-600 bg-blue-50 border border-blue-100 rounded px-1.5 py-1.5">
                       {syncStatus}
                     </p>
                   )}
                   {syncError && (
-                    <p className="text-xs text-red-600 bg-red-50 border border-red-100 rounded px-2 py-2">
+                    <p className="text-[10px] text-red-600 bg-red-50 border border-red-100 rounded px-1.5 py-1.5">
                       {syncError}
                     </p>
                   )}
                   {typeof syncProgress === 'number' && (
-                    <div className="space-y-1">
-                      <div className="flex justify-between text-xs text-gray-600">
+                    <div className="space-y-0.5">
+                      <div className="flex justify-between text-[10px] text-gray-600">
                         <span>Progres Sinkronisasi</span>
                         <span>{Math.max(0, Math.min(100, Math.round(syncProgress)))}%</span>
                       </div>
-                      <div className="h-2 rounded-full bg-gray-200 overflow-hidden">
+                      <div className="h-1.5 rounded-full bg-gray-200 overflow-hidden">
                         <div
                           className="h-full bg-blue-500 transition-all duration-300 ease-out"
                           style={{ width: `${Math.max(0, Math.min(100, syncProgress))}%` }}
@@ -388,18 +498,18 @@ export default function LoginPage({
                         await onSyncRequest();
                       }
                     }}
-                    className="w-full flex items-center justify-center gap-2 bg-blue-600 hover:bg-blue-700 text-white text-sm font-semibold px-4 py-3 rounded-lg transition-colors disabled:bg-blue-300"
+                    className="w-full flex items-center justify-center gap-1.5 bg-blue-600 hover:bg-blue-700 text-white text-[10px] font-semibold px-2 py-1.5 rounded transition-colors disabled:bg-blue-300"
                     style={{ WebkitAppRegion: 'no-drag', cursor: isSyncing ? 'not-allowed' : 'pointer' } as React.CSSProperties}
                     disabled={isSyncing}
                   >
                     {isSyncing ? (
                       <>
-                        <Loader2 className="w-4 h-4 animate-spin" />
+                        <Loader2 className="w-3 h-3 animate-spin" />
                         Sedang Sinkronisasi
                       </>
                     ) : (
                       <>
-                        <RefreshCw className="w-4 h-4" />
+                        <RefreshCw className="w-3 h-3" />
                         Sinkronisasi Knowledge Base PoS
                       </>
                     )}
@@ -409,7 +519,7 @@ export default function LoginPage({
               <button
                 type="button"
                 onClick={() => setIsSettingsView(false)}
-                className="text-sm text-gray-500 hover:text-gray-700 transition-colors"
+                className="text-[10px] text-gray-500 hover:text-gray-700 transition-colors"
                 style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
                 disabled={isSyncing}
               >

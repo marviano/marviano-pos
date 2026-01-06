@@ -106,28 +106,17 @@ class ConflictResolutionService {
    */
   private getTimestamp(data: UnknownRecord | null | undefined): number {
     if (!data) return 0;
-    
-    // #region agent log
-    fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'conflictResolution.ts:107',message:'getTimestamp entry',data:{hasData:!!data,dataKeys:data?Object.keys(data):[]},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
-    // #endregion
-    
     // Try different timestamp fields
     const timestampFields = ['updated_at', 'created_at', 'last_modified', 'timestamp'];
     
     for (const field of timestampFields) {
       if (data[field]) {
         const fieldValue = data[field];
-        // #region agent log
-        fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'conflictResolution.ts:115',message:'Found timestamp field',data:{field,fieldValue,fieldValueType:typeof fieldValue},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
-        // #endregion
         const timestamp = typeof fieldValue === 'number' 
           ? fieldValue 
           : (typeof fieldValue === 'string' || fieldValue instanceof Date 
               ? new Date(fieldValue as string | Date).getTime() 
               : 0);
-        // #region agent log
-        fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'conflictResolution.ts:122',message:'Calculated timestamp',data:{field,timestamp,isNaN:isNaN(timestamp),now:Date.now()},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
-        // #endregion
         if (!isNaN(timestamp)) {
           return timestamp;
         }
@@ -135,9 +124,6 @@ class ConflictResolutionService {
     }
     
     // Fallback to current time if no timestamp found
-    // #region agent log
-    fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'conflictResolution.ts:128',message:'No timestamp found, using fallback',data:{now:Date.now()},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
-    // #endregion
     return Date.now();
   }
 
@@ -177,20 +163,12 @@ class ConflictResolutionService {
     }
     
     // Original validation (timestamp check is optional for some data types)
-    const timestamp = this.getTimestamp(data);
-    // #region agent log
-    fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'conflictResolution.ts:167',message:'validateData timestamp check',data:{timestamp,timestampIsZero:timestamp===0,now:Date.now(),age:Date.now()-timestamp,maxAge:this.config.maxAge},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
-    // #endregion
-    if (timestamp === 0 && requiredFields && requiredFields.length > 0) {
+    const timestamp = this.getTimestamp(data);if (timestamp === 0 && requiredFields && requiredFields.length > 0) {
       // Only warn about missing timestamp if we're doing strict validation
       // Some data types might not have timestamps
     }
     
-    if (timestamp > 0 && this.isDataTooOld(data)) {
-      // #region agent log
-      fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'conflictResolution.ts:174',message:'Data is too old for sync',data:{timestamp,now:Date.now(),age:Date.now()-timestamp,maxAge:this.config.maxAge,created_at:data.created_at,updated_at:data.updated_at},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
-      // #endregion
-      errors.push('Data is too old for sync');
+    if (timestamp > 0 && this.isDataTooOld(data)) {errors.push('Data is too old for sync');
     }
     
     return {

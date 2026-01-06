@@ -45,3 +45,6 @@ GROUP BY CONSTRAINT_NAME;
 -- 3. Index should exist: idx_transactions_table_status
 -- 4. Should only have 1 foreign key constraint (if you see 2, there's a duplicate)
 
+
+
+

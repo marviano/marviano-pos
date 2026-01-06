@@ -1,0 +1,434 @@
+'use client';
+
+import { useState, useEffect } from 'react';
+import { XCircle, Calendar, User, Package, Receipt, Users } from 'lucide-react';
+
+interface CancelledItem {
+  id: number;
+  uuid_id: string;
+  transaction_id: number;
+  uuid_transaction_id: string;
+  product_id: number;
+  product_name: string;
+  quantity: number;
+  unit_price: number;
+  total_price: number;
+  custom_note: string | null;
+  cancelled_at: string; // created_at of cancelled item
+  transaction_receipt_number: string | null;
+  customer_name: string | null;
+  cancelled_by_user_id: number | null;
+  cancelled_by_user_name: string | null;
+  printer_type: 'R' | 'RR' | null; // R = Printer 1, RR = Printer 2
+}
+
+interface ElectronAPI {
+  localDbGetTransactions?: (businessId: number, limit: number) => Promise<unknown[]>;
+  localDbGetTransactionItems?: (transactionId: string) => Promise<unknown[]>;
+  localDbGetAllProducts?: () => Promise<unknown[]>;
+  localDbGetUsers?: () => Promise<unknown[]>;
+  getPrinter1AuditLog?: (fromDate?: string, toDate?: string, limit?: number) => Promise<{ success: boolean; entries: unknown[] }>;
+  getPrinter2AuditLog?: (fromDate?: string, toDate?: string, limit?: number) => Promise<{ success: boolean; entries: unknown[] }>;
+}
+
+const getElectronAPI = (): ElectronAPI | undefined => {
+  if (typeof window === 'undefined') return undefined;
+  return window.electronAPI as ElectronAPI | undefined;
+};
+
+// Format date to "Rabu, 14.40 14 Jan 2025"
+const formatCancelledDate = (dateString: string): string => {
+  try {
+    const date = new Date(dateString);
+    const days = ['Minggu', 'Senin', 'Selasa', 'Rabu', 'Kamis', 'Jumat', 'Sabtu'];
+    const months = ['Jan', 'Feb', 'Mar', 'Apr', 'Mei', 'Jun', 'Jul', 'Agu', 'Sep', 'Okt', 'Nov', 'Des'];
+    
+    const dayName = days[date.getDay()];
+    const hours = String(date.getHours()).padStart(2, '0');
+    const minutes = String(date.getMinutes()).padStart(2, '0');
+    const day = date.getDate();
+    const month = months[date.getMonth()];
+    const year = date.getFullYear();
+    
+    return `${dayName}, ${hours}.${minutes} ${day} ${month} ${year}`;
+  } catch (error) {
+    return dateString;
+  }
+};
+
+const formatRupiah = (amount: number): string => {
+  return new Intl.NumberFormat('id-ID', {
+    style: 'currency',
+    currency: 'IDR',
+    minimumFractionDigits: 0,
+  }).format(amount);
+};
+
+export default function CancelledItemsReport() {
+  const [cancelledItems, setCancelledItems] = useState<CancelledItem[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    fetchCancelledItems();
+  }, []);
+
+  const fetchCancelledItems = async () => {
+    try {
+      setLoading(true);
+      setError(null);
+
+      const electronAPI = getElectronAPI();
+      if (!electronAPI) {
+        setError('Electron API tidak tersedia');
+        setLoading(false);
+        return;
+      }
+
+      // Fetch printer audit logs to determine R/RR
+      const receiptizePrintedIds = new Set<string>();
+      const receiptizeCounters: Record<string, number> = {};
+      const receiptCounters: Record<string, number> = {};
+
+      // Fetch Printer 2 (Receiptize) audit log
+      if (electronAPI.getPrinter2AuditLog) {
+        try {
+          const printer2Result = await electronAPI.getPrinter2AuditLog(undefined, undefined, 5000);
+          if (printer2Result?.entries && Array.isArray(printer2Result.entries)) {
+            printer2Result.entries.forEach((entry: unknown) => {
+              const e = entry as { transaction_id?: string; printer2_receipt_number?: number; is_reprint?: number };
+              if (e.transaction_id && e.is_reprint === 0) {
+                // Only count original prints, not reprints
+                receiptizePrintedIds.add(e.transaction_id);
+                if (e.printer2_receipt_number) {
+                  receiptizeCounters[e.transaction_id] = e.printer2_receipt_number;
+                }
+              }
+            });
+          }
+        } catch (err) {
+          console.warn('Failed to fetch Printer 2 audit log:', err);
+        }
+      }
+
+      // Fetch Printer 1 (Receipt) audit log
+      if (electronAPI.getPrinter1AuditLog) {
+        try {
+          const printer1Result = await electronAPI.getPrinter1AuditLog(undefined, undefined, 5000);
+          if (printer1Result?.entries && Array.isArray(printer1Result.entries)) {
+            printer1Result.entries.forEach((entry: unknown) => {
+              const e = entry as { transaction_id?: string; printer1_receipt_number?: number; is_reprint?: number };
+              if (e.transaction_id && e.is_reprint === 0) {
+                // Only count original prints, not reprints
+                if (e.printer1_receipt_number) {
+                  receiptCounters[e.transaction_id] = e.printer1_receipt_number;
+                }
+              }
+            });
+          }
+        } catch (err) {
+          console.warn('Failed to fetch Printer 1 audit log:', err);
+        }
+      }
+
+      // Get all transactions to map transaction info
+      const allTransactions = await electronAPI.localDbGetTransactions?.(0, 100000);
+      const transactionsArray = Array.isArray(allTransactions) ? allTransactions as Record<string, unknown>[] : [];
+      const transactionsMap = new Map<string, Record<string, unknown>>();
+      transactionsArray.forEach((tx) => {
+        const txUuid = typeof tx.uuid_id === 'string' ? tx.uuid_id : String(tx.uuid_id || '');
+        if (txUuid) {
+          transactionsMap.set(txUuid, tx);
+        }
+      });
+
+      // Get all products to map product names
+      const allProducts = await electronAPI.localDbGetAllProducts?.();
+      const productsArray = Array.isArray(allProducts) ? allProducts as Record<string, unknown>[] : [];
+      const productsMap = new Map<number, Record<string, unknown>>();
+      productsArray.forEach((p) => {
+        const id = typeof p.id === 'number' ? p.id : (typeof p.id === 'string' ? parseInt(p.id, 10) : null);
+        if (id) {
+          productsMap.set(id, p);
+        }
+      });
+
+      // Get all users to map user names
+      const allUsers = electronAPI.localDbGetUsers ? await electronAPI.localDbGetUsers() : [];
+      const usersArray = Array.isArray(allUsers) ? allUsers as Record<string, unknown>[] : [];
+      const usersMap = new Map<number, Record<string, unknown>>();
+      usersArray.forEach((u) => {
+        const id = typeof u.id === 'number' ? u.id : (typeof u.id === 'string' ? parseInt(u.id, 10) : null);
+        if (id) {
+          usersMap.set(id, u);
+        }
+      });
+
+      // Get all pending transactions to find cancelled items
+      // We need to query all transactions and get their items
+      const cancelledItemsList: CancelledItem[] = [];
+
+      for (const tx of transactionsArray) {
+        const txUuid = typeof tx.uuid_id === 'string' ? tx.uuid_id : String(tx.uuid_id || '');
+        if (!txUuid) continue;
+
+        const items = await electronAPI.localDbGetTransactionItems?.(txUuid);
+        const itemsArray = Array.isArray(items) ? items as Record<string, unknown>[] : [];
+
+        // Filter for cancelled items
+        const cancelledItemsInTx = itemsArray.filter((item) => {
+          const productionStatus = typeof item.production_status === 'string' ? item.production_status : null;
+          return productionStatus === 'cancelled';
+        });
+
+        for (const item of cancelledItemsInTx) {
+          const productId = typeof item.product_id === 'number' ? item.product_id : (typeof item.product_id === 'string' ? parseInt(item.product_id, 10) : null);
+          if (!productId) continue;
+
+          const product = productsMap.get(productId);
+          const productName = product && typeof product.nama === 'string' ? product.nama : 'Unknown Product';
+
+          const transaction = transactionsMap.get(txUuid);
+          // Receipt number can be number or string, handle both
+          const receiptNumber = transaction 
+            ? (typeof transaction.receipt_number === 'number' 
+                ? transaction.receipt_number.toString() 
+                : (typeof transaction.receipt_number === 'string' ? transaction.receipt_number : null))
+            : null;
+          const customerName = transaction && typeof transaction.customer_name === 'string' ? transaction.customer_name : null;
+
+          // Try to get user from transaction (who created it)
+          // Note: Ideally we'd query activity_logs to get who actually cancelled it,
+          // but for now we use the transaction creator as a reasonable approximation
+          const transactionUserId = transaction && typeof transaction.user_id === 'number' 
+            ? transaction.user_id 
+            : (transaction && typeof transaction.user_id === 'string' ? parseInt(transaction.user_id, 10) : null);
+          
+          const user = transactionUserId ? usersMap.get(transactionUserId) : null;
+          const userName = user && typeof user.name === 'string' 
+            ? user.name 
+            : (user && typeof user.email === 'string' ? user.email : 'Tidak diketahui');
+
+          const itemId = typeof item.id === 'number' ? item.id : (typeof item.id === 'string' ? parseInt(item.id, 10) : 0);
+          const itemUuidId = typeof item.uuid_id === 'string' ? item.uuid_id : String(item.uuid_id || '');
+          const transactionIntId = typeof item.transaction_id === 'number' ? item.transaction_id : (typeof item.transaction_id === 'string' ? parseInt(item.transaction_id, 10) : 0);
+          const transactionUuidId = typeof item.uuid_transaction_id === 'string' ? item.uuid_transaction_id : String(item.uuid_transaction_id || '');
+          const quantity = typeof item.quantity === 'number' ? item.quantity : (typeof item.quantity === 'string' ? parseInt(item.quantity, 10) : 1);
+          const unitPrice = typeof item.unit_price === 'number' ? item.unit_price : (typeof item.unit_price === 'string' ? parseFloat(String(item.unit_price)) : 0);
+          const totalPrice = typeof item.total_price === 'number' ? item.total_price : (typeof item.total_price === 'string' ? parseFloat(String(item.total_price)) : 0);
+          const customNote = typeof item.custom_note === 'string' ? item.custom_note : null;
+          const cancelledAt = typeof item.created_at === 'string' ? item.created_at : new Date().toISOString();
+
+          // Determine printer type (R/RR)
+          // RR = Printer 2 (Receiptize) if in receiptizePrintedIds or has receiptizeCounter
+          // R = Printer 1 (Receipt) if has receiptCounter but NOT receiptize
+          // null = Transaction was never printed (all items cancelled before printing)
+          // Try both UUID and numeric ID for matching (audit logs might use either)
+          const txUuidId = transactionUuidId;
+          const txNumericId = transactionIntId.toString();
+          
+          // Check both UUID and numeric ID formats
+          const hasReceiptizeCounter = (typeof receiptizeCounters[txUuidId] === 'number' && receiptizeCounters[txUuidId] > 0) ||
+                                      (typeof receiptizeCounters[txNumericId] === 'number' && receiptizeCounters[txNumericId] > 0);
+          const hasReceiptCounter = (typeof receiptCounters[txUuidId] === 'number' && receiptCounters[txUuidId] > 0) ||
+                                   (typeof receiptCounters[txNumericId] === 'number' && receiptCounters[txNumericId] > 0);
+          const isInReceiptizeIds = receiptizePrintedIds.has(txUuidId) || receiptizePrintedIds.has(txNumericId);
+          const isReceiptize = isInReceiptizeIds || hasReceiptizeCounter;
+          
+          let printerType: 'R' | 'RR' | null = null;
+          if (isReceiptize) {
+            printerType = 'RR'; // Printer 2 (Receiptize)
+          } else if (hasReceiptCounter && !isReceiptize) {
+            printerType = 'R'; // Printer 1 (Receipt)
+          }
+          // If printerType is still null, it means transaction was never printed
+          // This is normal for transactions where all items were cancelled before payment/printing
+
+          cancelledItemsList.push({
+            id: itemId,
+            uuid_id: itemUuidId,
+            transaction_id: transactionIntId,
+            uuid_transaction_id: transactionUuidId,
+            product_id: productId,
+            product_name: productName,
+            quantity: quantity,
+            unit_price: unitPrice,
+            total_price: totalPrice,
+            custom_note: customNote,
+            cancelled_at: cancelledAt,
+            transaction_receipt_number: receiptNumber,
+            customer_name: customerName,
+            cancelled_by_user_id: transactionUserId,
+            cancelled_by_user_name: userName,
+            printer_type: printerType,
+          });
+        }
+      }
+
+      // Sort by cancelled_at descending (newest first)
+      cancelledItemsList.sort((a, b) => 
+        new Date(b.cancelled_at).getTime() - new Date(a.cancelled_at).getTime()
+      );
+
+      setCancelledItems(cancelledItemsList);
+    } catch (err) {
+      console.error('Error fetching cancelled items:', err);
+      setError('Gagal memuat data item yang dibatalkan');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  if (loading) {
+    return (
+      <div className="flex-1 flex items-center justify-center">
+        <div className="text-center">
+          <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600 mx-auto mb-4"></div>
+          <p className="text-gray-600">Memuat data...</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div className="flex-1 flex items-center justify-center">
+        <div className="text-center">
+          <XCircle className="w-12 h-12 text-red-500 mx-auto mb-4" />
+          <p className="text-red-600">{error}</p>
+          <button
+            onClick={fetchCancelledItems}
+            className="mt-4 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700"
+          >
+            Coba Lagi
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex-1 overflow-auto p-6">
+      <div className="bg-white rounded-lg shadow-sm border border-gray-200">
+        <div className="px-6 py-4 border-b border-gray-200">
+          <h2 className="text-xl font-bold text-gray-900 flex items-center gap-2">
+            <XCircle className="w-5 h-5 text-red-500" />
+            Item Dibatalkan
+          </h2>
+          <p className="text-sm text-gray-600 mt-1">
+            Total: {cancelledItems.length} item
+          </p>
+        </div>
+
+        {cancelledItems.length === 0 ? (
+          <div className="p-12 text-center">
+            <XCircle className="w-16 h-16 text-gray-300 mx-auto mb-4" />
+            <p className="text-gray-500 text-lg">Tidak ada item yang dibatalkan</p>
+          </div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full">
+              <thead className="bg-gray-50">
+                <tr>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                    Waktu Pembatalan
+                  </th>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                    Item
+                  </th>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                    Jumlah
+                  </th>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                    Harga
+                  </th>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                    Transaksi
+                  </th>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                    Pelanggan
+                  </th>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                    Dibatalkan Oleh
+                  </th>
+                </tr>
+              </thead>
+              <tbody className="bg-white divide-y divide-gray-200">
+                {cancelledItems.map((item) => (
+                  <tr key={item.uuid_id} className="hover:bg-gray-50">
+                    <td className="px-6 py-4 whitespace-nowrap">
+                      <div className="flex items-center text-sm text-gray-900">
+                        <Calendar className="w-4 h-4 text-gray-400 mr-2" />
+                        {formatCancelledDate(item.cancelled_at)}
+                      </div>
+                    </td>
+                    <td className="px-6 py-4">
+                      <div className="flex items-center">
+                        <Package className="w-4 h-4 text-gray-400 mr-2" />
+                        <div>
+                          <div className="text-sm font-medium text-gray-900">
+                            {item.product_name}
+                          </div>
+                          {item.custom_note && (
+                            <div className="text-xs text-gray-500 mt-1">
+                              Catatan: {item.custom_note}
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    </td>
+                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
+                      {item.quantity}x
+                    </td>
+                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
+                      {formatRupiah(item.total_price)}
+                    </td>
+                    <td className="px-6 py-4 whitespace-nowrap">
+                      <div className="flex items-center gap-2 text-sm text-gray-900">
+                        <Receipt className="w-4 h-4 text-gray-400 flex-shrink-0" />
+                        {item.printer_type ? (
+                          <span className={`inline-flex items-center px-1.5 py-0.5 rounded text-xs font-medium flex-shrink-0 ${
+                            item.printer_type === 'RR' 
+                              ? 'bg-green-100 text-green-800' 
+                              : 'bg-blue-100 text-blue-800'
+                          }`} title={item.printer_type === 'RR' ? 'Printer 2 (Receiptize)' : 'Printer 1 (Receipt)'}>
+                            {item.printer_type}
+                          </span>
+                        ) : (
+                          <span 
+                            className="inline-flex items-center px-1.5 py-0.5 rounded text-xs font-medium bg-gray-100 text-gray-500 flex-shrink-0"
+                            title="Transaksi belum dicetak (semua item dibatalkan sebelum pembayaran)"
+                          >
+                            -
+                          </span>
+                        )}
+                        <span className="whitespace-nowrap">
+                          {item.transaction_receipt_number 
+                            ? `#${item.transaction_receipt_number}` 
+                            : `ID: ${item.transaction_id}`}
+                        </span>
+                      </div>
+                    </td>
+                    <td className="px-6 py-4 whitespace-nowrap">
+                      <div className="flex items-center text-sm text-gray-900">
+                        <Users className="w-4 h-4 text-gray-400 mr-2" />
+                        {item.customer_name || 'Guest'}
+                      </div>
+                    </td>
+                    <td className="px-6 py-4 whitespace-nowrap">
+                      <div className="flex items-center text-sm text-gray-900">
+                        <User className="w-4 h-4 text-gray-400 mr-2" />
+                        {item.cancelled_by_user_name}
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+

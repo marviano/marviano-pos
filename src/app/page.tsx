@@ -9,7 +9,7 @@ import OfflineStatus from '@/components/OfflineStatus';
 import { LogOut, Minimize2, X } from 'lucide-react';
 import { databaseHealthService } from '@/lib/databaseHealth';
 import { smartSyncService } from '@/lib/smartSync';
-import { systemPosSyncService } from '@/lib/systemPosSync';
+// import { systemPosSyncService } from '@/lib/systemPosSync';
 
 export default function Home() {
   const router = useRouter();
@@ -176,23 +176,11 @@ export default function Home() {
             )}
             <span className="text-[9.6px] text-blue-700">{databaseStatus}</span>
             <button
-              onClick={async () => {
-                // #region agent log
-                fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'page.tsx:179',message:'Sync Tx button clicked',data:{timestamp:Date.now()},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
-                // #endregion
-                setIsSyncing(true);
+              onClick={async () => {setIsSyncing(true);
                 setDatabaseStatus('Syncing...');
                 try {
                   // Upload any pending local transactions to cloud
-                  console.log('🔄 [SYNC] Starting upload sync...');
-                  // #region agent log
-                  fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'page.tsx:185',message:'Before forceSync call',data:{timestamp:Date.now()},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
-                  // #endregion
-                  const syncResult = await smartSyncService.forceSync();
-                  // #region agent log
-                  fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'page.tsx:188',message:'After forceSync call',data:{success:syncResult.success,syncedCount:syncResult.syncedCount,message:syncResult.message},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
-                  // #endregion
-                  console.log('✅ [SYNC] Upload sync completed', syncResult);
+                  console.log('🔄 [SYNC] Starting upload sync...');const syncResult = await smartSyncService.forceSync();console.log('✅ [SYNC] Upload sync completed', syncResult);
 
                   // Show user-friendly status message
                   if (syncResult.success) {
@@ -207,11 +195,7 @@ export default function Home() {
 
                   // Trigger data refresh event for POSLayout
                   window.dispatchEvent(new CustomEvent('dataSynced'));
-                } catch (error) {
-                  // #region agent log
-                  fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'page.tsx:196',message:'Sync error caught',data:{error:error instanceof Error?error.message:String(error),stack:error instanceof Error?error.stack:undefined},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'E'})}).catch(()=>{});
-                  // #endregion
-                  console.error('❌ Sync failed:', error);
+                } catch (error) {console.error('❌ Sync failed:', error);
                   setDatabaseStatus('Sync failed');
                 } finally {
                   setIsSyncing(false);

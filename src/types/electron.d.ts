@@ -533,6 +533,7 @@ declare global {
       getAppConfig?: () => Promise<{ success: boolean; config: { serverHost?: string; apiUrl?: string; dbUser?: string; dbPassword?: string; dbName?: string; dbPort?: number } | null; error?: string }>;
       saveAppConfig?: (config: { serverHost?: string; apiUrl?: string; dbUser?: string; dbPassword?: string; dbName?: string; dbPort?: number }) => Promise<{ success: boolean; error?: string }>;
       resetAppConfig?: () => Promise<{ success: boolean; error?: string }>;
+      testDbConnection?: (config: { serverHost?: string; dbUser?: string; dbPassword?: string; dbName?: string; dbPort?: number }) => Promise<{ success: boolean; message?: string; error?: string }>;
     };
   }
 }

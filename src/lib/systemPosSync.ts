@@ -227,13 +227,7 @@ class SystemPosSyncService {
       // Allow max-retry transactions through for server check (they'll be handled specially)
       const pendingQueue = Array.isArray(result.queue)
         ? result.queue.filter((q: QueuedTransaction) => !q.synced_at)
-        : [];
-
-      // #region agent log
-      fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'systemPosSync.ts:218',message:'Pending queue filtered',data:{totalQueue:result.queue?.length||0,pendingCount:pendingQueue.length,exceededMaxRetries:result.queue?.filter((q:QueuedTransaction)=>q.retry_count>=this.config.maxRetries&&!q.synced_at).length||0,retryCounts:pendingQueue.map((q:QueuedTransaction)=>({id:q.transaction_id,retry:q.retry_count,synced_at:q.synced_at}))},timestamp:Date.now(),sessionId:'debug-session',runId:'post-fix',hypothesisId:'A'})}).catch(()=>{});
-      // #endregion
-
-      if (pendingQueue.length === 0) {
+        : [];if (pendingQueue.length === 0) {
         // console.log('✅ [SYSTEM POS SYNC] No pending transactions to sync');
         return;
       }
@@ -302,36 +296,19 @@ class SystemPosSyncService {
         headers: { 'Content-Type': 'application/json' },
       });
 
-      if (!response.ok) {
-        // #region agent log
-        fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'systemPosSync.ts:280',message:'Server check failed - response not OK',data:{transactionId,status:response.status},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'E'})}).catch(()=>{});
-        // #endregion
-        return { exists: false, updated_at: null };
+      if (!response.ok) {return { exists: false, updated_at: null };
       }
 
       const result = await response.json();
       if (result.success && Array.isArray(result.transactions)) {
         const transaction = result.transactions.find((t: UnknownRecord) => String(t.id) === String(transactionId));
-        if (transaction) {
-          // #region agent log
-          fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'systemPosSync.ts:288',message:'Transaction found on server',data:{transactionId,updated_at:transaction.updated_at||transaction.created_at},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'E'})}).catch(()=>{});
-          // #endregion
-          return { 
+        if (transaction) {return { 
             exists: true, 
             updated_at: transaction.updated_at || transaction.created_at || null 
           };
         }
-      }
-
-      // #region agent log
-      fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'systemPosSync.ts:296',message:'Transaction not found on server',data:{transactionId},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'E'})}).catch(()=>{});
-      // #endregion
-      return { exists: false, updated_at: null };
-    } catch (error) {
-      // #region agent log
-      fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'systemPosSync.ts:319',message:'Error checking transaction on server',data:{transactionId,error:error instanceof Error?error.message:String(error),errorStack:error instanceof Error?error.stack:undefined},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'E'})}).catch(()=>{});
-      // #endregion
-      console.error(`❌ [SYSTEM POS SYNC] Error checking transaction ${transactionId} on server:`);
+      }return { exists: false, updated_at: null };
+    } catch (error) {console.error(`❌ [SYSTEM POS SYNC] Error checking transaction ${transactionId} on server:`);
       if (error instanceof Error) {
         console.error(`❌ [SYSTEM POS SYNC] Error message:`, error.message);
         if (error.stack) {
@@ -355,20 +332,9 @@ class SystemPosSyncService {
 
     for (const queuedTx of batch) {
       // Handle transactions that exceeded max retries - check server status first
-      if (queuedTx.retry_count >= this.config.maxRetries) {
-        // #region agent log
-        fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'systemPosSync.ts:295',message:'Transaction exceeded max retries - checking server',data:{transactionId:queuedTx.transaction_id,retryCount:queuedTx.retry_count,maxRetries:this.config.maxRetries},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'E'})}).catch(()=>{});
-        // #endregion
-
-        try {
+      if (queuedTx.retry_count >= this.config.maxRetries) {try {
           // Check if transaction exists on server
-          const serverCheck = await this.checkTransactionOnServer(queuedTx.transaction_id);
-          
-          // #region agent log
-          fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'systemPosSync.ts:301',message:'Server check result for max-retry transaction',data:{transactionId:queuedTx.transaction_id,exists:serverCheck.exists,serverUpdatedAt:serverCheck.updated_at},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'E'})}).catch(()=>{});
-          // #endregion
-
-          if (serverCheck.exists) {
+          const serverCheck = await this.checkTransactionOnServer(queuedTx.transaction_id);if (serverCheck.exists) {
             // Transaction exists on server - compare updated_at timestamps
             const localTransaction = await this.fetchTransactionData(queuedTx.transaction_id);
             
@@ -378,20 +344,9 @@ class SystemPosSyncService {
               const localUpdatedAt = tx.updated_at || tx.created_at;
               const localUpdatedAtTime = localUpdatedAt ? new Date(localUpdatedAt).getTime() : 0;
               // Server already returns updated_at or created_at as fallback
-              const serverUpdatedAtTime = serverCheck.updated_at ? new Date(serverCheck.updated_at).getTime() : 0;
-
-              // #region agent log
-              fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'systemPosSync.ts:312',message:'Comparing updated_at timestamps',data:{transactionId:queuedTx.transaction_id,localUpdatedAt:localUpdatedAt,localTime:localUpdatedAtTime,serverUpdatedAt:serverCheck.updated_at,serverTime:serverUpdatedAtTime,localIsNewer:localUpdatedAtTime>serverUpdatedAtTime},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'E'})}).catch(()=>{});
-              // #endregion
-
-              if (localUpdatedAtTime > serverUpdatedAtTime) {
+              const serverUpdatedAtTime = serverCheck.updated_at ? new Date(serverCheck.updated_at).getTime() : 0;if (localUpdatedAtTime > serverUpdatedAtTime) {
                 // Local is newer (e.g., refund was added) - reset retry count and retry sync
-                console.log(`🔄 [SYSTEM POS SYNC] Transaction ${queuedTx.transaction_id} exists on server but local is newer (local: ${localUpdatedAt}, server: ${serverCheck.updated_at}), resetting retry count and retrying sync`);
-                // #region agent log
-                fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'systemPosSync.ts:363',message:'Local is newer - resetting retry count',data:{transactionId:queuedTx.transaction_id,localUpdatedAt,serverUpdatedAt:serverCheck.updated_at},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'E'})}).catch(()=>{});
-                // #endregion
-                
-                // Reset retry count to allow retry
+                console.log(`🔄 [SYSTEM POS SYNC] Transaction ${queuedTx.transaction_id} exists on server but local is newer (local: ${localUpdatedAt}, server: ${serverCheck.updated_at}), resetting retry count and retrying sync`);// Reset retry count to allow retry
                 const electronAPI = (window as { electronAPI?: UnknownRecord }).electronAPI;
                 if (electronAPI?.resetSystemPosRetryCount) {
                   await (electronAPI.resetSystemPosRetryCount as (transactionIds?: string[]) => Promise<{ success: boolean; count?: number }>)([queuedTx.transaction_id]);
@@ -466,22 +421,9 @@ class SystemPosSyncService {
           failed++;
           continue;
         }
-      }
-
-      // #region agent log
-      fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'systemPosSync.ts:287',message:'About to sync transaction',data:{transactionId:queuedTx.transaction_id,retryCount:queuedTx.retry_count},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
-      // #endregion
-      try {
-        await this.syncTransaction(queuedTx);
-        // #region agent log
-        fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'systemPosSync.ts:289',message:'Transaction sync succeeded',data:{transactionId:queuedTx.transaction_id},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
-        // #endregion
-        synced++;
-      } catch (error) {
-        // #region agent log
-        fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'systemPosSync.ts:430',message:'Transaction sync failed in processBatch',data:{transactionId:queuedTx.transaction_id,retryCount:queuedTx.retry_count,error:error instanceof Error?error.message:String(error),errorStack:error instanceof Error?error.stack:undefined},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
-        // #endregion
-        console.error(`❌ [SYSTEM POS SYNC] Error processing transaction ${queuedTx.transaction_id} in processBatch:`);
+      }try {
+        await this.syncTransaction(queuedTx);synced++;
+      } catch (error) {console.error(`❌ [SYSTEM POS SYNC] Error processing transaction ${queuedTx.transaction_id} in processBatch:`);
         if (error instanceof Error) {
           console.error(`❌ [SYSTEM POS SYNC] Error message:`, error.message);
           if (error.stack) {
@@ -521,11 +463,7 @@ class SystemPosSyncService {
     }
 
     try {
-      const allProducts = await (electronAPI.localDbGetAllProducts as () => Promise<Array<UnknownRecord>>)();
-      // #region agent log
-      fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'systemPosSync.ts:513',message:'Fetched all products from local database',data:{allProductsCount:allProducts?.length||0,requestedProductIds:productIds,firstProduct:allProducts?.[0]?Object.keys(allProducts[0]):[]},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'E'})}).catch(()=>{});
-      // #endregion
-      if (!Array.isArray(allProducts)) {
+      const allProducts = await (electronAPI.localDbGetAllProducts as () => Promise<Array<UnknownRecord>>)();if (!Array.isArray(allProducts)) {
         return [];
       }
       
@@ -533,11 +471,7 @@ class SystemPosSyncService {
       const filtered = allProducts.filter((product: UnknownRecord) => {
         const productId = product.id as number | undefined;
         return productId && productIds.includes(productId);
-      });
-      // #region agent log
-      fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'systemPosSync.ts:522',message:'Filtered products by IDs',data:{filteredCount:filtered.length,filteredProductIds:filtered.map((p:UnknownRecord)=>p.id),filteredFirstProduct:filtered[0]?Object.keys(filtered[0]):[],filteredFirstProductBusinessId:filtered[0]?(filtered[0] as UnknownRecord).business_id:undefined},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'E'})}).catch(()=>{});
-      // #endregion
-      return filtered;
+      });return filtered;
     } catch (error) {
       console.error('❌ [SYSTEM POS SYNC] Error fetching products from local database:', error);
       return [];
@@ -570,17 +504,8 @@ class SystemPosSyncService {
           harga_online: product.harga_online || 0,
           fee_kerja: product.fee_kerja || 0,
         };
-      });
-
-      // #region agent log
-      fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'systemPosSync.ts:557',message:'Checking business_id',data:{productCount:products.length,providedBusinessId:businessId,firstProductBusinessId:products[0]?(products[0] as UnknownRecord).business_id:undefined},timestamp:Date.now(),sessionId:'debug-session',runId:'post-fix',hypothesisId:'D'})}).catch(()=>{});
-      // #endregion
-      // Use provided business_id or try to get from first product
-      const finalBusinessId = businessId || ((products[0] as UnknownRecord)?.business_id as number);
-      // #region agent log
-      fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'systemPosSync.ts:559',message:'business_id check result',data:{finalBusinessId,hasBusinessId:!!finalBusinessId},timestamp:Date.now(),sessionId:'debug-session',runId:'post-fix',hypothesisId:'D'})}).catch(()=>{});
-      // #endregion
-      if (!finalBusinessId) {
+      });// Use provided business_id or try to get from first product
+      const finalBusinessId = businessId || ((products[0] as UnknownRecord)?.business_id as number);if (!finalBusinessId) {
         console.warn('⚠️ [SYSTEM POS SYNC] Cannot sync products - no business_id found');
         return false;
       }
@@ -652,47 +577,21 @@ class SystemPosSyncService {
       return false; // Not a product-related error
     }
 
-    console.log(`🔄 [SYSTEM POS SYNC] Detected missing products error for transaction ${queuedTx.transaction_id}, attempting to sync missing products...`);
-
-    // #region agent log
-    fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'systemPosSync.ts:616',message:'Detected missing products error',data:{transactionId:queuedTx.transaction_id,errorMessage},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'F'})}).catch(()=>{});
-    // #endregion
-
-    // Extract product IDs from transaction items
+    console.log(`🔄 [SYSTEM POS SYNC] Detected missing products error for transaction ${queuedTx.transaction_id}, attempting to sync missing products...`);// Extract product IDs from transaction items
     const productIds = this.extractProductIdsFromTransaction(transactionData);
     if (productIds.length === 0) {
       console.warn(`⚠️ [SYSTEM POS SYNC] No product IDs found in transaction ${queuedTx.transaction_id}`);
       return false;
-    }
-
-    // #region agent log
-    fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'systemPosSync.ts:477',message:'Extracted product IDs from transaction',data:{transactionId:queuedTx.transaction_id,productIds},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'F'})}).catch(()=>{});
-    // #endregion
-
-    // Fetch products from local database
+    }// Fetch products from local database
     const products = await this.fetchProductsFromLocalDB(productIds);
     if (products.length === 0) {
       console.warn(`⚠️ [SYSTEM POS SYNC] Products not found in local database for IDs: ${productIds.join(', ')}`);
       return false;
-    }
-
-    // #region agent log
-    fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'systemPosSync.ts:485',message:'Fetched products from local database',data:{transactionId:queuedTx.transaction_id,productCount:products.length,productIds:products.map((p:UnknownRecord)=>p.id)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'F'})}).catch(()=>{});
-    // #endregion
-
-    // Sync products to System POS
+    }// Sync products to System POS
     // Get business_id from transaction (products may have NULL business_id)
     // transactionData has nested structure: transactionData.transaction.business_id
     const transaction = transactionData.transaction as UnknownRecord | undefined;
-    const businessId = (transaction?.business_id || transactionData.business_id) as number | undefined;
-    // #region agent log
-    fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'systemPosSync.ts:641',message:'About to sync products to System POS',data:{transactionId:queuedTx.transaction_id,productCount:products.length,transactionBusinessId:businessId,hasTransaction:!!transaction,transactionBusinessIdFromNested:transaction?.business_id,transactionBusinessIdFromTop:transactionData.business_id},timestamp:Date.now(),sessionId:'debug-session',runId:'post-fix',hypothesisId:'F'})}).catch(()=>{});
-    // #endregion
-    const syncSuccess = await this.syncProductsToSystemPos(products, businessId);
-    // #region agent log
-    fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'systemPosSync.ts:644',message:'Product sync result',data:{transactionId:queuedTx.transaction_id,success:syncSuccess},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'F'})}).catch(()=>{});
-    // #endregion
-    if (!syncSuccess) {
+    const businessId = (transaction?.business_id || transactionData.business_id) as number | undefined;const syncSuccess = await this.syncProductsToSystemPos(products, businessId);if (!syncSuccess) {
       console.warn(`⚠️ [SYSTEM POS SYNC] Failed to sync products to System POS`);
       return false;
     }
@@ -738,20 +637,10 @@ class SystemPosSyncService {
         return;
       }
 
-      console.log(`📤 [SYSTEM POS SYNC] Syncing Transaction ${queuedTx.transaction_id} (Printer 2 Detected)...`);
-
-      // #region agent log
-      fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'systemPosSync.ts:703',message:'Starting transaction sync',data:{transactionId:queuedTx.transaction_id,hasItems:!!transactionData.items,itemCount:Array.isArray(transactionData.items)?transactionData.items.length:0,productIds:Array.isArray(transactionData.items)?transactionData.items.map((i:UnknownRecord)=>i.product_id).filter(Boolean):[],transactionUserId:(transactionData.transaction as UnknownRecord)?.user_id,transactionNote:(transactionData.transaction as UnknownRecord)?.note,transactionKeys:transactionData.transaction?Object.keys(transactionData.transaction):[]},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'G'})}).catch(()=>{});
-      // #endregion
-
-      // Phase 2: Convert transaction dates to MySQL format before sending
+      console.log(`📤 [SYSTEM POS SYNC] Syncing Transaction ${queuedTx.transaction_id} (Printer 2 Detected)...`);// Phase 2: Convert transaction dates to MySQL format before sending
       // Ensure status is validated (convert "completed" to "paid") for nested transaction structure
       if (transactionData.transaction && typeof transactionData.transaction === 'object') {
-        const trans = transactionData.transaction as UnknownRecord;
-        // #region agent log
-        fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'systemPosSync.ts:737',message:'Before status validation',data:{transactionId:queuedTx.transaction_id,rawStatus:trans.status,statusType:typeof trans.status,statusIsArray:Array.isArray(trans.status),statusIsObject:typeof trans.status==='object'&&trans.status!==null},timestamp:Date.now(),sessionId:'debug-session',runId:'post-fix',hypothesisId:'G'})}).catch(()=>{});
-        // #endregion
-        // Convert "completed" to "paid" (backward compatibility)
+        const trans = transactionData.transaction as UnknownRecord;// Convert "completed" to "paid" (backward compatibility)
         if (trans.status === 'completed') {
           trans.status = 'paid';
         }
@@ -761,11 +650,7 @@ class SystemPosSyncService {
           const oldStatus = trans.status;
           const validatedStatus = validateEnumValue(trans.status, 'transactions.status', 'status');
           // Ensure status is always a string (not null, not object, not array)
-          trans.status = validatedStatus !== null ? String(validatedStatus) : 'paid';
-          // #region agent log
-          fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'systemPosSync.ts:747',message:'After status validation',data:{transactionId:queuedTx.transaction_id,oldStatus,validatedStatus,newStatus:trans.status,statusType:typeof trans.status,statusIsString:typeof trans.status==='string'},timestamp:Date.now(),sessionId:'debug-session',runId:'post-fix',hypothesisId:'G'})}).catch(()=>{});
-          // #endregion
-        }
+          trans.status = validatedStatus !== null ? String(validatedStatus) : 'paid';}
       }
       // Convert dates - this will also validate top-level status if it exists
       const convertedTransactionData = convertTransactionDatesForMySQL(transactionData);
@@ -777,44 +662,14 @@ class SystemPosSyncService {
           const oldStatus = trans.status;
           const validatedStatus = validateEnumValue(trans.status, 'transactions.status', 'status');
           // Ensure status is always a string (not null, not object, not array)
-          trans.status = validatedStatus !== null ? String(validatedStatus) : 'paid';
-          // #region agent log
-          fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'systemPosSync.ts:757',message:'After date conversion status validation',data:{transactionId:queuedTx.transaction_id,oldStatus,validatedStatus,newStatus:trans.status,statusType:typeof trans.status,statusIsString:typeof trans.status==='string'},timestamp:Date.now(),sessionId:'debug-session',runId:'post-fix',hypothesisId:'G'})}).catch(()=>{});
-          // #endregion
-        }
-      }
-      
-      // #region agent log
-      fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'systemPosSync.ts:720',message:'Transaction data converted for MySQL',data:{transactionId:queuedTx.transaction_id,convertedUserId:(convertedTransactionData.transaction as UnknownRecord)?.user_id,convertedStatus:(convertedTransactionData.transaction as UnknownRecord)?.status,convertedNote:(convertedTransactionData.transaction as UnknownRecord)?.note,convertedKeys:convertedTransactionData.transaction?Object.keys(convertedTransactionData.transaction):[]},timestamp:Date.now(),sessionId:'debug-session',runId:'post-fix',hypothesisId:'G'})}).catch(()=>{});
-      // #endregion
-
-      // 1. Sync Transaction (Transactions + Items + Refunds)
+          trans.status = validatedStatus !== null ? String(validatedStatus) : 'paid';}
+      }// 1. Sync Transaction (Transactions + Items + Refunds)
       // Retry logic: if it fails due to missing products, sync products and retry once
       let retryCount = 0;
       const maxRetries = 1; // Only retry once after syncing products
       
       while (retryCount <= maxRetries) {
-        const transApiUrl = getApiUrl('/api/system-pos/transactions');
-        
-        // #region agent log
-        const transactionStatus = (convertedTransactionData.transaction as UnknownRecord)?.status;
-        const transactionStatusType = typeof transactionStatus;
-        const transactionStatusLength = transactionStatus ? String(transactionStatus).length : 0;
-        const transactionStatusIsString = typeof transactionStatus === 'string';
-        const transactionStatusIsArray = Array.isArray(transactionStatus);
-        const transactionStatusIsObject = typeof transactionStatus === 'object' && transactionStatus !== null;
-        // Final safety check: ensure status is a string before sending
-        if (convertedTransactionData.transaction && typeof convertedTransactionData.transaction === 'object') {
-          const trans = convertedTransactionData.transaction as UnknownRecord;
-          if (trans.status !== undefined && typeof trans.status !== 'string') {
-            console.warn(`⚠️ [SYSTEM POS SYNC] Status is not a string, converting: ${trans.status} (type: ${typeof trans.status})`);
-            trans.status = String(trans.status);
-          }
-        }
-        fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'systemPosSync.ts:773',message:'About to send transaction to API',data:{transactionId:queuedTx.transaction_id,transactionStatus,transactionStatusType,transactionStatusLength,transactionStatusIsString,transactionStatusIsArray,transactionStatusIsObject,hasTransaction:!!convertedTransactionData.transaction,transactionKeys:convertedTransactionData.transaction?Object.keys(convertedTransactionData.transaction).slice(0,10):[]},timestamp:Date.now(),sessionId:'debug-session',runId:'post-fix',hypothesisId:'G'})}).catch(()=>{});
-        // #endregion
-        
-        const transResponse = await fetch(transApiUrl, {
+        const transApiUrl = getApiUrl('/api/system-pos/transactions');const transResponse = await fetch(transApiUrl, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(convertedTransactionData),
@@ -828,24 +683,14 @@ class SystemPosSyncService {
             errorDetails = errorBody ? ` - ${errorBody.substring(0, 500)}` : '';
           } catch {
             // Ignore if we can't read the body
-          }
-          
-          // #region agent log
-          fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'systemPosSync.ts:640',message:'Transaction API response not OK',data:{transactionId:queuedTx.transaction_id,status:transResponse.status,statusText:transResponse.statusText,errorDetails,retryCount},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'D'})}).catch(()=>{});
-          // #endregion
-          
-          const error = new Error(`Transaction Sync Failed: HTTP ${transResponse.status} ${transResponse.statusText}${errorDetails}`);
+          }const error = new Error(`Transaction Sync Failed: HTTP ${transResponse.status} ${transResponse.statusText}${errorDetails}`);
           
           // Check if it's a missing products error and we haven't retried yet
           if (retryCount < maxRetries) {
             const shouldRetry = await this.handleMissingProductsError(error, transactionData, queuedTx);
             if (shouldRetry) {
               console.log(`🔄 [SYSTEM POS SYNC] Retrying transaction sync for ${queuedTx.transaction_id} after syncing products...`);
-              retryCount++;
-              // #region agent log
-              fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'systemPosSync.ts:651',message:'Retrying transaction after product sync',data:{transactionId:queuedTx.transaction_id,retryCount},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'F'})}).catch(()=>{});
-              // #endregion
-              continue; // Retry the transaction sync
+              retryCount++;continue; // Retry the transaction sync
             }
           }
           
@@ -862,12 +707,7 @@ class SystemPosSyncService {
 
         const transResult = await transResponse.json();
         
-        if (!transResult.success) {
-          // #region agent log
-          fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'systemPosSync.ts:670',message:'Transaction API returned success=false',data:{transactionId:queuedTx.transaction_id,error:transResult.error,fullResult:transResult,retryCount},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'D'})}).catch(()=>{});
-          // #endregion
-          
-          const errorMsg = transResult.error || 'Unknown Transaction Sync Error';
+        if (!transResult.success) {const errorMsg = transResult.error || 'Unknown Transaction Sync Error';
           const error = new Error(errorMsg);
           
           // Check if it's a missing products error and we haven't retried yet
@@ -875,11 +715,7 @@ class SystemPosSyncService {
             const shouldRetry = await this.handleMissingProductsError(error, transactionData, queuedTx);
             if (shouldRetry) {
               console.log(`🔄 [SYSTEM POS SYNC] Retrying transaction sync for ${queuedTx.transaction_id} after syncing products...`);
-              retryCount++;
-              // #region agent log
-              fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'systemPosSync.ts:680',message:'Retrying transaction after product sync (success=false)',data:{transactionId:queuedTx.transaction_id,retryCount},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'F'})}).catch(()=>{});
-              // #endregion
-              continue; // Retry the transaction sync
+              retryCount++;continue; // Retry the transaction sync
             }
           }
           
@@ -944,12 +780,7 @@ class SystemPosSyncService {
         }
       }
 
-    } catch (error) {
-      // #region agent log
-      fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'systemPosSync.ts:553',message:'syncTransaction catch block - BEFORE markSystemPosFailed',data:{transactionId:queuedTx.transaction_id,retryCount:queuedTx.retry_count,error:error instanceof Error?error.message:String(error),errorStack:error instanceof Error?error.stack:undefined},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})}).catch(()=>{});
-      // #endregion
-      
-      // Enhanced error logging with full details
+    } catch (error) {// Enhanced error logging with full details
       console.error(`❌ [SYSTEM POS SYNC] Failed to sync transaction ${queuedTx.transaction_id}`);
       if (error instanceof Error) {
         console.error(`❌ [SYSTEM POS SYNC] Error message:`, error.message);
@@ -970,18 +801,10 @@ class SystemPosSyncService {
 
       // Mark as failed (increment retry count)
       if (electronAPI.markSystemPosFailed) {
-        const errorMsg = error instanceof Error ? error.message : String(error);
-        // #region agent log
-        fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'systemPosSync.ts:409',message:'Calling markSystemPosFailed',data:{transactionId:queuedTx.transaction_id,currentRetryCount:queuedTx.retry_count,errorMessage:errorMsg},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})}).catch(()=>{});
-        // #endregion
-        const markResult = await (electronAPI.markSystemPosFailed as (transactionId: string, error: string) => Promise<{ success: boolean }>)(
+        const errorMsg = error instanceof Error ? error.message : String(error);const markResult = await (electronAPI.markSystemPosFailed as (transactionId: string, error: string) => Promise<{ success: boolean }>)(
           queuedTx.transaction_id,
           errorMsg
-        );
-        // #region agent log
-        fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'systemPosSync.ts:414',message:'markSystemPosFailed result',data:{transactionId:queuedTx.transaction_id,success:markResult.success},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})}).catch(()=>{});
-        // #endregion
-      }
+        );}
     }
   }
 

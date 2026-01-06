@@ -1,9 +1,10 @@
 'use client';
 
 import { useState } from 'react';
-import { Clock, FileText, Receipt } from 'lucide-react';
+import { Clock, FileText, Receipt, XCircle } from 'lucide-react';
 import ShiftReport from './ShiftReport';
 import TransactionsReport from './TransactionsReport';
+import CancelledItemsReport from './CancelledItemsReport';
 
 export default function Laporan() {
   const [activeTab, setActiveTab] = useState('shift');
@@ -14,6 +15,8 @@ export default function Laporan() {
         return <ShiftReport />;
       case 'transactions':
         return <TransactionsReport />;
+      case 'cancelled':
+        return <CancelledItemsReport />;
       default:
         return (
           <div className="flex-1 flex items-center justify-center">
@@ -50,6 +53,17 @@ export default function Laporan() {
           >
             <Receipt className="w-4 h-4" />
             <span>Semua Transaksi</span>
+          </button>
+          <button
+            onClick={() => setActiveTab('cancelled')}
+            className={`flex items-center space-x-2 px-4 py-2 rounded-lg font-medium transition-colors ${
+              activeTab === 'cancelled'
+                ? 'bg-blue-600 text-white'
+                : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+            }`}
+          >
+            <XCircle className="w-4 h-4" />
+            <span>Item Dibatalkan</span>
           </button>
           {/* Placeholder for future tabs */}
           <button

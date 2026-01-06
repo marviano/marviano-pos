@@ -159,13 +159,7 @@ class DatabaseHealthService {
       const response = await fetch(getApiUrl('/api/sync'));
       if (response.ok) {
         const jsonData = await response.json();
-        const data = jsonData.data || jsonData;
-        
-        // #region agent log - Check API response
-        fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'databaseHealth.ts:162',message:'Sync API response received',data:{hasData:!!data,dataKeys:data?Object.keys(data):[],hasRestaurantRooms:!!data.restaurantRooms,restaurantRoomsCount:Array.isArray(data.restaurantRooms)?data.restaurantRooms.length:'not array',hasRestaurantTables:!!data.restaurantTables,restaurantTablesCount:Array.isArray(data.restaurantTables)?data.restaurantTables.length:'not array'},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
-        // #endregion
-
-        // Save to local database
+        const data = jsonData.data || jsonData;// Save to local database
         const electronAPI = typeof window !== 'undefined' ? (window as { electronAPI?: UnknownRecord }).electronAPI : undefined;
         if (electronAPI) {
           // 1. CATEGORIES FIRST (dependencies)
@@ -271,18 +265,9 @@ class DatabaseHealthService {
           }
 
           // 7. RESTAURANT TABLE LAYOUT (rooms first, then tables due to foreign key)
-          // #region agent log - Check handler availability
-          fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'databaseHealth.ts:269',message:'Checking restaurant sync handlers',data:{hasUpsertRooms:!!electronAPI.localDbUpsertRestaurantRooms,hasUpsertTables:!!electronAPI.localDbUpsertRestaurantTables,hasDataRooms:!!data.restaurantRooms,hasDataTables:!!data.restaurantTables},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
-          // #endregion
           if (electronAPI.localDbUpsertRestaurantRooms) {
             if (data.restaurantRooms && Array.isArray(data.restaurantRooms) && data.restaurantRooms.length > 0) {
-              // #region agent log - Before upsert
-              fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'databaseHealth.ts:272',message:'Calling localDbUpsertRestaurantRooms',data:{roomCount:data.restaurantRooms.length,sampleRoom:data.restaurantRooms[0]},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})}).catch(()=>{});
-              // #endregion
               const result = await (electronAPI.localDbUpsertRestaurantRooms as (rows: unknown[]) => Promise<{ success: boolean }>)(data.restaurantRooms);
-              // #region agent log - After upsert
-              fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'databaseHealth.ts:275',message:'localDbUpsertRestaurantRooms result',data:{success:result.success,roomCount:data.restaurantRooms.length},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})}).catch(()=>{});
-              // #endregion
               console.log(`✅ ${data.restaurantRooms.length} restaurant rooms synced to local database`);
             } else {
               console.log(`ℹ️ [DB HEALTH] No restaurant rooms to sync (received: ${data.restaurantRooms ? (Array.isArray(data.restaurantRooms) ? data.restaurantRooms.length : 'not array') : 'undefined'})`);
@@ -293,13 +278,7 @@ class DatabaseHealthService {
 
           if (electronAPI.localDbUpsertRestaurantTables) {
             if (data.restaurantTables && Array.isArray(data.restaurantTables) && data.restaurantTables.length > 0) {
-              // #region agent log - Before upsert
-              fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'databaseHealth.ts:283',message:'Calling localDbUpsertRestaurantTables',data:{tableCount:data.restaurantTables.length,sampleTable:data.restaurantTables[0]},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'D'})}).catch(()=>{});
-              // #endregion
               const result = await (electronAPI.localDbUpsertRestaurantTables as (rows: unknown[]) => Promise<{ success: boolean }>)(data.restaurantTables);
-              // #region agent log - After upsert
-              fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'databaseHealth.ts:286',message:'localDbUpsertRestaurantTables result',data:{success:result.success,tableCount:data.restaurantTables.length},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'D'})}).catch(()=>{});
-              // #endregion
               console.log(`✅ ${data.restaurantTables.length} restaurant tables synced to local database`);
             } else {
               console.log(`ℹ️ [DB HEALTH] No restaurant tables to sync (received: ${data.restaurantTables ? (Array.isArray(data.restaurantTables) ? data.restaurantTables.length : 'not array') : 'undefined'})`);
@@ -310,7 +289,7 @@ class DatabaseHealthService {
 
           if (electronAPI.localDbUpsertRestaurantLayoutElements) {
             if (data.restaurantLayoutElements && Array.isArray(data.restaurantLayoutElements) && data.restaurantLayoutElements.length > 0) {
-              const result = await (electronAPI.localDbUpsertRestaurantLayoutElements as (rows: unknown[]) => Promise<{ success: boolean }>)(data.restaurantLayoutElements);
+              await (electronAPI.localDbUpsertRestaurantLayoutElements as (rows: unknown[]) => Promise<{ success: boolean }>)(data.restaurantLayoutElements);
               console.log(`✅ ${data.restaurantLayoutElements.length} restaurant layout elements synced to local database`);
             } else {
               console.log(`ℹ️ [DB HEALTH] No restaurant layout elements to sync (received: ${data.restaurantLayoutElements ? (Array.isArray(data.restaurantLayoutElements) ? data.restaurantLayoutElements.length : 'not array') : 'undefined'})`);

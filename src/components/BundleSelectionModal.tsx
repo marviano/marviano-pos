@@ -5,7 +5,7 @@ import Image from 'next/image';
 import { X, Check, Plus, Minus, SlidersHorizontal, MessageCircle } from 'lucide-react';
 import BundleProductCustomizationModal, { SelectedCustomization } from './BundleProductCustomizationModal';
 import CustomNoteModal from './CustomNoteModal';
-import { getApiUrl } from '@/lib/api';
+// import { getApiUrl } from '@/lib/api';
 
 interface Product {
   id: number;

@@ -5,7 +5,7 @@ import {
   Wallet,
   Package,
   DollarSign,
-  CreditCard,
+  // CreditCard,
   RefreshCw,
   StopCircle,
   AlertCircle,
@@ -668,24 +668,30 @@ export default function GantiShift() {
     setIsLoadingRefundDetails(true);
     try {
       // Fetch transaction items (this already includes customizations via readCustomizationsFromNormalizedTables)
-      const items = electronAPI.localDbGetTransactionItems
+      const allItems = electronAPI.localDbGetTransactionItems
         ? await electronAPI.localDbGetTransactionItems(refund.transaction_uuid)
         : [];
+      
+      // Filter out cancelled items - they should not be included in refund calculations
+      const items = (allItems as Array<Record<string, unknown>>).filter((item: Record<string, unknown>) => {
+        const productionStatus = typeof item.production_status === 'string' ? item.production_status : null;
+        return productionStatus !== 'cancelled';
+      });
 
       // Map items - customizations are already attached by localDbGetTransactionItems
-      const itemsWithCustomizations = (items as any[]).map((item: any) => {
+      const itemsWithCustomizations = (items as Array<Record<string, unknown>>).map((item: Record<string, unknown>) => {
         // Handle customizations - they're already in the item object
         const customizations = Array.isArray(item.customizations) 
           ? item.customizations 
           : (item.customizations ? [item.customizations] : []);
 
         return {
-          id: item.uuid_id || item.id,
-          product_name: item.product_name || '',
-          quantity: item.quantity || 0,
-          unit_price: item.unit_price || 0,
-          total_price: item.total_price || 0,
-          custom_note: item.custom_note || null,
+          id: String(item.uuid_id || item.id || ''),
+          product_name: String(item.product_name || ''),
+          quantity: typeof item.quantity === 'number' ? item.quantity : (typeof item.quantity === 'string' ? parseFloat(item.quantity) || 0 : 0),
+          unit_price: typeof item.unit_price === 'number' ? item.unit_price : (typeof item.unit_price === 'string' ? parseFloat(item.unit_price) || 0 : 0),
+          total_price: typeof item.total_price === 'number' ? item.total_price : (typeof item.total_price === 'string' ? parseFloat(item.total_price) || 0 : 0),
+          custom_note: typeof item.custom_note === 'string' ? item.custom_note : undefined,
           customizations: customizations.length > 0 ? customizations : undefined,
           bundleSelections: item.bundleSelections || undefined
         };
@@ -693,17 +699,18 @@ export default function GantiShift() {
 
       // Fetch transaction note and user info if available
       const transactions = await electronAPI.localDbGetTransactions?.(businessId, 1000);
-      const transaction = (transactions as any[])?.find((t: any) => t.uuid_id === refund.transaction_uuid);
-      const transactionNote = transaction?.note || null;
+      const transaction = (transactions as Array<Record<string, unknown>>)?.find((t: Record<string, unknown>) => t.uuid_id === refund.transaction_uuid);
+      const transactionNote = typeof transaction?.note === 'string' ? transaction.note : null;
       const transactionUserId = transaction?.user_id || null;
       const transactionUserName = transaction?.user_name || null;
 
       // If user_name not in transaction, fetch from users table
-      let userName = transactionUserName;
+      let userName: string | null = typeof transactionUserName === 'string' ? transactionUserName : null;
       if (!userName && transactionUserId && electronAPI.localDbGetUsers) {
         const users = await electronAPI.localDbGetUsers();
-        const user = (users as any[])?.find((u: any) => u.id === transactionUserId);
-        userName = user?.name || user?.email || `User ID: ${transactionUserId}`;
+        const user = (users as Array<Record<string, unknown>>)?.find((u: Record<string, unknown>) => u.id === transactionUserId);
+        const userNameFromUser = typeof user?.name === 'string' ? user.name : (typeof user?.email === 'string' ? user.email : null);
+        userName = userNameFromUser || `User ID: ${transactionUserId}`;
       }
 
       setSelectedRefundTransaction({
@@ -720,12 +727,13 @@ export default function GantiShift() {
   }, [businessId]);
 
   const fetchReportPayload = useCallback(
-    async ({ start, end, userId, businessId: reportBusinessId = businessId, shiftUuid }: { start: string; end: string | null; userId: number | null; businessId?: number; shiftUuid?: string | null; }): Promise<ReportDataPayload> => {
+    async ({ start, end, userId, businessId: reportBusinessId = businessId, shiftUuid, list_of_shifts }: { start: string; end: string | null; userId: number | null; businessId?: number; shiftUuid?: string | null; list_of_shifts?: Shift[]; }): Promise<ReportDataPayload> => {
       const electronAPI = getElectronAPI();
       if (!electronAPI) {
         throw new Error('Aplikasi Electron tidak terdeteksi.');
       }
-      if (!userId) {
+      // Allow userId to be null for "all users" queries (All Day view)
+      if (userId === undefined) {
         throw new Error('User ID tidak valid untuk laporan.');
       }
 
@@ -762,16 +770,40 @@ export default function GantiShift() {
         const breakdownPayload =
           breakdownResult.status === 'fulfilled' ? (breakdownResult.value as PaymentBreakdown[]) : [];
         const category2BreakdownPayload =
-          category2BreakdownResult.status === 'fulfilled' ? (category2BreakdownResult.value as Category2Breakdown[]) : [];
-        
-        // #region agent log
-        fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'GantiShift.tsx:654',message:'Category2 breakdown payload',data:{status:category2BreakdownResult.status,payloadLength:category2BreakdownPayload.length,payload:category2BreakdownPayload.slice(0,3),userId,start,end,reportBusinessId},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'D'})}).catch(()=>{});
-        // #endregion
-        const rawCash = cashResult.status === 'fulfilled' ? (cashResult.value as CashSummary) : defaultCash;
+          category2BreakdownResult.status === 'fulfilled' ? (category2BreakdownResult.value as Category2Breakdown[]) : [];const rawCash = cashResult.status === 'fulfilled' ? (cashResult.value as CashSummary) : defaultCash;
         const productSalesPayload =
           productSalesResult.status === 'fulfilled'
             ? (productSalesResult.value as ProductSalesPayload)
             : { products: [], customizations: [] };
+
+        // If list_of_shifts is provided, sum up total_discount from individual shifts
+        // This fixes the double-counting issue when shifts overlap in time
+        let finalTotalDiscount = statsPayload.total_discount ?? 0;
+        if (list_of_shifts && list_of_shifts.length > 0 && electronAPI.localDbGetShiftStatistics) {
+          // Fetch all shift statistics in parallel for better performance
+          const shiftStatsPromises = list_of_shifts.map(async (shift) => {
+            const shiftUserId = Number(shift.user_id ?? 0);
+            if (!shiftUserId || !electronAPI.localDbGetShiftStatistics) return null;
+            try {
+              return await electronAPI.localDbGetShiftStatistics(
+                shiftUserId,
+                shift.shift_start,
+                shift.shift_end,
+                reportBusinessId,
+                shift.uuid_id
+              );
+            } catch (error) {
+              console.error(`Error fetching discount for shift ${shift.id}:`, error);
+              return null;
+            }
+          });
+          
+          const shiftStatsResults = await Promise.all(shiftStatsPromises);
+          const summedDiscount = shiftStatsResults.reduce((sum, stats) => {
+            return sum + (stats?.total_discount ?? 0);
+          }, 0);
+          finalTotalDiscount = summedDiscount;
+        }
 
         const resolvedCash: CashSummary = {
           cash_shift: rawCash.cash_shift ?? 0,
@@ -786,7 +818,7 @@ export default function GantiShift() {
           statistics: {
             order_count: statsPayload.order_count ?? 0,
             total_amount: statsPayload.total_amount ?? 0,
-            total_discount: statsPayload.total_discount ?? 0,
+            total_discount: finalTotalDiscount,
             voucher_count: statsPayload.voucher_count ?? 0
           },
           paymentBreakdown: breakdownPayload,
@@ -1181,20 +1213,15 @@ export default function GantiShift() {
           const dayReportData = await fetchReportPayload({
             start: shiftSequenceInfo.dayStartUtc, // START FROM DAY START - INCLUDES SHIFT 1
             end: shiftSequenceInfo.dayEndUtc,
-            userId: null // null = all users for whole day report
+            userId: null, // null = all users for whole day report
+            list_of_shifts: shiftSequenceInfo.shifts // Pass shifts to sum up discounts correctly
           });
 
           console.log('📊 [PRINT WHOLE DAY] Data fetched:', {
             orders: dayReportData.statistics.order_count,
             total: dayReportData.statistics.total_amount,
             products: dayReportData.productSales.length
-          });
-          
-          // #region agent log
-          fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'GantiShift.tsx:1046',message:'Print all total revenue',data:{total_amount:dayReportData.statistics.total_amount,order_count:dayReportData.statistics.order_count,userId:shiftOwnerId,dayStart:shiftSequenceInfo.dayStartUtc,dayEnd:shiftSequenceInfo.dayEndUtc,businessId},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'E'})}).catch(()=>{});
-          // #endregion
-
-          const dayCash = dayReportData.cashSummary;
+          });const dayCash = dayReportData.cashSummary;
           const dayCashSales = dayCash.cash_shift_sales ?? dayCash.cash_shift ?? 0;
           const dayCashRefunds = dayCash.cash_shift_refunds ?? 0;
           // const dailyKasExpected = (dayCash.cash_whole_day ?? dayCash.cash_shift ?? 0) || dayCashSales - dayCashRefunds;
@@ -1299,11 +1326,7 @@ export default function GantiShift() {
               total_amount: p.total_amount || 0
             })),
             category2Breakdown: (() => {
-              const cat2Data = shiftReportData.category2Breakdown || [];
-              // #region agent log
-              fetch('http://127.0.0.1:7242/ingest/ab3104c9-1432-4522-ad92-f25b532b192c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'GantiShift.tsx:1187',message:'Category2 data before print',data:{category2Length:cat2Data.length,category2Data:cat2Data.slice(0,3),shiftId:shift.id},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'E'})}).catch(()=>{});
-              // #endregion
-              return cat2Data;
+              const cat2Data = shiftReportData.category2Breakdown || [];return cat2Data;
             })(),
             cashSummary: {
               cash_shift: shiftCash.cash_shift ?? 0,
@@ -1470,7 +1493,8 @@ export default function GantiShift() {
         const dayData = await fetchReportPayload({
           start: shiftSequenceInfo.dayStartUtc,
           end: shiftSequenceInfo.dayEndUtc,
-          userId: null // null = all users for whole day report
+          userId: null, // null = all users for whole day report
+          list_of_shifts: shiftSequenceInfo.shifts // Pass shifts to sum up discounts correctly
         });
 
         // setTabData(prev => ({ ...prev, 'all-day': dayData }));

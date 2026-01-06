@@ -21,3 +21,6 @@ DROP FOREIGN KEY transactions_ibfk_1;
 --
 -- Expected result: Only 'fk_transactions_table' should appear
 
+
+
+
