@@ -706,8 +706,29 @@ export default function PaymentModal({
           };
         }
 
-        // Note: For existing transactions, we don't need to save items again (they're already saved)
-        // Only save items for new transactions
+        // For existing transactions (lihat mode), fetch existing items to get their uuid_id and production_status
+        // This prevents duplicates when paying - we'll update existing items instead of creating new ones
+        const existingItemsMap = new Map<number, string>(); // transactionItemId -> uuid_id
+        const existingItemsProductionStatusMap = new Map<number, string | null>(); // transactionItemId -> production_status
+        if (loadedTransactionInfo?.transactionId) {
+          try {
+            const existingItems = await electronAPI.localDbGetTransactionItems?.(transactionId);
+            const existingItemsArray = Array.isArray(existingItems) ? existingItems as Record<string, unknown>[] : [];
+            existingItemsArray.forEach((item: Record<string, unknown>) => {
+              const itemId = typeof item.id === 'number' ? item.id : (typeof item.id === 'string' ? parseInt(item.id, 10) : null);
+              const itemUuidId = typeof item.uuid_id === 'string' ? item.uuid_id : (item.uuid_id ? String(item.uuid_id) : null);
+              const productionStatus = typeof item.production_status === 'string' ? item.production_status : (item.production_status === null ? null : null);
+              if (itemId && itemUuidId) {
+                existingItemsMap.set(itemId, itemUuidId);
+                existingItemsProductionStatusMap.set(itemId, productionStatus);
+              }
+            });
+            console.log('🔍 [PAYMENT] Found existing items:', existingItemsMap.size, 'items with uuid_id');
+            console.log('🔍 [PAYMENT] Production statuses:', Array.from(existingItemsProductionStatusMap.entries()).map(([id, status]) => `Item ${id}: ${status || 'null'}`));
+          } catch (error) {
+            console.warn('⚠️ [PAYMENT] Failed to fetch existing items:', error);
+          }
+        }
 
         const transactionItems = cartItems.map(item => {
           // Determine base price depending on platform when online
@@ -726,9 +747,24 @@ export default function PaymentModal({
           itemPrice += sumCustomizationPrice(item.customizations);
           itemPrice += calculateBundleCustomizationCharge(item.bundleSelections);
 
+          // For existing items (from loaded transaction), use their existing uuid_id to prevent duplicates
+          // For new items, generate a new UUID
+          const itemTransactionId = (item as any).transactionItemId;
+          const itemUuidId = itemTransactionId && existingItemsMap.has(itemTransactionId)
+            ? existingItemsMap.get(itemTransactionId)!
+            : generateTransactionItemId();
+
+          // For existing items, preserve their production_status (they may have already been sent to kitchen/barista)
+          // For new items, set production_status to null (they need to be sent)
+          const existingProductionStatus = itemTransactionId && existingItemsProductionStatusMap.has(itemTransactionId)
+            ? existingItemsProductionStatusMap.get(itemTransactionId)!
+            : null; // New items get null (will be sent to kitchen/barista)
+
           return {
-            id: generateTransactionItemId(),
-            transaction_id: transactionData.id,
+            id: itemTransactionId || generateTransactionItemId(), // Use existing ID if available, otherwise generate
+            uuid_id: itemUuidId, // Use existing UUID if item already exists, otherwise generate new one
+            transaction_id: 0, // Will be set by database based on uuid_transaction_id
+            uuid_transaction_id: transactionId, // Link to transaction by UUID
             product_id: item.product.id,
             quantity: item.quantity,
             unit_price: itemPrice,
@@ -736,7 +772,10 @@ export default function PaymentModal({
             customizations: item.customizations || null,
             custom_note: item.customNote || null,
             bundle_selections_json: item.bundleSelections ? JSON.stringify(item.bundleSelections) : null,
-            created_at: transactionData.created_at
+            created_at: transactionData.created_at,
+            production_status: existingProductionStatus, // Preserve existing status for previously saved items, null for new items
+            production_started_at: null,
+            production_finished_at: null,
           };
         });
 
@@ -765,13 +804,11 @@ export default function PaymentModal({
         // sync_status will be set to 'pending' by default in the database
         await electronAPI.localDbUpsertTransactions?.([localTransactionData]);
         
-        // Only save items for new transactions (not for existing transactions from "lihat" mode)
-        // Items are already saved when transaction was created or when new items were added
-        if (!loadedTransactionInfo?.transactionId) {
-          await electronAPI.localDbUpsertTransactionItems?.(transactionItems);
-        } else {
-          console.log('📝 [PAYMENT] Skipping item save - using existing transaction items');
-        }
+        // Always save transaction items from cart to ensure all items (including newly added ones) are saved
+        // This is important even in "lihat" mode because new items may have been added to the cart
+        // The upsert will handle existing items and add new ones
+        console.log('📝 [PAYMENT] Saving transaction items:', transactionItems.length, 'items');
+        await electronAPI.localDbUpsertTransactionItems?.(transactionItems);
 
         // ============================================
         // DEBUG LOG: Confirmation After Database Save
@@ -800,35 +837,67 @@ export default function PaymentModal({
         console.log(`✅ Items Saved: ${transactionItems.length} item(s)`);
         console.log('\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
 
-        // Broadcast order (Fire and forget, but keep promise for error logging)
-        // Get all products to retrieve category1_id
-        const allProducts = await electronAPI.localDbGetAllProducts?.();
-        const productsMap = new Map<number, { id: number; category1_id?: number | null; category1_name?: string | null; kategori?: string | null; [key: string]: unknown }>();
-        if (Array.isArray(allProducts)) {
-          allProducts.forEach((p: unknown) => {
-            if (p && typeof p === 'object' && 'id' in p && typeof (p as { id: unknown }).id === 'number') {
-              const product = p as { id: number; category1_id?: number | null; category1_name?: string | null; kategori?: string | null; [key: string]: unknown };
-              productsMap.set(product.id, product);
+        // Check if we should send items to kitchen/barista
+        // Only send items that haven't been sent before (production_status is null)
+        // If transaction was previously saved with "Simpan Order", items may have already been sent
+        const shouldSendToKitchen = !loadedTransactionInfo || 
+          transactionItems.some(item => {
+            // Check if this item was already sent (has production_status set)
+            const itemTransactionId = typeof item.id === 'string' ? parseInt(item.id, 10) : (typeof item.id === 'number' ? item.id : null);
+            if (itemTransactionId && existingItemsProductionStatusMap.has(itemTransactionId)) {
+              const existingStatus = existingItemsProductionStatusMap.get(itemTransactionId);
+              // If item has production_status set (not null), it was already sent
+              return existingStatus === null;
             }
+            // New items (not in existingItemsProductionStatusMap) should be sent
+            return true;
           });
-        }
 
-        // Helper function to map category1_name to category1_id
-        const mapCategoryNameToId = (categoryName: string | null | undefined): number | null => {
-          if (!categoryName) return null;
-          const name = categoryName.toLowerCase().trim();
-          if (name === 'makanan' || name === 'food') return 1;
-          if (name === 'minuman' || name === 'drinks' || name === 'drink') return 2;
-          if (name === 'dessert') return 3;
-          if (name === 'bakery') return 5;
-          return null;
-        };
+        // Broadcast order (Fire and forget, but keep promise for error logging)
+        // Only create and send orderData if items haven't been sent before
+        if (shouldSendToKitchen) {
+          // Get all products to retrieve category1_id
+          const allProducts = await electronAPI.localDbGetAllProducts?.();
+          const productsMap = new Map<number, { id: number; category1_id?: number | null; category1_name?: string | null; kategori?: string | null; [key: string]: unknown }>();
+          if (Array.isArray(allProducts)) {
+            allProducts.forEach((p: unknown) => {
+              if (p && typeof p === 'object' && 'id' in p && typeof (p as { id: unknown }).id === 'number') {
+                const product = p as { id: number; category1_id?: number | null; category1_name?: string | null; kategori?: string | null; [key: string]: unknown };
+                productsMap.set(product.id, product);
+              }
+            });
+          }
 
-        const orderData = {
+          // Helper function to map category1_name to category1_id
+          const mapCategoryNameToId = (categoryName: string | null | undefined): number | null => {
+            if (!categoryName) return null;
+            const name = categoryName.toLowerCase().trim();
+            if (name === 'makanan' || name === 'food') return 1;
+            if (name === 'minuman' || name === 'drinks' || name === 'drink') return 2;
+            if (name === 'dessert') return 3;
+            if (name === 'bakery') return 5;
+            return null;
+          };
+
+          // Filter items to only include those that haven't been sent (production_status is null)
+          const itemsToSend = transactionItems.filter(item => {
+            const itemTransactionId = typeof item.id === 'string' ? parseInt(item.id, 10) : (typeof item.id === 'number' ? item.id : null);
+            if (itemTransactionId && existingItemsProductionStatusMap.has(itemTransactionId)) {
+              const existingStatus = existingItemsProductionStatusMap.get(itemTransactionId);
+              // Only send items that haven't been sent before (production_status is null)
+              return existingStatus === null;
+            }
+            // New items should be sent
+            return true;
+          });
+
+          console.log(`📦 [PAYMENT] Sending ${itemsToSend.length} item(s) to kitchen/barista (${transactionItems.length - itemsToSend.length} already sent)`);
+
+          const orderData = {
           transactionId: transactionData.id,
           receiptNumber: 0,
           businessId: businessId,
-          items: transactionItems.map(item => {
+          items: itemsToSend.map(item => {
             const product = productsMap.get(item.product_id);
             const productName = cartItems.find(p => p.product.id === item.product_id)?.product.nama || 'Unknown Product';
             
@@ -964,6 +1033,9 @@ export default function PaymentModal({
             });
           }
         });
+        } else {
+          console.log('📦 [PAYMENT] Skipping kitchen/barista broadcast - all items were already sent when transaction was saved with "Simpan Order"');
+        }
 
         // 3. OPTIMISTIC UI UPDATE - CLOSE MODAL IMMEDIATELY
         setIsProcessing(false);

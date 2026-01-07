@@ -386,13 +386,14 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
 
           const refundTotalValue = transaction.refund_total ?? refunds.reduce((sum, refund) => sum + (refund.refund_amount ?? 0), 0);
           const finalAmount = Number(transaction.final_amount ?? 0);
+          // Always recalculate refund_status based on total refund amount vs final_amount
+          // This ensures correct status even if database has incorrect values
           const refundStatusValue =
-            transaction.refund_status ??
-            (refundTotalValue > 0
+            refundTotalValue > 0
               ? refundTotalValue >= finalAmount - 0.01
                 ? 'full'
                 : 'partial'
-              : 'none');
+              : 'none';
 
           console.log('💾 [TransactionList] Mapping items to transaction detail format');
           const mappedItems = items.map((item) => {

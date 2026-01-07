@@ -13,7 +13,6 @@ import GantiShift from './GantiShift';
 import Laporan from './Laporan';
 import GlobalSettings from './GlobalSettings';
 import StartShiftModal from './StartShiftModal';
-import TableLayout from './TableLayout';
 import ActiveOrdersTab from './ActiveOrdersTab';
 import KitchenDisplay from './KitchenDisplay';
 import BaristaDisplay from './BaristaDisplay';
@@ -123,7 +122,14 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
   // Helper function to check and prompt for unsaved changes
   const checkUnsavedChanges = (): boolean => {
     if (hasUnsavedChanges) {
-      const confirmed = window.confirm('Ada perubahan yang belum disimpan pada cart, apakah anda yakin untuk berpindah halaman?');
+      // Show different message based on whether we're in "lihat" mode
+      let message = 'Ada perubahan yang belum disimpan pada cart, apakah anda yakin untuk berpindah halaman?';
+      if (loadedTransactionInfo && loadedTransactionInfo.customerName) {
+        message = `Ada perubahan pada orderan pelanggan: ${loadedTransactionInfo.customerName}. Apakah anda yakin untuk berpindah halaman sebelum simpan pesanan?`;
+      } else if (loadedTransactionInfo) {
+        message = 'Ada perubahan pada orderan pelanggan. Apakah anda yakin untuk berpindah halaman sebelum simpan pesanan?';
+      }
+      const confirmed = window.confirm(message);
       if (!confirmed) {
         return false; // User cancelled, don't proceed
       }
@@ -705,10 +711,14 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
         const itemBundleSelections = typeof item.bundle_selections_json === 'string' ? item.bundle_selections_json : undefined;
         const transactionTableId = typeof transaction.table_id === 'number' ? transaction.table_id : (typeof transaction.table_id === 'string' ? parseInt(transaction.table_id, 10) : null);
         
-        // Check production_status to determine if item should be locked
+        // Check if item should be locked
+        // In "lihat" mode, ALL items should be locked because they've already been saved to the transaction
         // Items with production_status IS NULL or 'preparing' are visible on kitchen/barista and should be locked
+        // Items with production_status 'finished' should also be locked because they've been saved
+        // The only items that shouldn't be locked are cancelled items, but those are already filtered out above
         const productionStatus = typeof item.production_status === 'string' ? item.production_status : (item.production_status === null ? null : String(item.production_status || ''));
-        const isItemLocked = productionStatus === null || productionStatus === 'preparing';
+        // ALL items in "lihat" mode should be locked (they've all been saved to the transaction)
+        const isItemLocked = true;
 
         return {
           id: Date.now() + Math.random(), // Generate unique ID for cart
@@ -797,12 +807,12 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
                     🏪 Offline
                   </button>
 
-                  {/* Online Section with Platform Buttons */}
-                  <div className={`flex items-center rounded-lg overflow-hidden ${isOnlineTab && !showActiveOrders ? 'bg-blue-600' : 'bg-gray-100'
-                    }`}>
+                  {/* Online Section with Platform Buttons - Disabled in "lihat" mode */}
+                  <div className={`flex items-center rounded-lg overflow-hidden ${isOnlineTab && !showActiveOrders && !loadedTransactionInfo ? 'bg-blue-600' : 'bg-gray-100'
+                    } ${loadedTransactionInfo ? 'opacity-50 cursor-not-allowed' : ''}`}>
                     <div
-                      className={`px-4 py-2 font-medium cursor-default ${isOnlineTab && !showActiveOrders ? 'text-white' : 'text-gray-700'
-                        }`}
+                      className={`px-4 py-2 font-medium ${isOnlineTab && !showActiveOrders && !loadedTransactionInfo ? 'text-white' : 'text-gray-700'
+                        } ${loadedTransactionInfo ? 'cursor-not-allowed' : 'cursor-default'}`}
                     >
                       🌐 Online
                     </div>
@@ -810,71 +820,81 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
                     <div className="flex h-full">
                       <button
                         onClick={() => {
+                          if (loadedTransactionInfo) return; // Disabled in lihat mode
                           if (!checkUnsavedChanges()) return;
                           setSelectedOnlinePlatform('gofood');
                           setIsOnlineTab(true);
                           setShowActiveOrders(false);
                         }}
-                        className={`px-3 py-1 text-sm font-medium transition-colors h-full ${selectedOnlinePlatform === 'gofood' && isOnlineTab && !showActiveOrders
+                        disabled={!!loadedTransactionInfo}
+                        className={`px-3 py-1 text-sm font-medium transition-colors h-full ${selectedOnlinePlatform === 'gofood' && isOnlineTab && !showActiveOrders && !loadedTransactionInfo
                           ? 'bg-green-600 text-white'
-                          : isOnlineTab && !showActiveOrders ? 'text-white hover:bg-blue-700' : 'text-gray-700 hover:bg-gray-200'
-                          }`}
+                          : isOnlineTab && !showActiveOrders && !loadedTransactionInfo ? 'text-white hover:bg-blue-700' : 'text-gray-700 hover:bg-gray-200'
+                          } ${loadedTransactionInfo ? 'opacity-50 cursor-not-allowed' : ''}`}
                       >
                         GoFood
                       </button>
                       <button
                         onClick={() => {
+                          if (loadedTransactionInfo) return; // Disabled in lihat mode
                           if (!checkUnsavedChanges()) return;
                           setSelectedOnlinePlatform('grabfood');
                           setIsOnlineTab(true);
                           setShowActiveOrders(false);
                         }}
-                        className={`px-3 py-1 text-sm font-medium transition-colors h-full ${selectedOnlinePlatform === 'grabfood' && isOnlineTab && !showActiveOrders
+                        disabled={!!loadedTransactionInfo}
+                        className={`px-3 py-1 text-sm font-medium transition-colors h-full ${selectedOnlinePlatform === 'grabfood' && isOnlineTab && !showActiveOrders && !loadedTransactionInfo
                           ? 'bg-green-600 text-white'
-                          : isOnlineTab && !showActiveOrders ? 'text-white hover:bg-blue-700' : 'text-gray-700 hover:bg-gray-200'
-                          }`}
+                          : isOnlineTab && !showActiveOrders && !loadedTransactionInfo ? 'text-white hover:bg-blue-700' : 'text-gray-700 hover:bg-gray-200'
+                          } ${loadedTransactionInfo ? 'opacity-50 cursor-not-allowed' : ''}`}
                       >
                         Grab
                       </button>
                       <button
                         onClick={() => {
+                          if (loadedTransactionInfo) return; // Disabled in lihat mode
                           if (!checkUnsavedChanges()) return;
                           setSelectedOnlinePlatform('shopeefood');
                           setIsOnlineTab(true);
                           setShowActiveOrders(false);
                         }}
-                        className={`px-3 py-1 text-sm font-medium transition-colors h-full ${selectedOnlinePlatform === 'shopeefood' && isOnlineTab && !showActiveOrders
+                        disabled={!!loadedTransactionInfo}
+                        className={`px-3 py-1 text-sm font-medium transition-colors h-full ${selectedOnlinePlatform === 'shopeefood' && isOnlineTab && !showActiveOrders && !loadedTransactionInfo
                           ? 'bg-green-600 text-white'
-                          : isOnlineTab && !showActiveOrders ? 'text-white hover:bg-blue-700' : 'text-gray-700 hover:bg-gray-200'
-                          }`}
+                          : isOnlineTab && !showActiveOrders && !loadedTransactionInfo ? 'text-white hover:bg-blue-700' : 'text-gray-700 hover:bg-gray-200'
+                          } ${loadedTransactionInfo ? 'opacity-50 cursor-not-allowed' : ''}`}
                       >
                         Shopee
                       </button>
                       <button
                         onClick={() => {
+                          if (loadedTransactionInfo) return; // Disabled in lihat mode
                           if (!checkUnsavedChanges()) return;
                           setSelectedOnlinePlatform('qpon');
                           setIsOnlineTab(true);
                           setShowActiveOrders(false);
                         }}
-                        className={`px-3 py-1 text-sm font-medium transition-colors h-full ${selectedOnlinePlatform === 'qpon' && isOnlineTab && !showActiveOrders
+                        disabled={!!loadedTransactionInfo}
+                        className={`px-3 py-1 text-sm font-medium transition-colors h-full ${selectedOnlinePlatform === 'qpon' && isOnlineTab && !showActiveOrders && !loadedTransactionInfo
                           ? 'bg-green-600 text-white'
-                          : isOnlineTab && !showActiveOrders ? 'text-white hover:bg-blue-700' : 'text-gray-700 hover:bg-gray-200'
-                          }`}
+                          : isOnlineTab && !showActiveOrders && !loadedTransactionInfo ? 'text-white hover:bg-blue-700' : 'text-gray-700 hover:bg-gray-200'
+                          } ${loadedTransactionInfo ? 'opacity-50 cursor-not-allowed' : ''}`}
                       >
                         Qpon
                       </button>
                       <button
                         onClick={() => {
+                          if (loadedTransactionInfo) return; // Disabled in lihat mode
                           if (!checkUnsavedChanges()) return;
                           setSelectedOnlinePlatform('tiktok');
                           setIsOnlineTab(true);
                           setShowActiveOrders(false);
                         }}
-                        className={`px-3 py-1 text-sm font-medium transition-colors h-full rounded-r-lg ${selectedOnlinePlatform === 'tiktok' && isOnlineTab && !showActiveOrders
+                        disabled={!!loadedTransactionInfo}
+                        className={`px-3 py-1 text-sm font-medium transition-colors h-full rounded-r-lg ${selectedOnlinePlatform === 'tiktok' && isOnlineTab && !showActiveOrders && !loadedTransactionInfo
                           ? 'bg-green-600 text-white'
-                          : isOnlineTab && !showActiveOrders ? 'text-white hover:bg-blue-700' : 'text-gray-700 hover:bg-gray-200'
-                          }`}
+                          : isOnlineTab && !showActiveOrders && !loadedTransactionInfo ? 'text-white hover:bg-blue-700' : 'text-gray-700 hover:bg-gray-200'
+                          } ${loadedTransactionInfo ? 'opacity-50 cursor-not-allowed' : ''}`}
                       >
                         TikTok
                       </button>
@@ -1057,9 +1077,6 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
             </div>
           </div>
         );
-
-      case 'Table':
-        return <TableLayout />;
 
       case 'Kitchen':
         return <KitchenDisplay />;

@@ -38,7 +38,18 @@ interface LayoutElement {
   text_color: string;
 }
 
-export default function TableLayout() {
+interface PendingTransaction {
+  uuid_id: string;
+  table_id: number | null;
+  created_at: string;
+  status: string;
+}
+
+interface TableLayoutProps {
+  onLoadTransaction?: (transactionId: string) => void;
+}
+
+export default function TableLayout({ onLoadTransaction }: TableLayoutProps = {} as TableLayoutProps) {
   const { user } = useAuth();
   const businessId = user?.selectedBusinessId ?? 14;
   
@@ -46,6 +57,8 @@ export default function TableLayout() {
   const [selectedRoom, setSelectedRoom] = useState<number | null>(null);
   const [tables, setTables] = useState<Table[]>([]);
   const [layoutElements, setLayoutElements] = useState<LayoutElement[]>([]);
+  const [pendingTransactions, setPendingTransactions] = useState<PendingTransaction[]>([]);
+  const [currentTime, setCurrentTime] = useState(new Date());
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   
@@ -123,11 +136,32 @@ export default function TableLayout() {
     if (selectedRoom) {
       fetchTables();
       fetchLayoutElements();
+      fetchPendingTransactions();
     } else {
       setTables([]);
       setLayoutElements([]);
+      setPendingTransactions([]);
     }
-  }, [selectedRoom]);
+  }, [selectedRoom, businessId]);
+
+  // Fetch pending transactions periodically
+  useEffect(() => {
+    if (selectedRoom && businessId) {
+      fetchPendingTransactions();
+      const interval = setInterval(fetchPendingTransactions, 5000);
+      return () => clearInterval(interval);
+    }
+  }, [selectedRoom, businessId]);
+
+  // Update timer display every second
+  useEffect(() => {
+    if (pendingTransactions.length > 0) {
+      const interval = setInterval(() => {
+        setCurrentTime(new Date());
+      }, 1000);
+      return () => clearInterval(interval);
+    }
+  }, [pendingTransactions.length]);
 
   const fetchRooms = async () => {
     try {
@@ -203,6 +237,48 @@ export default function TableLayout() {
       setLayoutElements(Array.isArray(elementsData) ? elementsData : []);
     } catch (error) {
       console.error('Error fetching layout elements:', error);
+    }
+  };
+
+  const fetchPendingTransactions = async () => {
+    if (!businessId) return;
+    
+    try {
+      const electronAPI = window.electronAPI;
+      if (!electronAPI?.localDbGetTransactions) {
+        return;
+      }
+
+      const allTransactions = await electronAPI.localDbGetTransactions(businessId, 10000);
+      const transactionsArray = Array.isArray(allTransactions) ? allTransactions : [];
+      
+      const pending = transactionsArray
+        .filter((tx: unknown) => {
+          if (tx && typeof tx === 'object' && 'status' in tx) {
+            const transaction = tx as { status: string };
+            return transaction.status === 'pending';
+          }
+          return false;
+        })
+        .map((tx: unknown) => {
+          const t = tx as {
+            uuid_id?: string;
+            id?: string;
+            table_id?: number | null;
+            created_at?: string;
+            status?: string;
+          };
+          return {
+            uuid_id: t.uuid_id || t.id || '',
+            table_id: t.table_id || null,
+            created_at: t.created_at || new Date().toISOString(),
+            status: t.status || 'pending',
+          };
+        });
+
+      setPendingTransactions(pending);
+    } catch (error) {
+      console.error('Error fetching pending transactions:', error);
     }
   };
 
@@ -385,6 +461,11 @@ export default function TableLayout() {
                 (MIN_SIZE_PERCENT / 100) * canvasSize.height
               );
 
+              // Find pending transaction for this table
+              const tableTransaction = pendingTransactions.find(
+                tx => tx.table_id === table.id
+              );
+
               return (
                 <TableDisplay
                   key={table.id}
@@ -395,6 +476,9 @@ export default function TableLayout() {
                   pixelHeight={Math.max(pixelHeight, minPixelSize)}
                   fontSize={fontSize}
                   smallFontSize={smallFontSize}
+                  transaction={tableTransaction}
+                  currentTime={currentTime}
+                  onLoadTransaction={onLoadTransaction}
                 />
               );
               });
@@ -424,7 +508,10 @@ function TableDisplay({
   pixelWidth,
   pixelHeight,
   fontSize,
-  smallFontSize
+  smallFontSize,
+  transaction,
+  currentTime,
+  onLoadTransaction
 }: {
   table: Table;
   pixelX: number;
@@ -433,22 +520,29 @@ function TableDisplay({
   pixelHeight: number;
   fontSize: number;
   smallFontSize: number;
+  transaction?: PendingTransaction;
+  currentTime: Date;
+  onLoadTransaction?: (transactionId: string) => void;
 }) {
-  const [timer, setTimer] = useState<string>('--:--');
+  const formatTimer = (createdAt: string): string => {
+    const created = new Date(createdAt);
+    const diffMs = currentTime.getTime() - created.getTime();
 
-  // Timer update effect
-  useEffect(() => {
-    const updateTimer = () => {
-      const now = new Date();
-      const hours = now.getHours().toString().padStart(2, '0');
-      const minutes = now.getMinutes().toString().padStart(2, '0');
-      setTimer(`${hours}:${minutes}`);
-    };
-    
-    updateTimer();
-    const interval = setInterval(updateTimer, 1000);
-    return () => clearInterval(interval);
-  }, []);
+    const totalSeconds = Math.floor(diffMs / 1000);
+    const minutes = Math.floor(totalSeconds / 60);
+    const seconds = totalSeconds % 60;
+
+    return `${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
+  };
+
+  const timer = transaction ? formatTimer(transaction.created_at) : '--:--';
+  const isOccupied = !!transaction;
+
+  const handleTableClick = () => {
+    if (isOccupied && transaction && onLoadTransaction) {
+      onLoadTransaction(transaction.uuid_id);
+    }
+  };
 
   return (
     <div
@@ -459,12 +553,15 @@ function TableDisplay({
         width: pixelWidth,
         height: pixelHeight,
       }}
-      className="cursor-default"
+      className={isOccupied && onLoadTransaction ? "cursor-pointer" : "cursor-default"}
+      onClick={handleTableClick}
     >
       <div
         className={`w-full h-full flex flex-col items-center justify-center relative overflow-hidden ${
           table.shape === 'circle' ? 'rounded-full' : 'rounded-lg'
-        } bg-blue-400 text-gray-900 border-2 border-gray-800 shadow-lg`}
+        } ${isOccupied ? 'bg-orange-400' : 'bg-blue-400'} text-gray-900 border-2 border-gray-800 shadow-lg transition-colors ${
+          isOccupied && onLoadTransaction ? 'hover:bg-orange-500' : ''
+        }`}
         style={{
           minWidth: '40px',
           minHeight: '40px',

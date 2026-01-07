@@ -768,9 +768,24 @@ export default function TableSelectionModal({
       await electronAPI.localDbUpsertTransactions?.([updatedTransactionData]);
       await electronAPI.localDbUpsertTransactionItems?.(transactionItems);
 
+      // Small delay to ensure items are fully committed to database
+      await new Promise(resolve => setTimeout(resolve, 100));
+
       // Fetch saved transaction items to get their database IDs for saving customizations
       const savedTransactionItems = await electronAPI.localDbGetTransactionItems?.(transactionId);
       const savedItemsArray = Array.isArray(savedTransactionItems) ? savedTransactionItems as Record<string, unknown>[] : [];
+      
+      console.log('🔍 [TableSelectionModal] Fetched saved items after adding new items:', {
+        transactionId,
+        savedItemsCount: savedItemsArray.length,
+        newItemUuids: transactionItemUuids,
+        savedItems: savedItemsArray.map((item: Record<string, unknown>) => ({
+          id: item.id,
+          idType: typeof item.id,
+          uuid_id: item.uuid_id,
+          product_id: item.product_id
+        })).slice(0, 10)
+      });
 
       // Prepare customizations for new items
       const customizationData: Array<{
@@ -789,10 +804,10 @@ export default function TableSelectionModal({
       itemsToSave.forEach((cartItem, cartIndex) => {
         const itemUuid = transactionItemUuids[cartIndex];
         const savedItem = savedItemsArray.find((item: Record<string, unknown>) => 
-          item.uuid_id === itemUuid || item.id === itemUuid
-        ) as { id: number; uuid_id?: string } | undefined;
+          item.uuid_id === itemUuid || String(item.id) === String(itemUuid)
+        ) as { id: number | string; uuid_id?: string } | undefined;
 
-        if (!savedItem || !savedItem.id || savedItem.id === 0) {
+        if (!savedItem) {
           console.warn(`⚠️ Could not find saved transaction item for product ${cartItem.product.id}`, {
             itemUuid,
             savedItemsCount: savedItemsArray.length,
@@ -801,6 +816,22 @@ export default function TableSelectionModal({
               uuid_id: item.uuid_id,
               product_id: item.product_id 
             })).slice(0, 5)
+          });
+          return;
+        }
+
+        // Get the numeric database ID (not UUID)
+        // The database returns 'id' as numeric, but we need to ensure it's a number
+        const numericItemId = typeof savedItem.id === 'number' 
+          ? savedItem.id 
+          : (typeof savedItem.id === 'string' ? parseInt(savedItem.id, 10) : null);
+
+        if (!numericItemId || numericItemId === 0 || isNaN(numericItemId)) {
+          console.warn(`⚠️ Invalid transaction_item_id for product ${cartItem.product.id}`, {
+            itemUuid,
+            savedItemId: savedItem.id,
+            savedItemIdType: typeof savedItem.id,
+            numericItemId
           });
           return;
         }
@@ -825,7 +856,7 @@ export default function TableSelectionModal({
             }
 
             customizationData.push({
-              transaction_item_id: savedItem.id,
+              transaction_item_id: numericItemId,
               customization_type_id: customization.customization_id,
               bundle_product_id: null,
               created_at: new Date().toISOString(),
@@ -933,46 +964,50 @@ export default function TableSelectionModal({
 
   if (!isOpen) return null;
 
+  // In lihat mode, hide table selection UI when confirmation modal is showing
+  const shouldHideTableSelection = loadedTransactionInfo && showConfirmationModal;
 
   return (
     <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-      <div className="bg-white rounded-lg shadow-xl w-screen h-screen flex flex-col">
-        {/* Header */}
-        <div className="flex items-center justify-between p-4 border-b gap-4">
-          <div className="flex items-center gap-4 flex-1 min-w-0">
-            <h2 className="text-xl font-bold text-gray-900 whitespace-nowrap">Pilih Meja</h2>
-            {/* Room Selector */}
-            {!loading && !error && rooms.length > 0 && (
-              <div className="flex flex-wrap gap-2 flex-1 min-w-0">
-                {rooms.map((room) => (
-                  <button
-                    key={room.id}
-                    onClick={() => {setSelectedRoom(room.id);
-                    }}
-                    disabled={isSaving}
-                    className={`px-3 py-1.5 text-sm rounded-md transition-colors disabled:opacity-50 whitespace-nowrap ${
-                      selectedRoom === room.id
-                        ? 'bg-blue-600 text-white'
-                        : 'bg-gray-200 text-gray-900 hover:bg-gray-300'
-                    }`}
-                  >
-                    {room.name} ({room.table_count || 0})
-                  </button>
-                ))}
-              </div>
-            )}
+      {/* Table Selection Modal - Hidden when confirmation modal is showing in lihat mode */}
+      {!shouldHideTableSelection && (
+        <div className="bg-white rounded-lg shadow-xl w-screen h-screen flex flex-col">
+          {/* Header */}
+          <div className="flex items-center justify-between p-4 border-b gap-4">
+            <div className="flex items-center gap-4 flex-1 min-w-0">
+              <h2 className="text-xl font-bold text-gray-900 whitespace-nowrap">Pilih Meja</h2>
+              {/* Room Selector */}
+              {!loading && !error && rooms.length > 0 && (
+                <div className="flex flex-wrap gap-2 flex-1 min-w-0">
+                  {rooms.map((room) => (
+                    <button
+                      key={room.id}
+                      onClick={() => {setSelectedRoom(room.id);
+                      }}
+                      disabled={isSaving}
+                      className={`px-3 py-1.5 text-sm rounded-md transition-colors disabled:opacity-50 whitespace-nowrap ${
+                        selectedRoom === room.id
+                          ? 'bg-blue-600 text-white'
+                          : 'bg-gray-200 text-gray-900 hover:bg-gray-300'
+                      }`}
+                    >
+                      {room.name} ({room.table_count || 0})
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+            <button
+              onClick={onClose}
+              disabled={isSaving}
+              className="p-2 hover:bg-gray-100 rounded-lg transition-colors disabled:opacity-50 flex-shrink-0"
+            >
+              <X className="w-5 h-5 text-gray-900" />
+            </button>
           </div>
-          <button
-            onClick={onClose}
-            disabled={isSaving}
-            className="p-2 hover:bg-gray-100 rounded-lg transition-colors disabled:opacity-50 flex-shrink-0"
-          >
-            <X className="w-5 h-5 text-gray-900" />
-          </button>
-        </div>
 
-        {/* Content */}
-        <div className="flex-1 overflow-hidden p-4">
+          {/* Content */}
+          <div className="flex-1 overflow-hidden p-4">
           {loading && (
             <div className="flex items-center justify-center h-full">
               <div className="text-gray-600">Memuat layout meja...</div>
@@ -1166,12 +1201,19 @@ export default function TableSelectionModal({
             </>
           )}
         </div>
-      </div>
+        </div>
+      )}
 
       {/* New Items Confirmation Modal */}
       <NewItemsConfirmationModal
         isOpen={showConfirmationModal}
-        onClose={() => setShowConfirmationModal(false)}
+        onClose={() => {
+          setShowConfirmationModal(false);
+          // In lihat mode, close the entire modal when canceling confirmation
+          if (loadedTransactionInfo) {
+            onClose();
+          }
+        }}
         onConfirm={handleConfirmNewItems}
         newItems={newItemsToSave.map(item => ({
           ...item,

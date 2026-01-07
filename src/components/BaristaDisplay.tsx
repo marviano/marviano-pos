@@ -59,14 +59,18 @@ export default function BaristaDisplay() {
         return;
       }
 
-      // Fetch all pending transactions
+      // Fetch all transactions (pending, paid, and completed)
+      // We include paid/completed transactions because items might still be in production
       const transactions = await electronAPI.localDbGetTransactions?.(businessId, 10000);
       const transactionsArray = Array.isArray(transactions) ? transactions as Record<string, unknown>[] : [];
       
-      // Filter for pending transactions
-      const pendingTransactions = transactionsArray.filter((tx) => 
-        tx.status === 'pending'
-      );
+      // Filter for transactions that might have items in production
+      // Include pending (unpaid), paid, and completed transactions
+      // Items will be filtered by production_status later (only show unfinished items)
+      const relevantTransactions = transactionsArray.filter((tx) => {
+        const status = typeof tx.status === 'string' ? tx.status.toLowerCase() : '';
+        return status === 'pending' || status === 'paid' || status === 'completed';
+      });
 
       // Fetch all products to get category info
       const allProducts = await electronAPI.localDbGetAllProducts?.();
@@ -104,10 +108,10 @@ export default function BaristaDisplay() {
         }
       }
 
-      // Fetch transaction items for all pending transactions
+      // Fetch transaction items for all relevant transactions
       const allOrderItems: OrderItem[] = [];
       
-      for (const tx of pendingTransactions) {
+      for (const tx of relevantTransactions) {
         const transactionId = (tx.uuid_id || tx.id) as string | number | undefined;
         const items = await electronAPI.localDbGetTransactionItems?.(transactionId);
         const itemsArray = Array.isArray(items) ? items as Record<string, unknown>[] : [];
@@ -186,7 +190,7 @@ export default function BaristaDisplay() {
             continue;
           }
           
-          allOrderItems.push({
+          const orderItem = {
             id: itemId,
             uuid_id: typeof item.uuid_id === 'string' ? item.uuid_id : (itemId ? String(itemId) : ''),
             transaction_id: transactionIdStr || (transactionId ? String(transactionId) : ''),
@@ -195,13 +199,42 @@ export default function BaristaDisplay() {
             quantity: typeof item.quantity === 'number' ? item.quantity : (typeof item.quantity === 'string' ? parseInt(item.quantity, 10) : 1),
             custom_note: typeof item.custom_note === 'string' ? item.custom_note : null,
             production_status: itemProductionStatus,
-            production_started_at: typeof item.production_started_at === 'string' ? item.production_started_at : null,
-            production_finished_at: typeof item.production_finished_at === 'string' ? item.production_finished_at : null,
+            production_started_at: typeof item.production_started_at === 'string' ? item.production_started_at : (item.production_started_at instanceof Date ? item.production_started_at.toISOString() : null),
+            production_finished_at: typeof item.production_finished_at === 'string' ? item.production_finished_at : (item.production_finished_at instanceof Date ? item.production_finished_at.toISOString() : null),
             table_number: tableNumber || null,
             room_name: roomName || null,
-            created_at: typeof tx.created_at === 'string' ? tx.created_at : (typeof item.created_at === 'string' ? item.created_at : new Date().toISOString()),
+            created_at: (() => {
+              const txCreatedAt = typeof tx.created_at === 'string' ? tx.created_at : (tx.created_at instanceof Date ? tx.created_at.toISOString() : null);
+              const itemCreatedAt = typeof item.created_at === 'string' ? item.created_at : (item.created_at instanceof Date ? item.created_at.toISOString() : null);
+              
+              // CRITICAL FIX: Use transaction created_at as the source of truth for timer
+              // If item.created_at is null, use transaction.created_at (when item was ordered)
+              // Only fall back to current time if BOTH are null (should never happen in normal operation)
+              let finalCreatedAt: string;
+              if (itemCreatedAt) {
+                finalCreatedAt = itemCreatedAt;
+              } else if (txCreatedAt) {
+                // Use transaction created_at as fallback - this is when the order was placed
+                finalCreatedAt = txCreatedAt;
+              } else {
+                // Last resort: use current time (but log warning)
+                console.warn('Both item.created_at and tx.created_at are null, using current time (this should not happen):', { itemId, transactionId, productId });
+                finalCreatedAt = new Date().toISOString();
+              }
+              
+              // Validate the date string
+              const testDate = new Date(finalCreatedAt);
+              
+              if (isNaN(testDate.getTime())) {
+                console.warn('Invalid created_at date detected, using current time:', { txCreatedAt, itemCreatedAt, finalCreatedAt });
+                finalCreatedAt = new Date().toISOString();
+              }
+              return finalCreatedAt;
+            })(),
             customizations: itemCustomizations,
-          });
+          };
+          
+          allOrderItems.push(orderItem);
           
           // Debug: Log item details for this specific transaction
           if (transactionId === '0142601012201470001') {
@@ -234,78 +267,48 @@ export default function BaristaDisplay() {
         });
         const sortedOptionIds = allOptionIds.sort((a, b) => a - b).join(',');
         const customNote = item.custom_note || '';
-        const signature = `${item.product_id}_${sortedOptionIds}_${customNote}`;
+        // Include table_number in signature to prevent grouping items from different tables
+        const tableNumber = item.table_number || '';
+        // Include uuid_id to ensure each item is unique (one line per item, no grouping)
+        const itemUuid = item.uuid_id || item.id?.toString() || '';
+        const signature = `${item.product_id}_${sortedOptionIds}_${customNote}_${tableNumber}_${itemUuid}`;
 
-        // Track all items in this group
+        // Track all items in this group (each item has unique signature now, so groups will be size 1)
         if (!groupItemsMap.has(signature)) {
           groupItemsMap.set(signature, []);
         }
         groupItemsMap.get(signature)!.push(item);
 
-        if (groupedMap.has(signature)) {
-          const existing = groupedMap.get(signature)!;
-          existing.total_quantity += item.quantity;
-          // Update display text with new total quantity
-          let displayText = `${existing.total_quantity}x ${item.product_name}`;
-          
-          // Add customizations
-          const customizationTexts: string[] = [];
-          item.customizations.forEach(customization => {
-            customization.options.forEach(option => {
-              customizationTexts.push(`+${option.option_name}`);
-            });
+        // Since each item has unique signature (includes uuid_id), this will always be a new entry
+        // Build display text
+        let displayText = `${item.quantity}x ${item.product_name}`;
+        
+        // Add customizations
+        const customizationTexts: string[] = [];
+        item.customizations.forEach(customization => {
+          customization.options.forEach(option => {
+            customizationTexts.push(`+${option.option_name}`);
           });
-          if (customizationTexts.length > 0) {
-            displayText += ` ${customizationTexts.join(', ')}`;
-          }
-
-          // Add custom note
-          if (item.custom_note) {
-            displayText += ` note: ${item.custom_note}`;
-          }
-
-          // Add table number
-          if (item.table_number) {
-            displayText += ` table ${item.table_number}`;
-          }
-
-          existing.display_text = displayText;
-        } else {
-          // Build display text
-          let displayText = `${item.quantity}x ${item.product_name}`;
-          
-          // Add customizations
-          const customizationTexts: string[] = [];
-          item.customizations.forEach(customization => {
-            customization.options.forEach(option => {
-              customizationTexts.push(`+${option.option_name}`);
-            });
-          });
-          if (customizationTexts.length > 0) {
-            displayText += ` ${customizationTexts.join(', ')}`;
-          }
-
-          // Add custom note
-          if (item.custom_note) {
-            displayText += ` note: ${item.custom_note}`;
-          }
-
-          // Add table number
-          if (item.table_number) {
-            displayText += ` table ${item.table_number}`;
-          }
-
-          // Use production_started_at if available, otherwise created_at
-          const startTime = item.production_started_at || item.created_at;
-          
-          groupedMap.set(signature, {
-            ...item,
-            total_quantity: item.quantity,
-            display_text: displayText,
-            timer: formatTimer(startTime, currentTime),
-            production_started_at: startTime,
-          });
+        });
+        if (customizationTexts.length > 0) {
+          displayText += ` ${customizationTexts.join(', ')}`;
         }
+
+        // Add custom note
+        if (item.custom_note) {
+          displayText += ` note: ${item.custom_note}`;
+        }
+
+        // Use production_started_at if available, otherwise created_at
+        const startTime = item.production_started_at || item.created_at;
+        
+        groupedMap.set(signature, {
+          ...item,
+          total_quantity: item.quantity,
+          display_text: displayText,
+          timer: formatTimer(startTime, currentTime),
+          production_started_at: startTime,
+        });
       });
 
       // Separate active and finished orders
@@ -360,12 +363,27 @@ export default function BaristaDisplay() {
           // Update the grouped item's production_status to finished
           groupedItem.production_status = 'finished';
           // Use the most recent finished_at time from the items
+          // Since each item has unique signature now, itemsInGroup should have 1 item
           const finishedTimes = itemsInGroup
             .map(i => i.production_finished_at)
             .filter((t): t is string => t !== null)
             .sort((a, b) => new Date(b).getTime() - new Date(a).getTime());
           if (finishedTimes.length > 0) {
             groupedItem.production_finished_at = finishedTimes[0];
+          } else {
+            // If production_finished_at is null, use the item's production_finished_at directly
+            // This handles the case where the item is marked finished but finished_at wasn't set
+            const itemFinishedAt = itemsInGroup[0]?.production_finished_at;
+            if (itemFinishedAt) {
+              groupedItem.production_finished_at = itemFinishedAt;
+            } else {
+              // Log warning if finished item has no finished_at time
+              console.warn('Finished item has no production_finished_at:', {
+                itemId: itemsInGroup[0]?.id,
+                uuid_id: itemsInGroup[0]?.uuid_id,
+                production_status: itemsInGroup[0]?.production_status
+              });
+            }
           }
           finished.push(groupedItem);
         } else {
@@ -397,13 +415,29 @@ export default function BaristaDisplay() {
   };
 
   const formatTimer = (startTime: string | null, currentTime: Date): string => {
-    if (!startTime) return '00:00';
+    if (!startTime) {
+      return '00:00';
+    }
     const start = new Date(startTime);
+    
+    // Check if date is valid
+    if (isNaN(start.getTime())) {
+      console.warn('Invalid date for timer:', startTime);
+      return '00:00';
+    }
     const diffMs = currentTime.getTime() - start.getTime();
+    
+    // Handle negative time (if date is in future due to timezone issues)
+    if (diffMs < 0) {
+      console.warn('Negative time difference detected:', { startTime, currentTime: currentTime.toISOString(), diffMs });
+      return '00:00';
+    }
     const totalSeconds = Math.floor(diffMs / 1000);
     const minutes = Math.floor(totalSeconds / 60);
     const seconds = totalSeconds % 60;
-    return `${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
+    const result = `${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
+    
+    return result;
   };
 
   const formatDuration = (startTime: string | null, endTime: string | null): string => {
@@ -445,6 +479,34 @@ export default function BaristaDisplay() {
       const items = await electronAPI.localDbGetTransactionItems?.(item.transaction_id);
       const itemsArray = Array.isArray(items) ? items as Record<string, unknown>[] : [];
       console.log('📦 Found', itemsArray.length, 'transaction items');
+
+      // Fetch transaction to get table_id, then get table_number
+      const transactions = await electronAPI.localDbGetTransactions?.(businessId, 10000);
+      const transactionsArray = Array.isArray(transactions) ? transactions as Record<string, unknown>[] : [];
+      const currentTransaction = transactionsArray.find((tx) => 
+        tx.uuid_id === item.transaction_id || tx.id === item.transaction_id
+      ) as Record<string, unknown> | undefined;
+      
+      // Get table info if available
+      let transactionTableNumber = '';
+      if (currentTransaction && electronAPI.getRestaurantRooms && electronAPI.getRestaurantTables) {
+        const tableId = typeof currentTransaction.table_id === 'number' ? currentTransaction.table_id : (typeof currentTransaction.table_id === 'string' ? parseInt(currentTransaction.table_id, 10) : null);
+        if (tableId) {
+          const rooms = await electronAPI.getRestaurantRooms(businessId);
+          const roomsArray = Array.isArray(rooms) ? rooms : [];
+          for (const room of roomsArray) {
+            if (room.id && electronAPI.getRestaurantTables) {
+              const tables = await electronAPI.getRestaurantTables(room.id);
+              const tablesArray = Array.isArray(tables) ? tables : [];
+              const table = tablesArray.find((t: { id: number }) => t.id === tableId);
+              if (table) {
+                transactionTableNumber = table.table_number || '';
+                break;
+              }
+            }
+          }
+        }
+      }
 
       // Fetch customizations to match items by signature
       const customizationsData = await electronAPI.localDbGetTransactionItemCustomizationsNormalized?.(item.transaction_id);
@@ -515,7 +577,7 @@ export default function BaristaDisplay() {
           : (typeof transactionItem.id === 'number' ? transactionItem.id : 0);
         const itemCustomizations = itemIdForLookup ? customizationsMap.get(itemIdForLookup) || [] : [];
         
-        // Create signature for this item
+        // Create signature for this item (must match grouping signature including table_number)
         const allOptionIds: number[] = [];
         itemCustomizations.forEach((customization: { options: Array<{ option_name: string }> }) => {
           customization.options.forEach((option: { option_name: string }) => {
@@ -523,9 +585,10 @@ export default function BaristaDisplay() {
           });
         });
         const sortedOptionIds = allOptionIds.sort((a, b) => a - b).join(',');
-        const itemSignature = `${transactionItem.product_id}_${sortedOptionIds}_${itemNote}`;
+        // Use the table_number we fetched from the transaction (all items in same transaction have same table)
+        const itemSignature = `${transactionItem.product_id}_${sortedOptionIds}_${itemNote}_${transactionTableNumber}`;
 
-        // Create signature for the grouped item
+        // Create signature for the grouped item (must match grouping signature including table_number)
         const groupedOptionIds: number[] = [];
         item.customizations.forEach(customization => {
           customization.options.forEach(option => {
@@ -533,7 +596,8 @@ export default function BaristaDisplay() {
           });
         });
         const groupedSortedOptionIds = groupedOptionIds.sort((a, b) => a - b).join(',');
-        const groupedSignature = `${item.product_id}_${groupedSortedOptionIds}_${itemNote}`;
+        const groupedTableNumber = item.table_number || '';
+        const groupedSignature = `${item.product_id}_${groupedSortedOptionIds}_${itemNote}_${groupedTableNumber}`;
 
         // If signatures match, add to update list (only if not already finished)
         if (itemSignature === groupedSignature) {
@@ -691,7 +755,28 @@ export default function BaristaDisplay() {
                   <div className="flex justify-between items-start mb-2">
                     <div className="flex-1">
                       <div className="text-lg font-semibold text-gray-900">
-                        {item.display_text}
+                        {item.total_quantity}x {item.product_name}
+                        {item.customizations && item.customizations.length > 0 && (
+                          <span className="text-blue-700 font-bold">
+                            {' '}
+                            {item.customizations.map((customization, idx) => (
+                              <span key={idx}>
+                                {customization.options.map((option, optIdx) => (
+                                  <span key={optIdx}>
+                                    +{option.option_name}
+                                    {optIdx < customization.options.length - 1 && ', '}
+                                  </span>
+                                ))}
+                                {idx < item.customizations.length - 1 && ', '}
+                              </span>
+                            ))}
+                          </span>
+                        )}
+                        {item.custom_note && (
+                          <span className="text-purple-700 font-bold">
+                            {' '}note: {item.custom_note}
+                          </span>
+                        )}
                       </div>
                     </div>
                     <div className="ml-4">
@@ -700,9 +785,11 @@ export default function BaristaDisplay() {
                       </div>
                     </div>
                   </div>
-                  <div className="text-xs text-gray-500 mt-1">
-                    Double tap to mark as finished
-                  </div>
+                  {item.table_number && (
+                    <div className="text-xs text-gray-600 mt-2 font-semibold">
+                      {item.table_number}
+                    </div>
+                  )}
                 </div>
               ))}
             </div>
@@ -732,25 +819,30 @@ export default function BaristaDisplay() {
                     <div className="text-lg font-semibold text-gray-600">
                       {item.display_text}
                     </div>
+                  {(item.table_number || item.production_started_at || item.production_finished_at) && (
                     <div className="text-xs text-gray-500 mt-1">
-                      {item.production_started_at && item.production_finished_at && duration !== '00:00' ? (
-                        <span>
-                          Mulai: {formatTime(item.production_started_at)} | Selesai: {formatTime(item.production_finished_at)} | Durasi: <span className="font-semibold text-gray-700">{duration}</span>
-                        </span>
-                      ) : (
-                        <>
-                          {item.production_started_at && (
-                            <span>Mulai: {formatTime(item.production_started_at)}</span>
-                          )}
-                          {item.production_finished_at && (
-                            <span>{item.production_started_at ? ' | ' : ''}Selesai: {formatTime(item.production_finished_at)}</span>
-                          )}
-                          {duration !== '00:00' && (
-                            <span> | Durasi: <span className="font-semibold text-gray-700">{duration}</span></span>
-                          )}
-                        </>
-                      )}
+                      {(() => {
+                        const tableText = item.table_number ? `${item.table_number} | ` : '';
+                        // Use production_started_at if available, otherwise fall back to created_at
+                        const startTimeSource = item.production_started_at || item.created_at;
+                        const startTime = startTimeSource 
+                          ? new Date(startTimeSource).toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit', hour12: false })
+                          : null;
+                        const endTime = item.production_finished_at 
+                          ? new Date(item.production_finished_at).toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit', hour12: false })
+                          : null;
+                        let durationText = '';
+                        if (startTimeSource && item.production_finished_at) {
+                          const start = new Date(startTimeSource);
+                          const end = new Date(item.production_finished_at);
+                          const diffMs = end.getTime() - start.getTime();
+                          const diffMinutes = Math.floor(diffMs / (1000 * 60));
+                          durationText = ` | Waktu penyelesaian: ${diffMinutes} Menit`;
+                        }
+                        return `${tableText}${startTime ? `Mulai: ${startTime}` : ''}${startTime && endTime ? ' | ' : ''}${endTime ? `Selesai: ${endTime}` : ''}${durationText}`;
+                      })()}
                     </div>
+                  )}
                   </div>
                 );
               })}

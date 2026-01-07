@@ -171,18 +171,32 @@ const TransactionDetailModal: React.FC<TransactionDetailModalProps> = ({
     if (!transaction) {
       return 0;
     }
-    if (typeof transaction.refund_total === 'number') {
+    // Prefer refund_total from transaction if it's a valid number
+    if (typeof transaction.refund_total === 'number' && !Number.isNaN(transaction.refund_total)) {
       return transaction.refund_total;
     }
-    return (transaction.refunds || []).reduce(
-      (sum, refund) => sum + (refund.refund_amount || 0),
+    // Fallback: calculate from refunds array, ensuring all values are numbers
+    const calculated = (transaction.refunds || []).reduce(
+      (sum, refund) => {
+        const amount = typeof refund.refund_amount === 'number' 
+          ? refund.refund_amount 
+          : (typeof refund.refund_amount === 'string' ? parseFloat(refund.refund_amount) : 0);
+        return sum + (Number.isNaN(amount) ? 0 : amount);
+      },
       0
     );
+    return Number.isNaN(calculated) ? 0 : Number(calculated.toFixed(2));
   }, [transaction]);
 
   const outstandingAmount = useMemo(() => {
     if (!transaction) return 0;
-    return Math.max(0, Number(transaction.final_amount || 0) - totalRefunded);
+    const finalAmount = typeof transaction.final_amount === 'number'
+      ? transaction.final_amount
+      : (typeof transaction.final_amount === 'string' ? parseFloat(transaction.final_amount) : 0);
+    const safeFinalAmount = Number.isNaN(finalAmount) ? 0 : finalAmount;
+    const safeTotalRefunded = Number.isNaN(totalRefunded) ? 0 : totalRefunded;
+    const result = Math.max(0, safeFinalAmount - safeTotalRefunded);
+    return Number.isNaN(result) ? 0 : Number(result.toFixed(2));
   }, [transaction, totalRefunded]);
 
   // Get payment method code from ID or string
@@ -549,8 +563,22 @@ const TransactionDetailModal: React.FC<TransactionDetailModalProps> = ({
 
   if (!isOpen) return null;
 
-  const formatPrice = (price: number) => {
-    return `Rp ${price.toLocaleString('id-ID')}`;
+  const formatPrice = (price: number | string | null | undefined) => {
+    // Handle null, undefined, or invalid values
+    if (price === null || price === undefined) {
+      return 'Rp 0';
+    }
+    
+    // Convert to number if it's a string
+    const numPrice = typeof price === 'string' ? parseFloat(price) : price;
+    
+    // Check if it's a valid number
+    if (Number.isNaN(numPrice) || !Number.isFinite(numPrice)) {
+      return 'Rp 0';
+    }
+    
+    // Format with proper locale and no decimal places for IDR
+    return `Rp ${numPrice.toLocaleString('id-ID', { minimumFractionDigits: 0, maximumFractionDigits: 0 })}`;
   };
 
   const formatDate = (dateString: string) => {

@@ -156,7 +156,14 @@ const RefundModal: React.FC<RefundModalProps> = ({
       const safeTotalRefunded = Number.isNaN(totalRefunded) ? 0 : Number(totalRefunded);
       const safeNumericAmount = Number.isNaN(numericAmount) ? 0 : Number(numericAmount);
       const newRefundTotal = Number((safeTotalRefunded + safeNumericAmount).toFixed(2));
-      const newStatus = refundType === 'full' ? 'refunded' : transaction.status;
+      
+      // Calculate refund_status based on TOTAL refund amount vs final_amount, not just current refund
+      const finalAmount = Number(transaction.final_amount || 0);
+      const calculatedRefundStatus = newRefundTotal >= finalAmount - 0.01 ? 'full' : 'partial';
+      
+      // Keep transaction status as 'completed' even for full refunds
+      // The refund_status field already indicates refund state
+      const newStatus = transaction.status || 'completed';
       
       const baseRefundRecord: TransactionRefund = {
         ...refundPayload,
@@ -173,7 +180,7 @@ const RefundModal: React.FC<RefundModalProps> = ({
       const updatedTransaction: TransactionDetail = {
         ...transaction,
         refund_total: newRefundTotal,
-        refund_status: refundType,
+        refund_status: calculatedRefundStatus,
         status: newStatus,
         refunds: mergedRefunds
       };

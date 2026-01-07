@@ -294,18 +294,45 @@ const saveCustomizationsToNormalizedTables = async (
   }
 
   try {
+    // #region agent log
+    fetch('http://127.0.0.1:7242/ingest/7b565785-72b5-49f7-b2c0-57606ea0d0b5',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'main.ts:296',message:'saveCustomizationsToNormalizedTables entry',data:{transactionItemUuid,customizationsCount:customizations.length,bundleProductId},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'H'})}).catch(()=>{});
+    // #endregion
+    
     // Look up the INT id from transaction_items using UUID
     const itemRow = await executeQueryOne<{ id: number }>(
       'SELECT id FROM transaction_items WHERE uuid_id = ? LIMIT 1',
       [transactionItemUuid]
     );
 
+    // #region agent log
+    fetch('http://127.0.0.1:7242/ingest/7b565785-72b5-49f7-b2c0-57606ea0d0b5',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'main.ts:301',message:'Item lookup result',data:{transactionItemUuid,itemFound:!!itemRow,itemId:itemRow?.id},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'H'})}).catch(()=>{});
+    // #endregion
+
     if (!itemRow || typeof itemRow.id !== 'number') {
       console.warn(`⚠️ Transaction item UUID ${transactionItemUuid} not found, skipping customizations save`);
+      // #region agent log
+      fetch('http://127.0.0.1:7242/ingest/7b565785-72b5-49f7-b2c0-57606ea0d0b5',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'main.ts:305',message:'Item not found - skipping',data:{transactionItemUuid},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'H'})}).catch(()=>{});
+      // #endregion
       return;
     }
 
     const transactionItemId = itemRow.id;
+
+    // Convert createdAt to MySQL format (YYYY-MM-DD HH:MM:SS)
+    // Handle ISO strings, Date objects, or already-formatted strings
+    let mysqlCreatedAt: string;
+    if (typeof createdAt === 'string') {
+      // If it's an ISO string (contains 'T' or 'Z'), convert it
+      if (createdAt.includes('T') || createdAt.includes('Z')) {
+        mysqlCreatedAt = toMySQLTimestamp(createdAt);
+      } else {
+        // Already in MySQL format
+        mysqlCreatedAt = createdAt;
+      }
+    } else {
+      // Fallback: convert to MySQL format
+      mysqlCreatedAt = toMySQLTimestamp(createdAt || new Date());
+    }
 
     const connection = await getConnection();
     try {
@@ -339,7 +366,7 @@ const saveCustomizationsToNormalizedTables = async (
         const [ticResult] = await connection.query(`
           INSERT INTO transaction_item_customizations (transaction_item_id, uuid_transaction_item_id, customization_type_id, bundle_product_id, created_at)
           VALUES (?, ?, ?, ?, ?)
-        `, [transactionItemId, transactionItemUuid, customizationId, bundleProductId || null, createdAt]) as any;
+        `, [transactionItemId, transactionItemUuid, customizationId, bundleProductId || null, mysqlCreatedAt]) as any;
         const ticId = ticResult.insertId;
 
         // Insert selected options
@@ -358,7 +385,7 @@ const saveCustomizationsToNormalizedTables = async (
               INSERT INTO transaction_item_customization_options (
                 transaction_item_customization_id, customization_option_id, option_name, price_adjustment, created_at
               ) VALUES (?, ?, ?, ?, ?)
-            `, [ticId, optionId, optionName, priceAdjustment, createdAt]);
+            `, [ticId, optionId, optionName, priceAdjustment, mysqlCreatedAt]);
           }
         }
       }
@@ -2945,18 +2972,16 @@ function createWindows(): void {
             NULLIF(t.refund_total, 0),
             COALESCE(refund_summary.total_refund, 0)
           ) as refund_total,
-          COALESCE(
-            NULLIF(t.refund_status, 'none'),
-            NULLIF(t.refund_status, ''),
-            CASE 
-              WHEN COALESCE(refund_summary.total_refund, 0) > 0 THEN
-                CASE 
-                  WHEN COALESCE(refund_summary.total_refund, 0) >= (t.final_amount - 0.01) THEN 'full'
-                  ELSE 'partial'
-                END
-              ELSE 'none'
-            END
-          ) as refund_status
+          -- Always recalculate refund_status based on total refund amount vs final_amount
+          -- This ensures correct status even if database has incorrect values
+          CASE 
+            WHEN COALESCE(refund_summary.total_refund, t.refund_total, 0) > 0 THEN
+              CASE 
+                WHEN COALESCE(refund_summary.total_refund, t.refund_total, 0) >= (t.final_amount - 0.01) THEN 'full'
+                ELSE 'partial'
+              END
+            ELSE 'none'
+          END as refund_status
         FROM transactions t
         LEFT JOIN (
           SELECT 
@@ -3507,21 +3532,39 @@ function createWindows(): void {
         if (r.customizations && Array.isArray(r.customizations)) {
           try {
             const customizations = r.customizations as RawCustomization[];
+            // #region agent log
+            fetch('http://127.0.0.1:7242/ingest/7b565785-72b5-49f7-b2c0-57606ea0d0b5',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'main.ts:3505',message:'Saving customizations for item',data:{itemId:r.id,itemUuid:r.uuid_id,customizationsCount:customizations.length,hasCustomizations:customizations.length>0},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'F'})}).catch(()=>{});
+            // #endregion
             if (customizations.length > 0) {
-              const itemId = typeof r.id === 'string' ? r.id : String(r.id ?? '');
+              // CRITICAL: Use uuid_id (UUID string) not id (numeric) for lookup
+              // saveCustomizationsToNormalizedTables looks up items by uuid_id
+              const itemUuid = r.uuid_id || (typeof r.id === 'string' ? r.id : String(r.id ?? ''));
               const createdAt = r.created_at ? (typeof r.created_at === 'number' || typeof r.created_at === 'string' ? r.created_at : new Date()) : new Date();
               const createdAtStr = typeof createdAt === 'string' ? createdAt : (createdAt instanceof Date ? toMySQLTimestamp(createdAt) : toMySQLTimestamp(new Date()));
               if (createdAtStr) {
+                // #region agent log
+                fetch('http://127.0.0.1:7242/ingest/7b565785-72b5-49f7-b2c0-57606ea0d0b5',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'main.ts:3510',message:'Calling saveCustomizationsToNormalizedTables',data:{itemUuid,itemId:r.id,itemUuidId:r.uuid_id,customizationsCount:customizations.length},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'F'})}).catch(()=>{});
+                // #endregion
                 await saveCustomizationsToNormalizedTables(
-                  itemId,
+                  itemUuid,
                   customizations,
                   createdAtStr
                 );
+                // #region agent log
+                fetch('http://127.0.0.1:7242/ingest/7b565785-72b5-49f7-b2c0-57606ea0d0b5',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'main.ts:3520',message:'saveCustomizationsToNormalizedTables completed',data:{itemUuid,itemId:r.id},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'F'})}).catch(()=>{});
+                // #endregion
               }
             }
           } catch (error) {
             console.error('❌ Error saving main product customizations to normalized tables:', error);
+            // #region agent log
+            fetch('http://127.0.0.1:7242/ingest/7b565785-72b5-49f7-b2c0-57606ea0d0b5',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'main.ts:3525',message:'Error saving customizations',data:{itemId:r.id,error:String(error)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'F'})}).catch(()=>{});
+            // #endregion
           }
+        } else {
+          // #region agent log
+          fetch('http://127.0.0.1:7242/ingest/7b565785-72b5-49f7-b2c0-57606ea0d0b5',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'main.ts:3528',message:'No customizations in item',data:{itemId:r.id,itemUuid:r.uuid_id,hasCustomizations:!!r.customizations},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'F'})}).catch(()=>{});
+          // #endregion
         }
 
         // Extract and save bundle product customizations to normalized tables (NO JSON)
@@ -3539,7 +3582,8 @@ function createWindows(): void {
 
         if (bundleSelectionsData && bundleSelectionsData.length > 0) {
           try {
-            const transactionItemId = r.id as string;
+            // CRITICAL: Use uuid_id (UUID string) not id (numeric) for lookup
+            const transactionItemUuid = r.uuid_id || (typeof r.id === 'string' ? r.id : String(r.id ?? ''));
             const createdAt = r.created_at ? (typeof r.created_at === 'number' || typeof r.created_at === 'string' ? r.created_at : new Date()) : new Date();
             const createdAtTimestamp = toMySQLTimestamp(createdAt);
 
@@ -3557,7 +3601,7 @@ function createWindows(): void {
                   const createdAtStr = typeof createdAt === 'string' ? createdAt : (createdAt instanceof Date ? toMySQLTimestamp(createdAt) : toMySQLTimestamp(new Date()));
                   if (createdAtStr) {
                     await saveCustomizationsToNormalizedTables(
-                      transactionItemId,
+                      transactionItemUuid,
                       bundleProductCustomizations,
                       createdAtStr,
                       bundleProductId
@@ -3762,6 +3806,11 @@ function createWindows(): void {
 
   // NEW: Get normalized customizations for transaction items (for sync upload)
   ipcMain.handle('localdb-get-transaction-item-customizations-normalized', async (event, transactionId: string) => {
+    // #region agent log
+    console.log('🔍 [DEBUG] Electron function called with transactionId:', transactionId);
+    writeDebugLog(JSON.stringify({location:'main.ts:3762',message:'Electron function called',data:{transactionId,type:typeof transactionId},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'D'}));
+    // #endregion
+    
     try {
       // Get all transaction items for this transaction
       // Support both UUID and numeric ID lookups (similar to localDbGetTransactionItems)
@@ -3769,14 +3818,38 @@ function createWindows(): void {
       const isNumeric = typeof transactionId === 'number' || (typeof transactionId === 'string' && /^\d+$/.test(String(transactionId).trim()));
       const isSimpleNumeric = isNumeric && !isReceiptNumberFormat;
       
+      // #region agent log
+      console.log('🔍 [DEBUG] Transaction ID analysis:', { transactionId, isReceiptNumberFormat, isNumeric, isSimpleNumeric });
+      writeDebugLog(JSON.stringify({location:'main.ts:3768',message:'Transaction ID analysis',data:{transactionId,isReceiptNumberFormat,isNumeric,isSimpleNumeric},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'D'}));
+      // #endregion
+      
       let items: Array<{ id: number }> = [];
       
       if (isSimpleNumeric) {
         // Simple numeric ID - match by transaction_id
-        items = await executeQuery<{ id: number }>('SELECT id FROM transaction_items WHERE transaction_id = ?', [transactionId]);
+        // Convert transactionId to number if it's a string
+        const numericId = typeof transactionId === 'string' ? parseInt(transactionId, 10) : transactionId;
+        items = await executeQuery<{ id: number }>('SELECT id FROM transaction_items WHERE transaction_id = ?', [numericId]);
+        // #region agent log
+        console.log('🔍 [DEBUG] Items found (numeric):', items.length, 'items for transaction_id', numericId, items.map(i => i.id));
+        writeDebugLog(JSON.stringify({location:'main.ts:3786',message:'Items found (numeric)',data:{transactionId,numericId,itemsCount:items.length,itemIds:items.map(i=>i.id)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'D'}));
+        // #endregion
+        
+        // Debug: Check if customizations exist for these items
+        if (items.length > 0) {
+          const itemIdsForCheck = items.map(i => i.id);
+          const placeholders = itemIdsForCheck.map(() => '?').join(',');
+          const existingCustomizations = await executeQuery<{ count: number }>(`SELECT COUNT(*) as count FROM transaction_item_customizations WHERE transaction_item_id IN (${placeholders})`, itemIdsForCheck);
+          console.log('🔍 [DEBUG] Existing customizations in DB for these items:', existingCustomizations[0]?.count || 0);
+          writeDebugLog(JSON.stringify({location:'main.ts:3790',message:'Existing customizations check',data:{itemIds:itemIdsForCheck,existingCount:existingCustomizations[0]?.count || 0},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'D'}));
+        }
       } else {
         // UUID or receipt number format - match by uuid_transaction_id
         items = await executeQuery<{ id: number }>('SELECT id FROM transaction_items WHERE uuid_transaction_id = ?', [transactionId]);
+        
+        // #region agent log
+        writeDebugLog(JSON.stringify({location:'main.ts:3790',message:'Items found (UUID)',data:{transactionId,itemsCount:items.length,itemIds:items.map(i=>i.id)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'D'}));
+        // #endregion
         
         // If no items found, try joining with transactions table
         if (items.length === 0) {
@@ -3786,6 +3859,9 @@ function createWindows(): void {
           );
           if (tx && tx.id) {
             items = await executeQuery<{ id: number }>('SELECT id FROM transaction_items WHERE transaction_id = ?', [tx.id]);
+            // #region agent log
+            writeDebugLog(JSON.stringify({location:'main.ts:3798',message:'Items found (fallback)',data:{transactionId,txId:tx.id,itemsCount:items.length},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'D'}));
+            // #endregion
           }
         }
       }
@@ -3793,8 +3869,19 @@ function createWindows(): void {
       const allCustomizations: Array<Record<string, unknown>> = [];
       const allOptions: Array<Record<string, unknown>> = [];
 
+      // #region agent log
+      console.log('🔍 [DEBUG] Starting to fetch customizations for', items.length, 'items');
+      writeDebugLog(JSON.stringify({location:'main.ts:3791',message:'Starting to fetch customizations',data:{transactionId,itemsCount:items.length,itemIds:items.map(i=>i.id)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'D'}));
+      fetch('http://127.0.0.1:7242/ingest/7b565785-72b5-49f7-b2c0-57606ea0d0b5',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'main.ts:3828',message:'Starting to fetch customizations',data:{transactionId,itemsCount:items.length,itemIds:items.map(i=>i.id)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'G'})}).catch(()=>{});
+      // #endregion
+
       for (const item of items) {
         const itemId = item.id;
+
+        // #region agent log
+        console.log('🔍 [DEBUG] Fetching customizations for item:', itemId);
+        writeDebugLog(JSON.stringify({location:'main.ts:3796',message:'Fetching customizations for item',data:{itemId,transactionId},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'D'}));
+        // #endregion
 
         // Get customizations for this item with customization type name from product_customization_types
         // Use LEFT JOIN - if table doesn't exist, will fall back to NULL and use fallback name
@@ -3804,6 +3891,7 @@ function createWindows(): void {
             SELECT 
               tic.id,
               tic.transaction_item_id,
+              tic.uuid_transaction_item_id,
               tic.customization_type_id,
               tic.bundle_product_id,
               tic.created_at,
@@ -3812,13 +3900,24 @@ function createWindows(): void {
             LEFT JOIN product_customization_types pct ON tic.customization_type_id = pct.id
             WHERE tic.transaction_item_id = ?
           `, [itemId]);
+          
+          // #region agent log
+          console.log('🔍 [DEBUG] Customizations found for item', itemId, ':', customizations.length);
+          writeDebugLog(JSON.stringify({location:'main.ts:3812',message:'Customizations query result',data:{itemId,customizationsCount:customizations.length,customizations:customizations.map((c:any)=>({id:c.id,transaction_item_id:c.transaction_item_id,uuid_transaction_item_id:c.uuid_transaction_item_id}))},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'D'}));
+          fetch('http://127.0.0.1:7242/ingest/7b565785-72b5-49f7-b2c0-57606ea0d0b5',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'main.ts:3859',message:'Customizations query result',data:{itemId,customizationsCount:customizations.length,customizations:customizations.map((c:any)=>({id:c.id,transaction_item_id:c.transaction_item_id,uuid_transaction_item_id:c.uuid_transaction_item_id}))},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'G'})}).catch(()=>{});
+          // #endregion
         } catch (error) {
+          // #region agent log
+          writeDebugLog(JSON.stringify({location:'main.ts:3814',message:'Customizations query error',data:{itemId,error:String(error)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'D'}));
+          // #endregion
+          
           // If product_customization_types table doesn't exist, query without JOIN
           console.warn('⚠️ product_customization_types table not found, using fallback names');
           customizations = await executeQuery<Record<string, unknown>>(`
             SELECT 
               tic.id,
               tic.transaction_item_id,
+              tic.uuid_transaction_item_id,
               tic.customization_type_id,
               tic.bundle_product_id,
               tic.created_at,
@@ -3826,6 +3925,10 @@ function createWindows(): void {
             FROM transaction_item_customizations tic
             WHERE tic.transaction_item_id = ?
           `, [itemId]);
+          
+          // #region agent log
+          writeDebugLog(JSON.stringify({location:'main.ts:3826',message:'Customizations query result (fallback)',data:{itemId,customizationsCount:customizations.length},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'D'}));
+          // #endregion
         }
 
         for (const customization of customizations) {
@@ -3846,11 +3949,20 @@ function createWindows(): void {
         }
       }
 
+      // #region agent log
+      console.log('🔍 [DEBUG] Returning customizations:', allCustomizations.length, 'customizations,', allOptions.length, 'options');
+      writeDebugLog(JSON.stringify({location:'main.ts:3849',message:'Returning customizations',data:{transactionId,totalCustomizations:allCustomizations.length,totalOptions:allOptions.length},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'D'}));
+      fetch('http://127.0.0.1:7242/ingest/7b565785-72b5-49f7-b2c0-57606ea0d0b5',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'main.ts:3906',message:'Returning customizations',data:{transactionId,totalCustomizations:allCustomizations.length,totalOptions:allOptions.length,itemsProcessed:items.length},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'G'})}).catch(()=>{});
+      // #endregion
+
       return {
         customizations: allCustomizations,
         options: allOptions
       };
     } catch (error) {
+      // #region agent log
+      writeDebugLog(JSON.stringify({location:'main.ts:3890',message:'Error in electron function',data:{transactionId,error:String(error),errorStack:error instanceof Error ? error.stack : undefined},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'D'}));
+      // #endregion
       console.error('Error getting normalized customizations:', error);
       return { customizations: [], options: [] };
     }
@@ -3861,42 +3973,62 @@ function createWindows(): void {
     if (!Array.isArray(rows) || rows.length === 0) return { success: true, count: 0 };
 
     try {
-      const queries = rows.map(row => {
-        const getId = () => {
-          const val = row.id;
-          if (typeof val === 'number') return val;
-          if (typeof val === 'string') {
-            const num = Number(val);
-            return isNaN(num) ? null : num;
-          }
-          return null;
-        };
-        const getNumber = (key: string) => {
-          const val = row[key];
-          if (typeof val === 'number') return val;
-          if (typeof val === 'string') {
-            const num = Number(val);
-            return isNaN(num) ? null : num;
-          }
-          return null;
-        };
-        const getString = (key: string) => (typeof row[key] === 'string' ? row[key] as string : null);
-        const getDate = (key: string) => {
-          const val = row[key];
-          if (val instanceof Date) return val;
-          if (typeof val === 'string' || typeof val === 'number') return val;
-          return null;
-        };
+      const queries = rows
+        .map(row => {
+          const getId = () => {
+            const val = row.id;
+            if (typeof val === 'number') return val;
+            if (typeof val === 'string') {
+              const num = Number(val);
+              return isNaN(num) ? null : num;
+            }
+            return null;
+          };
+          const getNumber = (key: string) => {
+            const val = row[key];
+            if (typeof val === 'number') return val;
+            if (typeof val === 'string') {
+              const num = Number(val);
+              return isNaN(num) ? null : num;
+            }
+            return null;
+          };
+          const getString = (key: string) => (typeof row[key] === 'string' ? row[key] as string : null);
+          const getDate = (key: string) => {
+            const val = row[key];
+            if (val instanceof Date) return val;
+            if (typeof val === 'string' || typeof val === 'number') return val;
+            return null;
+          };
 
-        // If id is null/undefined/0, let database auto-generate it
-        const rowId = getId();
-        const hasId = rowId !== null && rowId !== 0;
-        
-        const transactionItemId = getString('transaction_item_id');
-        const customizationTypeId = getNumber('customization_type_id');
-        const bundleProductId = getNumber('bundle_product_id');
-        const createdDate = getDate('created_at');
-        const createdAt = createdDate ? toMySQLDateTime(createdDate as string | number | Date) : toMySQLDateTime(new Date());
+          // If id is null/undefined/0, let database auto-generate it
+          const rowId = getId();
+          const hasId = rowId !== null && rowId !== 0;
+          
+          const transactionItemId = getNumber('transaction_item_id'); // transaction_item_id is a numeric foreign key, not a string
+          const customizationTypeId = getNumber('customization_type_id');
+          const bundleProductId = getNumber('bundle_product_id');
+          const createdDate = getDate('created_at');
+          const createdAt = createdDate ? toMySQLDateTime(createdDate as string | number | Date) : toMySQLDateTime(new Date());
+          
+          // Validate required fields - transaction_item_id cannot be null
+          if (transactionItemId === null || transactionItemId === 0) {
+            console.warn('⚠️ [TRANSACTION ITEM CUSTOMIZATIONS UPSERT] Skipping row with null/zero transaction_item_id:', {
+              rowId,
+              customizationTypeId,
+              row: JSON.stringify(row).substring(0, 200)
+            });
+            return null; // Skip this row
+          }
+          
+          if (customizationTypeId === null || customizationTypeId === 0) {
+            console.warn('⚠️ [TRANSACTION ITEM CUSTOMIZATIONS UPSERT] Skipping row with null/zero customization_type_id:', {
+              rowId,
+              transactionItemId,
+              row: JSON.stringify(row).substring(0, 200)
+            });
+            return null; // Skip this row
+          }
         
         if (hasId) {
           return {
@@ -3934,10 +4066,16 @@ function createWindows(): void {
             ] as (string | number | null | boolean)[]
           };
         }
-      });
+      })
+      .filter((query): query is { sql: string; params: (string | number | null | boolean)[] } => query !== null); // Remove null entries (invalid rows)
+
+      if (queries.length === 0) {
+        console.warn('⚠️ [TRANSACTION ITEM CUSTOMIZATIONS UPSERT] No valid rows to insert after filtering');
+        return { success: true, count: 0 };
+      }
 
       await executeTransaction(queries);
-      return { success: true, count: rows.length };
+      return { success: true, count: queries.length };
     } catch (error) {
       console.error('Error upserting transaction item customizations:', error);
       return { success: false, error: error instanceof Error ? error.message : 'Unknown error' };

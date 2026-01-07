@@ -63,10 +63,10 @@ export default function NewItemsConfirmationModal({
         <div className="flex-1 overflow-y-auto p-4">
           <div className="mb-4">
             <p className="text-sm text-gray-600 mb-2">
-              Item berikut akan ditambahkan ke kitchen/barista:
+              Item berikut akan ditampilkan pada kitchen/barista untuk dikerjakan:
             </p>
             <div className="text-sm font-medium text-gray-900 mb-4">
-              Table/Room: {tableRoomDisplay}
+              {tableRoomDisplay}
             </div>
           </div>
 

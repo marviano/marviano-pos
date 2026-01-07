@@ -45,7 +45,8 @@ export default function KitchenDisplay() {
   // Update timer every second
   useEffect(() => {
     const interval = setInterval(() => {
-      setCurrentTime(new Date());
+      const newTime = new Date();
+      setCurrentTime(newTime);
     }, 1000);
     return () => clearInterval(interval);
   }, []);
@@ -59,14 +60,18 @@ export default function KitchenDisplay() {
         return;
       }
 
-      // Fetch all pending transactions
+      // Fetch all transactions (pending, paid, and completed)
+      // We include paid/completed transactions because items might still be in production
       const transactions = await electronAPI.localDbGetTransactions?.(businessId, 10000);
       const transactionsArray = Array.isArray(transactions) ? transactions as Record<string, unknown>[] : [];
       
-      // Filter for pending transactions
-      const pendingTransactions = transactionsArray.filter((tx) => 
-        tx.status === 'pending'
-      );
+      // Filter for transactions that might have items in production
+      // Include pending (unpaid), paid, and completed transactions
+      // Items will be filtered by production_status later (only show unfinished items)
+      const relevantTransactions = transactionsArray.filter((tx) => {
+        const status = typeof tx.status === 'string' ? tx.status.toLowerCase() : '';
+        return status === 'pending' || status === 'paid' || status === 'completed';
+      });
 
       // Fetch all products to get category info
       const allProducts = await electronAPI.localDbGetAllProducts?.();
@@ -102,10 +107,10 @@ export default function KitchenDisplay() {
         }
       }
 
-      // Fetch transaction items for all pending transactions
+      // Fetch transaction items for all relevant transactions
       const allOrderItems: OrderItem[] = [];
       
-      for (const tx of pendingTransactions) {
+      for (const tx of relevantTransactions) {
         const transactionId = (typeof tx.uuid_id === 'string' ? tx.uuid_id : null) || 
                               (typeof tx.id === 'string' ? tx.id : (typeof tx.id === 'number' ? tx.id.toString() : null)) ||
                               '';
@@ -190,11 +195,34 @@ export default function KitchenDisplay() {
             continue;
           }
           
-          const itemProductionStartedAt = typeof item.production_started_at === 'string' ? item.production_started_at : null;
-          const itemProductionFinishedAt = typeof item.production_finished_at === 'string' ? item.production_finished_at : null;
-          const itemCreatedAt = typeof item.created_at === 'string' ? item.created_at : null;
-          const txCreatedAt = typeof tx.created_at === 'string' ? tx.created_at : null;
+          const itemProductionStartedAt = typeof item.production_started_at === 'string' ? item.production_started_at : (item.production_started_at instanceof Date ? item.production_started_at.toISOString() : null);
+          const itemProductionFinishedAt = typeof item.production_finished_at === 'string' ? item.production_finished_at : (item.production_finished_at instanceof Date ? item.production_finished_at.toISOString() : null);
+          const itemCreatedAt = typeof item.created_at === 'string' ? item.created_at : (item.created_at instanceof Date ? item.created_at.toISOString() : null);
+          const txCreatedAt = typeof tx.created_at === 'string' ? tx.created_at : (tx.created_at instanceof Date ? tx.created_at.toISOString() : null);
           const productNama = typeof product.nama === 'string' ? product.nama : 'Unknown';
+
+          // CRITICAL FIX: Use transaction created_at as the source of truth for timer
+          // If item.created_at is null, use transaction.created_at (when item was ordered)
+          // Only fall back to current time if BOTH are null (should never happen in normal operation)
+          let finalCreatedAt: string;
+          if (itemCreatedAt) {
+            finalCreatedAt = itemCreatedAt;
+          } else if (txCreatedAt) {
+            // Use transaction created_at as fallback - this is when the order was placed
+            finalCreatedAt = txCreatedAt;
+          } else {
+            // Last resort: use current time (but log warning)
+            console.warn('Both item.created_at and tx.created_at are null, using current time (this should not happen):', { itemId, transactionId, productId });
+            finalCreatedAt = new Date().toISOString();
+          }
+          
+          // Validate the date string
+          const testDate = new Date(finalCreatedAt);
+          
+          if (isNaN(testDate.getTime())) {
+            console.warn('Invalid created_at date detected, using current time:', { txCreatedAt, itemCreatedAt, finalCreatedAt });
+            finalCreatedAt = new Date().toISOString();
+          }
 
           allOrderItems.push({
             id: itemId || 0,
@@ -209,7 +237,7 @@ export default function KitchenDisplay() {
             production_finished_at: itemProductionFinishedAt,
             table_number: tableNumber || null,
             room_name: roomName || null,
-            created_at: txCreatedAt || itemCreatedAt || new Date().toISOString(),
+            created_at: finalCreatedAt,
             customizations: itemCustomizations,
           });
         }
@@ -231,80 +259,47 @@ export default function KitchenDisplay() {
         });
         const sortedOptionIds = allOptionIds.sort((a, b) => a - b).join(',');
         const customNote = item.custom_note || '';
-        const signature = `${item.product_id}_${sortedOptionIds}_${customNote}`;
+        // Include table_number in signature to prevent grouping items from different tables
+        const tableNumber = item.table_number || '';
+        // Include uuid_id to ensure each item is unique (one line per item, no grouping)
+        const itemUuid = item.uuid_id || item.id?.toString() || '';
+        const signature = `${item.product_id}_${sortedOptionIds}_${customNote}_${tableNumber}_${itemUuid}`;
 
-        // Track all items in this group
+        // Track all items in this group (each item has unique signature now, so groups will be size 1)
         if (!groupItemsMap.has(signature)) {
           groupItemsMap.set(signature, []);
         }
         groupItemsMap.get(signature)!.push(item);
 
-        if (groupedMap.has(signature)) {
-          const existing = groupedMap.get(signature)!;
-          existing.total_quantity += item.quantity;
-          // Update display text with new total quantity
-          let displayText = `${existing.total_quantity}x ${item.product_name}`;
-          
-          // Add customizations
-          const customizationTexts: string[] = [];
-          item.customizations.forEach(customization => {
-            customization.options.forEach(option => {
-              const priceText = option.price_adjustment !== 0 
-                ? ` (+${option.price_adjustment})` 
-                : '';
-              customizationTexts.push(`+${option.option_name}${priceText}`);
-            });
+        // Since each item has unique signature (includes uuid_id), this will always be a new entry
+        // Build display text
+        let displayText = `${item.quantity}x ${item.product_name}`;
+        
+        // Add customizations
+        const customizationTexts: string[] = [];
+        item.customizations.forEach(customization => {
+          customization.options.forEach(option => {
+            const priceText = option.price_adjustment !== 0 
+              ? ` (+${option.price_adjustment})` 
+              : '';
+            customizationTexts.push(`+${option.option_name}${priceText}`);
           });
-          if (customizationTexts.length > 0) {
-            displayText += ` ${customizationTexts.join(', ')}`;
-          }
-
-          // Add custom note
-          if (item.custom_note) {
-            displayText += ` note: ${item.custom_note}`;
-          }
-
-          // Add table number
-          if (item.table_number) {
-            displayText += ` table ${item.table_number}`;
-          }
-
-          existing.display_text = displayText;
-        } else {
-          // Build display text
-          let displayText = `${item.quantity}x ${item.product_name}`;
-          
-          // Add customizations
-          const customizationTexts: string[] = [];
-          item.customizations.forEach(customization => {
-            customization.options.forEach(option => {
-              const priceText = option.price_adjustment !== 0 
-                ? ` (+${option.price_adjustment})` 
-                : '';
-              customizationTexts.push(`+${option.option_name}${priceText}`);
-            });
-          });
-          if (customizationTexts.length > 0) {
-            displayText += ` ${customizationTexts.join(', ')}`;
-          }
-
-          // Add custom note
-          if (item.custom_note) {
-            displayText += ` note: ${item.custom_note}`;
-          }
-
-          // Add table number
-          if (item.table_number) {
-            displayText += ` table ${item.table_number}`;
-          }
-
-          groupedMap.set(signature, {
-            ...item,
-            total_quantity: item.quantity,
-            display_text: displayText,
-            timer: formatTimer(item.created_at),
-          });
+        });
+        if (customizationTexts.length > 0) {
+          displayText += ` ${customizationTexts.join(', ')}`;
         }
+
+        // Add custom note
+        if (item.custom_note) {
+          displayText += ` note: ${item.custom_note}`;
+        }
+
+        groupedMap.set(signature, {
+          ...item,
+          total_quantity: item.quantity,
+          display_text: displayText,
+          timer: formatTimer(item.created_at),
+        });
       });
 
       // Separate active and finished orders
@@ -357,13 +352,48 @@ export default function KitchenDisplay() {
     }
   };
 
-  const formatTimer = (createdAt: string): string => {
+  const formatTimer = (createdAt: string | null | undefined): string => {
+    if (!createdAt) {
+      return '00:00';
+    }
     const created = new Date(createdAt);
+    
+    // Check if date is valid
+    if (isNaN(created.getTime())) {
+      console.warn('Invalid date for timer:', createdAt);
+      return '00:00';
+    }
     const diffMs = currentTime.getTime() - created.getTime();
+    
+    // Handle negative time (if date is in future due to timezone issues)
+    if (diffMs < 0) {
+      console.warn('Negative time difference detected:', { createdAt, currentTime: currentTime.toISOString(), diffMs });
+      return '00:00';
+    }
     const totalSeconds = Math.floor(diffMs / 1000);
     const minutes = Math.floor(totalSeconds / 60);
     const seconds = totalSeconds % 60;
-    return `${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
+    const result = `${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
+    
+    return result;
+  };
+
+  const formatTimeHHmm = (dateTime: string | null | undefined): string => {
+    if (!dateTime) return '-';
+    const date = new Date(dateTime);
+    if (isNaN(date.getTime())) return '-';
+    return date.toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit', hour12: false });
+  };
+
+  const formatDurationMinutes = (startTime: string | null | undefined, endTime: string | null | undefined): string => {
+    if (!startTime || !endTime) return '-';
+    const start = new Date(startTime);
+    const end = new Date(endTime);
+    if (isNaN(start.getTime()) || isNaN(end.getTime())) return '-';
+    const diffMs = end.getTime() - start.getTime();
+    if (diffMs < 0) return '-';
+    const minutes = Math.round(diffMs / 60000);
+    return `${minutes} Menit`;
   };
 
   // Poll database every 5 seconds
@@ -465,9 +495,12 @@ export default function KitchenDisplay() {
           });
         });
         const sortedOptionIds = allOptionIds.sort((a, b) => a - b).join(',');
-        const itemSignature = `${transactionItem.product_id}_${sortedOptionIds}_${itemNote}`;
+        // Get table_number from transaction (we need to fetch it)
+        // For now, use item.table_number as fallback since all items in same transaction have same table
+        const transactionTableNumber = item.table_number || '';
+        const itemSignature = `${transactionItem.product_id}_${sortedOptionIds}_${itemNote}_${transactionTableNumber}`;
 
-        // Create signature for the grouped item
+        // Create signature for the grouped item (must match grouping signature including table_number)
         const groupedOptionIds: number[] = [];
         item.customizations.forEach(customization => {
           customization.options.forEach(option => {
@@ -475,7 +508,8 @@ export default function KitchenDisplay() {
           });
         });
         const groupedSortedOptionIds = groupedOptionIds.sort((a, b) => a - b).join(',');
-        const groupedSignature = `${item.product_id}_${groupedSortedOptionIds}_${itemNote}`;
+        const groupedTableNumber = item.table_number || '';
+        const groupedSignature = `${item.product_id}_${groupedSortedOptionIds}_${itemNote}_${groupedTableNumber}`;
 
         // If signatures match, add to update list (only if not already finished)
         if (itemSignature === groupedSignature) {
@@ -576,7 +610,29 @@ export default function KitchenDisplay() {
                   <div className="flex justify-between items-start mb-2">
                     <div className="flex-1">
                       <div className="text-lg font-semibold text-gray-900">
-                        {item.display_text}
+                        {item.total_quantity}x {item.product_name}
+                        {item.customizations && item.customizations.length > 0 && (
+                          <span className="text-blue-700 font-bold">
+                            {' '}
+                            {item.customizations.map((customization, idx) => (
+                              <span key={idx}>
+                                {customization.options.map((option, optIdx) => (
+                                  <span key={optIdx}>
+                                    +{option.option_name}
+                                    {option.price_adjustment !== 0 && ` (+${option.price_adjustment})`}
+                                    {optIdx < customization.options.length - 1 && ', '}
+                                  </span>
+                                ))}
+                                {idx < item.customizations.length - 1 && ', '}
+                              </span>
+                            ))}
+                          </span>
+                        )}
+                        {item.custom_note && (
+                          <span className="text-purple-700 font-bold">
+                            {' '}note: {item.custom_note}
+                          </span>
+                        )}
                       </div>
                     </div>
                     <div className="ml-4">
@@ -585,9 +641,11 @@ export default function KitchenDisplay() {
                       </div>
                     </div>
                   </div>
-                  <div className="text-xs text-gray-500 mt-1">
-                    Double tap to mark as finished
-                  </div>
+                  {item.table_number && (
+                    <div className="text-xs text-gray-600 mt-2 font-semibold">
+                      {item.table_number}
+                    </div>
+                  )}
                 </div>
               ))}
             </div>
@@ -615,9 +673,33 @@ export default function KitchenDisplay() {
                   <div className="text-lg font-semibold text-gray-600 line-through">
                     {item.display_text}
                   </div>
-                  {item.production_finished_at && (
+                  {item.table_number && (
+                    <div className="text-xs text-gray-600 mt-1">
+                      {item.table_number}
+                    </div>
+                  )}
+                  {(item.table_number || item.production_started_at || item.production_finished_at) && (
                     <div className="text-xs text-gray-500 mt-1">
-                      Selesai: {new Date(item.production_finished_at).toLocaleTimeString('id-ID')}
+                      {(() => {
+                        const tableText = item.table_number ? `${item.table_number} | ` : '';
+                        // Use production_started_at if available, otherwise fall back to created_at
+                        const startTimeSource = item.production_started_at || item.created_at;
+                        const startTime = startTimeSource 
+                          ? new Date(startTimeSource).toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit', hour12: false })
+                          : null;
+                        const endTime = item.production_finished_at 
+                          ? new Date(item.production_finished_at).toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit', hour12: false })
+                          : null;
+                        let durationText = '';
+                        if (startTimeSource && item.production_finished_at) {
+                          const start = new Date(startTimeSource);
+                          const end = new Date(item.production_finished_at);
+                          const diffMs = end.getTime() - start.getTime();
+                          const diffMinutes = Math.floor(diffMs / (1000 * 60));
+                          durationText = ` | Waktu penyelesaian: ${diffMinutes} Menit`;
+                        }
+                        return `${tableText}${startTime ? `Mulai: ${startTime}` : ''}${startTime && endTime ? ' | ' : ''}${endTime ? `Selesai: ${endTime}` : ''}${durationText}`;
+                      })()}
                     </div>
                   )}
                 </div>
