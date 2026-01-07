@@ -324,14 +324,21 @@ const saveCustomizationsToNormalizedTables = async (
     if (typeof createdAt === 'string') {
       // If it's an ISO string (contains 'T' or 'Z'), convert it
       if (createdAt.includes('T') || createdAt.includes('Z')) {
-        mysqlCreatedAt = toMySQLTimestamp(createdAt);
+        const converted = toMySQLTimestamp(createdAt);
+        mysqlCreatedAt = converted || toMySQLTimestamp(new Date()) || '';
       } else {
         // Already in MySQL format
         mysqlCreatedAt = createdAt;
       }
     } else {
       // Fallback: convert to MySQL format
-      mysqlCreatedAt = toMySQLTimestamp(createdAt || new Date());
+      const converted = toMySQLTimestamp(createdAt || new Date());
+      mysqlCreatedAt = converted || toMySQLTimestamp(new Date()) || '';
+    }
+    
+    if (!mysqlCreatedAt) {
+      console.warn('⚠️ Failed to convert createdAt to MySQL format, using current timestamp');
+      mysqlCreatedAt = toMySQLTimestamp(new Date()) || new Date().toISOString().replace('T', ' ').slice(0, 19);
     }
 
     const connection = await getConnection();
@@ -3538,7 +3545,7 @@ function createWindows(): void {
             if (customizations.length > 0) {
               // CRITICAL: Use uuid_id (UUID string) not id (numeric) for lookup
               // saveCustomizationsToNormalizedTables looks up items by uuid_id
-              const itemUuid = r.uuid_id || (typeof r.id === 'string' ? r.id : String(r.id ?? ''));
+              const itemUuid: string = (r.uuid_id as string) || (typeof r.id === 'string' ? r.id : String(r.id ?? ''));
               const createdAt = r.created_at ? (typeof r.created_at === 'number' || typeof r.created_at === 'string' ? r.created_at : new Date()) : new Date();
               const createdAtStr = typeof createdAt === 'string' ? createdAt : (createdAt instanceof Date ? toMySQLTimestamp(createdAt) : toMySQLTimestamp(new Date()));
               if (createdAtStr) {
@@ -3583,7 +3590,7 @@ function createWindows(): void {
         if (bundleSelectionsData && bundleSelectionsData.length > 0) {
           try {
             // CRITICAL: Use uuid_id (UUID string) not id (numeric) for lookup
-            const transactionItemUuid = r.uuid_id || (typeof r.id === 'string' ? r.id : String(r.id ?? ''));
+            const transactionItemUuid: string = (r.uuid_id as string) || (typeof r.id === 'string' ? r.id : String(r.id ?? ''));
             const createdAt = r.created_at ? (typeof r.created_at === 'number' || typeof r.created_at === 'string' ? r.created_at : new Date()) : new Date();
             const createdAtTimestamp = toMySQLTimestamp(createdAt);
 

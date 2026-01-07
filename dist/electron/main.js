@@ -192,7 +192,8 @@ const saveCustomizationsToNormalizedTables = async (transactionItemUuid, customi
         if (typeof createdAt === 'string') {
             // If it's an ISO string (contains 'T' or 'Z'), convert it
             if (createdAt.includes('T') || createdAt.includes('Z')) {
-                mysqlCreatedAt = (0, mysqlDb_1.toMySQLTimestamp)(createdAt);
+                const converted = (0, mysqlDb_1.toMySQLTimestamp)(createdAt);
+                mysqlCreatedAt = converted || (0, mysqlDb_1.toMySQLTimestamp)(new Date()) || '';
             }
             else {
                 // Already in MySQL format
@@ -201,7 +202,12 @@ const saveCustomizationsToNormalizedTables = async (transactionItemUuid, customi
         }
         else {
             // Fallback: convert to MySQL format
-            mysqlCreatedAt = (0, mysqlDb_1.toMySQLTimestamp)(createdAt || new Date());
+            const converted = (0, mysqlDb_1.toMySQLTimestamp)(createdAt || new Date());
+            mysqlCreatedAt = converted || (0, mysqlDb_1.toMySQLTimestamp)(new Date()) || '';
+        }
+        if (!mysqlCreatedAt) {
+            console.warn('⚠️ Failed to convert createdAt to MySQL format, using current timestamp');
+            mysqlCreatedAt = (0, mysqlDb_1.toMySQLTimestamp)(new Date()) || new Date().toISOString().replace('T', ' ').slice(0, 19);
         }
         const connection = await (0, mysqlDb_1.getConnection)();
         try {

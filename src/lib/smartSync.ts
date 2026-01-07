@@ -635,7 +635,7 @@ class SmartSyncService {
             transactionData.transaction_item_customization_options = normalizedCustomizations.options;
 
             // #region agent log
-            fetch('http://127.0.0.1:7242/ingest/7b565785-72b5-49f7-b2c0-57606ea0d0b5',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'smartSync.ts:630',message:'Customizations fetched for sync',data:{transactionId:transactionData.id,customizationsCount:normalizedCustomizations.customizations.length,optionsCount:normalizedCustomizations.options.length,customizations:normalizedCustomizations.customizations.map((c:any)=>({id:c.id,transaction_item_id:c.transaction_item_id,uuid_transaction_item_id:c.uuid_transaction_item_id,customization_type_id:c.customization_type_id}))},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'D'})}).catch(()=>{});
+            fetch('http://127.0.0.1:7242/ingest/7b565785-72b5-49f7-b2c0-57606ea0d0b5',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'smartSync.ts:630',message:'Customizations fetched for sync',data:{transactionId:transactionData.id,customizationsCount:normalizedCustomizations.customizations.length,optionsCount:normalizedCustomizations.options.length,customizations:normalizedCustomizations.customizations.map((c: {id:number;transaction_item_id:string;uuid_transaction_item_id:string|null;customization_type_id:number})=>({id:c.id,transaction_item_id:c.transaction_item_id,uuid_transaction_item_id:c.uuid_transaction_item_id,customization_type_id:c.customization_type_id}))},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'D'})}).catch(()=>{});
             // #endregion
 
             // Log customization details for debugging

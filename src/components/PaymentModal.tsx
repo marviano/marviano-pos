@@ -749,14 +749,15 @@ export default function PaymentModal({
 
           // For existing items (from loaded transaction), use their existing uuid_id to prevent duplicates
           // For new items, generate a new UUID
-          const itemTransactionId = (item as any).transactionItemId;
-          const itemUuidId = itemTransactionId && existingItemsMap.has(itemTransactionId)
+          const itemTransactionIdRaw = (item as { transactionItemId?: number | string }).transactionItemId;
+          const itemTransactionId = typeof itemTransactionIdRaw === 'number' ? itemTransactionIdRaw : (typeof itemTransactionIdRaw === 'string' ? parseInt(itemTransactionIdRaw, 10) : null);
+          const itemUuidId = itemTransactionId !== null && !isNaN(itemTransactionId) && existingItemsMap.has(itemTransactionId)
             ? existingItemsMap.get(itemTransactionId)!
             : generateTransactionItemId();
 
           // For existing items, preserve their production_status (they may have already been sent to kitchen/barista)
           // For new items, set production_status to null (they need to be sent)
-          const existingProductionStatus = itemTransactionId && existingItemsProductionStatusMap.has(itemTransactionId)
+          const existingProductionStatus = itemTransactionId !== null && !isNaN(itemTransactionId) && existingItemsProductionStatusMap.has(itemTransactionId)
             ? existingItemsProductionStatusMap.get(itemTransactionId)!
             : null; // New items get null (will be sent to kitchen/barista)
 
