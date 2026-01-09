@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { useAuth } from '@/hooks/useAuth';
 
 interface OrderItem {
@@ -51,7 +51,7 @@ export default function BaristaDisplay() {
   }, []);
 
   // Fetch orders from database
-  const fetchOrders = async () => {
+  const fetchOrders = useCallback(async () => {
     try {
       const electronAPI = getElectronAPI();
       if (!electronAPI) {
@@ -412,7 +412,7 @@ export default function BaristaDisplay() {
       console.error('Error fetching orders:', error);
       setLoading(false);
     }
-  };
+  }, [businessId, currentTime]);
 
   const formatTimer = (startTime: string | null, currentTime: Date): string => {
     if (!startTime) {
@@ -462,7 +462,7 @@ export default function BaristaDisplay() {
     fetchOrders();
     const interval = setInterval(fetchOrders, 5000);
     return () => clearInterval(interval);
-  }, [businessId, currentTime]);
+  }, [fetchOrders]);
 
   const handleMarkFinished = async (item: GroupedOrderItem) => {
     console.log('🔵 handleMarkFinished called for item:', item);

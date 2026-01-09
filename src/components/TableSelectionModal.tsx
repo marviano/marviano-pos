@@ -237,19 +237,6 @@ export default function TableSelectionModal({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isOpen, businessId, loadedTransactionInfo?.transactionId]);
 
-  // Fetch tables and elements when room is selected
-  useEffect(() => {if (selectedRoom && isOpen) {
-      // Clear tables first to ensure clean state
-      setTables([]);
-      setLayoutElements([]);
-      fetchTables();
-      fetchLayoutElements();
-    } else {
-      setTables([]);
-      setLayoutElements([]);
-    }
-  }, [selectedRoom, isOpen]);
-
   const fetchRooms = async () => {
     try {
       setLoading(true);
@@ -282,8 +269,9 @@ export default function TableSelectionModal({
     }
   };
 
-  const fetchTables = async () => {
-    if (!selectedRoom) return;try {
+  const fetchTables = useCallback(async () => {
+    if (!selectedRoom) return;
+    try {
       const electronAPI = window.electronAPI;
       if (!electronAPI?.getRestaurantTables) {
         console.error('getRestaurantTables not available');
@@ -291,12 +279,14 @@ export default function TableSelectionModal({
       }
 
       const tablesData = await electronAPI.getRestaurantTables(selectedRoom);
-      const tablesArray = Array.isArray(tablesData) ? tablesData : [];setTables(tablesArray);
+      const tablesArray = Array.isArray(tablesData) ? tablesData : [];
+      setTables(tablesArray);
     } catch (error) {
-      console.error('Error fetching tables:', error);}
-  };
+      console.error('Error fetching tables:', error);
+    }
+  }, [selectedRoom]);
 
-  const fetchLayoutElements = async () => {
+  const fetchLayoutElements = useCallback(async () => {
     if (!selectedRoom) return;
 
     try {
@@ -311,7 +301,21 @@ export default function TableSelectionModal({
     } catch (error) {
       console.error('Error fetching layout elements:', error);
     }
-  };
+  }, [selectedRoom]);
+
+  // Fetch tables and elements when room is selected
+  useEffect(() => {
+    if (selectedRoom && isOpen) {
+      // Clear tables first to ensure clean state
+      setTables([]);
+      setLayoutElements([]);
+      fetchTables();
+      fetchLayoutElements();
+    } else {
+      setTables([]);
+      setLayoutElements([]);
+    }
+  }, [selectedRoom, isOpen, fetchTables, fetchLayoutElements]);
 
   const fetchPendingTransactions = async () => {
     try {

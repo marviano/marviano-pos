@@ -47,6 +47,13 @@ declare global {
     business_id?: number;
     printerType?: string;
     wholeDayReport?: ShiftPrintBreakdownSection;
+    sectionOptions?: {
+      barangTerjual?: boolean;
+      paymentMethod?: boolean;
+      categoryII?: boolean;
+      toppingSales?: boolean;
+      diskonVoucher?: boolean;
+    };
   };
 
   interface Window {
@@ -450,6 +457,10 @@ declare global {
       // Printer configurations
       localDbSavePrinterConfig?: (printerType: string, systemPrinterName: string, extraSettings?: Record<string, unknown>) => Promise<{ success: boolean; error?: string }>;
       localDbGetPrinterConfigs?: () => Promise<unknown[]>;
+
+      // Local settings (NOT synced to server)
+      localDbGetSetting?: (settingKey: string) => Promise<string | null>;
+      localDbSaveSetting?: (settingKey: string, settingValue: string) => Promise<{ success: boolean; error?: string }>;
 
       // Printer Management (new multi-printer system)
       generateNumericUuid?: (businessId: number) => Promise<{ success: boolean; uuid?: string; error?: string }>;

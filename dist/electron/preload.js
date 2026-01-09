@@ -47,6 +47,12 @@ electron_1.contextBridge.exposeInMainWorld('electronAPI', {
     // Businesses
     localDbUpsertBusinesses: (rows) => electron_1.ipcRenderer.invoke('localdb-upsert-businesses', rows),
     localDbGetBusinesses: () => electron_1.ipcRenderer.invoke('localdb-get-businesses'),
+    // Employees Position
+    localDbUpsertEmployeesPosition: (rows) => electron_1.ipcRenderer.invoke('localdb-upsert-employees-position', rows),
+    localDbGetEmployeesPosition: () => electron_1.ipcRenderer.invoke('localdb-get-employees-position'),
+    // Employees
+    localDbUpsertEmployees: (rows, skipValidation) => electron_1.ipcRenderer.invoke('localdb-upsert-employees', rows, skipValidation),
+    localDbGetEmployees: () => electron_1.ipcRenderer.invoke('localdb-get-employees'),
     // Ingredients
     localDbUpsertIngredients: (rows) => electron_1.ipcRenderer.invoke('localdb-upsert-ingredients', rows),
     localDbGetIngredients: (businessId) => electron_1.ipcRenderer.invoke('localdb-get-ingredients', businessId),
@@ -76,6 +82,9 @@ electron_1.contextBridge.exposeInMainWorld('electronAPI', {
     // Printer configurations
     localDbSavePrinterConfig: (printerType, systemPrinterName, extraSettings) => electron_1.ipcRenderer.invoke('localdb-save-printer-config', printerType, systemPrinterName, extraSettings),
     localDbGetPrinterConfigs: () => electron_1.ipcRenderer.invoke('localdb-get-printer-configs'),
+    // Local settings (NOT synced to server)
+    localDbGetSetting: (settingKey) => electron_1.ipcRenderer.invoke('localdb-get-setting', settingKey),
+    localDbSaveSetting: (settingKey, settingValue) => electron_1.ipcRenderer.invoke('localdb-save-setting', settingKey, settingValue),
     // Transaction sync status (using transactions table directly)
     localDbMarkTransactionFailed: (transactionId) => electron_1.ipcRenderer.invoke('localdb-mark-transaction-failed', transactionId),
     localDbQueueOfflineRefund: (refundData) => electron_1.ipcRenderer.invoke('localdb-queue-offline-refund', refundData),

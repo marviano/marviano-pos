@@ -628,6 +628,15 @@ export async function GET(request: NextRequest) {
     const totalRecords = Object.values(counts).reduce((sum, count) => sum + count, 0);
     console.log(`🎉 Comprehensive sync completed: ${totalRecords} total records synced`);
 
+    // #region agent log - server side
+    const fs3 = require('fs');
+    const path3 = require('path');
+    try {
+      const logPath3 = path3.join(process.cwd(), '.cursor', 'debug.log');
+      fs3.appendFileSync(logPath3, JSON.stringify({location:'sync/route.ts:683',message:'Returning sync response',data:{allKeys:Object.keys(syncResults)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})+'\n');
+    } catch(e){}
+    // #endregion
+
     return NextResponse.json({
       success: true,
       data: syncResults,

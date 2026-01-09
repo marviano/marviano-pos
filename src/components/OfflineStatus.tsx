@@ -81,48 +81,84 @@ export default function OfflineStatus({ className = '' }: OfflineStatusProps) {
     'Never';
 
   return (
-    <div className={`flex items-center space-x-[6.4px] ${className}`}>
+    <div className={`flex items-center space-x-[6px] ${className}`} style={{ fontFamily: 'Tahoma, "MS Sans Serif", sans-serif' }}>
       {/* Pending Transactions Indicator */}
       {pendingCount > 0 && (
-        <div className="flex items-center space-x-[3.2px] px-[6.4px] py-[3.2px] bg-blue-200 text-blue-800 text-[9.6px] border border-blue-400">
-          <RefreshCw className="w-[9.6px] h-[9.6px]" />
+        <div 
+          className="flex items-center space-x-[3px] px-[6px] py-[2px] text-[10px]"
+          style={{
+            background: 'linear-gradient(to bottom, #ece9d8 0%, #d4d0c8 100%)',
+            border: '1px solid #808080',
+            borderTopColor: '#ffffff',
+            borderLeftColor: '#ffffff',
+            borderRightColor: '#404040',
+            borderBottomColor: '#404040',
+            color: '#000080',
+            boxShadow: '1px 1px 0 rgba(0,0,0,0.1)'
+          }}
+        >
+          <RefreshCw className="w-[10px] h-[10px]" style={{ color: '#000080' }} />
           <span>{pendingCount} pending</span>
         </div>
       )}
 
       {/* Sync Status */}
       {syncInProgress && (
-        <div className="flex items-center space-x-[3.2px] px-[6.4px] py-[3.2px] bg-purple-200 text-purple-800 text-[9.6px] border border-purple-400">
-          <RefreshCw className="w-[9.6px] h-[9.6px] animate-spin" />
+        <div 
+          className="flex items-center space-x-[3px] px-[6px] py-[2px] text-[10px]"
+          style={{
+            background: 'linear-gradient(to bottom, #ece9d8 0%, #d4d0c8 100%)',
+            border: '1px solid #808080',
+            borderTopColor: '#ffffff',
+            borderLeftColor: '#ffffff',
+            borderRightColor: '#404040',
+            borderBottomColor: '#404040',
+            color: '#000080',
+            boxShadow: '1px 1px 0 rgba(0,0,0,0.1)'
+          }}
+        >
+          <RefreshCw className="w-[10px] h-[10px] animate-spin" style={{ color: '#000080' }} />
           <span>Syncing...</span>
         </div>
       )}
 
       {/* Last Sync Info */}
       {lastSync && (
-        <div className="flex items-center space-x-[3.2px] text-[9.6px] text-gray-500">
-          <Clock className="w-[9.6px] h-[9.6px]" />
+        <div className="flex items-center space-x-[3px] text-[10px] text-white" style={{ textShadow: '0 1px 1px rgba(0,0,0,0.5)' }}>
+          <Clock className="w-[10px] h-[10px]" />
           <span>Synced {lastSyncText}</span>
         </div>
       )}
 
       {/* Auto Sync Disabled Warning */}
       {!autoSyncEnabled && (
-        <div className="flex items-center space-x-[3.2px] px-[6.4px] py-[3.2px] bg-orange-200 text-orange-800 text-[9.6px] border border-orange-400">
-          <Pause className="w-[9.6px] h-[9.6px]" />
+        <div 
+          className="flex items-center space-x-[3px] px-[6px] py-[2px] text-[10px]"
+          style={{
+            background: 'linear-gradient(to bottom, #fff4e6 0%, #ffe4b5 100%)',
+            border: '1px solid #808080',
+            borderTopColor: '#ffffff',
+            borderLeftColor: '#ffffff',
+            borderRightColor: '#404040',
+            borderBottomColor: '#404040',
+            color: '#8b4513',
+            boxShadow: '1px 1px 0 rgba(0,0,0,0.1)'
+          }}
+        >
+          <Pause className="w-[10px] h-[10px]" style={{ color: '#8b4513' }} />
           <span>Auto Sync Off</span>
         </div>
       )}
 
       {/* Smart Sync Status */}
       {smartSyncStatus && autoSyncEnabled && (
-        <div className="flex items-center space-x-[3.2px] text-[9.6px] text-gray-500">
+        <div className="flex items-center space-x-[3px] text-[10px] text-white" style={{ textShadow: '0 1px 1px rgba(0,0,0,0.5)' }}>
           {smartSyncStatus.isSyncing ? (
-            <RefreshCw className="w-[9.6px] h-[9.6px] animate-spin text-blue-500" />
+            <RefreshCw className="w-[10px] h-[10px] animate-spin" style={{ color: '#ffff00' }} />
           ) : smartSyncStatus.consecutiveFailures > 0 ? (
-            <AlertTriangle className="w-[9.6px] h-[9.6px] text-yellow-500" />
+            <AlertTriangle className="w-[10px] h-[10px]" style={{ color: '#ffaa00' }} />
           ) : (
-            <CheckCircle className="w-[9.6px] h-[9.6px] text-green-500" />
+            <CheckCircle className="w-[10px] h-[10px]" style={{ color: '#00ff00' }} />
           )}
           <span>
             {smartSyncStatus.isSyncing ? 'Syncing' : 
@@ -134,11 +170,15 @@ export default function OfflineStatus({ className = '' }: OfflineStatusProps) {
 
       {/* Server Load Indicator */}
       {smartSyncStatus && smartSyncStatus.averageServerLoad > 0 && (
-        <div className={`flex items-center space-x-[3.2px] text-[9.6px] ${
-          smartSyncStatus.averageServerLoad > 1000 ? 'text-red-500' : 
-          smartSyncStatus.averageServerLoad > 500 ? 'text-yellow-500' : 
-          'text-green-500'
-        }`}>
+        <div 
+          className="flex items-center space-x-[3px] text-[10px]"
+          style={{
+            color: smartSyncStatus.averageServerLoad > 1000 ? '#ff0000' : 
+                   smartSyncStatus.averageServerLoad > 500 ? '#ffaa00' : 
+                   '#00ff00',
+            textShadow: '0 1px 1px rgba(0,0,0,0.5)'
+          }}
+        >
           <span>Load: {Math.round(smartSyncStatus.averageServerLoad)}ms</span>
         </div>
       )}

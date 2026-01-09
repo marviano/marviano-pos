@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { Edit, List, LayoutGrid } from 'lucide-react';
 import TableLayout from './TableLayout';
 
@@ -31,26 +31,7 @@ export default function ActiveOrdersTab({ businessId, isOpen, onLoadTransaction 
   const [currentTime, setCurrentTime] = useState(new Date());
   const [viewMode, setViewMode] = useState<'list' | 'layout'>('list');
 
-  useEffect(() => {
-    if (isOpen) {
-      fetchPendingTransactions();
-      // Refresh transaction list every 5 seconds
-      const interval = setInterval(fetchPendingTransactions, 5000);
-      return () => clearInterval(interval);
-    }
-  }, [isOpen, businessId]);
-
-  // Update timer display every second
-  useEffect(() => {
-    if (isOpen && pendingTransactions.length > 0) {
-      const interval = setInterval(() => {
-        setCurrentTime(new Date());
-      }, 1000);
-      return () => clearInterval(interval);
-    }
-  }, [isOpen, pendingTransactions.length]);
-
-  const fetchPendingTransactions = async () => {
+  const fetchPendingTransactions = useCallback(async () => {
     try {
       setLoading(true);
       setError(null);
@@ -148,7 +129,26 @@ export default function ActiveOrdersTab({ businessId, isOpen, onLoadTransaction 
     } finally {
       setLoading(false);
     }
-  };
+  }, [businessId]);
+
+  useEffect(() => {
+    if (isOpen) {
+      fetchPendingTransactions();
+      // Refresh transaction list every 5 seconds
+      const interval = setInterval(fetchPendingTransactions, 5000);
+      return () => clearInterval(interval);
+    }
+  }, [isOpen, fetchPendingTransactions]);
+
+  // Update timer display every second
+  useEffect(() => {
+    if (isOpen && pendingTransactions.length > 0) {
+      const interval = setInterval(() => {
+        setCurrentTime(new Date());
+      }, 1000);
+      return () => clearInterval(interval);
+    }
+  }, [isOpen, pendingTransactions.length]);
 
   const formatTimer = (createdAt: string): string => {
     const created = new Date(createdAt);

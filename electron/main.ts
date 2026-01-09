@@ -2064,6 +2064,373 @@ function createWindows(): void {
     }
   });
 
+  // Employees Position
+  ipcMain.handle('localdb-upsert-employees-position', async (event, rows: RowArray) => {
+    // #region agent log
+    const logData = {location:'main.ts:2067',message:'localdb-upsert-employees-position called',data:{rowCount:Array.isArray(rows)?rows.length:0,firstRow:Array.isArray(rows)&&rows.length>0?rows[0]:null},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'};
+    writeDebugLog(JSON.stringify(logData));
+    // #endregion
+    try {
+      const queries: Array<{ sql: string; params?: (string | number | null | boolean)[] }> = [];
+      
+      for (const r of rows) {
+        const getId = () => {
+          const val = r.id;
+          if (typeof val === 'number') return val;
+          if (typeof val === 'string') {
+            const num = Number(val);
+            return isNaN(num) ? null : num;
+          }
+          return null;
+        };
+        const getString = (key: string) => (typeof r[key] === 'string' ? r[key] as string : null);
+        const getDate = (key: string) => {
+          const val = r[key];
+          if (val instanceof Date) return val;
+          if (typeof val === 'string' || typeof val === 'number') return val;
+          return null;
+        };
+
+        const positionId = getId();
+        const namaJabatan = getString('nama_jabatan');
+        const createdAtRaw = getDate('created_at');
+        const updatedAtRaw = getDate('updated_at');
+        const createdAt = createdAtRaw ? toMySQLTimestamp(createdAtRaw as string | number | Date) : toMySQLTimestamp(new Date());
+        const updatedAt = updatedAtRaw ? toMySQLTimestamp(updatedAtRaw as string | number | Date) : toMySQLTimestamp(new Date());
+        
+        queries.push({
+          sql: `INSERT INTO employees_position (
+            id, nama_jabatan, created_at, updated_at
+          ) VALUES (?, ?, ?, ?)
+          ON DUPLICATE KEY UPDATE
+            nama_jabatan=VALUES(nama_jabatan), created_at=VALUES(created_at), updated_at=VALUES(updated_at)`,
+          params: [positionId, namaJabatan, createdAt, updatedAt]
+        });
+      }
+      
+      // #region agent log
+      const logBeforeExec = {location:'main.ts:2107',message:'Before executing employees_position queries',data:{queryCount:queries.length,firstQuery:queries.length>0?{sql:queries[0].sql,paramCount:queries[0].params?.length||0}:null},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'E'};
+      writeDebugLog(JSON.stringify(logBeforeExec));
+      // #endregion
+      if (queries.length > 0) {
+        await executeTransaction(queries);
+        // #region agent log
+        const logAfterExec = {location:'main.ts:2110',message:'After executing employees_position queries',data:{success:true},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'E'};
+        writeDebugLog(JSON.stringify(logAfterExec));
+        // #endregion
+      }
+      return { success: true };
+    } catch (error) {
+      // #region agent log
+      const logError = {location:'main.ts:2113',message:'employees_position upsert error',data:{error:error instanceof Error?error.message:String(error),stack:error instanceof Error?error.stack:undefined},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'D'};
+      writeDebugLog(JSON.stringify(logError));
+      // #endregion
+      console.error('Error upserting employees_position:', error);
+      return { success: false };
+    }
+  });
+
+  ipcMain.handle('localdb-get-employees-position', async () => {
+    try {
+      return await executeQuery('SELECT * FROM employees_position ORDER BY nama_jabatan ASC');
+    } catch (error) {
+      console.error('Error getting employees_position:', error);
+      return [];
+    }
+  });
+
+  // Employees
+  ipcMain.handle('localdb-upsert-employees', async (event, rows: RowArray, skipValidation: boolean = false) => {
+    // #region agent log
+    const logEntry = {location:'main.ts:2127',message:'localdb-upsert-employees called',data:{rowCount:Array.isArray(rows)?rows.length:0,skipValidation:skipValidation,firstRow:Array.isArray(rows)&&rows.length>0?rows[0]:null},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'};
+    writeDebugLog(JSON.stringify(logEntry));
+    // #endregion
+    try {
+      const queries: Array<{ sql: string; params?: (string | number | null | boolean)[] }> = [];
+      let skippedCount = 0;
+      
+      for (const r of rows) {
+        const getId = () => {
+          const val = r.id;
+          if (typeof val === 'number') return val;
+          if (typeof val === 'string') {
+            const num = Number(val);
+            return isNaN(num) ? null : num;
+          }
+          return null;
+        };
+        const getNumber = (key: string) => {
+          const val = r[key];
+          if (typeof val === 'number') return val;
+          if (typeof val === 'string') {
+            const num = Number(val);
+            return isNaN(num) ? null : num;
+          }
+          return null;
+        };
+        const getString = (key: string) => (typeof r[key] === 'string' ? r[key] as string : null);
+        const getDate = (key: string) => {
+          const val = r[key];
+          if (val instanceof Date) return val;
+          if (typeof val === 'string' || typeof val === 'number') return val;
+          return null;
+        };
+
+        const employeeId = getId();
+        const userId = getNumber('user_id');
+        const businessId = getNumber('business_id');
+        const jabatanId = getNumber('jabatan_id');
+        const noKtp = getString('no_ktp');
+        const phone = getString('phone');
+        const namaKaryawan = getString('nama_karyawan');
+        const jenisKelamin = getString('jenis_kelamin');
+        const alamat = getString('alamat');
+        const tanggalLahirRaw = getDate('tanggal_lahir');
+        const tanggalBekerjaRaw = getDate('tanggal_bekerja');
+        const createdAtRaw = getDate('created_at');
+        const updatedAtRaw = getDate('updated_at');
+
+        // Convert dates to MySQL DATE format (YYYY-MM-DD)
+        // Robust date conversion that handles various input formats
+        const convertToMySQLDate = (date: Date | string | number | null | undefined): string | null => {
+          if (!date) return null;
+          
+          // If already in YYYY-MM-DD format, return as-is
+          if (typeof date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(date)) {
+            return date;
+          }
+          
+          // Try to parse as date
+          let dateObj: Date;
+          if (typeof date === 'number') {
+            dateObj = new Date(date);
+          } else if (typeof date === 'string') {
+            // Handle ISO strings, MySQL datetime strings, etc.
+            dateObj = new Date(date);
+          } else {
+            dateObj = date;
+          }
+          
+          // Check if date is valid
+          if (isNaN(dateObj.getTime())) {
+            console.warn(`⚠️ [EMPLOYEES] Invalid date value: ${date}`);
+            return null;
+          }
+          
+          // Convert to UTC+7 (WIB) and extract date part
+          const utc7Timestamp = dateObj.getTime() + (7 * 60 * 60 * 1000);
+          const utc7Date = new Date(utc7Timestamp);
+          
+          const year = utc7Date.getUTCFullYear();
+          const month = String(utc7Date.getUTCMonth() + 1).padStart(2, '0');
+          const day = String(utc7Date.getUTCDate()).padStart(2, '0');
+          
+          return `${year}-${month}-${day}`;
+        };
+        const tanggalLahir = convertToMySQLDate(tanggalLahirRaw);
+        const tanggalBekerja = convertToMySQLDate(tanggalBekerjaRaw);
+        
+        // Validate required fields
+        if (!namaKaryawan) {
+          // #region agent log
+          writeDebugLog(JSON.stringify({location:'main.ts:2214',message:'Skipping employee - missing nama_karyawan',data:{employeeId:employeeId},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'F'}));
+          // #endregion
+          console.warn(`⚠️ [EMPLOYEES] Skipping employee ${employeeId}: nama_karyawan is required`);
+          skippedCount++;
+          continue;
+        }
+        
+        if (!jenisKelamin || !['pria', 'wanita'].includes(jenisKelamin)) {
+          // #region agent log
+          writeDebugLog(JSON.stringify({location:'main.ts:2220',message:'Skipping employee - invalid jenis_kelamin',data:{employeeId:employeeId,jenisKelamin:jenisKelamin},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'F'}));
+          // #endregion
+          console.warn(`⚠️ [EMPLOYEES] Skipping employee ${employeeId}: invalid jenis_kelamin`);
+          skippedCount++;
+          continue;
+        }
+        
+        if (!tanggalBekerja) {
+          // #region agent log
+          writeDebugLog(JSON.stringify({location:'main.ts:2226',message:'Skipping employee - missing tanggal_bekerja',data:{employeeId:employeeId,tanggalBekerjaRaw:tanggalBekerjaRaw},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'F'}));
+          // #endregion
+          console.warn(`⚠️ [EMPLOYEES] Skipping employee ${employeeId}: tanggal_bekerja is required`);
+          skippedCount++;
+          continue;
+        }
+        const createdAt = createdAtRaw ? toMySQLTimestamp(createdAtRaw as string | number | Date) : toMySQLTimestamp(new Date());
+        const updatedAt = updatedAtRaw ? toMySQLTimestamp(updatedAtRaw as string | number | Date) : toMySQLTimestamp(new Date());
+
+        // Validate foreign keys if not skipping validation
+        if (!skipValidation) {
+          // Validate user_id exists if provided
+          if (userId) {
+            try {
+              const userExists = await executeQueryOne<{ id: number }>('SELECT id FROM users WHERE id = ? LIMIT 1', [userId]);
+              if (!userExists) {
+                console.warn(`⚠️ [EMPLOYEES] Skipping employee ${employeeId}: user_id ${userId} does not exist`);
+                skippedCount++;
+                continue;
+              }
+            } catch (checkError) {
+              console.warn(`⚠️ [EMPLOYEES] Failed to verify user_id ${userId}:`, checkError);
+              skippedCount++;
+              continue;
+            }
+          }
+
+          // Validate business_id exists if provided
+          if (businessId) {
+            try {
+              const businessExists = await executeQueryOne<{ id: number }>('SELECT id FROM businesses WHERE id = ? LIMIT 1', [businessId]);
+              if (!businessExists) {
+                console.warn(`⚠️ [EMPLOYEES] Skipping employee ${employeeId}: business_id ${businessId} does not exist`);
+                skippedCount++;
+                continue;
+              }
+            } catch (checkError) {
+              console.warn(`⚠️ [EMPLOYEES] Failed to verify business_id ${businessId}:`, checkError);
+              skippedCount++;
+              continue;
+            }
+          }
+
+          // Validate jabatan_id exists if provided
+          if (jabatanId) {
+            try {
+              const jabatanExists = await executeQueryOne<{ id: number }>('SELECT id FROM employees_position WHERE id = ? LIMIT 1', [jabatanId]);
+              if (!jabatanExists) {
+                console.warn(`⚠️ [EMPLOYEES] Skipping employee ${employeeId}: jabatan_id ${jabatanId} does not exist`);
+                skippedCount++;
+                continue;
+              }
+            } catch (checkError) {
+              console.warn(`⚠️ [EMPLOYEES] Failed to verify jabatan_id ${jabatanId}:`, checkError);
+              skippedCount++;
+              continue;
+            }
+          }
+        }
+        
+        try {
+          // #region agent log
+          const logBuild = {location:'main.ts:2314',message:'Building employee query',data:{employeeId:employeeId,namaKaryawan:namaKaryawan,tanggalLahir:tanggalLahir,tanggalBekerja:tanggalBekerja,jenisKelamin:jenisKelamin},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'G'};
+          writeDebugLog(JSON.stringify(logBuild));
+          // #endregion
+          queries.push({
+            sql: `INSERT INTO employees (
+              id, user_id, business_id, jabatan_id, no_ktp, phone, nama_karyawan,
+              jenis_kelamin, alamat, tanggal_lahir, tanggal_bekerja, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON DUPLICATE KEY UPDATE
+              user_id=VALUES(user_id), business_id=VALUES(business_id), jabatan_id=VALUES(jabatan_id),
+              no_ktp=VALUES(no_ktp), phone=VALUES(phone), nama_karyawan=VALUES(nama_karyawan),
+              jenis_kelamin=VALUES(jenis_kelamin), alamat=VALUES(alamat), tanggal_lahir=VALUES(tanggal_lahir),
+              tanggal_bekerja=VALUES(tanggal_bekerja), created_at=VALUES(created_at), updated_at=VALUES(updated_at)`,
+            params: [
+              employeeId, userId, businessId, jabatanId, noKtp || null, phone || null, namaKaryawan,
+              jenisKelamin, alamat || null, tanggalLahir, tanggalBekerja, createdAt, updatedAt
+            ]
+          });
+        } catch (queryError) {
+          // #region agent log
+          const logError = {location:'main.ts:2332',message:'Error building employee query',data:{employeeId:employeeId,error:queryError instanceof Error?queryError.message:String(queryError)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'G'};
+          writeDebugLog(JSON.stringify(logError));
+          // #endregion
+          console.error(`❌ [EMPLOYEES] Error building query for employee ${employeeId}:`, queryError);
+          skippedCount++;
+          continue;
+        }
+      }
+      
+      // #region agent log
+      writeDebugLog(JSON.stringify({location:'main.ts:2343',message:'Before executing employee queries',data:{queryCount:queries.length,skipValidation:skipValidation,skippedCount:skippedCount},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'E'}));
+      // #endregion
+      if (queries.length > 0) {
+        if (skipValidation) {
+          // On first pass: Insert employees one by one to handle foreign key errors individually
+          let successCount = 0;
+          let failCount = 0;
+          for (const query of queries) {
+            try {
+              await executeUpdate(query.sql, query.params || []);
+              successCount++;
+              // #region agent log
+              writeDebugLog(JSON.stringify({location:'main.ts:2351',message:'Employee insert success',data:{employeeId:query.params?.[0]},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'E'}));
+              // #endregion
+            } catch (insertError: unknown) {
+              const err = insertError as { code?: string; errno?: number; message?: string };
+              // #region agent log
+              writeDebugLog(JSON.stringify({location:'main.ts:2353',message:'Employee insert failed',data:{employeeId:query.params?.[0],error:err.message,code:err.code,errno:err.errno,isForeignKey:err.code==='ER_NO_REFERENCED_ROW_2'||err.errno===1452},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'E'}));
+              // #endregion
+              if (err.code === 'ER_NO_REFERENCED_ROW_2' || err.errno === 1452) {
+                // Foreign key constraint - expected on first pass, will retry later
+                failCount++;
+                console.log(`ℹ️ [EMPLOYEES] Employee ${query.params?.[0]} insert failed (foreign key - will retry later): ${err.message}`);
+              } else {
+                // Unexpected error - log and continue
+                failCount++;
+                console.error(`❌ [EMPLOYEES] Employee ${query.params?.[0]} insert failed: ${err.message}`);
+                console.error(`❌ [EMPLOYEES] Error code: ${err.code}, errno: ${err.errno}`);
+              }
+            }
+          }
+          // #region agent log
+          writeDebugLog(JSON.stringify({location:'main.ts:2366',message:'First pass summary',data:{successCount:successCount,failCount:failCount,skippedCount:skippedCount},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'E'}));
+          // #endregion
+          console.log(`ℹ️ [EMPLOYEES] First pass: ${successCount} inserted, ${failCount} failed (will retry later)`);
+          if (skippedCount > 0) {
+            console.log(`⚠️ [EMPLOYEES] Skipped ${skippedCount} employees due to validation errors`);
+          }
+        } else {
+          // On retry pass: Use transaction for better performance
+          try {
+            await executeTransaction(queries);
+            // #region agent log
+            writeDebugLog(JSON.stringify({location:'main.ts:2374',message:'Employee transaction success',data:{queryCount:queries.length},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'E'}));
+            // #endregion
+            if (skippedCount > 0) {
+              console.log(`⚠️ [EMPLOYEES] Skipped ${skippedCount} employees due to missing foreign keys`);
+            }
+          } catch (transactionError: unknown) {
+            const err = transactionError as { code?: string; errno?: number; message?: string };
+            // #region agent log
+            writeDebugLog(JSON.stringify({location:'main.ts:2378',message:'Employee transaction error',data:{error:err.message,code:err.code,errno:err.errno},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'E'}));
+            // #endregion
+            console.error(`❌ [EMPLOYEES] Transaction error:`, transactionError);
+            throw transactionError;
+          }
+        }
+      } else {
+        // #region agent log
+        writeDebugLog(JSON.stringify({location:'main.ts:2383',message:'No employee queries to execute',data:{rowCount:rows.length,skippedCount:skippedCount},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'F'}));
+        // #endregion
+        console.warn(`⚠️ [EMPLOYEES] No valid employees to insert (all ${rows.length} skipped)`);
+      }
+      
+      if (skippedCount > 0 && !skipValidation) {
+        console.warn(`⚠️ [EMPLOYEES] Total skipped: ${skippedCount} employees`);
+      }
+      
+      return { success: true, skipped: skippedCount };
+    } catch (error) {
+      console.error('❌ [EMPLOYEES] Error upserting employees:', error);
+      if (error instanceof Error) {
+        console.error('❌ [EMPLOYEES] Error message:', error.message);
+        console.error('❌ [EMPLOYEES] Error stack:', error.stack);
+      }
+      return { success: false, error: error instanceof Error ? error.message : String(error) };
+    }
+  });
+
+  ipcMain.handle('localdb-get-employees', async () => {
+    try {
+      return await executeQuery('SELECT * FROM employees ORDER BY nama_karyawan ASC');
+    } catch (error) {
+      console.error('Error getting employees:', error);
+      return [];
+    }
+  });
+
   // Ingredients
   ipcMain.handle('localdb-upsert-ingredients', async (event, rows: RowArray) => {
     try {
@@ -6406,6 +6773,38 @@ function createWindows(): void {
     }
   });
 
+  // Local settings handlers (NOT synced to server)
+  ipcMain.handle('localdb-get-setting', async (event, settingKey: string) => {
+    try {
+      const result = await executeQueryOne<{ setting_value: string | null }>(
+        'SELECT setting_value FROM local_settings WHERE setting_key = ?',
+        [settingKey]
+      );
+      return result?.setting_value || null;
+    } catch (error) {
+      console.error('Error getting local setting:', error);
+      return null;
+    }
+  });
+
+  ipcMain.handle('localdb-save-setting', async (event, settingKey: string, settingValue: string) => {
+    try {
+      const now = toMySQLTimestamp(Date.now());
+      await executeUpsert(
+        `INSERT INTO local_settings (setting_key, setting_value, created_at, updated_at)
+         VALUES (?, ?, ?, ?)
+         ON DUPLICATE KEY UPDATE
+           setting_value = VALUES(setting_value),
+           updated_at = VALUES(updated_at)`,
+        [settingKey, settingValue, now, now]
+      );
+      return { success: true };
+    } catch (error) {
+      console.error('Error saving local setting:', error);
+      return { success: false, error: String(error) };
+    }
+  });
+
   // ==================== PRINTER MANAGEMENT IPC HANDLERS ====================
 
   // Generate 19-digit numeric UUID
@@ -8377,7 +8776,7 @@ function generateReceiptHTML(data: ReceiptPrintData, businessName: string, optio
 
 // Generate shift breakdown report HTML for printing
 function generateShiftBreakdownHTML(
-  shiftData: PrintableShiftReportSection & { businessName?: string; wholeDayReport?: PrintableShiftReportSection | null }
+  shiftData: PrintableShiftReportSection & { businessName?: string; wholeDayReport?: PrintableShiftReportSection | null; sectionOptions?: { barangTerjual?: boolean; paymentMethod?: boolean; categoryII?: boolean; toppingSales?: boolean; diskonVoucher?: boolean } }
 ): string {
   const formatDateTime = (dateString: string): string => {
     const date = new Date(dateString);
@@ -8428,10 +8827,68 @@ function generateShiftBreakdownHTML(
 
   const renderReportSection = (
     report: PrintableShiftReportSection,
-    options: { titleOverride?: string; businessName?: string } = {}
+    options: { titleOverride?: string; businessName?: string; sectionOptions?: { barangTerjual?: boolean; paymentMethod?: boolean; categoryII?: boolean; toppingSales?: boolean; diskonVoucher?: boolean } } = {}
   ): string => {
     const sectionTitle = options.titleOverride || report.title || 'LAPORAN SHIFT';
     const businessName = options.businessName || shiftData.businessName || 'Momoyo Bakery Kalimantan';
+    // Use sectionOptions from options directly if provided, otherwise use defaults
+    // This ensures we respect false values from the caller
+    const providedSectionOptions = options.sectionOptions;
+    
+    // Debug logging
+    writeDebugLog(JSON.stringify({
+      location: 'electron/main.ts:8453',
+      message: 'RENDER SECTION - Options sectionOptions',
+      data: options.sectionOptions,
+      timestamp: Date.now(),
+      sessionId: 'debug-session',
+      runId: 'post-fix',
+      hypothesisId: 'C'
+    }));
+    
+    console.log('🔍 [RENDER SECTION] Options sectionOptions:', JSON.stringify(options.sectionOptions));
+    console.log('🔍 [RENDER SECTION] Using provided options directly:', providedSectionOptions !== undefined && providedSectionOptions !== null);
+    
+    const sectionOptions = providedSectionOptions ? {
+      barangTerjual: providedSectionOptions.barangTerjual !== undefined ? providedSectionOptions.barangTerjual : true,
+      paymentMethod: providedSectionOptions.paymentMethod !== undefined ? providedSectionOptions.paymentMethod : true,
+      categoryII: providedSectionOptions.categoryII !== undefined ? providedSectionOptions.categoryII : true,
+      toppingSales: providedSectionOptions.toppingSales !== undefined ? providedSectionOptions.toppingSales : true,
+      diskonVoucher: providedSectionOptions.diskonVoucher !== undefined ? providedSectionOptions.diskonVoucher : true
+    } : {
+      barangTerjual: true,
+      paymentMethod: true,
+      categoryII: true,
+      toppingSales: true,
+      diskonVoucher: true
+    };
+    
+    // Debug logging
+    writeDebugLog(JSON.stringify({
+      location: 'electron/main.ts:8475',
+      message: 'RENDER SECTION - Final resolved sectionOptions',
+      data: sectionOptions,
+      timestamp: Date.now(),
+      sessionId: 'debug-session',
+      runId: 'post-fix',
+      hypothesisId: 'C'
+    }));
+    writeDebugLog(JSON.stringify({
+      location: 'electron/main.ts:8476',
+      message: 'RENDER SECTION - Check values',
+      data: {
+        barangTerjual: sectionOptions.barangTerjual,
+        barangTerjualType: typeof sectionOptions.barangTerjual,
+        barangTerjualEqualTrue: sectionOptions.barangTerjual === true
+      },
+      timestamp: Date.now(),
+      sessionId: 'debug-session',
+      runId: 'post-fix',
+      hypothesisId: 'C'
+    }));
+    
+    console.log('🔍 [RENDER SECTION] Final resolved sectionOptions:', JSON.stringify(sectionOptions));
+    console.log('🔍 [RENDER SECTION] barangTerjual value:', sectionOptions.barangTerjual, 'type:', typeof sectionOptions.barangTerjual, '=== true:', sectionOptions.barangTerjual === true);
     const shiftStartTime = formatDateTime(report.shift_start);
     const shiftEndTime = report.shift_end ? formatDateTime(report.shift_end) : 'Masih Berlangsung';
 
@@ -8447,7 +8904,8 @@ function generateShiftBreakdownHTML(
       try {
         const quantity = product.total_quantity || 0;
         const baseSubtotal = product.base_subtotal ?? (product.total_subtotal - product.customization_subtotal);
-        const unitPrice = product.base_unit_price ?? (quantity > 0 ? baseSubtotal / quantity : 0);
+        // Always calculate unit price from baseSubtotal/quantity (excludes customizations)
+        const unitPrice = quantity > 0 ? baseSubtotal / quantity : 0;
         const platformLabel = formatPlatformLabel(product.platform);
         const transactionLabel = formatTransactionLabel(product.transaction_type);
         const isBundleItem = Boolean(product.is_bundle_item);
@@ -8546,24 +9004,25 @@ function generateShiftBreakdownHTML(
       ? formatCurrency(-Math.abs(report.statistics.total_discount))
       : formatCurrency(0);
     const cashSummaryData = report.cashSummary;
-    const cashShiftSales = cashSummaryData.cash_shift_sales ?? cashSummaryData.cash_shift ?? 0;
-    const cashShiftRefunds = cashSummaryData.cash_shift_refunds ?? 0;
-    const cashWholeDaySales = cashSummaryData.cash_whole_day_sales ?? cashSummaryData.cash_whole_day ?? 0;
-    const cashWholeDayRefunds = cashSummaryData.cash_whole_day_refunds ?? 0;
-    const cashNetShift = cashSummaryData.cash_shift ?? (cashShiftSales - cashShiftRefunds);
-    const cashNetWholeDay = cashSummaryData.cash_whole_day ?? (cashWholeDaySales - cashWholeDayRefunds);
-    const kasMulaiSummary = cashSummaryData.kas_mulai ?? report.modal_awal ?? 0;
-    const kasExpectedSummary = cashSummaryData.kas_expected ?? (kasMulaiSummary + cashShiftSales - cashShiftRefunds);
-    const kasAkhirSummary = typeof cashSummaryData.kas_akhir === 'number' ? cashSummaryData.kas_akhir : null;
+    const cashShiftSales = Number(cashSummaryData.cash_shift_sales ?? cashSummaryData.cash_shift ?? 0) || 0;
+    const cashShiftRefunds = Number(cashSummaryData.cash_shift_refunds ?? 0) || 0;
+    const cashWholeDaySales = Number(cashSummaryData.cash_whole_day_sales ?? cashSummaryData.cash_whole_day ?? 0) || 0;
+    const cashWholeDayRefunds = Number(cashSummaryData.cash_whole_day_refunds ?? 0) || 0;
+    const cashNetShift = Number(cashSummaryData.cash_shift) || (cashShiftSales - cashShiftRefunds);
+    const cashNetWholeDay = Number(cashSummaryData.cash_whole_day) || (cashWholeDaySales - cashWholeDayRefunds);
+    // Ensure all values are numbers and handle NaN
+    const kasMulaiSummary = Number(cashSummaryData.kas_mulai ?? report.modal_awal ?? 0) || 0;
+    const kasExpectedSummary = Number(cashSummaryData.kas_expected) || (kasMulaiSummary + cashShiftSales - cashShiftRefunds);
+    const kasAkhirSummary = typeof cashSummaryData.kas_akhir === 'number' && !isNaN(cashSummaryData.kas_akhir) ? cashSummaryData.kas_akhir : null;
     let kasSelisihSummary =
-      typeof cashSummaryData.kas_selisih === 'number'
+      typeof cashSummaryData.kas_selisih === 'number' && !isNaN(cashSummaryData.kas_selisih)
         ? cashSummaryData.kas_selisih
-        : kasAkhirSummary !== null
+        : kasAkhirSummary !== null && !isNaN(kasExpectedSummary)
           ? Number((kasAkhirSummary - kasExpectedSummary).toFixed(2))
           : null;
     let kasSelisihLabelSummary: 'balanced' | 'plus' | 'minus' | null =
       cashSummaryData.kas_selisih_label ?? null;
-    if (kasSelisihSummary !== null) {
+    if (kasSelisihSummary !== null && !isNaN(kasSelisihSummary)) {
       if (Math.abs(kasSelisihSummary) < 0.01) {
         kasSelisihSummary = 0;
         kasSelisihLabelSummary = 'balanced';
@@ -8580,11 +9039,12 @@ function generateShiftBreakdownHTML(
             ? 'Balanced'
             : 'Pending';
     const varianceValueDisplay =
-      kasSelisihSummary === null
+      kasSelisihSummary === null || isNaN(kasSelisihSummary)
         ? '-'
         : `${kasSelisihSummary > 0 ? '+' : ''}${kasSelisihSummary.toLocaleString('id-ID')}`;
-    const kasAkhirDisplay = kasAkhirSummary !== null ? kasAkhirSummary.toLocaleString('id-ID') : '-';
-    const totalCashInCashierDisplay = (cashSummaryData.total_cash_in_cashier ?? kasExpectedSummary).toLocaleString('id-ID');
+    const kasAkhirDisplay = kasAkhirSummary !== null && !isNaN(kasAkhirSummary) ? kasAkhirSummary.toLocaleString('id-ID') : '-';
+    const totalCashInCashierValue = Number(cashSummaryData.total_cash_in_cashier) || kasExpectedSummary;
+    const totalCashInCashierDisplay = !isNaN(totalCashInCashierValue) ? totalCashInCashierValue.toLocaleString('id-ID') : '-';
 
     return `
     <div class="report-block">
@@ -8614,108 +9074,7 @@ function generateShiftBreakdownHTML(
 
       <div class="divider"></div>
 
-      <div class="section-title">BARANG TERJUAL</div>
-      <table>
-        <thead>
-          <tr>
-            <th>Product</th>
-            <th class="right">Qty</th>
-            <th class="right">Unit Price</th>
-            <th class="right">Subtotal</th>
-          </tr>
-        </thead>
-        <tbody>
-          ${productRows || '<tr><td colSpan="4" style="text-align: center;">Tidak ada produk</td></tr>'}
-          <tr class="total-row">
-            <td>TOTAL</td>
-            <td class="right">${totalProductQty}</td>
-            <td class="right">-</td>
-            <td class="right">${Number(totalProductBaseSubtotal).toLocaleString('id-ID')}</td>
-          </tr>
-        </tbody>
-      </table>
-
-      <div class="divider"></div>
-
-      <div class="section-title">PAYMENT METHOD</div>
-      <table>
-        <thead>
-          <tr>
-            <th>Payment Method</th>
-            <th class="right">Count</th>
-            <th class="right">Total</th>
-          </tr>
-        </thead>
-        <tbody>
-          ${paymentRows || '<tr><td colSpan="3" style="text-align: center;">Tidak ada transaksi</td></tr>'}
-          <tr class="total-row">
-            <td>TOTAL</td>
-            <td class="right">${totalPaymentCount}</td>
-            <td class="right">${Number(totalPaymentAmount).toLocaleString('id-ID')}</td>
-          </tr>
-        </tbody>
-      </table>
-
-      <div class="divider"></div>
-
-      <div class="section-title">CATEGORY II</div>
-      <table>
-        <thead>
-          <tr>
-            <th>Category II</th>
-            <th class="right">Quantity</th>
-            <th class="right">Total</th>
-          </tr>
-        </thead>
-        <tbody>
-          ${category2Rows || '<tr><td colSpan="3" style="text-align: center;">Tidak ada Category II</td></tr>'}
-          <tr class="total-row">
-            <td>TOTAL</td>
-            <td class="right">${totalCategory2Quantity}</td>
-            <td class="right">${Number(totalCategory2Amount).toLocaleString('id-ID')}</td>
-          </tr>
-        </tbody>
-      </table>
-
-      <div class="divider"></div>
-
-      <div class="section-title">TOPPING SALES BREAKDOWN</div>
-      <table>
-        <thead>
-          <tr>
-            <th>Customization</th>
-            <th class="right">Qty</th>
-            <th class="right">Revenue</th>
-          </tr>
-        </thead>
-        <tbody>
-          ${customizationRows || '<tr><td colSpan="3" style="text-align: center;">Tidak ada kustomisasi</td></tr>'}
-          <tr class="total-row">
-            <td>TOTAL</td>
-            <td class="right">${totalCustomizationUnits}</td>
-            <td class="right">${Number(totalCustomizationRevenue).toLocaleString('id-ID')}</td>
-          </tr>
-        </tbody>
-      </table>
-
-      <div class="divider"></div>
-
-      <div class="section-title">DISKON & VOUCHER</div>
-      <table>
-        <tbody>
-          <tr>
-            <td style="text-align: left; padding: 0.3mm 0;">Voucher Digunakan</td>
-            <td class="right">${report.statistics.voucher_count}</td>
-          </tr>
-          <tr>
-            <td style="text-align: left; padding: 0.3mm 0;">Total Diskon Voucher</td>
-            <td class="right">${formattedTotalDiscount}</td>
-          </tr>
-        </tbody>
-      </table>
-
-      <div class="divider"></div>
-
+      <div class="section-title">RINGKASAN</div>
       <div class="summary">
         <div class="summary-line">
           <span class="summary-label">Total Pesanan:</span>
@@ -8755,7 +9114,7 @@ function generateShiftBreakdownHTML(
         </div>
         <div class="summary-line">
           <span class="summary-label">Kas Diharapkan:</span>
-          <span class="summary-value">${kasExpectedSummary.toLocaleString('id-ID')}</span>
+          <span class="summary-value">${!isNaN(kasExpectedSummary) ? kasExpectedSummary.toLocaleString('id-ID') : '-'}</span>
         </div>
         <div class="summary-line">
           <span class="summary-label">Kas Akhir:</span>
@@ -8782,22 +9141,164 @@ function generateShiftBreakdownHTML(
           <span class="summary-value">${totalCashInCashierDisplay}</span>
         </div>
       </div>
+
+      <div class="divider"></div>
+
+      ${sectionOptions.barangTerjual === true ? `
+      <div class="section-title">BARANG TERJUAL</div>
+      <table>
+        <thead>
+          <tr>
+            <th>Product</th>
+            <th class="right">Qty</th>
+            <th class="right">Unit Price</th>
+            <th class="right">Subtotal</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${productRows || '<tr><td colSpan="4" style="text-align: center;">Tidak ada produk</td></tr>'}
+          <tr class="total-row">
+            <td>TOTAL</td>
+            <td class="right">${totalProductQty}</td>
+            <td class="right">-</td>
+            <td class="right">${Number(totalProductBaseSubtotal).toLocaleString('id-ID')}</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <div class="divider"></div>
+      ` : ''}
+
+      ${sectionOptions.paymentMethod === true ? `
+      <div class="section-title">PAYMENT METHOD</div>
+      <table>
+        <thead>
+          <tr>
+            <th>Payment Method</th>
+            <th class="right">Count</th>
+            <th class="right">Total</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${paymentRows || '<tr><td colSpan="3" style="text-align: center;">Tidak ada transaksi</td></tr>'}
+          <tr class="total-row">
+            <td>TOTAL</td>
+            <td class="right">${totalPaymentCount}</td>
+            <td class="right">${Number(totalPaymentAmount).toLocaleString('id-ID')}</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <div class="divider"></div>
+      ` : ''}
+
+      ${sectionOptions.categoryII === true ? `
+      <div class="section-title">CATEGORY II</div>
+      <table>
+        <thead>
+          <tr>
+            <th>Category II</th>
+            <th class="right">Quantity</th>
+            <th class="right">Total</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${category2Rows || '<tr><td colSpan="3" style="text-align: center;">Tidak ada Category II</td></tr>'}
+          <tr class="total-row">
+            <td>TOTAL</td>
+            <td class="right">${totalCategory2Quantity}</td>
+            <td class="right">${Number(totalCategory2Amount).toLocaleString('id-ID')}</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <div class="divider"></div>
+      ` : ''}
+
+      ${sectionOptions.toppingSales === true ? `
+      <div class="section-title">TOPPING SALES BREAKDOWN</div>
+      <table>
+        <thead>
+          <tr>
+            <th>Customization</th>
+            <th class="right">Qty</th>
+            <th class="right">Revenue</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${customizationRows || '<tr><td colSpan="3" style="text-align: center;">Tidak ada kustomisasi</td></tr>'}
+          <tr class="total-row">
+            <td>TOTAL</td>
+            <td class="right">${totalCustomizationUnits}</td>
+            <td class="right">${Number(totalCustomizationRevenue).toLocaleString('id-ID')}</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <div class="divider"></div>
+      ` : ''}
+
+      ${sectionOptions.diskonVoucher === true ? `
+      <div class="section-title">DISKON & VOUCHER</div>
+      <table>
+        <tbody>
+          <tr>
+            <td style="text-align: left; padding: 0.3mm 0;">Voucher Digunakan</td>
+            <td class="right">${report.statistics.voucher_count}</td>
+          </tr>
+          <tr>
+            <td style="text-align: left; padding: 0.3mm 0;">Total Diskon Voucher</td>
+            <td class="right">${formattedTotalDiscount}</td>
+          </tr>
+        </tbody>
+      </table>
+      ` : ''}
     </div>
     `;
   };
 
   const sections: string[] = [];
+  const defaultSectionOptions = {
+    barangTerjual: true,
+    paymentMethod: true,
+    categoryII: true,
+    toppingSales: true,
+    diskonVoucher: true
+  };
+  // Respect false values - only use defaults if sectionOptions is not provided at all
+  const sectionOptions = shiftData.sectionOptions ? {
+    barangTerjual: shiftData.sectionOptions.barangTerjual !== undefined ? shiftData.sectionOptions.barangTerjual : defaultSectionOptions.barangTerjual,
+    paymentMethod: shiftData.sectionOptions.paymentMethod !== undefined ? shiftData.sectionOptions.paymentMethod : defaultSectionOptions.paymentMethod,
+    categoryII: shiftData.sectionOptions.categoryII !== undefined ? shiftData.sectionOptions.categoryII : defaultSectionOptions.categoryII,
+    toppingSales: shiftData.sectionOptions.toppingSales !== undefined ? shiftData.sectionOptions.toppingSales : defaultSectionOptions.toppingSales,
+    diskonVoucher: shiftData.sectionOptions.diskonVoucher !== undefined ? shiftData.sectionOptions.diskonVoucher : defaultSectionOptions.diskonVoucher
+  } : defaultSectionOptions;
+  
+  // Debug logging
+  writeDebugLog(JSON.stringify({
+    location: 'electron/main.ts:8839',
+    message: 'GENERATE HTML - Section options',
+    data: sectionOptions,
+    timestamp: Date.now(),
+    sessionId: 'debug-session',
+    runId: 'post-fix',
+    hypothesisId: 'B'
+  }));
+  console.log('🔍 [GENERATE HTML] Section options:', JSON.stringify(sectionOptions));
+  
   sections.push(
     renderReportSection(shiftData, {
       titleOverride: shiftData.title || 'LAPORAN SHIFT',
-      businessName: shiftData.businessName
+      businessName: shiftData.businessName,
+      sectionOptions: sectionOptions
     })
   );
   if (shiftData.wholeDayReport) {
     sections.push(
       renderReportSection(shiftData.wholeDayReport, {
         titleOverride: shiftData.wholeDayReport.title || 'RINGKASAN HARIAN',
-        businessName: shiftData.businessName
+        businessName: shiftData.businessName,
+        sectionOptions: sectionOptions
       })
     );
   }
@@ -8972,7 +9473,7 @@ type PrintableShiftReportSection = {
 };
 
 // Print shift breakdown report
-ipcMain.handle('print-shift-breakdown', async (event, data: PrintableShiftReportSection & { business_id?: number; printerType?: string; wholeDayReport?: PrintableShiftReportSection | null }) => {
+ipcMain.handle('print-shift-breakdown', async (event, data: PrintableShiftReportSection & { business_id?: number; printerType?: string; wholeDayReport?: PrintableShiftReportSection | null; sectionOptions?: { barangTerjual?: boolean; paymentMethod?: boolean; categoryII?: boolean; toppingSales?: boolean; diskonVoucher?: boolean } }) => {
   try {
     console.log('🖨️ [SHIFT PRINT] Starting shift breakdown print...');
     console.log('   - Shift:', data.user_name);
@@ -9134,6 +9635,18 @@ ipcMain.handle('print-shift-breakdown', async (event, data: PrintableShiftReport
     let htmlContent: string;
     try {
       console.log('🎨 [SHIFT PRINT] Generating HTML...');
+      // Debug logging
+      writeDebugLog(JSON.stringify({
+        location: 'electron/main.ts:9191',
+        message: 'PRINT HANDLER - Received sectionOptions',
+        data: data.sectionOptions,
+        timestamp: Date.now(),
+        sessionId: 'debug-session',
+        runId: 'post-fix',
+        hypothesisId: 'A'
+      }));
+      console.log('🔍 [PRINT HANDLER] Received sectionOptions:', JSON.stringify(data.sectionOptions));
+      
       htmlContent = generateShiftBreakdownHTML({
         ...data,
         productSales: data.productSales || [],
@@ -9142,7 +9655,8 @@ ipcMain.handle('print-shift-breakdown', async (event, data: PrintableShiftReport
         category2Breakdown: data.category2Breakdown || [],
         cashSummary: data.cashSummary,
         wholeDayReport: data.wholeDayReport || null,
-        businessName
+        businessName,
+        sectionOptions: data.sectionOptions
       });
       console.log('✅ [SHIFT PRINT] HTML generation successful');
     } catch (htmlError) {

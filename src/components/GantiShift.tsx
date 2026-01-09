@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import {
   Wallet,
   Package,
@@ -12,7 +12,10 @@ import {
   CheckCircle,
   Loader2,
   Printer,
-  Ticket
+  Ticket,
+  ChevronDown,
+  ChevronUp,
+  Settings
 } from 'lucide-react';
 import { useAuth } from '@/hooks/useAuth';
 import { isSuperAdmin } from '@/lib/auth';
@@ -260,6 +263,7 @@ export default function GantiShift() {
   const [isEndingShift, setIsEndingShift] = useState(false);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [isLoadingInitial, setIsLoadingInitial] = useState(true);
+  const [isLoadingTabData, setIsLoadingTabData] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
   const [showEndShiftConfirm, setShowEndShiftConfirm] = useState(false);
@@ -296,6 +300,229 @@ export default function GantiShift() {
   const [productSales, setProductSales] = useState<ProductSale[]>([]);
   const [customizationSales, setCustomizationSales] = useState<CustomizationSale[]>([]);
   const [refunds, setRefunds] = useState<RefundDetail[]>([]);
+  const [recalculatedCategory2Breakdown, setRecalculatedCategory2Breakdown] = useState<Category2Breakdown[]>([]);
+  const [groupProducts, setGroupProducts] = useState(false); // Default: ungrouped
+
+  // Group productSales by product_id + transaction_type to combine platforms
+  const groupedProductSales = useMemo(() => {
+    const groupMap = new Map<string, {
+      product_id: number;
+      product_name: string;
+      product_code: string;
+      transaction_type: string;
+      platforms: string[];
+      unitPrices: number[];
+      total_quantity: number;
+      total_base_subtotal: number;
+      is_bundle_item: boolean;
+    }>();
+
+    productSales.forEach((product) => {
+      // Group key: product_id + transaction_type
+      const groupKey = `${product.product_id}-${product.transaction_type}`;
+      
+      const unitPrice = product.total_quantity > 0 
+        ? product.base_subtotal / product.total_quantity 
+        : 0;
+
+      const existing = groupMap.get(groupKey);
+      if (existing) {
+        // Add platform if not already present
+        if (!existing.platforms.includes(product.platform)) {
+          existing.platforms.push(product.platform);
+        }
+        // Add unit price if not already present (for distinct prices)
+        if (unitPrice > 0 && !existing.unitPrices.some(p => Math.abs(p - unitPrice) < 0.01)) {
+          existing.unitPrices.push(unitPrice);
+        }
+        // Sum quantities and subtotals
+        existing.total_quantity += product.total_quantity;
+        existing.total_base_subtotal += product.base_subtotal;
+      } else {
+        groupMap.set(groupKey, {
+          product_id: product.product_id,
+          product_name: product.product_name,
+          product_code: product.product_code,
+          transaction_type: product.transaction_type,
+          platforms: [product.platform],
+          unitPrices: unitPrice > 0 ? [unitPrice] : [],
+          total_quantity: product.total_quantity,
+          total_base_subtotal: product.base_subtotal,
+          is_bundle_item: product.is_bundle_item || false
+        });
+      }
+    });
+
+    // Convert to array and sort by product_name
+    return Array.from(groupMap.values()).sort((a, b) => 
+      a.product_name.localeCompare(b.product_name)
+    );
+  }, [productSales]);
+
+  // Use grouped or ungrouped products based on setting
+  type GroupedProductType = {
+    product_id: number;
+    product_name: string;
+    product_code: string;
+    transaction_type: string;
+    platforms: string[];
+    unitPrices: number[];
+    total_quantity: number;
+    total_base_subtotal: number;
+    is_bundle_item: boolean;
+  };
+  
+  // Type guard to check if product is grouped
+  const isGroupedProduct = (p: ProductSale | GroupedProductType): p is GroupedProductType => {
+    return 'platforms' in p && Array.isArray((p as GroupedProductType).platforms);
+  };
+  
+  const displayProductSales: (ProductSale | GroupedProductType)[] = groupProducts ? groupedProductSales : productSales;
+
+  // Helper function to group productSales for printing (same logic as groupedProductSales)
+  const groupProductSalesForPrint = (products: ProductSale[]): ProductSale[] => {
+    const groupMap = new Map<string, {
+      product_id: number;
+      product_name: string;
+      product_code: string;
+      transaction_type: string;
+      platform: string;
+      platforms: string[];
+      unitPrices: number[];
+      total_quantity: number;
+      total_base_subtotal: number;
+      is_bundle_item: boolean;
+    }>();
+
+    products.forEach((product) => {
+      const groupKey = `${product.product_id}-${product.transaction_type}`;
+      const unitPrice = product.total_quantity > 0 
+        ? product.base_subtotal / product.total_quantity 
+        : 0;
+
+      const existing = groupMap.get(groupKey);
+      if (existing) {
+        if (!existing.platforms.includes(product.platform)) {
+          existing.platforms.push(product.platform);
+        }
+        if (unitPrice > 0 && !existing.unitPrices.some(p => Math.abs(p - unitPrice) < 0.01)) {
+          existing.unitPrices.push(unitPrice);
+        }
+        existing.total_quantity += product.total_quantity;
+        existing.total_base_subtotal += product.base_subtotal;
+      } else {
+        groupMap.set(groupKey, {
+          product_id: product.product_id,
+          product_name: product.product_name,
+          product_code: product.product_code || '',
+          transaction_type: product.transaction_type,
+          platform: product.platform, // Keep first platform for compatibility
+          platforms: [product.platform],
+          unitPrices: unitPrice > 0 ? [unitPrice] : [],
+          total_quantity: product.total_quantity,
+          total_base_subtotal: product.base_subtotal,
+          is_bundle_item: product.is_bundle_item || false
+        });
+      }
+    });
+
+    // Convert back to ProductSale[] format with combined platforms
+    return Array.from(groupMap.values()).map((group) => {
+      const platformsStr = group.platforms
+        .map(p => {
+          const key = (p || 'offline').toLowerCase();
+          switch (key) {
+            case 'offline': return 'Offline';
+            case 'gofood': return 'GoFood';
+            case 'grabfood': return 'GrabFood';
+            case 'shopeefood': return 'ShopeeFood';
+            case 'qpon': return 'Qpon';
+            case 'tiktok': return 'TikTok';
+            default: return key.charAt(0).toUpperCase() + key.slice(1);
+          }
+        })
+        .sort()
+        .join(', ');
+
+      return {
+        product_id: group.product_id,
+        product_name: group.product_name,
+        product_code: group.product_code,
+        transaction_type: group.transaction_type,
+        platform: platformsStr, // Combined platforms as string
+        total_quantity: group.total_quantity,
+        total_subtotal: group.total_base_subtotal, // For compatibility
+        customization_subtotal: 0, // Already excluded in base_subtotal
+        base_subtotal: group.total_base_subtotal,
+        base_unit_price: group.total_quantity > 0 ? group.total_base_subtotal / group.total_quantity : 0,
+        is_bundle_item: group.is_bundle_item
+      } as ProductSale;
+    }).sort((a, b) => a.product_name.localeCompare(b.product_name));
+  };
+
+  // Helper function to recalculate Category II for printing (same logic as recalculateCategory2Breakdown)
+  const recalculateCategory2ForPrint = async (
+    products: ProductSale[],
+    originalCategory2: Category2Breakdown[],
+    electronAPI: ReturnType<typeof getElectronAPI>
+  ): Promise<Category2Breakdown[]> => {
+    if (!electronAPI?.localDbGetAllProducts || products.length === 0) {
+      return [];
+    }
+
+    try {
+      const allProducts = await electronAPI.localDbGetAllProducts();
+      const productsArray = Array.isArray(allProducts) ? allProducts as Record<string, unknown>[] : [];
+      
+      const productToCategory2NameMap = new Map<number, string>();
+      productsArray.forEach((p) => {
+        const productId = typeof p.id === 'number' ? p.id : (typeof p.id === 'string' ? parseInt(p.id, 10) : null);
+        const category2Name = typeof p.category2_name === 'string' ? p.category2_name : null;
+        if (productId && category2Name) {
+          productToCategory2NameMap.set(productId, category2Name);
+        }
+      });
+
+      const category2NameToIdMap = new Map<string, number>();
+      originalCategory2.forEach((cat) => {
+        category2NameToIdMap.set(cat.category2_name, cat.category2_id);
+      });
+
+      const category2Map = new Map<string, { category2_id: number; category2_name: string; total_quantity: number; total_amount: number }>();
+
+      products.forEach((product) => {
+        if (product.is_bundle_item) return;
+        const category2Name = productToCategory2NameMap.get(product.product_id);
+        if (!category2Name) return;
+        const category2Id = category2NameToIdMap.get(category2Name) || 0;
+        const existing = category2Map.get(category2Name);
+        if (existing) {
+          existing.total_quantity += product.total_quantity;
+          existing.total_amount += product.base_subtotal;
+        } else {
+          category2Map.set(category2Name, {
+            category2_id: category2Id,
+            category2_name: category2Name,
+            total_quantity: product.total_quantity,
+            total_amount: product.base_subtotal
+          });
+        }
+      });
+
+      return Array.from(category2Map.values())
+        .map((data) => ({
+          category2_id: data.category2_id,
+          category2_name: data.category2_name,
+          total_quantity: data.total_quantity,
+          total_amount: data.total_amount
+        }))
+        .sort((a, b) => a.category2_name.localeCompare(b.category2_name));
+    } catch (error) {
+      console.error('[Print Category II Recalc] Error:', error);
+      return [];
+    }
+  };
+
   const [selectedRefundTransaction, setSelectedRefundTransaction] = useState<{
     refund: RefundDetail;
     items: Array<{
@@ -318,7 +545,7 @@ export default function GantiShift() {
     note?: string | null;
     userName?: string;
   } | null>(null);
-  const [isLoadingRefundDetails, setIsLoadingRefundDetails] = useState(false);
+  // Removed isLoadingRefundDetails - not used in render
 
   // Date-time picker states for custom date range printing
   const [showDatePicker, setShowDatePicker] = useState(false);
@@ -331,6 +558,16 @@ export default function GantiShift() {
   const [printSelections, setPrintSelections] = useState<ShiftPrintSelection[]>([]);
   const [printWholeDaySelected, setPrintWholeDaySelected] = useState(false);
   const [isPrintingSelected, setIsPrintingSelected] = useState(false);
+  const [showPrintOptions, setShowPrintOptions] = useState(false);
+  const [printSectionOptions, setPrintSectionOptions] = useState({
+    barangTerjual: true,
+    paymentMethod: true,
+    categoryII: true,
+    toppingSales: true,
+    diskonVoucher: true
+  });
+  const [ringkasanOnly, setRingkasanOnly] = useState(false);
+  const [showSettingsModal, setShowSettingsModal] = useState(false);
 
   // Tab view states
   const [activeTab, setActiveTab] = useState<TabView>('all-day');
@@ -364,6 +601,37 @@ export default function GantiShift() {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentUserId]);
+
+  // Load grouping setting on mount
+  useEffect(() => {
+    const loadGroupingSetting = async () => {
+      const electronAPI = getElectronAPI();
+      if (electronAPI?.localDbGetSetting) {
+        try {
+          const value = await electronAPI.localDbGetSetting('groupProducts');
+          if (value === 'true') {
+            setGroupProducts(true);
+          }
+        } catch (error) {
+          console.error('Error loading grouping setting:', error);
+        }
+      }
+    };
+    loadGroupingSetting();
+  }, []);
+
+  // Save grouping setting when it changes
+  const handleGroupProductsChange = async (value: boolean) => {
+    setGroupProducts(value);
+    const electronAPI = getElectronAPI();
+    if (electronAPI?.localDbSaveSetting) {
+      try {
+        await electronAPI.localDbSaveSetting('groupProducts', value ? 'true' : 'false');
+      } catch (error) {
+        console.error('Error saving grouping setting:', error);
+      }
+    }
+  };
 
   // Auto-focus modal awal input when no active shift
   useEffect(() => {
@@ -419,10 +687,105 @@ export default function GantiShift() {
       });
       setProductSales([]);
       setCustomizationSales([]);
+      setRecalculatedCategory2Breakdown([]);
       setTodayTransactionsInfo(null);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeShift?.id, checkTodayTransactions]);
+
+  // Function to recalculate Category II breakdown using base_subtotal
+  const recalculateCategory2Breakdown = useCallback(async (products: ProductSale[], originalCategory2: Category2Breakdown[]) => {
+    console.log('[Category II Recalc] Starting recalculation with', products.length, 'products');
+    const electronAPI = getElectronAPI();
+    if (!electronAPI?.localDbGetAllProducts || products.length === 0) {
+      console.warn('[Category II Recalc] Cannot recalculate - no products or API unavailable');
+      // Set empty array instead of using original data with wrong totals
+      setRecalculatedCategory2Breakdown([]);
+      return;
+    }
+
+    try {
+      // Fetch all products to get category2_id mapping
+      const allProducts = await electronAPI.localDbGetAllProducts();
+      const productsArray = Array.isArray(allProducts) ? allProducts as Record<string, unknown>[] : [];
+      console.log('[Category II Recalc] Fetched', productsArray.length, 'products from database');
+      
+      // Build map: product_id -> category2_name (localDbGetAllProducts returns category2_name but not category2_id)
+      const productToCategory2NameMap = new Map<number, string>();
+
+      productsArray.forEach((p) => {
+        const productId = typeof p.id === 'number' ? p.id : (typeof p.id === 'string' ? parseInt(p.id, 10) : null);
+        const category2Name = typeof p.category2_name === 'string' ? p.category2_name : null;
+
+        if (productId && category2Name) {
+          productToCategory2NameMap.set(productId, category2Name);
+        }
+      });
+
+      // Build map: category2_name -> category2_id from originalCategory2 (to get the ID for final result)
+      const category2NameToIdMap = new Map<string, number>();
+      originalCategory2.forEach((cat) => {
+        category2NameToIdMap.set(cat.category2_name, cat.category2_id);
+      });
+
+      // Group productSales by category2_name and sum base_subtotal (without customizations)
+      const category2Map = new Map<string, { category2_id: number; category2_name: string; total_quantity: number; total_amount: number }>();
+
+      products.forEach((product) => {
+        if (product.is_bundle_item) return; // Skip bundle items
+
+        const category2Name = productToCategory2NameMap.get(product.product_id);
+        if (!category2Name) {
+          return;
+        }
+
+        const category2Id = category2NameToIdMap.get(category2Name) || 0; // Get ID from originalCategory2, or use 0 as fallback
+        const existing = category2Map.get(category2Name);
+        if (existing) {
+          existing.total_quantity += product.total_quantity;
+          existing.total_amount += product.base_subtotal; // Use base_subtotal (without customizations)
+        } else {
+          category2Map.set(category2Name, {
+            category2_id: category2Id,
+            category2_name: category2Name,
+            total_quantity: product.total_quantity,
+            total_amount: product.base_subtotal // Use base_subtotal (without customizations)
+          });
+        }
+      });
+
+      // Convert to array and sort by category2_name
+      const recalculated = Array.from(category2Map.values())
+        .map((data) => ({
+          category2_id: data.category2_id,
+          category2_name: data.category2_name,
+          total_quantity: data.total_quantity,
+          total_amount: data.total_amount
+        }))
+        .sort((a, b) => a.category2_name.localeCompare(b.category2_name));
+      console.log('[Category II Recalc] Recalculated totals:', recalculated);
+      setRecalculatedCategory2Breakdown(recalculated);
+    } catch (error) {
+      console.error('[Category II Recalc] Error recalculating Category II:', error);
+      // Set empty array on error (don't use original data with wrong totals)
+      setRecalculatedCategory2Breakdown([]);
+    }
+  }, []);
+
+  // Recalculate Category II breakdown when productSales or category2Breakdown changes
+  useEffect(() => {
+    if (productSales.length > 0 && category2Breakdown.length > 0) {
+      console.log('[Category II Recalc] useEffect triggered - recalculating with', productSales.length, 'products');
+      recalculateCategory2Breakdown(productSales, category2Breakdown);
+    } else if (category2Breakdown.length > 0 && productSales.length === 0) {
+      // Only use original data if we truly have no productSales data
+      console.log('[Category II Recalc] No productSales data, using original category2Breakdown');
+      setRecalculatedCategory2Breakdown(category2Breakdown);
+    } else {
+      // Clear if no data at all
+      setRecalculatedCategory2Breakdown([]);
+    }
+  }, [productSales, category2Breakdown, recalculateCategory2Breakdown]);
 
   // Auto-refresh statistics when shift is active
   useEffect(() => {
@@ -642,6 +1005,13 @@ export default function GantiShift() {
       setProductSales(productSalesData.products || []);
       setCustomizationSales(productSalesData.customizations || []);
       
+      // Recalculate Category II totals using base_subtotal (without customizations)
+      if (productSalesData.products && productSalesData.products.length > 0) {
+        recalculateCategory2Breakdown(productSalesData.products, category2BreakdownData);
+      } else {
+        setRecalculatedCategory2Breakdown(category2BreakdownData);
+      }
+      
       const refundsData = refundsResult.status === 'fulfilled' ? (refundsResult.value as RefundDetail[]) : [];
       setRefunds(refundsData);
 
@@ -659,13 +1029,12 @@ export default function GantiShift() {
     } finally {
       setIsRefreshing(false);
     }
-  }, [activeShift, businessId]);
+  }, [activeShift, businessId, recalculateCategory2Breakdown]);
 
   const handleRefundClick = useCallback(async (refund: RefundDetail) => {
     const electronAPI = getElectronAPI();
     if (!electronAPI) return;
 
-    setIsLoadingRefundDetails(true);
     try {
       // Fetch transaction items (this already includes customizations via readCustomizationsFromNormalizedTables)
       const allItems = electronAPI.localDbGetTransactionItems
@@ -721,8 +1090,6 @@ export default function GantiShift() {
       });
     } catch (error) {
       console.error('Error loading refund transaction details:', error);
-    } finally {
-      setIsLoadingRefundDetails(false);
     }
   }, [businessId]);
 
@@ -1208,13 +1575,39 @@ export default function GantiShift() {
       if (printWholeDaySelected) {
         try {
           console.log('📊 [PRINT WHOLE DAY] Starting...');
-          console.log('   Day range:', shiftSequenceInfo.dayStartUtc, 'to', shiftSequenceInfo.dayEndUtc);
+          
+          // Use TODAY's date bounds (same as "All Day" tab), not the active shift's date
+          const today = new Date();
+          const todayStr = today.toISOString().split('T')[0]; // YYYY-MM-DD format
+          const todayBounds = getGmt7DayBounds(todayStr);
+          
+          if (!todayBounds) {
+            throw new Error('Failed to calculate today bounds for print');
+          }
+          
+          console.log('   Day range (TODAY):', todayBounds.dayStartUtc, 'to', todayBounds.dayEndUtc);
+
+          // Get shifts for today first (before fetching report data)
+          const electronAPIForShifts = getElectronAPI();
+          let todayShiftsForReport: Shift[] = [];
+          
+          if (electronAPIForShifts?.localDbGetShifts) {
+            const shiftsResult = await electronAPIForShifts.localDbGetShifts({
+              businessId: businessId,
+              startDate: todayBounds.dayStartUtc,
+              endDate: todayBounds.dayEndUtc
+            });
+            todayShiftsForReport = (shiftsResult?.shifts || []) as Shift[];
+          } else {
+            // Fallback to shiftSequenceInfo if API not available
+            todayShiftsForReport = shiftSequenceInfo.shifts;
+          }
 
           const dayReportData = await fetchReportPayload({
-            start: shiftSequenceInfo.dayStartUtc, // START FROM DAY START - INCLUDES SHIFT 1
-            end: shiftSequenceInfo.dayEndUtc,
+            start: todayBounds.dayStartUtc, // Use TODAY's date bounds
+            end: todayBounds.dayEndUtc,
             userId: null, // null = all users for whole day report
-            list_of_shifts: shiftSequenceInfo.shifts // Pass shifts to sum up discounts correctly
+            list_of_shifts: todayShiftsForReport // Pass TODAY's shifts to sum up discounts correctly
           });
 
           console.log('📊 [PRINT WHOLE DAY] Data fetched:', {
@@ -1226,28 +1619,41 @@ export default function GantiShift() {
           const dayCashRefunds = dayCash.cash_shift_refunds ?? 0;
           // const dailyKasExpected = (dayCash.cash_whole_day ?? dayCash.cash_shift ?? 0) || dayCashSales - dayCashRefunds;
 
-          // Get modal awal from first shift
+          // Get modal awal from today's shifts
           let modalAwalWholeDay = 0;
-          if (shiftSequenceInfo.shifts.length > 0) {
-            modalAwalWholeDay = shiftSequenceInfo.shifts[0].modal_awal || 0;
+          if (todayShiftsForReport.length > 0) {
+            modalAwalWholeDay = todayShiftsForReport[0].modal_awal || 0;
           }
+
+          // Group products and recalculate Category II for print (only if setting is enabled)
+          const productsForPrint = groupProducts 
+            ? groupProductSalesForPrint(dayReportData.productSales)
+            : dayReportData.productSales;
+          const recalculatedCategory2 = await recalculateCategory2ForPrint(
+            dayReportData.productSales,
+            dayReportData.category2Breakdown || [],
+            electronAPI
+          );
 
           console.log('🖨️ [PRINT WHOLE DAY] Sending to printer...');
 
+          // Debug logging
+          fetch('http://127.0.0.1:7242/ingest/7b565785-72b5-49f7-b2c0-57606ea0d0b5',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'GantiShift.tsx:1584',message:'Print whole day - sectionOptions',data:printSectionOptions,timestamp:Date.now(),sessionId:'debug-session',runId:'pre-fix',hypothesisId:'B'})}).catch(()=>{});
+          
           const result = await electronAPI.printShiftBreakdown({
             user_name: 'Semua Shift',
-            shift_start: shiftSequenceInfo.dayStartUtc,
-            shift_end: shiftSequenceInfo.dayEndUtc,
+            shift_start: todayBounds.dayStartUtc,
+            shift_end: todayBounds.dayEndUtc,
             modal_awal: modalAwalWholeDay,
             statistics: dayReportData.statistics,
-            productSales: dayReportData.productSales,
+            productSales: productsForPrint,
             customizationSales: dayReportData.customizationSales,
             paymentBreakdown: dayReportData.paymentBreakdown.map(p => ({
               payment_method_name: p.payment_method_name || p.payment_method_code,
               transaction_count: p.transaction_count,
               total_amount: p.total_amount || 0
             })),
-            category2Breakdown: dayReportData.category2Breakdown || [],
+            category2Breakdown: recalculatedCategory2,
             cashSummary: {
               cash_shift: dayCash.cash_shift ?? 0,
               cash_shift_sales: dayCashSales,
@@ -1263,7 +1669,8 @@ export default function GantiShift() {
               kas_selisih_label: null
             },
             business_id: businessId,
-            printerType: 'receiptPrinter'
+            printerType: 'receiptPrinter',
+            sectionOptions: printSectionOptions
           });
 
           console.log('📄 [PRINT WHOLE DAY] Result:', result);
@@ -1310,6 +1717,16 @@ export default function GantiShift() {
           const shiftCashRefunds = shiftCash.cash_shift_refunds ?? 0;
           const shiftKasExpected = shift.modal_awal + shiftCashSales - shiftCashRefunds;
 
+          // Group products and recalculate Category II for print (only if setting is enabled)
+          const productsForPrint = groupProducts 
+            ? groupProductSalesForPrint(shiftReportData.productSales)
+            : shiftReportData.productSales;
+          const recalculatedCategory2 = await recalculateCategory2ForPrint(
+            shiftReportData.productSales,
+            shiftReportData.category2Breakdown || [],
+            electronAPI
+          );
+
           console.log(`🖨️ [PRINT SHIFT ${selection.shiftIndex}] Sending to printer...`);
 
           const result = await electronAPI.printShiftBreakdown({
@@ -1318,16 +1735,14 @@ export default function GantiShift() {
             shift_end: shift.shift_end,
             modal_awal: shift.modal_awal,
             statistics: shiftReportData.statistics,
-            productSales: shiftReportData.productSales,
+            productSales: productsForPrint,
             customizationSales: shiftReportData.customizationSales,
             paymentBreakdown: shiftReportData.paymentBreakdown.map(p => ({
               payment_method_name: p.payment_method_name || p.payment_method_code,
               transaction_count: p.transaction_count,
               total_amount: p.total_amount || 0
             })),
-            category2Breakdown: (() => {
-              const cat2Data = shiftReportData.category2Breakdown || [];return cat2Data;
-            })(),
+            category2Breakdown: recalculatedCategory2,
             cashSummary: {
               cash_shift: shiftCash.cash_shift ?? 0,
               cash_shift_sales: shiftCashSales,
@@ -1343,7 +1758,8 @@ export default function GantiShift() {
               kas_selisih_label: shift.kas_selisih_label ?? null
             },
             business_id: businessId,
-            printerType: 'receiptPrinter'
+            printerType: 'receiptPrinter',
+            sectionOptions: printSectionOptions
           });
 
           console.log(`📄 [PRINT SHIFT ${selection.shiftIndex}] Result:`, result);
@@ -1418,30 +1834,30 @@ export default function GantiShift() {
       const customKasExpected = modalAwalForCustom + customCashSales - customCashRefunds;
       const totalCashInCashierCustom = customKasExpected;
 
+      // Group products and recalculate Category II for print (only if setting is enabled)
+      const productsForPrint = groupProducts 
+        ? groupProductSalesForPrint(reportData.productSales)
+        : reportData.productSales;
+      const recalculatedCategory2 = await recalculateCategory2ForPrint(
+        reportData.productSales,
+        reportData.category2Breakdown || [],
+        electronAPI
+      );
+
       const result = await electronAPI.printShiftBreakdown({
         user_name: user?.name || activeShift?.user_name || 'Cashier',
         shift_start: startDateTime,
         shift_end: endDateTime,
         modal_awal: modalAwalForCustom,
         statistics: reportData.statistics,
-        productSales: reportData.productSales.map((p) => ({
-          product_name: p.product_name,
-          total_quantity: p.total_quantity,
-          total_subtotal: p.total_subtotal,
-          customization_subtotal: p.customization_subtotal,
-          base_subtotal: p.base_subtotal,
-          base_unit_price: p.base_unit_price,
-          platform: p.platform,
-          transaction_type: p.transaction_type,
-          is_bundle_item: p.is_bundle_item
-        })),
+        productSales: productsForPrint,
         customizationSales: reportData.customizationSales,
         paymentBreakdown: reportData.paymentBreakdown.map((p) => ({
           payment_method_name: p.payment_method_name || p.payment_method_code,
           transaction_count: p.transaction_count,
           total_amount: p.total_amount || 0
         })),
-        category2Breakdown: reportData.category2Breakdown || [],
+        category2Breakdown: recalculatedCategory2,
         cashSummary: {
           cash_shift: reportData.cashSummary.cash_shift,
           cash_shift_sales: customCashSales,
@@ -1457,7 +1873,8 @@ export default function GantiShift() {
           kas_selisih_label: null
         },
         business_id: businessId,
-        printerType: 'receiptPrinter'
+        printerType: 'receiptPrinter',
+        sectionOptions: printSectionOptions
       });
 
       if (result.success) {
@@ -1483,18 +1900,47 @@ export default function GantiShift() {
 
     const electronAPI = getElectronAPI();
     if (!electronAPI) return;
-
+    setIsLoadingTabData(true);
     try {
       if (tabView === 'all-day') {
         // Load whole day data
         const shiftOwnerId = Number(activeShift?.user_id ?? 0);
-        if (!shiftOwnerId) return;
+        if (!shiftOwnerId) {
+          setIsLoadingTabData(false);
+          return;
+        }
+
+        // For "All Day" tab, use TODAY's date, not the active shift's date
+        // The active shift might be from a previous day, but "All Day" should show current day
+        const today = new Date();
+        const todayStr = today.toISOString().split('T')[0]; // YYYY-MM-DD format
+        const todayBounds = getGmt7DayBounds(todayStr);
+        
+        if (!todayBounds) {
+          console.error('[All Day Tab] Failed to calculate today bounds');
+          setIsLoadingTabData(false);
+          return;
+        }
+
+        console.log('[All Day Tab] Loading data for all shifts:', {
+          dayStart: todayBounds.dayStartUtc,
+          dayEnd: todayBounds.dayEndUtc,
+          shiftsCount: shiftSequenceInfo.shifts.length,
+          usingToday: true,
+          todayDate: todayStr
+        });
 
         const dayData = await fetchReportPayload({
-          start: shiftSequenceInfo.dayStartUtc,
-          end: shiftSequenceInfo.dayEndUtc,
+          start: todayBounds.dayStartUtc,
+          end: todayBounds.dayEndUtc,
           userId: null, // null = all users for whole day report
           list_of_shifts: shiftSequenceInfo.shifts // Pass shifts to sum up discounts correctly
+        });
+
+        console.log('[All Day Tab] Data loaded:', {
+          orderCount: dayData.statistics.order_count,
+          totalAmount: dayData.statistics.total_amount,
+          productSalesCount: dayData.productSales.length
         });
 
         // setTabData(prev => ({ ...prev, 'all-day': dayData }));
@@ -1507,10 +1953,16 @@ export default function GantiShift() {
       } else {
         // Load specific shift data
         const shift = shiftSequenceInfo.shifts.find(s => s.id === tabView);
-        if (!shift) return;
+        if (!shift) {
+          setIsLoadingTabData(false);
+          return;
+        }
 
         const shiftUserId = Number(shift.user_id ?? 0);
-        if (!shiftUserId) return;
+        if (!shiftUserId) {
+          setIsLoadingTabData(false);
+          return;
+        }
 
         const shiftData = await fetchReportPayload({
           start: shift.shift_start,
@@ -1529,6 +1981,8 @@ export default function GantiShift() {
       }
     } catch (error) {
       console.error(`Error loading tab data for ${tabView}:`, error);
+    } finally {
+      setIsLoadingTabData(false);
     }
   }, [shiftSequenceInfo, activeShift, fetchReportPayload]);
 
@@ -1646,75 +2100,92 @@ export default function GantiShift() {
   return (
     <div className="flex-1 flex flex-col h-full bg-gray-50 overflow-y-auto">
       {/* Header */}
-      <div className="bg-white border-b border-gray-200 px-6 py-4 flex items-center gap-4 flex-wrap">
-        <h1 className="text-2xl font-bold text-gray-800">Ganti Shift</h1>
-
-        {/* Date Picker for Historical View */}
-        <div className="flex items-center gap-2">
-          {!selectedDate && viewMode === 'current' ? (
-            <span className="px-3 py-2 text-sm font-medium text-gray-700">Hari Ini</span>
-          ) : null}
-          <input
-            type="date"
-            value={selectedDate}
-            max={getTodayGmt7()}
-            onChange={(e) => handleDateChange(e.target.value)}
-            className="px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 text-gray-900 bg-white"
-          />
-          {viewMode === 'historical' && (
+      <div className="bg-white border-b border-gray-200 px-6 py-1">
+        <div className="flex items-center justify-between gap-4 flex-wrap">
+          {/* Left Side - Title Column with 2 rows */}
+          <div className="flex flex-col gap-0.5 items-center">
+            <h1 className="text-lg font-bold text-gray-800">Ganti Shift</h1>
             <button
-              onClick={handleBackToCurrent}
-              className="px-4 py-2 bg-yellow-500 text-white rounded-lg hover:bg-yellow-600 transition-colors text-sm font-medium"
+              onClick={() => setShowSettingsModal(true)}
+              className="flex items-center space-x-1.5 px-2 py-1 text-xs font-medium text-gray-700 bg-gray-50 hover:bg-gray-100 border border-gray-200 rounded-lg transition-all shadow-sm hover:shadow w-fit"
+              title="Pengaturan"
             >
-              Kembali ke Shift Aktif
+              <Settings className="w-3.5 h-3.5" />
+              <span>Pengaturan</span>
             </button>
-          )}
-        </div>
+          </div>
+          
+          {/* Right Side - Control Panel */}
+          <div className="flex items-center gap-3 flex-wrap">
+            {/* Date Picker Section */}
+            <div className="flex items-center gap-2 px-3 py-2 bg-gray-50 border border-gray-200 rounded-lg">
+              {!selectedDate && viewMode === 'current' ? (
+                <span className="text-xs font-medium text-gray-700">Hari Ini</span>
+              ) : null}
+              <input
+                type="date"
+                value={selectedDate}
+                max={getTodayGmt7()}
+                onChange={(e) => handleDateChange(e.target.value)}
+                className="px-2 py-1 border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-500 text-gray-900 bg-white text-xs"
+              />
+              {viewMode === 'historical' && (
+                <button
+                  onClick={handleBackToCurrent}
+                  className="px-3 py-1 bg-yellow-500 text-white rounded hover:bg-yellow-600 transition-colors text-[11px] font-medium"
+                >
+                  Kembali ke Shift Aktif
+                </button>
+              )}
+            </div>
 
-        {activeShift && (
-          <>
-            <button
-              onClick={handlePrintAll}
-              className="flex items-center space-x-2 px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 transition-colors"
-            >
-              <Printer className="w-4 h-4" />
-              <span>Print All</span>
-            </button>
-            {viewMode === 'current' && isCurrentUsersShift ? (
-              <button
-                onClick={handleEndShiftClick}
-                disabled={isEndingShift}
-                className="flex-1 flex items-center justify-center space-x-2 px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 disabled:opacity-50 disabled:cursor-not-allowed font-semibold transition-colors"
-              >
-                <StopCircle className="w-5 h-5" />
-                <span>{isEndingShift ? 'Mengakhiri Shift...' : 'End Shift'}</span>
-              </button>
-            ) : viewMode === 'current' && canForceCloseShift ? (
-              <button
-                onClick={handleForceCloseClick}
-                disabled={isEndingShift}
-                className="flex-1 flex items-center justify-center space-x-2 px-4 py-2 bg-orange-600 text-white rounded-lg hover:bg-orange-700 disabled:opacity-50 disabled:cursor-not-allowed font-semibold transition-colors"
-              >
-                <StopCircle className="w-5 h-5" />
-                <span>{isEndingShift ? 'Menutup Shift...' : 'Force Close Shift'}</span>
-              </button>
-            ) : viewMode === 'current' ? (
-              <div className="flex-1 px-4 py-2 bg-yellow-100 text-yellow-900 rounded-lg text-sm font-semibold flex items-center justify-center">
-                Shift aktif oleh {activeShift.user_name}
+            {/* Action Buttons Group */}
+            {activeShift && (
+              <div className="flex items-center gap-2 pl-3 border-l border-gray-300">
+                <button
+                  onClick={handlePrintAll}
+                  className="flex items-center space-x-2 px-3.5 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 transition-all shadow-sm hover:shadow text-xs font-medium"
+                >
+                  <Printer className="w-4 h-4" />
+                  <span>Print All</span>
+                </button>
+                {viewMode === 'current' && isCurrentUsersShift ? (
+                  <button
+                    onClick={handleEndShiftClick}
+                    disabled={isEndingShift}
+                    className="flex items-center justify-center space-x-2 px-3.5 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 disabled:opacity-50 disabled:cursor-not-allowed text-xs font-semibold transition-all shadow-sm hover:shadow"
+                  >
+                    <StopCircle className="w-4.5 h-4.5" />
+                    <span>{isEndingShift ? 'Mengakhiri Shift...' : 'End Shift'}</span>
+                  </button>
+                ) : viewMode === 'current' && canForceCloseShift ? (
+                  <button
+                    onClick={handleForceCloseClick}
+                    disabled={isEndingShift}
+                    className="flex items-center justify-center space-x-2 px-3.5 py-2 bg-orange-600 text-white rounded-lg hover:bg-orange-700 disabled:opacity-50 disabled:cursor-not-allowed text-xs font-semibold transition-all shadow-sm hover:shadow"
+                  >
+                    <StopCircle className="w-4.5 h-4.5" />
+                    <span>{isEndingShift ? 'Menutup Shift...' : 'Force Close Shift'}</span>
+                  </button>
+                ) : viewMode === 'current' ? (
+                  <div className="px-3.5 py-2 bg-yellow-100 text-yellow-900 rounded-lg text-xs font-semibold flex items-center justify-center border border-yellow-200">
+                    Shift aktif oleh {activeShift.user_name}
+                  </div>
+                ) : null}
+                {viewMode === 'current' && (
+                  <button
+                    onClick={handleRefresh}
+                    disabled={isRefreshing}
+                    className="flex items-center justify-center w-9 h-9 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition-all shadow-sm hover:shadow"
+                    title="Refresh"
+                  >
+                    <RefreshCw className={`w-4.5 h-4.5 ${isRefreshing ? 'animate-spin' : ''}`} />
+                  </button>
+                )}
               </div>
-            ) : null}
-            {viewMode === 'current' && (
-              <button
-                onClick={handleRefresh}
-                disabled={isRefreshing}
-                className="flex items-center justify-center w-10 h-10 bg-blue-600 text-white rounded-full hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-                title="Refresh"
-              >
-                <RefreshCw className={`w-5 h-5 ${isRefreshing ? 'animate-spin' : ''}`} />
-              </button>
             )}
-          </>
-        )}
+          </div>
+        </div>
       </div>
 
       {/* Error Message */}
@@ -2004,7 +2475,21 @@ export default function GantiShift() {
                 </div>
               )}
 
+              {/* Loading Indicator for Tab Data */}
+              {isLoadingTabData && (
+                <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-12">
+                  <div className="flex flex-col items-center justify-center">
+                    <Loader2 className="w-8 h-8 text-blue-600 animate-spin mb-4" />
+                    <p className="text-gray-600 text-sm">
+                      {activeTab === 'all-day' ? 'Memuat data seluruh hari...' : 'Memuat data shift...'}
+                    </p>
+                  </div>
+                </div>
+              )}
+
               {/* RINGKASAN (Final Summary) */}
+              {!isLoadingTabData && (
+                <>
               <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-6">
                 <h2 className="text-xl font-semibold text-gray-800 mb-3 text-center">RINGKASAN</h2>
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
@@ -2332,61 +2817,88 @@ export default function GantiShift() {
                       </tr>
                     </thead>
                     <tbody>
-                      {productSales.length > 0 ? (
+                      {displayProductSales.length > 0 ? (
                         <>
-                          {productSales.map((product, idx) => (
-                            <tr key={`${product.product_id}-${product.platform}-${product.transaction_type}-${idx}`} className="border-b border-gray-200 hover:bg-gray-50">
-                              <td className="py-1 px-2 font-medium">
-                                <div className="text-gray-900">
-                                  {product.is_bundle_item && <span className="text-[10px] font-semibold text-purple-600">[Bundle] </span>}
-                                  {product.product_name}
-                                </div>
-                                <div className="text-[10px] text-gray-600">
-                                  {product.transaction_type === 'drinks' ? 'Drinks' : 'Bakery'}
-                                  {' · '}
-                                  {formatPlatformLabel(product.platform)}
-                                </div>
-                              </td>
-                              <td className="py-1 px-2 text-right font-medium text-gray-900">{product.total_quantity}</td>
-                              <td className="py-1 px-2 text-right font-medium">
-                                {product.is_bundle_item ? (
-                                  <span className="text-gray-700">-</span>
-                                ) : (
-                                  <span className="text-gray-900">
-                                    {formatRupiah(
-                                      product.base_unit_price ??
-                                      (product.total_quantity > 0 ? product.base_subtotal / product.total_quantity : 0)
-                                    )}
-                                  </span>
-                                )}
-                              </td>
-                              <td className="py-1 px-2 text-right font-semibold">
-                                {product.is_bundle_item ? (
-                                  <span className="text-gray-700">-</span>
-                                ) : (
-                                  <span className="text-gray-900">
-                                    {formatRupiah(product.base_subtotal)}
-                                  </span>
-                                )}
-                              </td>
-                            </tr>
-                          ))}
+                          {displayProductSales.map((product, idx) => {
+                            // Handle both grouped (has platforms array) and ungrouped (has platform string) formats
+                            const isGrouped = isGroupedProduct(product);
+                            
+                            const platformsStr = isGrouped
+                              ? product.platforms
+                                  .map((p: string) => formatPlatformLabel(p))
+                                  .sort()
+                                  .join(', ')
+                              : formatPlatformLabel(product.platform || 'offline');
+                            
+                            // Format unit prices (for grouped) or single unit price (for ungrouped)
+                            const unitPricesStr = isGrouped
+                              ? product.unitPrices
+                                  .sort((a: number, b: number) => a - b)
+                                  .map((price: number) => formatRupiah(price))
+                                  .join(', ')
+                              : formatRupiah(product.base_unit_price || (product.total_quantity > 0 ? product.base_subtotal / product.total_quantity : 0));
+
+                            return (
+                              <tr key={`${product.product_id}-${product.transaction_type}-${idx}`} className="border-b border-gray-200 hover:bg-gray-50">
+                                <td className="py-1 px-2 font-medium">
+                                  <div className="text-gray-900">
+                                    {product.is_bundle_item && <span className="text-[10px] font-semibold text-purple-600">[Bundle] </span>}
+                                    {product.product_name}
+                                  </div>
+                                  <div className="text-[10px] text-gray-600">
+                                    {product.transaction_type === 'drinks' ? 'Drinks' : 'Bakery'}
+                                    {' · '}
+                                    {platformsStr}
+                                  </div>
+                                </td>
+                                <td className="py-1 px-2 text-right font-medium text-gray-900">{product.total_quantity}</td>
+                                <td className="py-1 px-2 text-right font-medium">
+                                  {product.is_bundle_item ? (
+                                    <span className="text-gray-700">-</span>
+                                  ) : (
+                                    <span className="text-gray-900">
+                                      {unitPricesStr || '-'}
+                                    </span>
+                                  )}
+                                </td>
+                                <td className="py-1 px-2 text-right font-semibold">
+                                  {product.is_bundle_item ? (
+                                    <span className="text-gray-700">-</span>
+                                  ) : (
+                                    <span className="text-gray-900">
+                                      {formatRupiah(isGrouped ? product.total_base_subtotal : product.base_subtotal)}
+                                    </span>
+                                  )}
+                                </td>
+                              </tr>
+                            );
+                          })}
                           <tr className="border-t-2 border-gray-300 bg-gray-100">
                             <td className="py-1 px-2 font-bold text-gray-900">TOTAL</td>
                             <td className="py-1 px-2 text-right font-bold text-gray-900">
-                              {productSales.reduce((sum, p) => sum + p.total_quantity, 0)}
+                              {displayProductSales.reduce((sum, p) => sum + p.total_quantity, 0)}
                             </td>
                             <td className="py-1 px-2 text-right font-bold">
                               {(() => {
-                                const regularProducts = productSales.filter(p => !p.is_bundle_item);
-                                const totalsByKey = regularProducts.reduce((acc, product) => {
-                                  const key = `${product.transaction_type}-${product.platform}`;
-                                  if (!acc.has(key)) {
-                                    acc.set(key, { quantity: 0, base: 0 });
-                                  }
-                                  const current = acc.get(key)!;
-                                  current.quantity += product.total_quantity;
-                                  current.base += product.base_subtotal;
+                                const regularProducts = displayProductSales.filter(p => !p.is_bundle_item);
+                                const totalsByKey = regularProducts.reduce((acc, p) => {
+                                  const isPGrouped = isGroupedProduct(p);
+                                  const platforms = isPGrouped 
+                                    ? p.platforms 
+                                    : [p.platform || 'offline'];
+                                  platforms.forEach((platform: string) => {
+                                    const key = `${p.transaction_type}-${platform}`;
+                                    if (!acc.has(key)) {
+                                      acc.set(key, { quantity: 0, base: 0 });
+                                    }
+                                    const current = acc.get(key)!;
+                                    // Distribute quantity and base proportionally (simplified: divide by platform count)
+                                    const platformCount = platforms.length;
+                                    const totalQty = isPGrouped ? p.total_quantity : p.total_quantity;
+                                    const baseSubtotal = isPGrouped ? p.total_base_subtotal : p.base_subtotal;
+                                    current.quantity += Math.round(totalQty / platformCount);
+                                    current.base += baseSubtotal / platformCount;
+                                  });
                                   return acc;
                                 }, new Map<string, { quantity: number; base: number }>());
 
@@ -2405,7 +2917,10 @@ export default function GantiShift() {
                               })()}
                             </td>
                             <td className="py-1 px-2 text-right font-bold text-gray-900">
-                              {formatRupiah(productSales.filter(p => !p.is_bundle_item).reduce((sum, p) => sum + p.base_subtotal, 0))}
+                              {formatRupiah(displayProductSales.filter(p => !p.is_bundle_item).reduce((sum, p) => {
+                                const baseSubtotal = isGroupedProduct(p) ? p.total_base_subtotal : p.base_subtotal;
+                                return sum + baseSubtotal;
+                              }, 0))}
                             </td>
                           </tr>
                         </>
@@ -2476,32 +2991,40 @@ export default function GantiShift() {
                       </tr>
                     </thead>
                     <tbody>
-                      {category2Breakdown.length > 0 ? (
-                        <>
-                          {category2Breakdown.map((item, idx) => (
-                            <tr key={idx} className="border-b border-gray-100 hover:bg-gray-50">
-                              <td className="py-1 px-2 text-gray-900 font-medium">{item.category2_name}</td>
-                              <td className="py-1 px-2 text-right font-medium text-gray-900">{item.total_quantity}</td>
-                              <td className="py-1 px-2 text-right font-semibold text-gray-900">{formatRupiah(item.total_amount)}</td>
+                      {(() => {
+                        // Always prefer recalculated data (with base_subtotal) if it exists
+                        // Only fall back to original category2Breakdown if recalculation hasn't run yet
+                        const displayData = recalculatedCategory2Breakdown.length > 0 
+                          ? recalculatedCategory2Breakdown 
+                          : (productSales.length > 0 ? [] : category2Breakdown); // If we have productSales but no recalculated data, show empty (recalculation in progress or failed)
+                        
+                        return displayData.length > 0 ? (
+                          <>
+                            {displayData.map((item, idx) => (
+                              <tr key={idx} className="border-b border-gray-100 hover:bg-gray-50">
+                                <td className="py-1 px-2 text-gray-900 font-medium">{item.category2_name}</td>
+                                <td className="py-1 px-2 text-right font-medium text-gray-900">{item.total_quantity}</td>
+                                <td className="py-1 px-2 text-right font-semibold text-gray-900">{formatRupiah(item.total_amount)}</td>
+                              </tr>
+                            ))}
+                            <tr className="border-t-2 border-gray-300 bg-gray-100">
+                              <td className="py-1 px-2 font-bold text-gray-900">TOTAL</td>
+                              <td className="py-1 px-2 text-right font-bold text-gray-900">
+                                {displayData.reduce((sum, item) => sum + item.total_quantity, 0)}
+                              </td>
+                              <td className="py-1 px-2 text-right font-bold text-gray-900">
+                                {formatRupiah(displayData.reduce((sum, item) => sum + item.total_amount, 0))}
+                              </td>
                             </tr>
-                          ))}
-                          <tr className="border-t-2 border-gray-300 bg-gray-100">
-                            <td className="py-1 px-2 font-bold text-gray-900">TOTAL</td>
-                            <td className="py-1 px-2 text-right font-bold text-gray-900">
-                              {category2Breakdown.reduce((sum, item) => sum + item.total_quantity, 0)}
-                            </td>
-                            <td className="py-1 px-2 text-right font-bold text-gray-900">
-                              {formatRupiah(category2Breakdown.reduce((sum, item) => sum + item.total_amount, 0))}
+                          </>
+                        ) : (
+                          <tr>
+                            <td colSpan={3} className="py-4 text-center text-gray-500">
+                              {productSales.length > 0 ? 'Menghitung...' : 'Tidak ada Category II'}
                             </td>
                           </tr>
-                        </>
-                      ) : (
-                        <tr>
-                          <td colSpan={3} className="py-4 text-center text-gray-500">
-                            Tidak ada Category II
-                          </td>
-                        </tr>
-                      )}
+                        );
+                      })()}
                     </tbody>
                   </table>
                 </div>
@@ -2576,6 +3099,8 @@ export default function GantiShift() {
               </div>
             </>
           )}
+                </>
+              )}
         </div>
       )}
 
@@ -2643,10 +3168,179 @@ export default function GantiShift() {
               })}
             </div>
 
-            <div className="bg-blue-50 border border-blue-200 rounded-lg p-3 mb-4">
-              <p className="text-sm text-blue-800">
-                💡 Anda dapat memilih lebih dari satu laporan untuk dicetak sekaligus.
-              </p>
+            {/* Collapsible Print Options */}
+            <div className="mb-4 border border-gray-200 rounded-lg overflow-hidden">
+              <button
+                type="button"
+                onClick={() => setShowPrintOptions(!showPrintOptions)}
+                className="w-full flex items-center justify-between p-3 bg-gray-50 hover:bg-gray-100 transition-colors"
+              >
+                <span className="font-semibold text-gray-800">Print Options</span>
+                {showPrintOptions ? (
+                  <ChevronUp className="w-5 h-5 text-gray-600" />
+                ) : (
+                  <ChevronDown className="w-5 h-5 text-gray-600" />
+                )}
+              </button>
+              
+              <div
+                className={`overflow-hidden transition-all duration-300 ease-in-out ${
+                  showPrintOptions ? 'max-h-96 opacity-100' : 'max-h-0 opacity-0'
+                }`}
+              >
+                <div className="p-4 space-y-3 bg-white border-t border-gray-200">
+                  {/* Ringkasan Only Toggle */}
+                  <div className="mb-4 pb-4 border-b border-gray-200">
+                    <label className="flex items-center justify-between cursor-pointer p-3 rounded-lg bg-blue-50 hover:bg-blue-100 transition-colors">
+                      <div className="flex flex-col">
+                        <span className="text-sm font-semibold text-gray-800">Ringkasan Only</span>
+                        <span className="text-xs text-gray-600 mt-1">Hanya tampilkan ringkasan, sembunyikan semua bagian lainnya</span>
+                      </div>
+                      <div className="relative inline-block w-14 h-8">
+                        <input
+                          type="checkbox"
+                          checked={ringkasanOnly}
+                          onChange={(e) => {
+                            const isEnabled = e.target.checked;
+                            setRingkasanOnly(isEnabled);
+                            setPrintSectionOptions({
+                              barangTerjual: !isEnabled,
+                              paymentMethod: !isEnabled,
+                              categoryII: !isEnabled,
+                              toppingSales: !isEnabled,
+                              diskonVoucher: !isEnabled
+                            });
+                          }}
+                          className="sr-only"
+                        />
+                        <div
+                          className={`absolute inset-0 rounded-full transition-colors duration-200 ease-in-out ${
+                            ringkasanOnly ? 'bg-blue-600' : 'bg-gray-300'
+                          }`}
+                        >
+                          <div
+                            className={`absolute top-1 left-1 w-6 h-6 bg-white rounded-full shadow-md transform transition-transform duration-200 ease-in-out ${
+                              ringkasanOnly ? 'translate-x-6' : 'translate-x-0'
+                            }`}
+                          />
+                        </div>
+                      </div>
+                    </label>
+                  </div>
+                  
+                  <p className="text-sm text-gray-600 mb-3">Pilih bagian yang ingin dicetak:</p>
+                  
+                  <label className={`flex items-center justify-between cursor-pointer p-2 rounded hover:bg-gray-50 ${ringkasanOnly ? 'opacity-50' : ''}`}>
+                    <span className="text-sm font-medium text-gray-700">BARANG TERJUAL</span>
+                    <input
+                      type="checkbox"
+                      checked={printSectionOptions.barangTerjual}
+                      onChange={(e) => {
+                        const newValue = e.target.checked;
+                        setPrintSectionOptions((prev) => ({
+                          ...prev,
+                          barangTerjual: newValue
+                        }));
+                        // Auto-update ringkasanOnly based on all sections
+                        const allUnchecked = !newValue && !printSectionOptions.paymentMethod && !printSectionOptions.categoryII && !printSectionOptions.toppingSales && !printSectionOptions.diskonVoucher;
+                        const allChecked = newValue && printSectionOptions.paymentMethod && printSectionOptions.categoryII && printSectionOptions.toppingSales && printSectionOptions.diskonVoucher;
+                        if (allUnchecked) setRingkasanOnly(true);
+                        else if (allChecked) setRingkasanOnly(false);
+                      }}
+                      disabled={ringkasanOnly}
+                      className="w-5 h-5 text-blue-600 rounded focus:ring-2 focus:ring-blue-500 disabled:opacity-50 disabled:cursor-not-allowed"
+                    />
+                  </label>
+
+                  <label className={`flex items-center justify-between cursor-pointer p-2 rounded hover:bg-gray-50 ${ringkasanOnly ? 'opacity-50' : ''}`}>
+                    <span className="text-sm font-medium text-gray-700">PAYMENT METHOD</span>
+                    <input
+                      type="checkbox"
+                      checked={printSectionOptions.paymentMethod}
+                      onChange={(e) => {
+                        const newValue = e.target.checked;
+                        setPrintSectionOptions((prev) => ({
+                          ...prev,
+                          paymentMethod: newValue
+                        }));
+                        // Auto-update ringkasanOnly based on all sections
+                        const allUnchecked = !printSectionOptions.barangTerjual && !newValue && !printSectionOptions.categoryII && !printSectionOptions.toppingSales && !printSectionOptions.diskonVoucher;
+                        const allChecked = printSectionOptions.barangTerjual && newValue && printSectionOptions.categoryII && printSectionOptions.toppingSales && printSectionOptions.diskonVoucher;
+                        if (allUnchecked) setRingkasanOnly(true);
+                        else if (allChecked) setRingkasanOnly(false);
+                      }}
+                      disabled={ringkasanOnly}
+                      className="w-5 h-5 text-blue-600 rounded focus:ring-2 focus:ring-blue-500 disabled:opacity-50 disabled:cursor-not-allowed"
+                    />
+                  </label>
+
+                  <label className={`flex items-center justify-between cursor-pointer p-2 rounded hover:bg-gray-50 ${ringkasanOnly ? 'opacity-50' : ''}`}>
+                    <span className="text-sm font-medium text-gray-700">CATEGORY II</span>
+                    <input
+                      type="checkbox"
+                      checked={printSectionOptions.categoryII}
+                      onChange={(e) => {
+                        const newValue = e.target.checked;
+                        setPrintSectionOptions((prev) => ({
+                          ...prev,
+                          categoryII: newValue
+                        }));
+                        // Auto-update ringkasanOnly based on all sections
+                        const allUnchecked = !printSectionOptions.barangTerjual && !printSectionOptions.paymentMethod && !newValue && !printSectionOptions.toppingSales && !printSectionOptions.diskonVoucher;
+                        const allChecked = printSectionOptions.barangTerjual && printSectionOptions.paymentMethod && newValue && printSectionOptions.toppingSales && printSectionOptions.diskonVoucher;
+                        if (allUnchecked) setRingkasanOnly(true);
+                        else if (allChecked) setRingkasanOnly(false);
+                      }}
+                      disabled={ringkasanOnly}
+                      className="w-5 h-5 text-blue-600 rounded focus:ring-2 focus:ring-blue-500 disabled:opacity-50 disabled:cursor-not-allowed"
+                    />
+                  </label>
+
+                  <label className={`flex items-center justify-between cursor-pointer p-2 rounded hover:bg-gray-50 ${ringkasanOnly ? 'opacity-50' : ''}`}>
+                    <span className="text-sm font-medium text-gray-700">TOPPING SALES BREAKDOWN</span>
+                    <input
+                      type="checkbox"
+                      checked={printSectionOptions.toppingSales}
+                      onChange={(e) => {
+                        const newValue = e.target.checked;
+                        setPrintSectionOptions((prev) => ({
+                          ...prev,
+                          toppingSales: newValue
+                        }));
+                        // Auto-update ringkasanOnly based on all sections
+                        const allUnchecked = !printSectionOptions.barangTerjual && !printSectionOptions.paymentMethod && !printSectionOptions.categoryII && !newValue && !printSectionOptions.diskonVoucher;
+                        const allChecked = printSectionOptions.barangTerjual && printSectionOptions.paymentMethod && printSectionOptions.categoryII && newValue && printSectionOptions.diskonVoucher;
+                        if (allUnchecked) setRingkasanOnly(true);
+                        else if (allChecked) setRingkasanOnly(false);
+                      }}
+                      disabled={ringkasanOnly}
+                      className="w-5 h-5 text-blue-600 rounded focus:ring-2 focus:ring-blue-500 disabled:opacity-50 disabled:cursor-not-allowed"
+                    />
+                  </label>
+
+                  <label className={`flex items-center justify-between cursor-pointer p-2 rounded hover:bg-gray-50 ${ringkasanOnly ? 'opacity-50' : ''}`}>
+                    <span className="text-sm font-medium text-gray-700">DISKON & VOUCHER</span>
+                    <input
+                      type="checkbox"
+                      checked={printSectionOptions.diskonVoucher}
+                      onChange={(e) => {
+                        const newValue = e.target.checked;
+                        setPrintSectionOptions((prev) => ({
+                          ...prev,
+                          diskonVoucher: newValue
+                        }));
+                        // Auto-update ringkasanOnly based on all sections
+                        const allUnchecked = !printSectionOptions.barangTerjual && !printSectionOptions.paymentMethod && !printSectionOptions.categoryII && !printSectionOptions.toppingSales && !newValue;
+                        const allChecked = printSectionOptions.barangTerjual && printSectionOptions.paymentMethod && printSectionOptions.categoryII && printSectionOptions.toppingSales && newValue;
+                        if (allUnchecked) setRingkasanOnly(true);
+                        else if (allChecked) setRingkasanOnly(false);
+                      }}
+                      disabled={ringkasanOnly}
+                      className="w-5 h-5 text-blue-600 rounded focus:ring-2 focus:ring-blue-500 disabled:opacity-50 disabled:cursor-not-allowed"
+                    />
+                  </label>
+                </div>
+              </div>
             </div>
 
             <div className="flex space-x-3">
@@ -2688,6 +3382,181 @@ export default function GantiShift() {
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
           <div className="bg-white rounded-lg shadow-xl max-w-md w-full p-6 animate-in zoom-in">
             <h3 className="text-xl font-bold text-gray-800 mb-4">Pilih Periode untuk Print</h3>
+
+            {/* Collapsible Print Options */}
+            <div className="mb-4 border border-gray-200 rounded-lg overflow-hidden">
+              <button
+                type="button"
+                onClick={() => setShowPrintOptions(!showPrintOptions)}
+                className="w-full flex items-center justify-between p-3 bg-gray-50 hover:bg-gray-100 transition-colors"
+              >
+                <span className="font-semibold text-gray-800">Print Options</span>
+                {showPrintOptions ? (
+                  <ChevronUp className="w-5 h-5 text-gray-600" />
+                ) : (
+                  <ChevronDown className="w-5 h-5 text-gray-600" />
+                )}
+              </button>
+              
+              <div
+                className={`overflow-hidden transition-all duration-300 ease-in-out ${
+                  showPrintOptions ? 'max-h-96 opacity-100' : 'max-h-0 opacity-0'
+                }`}
+              >
+                <div className="p-4 space-y-3 bg-white border-t border-gray-200">
+                  {/* Ringkasan Only Toggle */}
+                  <div className="mb-4 pb-4 border-b border-gray-200">
+                    <label className="flex items-center justify-between cursor-pointer p-3 rounded-lg bg-blue-50 hover:bg-blue-100 transition-colors">
+                      <div className="flex flex-col">
+                        <span className="text-sm font-semibold text-gray-800">Ringkasan Only</span>
+                        <span className="text-xs text-gray-600 mt-1">Hanya tampilkan ringkasan, sembunyikan semua bagian lainnya</span>
+                      </div>
+                      <div className="relative inline-block w-14 h-8">
+                        <input
+                          type="checkbox"
+                          checked={ringkasanOnly}
+                          onChange={(e) => {
+                            const isEnabled = e.target.checked;
+                            setRingkasanOnly(isEnabled);
+                            setPrintSectionOptions({
+                              barangTerjual: !isEnabled,
+                              paymentMethod: !isEnabled,
+                              categoryII: !isEnabled,
+                              toppingSales: !isEnabled,
+                              diskonVoucher: !isEnabled
+                            });
+                          }}
+                          className="sr-only"
+                        />
+                        <div
+                          className={`absolute inset-0 rounded-full transition-colors duration-200 ease-in-out ${
+                            ringkasanOnly ? 'bg-blue-600' : 'bg-gray-300'
+                          }`}
+                        >
+                          <div
+                            className={`absolute top-1 left-1 w-6 h-6 bg-white rounded-full shadow-md transform transition-transform duration-200 ease-in-out ${
+                              ringkasanOnly ? 'translate-x-6' : 'translate-x-0'
+                            }`}
+                          />
+                        </div>
+                      </div>
+                    </label>
+                  </div>
+                  
+                  <p className="text-sm text-gray-600 mb-3">Pilih bagian yang ingin dicetak:</p>
+                  
+                  <label className={`flex items-center justify-between cursor-pointer p-2 rounded hover:bg-gray-50 ${ringkasanOnly ? 'opacity-50' : ''}`}>
+                    <span className="text-sm font-medium text-gray-700">BARANG TERJUAL</span>
+                    <input
+                      type="checkbox"
+                      checked={printSectionOptions.barangTerjual}
+                      onChange={(e) => {
+                        const newValue = e.target.checked;
+                        setPrintSectionOptions((prev) => ({
+                          ...prev,
+                          barangTerjual: newValue
+                        }));
+                        // Auto-update ringkasanOnly based on all sections
+                        const allUnchecked = !newValue && !printSectionOptions.paymentMethod && !printSectionOptions.categoryII && !printSectionOptions.toppingSales && !printSectionOptions.diskonVoucher;
+                        const allChecked = newValue && printSectionOptions.paymentMethod && printSectionOptions.categoryII && printSectionOptions.toppingSales && printSectionOptions.diskonVoucher;
+                        if (allUnchecked) setRingkasanOnly(true);
+                        else if (allChecked) setRingkasanOnly(false);
+                      }}
+                      disabled={ringkasanOnly}
+                      className="w-5 h-5 text-blue-600 rounded focus:ring-2 focus:ring-blue-500 disabled:opacity-50 disabled:cursor-not-allowed"
+                    />
+                  </label>
+
+                  <label className={`flex items-center justify-between cursor-pointer p-2 rounded hover:bg-gray-50 ${ringkasanOnly ? 'opacity-50' : ''}`}>
+                    <span className="text-sm font-medium text-gray-700">PAYMENT METHOD</span>
+                    <input
+                      type="checkbox"
+                      checked={printSectionOptions.paymentMethod}
+                      onChange={(e) => {
+                        const newValue = e.target.checked;
+                        setPrintSectionOptions((prev) => ({
+                          ...prev,
+                          paymentMethod: newValue
+                        }));
+                        // Auto-update ringkasanOnly based on all sections
+                        const allUnchecked = !printSectionOptions.barangTerjual && !newValue && !printSectionOptions.categoryII && !printSectionOptions.toppingSales && !printSectionOptions.diskonVoucher;
+                        const allChecked = printSectionOptions.barangTerjual && newValue && printSectionOptions.categoryII && printSectionOptions.toppingSales && printSectionOptions.diskonVoucher;
+                        if (allUnchecked) setRingkasanOnly(true);
+                        else if (allChecked) setRingkasanOnly(false);
+                      }}
+                      disabled={ringkasanOnly}
+                      className="w-5 h-5 text-blue-600 rounded focus:ring-2 focus:ring-blue-500 disabled:opacity-50 disabled:cursor-not-allowed"
+                    />
+                  </label>
+
+                  <label className={`flex items-center justify-between cursor-pointer p-2 rounded hover:bg-gray-50 ${ringkasanOnly ? 'opacity-50' : ''}`}>
+                    <span className="text-sm font-medium text-gray-700">CATEGORY II</span>
+                    <input
+                      type="checkbox"
+                      checked={printSectionOptions.categoryII}
+                      onChange={(e) => {
+                        const newValue = e.target.checked;
+                        setPrintSectionOptions((prev) => ({
+                          ...prev,
+                          categoryII: newValue
+                        }));
+                        // Auto-update ringkasanOnly based on all sections
+                        const allUnchecked = !printSectionOptions.barangTerjual && !printSectionOptions.paymentMethod && !newValue && !printSectionOptions.toppingSales && !printSectionOptions.diskonVoucher;
+                        const allChecked = printSectionOptions.barangTerjual && printSectionOptions.paymentMethod && newValue && printSectionOptions.toppingSales && printSectionOptions.diskonVoucher;
+                        if (allUnchecked) setRingkasanOnly(true);
+                        else if (allChecked) setRingkasanOnly(false);
+                      }}
+                      disabled={ringkasanOnly}
+                      className="w-5 h-5 text-blue-600 rounded focus:ring-2 focus:ring-blue-500 disabled:opacity-50 disabled:cursor-not-allowed"
+                    />
+                  </label>
+
+                  <label className={`flex items-center justify-between cursor-pointer p-2 rounded hover:bg-gray-50 ${ringkasanOnly ? 'opacity-50' : ''}`}>
+                    <span className="text-sm font-medium text-gray-700">TOPPING SALES BREAKDOWN</span>
+                    <input
+                      type="checkbox"
+                      checked={printSectionOptions.toppingSales}
+                      onChange={(e) => {
+                        const newValue = e.target.checked;
+                        setPrintSectionOptions((prev) => ({
+                          ...prev,
+                          toppingSales: newValue
+                        }));
+                        // Auto-update ringkasanOnly based on all sections
+                        const allUnchecked = !printSectionOptions.barangTerjual && !printSectionOptions.paymentMethod && !printSectionOptions.categoryII && !newValue && !printSectionOptions.diskonVoucher;
+                        const allChecked = printSectionOptions.barangTerjual && printSectionOptions.paymentMethod && printSectionOptions.categoryII && newValue && printSectionOptions.diskonVoucher;
+                        if (allUnchecked) setRingkasanOnly(true);
+                        else if (allChecked) setRingkasanOnly(false);
+                      }}
+                      disabled={ringkasanOnly}
+                      className="w-5 h-5 text-blue-600 rounded focus:ring-2 focus:ring-blue-500 disabled:opacity-50 disabled:cursor-not-allowed"
+                    />
+                  </label>
+
+                  <label className={`flex items-center justify-between cursor-pointer p-2 rounded hover:bg-gray-50 ${ringkasanOnly ? 'opacity-50' : ''}`}>
+                    <span className="text-sm font-medium text-gray-700">DISKON & VOUCHER</span>
+                    <input
+                      type="checkbox"
+                      checked={printSectionOptions.diskonVoucher}
+                      onChange={(e) => {
+                        const newValue = e.target.checked;
+                        setPrintSectionOptions((prev) => ({
+                          ...prev,
+                          diskonVoucher: newValue
+                        }));
+                        // Auto-update ringkasanOnly based on all sections
+                        const allUnchecked = !printSectionOptions.barangTerjual && !printSectionOptions.paymentMethod && !printSectionOptions.categoryII && !printSectionOptions.toppingSales && !newValue;
+                        const allChecked = printSectionOptions.barangTerjual && printSectionOptions.paymentMethod && printSectionOptions.categoryII && printSectionOptions.toppingSales && newValue;
+                        if (allUnchecked) setRingkasanOnly(true);
+                        else if (allChecked) setRingkasanOnly(false);
+                      }}
+                      disabled={ringkasanOnly}
+                      className="w-5 h-5 text-blue-600 rounded focus:ring-2 focus:ring-blue-500 disabled:opacity-50 disabled:cursor-not-allowed"
+                    />
+                  </label>
+                </div>
+              </div>
+            </div>
 
             <div className="space-y-4 mb-6">
               <div>
@@ -2894,6 +3763,57 @@ export default function GantiShift() {
                 className="flex-1 px-4 py-2 bg-orange-600 text-white rounded-lg hover:bg-orange-700 disabled:opacity-50 disabled:cursor-not-allowed font-medium transition-colors"
               >
                 {isEndingShift ? 'Menutup...' : 'Force Close Shift'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Settings Modal */}
+      {showSettingsModal && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-lg shadow-xl max-w-md w-full p-6 animate-in zoom-in">
+            <h3 className="text-xl font-bold text-gray-800 mb-4">Pengaturan Laporan Shift</h3>
+            
+            <div className="space-y-4 mb-6">
+              {/* Group Products Setting */}
+              <div className="flex items-center justify-between p-4 border border-gray-200 rounded-lg">
+                <div className="flex-1">
+                  <label className="text-sm font-semibold text-gray-800 block mb-1">
+                    Group Produk dengan Nama Sama
+                  </label>
+                  <p className="text-xs text-gray-600">
+                    Aktifkan untuk menggabungkan produk dengan nama sama dari platform berbeda menjadi satu baris
+                  </p>
+                </div>
+                <div className="relative inline-block w-14 h-8 ml-4">
+                  <input
+                    type="checkbox"
+                    checked={groupProducts}
+                    onChange={(e) => handleGroupProductsChange(e.target.checked)}
+                    className="sr-only"
+                  />
+                  <div
+                    className={`absolute inset-0 rounded-full transition-colors duration-200 ease-in-out ${
+                      groupProducts ? 'bg-blue-600' : 'bg-gray-300'
+                    }`}
+                  >
+                    <div
+                      className={`absolute top-1 left-1 w-6 h-6 bg-white rounded-full shadow-md transform transition-transform duration-200 ease-in-out ${
+                        groupProducts ? 'translate-x-6' : 'translate-x-0'
+                      }`}
+                    />
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div className="flex justify-end">
+              <button
+                onClick={() => setShowSettingsModal(false)}
+                className="px-4 py-2 bg-gray-200 text-gray-800 rounded-lg hover:bg-gray-300 transition-colors font-medium"
+              >
+                Tutup
               </button>
             </div>
           </div>

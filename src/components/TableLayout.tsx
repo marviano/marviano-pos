@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import { useAuth } from '@/hooks/useAuth';
 
 interface Room {
@@ -68,102 +68,38 @@ export default function TableLayout({ onLoadTransaction }: TableLayoutProps = {}
   // const [canvasScale, setCanvasScale] = useState(1);
 
   // Update canvas size
-  useEffect(() => {
-    const updateCanvasSize = () => {
-      if (canvasRef.current && canvasContainerRef.current) {
-        const selectedRoomData = rooms.find(r => r.id === selectedRoom);
-        let width: number;
-        let height: number;
-        let scale = 1;
-
-        // Use stored canvas dimensions if available, otherwise calculate from container
-        if (selectedRoomData?.canvas_width && selectedRoomData?.canvas_height) {
-          // Use exact stored dimensions without scaling
-          // The container will handle scrolling if canvas is larger than viewport
-          width = selectedRoomData.canvas_width;
-          height = selectedRoomData.canvas_height;
-          scale = 1; // No scaling when using explicit dimensions
-        } else {
-          // Fallback to calculated 16:9 aspect ratio
-          const containerWidth = canvasContainerRef.current.clientWidth;
-          width = containerWidth;
-          height = (containerWidth / 16) * 9;
-          scale = 1;
-        }
-
-        setCanvasSize(prev => {
-          if (prev.width !== width || prev.height !== height) {
-            return { width, height };
-          }
-          return prev;
-        });
-      }
-    };
-
-    // Always observe container resize to recalculate scale when using stored dimensions
+  const updateCanvasSize = useCallback(() => {
     if (canvasRef.current && canvasContainerRef.current) {
-      updateCanvasSize();
-      
-      const resizeObserver = new ResizeObserver(() => {
-        updateCanvasSize();
-      });
-      
-      resizeObserver.observe(canvasContainerRef.current);
-      
-      window.addEventListener('resize', updateCanvasSize);
-      
-      return () => {
-        if (canvasContainerRef.current) {
-          resizeObserver.unobserve(canvasContainerRef.current);
+      const selectedRoomData = rooms.find(r => r.id === selectedRoom);
+      let width: number;
+      let height: number;
+      let scale = 1;
+
+      // Use stored canvas dimensions if available, otherwise calculate from container
+      if (selectedRoomData?.canvas_width && selectedRoomData?.canvas_height) {
+        // Use exact stored dimensions without scaling
+        // The container will handle scrolling if canvas is larger than viewport
+        width = selectedRoomData.canvas_width;
+        height = selectedRoomData.canvas_height;
+        scale = 1; // No scaling when using explicit dimensions
+      } else {
+        // Fallback to calculated 16:9 aspect ratio
+        const containerWidth = canvasContainerRef.current.clientWidth;
+        width = containerWidth;
+        height = (containerWidth / 16) * 9;
+        scale = 1;
+      }
+
+      setCanvasSize(prev => {
+        if (prev.width !== width || prev.height !== height) {
+          return { width, height };
         }
-        window.removeEventListener('resize', updateCanvasSize);
-      };
+        return prev;
+      });
     }
   }, [selectedRoom, rooms]);
 
-  // Fetch rooms when businessId is available
-  useEffect(() => {
-    if (businessId && businessId > 0) {
-      fetchRooms();
-    } else {
-      setError('No business selected. Please log in and select a business first.');
-      setLoading(false);
-    }
-  }, [businessId]);
-
-  // Fetch tables and elements when room is selected
-  useEffect(() => {
-    if (selectedRoom) {
-      fetchTables();
-      fetchLayoutElements();
-      fetchPendingTransactions();
-    } else {
-      setTables([]);
-      setLayoutElements([]);
-      setPendingTransactions([]);
-    }
-  }, [selectedRoom, businessId]);
-
-  // Fetch pending transactions periodically
-  useEffect(() => {
-    if (selectedRoom && businessId) {
-      fetchPendingTransactions();
-      const interval = setInterval(fetchPendingTransactions, 5000);
-      return () => clearInterval(interval);
-    }
-  }, [selectedRoom, businessId]);
-
-  // Update timer display every second
-  useEffect(() => {
-    if (pendingTransactions.length > 0) {
-      const interval = setInterval(() => {
-        setCurrentTime(new Date());
-      }, 1000);
-      return () => clearInterval(interval);
-    }
-  }, [pendingTransactions.length]);
-
-  const fetchRooms = async () => {
+  const fetchRooms = useCallback(async () => {
     try {
       setLoading(true);
       setError(null);
@@ -204,9 +140,9 @@ export default function TableLayout({ onLoadTransaction }: TableLayoutProps = {}
     } finally {
       setLoading(false);
     }
-  };
+  }, [businessId, user, selectedRoom]);
 
-  const fetchTables = async () => {
+  const fetchTables = useCallback(async () => {
     if (!selectedRoom) return;
     
     try {
@@ -221,9 +157,9 @@ export default function TableLayout({ onLoadTransaction }: TableLayoutProps = {}
     } catch (error) {
       console.error('Error fetching tables:', error);
     }
-  };
+  }, [selectedRoom]);
 
-  const fetchLayoutElements = async () => {
+  const fetchLayoutElements = useCallback(async () => {
     if (!selectedRoom) return;
     
     try {
@@ -238,9 +174,9 @@ export default function TableLayout({ onLoadTransaction }: TableLayoutProps = {}
     } catch (error) {
       console.error('Error fetching layout elements:', error);
     }
-  };
+  }, [selectedRoom]);
 
-  const fetchPendingTransactions = async () => {
+  const fetchPendingTransactions = useCallback(async () => {
     if (!businessId) return;
     
     try {
@@ -280,7 +216,71 @@ export default function TableLayout({ onLoadTransaction }: TableLayoutProps = {}
     } catch (error) {
       console.error('Error fetching pending transactions:', error);
     }
-  };
+  }, [businessId]);
+
+  useEffect(() => {
+    // Always observe container resize to recalculate scale when using stored dimensions
+    if (canvasRef.current && canvasContainerRef.current) {
+      updateCanvasSize();
+      
+      const resizeObserver = new ResizeObserver(() => {
+        updateCanvasSize();
+      });
+      
+      resizeObserver.observe(canvasContainerRef.current);
+      
+      window.addEventListener('resize', updateCanvasSize);
+      
+      return () => {
+        if (canvasContainerRef.current) {
+          resizeObserver.unobserve(canvasContainerRef.current);
+        }
+        window.removeEventListener('resize', updateCanvasSize);
+      };
+    }
+  }, [updateCanvasSize]);
+
+  // Fetch rooms when businessId is available
+  useEffect(() => {
+    if (businessId && businessId > 0) {
+      fetchRooms();
+    } else {
+      setError('No business selected. Please log in and select a business first.');
+      setLoading(false);
+    }
+  }, [businessId, fetchRooms]);
+
+  // Fetch tables and elements when room is selected
+  useEffect(() => {
+    if (selectedRoom) {
+      fetchTables();
+      fetchLayoutElements();
+      fetchPendingTransactions();
+    } else {
+      setTables([]);
+      setLayoutElements([]);
+      setPendingTransactions([]);
+    }
+  }, [selectedRoom, fetchTables, fetchLayoutElements, fetchPendingTransactions]);
+
+  // Fetch pending transactions periodically
+  useEffect(() => {
+    if (selectedRoom && businessId) {
+      fetchPendingTransactions();
+      const interval = setInterval(fetchPendingTransactions, 5000);
+      return () => clearInterval(interval);
+    }
+  }, [selectedRoom, businessId, fetchPendingTransactions]);
+
+  // Update timer display every second
+  useEffect(() => {
+    if (pendingTransactions.length > 0) {
+      const interval = setInterval(() => {
+        setCurrentTime(new Date());
+      }, 1000);
+      return () => clearInterval(interval);
+    }
+  }, [pendingTransactions.length]);
 
   if (loading) {
     return (

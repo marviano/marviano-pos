@@ -526,6 +526,15 @@ async function initializeMySQLSchema() {
       created_at BIGINT,
       updated_at BIGINT
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci`,
+        // Local settings table (NOT synced to server)
+        `CREATE TABLE IF NOT EXISTS local_settings (
+      id INT NOT NULL AUTO_INCREMENT,
+      setting_key VARCHAR(255) UNIQUE NOT NULL,
+      setting_value TEXT,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      PRIMARY KEY (id)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci`,
         // Offline_refunds table (for salespulse database)
         `CREATE TABLE IF NOT EXISTS offline_refunds (
       id INT NOT NULL AUTO_INCREMENT,

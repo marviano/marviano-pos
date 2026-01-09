@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { useAuth } from '@/hooks/useAuth';
 
 interface OrderItem {
@@ -51,8 +51,34 @@ export default function KitchenDisplay() {
     return () => clearInterval(interval);
   }, []);
 
+  const formatTimer = useCallback((createdAt: string | null | undefined): string => {
+    if (!createdAt) {
+      return '00:00';
+    }
+    const created = new Date(createdAt);
+    
+    // Check if date is valid
+    if (isNaN(created.getTime())) {
+      console.warn('Invalid date for timer:', createdAt);
+      return '00:00';
+    }
+    const diffMs = currentTime.getTime() - created.getTime();
+    
+    // Handle negative time (if date is in future due to timezone issues)
+    if (diffMs < 0) {
+      console.warn('Negative time difference detected:', { createdAt, currentTime: currentTime.toISOString(), diffMs });
+      return '00:00';
+    }
+    const totalSeconds = Math.floor(diffMs / 1000);
+    const minutes = Math.floor(totalSeconds / 60);
+    const seconds = totalSeconds % 60;
+    const result = `${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
+    
+    return result;
+  }, [currentTime]);
+
   // Fetch orders from database
-  const fetchOrders = async () => {
+  const fetchOrders = useCallback(async () => {
     try {
       const electronAPI = getElectronAPI();
       if (!electronAPI) {
@@ -350,33 +376,7 @@ export default function KitchenDisplay() {
       console.error('Error fetching orders:', error);
       setLoading(false);
     }
-  };
-
-  const formatTimer = (createdAt: string | null | undefined): string => {
-    if (!createdAt) {
-      return '00:00';
-    }
-    const created = new Date(createdAt);
-    
-    // Check if date is valid
-    if (isNaN(created.getTime())) {
-      console.warn('Invalid date for timer:', createdAt);
-      return '00:00';
-    }
-    const diffMs = currentTime.getTime() - created.getTime();
-    
-    // Handle negative time (if date is in future due to timezone issues)
-    if (diffMs < 0) {
-      console.warn('Negative time difference detected:', { createdAt, currentTime: currentTime.toISOString(), diffMs });
-      return '00:00';
-    }
-    const totalSeconds = Math.floor(diffMs / 1000);
-    const minutes = Math.floor(totalSeconds / 60);
-    const seconds = totalSeconds % 60;
-    const result = `${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
-    
-    return result;
-  };
+  }, [businessId, formatTimer]);
 
   const formatTimeHHmm = (dateTime: string | null | undefined): string => {
     if (!dateTime) return '-';
@@ -401,7 +401,7 @@ export default function KitchenDisplay() {
     fetchOrders();
     const interval = setInterval(fetchOrders, 5000);
     return () => clearInterval(interval);
-  }, [businessId, currentTime]);
+  }, [fetchOrders]);
 
   const handleMarkFinished = async (item: GroupedOrderItem) => {
     console.log('🔵 handleMarkFinished called for item:', item);

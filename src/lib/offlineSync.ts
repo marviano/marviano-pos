@@ -336,7 +336,7 @@ class OfflineSyncService {
         }
           // const targetBusinessId = Number(syncData.businessId ?? 14);
 
-          const totalSteps = 28;
+          const totalSteps = 30; // Updated: added 2 steps for employees_position and employees
           let completedSteps = 0;
           const advanceProgress = () => {
             completedSteps = Math.min(totalSteps, completedSteps + 1);
@@ -399,6 +399,31 @@ class OfflineSyncService {
           }
           advanceProgress();
 
+          // Pass 8: Retry employees now that users, businesses, and employees_position might exist (WITH validation)
+          if (Array.isArray(data.employees) && data.employees.length > 0) {
+            try {
+              console.log(`🔄 [SYNC] Retrying ${data.employees.length} employees (with validation)...`);
+              const result = await (electronAPI.localDbUpsertEmployees as (rows: unknown[], skipValidation?: boolean) => Promise<{ success: boolean; skipped?: number; error?: string }>)?.(data.employees, false);
+              if (result && !result.success) {
+                console.warn('⚠️ [SYNC] Employees retry upsert returned success=false');
+                if (result.error) {
+                  console.error('❌ [SYNC] Employees retry error:', result.error);
+                }
+              } else {
+                const skipped = result && 'skipped' in result ? result.skipped : 0;
+                console.log(`✅ [SYNC] ${data.employees.length} employees processed (retry pass), ${skipped || 0} skipped`);
+              }
+            } catch (err) {
+              console.error('❌ [SYNC] Failed to upsert employees on retry:', err);
+              if (err instanceof Error) {
+                console.error('❌ [SYNC] Error details:', err.message, err.stack);
+              }
+              // Don't throw - some employees may still have missing dependencies
+              console.warn('⚠️ [SYNC] Some employees may have missing dependencies (user_id, business_id, or jabatan_id)');
+            }
+          }
+          advanceProgress();
+
           // 6. Businesses (needs organizations)
           if (Array.isArray(data.businesses) && data.businesses.length > 0) {
             try {
@@ -412,6 +437,85 @@ class OfflineSyncService {
               console.error('❌ [SYNC] Failed to upsert businesses:', err);
               throw new Error(`Gagal menyinkronkan businesses: ${err instanceof Error ? err.message : String(err)}`);
             }
+          }
+          advanceProgress();
+
+          // Sync Employees Position (must be before employees due to foreign key)
+          // #region agent log
+          fetch('http://127.0.0.1:7242/ingest/7b565785-72b5-49f7-b2c0-57606ea0d0b5',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'offlineSync.ts:443',message:'Checking employeesPosition data',data:{hasData:!!data.employeesPosition,isArray:Array.isArray(data.employeesPosition),count:Array.isArray(data.employeesPosition)?data.employeesPosition.length:0,hasMethod:!!electronAPI.localDbUpsertEmployeesPosition},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
+          // #endregion
+          if (Array.isArray(data.employeesPosition) && data.employeesPosition.length > 0) {
+            try {
+              console.log(`🔄 [SYNC] Syncing ${data.employeesPosition.length} employee positions...`);
+              // #region agent log
+              fetch('http://127.0.0.1:7242/ingest/7b565785-72b5-49f7-b2c0-57606ea0d0b5',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'offlineSync.ts:447',message:'Calling localDbUpsertEmployeesPosition',data:{rowCount:data.employeesPosition.length,firstRow:data.employeesPosition[0]},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})}).catch(()=>{});
+              // #endregion
+              const result = await (electronAPI.localDbUpsertEmployeesPosition as (rows: unknown[]) => Promise<{ success: boolean }>)?.(data.employeesPosition);
+              // #region agent log
+              fetch('http://127.0.0.1:7242/ingest/7b565785-72b5-49f7-b2c0-57606ea0d0b5',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'offlineSync.ts:448',message:'localDbUpsertEmployeesPosition result',data:{result:result,success:result?.success,hasResult:!!result},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})}).catch(()=>{});
+              // #endregion
+              if (result && !result.success) {
+                console.warn('⚠️ [SYNC] EmployeesPosition upsert returned success=false');
+              } else {
+                console.log(`✅ [SYNC] ${data.employeesPosition.length} employee positions synced`);
+              }
+            } catch (err) {
+              // #region agent log
+              fetch('http://127.0.0.1:7242/ingest/7b565785-72b5-49f7-b2c0-57606ea0d0b5',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'offlineSync.ts:454',message:'localDbUpsertEmployeesPosition error',data:{error:err instanceof Error?err.message:String(err),stack:err instanceof Error?err.stack:undefined},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'D'})}).catch(()=>{});
+              // #endregion
+              console.error('❌ [SYNC] Failed to upsert employeesPosition:', err);
+              if (err instanceof Error) {
+                console.error('❌ [SYNC] Error details:', err.message, err.stack);
+              }
+              throw new Error(`Gagal menyinkronkan employeesPosition: ${err instanceof Error ? err.message : String(err)}`);
+            }
+          } else {
+            // #region agent log
+            fetch('http://127.0.0.1:7242/ingest/7b565785-72b5-49f7-b2c0-57606ea0d0b5',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'offlineSync.ts:461',message:'No employeesPosition data to sync',data:{hasData:!!data.employeesPosition,isArray:Array.isArray(data.employeesPosition),count:Array.isArray(data.employeesPosition)?data.employeesPosition.length:0},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
+            // #endregion
+            console.log('ℹ️ [SYNC] No employee positions to sync');
+          }
+          advanceProgress();
+
+          // Sync Employees (depends on employees_position, users, businesses)
+          // #region agent log
+          fetch('http://127.0.0.1:7242/ingest/7b565785-72b5-49f7-b2c0-57606ea0d0b5',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'offlineSync.ts:465',message:'Checking employees data',data:{hasData:!!data.employees,isArray:Array.isArray(data.employees),count:Array.isArray(data.employees)?data.employees.length:0,hasMethod:!!electronAPI.localDbUpsertEmployees},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
+          // #endregion
+          if (Array.isArray(data.employees) && data.employees.length > 0) {
+            try {
+              console.log(`🔄 [SYNC] Syncing ${data.employees.length} employees (first pass, skip validation)...`);
+              // #region agent log
+              fetch('http://127.0.0.1:7242/ingest/7b565785-72b5-49f7-b2c0-57606ea0d0b5',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'offlineSync.ts:469',message:'Calling localDbUpsertEmployees',data:{rowCount:data.employees.length,firstRow:data.employees[0],skipValidation:true},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})}).catch(()=>{});
+              // #endregion
+              const result = await (electronAPI.localDbUpsertEmployees as (rows: unknown[], skipValidation?: boolean) => Promise<{ success: boolean; skipped?: number }>)?.(data.employees, true);
+              // #region agent log
+              fetch('http://127.0.0.1:7242/ingest/7b565785-72b5-49f7-b2c0-57606ea0d0b5',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'offlineSync.ts:470',message:'localDbUpsertEmployees result',data:{result:result,success:result?.success,skipped:result?.skipped,hasResult:!!result},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})}).catch(()=>{});
+              // #endregion
+              if (result && !result.success) {
+                console.warn('⚠️ [SYNC] Employees upsert returned success=false');
+                if (result && 'error' in result) {
+                  console.error('❌ [SYNC] Employees error:', result.error);
+                }
+              } else {
+                const skipped = result && 'skipped' in result ? result.skipped : 0;
+                console.log(`✅ [SYNC] ${data.employees.length} employees processed (first pass), ${skipped || 0} skipped`);
+              }
+            } catch (err) {
+              // #region agent log
+              fetch('http://127.0.0.1:7242/ingest/7b565785-72b5-49f7-b2c0-57606ea0d0b5',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'offlineSync.ts:480',message:'localDbUpsertEmployees error',data:{error:err instanceof Error?err.message:String(err),stack:err instanceof Error?err.stack:undefined},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'D'})}).catch(()=>{});
+              // #endregion
+              console.error('❌ [SYNC] Failed to upsert employees:', err);
+              if (err instanceof Error) {
+                console.error('❌ [SYNC] Error details:', err.message, err.stack);
+              }
+              // Don't throw - employees may have foreign key issues, will retry later
+              console.warn('⚠️ [SYNC] Employees sync failed (will retry later if dependencies are available)');
+            }
+          } else {
+            // #region agent log
+            fetch('http://127.0.0.1:7242/ingest/7b565785-72b5-49f7-b2c0-57606ea0d0b5',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'offlineSync.ts:488',message:'No employees data to sync',data:{hasData:!!data.employees,isArray:Array.isArray(data.employees),count:Array.isArray(data.employees)?data.employees.length:0},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
+            // #endregion
+            console.log('ℹ️ [SYNC] No employees to sync');
           }
           advanceProgress();
 

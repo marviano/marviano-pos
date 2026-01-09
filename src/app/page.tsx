@@ -6,7 +6,7 @@ import { useAuth } from '@/hooks/useAuth';
 import { isSuperAdmin } from '@/lib/auth';
 import POSLayout from '@/components/POSLayout';
 import OfflineStatus from '@/components/OfflineStatus';
-import { LogOut, Minimize2, X } from 'lucide-react';
+import { LogOut, X } from 'lucide-react';
 import { databaseHealthService } from '@/lib/databaseHealth';
 import { smartSyncService } from '@/lib/smartSync';
 // import { systemPosSyncService } from '@/lib/systemPosSync';
@@ -150,31 +150,49 @@ export default function Home() {
 
   return (
     <div className="h-screen flex flex-col overflow-hidden">
-      {/* Top Bar with User Info and Logout */}
-      <div className="h-[25.6px] bg-white border-b border-gray-200 flex items-center justify-between px-[9.6px] relative">
-        <div className="flex items-center space-x-[9.6px]">
-          <h1 className="text-[11.2px] font-semibold text-gray-800">MOMOYO MADIUN 1</h1>
-          <div className="w-px h-[16px] bg-gray-300"></div>
+      {/* Top Bar with User Info and Logout - Windows XP Style */}
+      <div 
+        className="h-[30px] flex items-center justify-between relative border-b-2 border-[#245edb]"
+        style={{
+          background: 'linear-gradient(to bottom, #3a6ea5 0%, #245edb 50%, #1e4a8f 100%)',
+          fontFamily: 'Tahoma, "MS Sans Serif", sans-serif',
+          boxShadow: 'inset 0 1px 0 rgba(255,255,255,0.2)'
+        }}
+      >
+        <div className="flex items-center space-x-[8px] px-[8px]">
+          <h1 className="text-[11px] font-bold text-white" style={{ textShadow: '0 1px 1px rgba(0,0,0,0.5)' }}>
+            MOMOYO MADIUN 1
+          </h1>
+          <div className="w-[1px] h-[20px] bg-[#1e4a8f]" style={{ boxShadow: '1px 0 0 rgba(255,255,255,0.1)' }}></div>
           <button
             ref={userDebugButtonRef}
             type="button"
             onClick={() => setShowUserDebug(prev => !prev)}
-            className="text-[9.6px] font-medium text-gray-600 hover:text-gray-900 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-offset-2 focus-visible:ring-offset-white px-[3.2px] transition-colors"
+            className="text-[10px] font-normal text-white hover:text-yellow-200 px-[4px] py-[2px] transition-colors"
+            style={{ textShadow: '0 1px 1px rgba(0,0,0,0.5)' }}
             title="Klik untuk melihat detail pengguna"
           >
             {user?.name || 'Pengguna'}
           </button>
-          <div className="w-px h-[16px] bg-gray-300"></div>
+          <div className="w-[1px] h-[20px] bg-[#1e4a8f]" style={{ boxShadow: '1px 0 0 rgba(255,255,255,0.1)' }}></div>
           <OfflineStatus />
         </div>
-        <div className="flex items-center space-x-[4.8px]">
-          <div className="w-px h-[16px] bg-gray-300"></div>
-          <div className="flex items-center gap-[4.8px] px-[4.8px] py-[1.6px] bg-blue-100 border border-blue-200">
-            <span className="text-[9.6px] text-blue-700 font-medium">Database:</span>
+        <div className="flex items-center space-x-[4px] px-[4px]">
+          <div className="w-[1px] h-[20px] bg-[#1e4a8f]" style={{ boxShadow: '1px 0 0 rgba(255,255,255,0.1)' }}></div>
+          <div 
+            className="flex items-center gap-[6px] px-[8px] py-[4px] transition-all duration-300 ease-in-out"
+            style={{
+              background: 'rgba(255, 255, 255, 0.15)',
+              backdropFilter: 'blur(8px)',
+              border: '1px solid rgba(255, 255, 255, 0.2)',
+              boxShadow: '0 2px 4px rgba(0,0,0,0.2), inset 0 1px 0 rgba(255,255,255,0.3)'
+            }}
+          >
+            <span className="text-[10px] text-white font-medium" style={{ textShadow: '0 1px 2px rgba(0,0,0,0.5)' }}>Database:</span>
             {isSyncing && (
-              <span className="inline-block w-[3.2px] h-[3.2px] bg-blue-600 animate-pulse"></span>
+              <span className="inline-block w-[6px] h-[6px] bg-white rounded-full animate-pulse" style={{ boxShadow: '0 0 4px rgba(255,255,255,0.8)' }}></span>
             )}
-            <span className="text-[9.6px] text-blue-700">{databaseStatus}</span>
+            <span className="text-[10px] text-white" style={{ textShadow: '0 1px 2px rgba(0,0,0,0.5)' }}>{databaseStatus}</span>
             <button
               onClick={async () => {setIsSyncing(true);
                 setDatabaseStatus('Syncing...');
@@ -202,13 +220,46 @@ export default function Home() {
                 }
               }}
               disabled={isSyncing}
-              className="px-[3.2px] py-[1.6px] text-[9.6px] bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
+              className="px-[10px] py-[4px] text-[10px] font-medium rounded disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-200"
+              style={{
+                background: isSyncing 
+                  ? 'linear-gradient(135deg, #6b7280 0%, #4b5563 100%)'
+                  : 'linear-gradient(135deg, #3b82f6 0%, #2563eb 100%)',
+                border: 'none',
+                color: '#ffffff',
+                textShadow: '0 1px 2px rgba(0,0,0,0.3)',
+                boxShadow: isSyncing 
+                  ? 'inset 0 2px 4px rgba(0,0,0,0.3)'
+                  : '0 2px 4px rgba(0,0,0,0.3), inset 0 1px 0 rgba(255,255,255,0.2)'
+              }}
+              onMouseEnter={(e) => {
+                if (!isSyncing) {
+                  e.currentTarget.style.background = 'linear-gradient(135deg, #2563eb 0%, #1d4ed8 100%)';
+                  e.currentTarget.style.boxShadow = '0 3px 6px rgba(0,0,0,0.4), inset 0 1px 0 rgba(255,255,255,0.2)';
+                }
+              }}
+              onMouseLeave={(e) => {
+                if (!isSyncing) {
+                  e.currentTarget.style.background = 'linear-gradient(135deg, #3b82f6 0%, #2563eb 100%)';
+                  e.currentTarget.style.boxShadow = '0 2px 4px rgba(0,0,0,0.3), inset 0 1px 0 rgba(255,255,255,0.2)';
+                }
+              }}
+              onMouseDown={(e) => {
+                if (!isSyncing) {
+                  e.currentTarget.style.boxShadow = 'inset 0 2px 4px rgba(0,0,0,0.3)';
+                }
+              }}
+              onMouseUp={(e) => {
+                if (!isSyncing) {
+                  e.currentTarget.style.boxShadow = '0 2px 4px rgba(0,0,0,0.3), inset 0 1px 0 rgba(255,255,255,0.2)';
+                }
+              }}
               title="Sync database"
             >
               Sync Tx
             </button>
           </div>
-          <div className="w-px h-[16px] bg-gray-300"></div>
+          <div className="w-[1px] h-[20px] bg-[#1e4a8f]" style={{ boxShadow: '1px 0 0 rgba(255,255,255,0.1)' }}></div>
           <button
             onClick={async () => {
               if (window.electronAPI) {
@@ -217,21 +268,63 @@ export default function Home() {
                 alert(result.message || 'Customer display created');
               }
             }}
-            className="flex items-center space-x-[3.2px] bg-blue-500 hover:bg-blue-600 text-white px-[4.8px] py-[3.2px] transition-colors"
+            className="flex items-center space-x-[6px] text-[10px] font-medium px-[10px] py-[4px] rounded transition-all duration-200"
+            style={{
+              background: 'linear-gradient(135deg, #10b981 0%, #059669 100%)',
+              border: 'none',
+              color: '#ffffff',
+              textShadow: '0 1px 2px rgba(0,0,0,0.3)',
+              boxShadow: '0 2px 4px rgba(0,0,0,0.3), inset 0 1px 0 rgba(255,255,255,0.2)'
+            }}
+            onMouseEnter={(e) => {
+              e.currentTarget.style.background = 'linear-gradient(135deg, #059669 0%, #047857 100%)';
+              e.currentTarget.style.boxShadow = '0 3px 6px rgba(0,0,0,0.4), inset 0 1px 0 rgba(255,255,255,0.2)';
+            }}
+            onMouseLeave={(e) => {
+              e.currentTarget.style.background = 'linear-gradient(135deg, #10b981 0%, #059669 100%)';
+              e.currentTarget.style.boxShadow = '0 2px 4px rgba(0,0,0,0.3), inset 0 1px 0 rgba(255,255,255,0.2)';
+            }}
+            onMouseDown={(e) => {
+              e.currentTarget.style.boxShadow = 'inset 0 2px 4px rgba(0,0,0,0.3)';
+            }}
+            onMouseUp={(e) => {
+              e.currentTarget.style.boxShadow = '0 2px 4px rgba(0,0,0,0.3), inset 0 1px 0 rgba(255,255,255,0.2)';
+            }}
             title="Create Customer Display"
           >
-            <span className="text-[9.6px]">Customer Display</span>
+            <span>Customer Display</span>
           </button>
-          <div className="w-px h-[16px] bg-gray-300"></div>
+          <div className="w-[1px] h-[20px] bg-[#1e4a8f]" style={{ boxShadow: '1px 0 0 rgba(255,255,255,0.1)' }}></div>
           <button
             onClick={logout}
-            className="flex items-center space-x-[3.2px] bg-red-500 hover:bg-red-600 text-white px-[4.8px] py-[3.2px] transition-colors"
+            className="flex items-center space-x-[6px] text-[10px] font-medium px-[10px] py-[4px] rounded transition-all duration-200"
+            style={{
+              background: 'linear-gradient(135deg, #ef4444 0%, #dc2626 100%)',
+              border: 'none',
+              color: '#ffffff',
+              textShadow: '0 1px 2px rgba(0,0,0,0.3)',
+              boxShadow: '0 2px 4px rgba(0,0,0,0.3), inset 0 1px 0 rgba(255,255,255,0.2)'
+            }}
+            onMouseEnter={(e) => {
+              e.currentTarget.style.background = 'linear-gradient(135deg, #dc2626 0%, #b91c1c 100%)';
+              e.currentTarget.style.boxShadow = '0 3px 6px rgba(0,0,0,0.4), inset 0 1px 0 rgba(255,255,255,0.2)';
+            }}
+            onMouseLeave={(e) => {
+              e.currentTarget.style.background = 'linear-gradient(135deg, #ef4444 0%, #dc2626 100%)';
+              e.currentTarget.style.boxShadow = '0 2px 4px rgba(0,0,0,0.3), inset 0 1px 0 rgba(255,255,255,0.2)';
+            }}
+            onMouseDown={(e) => {
+              e.currentTarget.style.boxShadow = 'inset 0 2px 4px rgba(0,0,0,0.3)';
+            }}
+            onMouseUp={(e) => {
+              e.currentTarget.style.boxShadow = '0 2px 4px rgba(0,0,0,0.3), inset 0 1px 0 rgba(255,255,255,0.2)';
+            }}
             title="Logout"
           >
-            <LogOut className="w-[9.6px] h-[9.6px]" />
-            <span className="text-[9.6px]">Logout</span>
+            <LogOut className="w-[11px] h-[11px]" />
+            <span>Logout</span>
           </button>
-          <div className="w-px h-[16px] bg-gray-300"></div>
+          <div className="w-[1px] h-[20px] bg-[#1e4a8f]" style={{ boxShadow: '1px 0 0 rgba(255,255,255,0.1)' }}></div>
           <button
             onClick={() => {
               if (window.electronAPI) {
@@ -244,13 +337,43 @@ export default function Home() {
                 window.electronAPI.minimizeWindow();
               }
             }}
-            className="p-[4.8px] hover:bg-gray-100 transition-colors"
-            style={{ touchAction: 'manipulation' }}
+            className="w-[22px] h-[22px] flex items-center justify-center"
+            style={{
+              background: 'linear-gradient(to bottom, #ece9d8 0%, #d4d0c8 100%)',
+              border: '1px solid #808080',
+              borderTopColor: '#ffffff',
+              borderLeftColor: '#ffffff',
+              borderRightColor: '#404040',
+              borderBottomColor: '#404040',
+              boxShadow: '1px 1px 0 rgba(0,0,0,0.1)',
+              touchAction: 'manipulation'
+            }}
+            onMouseDown={(e) => {
+              e.currentTarget.style.boxShadow = 'inset 1px 1px 2px rgba(0,0,0,0.2)';
+              e.currentTarget.style.borderTopColor = '#404040';
+              e.currentTarget.style.borderLeftColor = '#404040';
+              e.currentTarget.style.borderRightColor = '#ffffff';
+              e.currentTarget.style.borderBottomColor = '#ffffff';
+            }}
+            onMouseUp={(e) => {
+              e.currentTarget.style.boxShadow = '1px 1px 0 rgba(0,0,0,0.1)';
+              e.currentTarget.style.borderTopColor = '#ffffff';
+              e.currentTarget.style.borderLeftColor = '#ffffff';
+              e.currentTarget.style.borderRightColor = '#404040';
+              e.currentTarget.style.borderBottomColor = '#404040';
+            }}
+            onMouseLeave={(e) => {
+              e.currentTarget.style.boxShadow = '1px 1px 0 rgba(0,0,0,0.1)';
+              e.currentTarget.style.borderTopColor = '#ffffff';
+              e.currentTarget.style.borderLeftColor = '#ffffff';
+              e.currentTarget.style.borderRightColor = '#404040';
+              e.currentTarget.style.borderBottomColor = '#404040';
+            }}
             title="Minimize"
           >
-            <Minimize2 className="w-[9.6px] h-[9.6px] text-gray-600" />
+            <span className="text-[12px] font-bold" style={{ color: '#800000' }}>_</span>
           </button>
-          <div className="w-px h-[16px] bg-gray-300"></div>
+          <div className="w-[1px] h-[20px] bg-[#1e4a8f]" style={{ boxShadow: '1px 0 0 rgba(255,255,255,0.1)' }}></div>
           <button
             onClick={() => {
               if (window.electronAPI) {
@@ -263,75 +386,153 @@ export default function Home() {
                 window.electronAPI.closeWindow();
               }
             }}
-            className="p-[4.8px] hover:bg-red-100 transition-colors"
-            style={{ touchAction: 'manipulation' }}
+            className="w-[22px] h-[22px] flex items-center justify-center"
+            style={{
+              background: 'linear-gradient(to bottom, #ece9d8 0%, #d4d0c8 100%)',
+              border: '1px solid #808080',
+              borderTopColor: '#ffffff',
+              borderLeftColor: '#ffffff',
+              borderRightColor: '#404040',
+              borderBottomColor: '#404040',
+              boxShadow: '1px 1px 0 rgba(0,0,0,0.1)',
+              touchAction: 'manipulation'
+            }}
+            onMouseDown={(e) => {
+              e.currentTarget.style.boxShadow = 'inset 1px 1px 2px rgba(0,0,0,0.2)';
+              e.currentTarget.style.borderTopColor = '#404040';
+              e.currentTarget.style.borderLeftColor = '#404040';
+              e.currentTarget.style.borderRightColor = '#ffffff';
+              e.currentTarget.style.borderBottomColor = '#ffffff';
+            }}
+            onMouseUp={(e) => {
+              e.currentTarget.style.boxShadow = '1px 1px 0 rgba(0,0,0,0.1)';
+              e.currentTarget.style.borderTopColor = '#ffffff';
+              e.currentTarget.style.borderLeftColor = '#ffffff';
+              e.currentTarget.style.borderRightColor = '#404040';
+              e.currentTarget.style.borderBottomColor = '#404040';
+            }}
+            onMouseLeave={(e) => {
+              e.currentTarget.style.boxShadow = '1px 1px 0 rgba(0,0,0,0.1)';
+              e.currentTarget.style.borderTopColor = '#ffffff';
+              e.currentTarget.style.borderLeftColor = '#ffffff';
+              e.currentTarget.style.borderRightColor = '#404040';
+              e.currentTarget.style.borderBottomColor = '#404040';
+            }}
             title="Close"
           >
-            <X className="w-[9.6px] h-[9.6px] text-red-600" />
+            <X className="w-[10px] h-[10px]" style={{ color: '#800000' }} />
           </button>
         </div>
 
         {showUserDebug && (
           <div
             ref={userDebugPanelRef}
-            className="absolute top-full left-[12.8px] mt-[6.4px] w-[230.4px] border border-gray-200 bg-white shadow-xl p-[12.8px] z-50"
+            className="absolute top-full left-[12px] mt-[4px] w-[240px] p-[12px] z-50"
+            style={{
+              background: 'linear-gradient(to bottom, #ece9d8 0%, #d4d0c8 100%)',
+              border: '2px solid #808080',
+              borderTopColor: '#ffffff',
+              borderLeftColor: '#ffffff',
+              borderRightColor: '#404040',
+              borderBottomColor: '#404040',
+              boxShadow: '2px 2px 4px rgba(0,0,0,0.3)',
+              fontFamily: 'Tahoma, "MS Sans Serif", sans-serif'
+            }}
           >
-            <div className="flex items-center justify-between mb-[6.4px]">
-              <span className="text-[11.2px] font-semibold text-gray-800">User Debug Info</span>
+            <div className="flex items-center justify-between mb-[8px]">
+              <span className="text-[11px] font-bold text-[#000080]">User Debug Info</span>
               <button
                 type="button"
                 onClick={() => setShowUserDebug(false)}
-                className="p-[3.2px] hover:bg-gray-100 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+                className="w-[18px] h-[18px] flex items-center justify-center"
+                style={{
+                  background: 'linear-gradient(to bottom, #ece9d8 0%, #d4d0c8 100%)',
+                  border: '1px solid #808080',
+                  borderTopColor: '#ffffff',
+                  borderLeftColor: '#ffffff',
+                  borderRightColor: '#404040',
+                  borderBottomColor: '#404040',
+                  boxShadow: '1px 1px 0 rgba(0,0,0,0.1)'
+                }}
+                onMouseDown={(e) => {
+                  e.currentTarget.style.boxShadow = 'inset 1px 1px 2px rgba(0,0,0,0.2)';
+                  e.currentTarget.style.borderTopColor = '#404040';
+                  e.currentTarget.style.borderLeftColor = '#404040';
+                  e.currentTarget.style.borderRightColor = '#ffffff';
+                  e.currentTarget.style.borderBottomColor = '#ffffff';
+                }}
+                onMouseUp={(e) => {
+                  e.currentTarget.style.boxShadow = '1px 1px 0 rgba(0,0,0,0.1)';
+                  e.currentTarget.style.borderTopColor = '#ffffff';
+                  e.currentTarget.style.borderLeftColor = '#ffffff';
+                  e.currentTarget.style.borderRightColor = '#404040';
+                  e.currentTarget.style.borderBottomColor = '#404040';
+                }}
+                onMouseLeave={(e) => {
+                  e.currentTarget.style.boxShadow = '1px 1px 0 rgba(0,0,0,0.1)';
+                  e.currentTarget.style.borderTopColor = '#ffffff';
+                  e.currentTarget.style.borderLeftColor = '#ffffff';
+                  e.currentTarget.style.borderRightColor = '#404040';
+                  e.currentTarget.style.borderBottomColor = '#404040';
+                }}
                 aria-label="Close user debug panel"
               >
-                <X className="w-[12.8px] h-[12.8px] text-gray-500" />
+                <X className="w-[12px] h-[12px]" style={{ color: '#000080' }} />
               </button>
             </div>
-            <div className="space-y-[6.4px] text-[11.2px]">
+            <div className="space-y-[6px] text-[11px] text-[#000080]">
               <div>
-                <span className="text-gray-500">Nama:</span>
-                <span className="ml-[6.4px] font-medium text-gray-800">{user?.name || 'Tidak diketahui'}</span>
+                <span className="text-[#000080]">Nama:</span>
+                <span className="ml-[6px] font-bold">{user?.name || 'Tidak diketahui'}</span>
               </div>
               <div>
-                <span className="text-gray-500">Email:</span>
-                <span className="ml-[6.4px] text-gray-800">{user?.email || 'Tidak diketahui'}</span>
+                <span className="text-[#000080]">Email:</span>
+                <span className="ml-[6px]">{user?.email || 'Tidak diketahui'}</span>
               </div>
               <div>
-                <span className="text-gray-500">Role:</span>
-                <span className="ml-[6.4px] text-gray-800 font-medium">
+                <span className="text-[#000080]">Role:</span>
+                <span className="ml-[6px] font-bold">
                   {roleDisplayName}
                   {user?.role_id !== null && user?.role_id !== undefined ? ` (${user.role_id})` : ''}
                 </span>
               </div>
               <div>
-                <span className="text-gray-500">Normalized Role:</span>
-                <span className="ml-[6.4px] uppercase tracking-wide text-[9.6px] font-semibold text-blue-600">
+                <span className="text-[#000080]">Normalized Role:</span>
+                <span className="ml-[6px] uppercase tracking-wide text-[10px] font-bold text-[#000080]">
                   {user?.role || 'N/A'}
                 </span>
               </div>
               <div>
-                <span className="text-gray-500">Role ID:</span>
-                <span className="ml-[6.4px] text-gray-800">
+                <span className="text-[#000080]">Role ID:</span>
+                <span className="ml-[6px]">
                   {user?.role_id !== null && user?.role_id !== undefined ? user.role_id : 'N/A'}
                 </span>
               </div>
-              <div className="pt-[6.4px] border-t border-gray-100">
-                <span className="text-gray-500">Permissions ({isSuperAdmin(user) ? 'ALL' : appPermissions.length}):</span>
+              <div className="pt-[6px] border-t-2 border-[#808080]">
+                <span className="text-[#000080] font-bold">Permissions ({isSuperAdmin(user) ? 'ALL' : appPermissions.length}):</span>
                 {isSuperAdmin(user) ? (
-                  <p className="mt-[3.2px] text-green-600 text-[9.6px] font-medium">
+                  <p className="mt-[4px] text-[#008000] text-[10px] font-bold">
                     ✨ Super Admin Access (All Permissions)
                   </p>
                 ) : appPermissions.length === 0 ? (
-                  <p className="mt-[3.2px] text-gray-400 text-[9.6px]">Tidak ada permission yang tersedia</p>
+                  <p className="mt-[4px] text-[#808080] text-[10px]">Tidak ada permission yang tersedia</p>
                 ) : (
-                  <ul className="mt-[3.2px] max-h-[102.4px] overflow-y-auto space-y-[3.2px] text-[9.6px] text-gray-700">
+                  <ul className="mt-[4px] max-h-[120px] overflow-y-auto space-y-[3px] text-[10px]">
                     {appPermissions.map(permission => (
                       <li
                         key={permission.full}
-                        className="px-[6.4px] py-[3.2px] bg-gray-100 border border-gray-200 flex flex-col"
+                        className="px-[6px] py-[3px] flex flex-col"
+                        style={{
+                          background: 'linear-gradient(to bottom, #ffffff 0%, #f0f0f0 100%)',
+                          border: '1px solid #808080',
+                          borderTopColor: '#ffffff',
+                          borderLeftColor: '#ffffff',
+                          borderRightColor: '#c0c0c0',
+                          borderBottomColor: '#c0c0c0'
+                        }}
                       >
-                        <span className="font-medium text-gray-800">{permission.label}</span>
-                        <span className="text-[8.8px] text-gray-500">{permission.full}</span>
+                        <span className="font-bold text-[#000080]">{permission.label}</span>
+                        <span className="text-[9px] text-[#404040]">{permission.full}</span>
                       </li>
                     ))}
                   </ul>

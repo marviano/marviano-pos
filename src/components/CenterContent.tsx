@@ -686,6 +686,51 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
               }
             }
             
+            // Check if transaction has any active (non-cancelled) items left
+            // If all items are cancelled, update transaction status to 'cancelled'
+            if (item.transactionId && electronAPI?.localDbGetTransactionItems && electronAPI?.localDbGetTransactions && electronAPI?.localDbUpsertTransactions) {
+              try {
+                // Fetch all items for this transaction
+                const allTransactionItems = await electronAPI.localDbGetTransactionItems(item.transactionId);
+                const allItemsArray = Array.isArray(allTransactionItems) ? allTransactionItems as Record<string, unknown>[] : [];
+                
+                // Check if there are any active (non-cancelled) items
+                const hasActiveItems = allItemsArray.some((ti) => {
+                  const status = typeof ti.production_status === 'string' ? ti.production_status : null;
+                  return status !== 'cancelled';
+                });
+                
+                // If no active items, update transaction status to 'cancelled'
+                if (!hasActiveItems) {
+                  // Fetch the transaction to get all its data
+                  const allTransactions = await electronAPI.localDbGetTransactions(businessId, 10000);
+                  const transactionsArray = Array.isArray(allTransactions) ? allTransactions : [];
+                  const transaction = transactionsArray.find((tx: unknown) => {
+                    if (tx && typeof tx === 'object' && 'uuid_id' in tx) {
+                      const t = tx as { uuid_id?: string; id?: string };
+                      return (t.uuid_id === item.transactionId) || (t.id === item.transactionId);
+                    }
+                    return false;
+                  }) as Record<string, unknown> | undefined;
+                  
+                  if (transaction) {
+                    // Update transaction status to 'cancelled'
+                    const updatedTransaction = {
+                      ...transaction,
+                      status: 'cancelled',
+                      updated_at: new Date().toISOString(),
+                    };
+                    
+                    await electronAPI.localDbUpsertTransactions([updatedTransaction]);
+                    console.log(`✅ Transaction ${item.transactionId} status updated to 'cancelled' (all items cancelled)`);
+                  }
+                }
+              } catch (error) {
+                console.error('Error checking/updating transaction status:', error);
+                // Don't block the item removal if this check fails
+              }
+            }
+            
             // Remove from cart UI
             const newCartItems = cartItems.filter(cartItem => cartItem.id !== item.id);
             setCartItems(newCartItems);
@@ -773,6 +818,51 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
                 }]);
               } else {
                 console.warn('Transaction item not found in database');
+              }
+            }
+            
+            // Check if transaction has any active (non-cancelled) items left
+            // If all items are cancelled, update transaction status to 'cancelled'
+            if (item.transactionId && electronAPI?.localDbGetTransactionItems && electronAPI?.localDbGetTransactions && electronAPI?.localDbUpsertTransactions) {
+              try {
+                // Fetch all items for this transaction
+                const allTransactionItems = await electronAPI.localDbGetTransactionItems(item.transactionId);
+                const allItemsArray = Array.isArray(allTransactionItems) ? allTransactionItems as Record<string, unknown>[] : [];
+                
+                // Check if there are any active (non-cancelled) items
+                const hasActiveItems = allItemsArray.some((ti) => {
+                  const status = typeof ti.production_status === 'string' ? ti.production_status : null;
+                  return status !== 'cancelled';
+                });
+                
+                // If no active items, update transaction status to 'cancelled'
+                if (!hasActiveItems) {
+                  // Fetch the transaction to get all its data
+                  const allTransactions = await electronAPI.localDbGetTransactions(businessId, 10000);
+                  const transactionsArray = Array.isArray(allTransactions) ? allTransactions : [];
+                  const transaction = transactionsArray.find((tx: unknown) => {
+                    if (tx && typeof tx === 'object' && 'uuid_id' in tx) {
+                      const t = tx as { uuid_id?: string; id?: string };
+                      return (t.uuid_id === item.transactionId) || (t.id === item.transactionId);
+                    }
+                    return false;
+                  }) as Record<string, unknown> | undefined;
+                  
+                  if (transaction) {
+                    // Update transaction status to 'cancelled'
+                    const updatedTransaction = {
+                      ...transaction,
+                      status: 'cancelled',
+                      updated_at: new Date().toISOString(),
+                    };
+                    
+                    await electronAPI.localDbUpsertTransactions([updatedTransaction]);
+                    console.log(`✅ Transaction ${item.transactionId} status updated to 'cancelled' (all items cancelled)`);
+                  }
+                }
+              } catch (error) {
+                console.error('Error checking/updating transaction status:', error);
+                // Don't block the item removal if this check fails
               }
             }
             
