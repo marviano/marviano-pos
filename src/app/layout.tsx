@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import "./globals.css";
 import WindowFocusHandler from "@/components/WindowFocusHandler";
 import ServiceWorkerErrorHandler from "@/components/ServiceWorkerErrorHandler";
+import DisableHMR from "@/components/DisableHMR";
 
 export const metadata: Metadata = {
   title: "Marviano POS",
@@ -20,6 +21,7 @@ export default function RootLayout({
       >
         <WindowFocusHandler />
         <ServiceWorkerErrorHandler />
+        <DisableHMR />
         {children}
       </body>
     </html>

@@ -607,9 +607,6 @@ class SmartSyncService {
             }
 
             // Fetch normalized customizations
-            // #region agent log
-            fetch('http://127.0.0.1:7242/ingest/7b565785-72b5-49f7-b2c0-57606ea0d0b5',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'smartSync.ts:609',message:'About to call electron function',data:{transactionId:transactionData.id,transactionUuid:transactionData.uuid_id},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'D'})}).catch(()=>{});
-            // #endregion
             
             const normalizedCustomizations = await (electronAPI.localDbGetTransactionItemCustomizationsNormalized as (transactionId: string) => Promise<{
               customizations: Array<{
@@ -633,10 +630,6 @@ class SmartSyncService {
             // Add normalized customization arrays to transaction data
             transactionData.transaction_item_customizations = normalizedCustomizations.customizations;
             transactionData.transaction_item_customization_options = normalizedCustomizations.options;
-
-            // #region agent log
-            fetch('http://127.0.0.1:7242/ingest/7b565785-72b5-49f7-b2c0-57606ea0d0b5',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'smartSync.ts:630',message:'Customizations fetched for sync',data:{transactionId:transactionData.id,customizationsCount:normalizedCustomizations.customizations.length,optionsCount:normalizedCustomizations.options.length,customizations:normalizedCustomizations.customizations.map((c: {id:number;transaction_item_id:string;uuid_transaction_item_id:string|null;customization_type_id:number})=>({id:c.id,transaction_item_id:c.transaction_item_id,uuid_transaction_item_id:c.uuid_transaction_item_id,customization_type_id:c.customization_type_id}))},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'D'})}).catch(()=>{});
-            // #endregion
 
             // Log customization details for debugging
             console.log(`✅ [SMART SYNC] Added ${normalizedCustomizations.customizations.length} customizations and ${normalizedCustomizations.options.length} options to transaction ${transactionData.id}`);
@@ -667,9 +660,6 @@ class SmartSyncService {
               }
             }
           } catch (error) {
-            // #region agent log
-            fetch('http://127.0.0.1:7242/ingest/7b565785-72b5-49f7-b2c0-57606ea0d0b5',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'smartSync.ts:661',message:'Error fetching customizations',data:{transactionId:transactionData.id,error:String(error)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'D'})}).catch(()=>{});
-            // #endregion
             console.warn(`⚠️ [SMART SYNC] Failed to fetch transaction items or normalized customizations for transaction ${transactionData.id}:`, error);
             // Continue with items from JSON blob if fetch fails - backward compatibility
           }

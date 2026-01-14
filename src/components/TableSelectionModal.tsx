@@ -91,8 +91,11 @@ interface TableSelectionModalProps {
     tableName: string | null;
     roomName: string | null;
     customerName: string | null;
+    waiterName: string | null;
+    waiterColor: string | null;
   } | null;
   onItemsLocked?: (itemIds: number[]) => void;
+  waiterId?: number | null;
 }
 
 const getElectronAPI = () => (typeof window !== 'undefined' ? window.electronAPI : undefined);
@@ -106,6 +109,7 @@ export default function TableSelectionModal({
   customerName = '',
   loadedTransactionInfo = null,
   onItemsLocked,
+  waiterId = null,
 }: TableSelectionModalProps) {
   const { user } = useAuth();
   const businessId = user?.selectedBusinessId ?? 14;
@@ -422,11 +426,13 @@ export default function TableSelectionModal({
       }, 0);
 
       // Prepare transaction data
+      console.log('🔍 [TABLE SELECTION] Saving transaction with waiterId:', waiterId);
       const transactionData = {
         uuid_id: transactionId,
         id: transactionId, // For compatibility
         business_id: businessId,
         user_id: user?.id ? parseInt(String(user.id)) : 1,
+        waiter_id: waiterId || null,
         payment_method: 'cash',
         pickup_method: 'dine-in' as const,
         total_amount: orderTotal,
@@ -506,6 +512,13 @@ export default function TableSelectionModal({
         };
       });
       // Save transaction and items to local database
+      console.log('💾 [TABLE SELECTION] Saving transaction with data:', {
+        transactionId: transactionData.id,
+        waiter_id: transactionData.waiter_id,
+        waiterId_prop: waiterId,
+        business_id: transactionData.business_id,
+        user_id: transactionData.user_id
+      });
       await electronAPI.localDbUpsertTransactions?.([transactionData]);
       await electronAPI.localDbUpsertTransactionItems?.(transactionItems);
       // Fetch saved transaction items to get their database IDs for saving customizations

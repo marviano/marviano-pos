@@ -285,6 +285,7 @@ async function initializeMySQLSchema() {
       uuid_id VARCHAR(36) NOT NULL,
       business_id INT NOT NULL,
       user_id INT NOT NULL,
+      waiter_id INT DEFAULT NULL,
       shift_uuid CHAR(36) DEFAULT NULL,
       payment_method VARCHAR(50) NOT NULL,
       pickup_method ENUM('dine-in','take-away') NOT NULL,
@@ -321,6 +322,7 @@ async function initializeMySQLSchema() {
       UNIQUE KEY uuid_id (uuid_id),
       KEY idx_transactions_business (business_id),
       KEY idx_transactions_user (user_id),
+      KEY idx_transactions_waiter (waiter_id),
       KEY idx_transactions_date (created_at),
       KEY idx_transactions_status (status),
       KEY idx_transactions_contact (contact_id),
@@ -335,7 +337,8 @@ async function initializeMySQLSchema() {
       KEY idx_transactions_shift_uuid (shift_uuid),
       CONSTRAINT fk_transactions_business FOREIGN KEY (business_id) REFERENCES businesses(id) ON DELETE CASCADE,
       CONSTRAINT fk_transactions_payment_method FOREIGN KEY (payment_method_id) REFERENCES payment_methods(id),
-      CONSTRAINT fk_transactions_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+      CONSTRAINT fk_transactions_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+      CONSTRAINT fk_transactions_waiter FOREIGN KEY (waiter_id) REFERENCES employees(id) ON DELETE RESTRICT
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci`,
         // Transaction_items table
         `CREATE TABLE IF NOT EXISTS transaction_items (
@@ -621,6 +624,45 @@ async function initializeMySQLSchema() {
         FOREIGN KEY (room_id) 
         REFERENCES restaurant_rooms(id) 
         ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+        // Receipt_templates table (stores HTML template code)
+        `CREATE TABLE IF NOT EXISTS receipt_templates (
+      id INT NOT NULL AUTO_INCREMENT,
+      template_type ENUM('receipt', 'bill', 'refund') NOT NULL COMMENT 'Type of template: receipt (paid transaction), bill (unpaid order), or refund',
+      template_name VARCHAR(255) DEFAULT NULL COMMENT 'Template name (e.g., "MOMOYO Receipt", "MOMOYO Bill")',
+      business_id INT DEFAULT NULL COMMENT 'NULL = global template, INT = business-specific template',
+      template_code LONGTEXT NOT NULL COMMENT 'HTML template code with placeholders',
+      is_active TINYINT(1) DEFAULT 1 COMMENT 'Whether this template is active',
+      is_default TINYINT(1) DEFAULT 0 COMMENT 'Whether this template is the default/active template for its type',
+      version INT DEFAULT 1 COMMENT 'Template version number',
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      PRIMARY KEY (id),
+      KEY idx_receipt_templates_type (template_type),
+      KEY idx_receipt_templates_business (business_id),
+      KEY idx_receipt_templates_active (is_active),
+      KEY idx_receipt_templates_name (template_name),
+      CONSTRAINT fk_receipt_templates_business FOREIGN KEY (business_id) REFERENCES businesses(id) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+        // Receipt_settings table (stores logo, address, phone, etc.)
+        `CREATE TABLE IF NOT EXISTS receipt_settings (
+      id INT NOT NULL AUTO_INCREMENT,
+      business_id INT DEFAULT NULL COMMENT 'NULL = global settings, INT = business-specific settings',
+      store_name VARCHAR(255) DEFAULT NULL COMMENT 'Store name (e.g., "MOMOYO")',
+      address TEXT DEFAULT NULL COMMENT 'Store address',
+      phone_number VARCHAR(50) DEFAULT NULL COMMENT 'Contact phone number',
+      contact_phone VARCHAR(50) DEFAULT NULL COMMENT 'Alternative contact phone (e.g., "silahkan hubungi: 0813-9888-8568")',
+      logo_base64 LONGTEXT DEFAULT NULL COMMENT 'Logo as base64 data URI',
+      footer_text TEXT DEFAULT NULL COMMENT 'Footer text on receipt',
+      partnership_contact VARCHAR(255) DEFAULT NULL COMMENT 'Partnership contact info',
+      is_active TINYINT(1) DEFAULT 1 COMMENT 'Whether these settings are active',
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      PRIMARY KEY (id),
+      UNIQUE KEY unique_receipt_settings_business (business_id),
+      KEY idx_receipt_settings_business (business_id),
+      KEY idx_receipt_settings_active (is_active),
+      CONSTRAINT fk_receipt_settings_business FOREIGN KEY (business_id) REFERENCES businesses(id) ON DELETE CASCADE
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`
     ];
     try {

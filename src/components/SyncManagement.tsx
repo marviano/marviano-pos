@@ -2185,7 +2185,7 @@ WHERE ${baseWhere};`;
         <AlertTriangle className="w-3.5 h-3.5" />
       </button>
 
-      <div className="flex-1 flex flex-col max-w-7xl mx-auto w-full px-6 py-6 overflow-y-auto">
+      <div className="flex-1 flex flex-col max-w-7xl mx-auto w-full px-6 pb-6 pt-6 overflow-y-auto">
         {/* Header */}
         <div className="mb-6">
           <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">

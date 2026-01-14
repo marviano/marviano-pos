@@ -1,5 +1,7 @@
 import { NextResponse, NextRequest } from 'next/server';
 import { queryVps } from '@/lib/db';
+import fs from 'fs';
+import path from 'path';
 
 export async function GET(request: NextRequest) {
   try {
@@ -229,6 +231,55 @@ export async function GET(request: NextRequest) {
       console.warn('⚠️ Failed to sync contacts:', error);
       syncResults.contacts = [];
       counts.contacts = 0;
+    }
+
+    // Sync Employees Position (must be before employees due to foreign key)
+    try {
+      console.log('🔄 [SYNC ROUTE] Fetching employees_position...');
+      const employeesPosition = await queryVps<unknown[]>(`
+        SELECT id, nama_jabatan, created_at, updated_at
+        FROM employees_position 
+        ORDER BY nama_jabatan ASC
+      `);
+      syncResults.employeesPosition = employeesPosition;
+      counts.employeesPosition = employeesPosition.length;
+      console.log(`✅ [SYNC ROUTE] Synced ${employeesPosition.length} employee positions`);
+      if (employeesPosition.length > 0) {
+        const first = employeesPosition[0] as Record<string, unknown>;
+        console.log(`   Sample: id=${first?.id}, nama_jabatan=${first?.nama_jabatan}`);
+      }
+    } catch (error: unknown) {
+      const errorMsg = error instanceof Error ? error.message : String(error);
+      console.error('❌ [SYNC ROUTE] Failed to sync employees_position:', errorMsg);
+      console.error('   Full error:', error);
+      syncResults.employeesPosition = [];
+      counts.employeesPosition = 0;
+    }
+
+    // Sync Employees
+    try {
+      console.log('🔄 [SYNC ROUTE] Fetching employees...');
+      const employees = await queryVps<unknown[]>(`
+        SELECT id, user_id, business_id, jabatan_id, no_ktp, phone, nama_karyawan,
+               jenis_kelamin, alamat, tanggal_lahir, tanggal_bekerja, pin, color,
+               created_at, updated_at
+        FROM employees 
+        ORDER BY nama_karyawan ASC
+      `);
+      syncResults.employees = employees;
+      counts.employees = employees.length;
+      console.log(`✅ [SYNC ROUTE] Synced ${employees.length} employees`);
+      if (employees.length > 0) {
+        const first = employees[0] as Record<string, unknown>;
+        console.log(`   Sample: id=${first?.id}, nama_karyawan=${first?.nama_karyawan}, color=${first?.color || 'NULL'}`);
+        console.log(`   Has color field: ${'color' in first}`);
+      }
+    } catch (error: unknown) {
+      const errorMsg = error instanceof Error ? error.message : String(error);
+      console.error('❌ [SYNC ROUTE] Failed to sync employees:', errorMsg);
+      console.error('   Full error:', error);
+      syncResults.employees = [];
+      counts.employees = 0;
     }
 
     // Sync Roles
@@ -629,12 +680,12 @@ export async function GET(request: NextRequest) {
     console.log(`🎉 Comprehensive sync completed: ${totalRecords} total records synced`);
 
     // #region agent log - server side
-    const fs3 = require('fs');
-    const path3 = require('path');
     try {
-      const logPath3 = path3.join(process.cwd(), '.cursor', 'debug.log');
-      fs3.appendFileSync(logPath3, JSON.stringify({location:'sync/route.ts:683',message:'Returning sync response',data:{allKeys:Object.keys(syncResults)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})+'\n');
-    } catch(e){}
+      const logPath3 = path.join(process.cwd(), '.cursor', 'debug.log');
+      fs.appendFileSync(logPath3, JSON.stringify({location:'sync/route.ts:683',message:'Returning sync response',data:{allKeys:Object.keys(syncResults)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})+'\n');
+    } catch {
+      // Silently ignore logging errors
+    }
     // #endregion
 
     return NextResponse.json({

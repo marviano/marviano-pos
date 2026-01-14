@@ -27,6 +27,7 @@ interface TransactionData {
   id: string; // UUID for transaction
   business_id: number;
   user_id: number;
+  waiter_id?: number | null;
   payment_method: 'cash' | 'debit' | 'qr' | 'ewallet' | 'cl' | 'voucher' | 'qpon' | 'gofood' | 'grabfood' | 'shopeefood' | 'tiktok';
   pickup_method: 'dine-in' | 'take-away';
   total_amount: number;
@@ -103,7 +104,8 @@ export async function POST(request: NextRequest) {
     INSERT INTO transactions (
       uuid_id,
       business_id, 
-      user_id, 
+      user_id,
+      waiter_id,
       payment_method_id, 
       pickup_method, 
       total_amount, 
@@ -125,11 +127,12 @@ export async function POST(request: NextRequest) {
       transaction_type,
       status,
       created_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `, [
         transactionData.id, // Use UUID from client
         transactionData.business_id,
         transactionData.user_id,
+        transactionData.waiter_id || null,
         paymentMethodId,
         transactionData.pickup_method,
         transactionData.total_amount,

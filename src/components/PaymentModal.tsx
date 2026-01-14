@@ -107,7 +107,10 @@ interface PaymentModalProps {
     tableName: string | null;
     roomName: string | null;
     customerName: string | null;
+    waiterName: string | null;
+    waiterColor: string | null;
   } | null;
+  waiterId?: number | null;
 }
 
 type PaymentMethod = 'cash' | 'debit' | 'qr' | 'ewallet' | 'cl' | 'voucher' | 'qpon' | 'gofood' | 'grabfood' | 'shopeefood' | 'tiktok';
@@ -123,6 +126,7 @@ export default function PaymentModal({
   isOnline = false,
   selectedOnlinePlatform = null,
   initialCustomerName = '',
+  waiterId = null,
   loadedTransactionInfo = null
 }: PaymentModalProps) {
   const { user } = useAuth();
@@ -625,6 +629,7 @@ export default function PaymentModal({
         id: transactionId,
         business_id: businessId,
         user_id: user?.id ? parseInt(user.id) : 1, // Get user ID from auth context
+        waiter_id: waiterId || null,
         payment_method: selectedPaymentMethod,
         pickup_method: finalPickupMethod,
         total_amount: orderTotal,
@@ -1389,6 +1394,7 @@ export default function PaymentModal({
 
               // Log to audit FIRST (before queueing) - System POS sync requires printer audit to exist
               // This ensures the audit is in local database before the transaction is queued
+              let auditLogSuccess = false;
               try {
                 const logResult = await window.electronAPI?.logPrinter2Print?.(transactionData.id, printer2Counter, 'manual', undefined, globalCounter);
                 if (isSuccessResponse(logResult) && !logResult.success) {
@@ -1397,6 +1403,7 @@ export default function PaymentModal({
                 } else if (!isSuccessResponse(logResult)) {
                   console.warn('⚠️ Failed to log Printer 2 audit: Invalid response', logResult);
                 } else {
+                  auditLogSuccess = true;
                   // Small delay to ensure database commit is complete before queueing
                   await new Promise(resolve => setTimeout(resolve, 100));
                 }
@@ -1405,24 +1412,24 @@ export default function PaymentModal({
                 console.warn('⚠️ Transaction saved but audit log failed - receiptize badge may not appear correctly');
               }
 
-              // DISABLED: system_pos database has been dropped on VPS, queueing is disabled
-              // Queue transaction for System POS sync AFTER audit is saved and committed
-              // This ensures the printer audit exists in local database when system-pos sync queries for it
-              // try {
-              //   const queueResult = await window.electronAPI?.queueTransactionForSystemPos?.(transactionData.id);
-              //   if (queueResult?.success) {
-              //     console.log(`✅ [SYSTEM POS] Queued transaction ${transactionData.id} for System POS sync`);
-              //   } else if (queueResult?.alreadySynced) {
-              //     console.log(`✅ [SYSTEM POS] Transaction ${transactionData.id} already synced to System POS`);
-              //   } else if (queueResult?.alreadyQueued) {
-              //     console.log(`⚠️ [SYSTEM POS] Transaction ${transactionData.id} already queued`);
-              //   } else {
-              //     console.warn(`⚠️ [SYSTEM POS] Failed to queue transaction ${transactionData.id}:`, queueResult?.error);
-              //   }
-              // } catch (queueError) {
-              //   console.error('❌ [SYSTEM POS] Error queueing transaction for System POS:', queueError);
-              //   // Don't fail the transaction if System POS queue fails
-              // }
+              // Insert transaction into system_pos database AFTER audit is saved and committed
+              // System POS database is on localhost MySQL for local transaction storage
+              // This ensures the printer audit exists in local database before insertion
+              if (auditLogSuccess) {
+                try {
+                  const insertResult = await window.electronAPI?.queueTransactionForSystemPos?.(transactionData.id);
+                  if (insertResult?.success) {
+                    console.log(`✅ [SYSTEM POS] Inserted transaction ${transactionData.id} into system_pos database`);
+                  } else if (insertResult?.alreadyQueued) {
+                    console.log(`✅ [SYSTEM POS] Transaction ${transactionData.id} already exists in system_pos`);
+                  } else {
+                    console.warn(`⚠️ [SYSTEM POS] Failed to insert transaction ${transactionData.id}:`, insertResult?.error);
+                  }
+                } catch (insertError) {
+                  console.error('❌ [SYSTEM POS] Error inserting transaction into system_pos:', insertError);
+                  // Don't fail the transaction if System POS insertion fails
+                }
+              }
 
               // Print after logging - loop for copies
               await new Promise(r => setTimeout(r, 500));

@@ -16,6 +16,7 @@ interface OrderItem {
   production_finished_at: string | null;
   table_number: string | null;
   room_name: string | null;
+  customer_name: string | null;
   created_at: string;
   customizations: Array<{
     customization_name: string;
@@ -180,6 +181,7 @@ export default function BaristaDisplay() {
           const tableNumber = tableInfo ? tableInfo.table_number : null;
           const roomId = tableInfo ? tableInfo.room_id : null;
           const roomName = roomId && roomsMap.has(roomId) ? roomsMap.get(roomId)! : null;
+          const customerName = typeof tx.customer_name === 'string' ? tx.customer_name : null;
 
           const itemId = typeof item.id === 'number' ? item.id : (typeof item.id === 'string' ? parseInt(item.id, 10) : 0);
           const itemCustomizations = itemId ? customizationsMap.get(itemId) || [] : [];
@@ -203,6 +205,7 @@ export default function BaristaDisplay() {
             production_finished_at: typeof item.production_finished_at === 'string' ? item.production_finished_at : (item.production_finished_at instanceof Date ? item.production_finished_at.toISOString() : null),
             table_number: tableNumber || null,
             room_name: roomName || null,
+            customer_name: customerName || null,
             created_at: (() => {
               const txCreatedAt = typeof tx.created_at === 'string' ? tx.created_at : (tx.created_at instanceof Date ? tx.created_at.toISOString() : null);
               const itemCreatedAt = typeof item.created_at === 'string' ? item.created_at : (item.created_at instanceof Date ? item.created_at.toISOString() : null);
@@ -739,57 +742,61 @@ export default function BaristaDisplay() {
         <div className="bg-blue-500 text-white px-6 py-4 flex-shrink-0">
           <h2 className="text-2xl font-bold">Barista - Pesanan Aktif</h2>
         </div>
-        <div className="flex-1 overflow-y-auto p-4">
+        <div className="flex-1 overflow-y-auto px-1 py-4">
           {activeOrders.length === 0 ? (
             <div className="text-center text-gray-500 mt-8">
               <p>Tidak ada pesanan aktif</p>
             </div>
           ) : (
-            <div className="space-y-3">
+            <div className="space-y-2">
               {activeOrders.map((item, index) => (
                 <div
                   key={`${item.uuid_id}-${index}`}
                   onDoubleClick={() => handleMarkFinished(item)}
-                  className="bg-white border-2 border-blue-300 rounded-lg p-4 cursor-pointer hover:border-blue-500 hover:shadow-md transition-all"
+                  className="bg-white border-2 border-blue-300 rounded-lg pl-3 pr-1 py-4 cursor-pointer hover:border-blue-500 hover:shadow-md transition-all flex relative"
+                  style={{ minHeight: '120px' }}
                 >
-                  <div className="flex justify-between items-start mb-2">
-                    <div className="flex-1">
-                      <div className="text-lg font-semibold text-gray-900">
-                        {item.total_quantity}x {item.product_name}
-                        {item.customizations && item.customizations.length > 0 && (
-                          <span className="text-blue-700 font-bold">
-                            {' '}
-                            {item.customizations.map((customization, idx) => (
-                              <span key={idx}>
-                                {customization.options.map((option, optIdx) => (
-                                  <span key={optIdx}>
-                                    +{option.option_name}
-                                    {optIdx < customization.options.length - 1 && ', '}
-                                  </span>
-                                ))}
-                                {idx < item.customizations.length - 1 && ', '}
-                              </span>
-                            ))}
-                          </span>
-                        )}
-                        {item.custom_note && (
-                          <span className="text-purple-700 font-bold">
-                            {' '}note: {item.custom_note}
-                          </span>
-                        )}
-                      </div>
-                    </div>
-                    <div className="ml-4">
-                      <div className="text-2xl font-mono font-bold text-blue-600">
-                        {item.timer}
-                      </div>
+                  <div className="flex-1">
+                    <div className="text-lg font-semibold text-gray-900">
+                      {item.total_quantity}x {item.product_name}
+                      {item.customizations && item.customizations.length > 0 && (
+                        <span className="text-blue-700 font-bold">
+                          {' '}
+                          {item.customizations.map((customization, idx) => (
+                            <span key={idx}>
+                              {customization.options.map((option, optIdx) => (
+                                <span key={optIdx}>
+                                  +{option.option_name}
+                                  {optIdx < customization.options.length - 1 && ', '}
+                                </span>
+                              ))}
+                              {idx < item.customizations.length - 1 && ', '}
+                            </span>
+                          ))}
+                        </span>
+                      )}
+                      {item.custom_note && (
+                        <span className="text-purple-700 font-bold">
+                          {' '}note: {item.custom_note}
+                        </span>
+                      )}
                     </div>
                   </div>
-                  {item.table_number && (
-                    <div className="text-xs text-gray-600 mt-2 font-semibold">
-                      {item.table_number}
+                  <div className="ml-0 pr-3 flex flex-col items-center justify-center" style={{ width: '150px', minHeight: '100%' }}>
+                    <div className="text-3xl font-mono font-bold text-blue-600">
+                      {item.timer}
                     </div>
-                  )}
+                    {item.customer_name && (
+                      <div className="text-xl text-gray-600 font-semibold text-center mt-2">
+                        {item.customer_name}
+                      </div>
+                    )}
+                    {item.table_number && (
+                      <div className="text-xl text-gray-600 font-semibold text-center mt-1">
+                        {item.table_number}
+                      </div>
+                    )}
+                  </div>
                 </div>
               ))}
             </div>
@@ -802,13 +809,13 @@ export default function BaristaDisplay() {
         <div className="bg-green-500 text-white px-6 py-4 flex-shrink-0">
           <h2 className="text-2xl font-bold">Barista - Pesanan Selesai</h2>
         </div>
-        <div className="flex-1 overflow-y-auto p-4">
+        <div className="flex-1 overflow-y-auto px-1 py-4">
           {finishedOrders.length === 0 ? (
             <div className="text-center text-gray-500 mt-8">
               <p>Tidak ada pesanan selesai</p>
             </div>
           ) : (
-            <div className="space-y-3">
+            <div className="space-y-2">
               {finishedOrders.map((item, index) => {
                 const duration = formatDuration(item.production_started_at, item.production_finished_at);
                 return (

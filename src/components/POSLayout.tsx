@@ -8,7 +8,6 @@ import SlideshowManager from './SlideshowManager';
 import TransactionList from './TransactionList';
 import PrinterSetup from './PrinterSetup';
 import SyncManagement from './SyncManagement';
-import ServerSettings from './ServerSettings';
 import GantiShift from './GantiShift';
 import Laporan from './Laporan';
 import GlobalSettings from './GlobalSettings';
@@ -16,12 +15,13 @@ import StartShiftModal from './StartShiftModal';
 import ActiveOrdersTab from './ActiveOrdersTab';
 import KitchenDisplay from './KitchenDisplay';
 import BaristaDisplay from './BaristaDisplay';
+import ReceiptTemplateSettings from './ReceiptTemplateSettings';
 import { mockMenuItems } from '@/data/mockData';
 import { fetchCategories, fetchProducts } from '@/lib/offlineDataFetcher';
 import { databaseHealthService } from '@/lib/databaseHealth';
 import { useAuth } from '@/hooks/useAuth';
 import { isSuperAdmin } from '@/lib/auth';
-import { ClipboardList, FilePlus } from 'lucide-react';
+import { ClipboardList, FilePlus, ChevronRight, Store, Globe } from 'lucide-react';
 
 type LocalCategory = {
   jenis: string;
@@ -85,6 +85,18 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
   const [internalActiveMenuItem, setInternalActiveMenuItem] = useState('Kasir');
   const activeMenuItem = externalActiveMenuItem ?? internalActiveMenuItem;
   
+  // Sidebar visibility state - auto-hide for Kitchen/Barista displays
+  const [sidebarVisible, setSidebarVisible] = useState(true);
+  
+  // Auto-hide sidebar when switching to Kitchen/Barista
+  useEffect(() => {
+    if (activeMenuItem === 'Kitchen' || activeMenuItem === 'Barista') {
+      setSidebarVisible(false);
+    } else {
+      setSidebarVisible(true);
+    }
+  }, [activeMenuItem]);
+  
   // Wrapper for setActiveMenuItem with unsaved changes check
   const setActiveMenuItemWithCheck = (item: string) => {
     // If trying to change page and there are unsaved changes, show confirmation
@@ -116,6 +128,8 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
     tableName: string | null;
     roomName: string | null;
     customerName: string | null;
+    waiterName: string | null;
+    waiterColor: string | null;
   } | null>(null);
   const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false);
   
@@ -369,11 +383,9 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
         // console.log('🔄 [STARTUP] Auto-syncing products and prices on app start...');
         const success = await databaseHealthService.forceSync();
         if (success) {
-          console.log('✅ [STARTUP] Products and prices synced successfully');
           // Trigger UI refresh to show new data
           window.dispatchEvent(new CustomEvent('dataSynced'));
         } else {
-          console.warn('⚠️ [STARTUP] Failed to sync products and prices (will use cached data)');
         }
       } catch (error) {
         console.error('❌ [STARTUP] Error syncing on startup:', error);
@@ -387,7 +399,6 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
   // Listen for data sync events to refresh categories and products
   useEffect(() => {
     const handleDataSynced = async () => {
-      console.log('🔄 Data synced event received, refreshing categories and products...');
       setIsLoadingCategories(true);
       setIsLoadingProducts(true);
 
@@ -758,6 +769,27 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
       setIsOnlineTab(false);
       setSelectedOnlinePlatform(null);
       
+      // Fetch waiter information if waiter_id exists
+      let waiterName: string | null = null;
+      let waiterColor: string | null = null;
+      const waiterId = typeof transaction.waiter_id === 'number' ? transaction.waiter_id : (typeof transaction.waiter_id === 'string' ? parseInt(transaction.waiter_id, 10) : null);
+      if (waiterId && electronAPI.localDbGetEmployees) {
+        try {
+          const allEmployees = await electronAPI.localDbGetEmployees();
+          const employeesArray = Array.isArray(allEmployees) ? allEmployees : [];
+          const waiter = employeesArray.find((emp: { id?: number | string; nama_karyawan?: string; color?: string | null }) => {
+            const empId = typeof emp.id === 'number' ? emp.id : (typeof emp.id === 'string' ? parseInt(emp.id, 10) : null);
+            return empId === waiterId;
+          });
+          if (waiter && typeof waiter.nama_karyawan === 'string') {
+            waiterName = waiter.nama_karyawan;
+            waiterColor = typeof waiter.color === 'string' && waiter.color ? waiter.color : null;
+          }
+        } catch (error) {
+          console.warn('Failed to fetch waiter information:', error);
+        }
+      }
+
       // Set loaded transaction info for display
       const customerName = typeof transaction.customer_name === 'string' ? transaction.customer_name : null;
       setLoadedTransactionInfo({
@@ -765,6 +797,8 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
         tableName,
         roomName,
         customerName,
+        waiterName,
+        waiterColor,
       });
 
       // Switch to Kasir page if not already there
@@ -788,9 +822,9 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
         return (
           <div className="flex-1 flex flex-col h-full min-h-0">
             {/* Kasir Tabs - NEW STRUCTURE */}
-            <div className="bg-white border-b border-gray-200 px-4 py-2 relative">
-              <div className="flex space-x-2 flex-wrap items-center justify-between">
-                <div className="flex space-x-2 flex-wrap items-center">
+            <div className="bg-white border-b border-gray-200 px-4 py-3 relative">
+              <div className="flex space-x-3 flex-wrap items-center justify-between">
+                <div className="flex space-x-3 flex-wrap items-center">
                   {/* Offline Tab */}
                   <button
                     onClick={() => {
@@ -799,25 +833,37 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
                       setSelectedOnlinePlatform(null);
                       setShowActiveOrders(false);
                     }}
-                    className={`px-6 py-2 rounded-lg font-medium transition-colors ${!isOnlineTab && !showActiveOrders
-                      ? 'bg-blue-600 text-white'
-                      : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
-                      }`}
+                    className={`group relative px-6 py-2.5 rounded-xl font-semibold text-sm transition-all duration-300 flex items-center gap-2.5 ${
+                      !isOnlineTab && !showActiveOrders
+                        ? 'bg-gradient-to-r from-indigo-500 to-indigo-600 text-white shadow-lg hover:shadow-xl hover:scale-105 active:scale-100 border border-indigo-400/20'
+                        : 'bg-white text-gray-700 hover:bg-gray-50 shadow-md hover:shadow-lg hover:scale-105 active:scale-100 border-2 border-indigo-500/30 hover:border-indigo-500/50'
+                    }`}
                   >
-                    🏪 Offline
+                    <Store className={`w-4 h-4 transition-transform duration-300 ${!isOnlineTab && !showActiveOrders ? 'group-hover:scale-110' : 'group-hover:scale-110'}`} />
+                    <span>Offline</span>
+                    {!isOnlineTab && !showActiveOrders && (
+                      <div className="absolute inset-0 rounded-xl bg-white/0 group-hover:bg-white/10 transition-colors duration-300"></div>
+                    )}
                   </button>
 
                   {/* Online Section with Platform Buttons - Disabled in "lihat" mode */}
-                  <div className={`flex items-center rounded-lg overflow-hidden ${isOnlineTab && !showActiveOrders && !loadedTransactionInfo ? 'bg-blue-600' : 'bg-gray-100'
+                  <div className={`flex items-center rounded-xl overflow-hidden shadow-md transition-all duration-300 ${
+                    isOnlineTab && !showActiveOrders && !loadedTransactionInfo 
+                      ? 'bg-gradient-to-r from-cyan-500 to-cyan-600 border border-cyan-400/20' 
+                      : 'bg-white border-2 border-cyan-500/30'
                     } ${loadedTransactionInfo ? 'opacity-50 cursor-not-allowed' : ''}`}>
                     <div
-                      className={`px-4 py-2 font-medium ${isOnlineTab && !showActiveOrders && !loadedTransactionInfo ? 'text-white' : 'text-gray-700'
+                      className={`px-4 py-2.5 font-semibold text-sm flex items-center gap-2 transition-all duration-300 ${
+                        isOnlineTab && !showActiveOrders && !loadedTransactionInfo 
+                          ? 'text-white' 
+                          : 'text-gray-700'
                         } ${loadedTransactionInfo ? 'cursor-not-allowed' : 'cursor-default'}`}
                     >
-                      🌐 Online
+                      <Globe className="w-4 h-4" />
+                      <span>Online</span>
                     </div>
 
-                    <div className="flex h-full">
+                    <div className="flex h-full border-l border-cyan-400/20">
                       <button
                         onClick={() => {
                           if (loadedTransactionInfo) return; // Disabled in lihat mode
@@ -827,12 +873,18 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
                           setShowActiveOrders(false);
                         }}
                         disabled={!!loadedTransactionInfo}
-                        className={`px-3 py-1 text-sm font-medium transition-colors h-full ${selectedOnlinePlatform === 'gofood' && isOnlineTab && !showActiveOrders && !loadedTransactionInfo
-                          ? 'bg-green-600 text-white'
-                          : isOnlineTab && !showActiveOrders && !loadedTransactionInfo ? 'text-white hover:bg-blue-700' : 'text-gray-700 hover:bg-gray-200'
-                          } ${loadedTransactionInfo ? 'opacity-50 cursor-not-allowed' : ''}`}
+                        className={`group relative px-4 py-2.5 text-sm font-semibold transition-all duration-300 h-full ${
+                          selectedOnlinePlatform === 'gofood' && isOnlineTab && !showActiveOrders && !loadedTransactionInfo
+                            ? 'bg-gradient-to-r from-green-500 to-green-600 text-white shadow-inner'
+                            : isOnlineTab && !showActiveOrders && !loadedTransactionInfo 
+                              ? 'text-white hover:bg-cyan-700/50' 
+                              : 'text-gray-700 hover:bg-gray-100'
+                          } ${loadedTransactionInfo ? 'opacity-50 cursor-not-allowed' : 'hover:scale-105'}`}
                       >
                         GoFood
+                        {selectedOnlinePlatform === 'gofood' && isOnlineTab && !showActiveOrders && !loadedTransactionInfo && (
+                          <div className="absolute inset-0 bg-white/0 group-hover:bg-white/10 transition-colors duration-300"></div>
+                        )}
                       </button>
                       <button
                         onClick={() => {
@@ -843,12 +895,18 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
                           setShowActiveOrders(false);
                         }}
                         disabled={!!loadedTransactionInfo}
-                        className={`px-3 py-1 text-sm font-medium transition-colors h-full ${selectedOnlinePlatform === 'grabfood' && isOnlineTab && !showActiveOrders && !loadedTransactionInfo
-                          ? 'bg-green-600 text-white'
-                          : isOnlineTab && !showActiveOrders && !loadedTransactionInfo ? 'text-white hover:bg-blue-700' : 'text-gray-700 hover:bg-gray-200'
-                          } ${loadedTransactionInfo ? 'opacity-50 cursor-not-allowed' : ''}`}
+                        className={`group relative px-4 py-2.5 text-sm font-semibold transition-all duration-300 h-full ${
+                          selectedOnlinePlatform === 'grabfood' && isOnlineTab && !showActiveOrders && !loadedTransactionInfo
+                            ? 'bg-gradient-to-r from-green-500 to-green-600 text-white shadow-inner'
+                            : isOnlineTab && !showActiveOrders && !loadedTransactionInfo 
+                              ? 'text-white hover:bg-cyan-700/50' 
+                              : 'text-gray-700 hover:bg-gray-100'
+                          } ${loadedTransactionInfo ? 'opacity-50 cursor-not-allowed' : 'hover:scale-105'}`}
                       >
                         Grab
+                        {selectedOnlinePlatform === 'grabfood' && isOnlineTab && !showActiveOrders && !loadedTransactionInfo && (
+                          <div className="absolute inset-0 bg-white/0 group-hover:bg-white/10 transition-colors duration-300"></div>
+                        )}
                       </button>
                       <button
                         onClick={() => {
@@ -859,12 +917,18 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
                           setShowActiveOrders(false);
                         }}
                         disabled={!!loadedTransactionInfo}
-                        className={`px-3 py-1 text-sm font-medium transition-colors h-full ${selectedOnlinePlatform === 'shopeefood' && isOnlineTab && !showActiveOrders && !loadedTransactionInfo
-                          ? 'bg-green-600 text-white'
-                          : isOnlineTab && !showActiveOrders && !loadedTransactionInfo ? 'text-white hover:bg-blue-700' : 'text-gray-700 hover:bg-gray-200'
-                          } ${loadedTransactionInfo ? 'opacity-50 cursor-not-allowed' : ''}`}
+                        className={`group relative px-4 py-2.5 text-sm font-semibold transition-all duration-300 h-full ${
+                          selectedOnlinePlatform === 'shopeefood' && isOnlineTab && !showActiveOrders && !loadedTransactionInfo
+                            ? 'bg-gradient-to-r from-green-500 to-green-600 text-white shadow-inner'
+                            : isOnlineTab && !showActiveOrders && !loadedTransactionInfo 
+                              ? 'text-white hover:bg-cyan-700/50' 
+                              : 'text-gray-700 hover:bg-gray-100'
+                          } ${loadedTransactionInfo ? 'opacity-50 cursor-not-allowed' : 'hover:scale-105'}`}
                       >
                         Shopee
+                        {selectedOnlinePlatform === 'shopeefood' && isOnlineTab && !showActiveOrders && !loadedTransactionInfo && (
+                          <div className="absolute inset-0 bg-white/0 group-hover:bg-white/10 transition-colors duration-300"></div>
+                        )}
                       </button>
                       <button
                         onClick={() => {
@@ -875,12 +939,18 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
                           setShowActiveOrders(false);
                         }}
                         disabled={!!loadedTransactionInfo}
-                        className={`px-3 py-1 text-sm font-medium transition-colors h-full ${selectedOnlinePlatform === 'qpon' && isOnlineTab && !showActiveOrders && !loadedTransactionInfo
-                          ? 'bg-green-600 text-white'
-                          : isOnlineTab && !showActiveOrders && !loadedTransactionInfo ? 'text-white hover:bg-blue-700' : 'text-gray-700 hover:bg-gray-200'
-                          } ${loadedTransactionInfo ? 'opacity-50 cursor-not-allowed' : ''}`}
+                        className={`group relative px-4 py-2.5 text-sm font-semibold transition-all duration-300 h-full ${
+                          selectedOnlinePlatform === 'qpon' && isOnlineTab && !showActiveOrders && !loadedTransactionInfo
+                            ? 'bg-gradient-to-r from-green-500 to-green-600 text-white shadow-inner'
+                            : isOnlineTab && !showActiveOrders && !loadedTransactionInfo 
+                              ? 'text-white hover:bg-cyan-700/50' 
+                              : 'text-gray-700 hover:bg-gray-100'
+                          } ${loadedTransactionInfo ? 'opacity-50 cursor-not-allowed' : 'hover:scale-105'}`}
                       >
                         Qpon
+                        {selectedOnlinePlatform === 'qpon' && isOnlineTab && !showActiveOrders && !loadedTransactionInfo && (
+                          <div className="absolute inset-0 bg-white/0 group-hover:bg-white/10 transition-colors duration-300"></div>
+                        )}
                       </button>
                       <button
                         onClick={() => {
@@ -891,26 +961,33 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
                           setShowActiveOrders(false);
                         }}
                         disabled={!!loadedTransactionInfo}
-                        className={`px-3 py-1 text-sm font-medium transition-colors h-full rounded-r-lg ${selectedOnlinePlatform === 'tiktok' && isOnlineTab && !showActiveOrders && !loadedTransactionInfo
-                          ? 'bg-green-600 text-white'
-                          : isOnlineTab && !showActiveOrders && !loadedTransactionInfo ? 'text-white hover:bg-blue-700' : 'text-gray-700 hover:bg-gray-200'
-                          } ${loadedTransactionInfo ? 'opacity-50 cursor-not-allowed' : ''}`}
+                        className={`group relative px-4 py-2.5 text-sm font-semibold transition-all duration-300 h-full rounded-r-xl ${
+                          selectedOnlinePlatform === 'tiktok' && isOnlineTab && !showActiveOrders && !loadedTransactionInfo
+                            ? 'bg-gradient-to-r from-green-500 to-green-600 text-white shadow-inner'
+                            : isOnlineTab && !showActiveOrders && !loadedTransactionInfo 
+                              ? 'text-white hover:bg-cyan-700/50' 
+                              : 'text-gray-700 hover:bg-gray-100'
+                          } ${loadedTransactionInfo ? 'opacity-50 cursor-not-allowed' : 'hover:scale-105'}`}
                       >
                         TikTok
+                        {selectedOnlinePlatform === 'tiktok' && isOnlineTab && !showActiveOrders && !loadedTransactionInfo && (
+                          <div className="absolute inset-0 rounded-r-xl bg-white/0 group-hover:bg-white/10 transition-colors duration-300"></div>
+                        )}
                       </button>
                     </div>
                   </div>
                 </div>
 
                 {/* New and Active Orders Buttons - Right Side */}
-                <div className="flex items-center gap-2">
+                <div className="flex items-center gap-3">
                   {/* New Button */}
                   <button
                     onClick={clearAllCarts}
-                    className="px-6 py-2 rounded-lg font-medium transition-colors border-2 border-blue-500 bg-gray-100 text-gray-700 hover:bg-gray-200 flex items-center gap-2"
+                    className="group relative px-6 py-2.5 rounded-xl font-semibold text-sm transition-all duration-300 flex items-center gap-2.5 bg-gradient-to-r from-blue-500 to-blue-600 text-white hover:from-blue-600 hover:to-blue-700 shadow-lg hover:shadow-xl hover:scale-105 active:scale-100 border border-blue-400/20"
                   >
-                    <FilePlus className="w-4 h-4" />
-                    New
+                    <FilePlus className="w-4 h-4 transition-transform duration-300 group-hover:rotate-90" />
+                    <span>New</span>
+                    <div className="absolute inset-0 rounded-xl bg-white/0 group-hover:bg-white/10 transition-colors duration-300"></div>
                   </button>
 
                   {/* Active Orders Tab Button */}
@@ -926,17 +1003,25 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
                         setSelectedOnlinePlatform(null);
                       }
                     }}
-                    className={`px-6 py-2 rounded-lg font-medium transition-colors relative border-2 border-green-500 ${showActiveOrders
-                      ? 'bg-blue-600 text-white'
-                      : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
-                      } flex items-center gap-2`}
+                    className={`group relative px-6 py-2.5 rounded-xl font-semibold text-sm transition-all duration-300 flex items-center gap-2.5 ${
+                      showActiveOrders
+                        ? 'bg-gradient-to-r from-emerald-500 to-emerald-600 text-white shadow-lg hover:shadow-xl hover:scale-105 active:scale-100 border border-emerald-400/20'
+                        : 'bg-white text-gray-700 hover:bg-gray-50 shadow-md hover:shadow-lg hover:scale-105 active:scale-100 border-2 border-emerald-500/30 hover:border-emerald-500/50'
+                    }`}
                   >
-                    <ClipboardList className="w-4 h-4" />
-                    Active Orders
+                    <ClipboardList className={`w-4 h-4 transition-transform duration-300 ${showActiveOrders ? 'group-hover:scale-110' : 'group-hover:scale-110'}`} />
+                    <span>Active Orders</span>
                     {pendingOrdersCount > 0 && (
-                      <span className="ml-1 inline-flex items-center justify-center px-2 py-1 text-xs font-bold leading-none text-white bg-red-600 rounded-full">
+                      <span className={`ml-1 inline-flex items-center justify-center min-w-[22px] h-5 px-2 text-xs font-bold leading-none rounded-full transition-all duration-300 ${
+                        showActiveOrders 
+                          ? 'text-emerald-600 bg-white shadow-sm' 
+                          : 'text-white bg-gradient-to-r from-red-500 to-red-600 shadow-md'
+                      }`}>
                         {pendingOrdersCount > 99 ? '99+' : pendingOrdersCount}
                       </span>
+                    )}
+                    {showActiveOrders && (
+                      <div className="absolute inset-0 rounded-xl bg-white/0 group-hover:bg-white/10 transition-colors duration-300"></div>
                     )}
                   </button>
                 </div>
@@ -990,7 +1075,7 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
         );
 
       case 'Daftar Transaksi':
-        return <TransactionList businessId={businessId} />;
+        return <TransactionList businessId={businessId} onLoadTransaction={loadTransactionIntoCart} />;
 
       case 'Ganti Shift':
         return <GantiShift />;
@@ -998,14 +1083,14 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
       case 'Laporan':
         return <Laporan />;
 
-      case 'Setelan':
+      case 'Settings':
         if (!canAccessSync && !canAccessPrinter) {
           return (
             <div className="flex-1 flex items-center justify-center">
               <div className="text-center space-y-2">
                 <h2 className="text-lg font-semibold text-gray-700">Akses Ditolak</h2>
                 <p className="text-gray-500 text-sm">
-                  Anda tidak memiliki izin untuk membuka menu Setelan.
+                  Anda tidak memiliki izin untuk membuka menu Settings.
                 </p>
               </div>
             </div>
@@ -1014,7 +1099,7 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
         return (
           <div className="flex-1 flex flex-col h-full overflow-y-auto overflow-x-hidden">
             {/* Settings Tabs */}
-            <div className="border-b border-gray-200 mb-6 flex-shrink-0 bg-white">
+            <div className="border-b border-gray-200 flex-shrink-0 bg-white">
               <nav className="-mb-px flex space-x-8 mt-4 px-6">
                 {canAccessSync && (
                   <button
@@ -1048,13 +1133,13 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
                   </button>
                 )}
                 <button
-                  onClick={() => setActiveSettingsTab('server')}
-                  className={`py-2 px-1 border-b-2 font-semibold text-lg ${activeSettingsTab === 'server'
+                  onClick={() => setActiveSettingsTab('receipt-template')}
+                  className={`py-2 px-1 border-b-2 font-semibold text-lg ${activeSettingsTab === 'receipt-template'
                     ? 'border-blue-500 text-blue-600'
                     : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
                     }`}
                 >
-                  Server
+                  Template Struk
                 </button>
               </nav>
             </div>
@@ -1064,7 +1149,7 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
               {activeSettingsTab === 'sync' && canAccessSync && <SyncManagement />}
               {activeSettingsTab === 'slideshow' && <SlideshowManager />}
               {activeSettingsTab === 'printers' && canAccessPrinter && <PrinterSetup />}
-              {activeSettingsTab === 'server' && <ServerSettings />}
+              {activeSettingsTab === 'receipt-template' && <ReceiptTemplateSettings />}
             </div>
           </div>
         );
@@ -1100,12 +1185,27 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
 
   return (
     <div className="flex flex-1 h-full min-h-0 bg-gray-100 overflow-hidden">
-      {/* Left Sidebar - Always accessible */}
-      <LeftSidebar
-        menuItems={mockMenuItems}
-        activeMenuItem={activeMenuItem}
-        onMenuItemClick={setActiveMenuItemWithCheck}
-      />
+      {/* Left Sidebar - Conditionally rendered */}
+      {sidebarVisible && (
+        <LeftSidebar
+          menuItems={mockMenuItems}
+          activeMenuItem={activeMenuItem}
+          onMenuItemClick={setActiveMenuItemWithCheck}
+          onToggleSidebar={() => setSidebarVisible(!sidebarVisible)}
+          isKitchenOrBarista={activeMenuItem === 'Kitchen' || activeMenuItem === 'Barista'}
+        />
+      )}
+
+      {/* Toggle button when sidebar is hidden (for Kitchen/Barista) */}
+      {!sidebarVisible && (activeMenuItem === 'Kitchen' || activeMenuItem === 'Barista') && (
+        <button
+          onClick={() => setSidebarVisible(true)}
+          className="absolute left-0 bottom-6 z-50 bg-blue-800 text-white p-2 rounded-r-lg hover:bg-blue-900 transition-colors"
+          title="Show Sidebar"
+        >
+          <ChevronRight className="w-5 h-5" />
+        </button>
+      )}
 
       {/* Main Content Area - Blurred when shift modal is shown on Kasir page */}
       <div className={`flex-1 relative ${showStartShiftModal && activeMenuItem === 'Kasir' ? 'blur-sm pointer-events-none' : ''}`}>

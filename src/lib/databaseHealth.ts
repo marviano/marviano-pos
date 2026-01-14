@@ -7,7 +7,7 @@
  * Use SyncManagement component for full bidirectional sync with transaction upload.
  */
 
-import { getApiUrl } from '@/lib/api';
+import { getApiUrl, cleanUrl } from '@/lib/api';
 
 type UnknownRecord = Record<string, unknown>;
 
@@ -99,18 +99,22 @@ class DatabaseHealthService {
     const health = await this.checkDatabaseHealth();
 
     if (!health.needsSync) {
-      console.log('✅ [DB HEALTH] Database is healthy, no sync needed');
       return true;
     }
 
-    console.log('🔄 [DB HEALTH] Database needs sync, performing initial sync...');
 
     try {
       // Trigger comprehensive sync
-      const response = await fetch(getApiUrl('/api/sync'));
+      const syncUrl = cleanUrl(getApiUrl('/api/sync'));
+      const response = await fetch(syncUrl);
       if (response.ok) {
+        // Check if response is actually JSON before parsing
+        const contentType = response.headers.get('content-type');
+        if (!contentType || !contentType.includes('application/json')) {
+          const text = await response.text();
+          throw new Error(`Server returned non-JSON response (${contentType}). Response: ${text.substring(0, 200)}`);
+        }
         await response.json();
-        console.log('✅ [DB HEALTH] Initial sync completed');
 
         // Verify sync was successful
         const newHealth = await this.checkDatabaseHealth();
@@ -156,8 +160,20 @@ class DatabaseHealthService {
     // console.log('🔄 [DB HEALTH] Force syncing master data (transactions skipped for safety)...');
 
     try {
-      const response = await fetch(getApiUrl('/api/sync'));
+      const syncUrl = cleanUrl(getApiUrl('/api/sync'));
+      const response = await fetch(syncUrl);
+      
+      // Handle redirects explicitly
+      if (response.type === 'opaqueredirect' || (response.status >= 300 && response.status < 400)) {
+        throw new Error(`Server redirected from ${syncUrl} to ${response.url || 'unknown'}. The API endpoint may not exist on this server.`);
+      }
       if (response.ok) {
+        // Check if response is actually JSON before parsing
+        const contentType = response.headers.get('content-type');
+        if (!contentType || !contentType.includes('application/json')) {
+          const text = await response.text();
+          throw new Error(`Server returned non-JSON response (${contentType}). Response: ${text.substring(0, 200)}`);
+        }
         const jsonData = await response.json();
         const data = jsonData.data || jsonData;// Save to local database
         const electronAPI = typeof window !== 'undefined' ? (window as { electronAPI?: UnknownRecord }).electronAPI : undefined;
@@ -165,17 +181,14 @@ class DatabaseHealthService {
           // 1. CATEGORIES FIRST (dependencies)
           if (data.category1 && data.category1.length > 0) {
             await (electronAPI.localDbUpsertCategory1 as (rows: unknown[]) => Promise<{ success: boolean }>)(data.category1);
-            console.log(`✅ ${data.category1.length} category1 synced to local database`);
           }
 
           if (data.category2 && data.category2.length > 0) {
             // Get junction table data (REQUIRED - junction table only, no business_id column)
             const junctionTableData = (data.category2Businesses as Array<{ category2_id: number; business_id: number }> | undefined) || undefined;
             if (!junctionTableData || junctionTableData.length === 0) {
-              console.warn(`⚠️ [DB HEALTH] No junction table data provided for category2 - skipping sync`);
             } else {
               await (electronAPI.localDbUpsertCategory2 as (rows: unknown[], junctionData?: Array<{ category2_id: number; business_id: number }>) => Promise<{ success: boolean }>)(data.category2, junctionTableData);
-              console.log(`✅ ${data.category2.length} category2 synced to local database with ${junctionTableData.length} business relationships`);
             }
           }
 
@@ -190,123 +203,97 @@ class DatabaseHealthService {
 
             if (formattedCategories.length > 0) {
               await (electronAPI.localDbUpsertCategories as (rows: unknown[]) => Promise<{ success: boolean }>)(formattedCategories);
-              console.log(`✅ ${formattedCategories.length} categories synced to local database`);
             }
           }
 
           // 2. CUSTOMIZATION TYPES AND OPTIONS (dependencies)
           if (electronAPI.localDbUpsertCustomizationTypes && data.customizationTypes && data.customizationTypes.length > 0) {
             await (electronAPI.localDbUpsertCustomizationTypes as (rows: unknown[]) => Promise<{ success: boolean }>)(data.customizationTypes);
-            console.log(`✅ ${data.customizationTypes.length} customization types synced to local database`);
           }
 
           if (electronAPI.localDbUpsertCustomizationOptions && data.customizationOptions && data.customizationOptions.length > 0) {
             await (electronAPI.localDbUpsertCustomizationOptions as (rows: unknown[]) => Promise<{ success: boolean }>)(data.customizationOptions);
-            console.log(`✅ ${data.customizationOptions.length} customization options synced to local database`);
           }
 
           // 3. PRODUCTS (depends on categories and customization types)
           if (Array.isArray(data.products) && data.products.length > 0) {
             await (electronAPI.localDbUpsertProducts as (rows: unknown[]) => Promise<{ success: boolean }>)(data.products);
-            console.log(`✅ ${data.products.length} products synced to local database`);
           }
 
           // 3.5. PRODUCT-BUSINESSES JUNCTION TABLE (REQUIRED for product filtering)
           if (electronAPI.localDbUpsertProductBusinesses && Array.isArray(data.productBusinesses) && data.productBusinesses.length > 0) {
             await (electronAPI.localDbUpsertProductBusinesses as (rows: Array<{ product_id: number; business_id: number }>) => Promise<{ success: boolean }>)(data.productBusinesses);
-            console.log(`✅ ${data.productBusinesses.length} product-business relationships synced to local database`);
           } else if (Array.isArray(data.productBusinesses) && data.productBusinesses.length === 0) {
-            console.warn('⚠️ [DB HEALTH] product_businesses data is empty - products may not appear correctly');
+            // product_businesses data is empty
           } else if (!data.productBusinesses) {
-            console.warn('⚠️ [DB HEALTH] product_businesses data is missing from API response - products may not appear correctly');
+            // product_businesses data is missing from API response
           }
 
           // 4. PRODUCT-RELATED DATA
           if (electronAPI.localDbUpsertProductCustomizations && data.productCustomizations && data.productCustomizations.length > 0) {
             await (electronAPI.localDbUpsertProductCustomizations as (rows: unknown[]) => Promise<{ success: boolean }>)(data.productCustomizations);
-            console.log(`✅ ${data.productCustomizations.length} product customizations synced to local database`);
           }
 
           if (Array.isArray(data.bundleItems) && data.bundleItems.length > 0) {
             await (electronAPI.localDbUpsertBundleItems as (rows: unknown[]) => Promise<{ success: boolean }>)(data.bundleItems);
-            console.log(`✅ ${data.bundleItems.length} bundle items synced to local database`);
           }
 
           // 5. SKIP TRANSACTION DATA (SAFETY)
           // Transaction data is NOT downloaded to prevent overwriting local records
           // Reason: POS device is the source of truth for transaction data
           // Tables skipped: transactions, transaction_items, shifts, refunds, printer logs
-          console.log('⚠️ [DB HEALTH] Skipping transaction data download (upload-only for safety)');
 
           // 6. PAYMENT AND ORGANIZATION DATA
           if (data.paymentMethods && data.paymentMethods.length > 0) {
             await (electronAPI.localDbUpsertPaymentMethods as (rows: unknown[]) => Promise<{ success: boolean }>)(data.paymentMethods);
-            console.log(`✅ ${data.paymentMethods.length} payment methods synced to local database`);
           }
 
           if (data.banks && data.banks.length > 0) {
             await (electronAPI.localDbUpsertBanks as (rows: unknown[]) => Promise<{ success: boolean }>)(data.banks);
-            console.log(`✅ ${data.banks.length} banks synced to local database`);
           }
 
           if (data.organizations && data.organizations.length > 0) {
             await (electronAPI.localDbUpsertOrganizations as (rows: unknown[]) => Promise<{ success: boolean }>)(data.organizations);
-            console.log(`✅ ${data.organizations.length} organizations synced to local database`);
           }
 
           if (data.managementGroups && data.managementGroups.length > 0) {
             await (electronAPI.localDbUpsertManagementGroups as (rows: unknown[]) => Promise<{ success: boolean }>)(data.managementGroups);
-            console.log(`✅ ${data.managementGroups.length} management groups synced to local database`);
           }
 
           if (data.clAccounts && data.clAccounts.length > 0) {
             await (electronAPI.localDbUpsertClAccounts as (rows: unknown[]) => Promise<{ success: boolean }>)(data.clAccounts);
-            console.log(`✅ ${data.clAccounts.length} CL accounts synced to local database`);
           }
 
           // 7. RESTAURANT TABLE LAYOUT (rooms first, then tables due to foreign key)
           if (electronAPI.localDbUpsertRestaurantRooms) {
             if (data.restaurantRooms && Array.isArray(data.restaurantRooms) && data.restaurantRooms.length > 0) {
               const result = await (electronAPI.localDbUpsertRestaurantRooms as (rows: unknown[]) => Promise<{ success: boolean }>)(data.restaurantRooms);
-              console.log(`✅ ${data.restaurantRooms.length} restaurant rooms synced to local database`);
-            } else {
-              console.log(`ℹ️ [DB HEALTH] No restaurant rooms to sync (received: ${data.restaurantRooms ? (Array.isArray(data.restaurantRooms) ? data.restaurantRooms.length : 'not array') : 'undefined'})`);
+              // Restaurant rooms synced
             }
-          } else {
-            console.warn('⚠️ [DB HEALTH] localDbUpsertRestaurantRooms not available in Electron API');
           }
 
           if (electronAPI.localDbUpsertRestaurantTables) {
             if (data.restaurantTables && Array.isArray(data.restaurantTables) && data.restaurantTables.length > 0) {
               const result = await (electronAPI.localDbUpsertRestaurantTables as (rows: unknown[]) => Promise<{ success: boolean }>)(data.restaurantTables);
-              console.log(`✅ ${data.restaurantTables.length} restaurant tables synced to local database`);
-            } else {
-              console.log(`ℹ️ [DB HEALTH] No restaurant tables to sync (received: ${data.restaurantTables ? (Array.isArray(data.restaurantTables) ? data.restaurantTables.length : 'not array') : 'undefined'})`);
+              // Restaurant tables synced
             }
-          } else {
-            console.warn('⚠️ [DB HEALTH] localDbUpsertRestaurantTables not available in Electron API');
           }
 
           if (electronAPI.localDbUpsertRestaurantLayoutElements) {
             if (data.restaurantLayoutElements && Array.isArray(data.restaurantLayoutElements) && data.restaurantLayoutElements.length > 0) {
               await (electronAPI.localDbUpsertRestaurantLayoutElements as (rows: unknown[]) => Promise<{ success: boolean }>)(data.restaurantLayoutElements);
-              console.log(`✅ ${data.restaurantLayoutElements.length} restaurant layout elements synced to local database`);
-            } else {
-              console.log(`ℹ️ [DB HEALTH] No restaurant layout elements to sync (received: ${data.restaurantLayoutElements ? (Array.isArray(data.restaurantLayoutElements) ? data.restaurantLayoutElements.length : 'not array') : 'undefined'})`);
+              // Restaurant layout elements synced
             }
-          } else {
-            console.warn('⚠️ [DB HEALTH] localDbUpsertRestaurantLayoutElements not available in Electron API');
           }
 
         }
 
-        console.log('✅ [DB HEALTH] Master data sync completed (transactions protected)');
         return true;
       } else {
         throw new Error(`Force sync failed: ${response.status}`);
       }
     } catch (error) {
-      console.error('❌ [DB HEALTH] Force sync failed:', error);
+      console.error('Force sync failed:', error);
       return false;
     }
   }

@@ -234,7 +234,7 @@ export default function SlideshowManager() {
   };
 
   return (
-    <div className="bg-white rounded-lg border border-gray-200 p-6">
+    <div className="bg-white rounded-lg border border-gray-200 px-6 pb-6 pt-6">
       <div className="flex justify-between items-center mb-4">
         <h3 className="text-lg font-semibold text-black">Slideshow Manager</h3>
         <div className="flex space-x-2">

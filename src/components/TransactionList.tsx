@@ -1,15 +1,12 @@
 'use client';
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { useRouter } from 'next/navigation';
 import { Clock, CreditCard, RefreshCw, Search, Filter, ChevronUp, ChevronDown, Wifi, WifiOff } from 'lucide-react';
 import TransactionDetailModal, { TransactionDetail, TransactionRefund } from './TransactionDetailModal';
-import { offlineSyncService } from '@/lib/offlineSync';
 import { useAuth } from '@/hooks/useAuth';
 import { hasPermission } from '@/lib/permissions';
 import { isSuperAdmin } from '@/lib/auth';
-
-import { getApiUrl } from '@/lib/api';
 
 // Format price for display (hoisted to module scope so it can be reused)
 const formatPrice = (price: number | string) => {
@@ -27,6 +24,7 @@ interface Transaction {
   id: string; // Changed to string for UUID
   business_id: number;
   user_id: number;
+  waiter_id?: number | null;
   shift_uuid?: string | null; // Added shift_uuid
   payment_method: 'cash' | 'debit' | 'qr' | 'ewallet' | 'cl' | 'voucher' | 'qpon' | 'gofood' | 'grabfood' | 'shopeefood' | 'tiktok';
   payment_method_id?: number; // Source of truth - foreign key to payment_methods table
@@ -55,6 +53,7 @@ interface Transaction {
 
 interface TransactionListProps {
   businessId?: number;
+  onLoadTransaction?: (transactionId: string) => void;
 }
 
 // Types for electron API responses
@@ -62,6 +61,7 @@ interface ElectronTransaction {
   id: string;
   business_id: number;
   user_id: number;
+  waiter_id?: number | null;
   payment_method: string;
   pickup_method: string;
   total_amount: number;
@@ -144,15 +144,24 @@ interface ElectronAPI {
   localDbGetTransactions: (businessId: number, limit: number) => Promise<ElectronTransaction[]>;
   localDbGetTransactionItems: (transactionId: string) => Promise<ElectronTransactionItem[]>;
   localDbGetTransactionRefunds: (transactionId: string) => Promise<TransactionRefund[]>;
-  localDbGetAllProducts: () => Promise<ElectronProduct[]>;
+  localDbGetAllProducts: (businessId?: number) => Promise<ElectronProduct[]>;
   localDbGetUsers: () => Promise<ElectronUser[]>;
   localDbGetBusinesses: () => Promise<ElectronBusiness[]>;
+  localDbGetEmployees?: () => Promise<Array<{ id: number | string; nama_karyawan?: string }>>;
   getPrinter1AuditLog?: (fromDate?: string, toDate?: string, limit?: number) => Promise<{ entries: Array<{ transaction_id?: string; printer1_receipt_number?: number; printed_at_epoch?: number; is_reprint?: number }> }>;
   getPrinter2AuditLog: (fromDate?: string, toDate?: string, limit?: number) => Promise<{ entries: Array<{ transaction_id?: string; printer2_receipt_number?: number; printed_at_epoch?: number; is_reprint?: number }> }>;
   navigateTo?: (path: string) => void;
+  // System POS database handlers
+  localDbGetSystemPosTransactions?: (businessId?: number, limit?: number) => Promise<ElectronTransaction[]>;
+  localDbGetSystemPosTransactionItems?: (transactionId?: number | string) => Promise<ElectronTransactionItem[]>;
+  localDbGetSystemPosTransactionRefunds?: (transactionUuid: string) => Promise<TransactionRefund[]>;
+  localDbGetSystemPosUsers?: () => Promise<ElectronUser[]>;
+  localDbGetSystemPosBusinesses?: () => Promise<ElectronBusiness[]>;
+  localDbGetSystemPosAllProducts?: (businessId?: number) => Promise<ElectronProduct[]>;
+  localDbGetSystemPosEmployees?: () => Promise<Array<{ id: number | string; nama_karyawan?: string; color?: string | null }>>;
 }
 
-export default function TransactionList({ businessId = 14 }: TransactionListProps) {
+export default function TransactionList({ businessId = 14, onLoadTransaction }: TransactionListProps) {
   const router = useRouter();
   const { user } = useAuth();
   const [transactions, setTransactions] = useState<Transaction[]>([]);
@@ -169,6 +178,7 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
   const [voucherClickCount, setVoucherClickCount] = useState(0);
   const [showPrintingLogs, setShowPrintingLogs] = useState(false);
+  const [employeesMap, setEmployeesMap] = useState<Map<number, { name: string; color: string | null }>>(new Map());
 
   // Get today's date in UTC+7 timezone
   // Import from shared utility for consistency
@@ -185,269 +195,157 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
   const [isLoadingDetail, setIsLoadingDetail] = useState(false);
   const [loadingTransactionId, setLoadingTransactionId] = useState<string | null>(null);
   const [copiedUuid, setCopiedUuid] = useState<string | null>(null);
-  // Default to online mode if offline database is not available (migration scenario)
-  const [isOnlineMode, setIsOnlineMode] = useState(() => {
-    if (typeof window === 'undefined') return true;
-    const hasElectronAPI = !!(window as { electronAPI?: ElectronAPI }).electronAPI;
-    // If no Electron API (offline DB), default to online mode
-    return !hasElectronAPI;
-  });
+  // Default to offline mode (salespulse DB)
+  const [isSystemPosMode, setIsSystemPosMode] = useState(false);
 
   // Permission checks
   const canViewPastData = hasPermission(user, 'daftartransaksi.viewpastdata');
   const canViewUserDataOnly = hasPermission(user, 'daftartransaksi.viewuserdataonly');
   const canViewAllData = hasPermission(user, 'daftartransaksi.viewalldata');
   const canViewPrintingLogs = hasPermission(user, 'daftartransaksi.viewprintinglogs');
-  const canViewOfflineOnlineSwitch = isSuperAdmin(user) || hasPermission(user, 'daftartransaksi.offlineonlineswitch');
+  const canViewOfflineSystemPosSwitch = isSuperAdmin(user); // Only super admin can see the switch
   const canRefund = isSuperAdmin(user) || hasPermission(user, 'daftartransaksi.refund');
 
   // Check for conflicting permissions (Super Admin bypasses this check)
   const hasConflictingPermissions = !isSuperAdmin(user) && canViewUserDataOnly && canViewAllData;
 
-  // Fetch transaction details with offline fallback
-  const fetchTransactionDetail = async (transactionId: string) => {console.log('🔍 [TransactionList] fetchTransactionDetail called with ID:', transactionId);
+  // Fetch transaction details from offline or system_pos database
+  const fetchTransactionDetail = async (transactionId: string) => {
     setIsLoadingDetail(true);
     try {
-      const response = await offlineSyncService.fetchWithFallback<TransactionDetail>(
-        // Online fetch
-        async () => {
-          const apiUrl = getApiUrl(`/api/transactions/${transactionId}`);
-          console.log('🌐 [TransactionList] Fetching transaction detail from API:', apiUrl);
-          const response = await fetch(apiUrl);
-          if (!response.ok) {
-            const errorText = await response.text();
-            console.error('❌ [TransactionList] API error response:', {
-              status: response.status,
-              statusText: response.statusText,
-              body: errorText
-            });
-            throw new Error('Failed to fetch transaction details');
-          }
-          const data = await response.json();console.log('🌐 [TransactionList] API response received:', {
-            success: data.success,
-            transactionId: data.transaction?.id || data.transaction?.uuid_id,
-            itemCount: data.transaction?.items?.length || 0
-          });
-          if (data.success) {
-            const transaction = data.transaction;
-            
-            // FIX: If API doesn't return customizations, fetch from local DB and merge
-            if (transaction && transaction.items && Array.isArray(transaction.items)) {
-              const needsCustomizations = transaction.items.some((item: { customizations?: unknown }) => 
-                !item.customizations || (Array.isArray(item.customizations) && item.customizations.length === 0)
-              );
-              
-              if (needsCustomizations && typeof window !== 'undefined' && (window as { electronAPI?: ElectronAPI }).electronAPI) {
-                try {
-                  // Fetch items with customizations from local DB
-                  const localItems: ElectronTransactionItem[] = await (window as { electronAPI: ElectronAPI }).electronAPI.localDbGetTransactionItems(transactionId);
-                  
-                  // Filter out cancelled items - they should not appear in transaction details
-                  const activeLocalItems = localItems.filter(item => {
-                    const productionStatus = typeof item.production_status === 'string' ? item.production_status : null;
-                    return productionStatus !== 'cancelled';
-                  });
-                  
-                  // Merge customizations from local DB into API response
-                  transaction.items = transaction.items.map((apiItem: { id?: string; customizations?: unknown; custom_note?: string }) => {
-                    const localItem = activeLocalItems.find(li => String(li.id) === String(apiItem.id));
-                    if (localItem && localItem.customizations && Array.isArray(localItem.customizations) && localItem.customizations.length > 0) {
-                      return {
-                        ...apiItem,
-                        customizations: localItem.customizations,
-                        custom_note: localItem.custom_note || apiItem.custom_note
-                      };
-                    }
-                    return apiItem;
-                  });
-                } catch (error) {
-                  console.warn('Failed to fetch customizations from local DB:', error);
-                }
-              }
-            }
-            
-            // Ensure all items have product_name, customizations, and custom_note
-            if (transaction && transaction.items && Array.isArray(transaction.items)) {// If any item is missing product_name, try to get it from local DB as fallback
-              const needsProductName = transaction.items.some((item: { product_name?: string; product_id?: number }) =>
-                !item.product_name && item.product_id
-              );
+      if (typeof window === 'undefined' || !(window as { electronAPI?: ElectronAPI }).electronAPI) {
+        throw new Error('Database not available');
+      }
 
-              if (needsProductName && typeof window !== 'undefined' && (window as { electronAPI?: ElectronAPI }).electronAPI) {
-                try {
-                  const products: ElectronProduct[] = await (window as { electronAPI: ElectronAPI }).electronAPI.localDbGetAllProducts();
-                  transaction.items = transaction.items.map((item: { product_name?: string; product_id?: number; customizations?: unknown; custom_note?: string }) => {
-                    const mappedItem: { product_name?: string; product_id?: number; customizations?: unknown; custom_note?: string } = { ...item };
-                    if (!item.product_name && item.product_id) {
-                      const product = products.find((p) => p.id === item.product_id);
-                      mappedItem.product_name = product?.nama || 'Unknown Product';
-                    }
-                    // Ensure customizations and custom_note are included (even if empty/null)
-                    if (!mappedItem.customizations) {
-                      mappedItem.customizations = [];
-                    }
-                    if (mappedItem.custom_note === undefined || mappedItem.custom_note === null) {
-                      mappedItem.custom_note = undefined;
-                    }
-                    return mappedItem;
-                  });
-                } catch (error) {
-                  console.warn('Failed to fetch products for fallback:', error);
-                  // Ensure at least Unknown Product is set, and customizations/custom_note
-                  transaction.items = transaction.items.map((item: { product_name?: string; customizations?: unknown; custom_note?: string }) => ({
-                    ...item,
-                    product_name: item.product_name || 'Unknown Product',
-                    customizations: item.customizations || [],
-                    custom_note: item.custom_note || undefined
-                  }));
-                }
-              } else {
-                // Ensure at least Unknown Product is set, and customizations/custom_note
-                transaction.items = transaction.items.map((item: { product_name?: string; customizations?: unknown; custom_note?: string }) => ({
-                  ...item,
-                  product_name: item.product_name || 'Unknown Product',
-                  customizations: item.customizations || [],
-                  custom_note: item.custom_note || undefined
-                }));
-              }}return transaction;
-          } else {
-            throw new Error(data.message || 'Failed to fetch transaction details');
-          }
-        },
-        // Offline fetch
-        async () => {
-          if (typeof window === 'undefined' || !(window as { electronAPI?: ElectronAPI }).electronAPI) {
-            throw new Error('Offline database not available');
-          }
+      const electronAPI = (window as { electronAPI: ElectronAPI }).electronAPI;
+      const useSystemPos = isSystemPosMode;
 
-          // Get transaction from local database
-          console.log('💾 [TransactionList] Fetching transaction detail from offline DB, ID:', transactionId);
-          const transactions: ElectronTransaction[] = await (window as { electronAPI: ElectronAPI }).electronAPI.localDbGetTransactions(businessId, 1000);
-          console.log('💾 [TransactionList] Found', transactions.length, 'transactions in offline DB');
-          
-          // Try to find transaction by ID (UUID) or receipt_number
-          let transaction = transactions.find((tx) => {
-            return String(tx.id) === String(transactionId);
-          });
-          
-          // If not found by ID, try by receipt_number
-          if (!transaction) {
-            console.log('💾 [TransactionList] Not found by ID, trying receipt_number match');
-            transaction = transactions.find((tx) => {
-              return tx.receipt_number !== null && String(tx.receipt_number) === String(transactionId);
-            });
-          }
+      // Get transaction from appropriate database
+      const transactions: ElectronTransaction[] = useSystemPos && electronAPI.localDbGetSystemPosTransactions
+        ? await electronAPI.localDbGetSystemPosTransactions(businessId, 1000)
+        : await electronAPI.localDbGetTransactions(businessId, 1000);
+      
+      // Try to find transaction by ID (UUID) or receipt_number
+      let transaction = transactions.find((tx) => {
+        return String(tx.id) === String(transactionId);
+      });
+      
+      // If not found by ID, try by receipt_number
+      if (!transaction) {
+        transaction = transactions.find((tx) => {
+          return tx.receipt_number !== null && String(tx.receipt_number) === String(transactionId);
+        });
+      }
 
-          if (!transaction) {
-            console.error('❌ [TransactionList] Transaction not found in offline database:', {
-              transactionId,
-              availableIds: transactions.slice(0, 5).map(tx => ({ id: String(tx.id), receipt_number: tx.receipt_number }))
-            });
-            throw new Error('Transaction not found in offline database');
-          }
-          
-          // Get the actual UUID from the transaction (id field should be UUID)
-          const transactionUuid = transaction.id;
-          
-          console.log('✅ [TransactionList] Found transaction in offline DB:', {
-            id: transaction.id,
-            uuid_id: transactionUuid,
-            receipt_number: transaction.receipt_number,
-            totalAmount: transaction.total_amount,
-            itemCount: 'will fetch items next'
-          });
+      if (!transaction) {
+        console.error(`❌ [TransactionList] Transaction not found in ${useSystemPos ? 'system_pos' : 'offline'} database:`, {
+          transactionId,
+          availableIds: transactions.slice(0, 5).map(tx => ({ id: String(tx.id), receipt_number: tx.receipt_number }))
+        });
+        throw new Error(`Transaction not found in ${useSystemPos ? 'system_pos' : 'offline'} database`);
+      }
+      
+      // Get the actual UUID from the transaction (id field should be UUID)
+      const transactionUuid = transaction.id;
 
-          // Get transaction items using the transaction's UUID (not the receipt number)
-          console.log('💾 [TransactionList] Fetching transaction items for UUID:', transactionUuid);
-          const allItems: ElectronTransactionItem[] = await (window as { electronAPI: ElectronAPI }).electronAPI.localDbGetTransactionItems(transactionUuid);
-          // Filter out cancelled items - they should not appear in transaction details
-          const items: ElectronTransactionItem[] = allItems.filter(item => {
-            const productionStatus = typeof item.production_status === 'string' ? item.production_status : null;
-            return productionStatus !== 'cancelled';
-          });
-          console.log('💾 [TransactionList] Found', items.length, 'active transaction items (excluding cancelled):', items.map(i => ({
-            id: i.id,
-            product_id: i.product_id,
-            product_name: i.product_name,
-            quantity: i.quantity,
-            hasCustomizations: !!i.customizations && Array.isArray(i.customizations) && i.customizations.length > 0
-          })));// Products fetch as fallback in case product_name wasn't in JOIN result
-          const products: ElectronProduct[] = await (window as { electronAPI: ElectronAPI }).electronAPI.localDbGetAllProducts();
-          console.log('💾 [TransactionList] Fetched', products.length, 'products for fallback');
+      // Get transaction items from appropriate database
+      const allItems: ElectronTransactionItem[] = useSystemPos && electronAPI.localDbGetSystemPosTransactionItems
+        ? await electronAPI.localDbGetSystemPosTransactionItems(transactionUuid)
+        : await electronAPI.localDbGetTransactionItems(transactionUuid);
+      
+      // Filter out cancelled items - they should not appear in transaction details
+      const items: ElectronTransactionItem[] = allItems.filter(item => {
+        const productionStatus = typeof item.production_status === 'string' ? item.production_status : null;
+        return productionStatus !== 'cancelled';
+      });
+      
+      // Products fetch as fallback in case product_name wasn't in JOIN result
+      // Fetch from appropriate database based on mode
+      const products: ElectronProduct[] = useSystemPos && electronAPI.localDbGetSystemPosAllProducts
+        ? await electronAPI.localDbGetSystemPosAllProducts(businessId)
+        : await electronAPI.localDbGetAllProducts(businessId);
 
-          // Get users and businesses to show actual names
-          const users: ElectronUser[] = await (window as { electronAPI: ElectronAPI }).electronAPI.localDbGetUsers();
-          const businesses: ElectronBusiness[] = await (window as { electronAPI: ElectronAPI }).electronAPI.localDbGetBusinesses();
-          const refunds: TransactionRefund[] = await (window as { electronAPI: ElectronAPI }).electronAPI.localDbGetTransactionRefunds(transactionId);
+      // Get users and businesses to show actual names
+      // Fetch from appropriate database based on mode
+      const users: ElectronUser[] = useSystemPos && electronAPI.localDbGetSystemPosUsers
+        ? await electronAPI.localDbGetSystemPosUsers()
+        : await electronAPI.localDbGetUsers();
+      const businesses: ElectronBusiness[] = useSystemPos && electronAPI.localDbGetSystemPosBusinesses
+        ? await electronAPI.localDbGetSystemPosBusinesses()
+        : await electronAPI.localDbGetBusinesses();
+      
+      // Get refunds from appropriate database
+      const refunds: TransactionRefund[] = useSystemPos && electronAPI.localDbGetSystemPosTransactionRefunds
+        ? await electronAPI.localDbGetSystemPosTransactionRefunds(transactionId)
+        : await electronAPI.localDbGetTransactionRefunds(transactionId);
 
-          const user = users.find((u) => u.id === transaction.user_id);
-          const business = businesses.find((b) => b.id === transaction.business_id);
+      const user = users.find((u) => u.id === transaction.user_id);
+      const business = businesses.find((b) => b.id === transaction.business_id);
 
-          // Removed normalizeJsonField - no longer using JSON for customizations
+      const refundTotalValue = transaction.refund_total ?? refunds.reduce((sum, refund) => sum + (refund.refund_amount ?? 0), 0);
+      const finalAmount = Number(transaction.final_amount ?? 0);
+      // Always recalculate refund_status based on total refund amount vs final_amount
+      // This ensures correct status even if database has incorrect values
+      const refundStatusValue =
+        refundTotalValue > 0
+          ? refundTotalValue >= finalAmount - 0.01
+            ? 'full'
+            : 'partial'
+          : 'none';
 
-          const refundTotalValue = transaction.refund_total ?? refunds.reduce((sum, refund) => sum + (refund.refund_amount ?? 0), 0);
-          const finalAmount = Number(transaction.final_amount ?? 0);
-          // Always recalculate refund_status based on total refund amount vs final_amount
-          // This ensures correct status even if database has incorrect values
-          const refundStatusValue =
-            refundTotalValue > 0
-              ? refundTotalValue >= finalAmount - 0.01
-                ? 'full'
-                : 'partial'
-              : 'none';
+      const mappedItems = items.map((item) => {
+        // Use product_name from JOIN first, then fallback to active products lookup
+        // Ensure product_id is properly compared (handle both number and string)
+        const productId = typeof item.product_id === 'number' ? item.product_id : Number(item.product_id);
+        const product = products.find((p) => p.id === productId);
+        // Check if product_name is null, undefined, or empty string
+        const productName = (item.product_name && String(item.product_name).trim())
+          ? String(item.product_name).trim()
+          : (product?.nama && String(product.nama).trim())
+            ? String(product.nama).trim()
+            : 'Unknown Product';
+        
+        const customizations = Array.isArray(item.customizations) 
+          ? item.customizations 
+          : (item.customizations ? [item.customizations] : []);
+        
+        // Safely convert prices to numbers (handle null, undefined, string, or number)
+        const parsePrice = (value: unknown): number => {
+          if (typeof value === 'number' && !isNaN(value)) return value;
+          if (value === null || value === undefined) return 0;
+          const parsed = Number(value);
+          return isNaN(parsed) ? 0 : parsed;
+        };
+        
+        const mappedItem = {
+          id: item.id,
+          product_name: productName,
+          quantity: item.quantity,
+          unit_price: parsePrice(item.unit_price),
+          total_price: parsePrice(item.total_price),
+          custom_note: item.custom_note || undefined,
+          customizations: customizations,
+          bundleSelections: item.bundleSelections || undefined
+        };
+        
+        return mappedItem;
+      });
 
-          console.log('💾 [TransactionList] Mapping items to transaction detail format');
-          const mappedItems = items.map((item) => {
-            // Use product_name from JOIN first, then fallback to active products lookup
-            // Ensure product_id is properly compared (handle both number and string)
-            const productId = typeof item.product_id === 'number' ? item.product_id : Number(item.product_id);
-            const product = products.find((p) => p.id === productId);
-            // Check if product_name is null, undefined, or empty string
-            const productName = (item.product_name && String(item.product_name).trim())
-              ? String(item.product_name).trim()
-              : (product?.nama && String(product.nama).trim())
-                ? String(product.nama).trim()
-                : 'Unknown Product';
-            
-            const customizations = Array.isArray(item.customizations) 
-              ? item.customizations 
-              : (item.customizations ? [item.customizations] : []);
-            
-            // Safely convert prices to numbers (handle null, undefined, string, or number)
-            const parsePrice = (value: unknown): number => {
-              if (typeof value === 'number' && !isNaN(value)) return value;
-              if (value === null || value === undefined) return 0;
-              const parsed = Number(value);
-              return isNaN(parsed) ? 0 : parsed;
-            };
-            
-            const mappedItem = {
-              id: item.id,
-              product_name: productName,
-              quantity: item.quantity,
-              unit_price: parsePrice(item.unit_price),
-              total_price: parsePrice(item.total_price),
-              custom_note: item.custom_note || undefined,
-              customizations: customizations,
-              bundleSelections: item.bundleSelections || undefined
-            };
-            
-            return mappedItem;
-          });
-          
-          console.log('💾 [TransactionList] Total mapped items:', mappedItems.length);
-
-          return {
-            ...transaction,
-            payment_method: (transaction.payment_method || 'cash') as TransactionDetail['payment_method'],
-            items: mappedItems,
-            user_name: user?.name || 'Unknown User',
-            business_name: business?.name || 'Unknown Business',
-            refunds,
-            refund_total: refundTotalValue,
-            refund_status: refundStatusValue
-          } as TransactionDetail;
-        }
-      );setSelectedTransaction(response);
+      const response: TransactionDetail = {
+        ...transaction,
+        payment_method: (transaction.payment_method || 'cash') as TransactionDetail['payment_method'],
+        pickup_method: (transaction.pickup_method || 'dine-in') as TransactionDetail['pickup_method'],
+        transaction_type: (transaction.transaction_type || 'drinks') as TransactionDetail['transaction_type'],
+        voucher_type: (transaction.voucher_type || 'none') as TransactionDetail['voucher_type'],
+        items: mappedItems,
+        user_name: user?.name || 'Unknown User',
+        business_name: business?.name || 'Unknown Business',
+        refunds,
+        refund_total: refundTotalValue,
+        refund_status: refundStatusValue
+      };
+      
+      setSelectedTransaction(response);
       setIsDetailModalOpen(true);
     } catch (error: unknown) {
       console.error('Error fetching transaction details:', error);
@@ -459,8 +357,16 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
   };
 
   // Handle row click
-  const handleRowClick = (transactionId: string) => {
-    console.log('🖱️ [TransactionList] Row clicked, fetching details for transaction ID:', transactionId);
+  const handleRowClick = (transaction: Transaction) => {
+    const transactionId = transaction.id;
+    
+    // If transaction is pending and onLoadTransaction is provided, load it into cart and navigate to kasir
+    if (transaction.status === 'pending' && onLoadTransaction) {
+      onLoadTransaction(transactionId);
+      return;
+    }
+    
+    // Otherwise, open detail modal as usual
     setLoadingTransactionId(transactionId);
     setIsLoadingDetail(true);
     setIsDetailModalOpen(true);
@@ -573,7 +479,6 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
 
       // If no results with date filter, try without date filter (fallback)
       if (entries.length === 0) {
-        console.log('⚠️ [TransactionList] No receiptize entries with date filter, trying without date filter');
         response = await electronAPI.getPrinter2AuditLog(undefined, undefined, 2000);
         entries = Array.isArray(response?.entries) ? response.entries : [];
       }
@@ -603,12 +508,8 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
       }
       
       // Debug: Log sample IDs to see what format they are
-      if (ids.size > 0) {
-        const sampleIds = Array.from(ids).slice(0, 3);
-        console.log('🔍 [TransactionList] Receiptize audit log transaction IDs (sample):', sampleIds);
-      }
+      // Removed unused sampleIds variable
 
-      console.log(`📊 [TransactionList] Receiptize audit log: ${entries.length} total entries, ${ids.size} unique transactions, ${Object.keys(originalCounters).length} with counters`);
       return { success: true, ids, counters: originalCounters };
     } catch (err) {
       console.error('Failed to fetch Receiptize audit log:', err);
@@ -631,7 +532,6 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
 
       // If no results with date filter, try without date filter (fallback)
       if (entries.length === 0) {
-        console.log('⚠️ [TransactionList] No receipt entries with date filter, trying without date filter');
         response = await electronAPI.getPrinter1AuditLog(undefined, undefined, 2000);
         entries = Array.isArray(response?.entries) ? response.entries : [];
       }
@@ -667,171 +567,91 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
 
   // Fetch transactions function
   const fetchTransactions = useCallback(async (): Promise<boolean> => {
-    // console.log('🔄 [TransactionList] fetchTransactions called - isOnlineMode:', isOnlineMode);
     setIsLoading(true);
     setError(null);
 
     try {
-      let transactionsData: Transaction[];
-
-      if (isOnlineMode) {
-        console.log('🌐 [TransactionList] Fetching from online API');
-        console.log('🌐 [TransactionList] API URL:', getApiUrl(`/api/transactions?business_id=${businessId}&from_date=${fromDate}&to_date=${toDate}&limit=10000`));
-        // Fetch from online API only
-        // Using 10000 limit to ensure we get all transactions in the date range
-        const apiUrl = getApiUrl(`/api/transactions?business_id=${businessId}&from_date=${fromDate}&to_date=${toDate}&limit=10000`);
-        const response = await fetch(apiUrl);
-        
-        if (!response.ok) {
-          const errorText = await response.text();
-          console.error('❌ [TransactionList] API Error Response:', {
-            status: response.status,
-            statusText: response.statusText,
-            body: errorText
-          });
-          throw new Error(`Failed to fetch transactions: ${response.status} ${response.statusText}`);
-        }
-        
-        const data = await response.json();
-        console.log('🌐 [TransactionList] API Response:', {
-          success: data.success,
-          transactionCount: data.transactions?.length || 0,
-          hasTransactions: Array.isArray(data.transactions)
-        });
-        
-        if (!data.success) {
-          throw new Error(data.error || 'API returned unsuccessful response');
-        }
-        
-        transactionsData = (data.transactions || []).map((tx: Record<string, unknown>) => {
-          // CRITICAL: Always use uuid_id as the id, never numeric id or receipt_number
-          // This ensures the transaction list uses UUIDs that match the detail API
-          const transactionId = tx.uuid_id || tx.id;
-          
-          if (!transactionId) {
-            console.warn('⚠️ [TransactionList] Transaction missing both uuid_id and id:', tx);
-          }
-          
-          // Ensure refund_total and refund_status are properly included
-          const refundTotal = tx.refund_total !== undefined && tx.refund_total !== null
-            ? (typeof tx.refund_total === 'number' ? tx.refund_total : parseFloat(String(tx.refund_total)))
-            : null;
-          const refundStatus = tx.refund_status || null;
-
-          return {
-            ...tx,
-            id: transactionId, // Always use UUID, not numeric ID or receipt number
-            voucher_value: tx.voucher_value !== undefined && tx.voucher_value !== null ? parseFloat(String(tx.voucher_value)) : null,
-            voucher_discount: tx.voucher_discount !== undefined && tx.voucher_discount !== null ? parseFloat(String(tx.voucher_discount)) : 0,
-            voucher_type: tx.voucher_type || 'none',
-            voucher_label: tx.voucher_label || null,
-            customer_unit: tx.customer_unit !== undefined && tx.customer_unit !== null ? Number(tx.customer_unit) : null,
-            refund_total: refundTotal,
-            refund_status: refundStatus
-          };
-        });
-        
-        console.log('🌐 [TransactionList] Processed transactions:', transactionsData.length);
-      } else {
-        // console.log('💾 [TransactionList] Fetching from offline database');
-        // Fetch from offline database only
-        if (typeof window === 'undefined' || !(window as { electronAPI?: ElectronAPI }).electronAPI) {
-          console.warn('⚠️ [TransactionList] Offline database not available, showing empty list');
-          setTransactions([]);
-          return true;
-        }
-
-        // Fetch a large number of transactions to ensure we get all transactions in the date range
-        // Using 50000 limit to match printing page (offline-first, need all transactions)
-        // This ensures we capture all transactions even for busy days with many transactions
-        const offlineTransactions: ElectronTransaction[] = await (window as { electronAPI: ElectronAPI }).electronAPI.localDbGetTransactions(businessId, 50000);
-        // console.log('💾 [TransactionList] Raw offline transactions count:', offlineTransactions.length);
-
-        // Get users and businesses to show actual names (fetch once for all transactions)
-        const users: ElectronUser[] = await (window as { electronAPI: ElectronAPI }).electronAPI.localDbGetUsers();
-        const businesses: ElectronBusiness[] = await (window as { electronAPI: ElectronAPI }).electronAPI.localDbGetBusinesses();
-
-
-        // Filter by date range - need to convert to local date for accurate filtering
-        // This ensures we only show transactions within the selected date range
-        const filteredTransactions = offlineTransactions.filter((tx) => {
-          // Convert UTC to local date for accurate filtering
-          const localDate = new Date(tx.created_at);
-          const localDateString = localDate.getFullYear() + '-' +
-            String(localDate.getMonth() + 1).padStart(2, '0') + '-' +
-            String(localDate.getDate()).padStart(2, '0');
-          const isInRange = localDateString >= fromDate && localDateString <= toDate;
-          return isInRange;
-        });
-
-        // console.log('💾 [TransactionList] Filtered transactions (date range):', filteredTransactions.length, 'from', fromDate, 'to', toDate);
-
-        transactionsData = filteredTransactions.map((tx) => {
-          const user = users.find((u) => u.id === tx.user_id);
-          const business = businesses.find((b) => b.id === tx.business_id);
-
-          // CRITICAL: Use UUID as id, not numeric ID
-          // The offline database should have uuid_id field, but if not, use id as fallback
-          // This ensures consistency with the API which uses UUIDs
-          const transactionId = tx.id; // Offline DB already uses UUID as id
-          
-          // Calculate refund_total and refund_status from the transaction data
-          // The query should already include these, but ensure they're properly typed
-          const refundTotal = tx.refund_total !== undefined && tx.refund_total !== null 
-            ? (typeof tx.refund_total === 'number' ? tx.refund_total : Number(tx.refund_total)) 
-            : null;
-          const refundStatus = tx.refund_status || null;
-
-          // Debug logging for transactions with refunds
-          if (refundTotal && refundTotal > 0) {
-            console.log('💰 [TransactionList] Transaction with refund:', {
-              txId: tx.id,
-              refundTotal: refundTotal,
-              refundStatus: refundStatus,
-              rawRefundTotal: tx.refund_total,
-              rawRefundStatus: tx.refund_status
-            });
-          }
-
-          return {
-            id: transactionId, // Should already be UUID from offline DB
-            business_id: tx.business_id,
-            user_id: tx.user_id,
-            payment_method: tx.payment_method as Transaction['payment_method'],
-            pickup_method: tx.pickup_method as Transaction['pickup_method'],
-            total_amount: tx.total_amount,
-            voucher_discount: tx.voucher_discount || 0,
-            voucher_type: (tx.voucher_type || 'none') as Transaction['voucher_type'],
-            voucher_value: tx.voucher_value !== undefined && tx.voucher_value !== null ? Number(tx.voucher_value) : null,
-            voucher_label: tx.voucher_label || null,
-            final_amount: tx.final_amount,
-            amount_received: tx.amount_received,
-            change_amount: tx.change_amount || 0,
-            contact_id: tx.contact_id,
-            customer_name: tx.customer_name,
-            customer_unit: tx.customer_unit !== undefined && tx.customer_unit !== null ? Number(tx.customer_unit) : null,
-            note: tx.note || null,
-            receipt_number: tx.receipt_number,
-            transaction_type: (tx.transaction_type || 'drinks') as Transaction['transaction_type'],
-            status: tx.status || 'paid',
-            created_at: tx.created_at,
-            shift_uuid: tx.shift_uuid, // Include shift_uuid
-            refund_total: refundTotal,
-            refund_status: refundStatus,
-            user_name: user?.name || 'Unknown User',
-            business_name: business?.name || 'Unknown Business'
-          };
-        });
-        
-        // Debug: Log sample transaction IDs to compare with receiptize IDs
-        if (transactionsData.length > 0) {
-          const sampleTxIds = transactionsData.slice(0, 3).map(t => String(t.id));
-          console.log('🔍 [TransactionList] Transaction IDs from offline DB (sample):', sampleTxIds);
-        }
-
-        // console.log('💾 [TransactionList] Processed transactions for display:', transactionsData.length);
-
+      if (typeof window === 'undefined' || !(window as { electronAPI?: ElectronAPI }).electronAPI) {
+        console.warn('⚠️ [TransactionList] Database not available, showing empty list');
+        setTransactions([]);
+        return true;
       }
+
+      const electronAPI = (window as { electronAPI: ElectronAPI }).electronAPI;
+      const useSystemPos = isSystemPosMode;
+
+      // Fetch from appropriate database
+      const dbTransactions: ElectronTransaction[] = useSystemPos && electronAPI.localDbGetSystemPosTransactions
+        ? await electronAPI.localDbGetSystemPosTransactions(businessId, 50000)
+        : await electronAPI.localDbGetTransactions(businessId, 50000);
+
+      // Get users and businesses to show actual names (fetch once for all transactions)
+      // Fetch from appropriate database based on mode
+      const users: ElectronUser[] = useSystemPos && electronAPI.localDbGetSystemPosUsers
+        ? await electronAPI.localDbGetSystemPosUsers()
+        : await electronAPI.localDbGetUsers();
+      const businesses: ElectronBusiness[] = useSystemPos && electronAPI.localDbGetSystemPosBusinesses
+        ? await electronAPI.localDbGetSystemPosBusinesses()
+        : await electronAPI.localDbGetBusinesses();
+
+      // Filter by date range - need to convert to local date for accurate filtering
+      // This ensures we only show transactions within the selected date range
+      const dateFilteredTransactions = dbTransactions.filter((tx) => {
+        // Convert UTC to local date for accurate filtering
+        const localDate = new Date(tx.created_at);
+        const localDateString = localDate.getFullYear() + '-' +
+          String(localDate.getMonth() + 1).padStart(2, '0') + '-' +
+          String(localDate.getDate()).padStart(2, '0');
+        const isInRange = localDateString >= fromDate && localDateString <= toDate;
+        return isInRange;
+      });
+
+      const transactionsData = dateFilteredTransactions.map((tx) => {
+        const user = users.find((u) => u.id === tx.user_id);
+        const business = businesses.find((b) => b.id === tx.business_id);
+
+        // CRITICAL: Use UUID as id, not numeric ID
+        // The database should have uuid_id field, but if not, use id as fallback
+        // This ensures consistency with the API which uses UUIDs
+        const transactionId = tx.id; // DB already uses UUID as id
+        
+        // Calculate refund_total and refund_status from the transaction data
+        // The query should already include these, but ensure they're properly typed
+        const refundTotal = tx.refund_total !== undefined && tx.refund_total !== null 
+          ? (typeof tx.refund_total === 'number' ? tx.refund_total : Number(tx.refund_total)) 
+          : null;
+        const refundStatus = tx.refund_status || null;
+
+        return {
+          id: transactionId, // Should already be UUID from DB
+          business_id: tx.business_id,
+          user_id: tx.user_id,
+          payment_method: tx.payment_method as Transaction['payment_method'],
+          pickup_method: tx.pickup_method as Transaction['pickup_method'],
+          total_amount: tx.total_amount,
+          voucher_discount: tx.voucher_discount || 0,
+          voucher_type: (tx.voucher_type || 'none') as Transaction['voucher_type'],
+          voucher_value: tx.voucher_value !== undefined && tx.voucher_value !== null ? Number(tx.voucher_value) : null,
+          voucher_label: tx.voucher_label || null,
+          final_amount: tx.final_amount,
+          amount_received: tx.amount_received,
+          change_amount: tx.change_amount || 0,
+          contact_id: tx.contact_id,
+          customer_name: tx.customer_name,
+          customer_unit: tx.customer_unit !== undefined && tx.customer_unit !== null ? Number(tx.customer_unit) : null,
+          note: tx.note || null,
+          receipt_number: tx.receipt_number,
+          transaction_type: (tx.transaction_type || 'drinks') as Transaction['transaction_type'],
+          waiter_id: typeof tx.waiter_id === 'number' ? tx.waiter_id : (typeof tx.waiter_id === 'string' ? parseInt(tx.waiter_id, 10) : null),
+          status: tx.status || 'paid',
+          created_at: tx.created_at,
+          shift_uuid: tx.shift_uuid, // Include shift_uuid
+          refund_total: refundTotal,
+          refund_status: refundStatus,
+          user_name: user?.name || 'Unknown User',
+          business_name: business?.name || 'Unknown Business'
+        };
+      });
 
       // Apply permission-based filtering
       let filteredTransactions = transactionsData;
@@ -856,39 +676,10 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
 
       setTransactions(filteredTransactions);
 
-      // Debug logging for offline mode revenue calculation (offline-first priority)
-      if (!isOnlineMode) {
-        const totalRevenueDebug = filteredTransactions.reduce((sum, t) => {
-          const amount = typeof t.final_amount === 'string' ? parseFloat(t.final_amount) : t.final_amount;
-          return sum + (isNaN(amount) ? 0 : amount);
-        }, 0);
-        console.log('💾 [TransactionList] Offline mode summary:', {
-          afterDateFilter: transactionsData.length,
-          afterPermissionFilter: filteredTransactions.length,
-          totalRevenue: totalRevenueDebug,
-          dateRange: { fromDate, toDate },
-          businessId,
-          paymentMethods: filteredTransactions.reduce((acc, tx) => {
-            acc[tx.payment_method] = (acc[tx.payment_method] || 0) + 1;
-            return acc;
-          }, {} as Record<string, number>)
-        });
-      }
-
       // Fetch original Receiptize counters (from Printer2 audit log)
       const receiptizeResult = await fetchReceiptizePrintedIds();
       setReceiptizePrintedIds(receiptizeResult.ids);
       setReceiptizeCounters(receiptizeResult.counters);
-
-      console.log('🔍 [TransactionList] Receiptize Result:', {
-        success: receiptizeResult.success,
-        idsCount: receiptizeResult.ids.size,
-        countersCount: Object.keys(receiptizeResult.counters).length,
-        sampleIds: Array.from(receiptizeResult.ids).slice(0, 5),
-        dateRange: { fromDate, toDate },
-        fromEpoch: fromDate ? new Date(fromDate).getTime() : null,
-        toEpoch: toDate ? new Date(toDate + 'T23:59:59').getTime() : null
-      });
 
       if (!receiptizeResult.success) {
         setError(prev => prev ?? 'Failed to fetch Receiptize print history');
@@ -907,7 +698,7 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
       console.error('❌ [TransactionList] Error fetching transactions:', {
         error: err,
         message: errorMessage,
-        isOnlineMode,
+        isSystemPosMode,
         businessId,
         fromDate,
         toDate
@@ -918,7 +709,37 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
     } finally {
       setIsLoading(false);
     }
-  }, [isOnlineMode, fromDate, toDate, businessId, fetchReceiptizePrintedIds, fetchReceiptPrintedIds, canViewUserDataOnly, canViewAllData, canViewPastData, user]);
+  }, [isSystemPosMode, fromDate, toDate, businessId, fetchReceiptizePrintedIds, fetchReceiptPrintedIds, canViewUserDataOnly, canViewAllData, canViewPastData, user]);
+
+  // Fetch employees to get waiter names
+  useEffect(() => {
+    const fetchEmployees = async () => {
+      if (typeof window === 'undefined') return;
+      const electronAPI = (window as { electronAPI?: ElectronAPI }).electronAPI;
+      if (!electronAPI) return;
+
+      try {
+        // Fetch from appropriate database based on mode
+        const allEmployees = isSystemPosMode && electronAPI.localDbGetSystemPosEmployees
+          ? await electronAPI.localDbGetSystemPosEmployees()
+          : (electronAPI.localDbGetEmployees ? await electronAPI.localDbGetEmployees() : []);
+        
+        const employeesArray = Array.isArray(allEmployees) ? allEmployees : [];
+        const map = new Map<number, { name: string; color: string | null }>();
+        employeesArray.forEach((emp: { id?: number | string; nama_karyawan?: string; color?: string | null }) => {
+          const empId = typeof emp.id === 'number' ? emp.id : (typeof emp.id === 'string' ? parseInt(emp.id, 10) : null);
+          if (empId && typeof emp.nama_karyawan === 'string') {
+            const color = typeof emp.color === 'string' && emp.color ? emp.color : null;
+            map.set(empId, { name: emp.nama_karyawan, color });
+          }
+        });
+        setEmployeesMap(map);
+      } catch (error) {
+        console.warn('Failed to fetch employees:', error);
+      }
+    };
+    fetchEmployees();
+  }, [isSystemPosMode]);
 
   // Fetch transactions on mount and when dependencies change
   useEffect(() => {
@@ -936,14 +757,33 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
     setReceiptizeCounters({});
     setReceiptizePrintedIds(new Set<string>());
     setReceiptCounters({});
-  }, [businessId, fromDate, toDate, isOnlineMode]);
+  }, [businessId, fromDate, toDate, isSystemPosMode]);
 
-  // State for refresh click counter
+  // State for refresh click counter (value is only used internally by React state)
   const [, setRefreshClickCount] = useState(0);
   const [lastRefreshClick, setLastRefreshClick] = useState(0);
+  const grandTotalClickCountRef = useRef(0);
+  const lastGrandTotalClickRef = useRef(0);
 
-  // Debug log for refresh clicks
-  // console.log('🔄 [TransactionList] Refresh click count:', refreshClickCount);
+  // Handle 5x click logic for grand total
+  const handleFiveClickToggle = useCallback(() => {
+    const now = Date.now();
+    const timeSinceLastClick = now - lastGrandTotalClickRef.current;
+    
+    if (timeSinceLastClick > 3000) {
+      // Reset counter if more than 3 seconds passed
+      grandTotalClickCountRef.current = 1;
+    } else {
+      grandTotalClickCountRef.current += 1;
+      const newCount = grandTotalClickCountRef.current;
+      if (newCount >= 5) {
+        // Toggle show all transactions after 5 clicks
+        setShowAllTransactions(prev => !prev);
+        grandTotalClickCountRef.current = 0; // Reset counter
+      }
+    }
+    lastGrandTotalClickRef.current = now;
+  }, []);
 
   const handleRefresh = useCallback(async () => {
     const success = await fetchTransactions();
@@ -962,7 +802,6 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
         if (newCount >= 5) {
           // Show all transactions after 5 clicks
           setShowAllTransactions(true);
-          console.log('🔓 [TransactionList] 5x refresh clicked - showing all transactions');
           return 0; // Reset counter
         }
         return newCount;
@@ -1090,15 +929,6 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
       const txId = String(transaction.id);
       const isInSet = receiptizePrintedIds.has(txId);
       
-      // Debug logging for first few transactions
-      if (transactions.indexOf(transaction) < 3) {
-        console.log('🔍 [TransactionList] Filter check:', {
-          txId,
-          isInSet,
-          receiptizeIds: Array.from(receiptizePrintedIds).slice(0, 5),
-          transactionId: transaction.id
-        });
-      }
       
       // Show if transaction is in receiptizePrintedIds (meaning it was printed to Printer2/receiptize)
       // This is more reliable than checking counters since IDs are set even for reprints
@@ -1117,14 +947,6 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
     baseTransactions = transactions;
   }
   
-  console.log('📊 [TransactionList] Transaction filtering:', {
-    totalTransactions: transactions.length,
-    receiptizeIdsCount: receiptizePrintedIds.size,
-    showAllTransactions,
-    baseTransactionsCount: baseTransactions.length,
-    receiptizeIds: Array.from(receiptizePrintedIds).slice(0, 5),
-    transactionIds: transactions.slice(0, 3).map(t => String(t.id))
-  });
 
 
   const resolveReceiptSequence = (tx: Transaction) => {
@@ -1287,25 +1109,25 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
             })}
           </h1>
 
-          {/* Online/Offline Toggle - Only show for authorized users */}
-          {canViewOfflineOnlineSwitch && (
+          {/* Offline/System POS Toggle - Only show for super admin */}
+          {canViewOfflineSystemPosSwitch && (
             <div className="flex items-center gap-3">
-              <span className={`text-sm font-medium ${!isOnlineMode ? 'text-gray-900' : 'text-gray-500'}`}>
+              <span className={`text-sm font-medium ${!isSystemPosMode ? 'text-gray-900' : 'text-gray-500'}`}>
                 <WifiOff className="inline w-4 h-4 mr-1" />
                 Offline
               </span>
               <label className="relative inline-flex items-center cursor-pointer">
                 <input
                   type="checkbox"
-                  checked={isOnlineMode}
-                  onChange={(e) => setIsOnlineMode(e.target.checked)}
+                  checked={isSystemPosMode}
+                  onChange={(e) => setIsSystemPosMode(e.target.checked)}
                   className="sr-only peer"
                 />
                 <div className="w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-blue-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-600"></div>
               </label>
-              <span className={`text-sm font-medium ${isOnlineMode ? 'text-gray-900' : 'text-gray-500'}`}>
+              <span className={`text-sm font-medium ${isSystemPosMode ? 'text-gray-900' : 'text-gray-500'}`}>
                 <Wifi className="inline w-4 h-4 mr-1" />
-                Online
+                System POS
               </span>
             </div>
           )}
@@ -1447,7 +1269,13 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
           </div>
 
           {/* Grand Total Card */}
-          <GrandTotalCard totalRevenue={totalRevenue} totalRefund={totalRefund} totalCustomerUnit={totalCustomerUnit} totalTransactionCount={totalTransactionCount} />
+          <GrandTotalCard 
+            totalRevenue={totalRevenue} 
+            totalRefund={totalRefund} 
+            totalCustomerUnit={totalCustomerUnit} 
+            totalTransactionCount={totalTransactionCount}
+            onFiveClick={handleFiveClickToggle}
+          />
         </div>
 
         {/* Search and Filter */}
@@ -1519,7 +1347,7 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
         )}
 
         {/* Info Message for Offline Mode */}
-        {!isOnlineMode && transactions.length === 0 && !error && (
+        {!isSystemPosMode && transactions.length === 0 && !error && (
           <div className="bg-blue-50 border border-blue-200 rounded-lg p-4 mb-6 flex-shrink-0">
             <div className="flex items-center gap-2">
               <Clock className="w-5 h-5 text-blue-600" />
@@ -1534,16 +1362,16 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
           </div>
         )}
 
-        {/* Info Message for Online Mode */}
-        {isOnlineMode && transactions.length === 0 && !error && (
+        {/* Info Message for System POS Mode */}
+        {isSystemPosMode && transactions.length === 0 && !error && (
           <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-4 mb-6 flex-shrink-0">
             <div className="flex items-center gap-2">
               <Wifi className="w-5 h-5 text-yellow-600" />
               <div>
-                <p className="text-yellow-800 font-medium">No transactions found for this date range in MySQL database</p>
+                <p className="text-yellow-800 font-medium">No transactions found for this date range in system_pos database</p>
                 <p className="text-yellow-600 text-sm mt-1">
-                  Make sure the database connection is configured correctly and data has been migrated.
-                  Check the console for API errors.
+                  Only transactions printed to Printer 2 are stored in system_pos database.
+                  Make sure transactions have been printed to Printer 2.
                 </p>
               </div>
             </div>
@@ -1575,18 +1403,9 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
                           {getSortIcon('receipt_number')}
                         </div>
                       </th>
-                      <th className="px-2 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider w-16">
+                      <th className="px-2 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider w-24">
                         <div className="flex items-center gap-1">
                           <span className="text-xs">UUID</span>
-                        </div>
-                      </th>
-                      <th
-                        className="px-3 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider cursor-pointer hover:bg-gray-100 select-none w-20"
-                        onClick={() => handleSort('transaction_type')}
-                      >
-                        <div className="flex items-center gap-1">
-                          Type
-                          {getSortIcon('transaction_type')}
                         </div>
                       </th>
                       <th
@@ -1599,7 +1418,7 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
                         </div>
                       </th>
                       <th
-                        className="px-2 py-3 text-left text-[10px] font-medium text-gray-500 uppercase tracking-wider cursor-pointer hover:bg-gray-100 select-none w-20"
+                        className="px-2 py-3 text-left text-[10px] font-medium text-gray-500 uppercase tracking-wider cursor-pointer hover:bg-gray-100 select-none w-28"
                         onClick={() => handleSort('payment_method')}
                       >
                         <div className="flex items-center gap-1">
@@ -1653,21 +1472,19 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
                         </div>
                       </th>
                       <th
-                        className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider cursor-pointer hover:bg-gray-100 select-none w-12"
-                        onClick={() => handleSort('customer_unit')}
-                      >
-                        <div className="flex items-center gap-1">
-                          CU
-                          {getSortIcon('customer_unit')}
-                        </div>
-                      </th>
-                      <th
                         className="px-6 py-3 text-left text-[10px] font-medium text-gray-500 uppercase tracking-wider cursor-pointer hover:bg-gray-100 select-none"
                         onClick={() => handleSort('customer_name')}
                       >
                         <div className="flex items-center gap-1">
                           Pelanggan
                           {getSortIcon('customer_name')}
+                        </div>
+                      </th>
+                      <th
+                        className="px-3 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider cursor-pointer hover:bg-gray-100 select-none w-24"
+                      >
+                        <div className="flex items-center gap-1">
+                          Waiter
                         </div>
                       </th>
                       <th
@@ -1679,27 +1496,25 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
                           {getSortIcon('user_name')}
                         </div>
                       </th>
-                      <th
-                        className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider cursor-pointer hover:bg-gray-100 select-none"
-                        onClick={() => handleSort('note')}
-                      >
-                        <div className="flex items-center gap-1">
-                          Catatan
-                          {getSortIcon('note')}
-                        </div>
-                      </th>
                     </tr>
                   </thead>
                   <tbody className="bg-white divide-y divide-gray-200">
                     {filteredTransactions.map((transaction, index) => (
                       <tr
                         key={transaction.id}
-                        className={`hover:bg-gray-50 cursor-pointer transition-colors ${index % 2 === 0 ? 'bg-blue-50' : 'bg-white'} ${loadingTransactionId === transaction.id ? 'opacity-50' : ''}`}
-                        onClick={() => handleRowClick(transaction.id)}
+                        className={`cursor-pointer transition-colors ${transaction.status === 'pending' ? 'bg-orange-50 hover:bg-orange-100' : (index % 2 === 0 ? 'bg-blue-50 hover:bg-gray-50' : 'bg-white hover:bg-gray-50')} ${loadingTransactionId === transaction.id ? 'opacity-50' : ''}`}
+                        onClick={() => handleRowClick(transaction)}
                       >
                         <td className="px-2 py-4 whitespace-nowrap">
                           <div className="flex items-center gap-1">
                             {(() => {
+                              // For pending (unpaid) transactions, show "-" instead of receipt number
+                              if (transaction.status === 'pending') {
+                                return (
+                                  <span className="text-xs text-gray-400">-</span>
+                                );
+                              }
+                              
                               const txId = String(transaction.id);
                               const receiptizeCounter = receiptizeCounters[txId];
                               const receiptCounter = receiptCounters[txId];
@@ -1790,21 +1605,11 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
                               e.stopPropagation(); // Prevent row click
                               handleCopyUuid(String(transaction.id), e);
                             }}
-                            className="p-1 hover:bg-gray-200 rounded transition-colors"
+                            className="px-2 py-1 text-xs text-gray-600 hover:bg-gray-200 rounded transition-colors border border-gray-300 hover:border-gray-400"
                             title={`Copy UUID: ${String(transaction.id)}`}
                           >
-                            <svg className="w-4 h-4 text-gray-500 hover:text-gray-700" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
-                            </svg>
+                            Copy UUID
                           </button>
-                        </td>
-                        <td className="px-3 py-4 whitespace-nowrap">
-                          <span className={`inline-flex px-1.5 py-0.5 text-xs font-semibold rounded-full ${transaction.transaction_type === 'drinks'
-                              ? 'bg-blue-100 text-blue-800'
-                              : 'bg-orange-100 text-orange-800'
-                            }`}>
-                            {transaction.transaction_type === 'drinks' ? '🥤' : '🥖'} {transaction.transaction_type}
-                          </span>
                         </td>
                         <td className="px-6 py-4 whitespace-nowrap">
                           <span className="text-[10px] text-gray-900">
@@ -1812,9 +1617,16 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
                           </span>
                         </td>
                         <td className="px-2 py-4 whitespace-nowrap">
-                          <span className={`inline-flex px-1.5 py-0.5 text-xs font-semibold rounded-full ${getPaymentMethodColor(transaction)}`}>
-                            {getPaymentMethodLabel(transaction)}
-                          </span>
+                          <div className="flex flex-col gap-1">
+                            <span className={`inline-flex px-1.5 py-0.5 text-xs font-semibold rounded-full ${getPaymentMethodColor(transaction)}`}>
+                              {getPaymentMethodLabel(transaction)}
+                            </span>
+                            {transaction.status === 'pending' && (
+                              <span className="inline-flex px-1.5 py-0.5 text-[10px] font-semibold rounded-full bg-orange-100 text-orange-800">
+                                Belum Bayar
+                              </span>
+                            )}
+                          </div>
                         </td>
                         <td className="px-2 py-4 whitespace-nowrap">
                           <span className="text-xs text-gray-900 capitalize">
@@ -1888,13 +1700,6 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
                             return <span className="text-xs text-gray-400">-</span>;
                           })()}
                         </td>
-                        <td className="px-2 py-4 whitespace-nowrap">
-                          <span className="text-xs text-gray-900">
-                            {transaction.customer_unit !== undefined && transaction.customer_unit !== null
-                              ? transaction.customer_unit
-                              : '-'}
-                          </span>
-                        </td>
                         <td className="px-6 py-4">
                           <span
                             className="text-xs text-gray-900 truncate block max-w-[120px]"
@@ -1903,20 +1708,34 @@ export default function TransactionList({ businessId = 14 }: TransactionListProp
                             {transaction.customer_name || 'Guest'}
                           </span>
                         </td>
+                        <td className="px-3 py-4 whitespace-nowrap">
+                          {(() => {
+                            if (!transaction.waiter_id || !employeesMap.has(transaction.waiter_id)) {
+                              return <span className="text-xs text-gray-900">-</span>;
+                            }
+                            const waiter = employeesMap.get(transaction.waiter_id)!;
+                            const color = waiter.color;
+                            
+                            if (color) {
+                              return (
+                                <span
+                                  className="text-xs font-medium text-white px-2 py-1"
+                                  style={{ backgroundColor: color }}
+                                >
+                                  {waiter.name}
+                                </span>
+                              );
+                            }
+                            
+                            return <span className="text-xs text-gray-900">{waiter.name}</span>;
+                          })()}
+                        </td>
                         <td className="px-6 py-4">
                           <span
                             className="text-xs text-gray-900 truncate block max-w-[120px]"
                             title={transaction.user_name || 'Unknown'}
                           >
                             {transaction.user_name || 'Unknown'}
-                          </span>
-                        </td>
-                        <td className="px-6 py-4">
-                          <span
-                            className="text-xs text-gray-500 italic truncate block max-w-[120px]"
-                            title={transaction.note || '-'}
-                          >
-                            {transaction.note || '-'}
                           </span>
                         </td>
                       </tr>
@@ -1999,13 +1818,18 @@ interface GrandTotalCardProps {
   totalRefund: number;
   totalCustomerUnit: number;
   totalTransactionCount: number;
+  onFiveClick: () => void;
 }
 
-function GrandTotalCard({ totalRevenue, totalRefund, totalCustomerUnit, totalTransactionCount }: GrandTotalCardProps) {
+function GrandTotalCard({ totalRevenue, totalRefund, totalCustomerUnit, totalTransactionCount, onFiveClick }: GrandTotalCardProps) {
   const netRevenue = totalRevenue - totalRefund;
 
   return (
-    <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-4 md:col-span-1">
+    <div 
+      className="bg-white rounded-lg shadow-sm border border-gray-200 p-4 md:col-span-1 cursor-pointer hover:bg-gray-50 transition-colors"
+      onClick={onFiveClick}
+      title="Click 5 times to toggle R/RR badge display"
+    >
       <div className="flex items-center gap-2 mb-3">
         <div className="w-3 h-3 bg-purple-500 rounded-full"></div>
         <h3 className="font-semibold text-gray-900 text-sm">Grand Total</h3>

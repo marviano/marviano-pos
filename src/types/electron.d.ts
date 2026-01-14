@@ -146,6 +146,7 @@ declare global {
       localDbGetCategories?: () => Promise<{ category2_name: string; updated_at: number }[]>;
       localDbUpsertProducts?: (rows: unknown[]) => Promise<{ success: boolean }>;
       localDbCleanupOrphanedProducts?: (businessId: number, syncedProductIds: number[]) => Promise<{ success: boolean; deletedCount?: number; deletedProductIds?: number[]; error?: string }>;
+      localDbCleanupOrphanedEmployees?: (businessId: number, syncedEmployeeIds: number[]) => Promise<{ success: boolean; deletedCount?: number; deletedEmployeeIds?: number[]; error?: string }>;
       localDbGetProductsByJenis?: (jenis: string) => Promise<unknown[]>;
       localDbGetProductsByCategory2?: (category2Name: string) => Promise<unknown[]>;
       localDbGetAllProducts?: () => Promise<unknown[]>;
@@ -160,6 +161,8 @@ declare global {
       localDbGetPendingRefunds?: () => Promise<unknown[]>;
       localDbMarkRefundSynced?: (offlineRefundId: number) => Promise<{ success: boolean }>;
       localDbMarkRefundFailed?: (offlineRefundId: number) => Promise<{ success: boolean }>;
+      localDbDeleteRefund?: (offlineRefundId: number) => Promise<{ success: boolean; error?: string }>;
+      localDbCheckTransactionExists?: (transactionUuid: string) => Promise<{ exists: boolean; error?: string }>;
 
       // Restaurant Table Layout
       getRestaurantRooms?: (businessId: number) => Promise<Array<{
@@ -255,6 +258,8 @@ declare global {
       localDbArchiveTransactions?: (payload: { businessId: number; from?: string | null; to?: string | null }) => Promise<number>;
       localDbDeleteTransactions?: (payload: { businessId: number; from?: string | null; to?: string | null }) => Promise<number>;
       localDbDeleteTransactionItems?: (payload: { businessId: number; from?: string | null; to?: string | null }) => Promise<{ success: boolean; deleted?: number }>;
+      localDbSplitBill?: (payload: { sourceTransactionUuid: string; destinationTransactionUuid: string; itemIds: (number | string)[] }) => Promise<{ success: boolean; error?: string }>;
+      localDbUpsertActivityLogs?: (rows: Array<{ user_id: number; action: string; business_id: number; details: string; created_at: string }>) => Promise<{ success: boolean; error?: string }>;
 
       // Comprehensive POS table operations
       // Users
@@ -280,6 +285,14 @@ declare global {
       // Teams
       localDbUpsertTeams?: (rows: unknown[]) => Promise<{ success: boolean }>;
       localDbGetTeams?: () => Promise<unknown[]>;
+
+      // Employees Position
+      localDbUpsertEmployeesPosition?: (rows: unknown[]) => Promise<{ success: boolean }>;
+      localDbGetEmployeesPosition?: () => Promise<unknown[]>;
+
+      // Employees
+      localDbUpsertEmployees?: (rows: unknown[], skipValidation?: boolean) => Promise<{ success: boolean; skipped?: number; error?: string }>;
+      localDbGetEmployees?: () => Promise<Record<string, unknown>[]>;
 
       // Roles & permissions
       localDbUpsertRoles?: (rows: unknown[]) => Promise<{ success: boolean }>;
@@ -530,21 +543,45 @@ declare global {
         error?: string;
       }>;
 
-      // WebSocket Server Management
-      websocketServerStart?: (port?: number) => Promise<{ success: boolean; error?: string; port?: number }>;
-      websocketServerStop?: () => Promise<{ success: boolean; error?: string }>;
-      websocketServerStatus?: () => Promise<{
-        isRunning: boolean;
-        port: number;
-        clientCount: number;
-        clients: Array<{ id: string; type: 'pos'; connectedAt: number }>;
-      }>;
 
       // Configuration Management
       getAppConfig?: () => Promise<{ success: boolean; config: { serverHost?: string; apiUrl?: string; dbUser?: string; dbPassword?: string; dbName?: string; dbPort?: number } | null; error?: string }>;
       saveAppConfig?: (config: { serverHost?: string; apiUrl?: string; dbUser?: string; dbPassword?: string; dbName?: string; dbPort?: number }) => Promise<{ success: boolean; error?: string }>;
       resetAppConfig?: () => Promise<{ success: boolean; error?: string }>;
       testDbConnection?: (config: { serverHost?: string; dbUser?: string; dbPassword?: string; dbName?: string; dbPort?: number }) => Promise<{ success: boolean; message?: string; error?: string }>;
+
+      // Receipt Template and Settings Management
+      getReceiptTemplate?: (templateType: 'receipt' | 'bill', businessId?: number) => Promise<{ success: boolean; template: string | null; error?: string }>;
+      getReceiptTemplates?: (templateType: 'receipt' | 'bill', businessId?: number) => Promise<{ success: boolean; templates: Array<{ id: number; name: string; is_default: boolean }>; error?: string }>;
+      setDefaultReceiptTemplate?: (templateType: 'receipt' | 'bill', templateName: string, businessId?: number) => Promise<{ success: boolean; error?: string }>;
+      saveReceiptTemplate?: (templateType: 'receipt' | 'bill', templateCode: string, businessId?: number) => Promise<{ success: boolean; error?: string }>;
+      getReceiptSettings?: (businessId?: number) => Promise<{
+        success: boolean;
+        settings: {
+          id: number;
+          business_id: number | null;
+          store_name: string | null;
+          address: string | null;
+          phone_number: string | null;
+          contact_phone: string | null;
+          logo_base64: string | null;
+          footer_text: string | null;
+          partnership_contact: string | null;
+          is_active: number;
+          created_at: string;
+          updated_at: string;
+        } | null;
+        error?: string;
+      }>;
+      saveReceiptSettings?: (settings: {
+        store_name?: string | null;
+        address?: string | null;
+        phone_number?: string | null;
+        contact_phone?: string | null;
+        logo_base64?: string | null;
+        footer_text?: string | null;
+        partnership_contact?: string | null;
+      }, businessId?: number) => Promise<{ success: boolean; error?: string }>;
     };
   }
 }

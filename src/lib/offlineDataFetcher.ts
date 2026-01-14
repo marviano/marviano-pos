@@ -150,7 +150,6 @@ async function fetchProductsFromMySQL(
       }
     }
 
-    console.log(`✅ [FETCH PRODUCTS] Fetched ${products.length} products from MySQL`);
     return products as unknown as Product[];
   } catch (error) {
     console.error('❌ [FETCH PRODUCTS] MySQL query error:', error);return [];
@@ -230,7 +229,6 @@ async function fetchCategoriesFromMySQL(
         }
         return true;
       });
-      console.log(`🔍 [FETCH CATEGORIES] Filtered ${beforeCount - filteredProducts.length} products with invalid harga_jual (NULL/0) in offline mode, ${filteredProducts.length} remaining`);
     }
 
     // Get distinct category2 names from filtered products
@@ -383,7 +381,7 @@ async function fetchCategoriesFromMySQL(
       active: index === 0
     }));
 
-    console.log(`✅ [FETCH CATEGORIES] Fetched ${categories.length} categories from MySQL`);return categories;
+    return categories;
   } catch (error) {
     console.error('❌ [FETCH CATEGORIES] MySQL query error:', error);return [];
   }

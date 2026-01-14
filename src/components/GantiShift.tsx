@@ -1638,7 +1638,6 @@ export default function GantiShift() {
           console.log('🖨️ [PRINT WHOLE DAY] Sending to printer...');
 
           // Debug logging
-          fetch('http://127.0.0.1:7242/ingest/7b565785-72b5-49f7-b2c0-57606ea0d0b5',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'GantiShift.tsx:1584',message:'Print whole day - sectionOptions',data:printSectionOptions,timestamp:Date.now(),sessionId:'debug-session',runId:'pre-fix',hypothesisId:'B'})}).catch(()=>{});
           
           const result = await electronAPI.printShiftBreakdown({
             user_name: 'Semua Shift',

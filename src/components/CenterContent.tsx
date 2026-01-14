@@ -9,6 +9,7 @@ import EditItemModal from './EditItemModal';
 import PaymentModal from './PaymentModal';
 import BundleSelectionModal from './BundleSelectionModal';
 import TableSelectionModal from './TableSelectionModal';
+import WaiterSelectionModal from './WaiterSelectionModal';
 import { offlineSyncService } from '@/lib/offlineSync';
 import { getApiUrl } from '@/lib/api';
 import { useAuth } from '@/hooks/useAuth';
@@ -84,6 +85,24 @@ interface CartItem {
   tableId?: number | null; // Table ID (for logging)
 }
 
+interface Employee {
+  id: number;
+  user_id: number | null;
+  business_id: number | null;
+  jabatan_id: number | null;
+  no_ktp: string;
+  phone: string | null;
+  nama_karyawan: string;
+  jenis_kelamin: string;
+  alamat: string | null;
+  tanggal_lahir: string | null;
+  tanggal_bekerja: string;
+  color: string | null;
+  pin: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
 const categoryEmoji = (categoryName?: string | null) => {
   switch (categoryName) {
     case 'Bakery':
@@ -148,6 +167,8 @@ interface CenterContentProps {
     tableName: string | null;
     roomName: string | null;
     customerName: string | null;
+    waiterName: string | null;
+    waiterColor: string | null;
   } | null;
   onReloadTransaction?: (transactionId: string) => void;
   onClearLoadedTransaction?: () => void;
@@ -163,6 +184,7 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
   const [showBundleModal, setShowBundleModal] = useState(false);
   const [selectedProduct, setSelectedProduct] = useState<Product | null>(null);
   const [selectedCartItem, setSelectedCartItem] = useState<CartItem | null>(null);
+  const [copiedUuid, setCopiedUuid] = useState<string | null>(null);
   const [loadingProductId, setLoadingProductId] = useState<number | null>(null);
   const [showPaymentModal, setShowPaymentModal] = useState(false);
   const [showTableSelectionModal, setShowTableSelectionModal] = useState(false);
@@ -171,6 +193,13 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
   const [showPasswordModal, setShowPasswordModal] = useState(false);
   const [passwordInput, setPasswordInput] = useState('');
   const [pendingLockedItemAction, setPendingLockedItemAction] = useState<{ item: CartItem; action: 'reduce' | 'delete' } | null>(null);
+  
+  // Waiter selection state
+  const [currentUserEmployee, setCurrentUserEmployee] = useState<Employee | null>(null);
+  const [selectedWaiterId, setSelectedWaiterId] = useState<number | null>(null);
+  const [selectedWaiterName, setSelectedWaiterName] = useState<string | null>(null);
+  const [selectedWaiterColor, setSelectedWaiterColor] = useState<string | null>(null);
+  const [showWaiterModal, setShowWaiterModal] = useState(false);
 
   // Column count state - load from localStorage, default to 5
   const [columnCount, setColumnCount] = useState<number>(() => {
@@ -214,8 +243,43 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
     } else if (!loadedTransactionInfo) {
       // Clear customer name when no transaction is loaded (e.g., when New button is clicked)
       setCustomerName('');
+      // Clear waiter selection when no transaction is loaded
+      setSelectedWaiterId(null);
+      setSelectedWaiterName(null);
+      setSelectedWaiterColor(null);
     }
   }, [loadedTransactionInfo]);
+
+  // Step 2: Access Control - Fetch current user's employee record
+  useEffect(() => {
+    if (user?.id && businessId) {
+      const fetchCurrentUserEmployee = async () => {
+        try {
+          const electronAPI = typeof window !== 'undefined' ? window.electronAPI : undefined;
+          if (electronAPI?.localDbGetEmployees) {
+            const allEmployees = await electronAPI.localDbGetEmployees();
+            const employee = (allEmployees as unknown as Employee[]).find(
+              (emp: Employee) => 
+                emp.user_id === parseInt(String(user.id)) && 
+                emp.business_id === businessId
+            );
+            setCurrentUserEmployee(employee || null);
+          }
+        } catch (error) {
+          console.error('Error fetching current user employee:', error);
+          setCurrentUserEmployee(null);
+        }
+      };
+      fetchCurrentUserEmployee();
+    } else {
+      setCurrentUserEmployee(null);
+    }
+  }, [user?.id, businessId]);
+
+  // Check if user can select waiter (SPV, Cashier, or Waiter)
+  const canSelectWaiter = currentUserEmployee?.jabatan_id === 1 || 
+                          currentUserEmployee?.jabatan_id === 2 || 
+                          currentUserEmployee?.jabatan_id === 6;
 
   // Calculate responsive sizes based on column count
   const gridStyles = useMemo(() => {
@@ -938,33 +1002,127 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
         {loadedTransactionInfo && (
           <div className="bg-yellow-100 border-b-2 border-yellow-400 px-4 py-2 flex-shrink-0">
             <div className="flex items-center justify-between">
-              <span className="text-sm font-semibold text-yellow-900">
-                Opening - {loadedTransactionInfo.transactionId}
-                {loadedTransactionInfo.tableName && loadedTransactionInfo.roomName
-                  ? `/${loadedTransactionInfo.tableName}/${loadedTransactionInfo.roomName}`
-                  : ''}
-                {loadedTransactionInfo.customerName
-                  ? `/${loadedTransactionInfo.customerName}`
-                  : ''}
+              <span className="text-sm font-semibold text-yellow-900 flex items-center gap-2 flex-wrap">
+                <button
+                  onClick={async (e) => {
+                    e.stopPropagation();
+                    try {
+                      const textArea = document.createElement('textarea');
+                      textArea.value = loadedTransactionInfo.transactionId;
+                      textArea.style.position = 'fixed';
+                      textArea.style.left = '-9999px';
+                      textArea.style.top = '0';
+                      textArea.style.opacity = '0';
+                      textArea.setAttribute('readonly', '');
+                      document.body.appendChild(textArea);
+                      textArea.focus();
+                      textArea.select();
+                      textArea.setSelectionRange(0, loadedTransactionInfo.transactionId.length);
+                      
+                      try {
+                        if (window.isSecureContext && navigator.clipboard && navigator.clipboard.writeText) {
+                          await navigator.clipboard.writeText(loadedTransactionInfo.transactionId);
+                        } else {
+                          const successful = document.execCommand('copy');
+                          if (!successful) {
+                            throw new Error('execCommand copy failed');
+                          }
+                        }
+                      } catch {
+                        const successful = document.execCommand('copy');
+                        if (!successful) {
+                          throw new Error('All copy methods failed');
+                        }
+                      }
+                      
+                      document.body.removeChild(textArea);
+                      setCopiedUuid(loadedTransactionInfo.transactionId);
+                      setTimeout(() => {
+                        setCopiedUuid(null);
+                      }, 2000);
+                    } catch (error) {
+                      console.error('Failed to copy UUID:', error);
+                      alert('Gagal menyalin UUID. Silakan salin manual: ' + loadedTransactionInfo.transactionId);
+                    }
+                  }}
+                  className="px-2 py-1 text-xs text-gray-700 hover:bg-yellow-200 rounded transition-colors border border-yellow-300 hover:border-yellow-400"
+                  title={`Copy UUID: ${loadedTransactionInfo.transactionId}`}
+                >
+                  {copiedUuid === loadedTransactionInfo.transactionId ? 'Copied!' : 'Copy UUID'}
+                </button>
+                {loadedTransactionInfo.waiterName && (
+                  <>
+                    <span className="text-yellow-700">|</span>
+                    <span className="text-yellow-700">by</span>
+                    {loadedTransactionInfo.waiterColor ? (
+                      <span
+                        className="text-xs font-medium text-white px-2 py-1"
+                        style={{ backgroundColor: loadedTransactionInfo.waiterColor }}
+                      >
+                        {loadedTransactionInfo.waiterName}
+                      </span>
+                    ) : (
+                      <span className="font-medium">{loadedTransactionInfo.waiterName}</span>
+                    )}
+                  </>
+                )}
+                {(loadedTransactionInfo.tableName || loadedTransactionInfo.roomName || loadedTransactionInfo.customerName) && (
+                  <>
+                    <span className="text-yellow-700">|</span>
+                    <span>
+                      {loadedTransactionInfo.tableName && loadedTransactionInfo.roomName
+                        ? `${loadedTransactionInfo.tableName}/${loadedTransactionInfo.roomName}`
+                        : loadedTransactionInfo.tableName || loadedTransactionInfo.roomName || ''}
+                      {loadedTransactionInfo.customerName && (
+                        <span className="text-yellow-700">: {loadedTransactionInfo.customerName}</span>
+                      )}
+                    </span>
+                  </>
+                )}
               </span>
             </div>
           </div>
         )}
         <div className="flex-1 p-4 flex flex-col overflow-hidden">
 
-        {/* Customer Name Input - Only show when no transaction is loaded */}
+        {/* Customer Name and Waiter Selection - Same line, half each */}
         {!loadedTransactionInfo && (
           <div className="mb-4 flex-shrink-0">
-            <label className="block text-sm font-medium text-gray-700 mb-1">
-              Nama Pelanggan
-            </label>
-            <input
-              type="text"
-              value={customerName}
-              onChange={(e) => setCustomerName(e.target.value)}
-              placeholder="Masukkan nama pelanggan"
-              className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm text-black placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-            />
+            <div className="grid grid-cols-2 gap-2">
+              {/* Customer Name Input - Left Half */}
+              <input
+                type="text"
+                value={customerName}
+                onChange={(e) => setCustomerName(e.target.value)}
+                placeholder="Nama pelanggan"
+                className="rounded-lg px-3 py-2 border-2 border-blue-500 text-base text-black placeholder:text-gray-400 focus:outline-none animate-pulse"
+                style={{ 
+                  padding: '1rem', 
+                  animation: 'pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite',
+                  fontSize: 'clamp(0.875rem, 2.5vw, 1.125rem)' // Responsive font size: min 14px, scales with viewport, max 18px
+                }}
+              />
+
+              {/* Waiter Selection - Right Half */}
+              <button
+                onClick={() => setShowWaiterModal(true)}
+                className="w-full rounded-lg transition-all hover:shadow-lg cursor-pointer"
+                style={{ 
+                  backgroundColor: selectedWaiterColor || '#3B82F6',
+                  padding: '1rem'
+                }}
+              >
+                {selectedWaiterName ? (
+                  <div className="bg-white rounded px-3 py-2 text-center">
+                    <span className="font-medium text-gray-800">
+                      {selectedWaiterName}
+                    </span>
+                  </div>
+                ) : (
+                  <span className="text-white">Pilih Waiter</span>
+                )}
+              </button>
+            </div>
           </div>
         )}
 
@@ -1201,8 +1359,9 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
           <div className="flex space-x-2 mt-3">
             <button
               onClick={() => setShowTableSelectionModal(true)}
-              disabled={cartItems.length === 0}
+              disabled={cartItems.length === 0 || isOnline}
               className="flex-1 bg-blue-500 hover:bg-blue-600 disabled:bg-gray-400 disabled:cursor-not-allowed text-white py-1.5 px-3 rounded-lg transition-colors text-sm"
+              title={isOnline ? 'Simpan Order hanya tersedia di tab Offline' : undefined}
             >
               Simpan Order
             </button>
@@ -1280,29 +1439,6 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
         <div className="overflow-y-auto mb-4" style={{ height: 'calc(97vh)' }}>
           <div className={`grid ${gridStyles.gridCols} gap-2`}>
             {(() => {
-              // Debug: Log ALL products and their harga_jual values
-              console.log('🔍 [CENTER CONTENT] Total products received:', products.length);
-              console.log('🔍 [CENTER CONTENT] Sample products (first 5):', products.slice(0, 5).map(p => ({ 
-                id: p.id, 
-                nama: p.nama, 
-                harga_jual: p.harga_jual, 
-                harga_jual_type: typeof p.harga_jual,
-                isNull: p.harga_jual === null,
-                isUndefined: p.harga_jual === undefined,
-                isZero: p.harga_jual === 0
-              })));
-              
-              // Debug: Log products with null harga_jual
-              const productsWithNullPrice = products.filter(p => p.harga_jual === null || p.harga_jual === undefined);
-              if (productsWithNullPrice.length > 0) {
-                console.log('⚠️ [CENTER CONTENT] Products with NULL harga_jual found:', productsWithNullPrice.length, productsWithNullPrice.map(p => ({ id: p.id, nama: p.nama, harga_jual: p.harga_jual })));
-              }
-              
-              // Debug: Log products with zero harga_jual
-              const productsWithZeroPrice = products.filter(p => p.harga_jual === 0);
-              if (productsWithZeroPrice.length > 0) {
-                console.log('ℹ️ [CENTER CONTENT] Products with ZERO harga_jual (should show):', productsWithZeroPrice.length, productsWithZeroPrice.map(p => ({ id: p.id, nama: p.nama, harga_jual: p.harga_jual })));
-              }
 
               // Helper function to check if price is null/undefined
               // Note: 0 is handled separately in filtering logic (filtered out in offline mode)
@@ -1336,26 +1472,6 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
                 return !isPriceNull(p);
               });
 
-              // Debug: Log filtering results
-              const filteredOutCount = products.length - filteredProducts.length;
-              console.log('🔍 [CENTER CONTENT] Filtering results:', {
-                totalProducts: products.length,
-                filteredOut: filteredOutCount,
-                remaining: filteredProducts.length,
-                isOnline: isOnline,
-                selectedPlatform: selectedOnlinePlatform
-              });
-              
-              // Debug: Check what was filtered out
-              if (filteredOutCount > 0) {
-                const filteredOutProducts = products.filter(p => !filteredProducts.includes(p));
-                console.log('🔍 [CENTER CONTENT] Filtered out products details:', filteredOutProducts.map(p => ({ 
-                  id: p.id, 
-                  nama: p.nama, 
-                  harga_jual: p.harga_jual,
-                  harga_jual_type: typeof p.harga_jual
-                })));
-              }
 
               // Then filter by search query if provided
               if (searchQuery.trim()) {
@@ -1554,6 +1670,7 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
         transactionType={transactionType}
         isOnline={isOnline}
         selectedOnlinePlatform={selectedOnlinePlatform}
+        waiterId={selectedWaiterId}
       />
 
       {/* Table Selection Modal */}
@@ -1597,12 +1714,15 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
           bundleSelections?: unknown[];
         }>}
         transactionType={transactionType}
+        waiterId={selectedWaiterId}
         onSuccess={() => {
+          console.log('🔍 [CENTER CONTENT] Transaction saved successfully with waiterId:', selectedWaiterId);
           // Only clear cart for new orders, not for "lihat" mode
           if (!loadedTransactionInfo) {
             // New order: clear cart after successful save
             setCartItems([]);
             sendCartUpdate([]);
+            // Note: We keep selectedWaiterId so it persists for the next order
           } else {
             // "Lihat" mode: reload transaction to get updated items with correct transactionItemId
             // After reload, all items will be locked, so unsaved changes flag will be cleared automatically
@@ -1723,6 +1843,20 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
           </div>
         </div>
       )}
+
+      {/* Waiter Selection Modal */}
+      <WaiterSelectionModal
+        isOpen={showWaiterModal}
+        onClose={() => setShowWaiterModal(false)}
+        onSelect={(employeeId, employeeName, employeeColor) => {
+          console.log('🔍 [CENTER CONTENT] Waiter selected:', { employeeId, employeeName, employeeColor });
+          setSelectedWaiterId(employeeId);
+          setSelectedWaiterName(employeeName);
+          setSelectedWaiterColor(employeeColor);
+          setShowWaiterModal(false);
+        }}
+        businessId={businessId}
+      />
     </div>
   );
 }

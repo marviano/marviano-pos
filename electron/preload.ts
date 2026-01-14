@@ -63,6 +63,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // Employees
   localDbUpsertEmployees: (rows: UnknownRecord[], skipValidation?: boolean) => ipcRenderer.invoke('localdb-upsert-employees', rows, skipValidation),
   localDbGetEmployees: () => ipcRenderer.invoke('localdb-get-employees'),
+  localDbCleanupOrphanedEmployees: (businessId: number, syncedEmployeeIds: number[]) => ipcRenderer.invoke('localdb-cleanup-orphaned-employees', businessId, syncedEmployeeIds),
 
   // Ingredients
   localDbUpsertIngredients: (rows: UnknownRecord[]) => ipcRenderer.invoke('localdb-upsert-ingredients', rows),
@@ -110,6 +111,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   localDbQueueOfflineRefund: (refundData: UnknownRecord) => ipcRenderer.invoke('localdb-queue-offline-refund', refundData),
   localDbGetPendingRefunds: () => ipcRenderer.invoke('localdb-get-pending-refunds'),
   localDbMarkRefundSynced: (offlineRefundId: number) => ipcRenderer.invoke('localdb-mark-refund-synced', offlineRefundId),
+  localDbDeleteRefund: (offlineRefundId: number) => ipcRenderer.invoke('localdb-delete-refund', offlineRefundId),
+  localDbCheckTransactionExists: (transactionUuid: string) => ipcRenderer.invoke('localdb-check-transaction-exists', transactionUuid),
 
   // Restaurant Table Layout
   getRestaurantRooms: (businessId: number) => ipcRenderer.invoke('get-restaurant-rooms', businessId),
@@ -157,9 +160,18 @@ contextBridge.exposeInMainWorld('electronAPI', {
   localDbUpsertTransactionItemCustomizations: (rows: UnknownRecord[]) => ipcRenderer.invoke('localdb-upsert-transaction-item-customizations', rows),
   localDbUpsertTransactionItemCustomizationOptions: (rows: UnknownRecord[]) => ipcRenderer.invoke('localdb-upsert-transaction-item-customization-options', rows),
   localDbGetTransactionRefunds: (transactionUuid: string) => ipcRenderer.invoke('localdb-get-transaction-refunds', transactionUuid),
+  // System POS database handlers
+  localDbGetSystemPosTransactions: (businessId?: number, limit?: number) => ipcRenderer.invoke('localdb-get-system-pos-transactions', businessId, limit),
+  localDbGetSystemPosTransactionItems: (transactionId?: number | string) => ipcRenderer.invoke('localdb-get-system-pos-transaction-items', transactionId),
+  localDbGetSystemPosTransactionRefunds: (transactionUuid: string) => ipcRenderer.invoke('localdb-get-system-pos-transaction-refunds', transactionUuid),
+  localDbGetSystemPosUsers: () => ipcRenderer.invoke('localdb-get-system-pos-users'),
+  localDbGetSystemPosBusinesses: () => ipcRenderer.invoke('localdb-get-system-pos-businesses'),
+  localDbGetSystemPosAllProducts: (businessId?: number) => ipcRenderer.invoke('localdb-get-system-pos-all-products', businessId),
+  localDbGetSystemPosEmployees: () => ipcRenderer.invoke('localdb-get-system-pos-employees'),
   localDbGetShiftRefunds: (userId: number | null, shiftStart: string, shiftEnd: string | null, businessId?: number, shiftUuid?: string | null) => ipcRenderer.invoke('localdb-get-shift-refunds', userId, shiftStart, shiftEnd, businessId, shiftUuid),
   localDbUpsertTransactionRefunds: (rows: UnknownRecord[]) => ipcRenderer.invoke('localdb-upsert-transaction-refunds', rows),
   localDbApplyTransactionRefund: (payload: UnknownRecord) => ipcRenderer.invoke('localdb-apply-transaction-refund', payload),
+  localDbSplitBill: (payload: { sourceTransactionUuid: string; destinationTransactionUuid: string; itemIds: number[] }) => ipcRenderer.invoke('localdb-split-bill', payload),
 
   // Payment Methods
   localDbUpsertPaymentMethods: (rows: UnknownRecord[]) => ipcRenderer.invoke('localdb-upsert-payment-methods', rows),
@@ -298,15 +310,31 @@ contextBridge.exposeInMainWorld('electronAPI', {
     includeTransactions?: boolean;
   }) => ipcRenderer.invoke('restore-from-server', options),
 
-  // WebSocket Server Management
-  websocketServerStart: (port?: number) => ipcRenderer.invoke('websocket-server-start', port),
-  websocketServerStop: () => ipcRenderer.invoke('websocket-server-stop'),
-  websocketServerStatus: () => ipcRenderer.invoke('websocket-server-status'),
 
   // Configuration Management
   getAppConfig: () => ipcRenderer.invoke('get-app-config'),
   saveAppConfig: (config: { serverHost?: string; apiUrl?: string; dbUser?: string; dbPassword?: string; dbName?: string; dbPort?: number }) => ipcRenderer.invoke('save-app-config', config),
   resetAppConfig: () => ipcRenderer.invoke('reset-app-config'),
   testDbConnection: (config: { serverHost?: string; dbUser?: string; dbPassword?: string; dbName?: string; dbPort?: number }) => ipcRenderer.invoke('test-db-connection', config),
+
+  // Receipt Template and Settings Management
+  getReceiptTemplate: (templateType: 'receipt' | 'bill', businessId?: number) => ipcRenderer.invoke('get-receipt-template', templateType, businessId),
+  getReceiptTemplates: (templateType: 'receipt' | 'bill', businessId?: number) => ipcRenderer.invoke('get-receipt-templates', templateType, businessId),
+  setDefaultReceiptTemplate: (templateType: 'receipt' | 'bill', templateName: string, businessId?: number) => ipcRenderer.invoke('set-default-receipt-template', templateType, templateName, businessId),
+  saveReceiptTemplate: (templateType: 'receipt' | 'bill', templateCode: string, businessId?: number) => ipcRenderer.invoke('save-receipt-template', templateType, templateCode, businessId),
+  getReceiptSettings: (businessId?: number) => ipcRenderer.invoke('get-receipt-settings', businessId),
+  saveReceiptSettings: (settings: {
+    store_name?: string | null;
+    address?: string | null;
+    phone_number?: string | null;
+    contact_phone?: string | null;
+    logo_base64?: string | null;
+    footer_text?: string | null;
+    partnership_contact?: string | null;
+  }, businessId?: number) => ipcRenderer.invoke('save-receipt-settings', settings, businessId),
+
+  // Activity Logs
+  localDbUpsertActivityLogs: (rows: UnknownRecord[]) => ipcRenderer.invoke('localdb-upsert-activity-logs', rows),
+  localDbGetActivityLogs: (businessId?: number) => ipcRenderer.invoke('localdb-get-activity-logs', businessId),
 });
 

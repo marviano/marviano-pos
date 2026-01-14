@@ -3,7 +3,6 @@ import * as path from 'path';
 import * as fs from 'fs';
 import * as os from 'os';
 import { PrinterManagementService } from './printerManagement';
-import { websocketServer } from './websocketServer';
 import { initializeMySQLPool, getMySQLPool, executeQuery, executeQueryOne, executeUpdate, executeUpsert, executeTransaction, getConnection, initializeSystemPosPool, executeSystemPosQuery, executeSystemPosQueryOne, executeSystemPosUpdate, executeSystemPosTransaction, toMySQLDateTime, toMySQLTimestamp, testDatabaseConnection } from './mysqlDb';
 import { initializeMySQLSchema } from './mysqlSchema';
 import { readConfig, writeConfig, resetConfig, getDbConfig, type AppConfig } from './configManager';
@@ -7546,14 +7545,6 @@ app.whenReady().then(() => {
 
   createWindows();
 
-  // Start WebSocket server (default port 19967)
-  const wsResult = websocketServer.start(19967);
-  if (wsResult.success) {
-    console.log(`✅ WebSocket server started on port ${wsResult.port}`);
-  } else {
-    console.error(`❌ Failed to start WebSocket server: ${wsResult.error}`);
-  }
-
   app.on('activate', () => {
     // On macOS, re-create windows when the dock icon is clicked
     if (BrowserWindow.getAllWindows().length === 0) {
@@ -7564,18 +7555,12 @@ app.whenReady().then(() => {
 
 // Quit when all windows are closed
 app.on('window-all-closed', () => {
-  // Stop WebSocket server before quitting
-  websocketServer.stop();
   // On macOS, keep the app running even when all windows are closed
   if (process.platform !== 'darwin') {
     app.quit();
   }
 });
 
-// Stop WebSocket server on app quit
-app.on('before-quit', () => {
-  websocketServer.stop();
-});
 
 // IPC handlers for POS-specific functionality
 ipcMain.handle('print-receipt', async (event, data: ReceiptPrintData) => {
@@ -11634,44 +11619,4 @@ ipcMain.handle('localdb-upsert-restaurant-layout-elements', async (event, rows: 
   }
 });
 
-// IPC handlers for WebSocket server management
-ipcMain.handle('websocket-server-start', async (event, port: number = 8080) => {
-  try {
-    const result = websocketServer.start(port);
-    return result;
-  } catch (error) {
-    console.error('[IPC] Error starting WebSocket server:', error);
-    return {
-      success: false,
-      error: error instanceof Error ? error.message : 'Unknown error'
-    };
-  }
-});
-
-ipcMain.handle('websocket-server-stop', async () => {
-  try {
-    const result = websocketServer.stop();
-    return result;
-  } catch (error) {
-    console.error('[IPC] Error stopping WebSocket server:', error);
-    return {
-      success: false,
-      error: error instanceof Error ? error.message : 'Unknown error'
-    };
-  }
-});
-
-ipcMain.handle('websocket-server-status', async () => {
-  try {
-    return websocketServer.getStatus();
-  } catch (error) {
-    console.error('[IPC] Error getting WebSocket server status:', error);
-    return {
-      isRunning: false,
-      port: 19967,
-      clientCount: 0,
-      clients: []
-    };
-  }
-});
 

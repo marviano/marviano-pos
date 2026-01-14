@@ -13,7 +13,8 @@ import {
   Receipt,
   Table as TableIcon,
   ChefHat,
-  Coffee
+  Coffee,
+  ChevronLeft
 } from 'lucide-react';
 import { useAuth } from '@/hooks/useAuth';
 import { isSuperAdmin } from '@/lib/auth';
@@ -30,9 +31,11 @@ interface LeftSidebarProps {
   menuItems: MenuItem[];
   activeMenuItem: string;
   onMenuItemClick: (item: string) => void;
+  onToggleSidebar?: () => void;
+  isKitchenOrBarista?: boolean;
 }
 
-export default function LeftSidebar({ menuItems, activeMenuItem, onMenuItemClick }: LeftSidebarProps) {
+export default function LeftSidebar({ menuItems, activeMenuItem, onMenuItemClick, onToggleSidebar, isKitchenOrBarista = false }: LeftSidebarProps) {
   const { user } = useAuth();
   const permissions = useMemo(() => user?.permissions ?? [], [user?.permissions]);
   const isAdmin = isSuperAdmin(user);
@@ -62,7 +65,7 @@ export default function LeftSidebar({ menuItems, activeMenuItem, onMenuItemClick
         return <Heart className="w-5 h-5" />;
       case 'Laporan':
         return <PieChart className="w-5 h-5" />;
-      case 'Setelan':
+      case 'Settings':
         return <Sliders className="w-5 h-5" />;
       case 'Setelan Global':
         return <Settings className="w-5 h-5" />;
@@ -90,8 +93,8 @@ export default function LeftSidebar({ menuItems, activeMenuItem, onMenuItemClick
       <div className="flex-1 overflow-y-auto overflow-x-hidden px-2 min-h-0">
         <div className="py-1">
           {menuItems.map((item) => {
-            // Old Setelan - requires permissions
-            if (item.name === 'Setelan') {
+            // Settings - requires permissions
+            if (item.name === 'Settings') {
               const canAccessSync = isAdmin ||
                 permissions.includes('setelan.sinkronisasi') ||
                 permissions.includes('marviano-pos_setelan_sinkronisasi');
@@ -100,7 +103,7 @@ export default function LeftSidebar({ menuItems, activeMenuItem, onMenuItemClick
                 permissions.includes('marviano-pos_setelan_printer-setup');
               const canAccessSettings = canAccessSync || canAccessPrinter;
               
-              /* console.log(`🔧 [SIDEBAR DEBUG] 'Setelan' access:`, {
+              /* console.log(`🔧 [SIDEBAR DEBUG] 'Settings' access:`, {
                 isAdmin,
                 hasSyncPerm: permissions.includes('setelan.sinkronisasi'),
                 hasPrinterPerm: permissions.includes('setelan.printersetup'),
@@ -140,23 +143,37 @@ export default function LeftSidebar({ menuItems, activeMenuItem, onMenuItemClick
         <div className="flex flex-col items-center space-y-2">
           <Wifi className="w-5 h-5 text-white" />
           <div className="w-[30%] border-t border-blue-600"></div>
-          <button
-            onClick={() => {
-              if (window.electronAPI) {
-                window.electronAPI.minimizeWindow();
-              }
-            }}
-            onTouchEnd={(e) => {
-              e.preventDefault();
-              if (window.electronAPI) {
-                window.electronAPI.minimizeWindow();
-              }
-            }}
-            className="p-2 text-white hover:bg-blue-900 rounded"
-            title="Minimize"
-          >
-            <Minimize2 className="w-4 h-4" />
-          </button>
+          {isKitchenOrBarista && onToggleSidebar ? (
+            <button
+              onClick={onToggleSidebar}
+              onTouchEnd={(e) => {
+                e.preventDefault();
+                onToggleSidebar();
+              }}
+              className="p-2 text-white hover:bg-blue-900 rounded"
+              title="Hide Sidebar"
+            >
+              <ChevronLeft className="w-4 h-4" />
+            </button>
+          ) : (
+            <button
+              onClick={() => {
+                if (window.electronAPI) {
+                  window.electronAPI.minimizeWindow();
+                }
+              }}
+              onTouchEnd={(e) => {
+                e.preventDefault();
+                if (window.electronAPI) {
+                  window.electronAPI.minimizeWindow();
+                }
+              }}
+              className="p-2 text-white hover:bg-blue-900 rounded"
+              title="Minimize"
+            >
+              <Minimize2 className="w-4 h-4" />
+            </button>
+          )}
         </div>
       </div>
     </div>

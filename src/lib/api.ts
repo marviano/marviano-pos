@@ -3,6 +3,21 @@ let cachedApiUrl: string | null = null;
 let configCachePromise: Promise<string | null> | null = null;
 
 /**
+ * Clean URL to remove any potential console output contamination
+ * Electron console messages can sometimes be appended to URLs
+ */
+export function cleanUrl(url: string): string {
+  if (!url || typeof url !== 'string') {
+    return url;
+  }
+  // Remove any [ELECTRON] prefixes and console error messages that might have been appended
+  let cleaned = url.split('[ELECTRON]')[0].split('source: devtools://')[0].trim();
+  // Remove any trailing error messages that might have been appended
+  cleaned = cleaned.split('ERROR:CONSOLE')[0].trim();
+  return cleaned;
+}
+
+/**
  * Get API URL from runtime config (Electron) or environment variable
  */
 async function getRuntimeApiUrl(): Promise<string | null> {
@@ -11,15 +26,17 @@ async function getRuntimeApiUrl(): Promise<string | null> {
     try {
       const result = await window.electronAPI.getAppConfig();
       if (result?.success && result.config?.apiUrl) {
-        return result.config.apiUrl.trim();
+        // Clean the URL immediately when reading from Electron config
+        return cleanUrl(result.config.apiUrl.trim());
       }
     } catch (error) {
       console.warn('Failed to get API URL from runtime config:', error);
     }
   }
   
-  // Fallback to environment variable
-  return (process.env.NEXT_PUBLIC_API_URL || '').trim() || null;
+  // Fallback to environment variable - clean it immediately
+  const envUrl = (process.env.NEXT_PUBLIC_API_URL || '').trim();
+  return envUrl ? cleanUrl(envUrl) : null;
 }
 
 /**
@@ -58,9 +75,13 @@ export const getApiUrl = (path: string): string => {
   // Try to get base URL from cache first (synchronous)
   let baseUrl = getCachedApiUrl();
   
-  // If no cached URL, try environment variable
+  // If no cached URL, try environment variable - clean it immediately
   if (!baseUrl) {
-    baseUrl = (process.env.NEXT_PUBLIC_API_URL || '').trim();
+    const envUrl = (process.env.NEXT_PUBLIC_API_URL || '').trim();
+    baseUrl = envUrl ? cleanUrl(envUrl) : null;
+  } else {
+    // Clean cached URL in case it was corrupted
+    baseUrl = cleanUrl(baseUrl);
   }
   
   // If still no base URL, check if we're in development mode
@@ -91,6 +112,7 @@ export const getApiUrl = (path: string): string => {
   }
   // Note: HTTPS URLs without explicit port will use default port 443, which is fine
 
+  // Ensure the path is properly appended (don't let server strip it)
   const finalUrl = `${normalizedBaseUrl}${normalizedPath}`;
   return finalUrl;
 };

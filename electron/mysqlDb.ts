@@ -511,6 +511,235 @@ export async function testDatabaseConnection(config: {
 }
 
 /**
+ * Helper function to convert unknown values to MySQL parameter types
+ */
+function convertToMySQLParam(value: unknown): string | number | null | boolean {
+  if (value === null || value === undefined) {
+    return null;
+  }
+  if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
+    return value;
+  }
+  if (value instanceof Date) {
+    return toMySQLDateTime(value) || null;
+  }
+  // Convert other types to string
+  return String(value);
+}
+
+/**
+ * Insert complete transaction data into system_pos database
+ * Fetches transaction and all related data from salespulse DB and inserts into system_pos DB
+ */
+export async function insertTransactionToSystemPos(transactionId: string): Promise<{ success: boolean; error?: string; skipped?: boolean }> {
+  const mainPool = getMySQLPool();
+  const systemPosPool = getSystemPosPool();
+  
+  try {
+    // Step 1: Check if transaction already exists in system_pos (deduplication)
+    const existingTx = await executeSystemPosQueryOne<{ id: number }>(
+      'SELECT id FROM transactions WHERE uuid_id = ?',
+      [transactionId]
+    );
+    
+    if (existingTx) {
+      console.log(`⏭️ [SYSTEM POS] Transaction ${transactionId} already exists in system_pos, skipping insertion`);
+      return { success: true, skipped: true };
+    }
+
+    // Step 2: Fetch transaction from salespulse DB
+    const transaction = await executeQueryOne<Record<string, unknown>>(
+      'SELECT * FROM transactions WHERE uuid_id = ?',
+      [transactionId]
+    );
+
+    if (!transaction) {
+      return { success: false, error: `Transaction ${transactionId} not found in salespulse DB` };
+    }
+
+    // Step 3: Fetch transaction items
+    const items = await executeQuery<Record<string, unknown>>(
+      'SELECT * FROM transaction_items WHERE uuid_transaction_id = ? ORDER BY id ASC',
+      [transactionId]
+    );
+
+    // Step 4: Fetch customizations and options
+    const itemIds = items.map(item => item.id).filter((id): id is number => typeof id === 'number');
+    let customizations: Record<string, unknown>[] = [];
+    let customizationOptions: Record<string, unknown>[] = [];
+
+    if (itemIds.length > 0) {
+      const placeholders = itemIds.map(() => '?').join(',');
+      customizations = await executeQuery<Record<string, unknown>>(
+        `SELECT * FROM transaction_item_customizations WHERE transaction_item_id IN (${placeholders})`,
+        itemIds
+      );
+
+      if (customizations.length > 0) {
+        const customizationIds = customizations.map(c => c.id).filter((id): id is number => typeof id === 'number');
+        if (customizationIds.length > 0) {
+          const optionPlaceholders = customizationIds.map(() => '?').join(',');
+          customizationOptions = await executeQuery<Record<string, unknown>>(
+            `SELECT * FROM transaction_item_customization_options WHERE transaction_item_customization_id IN (${optionPlaceholders})`,
+            customizationIds
+          );
+        }
+      }
+    }
+
+    // Step 5: Fetch refunds
+    const refunds = await executeQuery<Record<string, unknown>>(
+      'SELECT * FROM transaction_refunds WHERE transaction_uuid = ? ORDER BY refunded_at DESC',
+      [transactionId]
+    );
+
+    // Step 6: Fetch shift if exists
+    let shift: Record<string, unknown> | null = null;
+    if (transaction.shift_uuid && typeof transaction.shift_uuid === 'string') {
+      shift = await executeQueryOne<Record<string, unknown>>(
+        'SELECT * FROM shifts WHERE uuid_id = ?',
+        [transaction.shift_uuid]
+      );
+    }
+
+    // Step 7: Check and insert missing products
+    const productIds = items
+      .map(item => item.product_id)
+      .filter((id): id is number => typeof id === 'number' && id > 0);
+    
+    const uniqueProductIds = [...new Set(productIds)];
+    
+    let productsInserted = 0;
+    let productsFailed = 0;
+    let productsSkipped = 0;
+    
+    for (const productId of uniqueProductIds) {
+      const existingProduct = await executeSystemPosQueryOne<{ id: number }>(
+        'SELECT id FROM products WHERE id = ?',
+        [productId]
+      );
+
+      if (!existingProduct) {
+        // Fetch product from salespulse DB
+        const product = await executeQueryOne<Record<string, unknown>>(
+          'SELECT * FROM products WHERE id = ?',
+          [productId]
+        );
+
+        if (product) {
+          try {
+            // Insert product into system_pos
+            // Build INSERT statement with all product fields
+            const productFields = Object.keys(product).filter(key => key !== 'id' || product.id === productId);
+            const productValues = productFields.map(field => convertToMySQLParam(product[field]));
+            const productPlaceholders = productFields.map(() => '?').join(', ');
+            
+            await executeSystemPosUpdate(
+              `INSERT INTO products (${productFields.join(', ')}) VALUES (${productPlaceholders})`,
+              productValues
+            );
+            productsInserted++;
+            console.log(`✅ [SYSTEM POS] Inserted missing product ${productId} into system_pos`);
+          } catch (productError: unknown) {
+            productsFailed++;
+            const errorMsg = productError instanceof Error ? productError.message : String(productError);
+            console.error(`⚠️ [SYSTEM POS] Failed to insert product ${productId}:`, errorMsg);
+            // Continue with transaction insertion even if product insert fails
+          }
+        } else {
+          productsFailed++;
+          console.warn(`⚠️ [SYSTEM POS] Product ${productId} not found in salespulse DB, transaction may fail`);
+        }
+      } else {
+        productsSkipped++;
+      }
+    }
+
+    // Step 8: Insert all data into system_pos DB using transaction
+    const queries: Array<{ sql: string; params?: (string | number | null | boolean)[] }> = [];
+
+    // Insert transaction
+    const txFields = Object.keys(transaction);
+    const txValues = txFields.map(field => convertToMySQLParam(transaction[field]));
+    const txPlaceholders = txFields.map(() => '?').join(', ');
+    queries.push({
+      sql: `INSERT INTO transactions (${txFields.join(', ')}) VALUES (${txPlaceholders})`,
+      params: txValues
+    });
+
+    // Insert transaction items
+    for (const item of items) {
+      const itemFields = Object.keys(item);
+      const itemValues = itemFields.map(field => convertToMySQLParam(item[field]));
+      const itemPlaceholders = itemFields.map(() => '?').join(', ');
+      queries.push({
+        sql: `INSERT INTO transaction_items (${itemFields.join(', ')}) VALUES (${itemPlaceholders})`,
+        params: itemValues
+      });
+    }
+
+    // Insert customizations
+    for (const customization of customizations) {
+      const custFields = Object.keys(customization);
+      const custValues = custFields.map(field => convertToMySQLParam(customization[field]));
+      const custPlaceholders = custFields.map(() => '?').join(', ');
+      queries.push({
+        sql: `INSERT INTO transaction_item_customizations (${custFields.join(', ')}) VALUES (${custPlaceholders})`,
+        params: custValues
+      });
+    }
+
+    // Insert customization options
+    for (const option of customizationOptions) {
+      const optFields = Object.keys(option);
+      const optValues = optFields.map(field => convertToMySQLParam(option[field]));
+      const optPlaceholders = optFields.map(() => '?').join(', ');
+      queries.push({
+        sql: `INSERT INTO transaction_item_customization_options (${optFields.join(', ')}) VALUES (${optPlaceholders})`,
+        params: optValues
+      });
+    }
+
+    // Insert refunds
+    for (const refund of refunds) {
+      const refundFields = Object.keys(refund);
+      const refundValues = refundFields.map(field => convertToMySQLParam(refund[field]));
+      const refundPlaceholders = refundFields.map(() => '?').join(', ');
+      queries.push({
+        sql: `INSERT INTO transaction_refunds (${refundFields.join(', ')}) VALUES (${refundPlaceholders})`,
+        params: refundValues
+      });
+    }
+
+    // Insert shift if exists
+    if (shift) {
+      const shiftFields = Object.keys(shift);
+      const shiftValues = shiftFields.map(field => convertToMySQLParam(shift[field]));
+      const shiftPlaceholders = shiftFields.map(() => '?').join(', ');
+      queries.push({
+        sql: `INSERT INTO shifts (${shiftFields.join(', ')}) VALUES (${shiftPlaceholders}) ON DUPLICATE KEY UPDATE uuid_id = uuid_id`,
+        params: shiftValues
+      });
+    }
+
+    // Execute all inserts in a transaction
+    if (queries.length > 0) {
+      await executeSystemPosTransaction(queries);
+      console.log(`✅ [SYSTEM POS] Successfully inserted transaction ${transactionId} with ${items.length} items, ${customizations.length} customizations, ${refunds.length} refunds${shift ? ', 1 shift' : ''}`);
+    }
+
+    return { success: true };
+  } catch (error: unknown) {
+    const errorMsg = error instanceof Error ? error.message : String(error);
+    console.error(`❌ [SYSTEM POS] Error inserting transaction ${transactionId} into system_pos:`, errorMsg);
+    if (error instanceof Error && error.stack) {
+      console.error(`❌ [SYSTEM POS] Stack trace:`, error.stack);
+    }
+    return { success: false, error: errorMsg };
+  }
+}
+
+/**
  * Close the MySQL connection pools
  */
 export async function closeMySQLPool(): Promise<void> {
