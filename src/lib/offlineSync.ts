@@ -331,10 +331,10 @@ class OfflineSyncService {
           // Handle circular dependency: Organizations <-> Users <-> Roles
           // Strategy: Sync in multiple passes, allowing partial data
           
-          // Pass 1: Try to sync organizations (may skip if owner_user_id doesn't exist)
+          // Pass 1: Try to sync organizations (FIRST PASS - skip owner validation to break circular dependency)
           if (Array.isArray(data.organizations) && data.organizations.length > 0) {
             try {
-              const result = await (electronAPI.localDbUpsertOrganizations as (rows: unknown[]) => Promise<{ success: boolean }>)?.(data.organizations);
+              const result = await (electronAPI.localDbUpsertOrganizations as (rows: unknown[], skipValidation?: boolean) => Promise<{ success: boolean }>)?.(data.organizations, true);
               if (result && !result.success) {
               }
             } catch (err) {
@@ -461,14 +461,23 @@ class OfflineSyncService {
 
           // Sync Employees (depends on employees_position, users, businesses)
           if (Array.isArray(data.employees) && data.employees.length > 0) {
+            // #region agent log
+            fetch('http://127.0.0.1:7242/ingest/7b565785-72b5-49f7-b2c0-57606ea0d0b5',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'offlineSync.ts:463',message:'Starting employees sync',data:{employeesCount:data.employees.length,employees:data.employees.map((e:any)=>({id:e.id,business_id:e.business_id,jabatan_id:e.jabatan_id,nama:e.nama_karyawan}))},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
+            // #endregion
             try {
               const result = await (electronAPI.localDbUpsertEmployees as (rows: unknown[], skipValidation?: boolean) => Promise<{ success: boolean; skipped?: number }>)?.(data.employees, true);
+              // #region agent log
+              fetch('http://127.0.0.1:7242/ingest/7b565785-72b5-49f7-b2c0-57606ea0d0b5',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'offlineSync.ts:466',message:'Employees sync result',data:{success:result?.success,skipped:result?.skipped,error:result&&'error' in result?result.error:null},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
+              // #endregion
               if (result && !result.success) {
                 if (result && 'error' in result) {
                   console.error('Employees error:', result.error);
                 }
               }
             } catch (err) {
+              // #region agent log
+              fetch('http://127.0.0.1:7242/ingest/7b565785-72b5-49f7-b2c0-57606ea0d0b5',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'offlineSync.ts:472',message:'Employees sync error',data:{error:err instanceof Error?err.message:String(err)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
+              // #endregion
               console.error('Failed to upsert employees:', err);
               if (err instanceof Error) {
                 console.error('Error details:', err.message, err.stack);
@@ -613,16 +622,16 @@ class OfflineSyncService {
           }
           advanceProgress();
 
-          if (Array.isArray(data.source) && data.source.length > 0) {
-            await (electronAPI.localDbUpsertSource as (rows: unknown[]) => Promise<{ success: boolean }>)?.(data.source);
-            // console.log(`✅ ${data.source.length} source records synced to local database`);
-          }
+          // Skip source table - not needed in POS app (CRM-only)
+          // if (Array.isArray(data.source) && data.source.length > 0) {
+          //   await (electronAPI.localDbUpsertSource as (rows: unknown[]) => Promise<{ success: boolean }>)?.(data.source);
+          // }
           advanceProgress();
 
-          if (Array.isArray(data.pekerjaan) && data.pekerjaan.length > 0) {
-            await (electronAPI.localDbUpsertPekerjaan as (rows: unknown[]) => Promise<{ success: boolean }>)?.(data.pekerjaan);
-            // console.log(`✅ ${data.pekerjaan.length} pekerjaan records synced to local database`);
-          }
+          // Skip pekerjaan table - not needed in POS app (CRM-only)
+          // if (Array.isArray(data.pekerjaan) && data.pekerjaan.length > 0) {
+          //   await (electronAPI.localDbUpsertPekerjaan as (rows: unknown[]) => Promise<{ success: boolean }>)?.(data.pekerjaan);
+          // }
           advanceProgress();
 
           // Sync new tables for enhanced offline support

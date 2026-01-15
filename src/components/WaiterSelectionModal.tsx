@@ -48,21 +48,45 @@ export default function WaiterSelectionModal({
     if (isOpen) {
       const fetchEmployees = async () => {
         setIsLoading(true);
+        // #region agent log
+        fetch('http://127.0.0.1:7242/ingest/7b565785-72b5-49f7-b2c0-57606ea0d0b5',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'WaiterSelectionModal.tsx:50',message:'Modal opened, starting fetch',data:{businessId,isOpen,businessIdType:typeof businessId},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})}).catch(()=>{});
+        // #endregion
         try {
           const electronAPI = getElectronAPI();
           if (electronAPI?.localDbGetEmployees) {
             const allEmployees = await electronAPI.localDbGetEmployees();
+            // #region agent log
+            fetch('http://127.0.0.1:7242/ingest/7b565785-72b5-49f7-b2c0-57606ea0d0b5',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'WaiterSelectionModal.tsx:55',message:'Fetched allEmployees from localDb',data:{allEmployeesCount:Array.isArray(allEmployees)?allEmployees.length:0,allEmployees:Array.isArray(allEmployees)?allEmployees.map((e:any)=>({id:e.id,business_id:e.business_id,business_idType:typeof e.business_id,jabatan_id:e.jabatan_id,jabatan_idType:typeof e.jabatan_id,nama:e.nama_karyawan})):null},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
+            // #endregion
             // Filter employees for this business and filter waiters (jabatan_id = 1)
+            // Include employees with matching business_id OR business_id = null (shared/global employees)
             const filteredEmployees = (allEmployees as unknown as Employee[]).filter(
-              (emp: Employee) =>
-                emp.business_id === businessId &&
-                (emp.jabatan_id === 1 || emp.jabatan_id === 2 || emp.jabatan_id === 6)
+              (emp: Employee) => {
+                const businessMatch = emp.business_id === businessId || emp.business_id === null;
+                const jabatanMatch = emp.jabatan_id === 1 || emp.jabatan_id === 2 || emp.jabatan_id === 6;
+                // #region agent log
+                fetch('http://127.0.0.1:7242/ingest/7b565785-72b5-49f7-b2c0-57606ea0d0b5',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'WaiterSelectionModal.tsx:60',message:'Filtering employee',data:{empId:emp.id,empBusinessId:emp.business_id,empBusinessIdType:typeof emp.business_id,businessId,businessIdType:typeof businessId,businessMatch,jabatanId:emp.jabatan_id,jabatanIdType:typeof emp.jabatan_id,jabatanMatch,passesFilter:businessMatch&&jabatanMatch},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})}).catch(()=>{});
+                // #endregion
+                return businessMatch && jabatanMatch;
+              }
             );
+            // #region agent log
+            fetch('http://127.0.0.1:7242/ingest/7b565785-72b5-49f7-b2c0-57606ea0d0b5',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'WaiterSelectionModal.tsx:66',message:'Filtered employees result',data:{filteredCount:filteredEmployees.length,filteredEmployees:filteredEmployees.map(e=>({id:e.id,business_id:e.business_id,jabatan_id:e.jabatan_id,nama:e.nama_karyawan}))},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'E'})}).catch(()=>{});
+            // #endregion
             setEmployees(filteredEmployees);
+            // #region agent log
+            fetch('http://127.0.0.1:7242/ingest/7b565785-72b5-49f7-b2c0-57606ea0d0b5',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'WaiterSelectionModal.tsx:68',message:'setEmployees called',data:{filteredCount:filteredEmployees.length},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'E'})}).catch(()=>{});
+            // #endregion
           } else {
+            // #region agent log
+            fetch('http://127.0.0.1:7242/ingest/7b565785-72b5-49f7-b2c0-57606ea0d0b5',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'WaiterSelectionModal.tsx:71',message:'localDbGetEmployees not available',data:{hasElectronAPI:!!electronAPI},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
+            // #endregion
             setEmployees([]);
           }
         } catch (error) {
+          // #region agent log
+          fetch('http://127.0.0.1:7242/ingest/7b565785-72b5-49f7-b2c0-57606ea0d0b5',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'WaiterSelectionModal.tsx:75',message:'Error fetching employees',data:{error:error instanceof Error?error.message:String(error)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
+          // #endregion
           console.error('Error fetching employees:', error);
           setEmployees([]);
         } finally {
@@ -78,6 +102,9 @@ export default function WaiterSelectionModal({
 
   // Sort employees: Waiters first, then SPV and Cashier at end
   const sortedEmployees = useMemo(() => {
+    // #region agent log
+    fetch('http://127.0.0.1:7242/ingest/7b565785-72b5-49f7-b2c0-57606ea0d0b5',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'WaiterSelectionModal.tsx:81',message:'Computing sortedEmployees',data:{employeesCount:employees.length,employees:employees.map(e=>({id:e.id,jabatan_id:e.jabatan_id,nama:e.nama_karyawan}))},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'E'})}).catch(()=>{});
+    // #endregion
     const waiters = employees
       .filter(emp => emp.jabatan_id === 1)
       .sort((a, b) => a.nama_karyawan.localeCompare(b.nama_karyawan));
@@ -86,7 +113,11 @@ export default function WaiterSelectionModal({
       .filter(emp => emp.jabatan_id === 2 || emp.jabatan_id === 6)
       .sort((a, b) => a.nama_karyawan.localeCompare(b.nama_karyawan));
     
-    return [...waiters, ...spvCashier];
+    const result = [...waiters, ...spvCashier];
+    // #region agent log
+    fetch('http://127.0.0.1:7242/ingest/7b565785-72b5-49f7-b2c0-57606ea0d0b5',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'WaiterSelectionModal.tsx:91',message:'sortedEmployees computed',data:{sortedCount:result.length,sortedEmployees:result.map(e=>({id:e.id,jabatan_id:e.jabatan_id,nama:e.nama_karyawan}))},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'E'})}).catch(()=>{});
+    // #endregion
+    return result;
   }, [employees]);
 
   // Focus PIN input when pending waiter is set

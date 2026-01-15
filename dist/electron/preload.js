@@ -150,7 +150,7 @@ electron_1.contextBridge.exposeInMainWorld('electronAPI', {
     localDbUpsertBanks: (rows) => electron_1.ipcRenderer.invoke('localdb-upsert-banks', rows),
     localDbGetBanks: () => electron_1.ipcRenderer.invoke('localdb-get-banks'),
     // Organizations
-    localDbUpsertOrganizations: (rows) => electron_1.ipcRenderer.invoke('localdb-upsert-organizations', rows),
+    localDbUpsertOrganizations: (rows, skipValidation) => electron_1.ipcRenderer.invoke('localdb-upsert-organizations', rows, skipValidation),
     localDbGetOrganizations: () => electron_1.ipcRenderer.invoke('localdb-get-organizations'),
     // Management Groups
     localDbUpsertManagementGroups: (rows) => electron_1.ipcRenderer.invoke('localdb-upsert-management-groups', rows),

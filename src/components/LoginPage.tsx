@@ -244,7 +244,25 @@ export default function LoginPage({
                               />
                             </div>
                             
-                            {/* Row 1: Nama Database */}
+                            {/* Row 1: Port Database */}
+                            <div>
+                              <label className="block text-[9px] font-medium text-gray-700 mb-0.5">
+                                Port Database
+                              </label>
+                              <input
+                                type="number"
+                                value={appConfig.dbPort || 3306}
+                                onChange={(e) => {
+                                  const port = e.target.value ? parseInt(e.target.value, 10) : undefined;
+                                  setAppConfig(prev => ({ ...prev, dbPort: port }));
+                                  setConnectionTestResult(null);
+                                }}
+                                placeholder="3306"
+                                className="w-full px-2 py-1.5 text-xs border border-gray-300 rounded focus:ring-1 focus:ring-blue-500 focus:border-blue-500 text-gray-900 placeholder:opacity-50"
+                              />
+                            </div>
+                            
+                            {/* Row 2: Nama Database */}
                             <div>
                               <label className="block text-[9px] font-medium text-gray-700 mb-0.5">
                                 Nama Database
@@ -261,7 +279,10 @@ export default function LoginPage({
                               />
                             </div>
                             
-                            {/* Row 2: Username Database */}
+                            {/* Row 2: Empty space for alignment */}
+                            <div></div>
+                            
+                            {/* Row 3: Username Database */}
                             <div>
                               <label className="block text-[9px] font-medium text-gray-700 mb-0.5">
                                 Username Database
@@ -278,7 +299,7 @@ export default function LoginPage({
                               />
                             </div>
                             
-                            {/* Row 2: Password Database */}
+                            {/* Row 3: Password Database */}
                             <div>
                               <label className="block text-[9px] font-medium text-gray-700 mb-0.5">
                                 Password Database

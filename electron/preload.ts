@@ -182,7 +182,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   localDbGetBanks: () => ipcRenderer.invoke('localdb-get-banks'),
 
   // Organizations
-  localDbUpsertOrganizations: (rows: UnknownRecord[]) => ipcRenderer.invoke('localdb-upsert-organizations', rows),
+  localDbUpsertOrganizations: (rows: UnknownRecord[], skipValidation?: boolean) => ipcRenderer.invoke('localdb-upsert-organizations', rows, skipValidation),
   localDbGetOrganizations: () => ipcRenderer.invoke('localdb-get-organizations'),
 
   // Management Groups

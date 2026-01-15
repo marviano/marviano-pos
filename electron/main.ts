@@ -2188,6 +2188,8 @@ function createWindows(): void {
         const tanggalBekerjaRaw = getDate('tanggal_bekerja');
         const createdAtRaw = getDate('created_at');
         const updatedAtRaw = getDate('updated_at');
+        const pin = getString('pin');
+        const color = getString('color');
 
         // Convert dates to MySQL DATE format (YYYY-MM-DD)
         // Robust date conversion that handles various input formats
@@ -2318,16 +2320,16 @@ function createWindows(): void {
           queries.push({
             sql: `INSERT INTO employees (
               id, user_id, business_id, jabatan_id, no_ktp, phone, nama_karyawan,
-              jenis_kelamin, alamat, tanggal_lahir, tanggal_bekerja, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+              jenis_kelamin, alamat, tanggal_lahir, tanggal_bekerja, pin, color, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON DUPLICATE KEY UPDATE
               user_id=VALUES(user_id), business_id=VALUES(business_id), jabatan_id=VALUES(jabatan_id),
               no_ktp=VALUES(no_ktp), phone=VALUES(phone), nama_karyawan=VALUES(nama_karyawan),
               jenis_kelamin=VALUES(jenis_kelamin), alamat=VALUES(alamat), tanggal_lahir=VALUES(tanggal_lahir),
-              tanggal_bekerja=VALUES(tanggal_bekerja), created_at=VALUES(created_at), updated_at=VALUES(updated_at)`,
+              tanggal_bekerja=VALUES(tanggal_bekerja), pin=VALUES(pin), color=VALUES(color), created_at=VALUES(created_at), updated_at=VALUES(updated_at)`,
             params: [
               employeeId, userId, businessId, jabatanId, noKtp || null, phone || null, namaKaryawan,
-              jenisKelamin, alamat || null, tanggalLahir, tanggalBekerja, createdAt, updatedAt
+              jenisKelamin, alamat || null, tanggalLahir, tanggalBekerja, pin || null, color || null, createdAt, updatedAt
             ]
           });
         } catch (queryError) {
@@ -2423,8 +2425,21 @@ function createWindows(): void {
 
   ipcMain.handle('localdb-get-employees', async () => {
     try {
-      return await executeQuery('SELECT * FROM employees ORDER BY nama_karyawan ASC');
+      // #region agent log
+      const logBefore = {location:'main.ts:2425',message:'localdb-get-employees called',data:{},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'};
+      writeDebugLog(JSON.stringify(logBefore));
+      // #endregion
+      const result = await executeQuery('SELECT * FROM employees ORDER BY nama_karyawan ASC');
+      // #region agent log
+      const logAfter = {location:'main.ts:2427',message:'localdb-get-employees result',data:{resultCount:Array.isArray(result)?result.length:0,result:Array.isArray(result)?result.map((e:any)=>({id:e.id,business_id:e.business_id,jabatan_id:e.jabatan_id,nama:e.nama_karyawan})):null},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'};
+      writeDebugLog(JSON.stringify(logAfter));
+      // #endregion
+      return result;
     } catch (error) {
+      // #region agent log
+      const logError = {location:'main.ts:2430',message:'localdb-get-employees error',data:{error:error instanceof Error?error.message:String(error)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'};
+      writeDebugLog(JSON.stringify(logError));
+      // #endregion
       console.error('Error getting employees:', error);
       return [];
     }

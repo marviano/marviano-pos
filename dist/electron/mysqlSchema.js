@@ -663,7 +663,45 @@ async function initializeMySQLSchema() {
       KEY idx_receipt_settings_business (business_id),
       KEY idx_receipt_settings_active (is_active),
       CONSTRAINT fk_receipt_settings_business FOREIGN KEY (business_id) REFERENCES businesses(id) ON DELETE CASCADE
-    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+        // Employees_position table (must be before employees due to foreign key)
+        `CREATE TABLE IF NOT EXISTS employees_position (
+      id INT NOT NULL AUTO_INCREMENT,
+      nama_jabatan VARCHAR(255) NOT NULL,
+      created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      PRIMARY KEY (id),
+      UNIQUE KEY unique_nama_jabatan (nama_jabatan),
+      KEY idx_nama_jabatan (nama_jabatan)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='Employee job titles/positions'`,
+        // Employees table
+        `CREATE TABLE IF NOT EXISTS employees (
+      id INT NOT NULL AUTO_INCREMENT,
+      user_id INT DEFAULT NULL,
+      business_id INT DEFAULT NULL,
+      jabatan_id INT DEFAULT NULL,
+      no_ktp VARCHAR(50) NOT NULL,
+      phone VARCHAR(20) DEFAULT NULL,
+      nama_karyawan VARCHAR(255) NOT NULL,
+      jenis_kelamin ENUM('pria', 'wanita') NOT NULL,
+      alamat TEXT DEFAULT NULL,
+      tanggal_lahir DATE DEFAULT NULL,
+      tanggal_bekerja DATE NOT NULL,
+      pin VARCHAR(6) DEFAULT NULL,
+      color VARCHAR(7) DEFAULT NULL,
+      created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      PRIMARY KEY (id),
+      UNIQUE KEY unique_no_ktp (no_ktp),
+      KEY idx_employees_user (user_id),
+      KEY idx_employees_business (business_id),
+      KEY idx_employees_jabatan (jabatan_id),
+      KEY idx_employees_phone (phone),
+      KEY idx_employees_nama (nama_karyawan),
+      CONSTRAINT fk_employees_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE SET NULL,
+      CONSTRAINT fk_employees_business FOREIGN KEY (business_id) REFERENCES businesses(id) ON DELETE SET NULL,
+      CONSTRAINT fk_employees_jabatan FOREIGN KEY (jabatan_id) REFERENCES employees_position(id) ON DELETE SET NULL
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='Employee records linked to users and businesses'`
     ];
     try {
         for (const tableSql of tables) {

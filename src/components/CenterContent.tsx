@@ -261,7 +261,7 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
             const employee = (allEmployees as unknown as Employee[]).find(
               (emp: Employee) => 
                 emp.user_id === parseInt(String(user.id)) && 
-                emp.business_id === businessId
+                (emp.business_id === businessId || emp.business_id === null)
             );
             setCurrentUserEmployee(employee || null);
           }
