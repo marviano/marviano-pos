@@ -161,7 +161,7 @@ interface ElectronAPI {
   localDbGetSystemPosEmployees?: () => Promise<Array<{ id: number | string; nama_karyawan?: string; color?: string | null }>>;
 }
 
-export default function TransactionList({ businessId = 14, onLoadTransaction }: TransactionListProps) {
+export default function TransactionList({ businessId, onLoadTransaction }: TransactionListProps) {
   const router = useRouter();
   const { user } = useAuth();
   const [transactions, setTransactions] = useState<Transaction[]>([]);
@@ -169,6 +169,17 @@ export default function TransactionList({ businessId = 14, onLoadTransaction }: 
   const [error, setError] = useState<string | null>(null);
   const [searchTerm, setSearchTerm] = useState('');
   const [filterMethod, setFilterMethod] = useState<string>('all');
+  
+  // Use businessId from props, or fallback to user's selectedBusinessId
+  const effectiveBusinessId = businessId ?? user?.selectedBusinessId;
+  
+  if (!effectiveBusinessId) {
+    return (
+      <div className="p-4 bg-red-50 border border-red-200 rounded-lg">
+        <p className="text-red-700">No business selected. Please log in and select a business.</p>
+      </div>
+    );
+  }
   const [sortField, setSortField] = useState<string>('created_at');
   const [sortDirection, setSortDirection] = useState<'asc' | 'desc'>('desc');
   const [receiptizePrintedIds, setReceiptizePrintedIds] = useState<Set<string>>(() => new Set());
@@ -222,8 +233,8 @@ export default function TransactionList({ businessId = 14, onLoadTransaction }: 
 
       // Get transaction from appropriate database
       const transactions: ElectronTransaction[] = useSystemPos && electronAPI.localDbGetSystemPosTransactions
-        ? await electronAPI.localDbGetSystemPosTransactions(businessId, 1000)
-        : await electronAPI.localDbGetTransactions(businessId, 1000);
+        ? await electronAPI.localDbGetSystemPosTransactions(effectiveBusinessId, 1000)
+        : await electronAPI.localDbGetTransactions(effectiveBusinessId, 1000);
       
       // Try to find transaction by ID (UUID) or receipt_number
       let transaction = transactions.find((tx) => {
@@ -262,8 +273,8 @@ export default function TransactionList({ businessId = 14, onLoadTransaction }: 
       // Products fetch as fallback in case product_name wasn't in JOIN result
       // Fetch from appropriate database based on mode
       const products: ElectronProduct[] = useSystemPos && electronAPI.localDbGetSystemPosAllProducts
-        ? await electronAPI.localDbGetSystemPosAllProducts(businessId)
-        : await electronAPI.localDbGetAllProducts(businessId);
+        ? await electronAPI.localDbGetSystemPosAllProducts(effectiveBusinessId)
+        : await electronAPI.localDbGetAllProducts(effectiveBusinessId);
 
       // Get users and businesses to show actual names
       // Fetch from appropriate database based on mode
@@ -373,7 +384,7 @@ export default function TransactionList({ businessId = 14, onLoadTransaction }: 
     fetchTransactionDetail(transactionId);
   };
 
-  const handleTransactionUpdated = (updatedTransaction: TransactionDetail) => {
+  const handleTransactionUpdated = async (updatedTransaction: TransactionDetail) => {
     setSelectedTransaction(updatedTransaction);
     setTransactions((prev) =>
       prev.map((tx) =>
@@ -386,6 +397,8 @@ export default function TransactionList({ businessId = 14, onLoadTransaction }: 
           : tx
       )
     );
+    // Refresh transaction list from database to ensure we have the latest data
+    await fetchTransactions();
   };
 
   // Close detail modal
@@ -582,8 +595,8 @@ export default function TransactionList({ businessId = 14, onLoadTransaction }: 
 
       // Fetch from appropriate database
       const dbTransactions: ElectronTransaction[] = useSystemPos && electronAPI.localDbGetSystemPosTransactions
-        ? await electronAPI.localDbGetSystemPosTransactions(businessId, 50000)
-        : await electronAPI.localDbGetTransactions(businessId, 50000);
+        ? await electronAPI.localDbGetSystemPosTransactions(effectiveBusinessId, 50000)
+        : await electronAPI.localDbGetTransactions(effectiveBusinessId, 50000);
 
       // Get users and businesses to show actual names (fetch once for all transactions)
       // Fetch from appropriate database based on mode
@@ -699,7 +712,7 @@ export default function TransactionList({ businessId = 14, onLoadTransaction }: 
         error: err,
         message: errorMessage,
         isSystemPosMode,
-        businessId,
+        businessId: effectiveBusinessId,
         fromDate,
         toDate
       });
@@ -709,7 +722,7 @@ export default function TransactionList({ businessId = 14, onLoadTransaction }: 
     } finally {
       setIsLoading(false);
     }
-  }, [isSystemPosMode, fromDate, toDate, businessId, fetchReceiptizePrintedIds, fetchReceiptPrintedIds, canViewUserDataOnly, canViewAllData, canViewPastData, user]);
+  }, [isSystemPosMode, fromDate, toDate, effectiveBusinessId, fetchReceiptizePrintedIds, fetchReceiptPrintedIds, canViewUserDataOnly, canViewAllData, canViewPastData, user]);
 
   // Fetch employees to get waiter names
   useEffect(() => {
@@ -757,7 +770,7 @@ export default function TransactionList({ businessId = 14, onLoadTransaction }: 
     setReceiptizeCounters({});
     setReceiptizePrintedIds(new Set<string>());
     setReceiptCounters({});
-  }, [businessId, fromDate, toDate, isSystemPosMode]);
+  }, [effectiveBusinessId, fromDate, toDate, isSystemPosMode]);
 
   // State for refresh click counter (value is only used internally by React state)
   const [, setRefreshClickCount] = useState(0);

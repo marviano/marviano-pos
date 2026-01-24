@@ -112,14 +112,25 @@ export default function TableSelectionModal({
   waiterId = null,
 }: TableSelectionModalProps) {
   const { user } = useAuth();
-  const businessId = user?.selectedBusinessId ?? 14;
-
   const [rooms, setRooms] = useState<Room[]>([]);
   const [selectedRoom, setSelectedRoom] = useState<number | null>(null);
   const [tables, setTables] = useState<Table[]>([]);
   const [layoutElements, setLayoutElements] = useState<LayoutElement[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  
+  const businessId = user?.selectedBusinessId;
+  
+  if (!businessId) {
+    return (
+      <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+        <div className="bg-white rounded-lg p-6 max-w-md">
+          <h2 className="text-xl font-bold text-red-600 mb-2">No Business Selected</h2>
+          <p className="text-gray-700">Please log in and select a business to select a table.</p>
+        </div>
+      </div>
+    );
+  }
   const [pendingTransactions, setPendingTransactions] = useState<PendingTransaction[]>([]);
   // const [selectedTableId, setSelectedTableId] = useState<number | null>(null);
   const [isSaving, setIsSaving] = useState(false);
@@ -1174,9 +1185,9 @@ export default function TableSelectionModal({
                         const pixelHeight = (heightPercent / 100) * canvasSize.height;
 
                         const minDimension = Math.min(pixelWidth, pixelHeight);
-                        const baseFontSize = Math.max(10, Math.min(24, minDimension * 0.25));
-                        const fontSize = baseFontSize * fontSizeMultiplier; // Apply global font size multiplier
-                        const smallFontSize = Math.max(8, fontSize * 0.7);
+                        const baseFontSize = Math.max(7, Math.min(24, minDimension * 0.25));
+                        const fontSize = baseFontSize * fontSizeMultiplier;
+                        const smallFontSize = Math.max(6, fontSize * 0.7);
 
                       const MIN_SIZE_PERCENT = 4;
                       const minPixelSize = Math.min(
@@ -1252,7 +1263,7 @@ export default function TableSelectionModal({
   );
 }
 
-// Table Display Component
+// Table Display — layout aligned with salespulse (no overlap on square, narrow padding)
 function TableDisplay({
   table,
   pixelX,
@@ -1278,34 +1289,32 @@ function TableDisplay({
 }) {
   const [timer, setTimer] = useState<string>('--:--');
 
-  useEffect(() => {const updateTimer = () => {
+  const timerFontSize = Math.max(6, fontSize * 0.9);
+  const timerPadV = Math.max(1, Math.round(timerFontSize * 0.12));
+  const timerPadH = Math.max(1, Math.round(timerFontSize * 0.22));
+  const timerTopPx = table.shape === 'circle' ? pixelHeight * 0.12 : 4;
+  const timerBlockHeight = timerFontSize + 2 * timerPadV;
+
+  useEffect(() => {
+    const updateTimer = () => {
       if (orderCreatedAt) {
-        // Calculate elapsed time since order was created
         const now = new Date();
         const created = new Date(orderCreatedAt);
         const diffMs = now.getTime() - created.getTime();
-        
-        // Convert to minutes and seconds
         const totalSeconds = Math.floor(diffMs / 1000);
         const minutes = Math.floor(totalSeconds / 60);
         const seconds = totalSeconds % 60;
-        
-        // Format as "MM:SS" (e.g., "15:30" = 15 minutes 30 seconds)
-        const timerValue = `${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;setTimer(timerValue);
+        setTimer(`${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`);
       } else {
-        // No pending order, show "--:--" instead of current time
-        // Timer should only show elapsed time for pending orders
-        const timerValue = '--:--';setTimer(timerValue);
+        setTimer('--:--');
       }
     };
-
     updateTimer();
     const interval = setInterval(updateTimer, 1000);
     return () => clearInterval(interval);
   }, [orderCreatedAt]);
 
-  // Determine table color - RED if has pending order, otherwise blue/green
-  const tableBgColor = hasPendingOrder ? '#ef4444' : '#60a5fa'; // red-500 : blue-400
+  const tableBgColor = hasPendingOrder ? '#ef4444' : '#60a5fa';
 
   return (
     <div
@@ -1334,14 +1343,14 @@ function TableDisplay({
         style={{
           minWidth: '40px',
           minHeight: '40px',
-          backgroundColor: tableBgColor, // Use inline style to ensure color override
+          backgroundColor: tableBgColor,
         }}
       >
-        {/* Timer area at the top */}
+        {/* Timer — scaled padding; top offset included in main margin to avoid overlap on square */}
         <div
           className="absolute left-1/2 -translate-x-1/2 text-center"
           style={{
-            fontSize: `${Math.max(fontSize * 0.9, 12)}px`,
+            fontSize: `${timerFontSize}px`,
             fontWeight: 'bold',
             top: table.shape === 'circle' ? '12%' : '4px',
             maxWidth: '90%',
@@ -1349,8 +1358,9 @@ function TableDisplay({
           }}
         >
           <div
-            className="bg-black/40 px-2 py-0.5 rounded text-white font-mono whitespace-nowrap"
+            className="bg-black/40 rounded text-white font-mono whitespace-nowrap"
             style={{
+              padding: `${timerPadV}px ${timerPadH}px`,
               WebkitTextStroke: '0.8px rgba(0, 0, 0, 0.9)',
               textShadow: '0 0 3px rgba(0, 0, 0, 0.6), 0 1px 2px rgba(0, 0, 0, 0.4)',
               letterSpacing: '0.5px'
@@ -1360,24 +1370,15 @@ function TableDisplay({
           </div>
         </div>
 
-        {/* Main content area */}
+        {/* Main content: marginTop = timer top + timer height + buffer; narrow padding; leading-tight + gap-px */}
         <div
-          className="flex flex-col items-center justify-center flex-1 w-full px-1"
-          style={{ marginTop: `${Math.max(fontSize * 0.9, 12) + 8}px` }}
+          className="flex flex-col items-center justify-center flex-1 w-full px-0.5 gap-px"
+          style={{ marginTop: `${timerTopPx + timerBlockHeight + 2}px` }}
         >
-          {/* Table number */}
-          <div
-            className="font-bold whitespace-nowrap"
-            style={{ fontSize: `${fontSize}px` }}
-          >
+          <div className="font-bold whitespace-nowrap leading-tight" style={{ fontSize: `${fontSize}px` }}>
             {table.table_number}
           </div>
-
-          {/* Capacity */}
-          <div
-            className="opacity-75 whitespace-nowrap"
-            style={{ fontSize: `${smallFontSize}px` }}
-          >
+          <div className="opacity-75 whitespace-nowrap leading-tight" style={{ fontSize: `${smallFontSize}px` }}>
             {table.capacity}p
           </div>
         </div>

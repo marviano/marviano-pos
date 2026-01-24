@@ -63,7 +63,13 @@ export default function OfflineStatus({ className = '' }: OfflineStatusProps) {
         return;
       }
       try {
+        // #region agent log
+        fetch('http://127.0.0.1:7242/ingest/7b565785-72b5-49f7-b2c0-57606ea0d0b5',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'OfflineStatus.tsx:65',message:'Calling localDbGetUnsyncedTransactions without businessId',data:{},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
+        // #endregion
         const pending = await electronAPI.localDbGetUnsyncedTransactions();
+        // #region agent log
+        fetch('http://127.0.0.1:7242/ingest/7b565785-72b5-49f7-b2c0-57606ea0d0b5',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'OfflineStatus.tsx:67',message:'Received pending transactions (no filter)',data:{rawCount:Array.isArray(pending)?pending.length:0,firstTx:pending&&Array.isArray(pending)&&pending.length>0?(()=>{const p=pending[0] as Record<string,unknown>;return{id:p?.id,business_id:p?.business_id,sync_status:p?.sync_status};})():null},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
+        // #endregion
         setPendingCount(Array.isArray(pending) ? pending.length : 0);
       } catch (error) {
         console.warn('Failed to get pending transactions:', error);

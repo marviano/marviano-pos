@@ -18,6 +18,7 @@ import {
 } from 'lucide-react';
 import { useAuth } from '@/hooks/useAuth';
 import { isSuperAdmin } from '@/lib/auth';
+import { hasPermission } from '@/lib/permissions';
 import { useEffect, useMemo } from 'react';
 
 interface MenuItem {
@@ -75,6 +76,8 @@ export default function LeftSidebar({ menuItems, activeMenuItem, onMenuItemClick
         return <ChefHat className="w-5 h-5" />;
       case 'Barista':
         return <Coffee className="w-5 h-5" />;
+      case 'Barista & Kitchen':
+        return <ChefHat className="w-5 h-5" />;
       default:
         return <Database className="w-5 h-5" />;
     }
@@ -111,6 +114,27 @@ export default function LeftSidebar({ menuItems, activeMenuItem, onMenuItemClick
               }); */
 
               if (!canAccessSettings) {
+                return null;
+              }
+            }
+
+            // Kitchen - requires access_kitchen permission
+            if (item.name === 'Kitchen') {
+              if (!isAdmin && !hasPermission(user, 'access_kitchen')) {
+                return null;
+              }
+            }
+
+            // Barista - requires access_barista permission
+            if (item.name === 'Barista') {
+              if (!isAdmin && !hasPermission(user, 'access_barista')) {
+                return null;
+              }
+            }
+
+            // Barista & Kitchen - requires access_baristaandkitchen permission
+            if (item.name === 'Barista & Kitchen') {
+              if (!isAdmin && !hasPermission(user, 'access_baristaandkitchen')) {
                 return null;
               }
             }

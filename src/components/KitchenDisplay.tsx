@@ -1,7 +1,8 @@
 'use client';
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { useAuth } from '@/hooks/useAuth';
+import { isSuperAdmin } from '@/lib/auth';
 
 interface OrderItem {
   id: number;
@@ -35,13 +36,41 @@ interface GroupedOrderItem extends OrderItem {
 
 const getElectronAPI = () => (typeof window !== 'undefined' ? window.electronAPI : undefined);
 
-export default function KitchenDisplay() {
+export default function KitchenDisplay({ viewOnly = false }: { viewOnly?: boolean }) {
   const { user } = useAuth();
-  const businessId = user?.selectedBusinessId ?? 14;
   const [activeOrders, setActiveOrders] = useState<GroupedOrderItem[]>([]);
   const [finishedOrders, setFinishedOrders] = useState<GroupedOrderItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [currentTime, setCurrentTime] = useState(new Date());
+  const previousOrderIdsRef = useRef<Set<string>>(new Set());
+  const soundRef = useRef<HTMLAudioElement | null>(null);
+  
+  const businessId = user?.selectedBusinessId;
+  
+  if (!businessId) {
+    return (
+      <div className="h-screen flex items-center justify-center bg-gray-100">
+        <div className="text-center p-8 bg-white rounded-lg shadow-lg">
+          <h2 className="text-xl font-bold text-red-600 mb-2">No Business Selected</h2>
+          <p className="text-gray-700">Please log in and select a business to access the Kitchen Display.</p>
+        </div>
+      </div>
+    );
+  }
+
+  // Check permission
+  const hasPermission = user?.permissions?.includes('access_kitchen') || false;
+  
+  if (!isSuperAdmin(user) && !hasPermission) {
+    return (
+      <div className="h-screen flex items-center justify-center bg-gray-100">
+        <div className="text-center p-8 bg-white rounded-lg shadow-lg">
+          <h2 className="text-xl font-bold text-red-600 mb-2">Access Denied</h2>
+          <p className="text-gray-700">You do not have permission to access the Kitchen Display.</p>
+        </div>
+      </div>
+    );
+  }
 
   // Update timer every second
   useEffect(() => {
@@ -374,6 +403,31 @@ export default function KitchenDisplay() {
 
       setActiveOrders(active);
       setFinishedOrders(finished);
+      
+      // Check for new orders and play sound
+      if (!loading && previousOrderIdsRef.current.size > 0) {
+        const currentOrderIds = new Set(active.map(order => order.uuid_id));
+        const newOrderIds = [...currentOrderIds].filter(id => !previousOrderIdsRef.current.has(id));
+        
+        if (newOrderIds.length > 0) {
+          // Play sound for new orders
+          try {
+            if (!soundRef.current) {
+              soundRef.current = new Audio('/blacksmith_refine.mp3');
+              soundRef.current.volume = 0.7;
+            }
+            soundRef.current.play().catch(error => {
+              console.warn('Failed to play sound:', error);
+            });
+          } catch (error) {
+            console.warn('Error playing sound:', error);
+          }
+        }
+      }
+      
+      // Update previous order IDs
+      previousOrderIdsRef.current = new Set(active.map(order => order.uuid_id));
+      
       setLoading(false);
     } catch (error) {
       console.error('Error fetching orders:', error);
@@ -403,7 +457,14 @@ export default function KitchenDisplay() {
   useEffect(() => {
     fetchOrders();
     const interval = setInterval(fetchOrders, 5000);
-    return () => clearInterval(interval);
+    return () => {
+      clearInterval(interval);
+      // Cleanup audio
+      if (soundRef.current) {
+        soundRef.current.pause();
+        soundRef.current = null;
+      }
+    };
   }, [fetchOrders]);
 
   const handleMarkFinished = async (item: GroupedOrderItem) => {
@@ -594,7 +655,7 @@ export default function KitchenDisplay() {
     <div className="flex-1 flex h-full bg-gray-50">
       {/* Column 1: Active Orders */}
       <div className="w-1/2 border-r border-gray-300 flex flex-col">
-        <div className="bg-orange-500 text-white px-6 py-4 flex-shrink-0">
+        <div className="bg-blue-500 text-white px-6 py-4 flex-shrink-0">
           <h2 className="text-2xl font-bold">Dapur - Pesanan Aktif</h2>
         </div>
         <div className="flex-1 overflow-y-auto px-1 py-4">
@@ -607,8 +668,10 @@ export default function KitchenDisplay() {
               {activeOrders.map((item, index) => (
                 <div
                   key={`${item.uuid_id}-${index}`}
-                  onDoubleClick={() => handleMarkFinished(item)}
-                  className="bg-white border-2 border-orange-300 rounded-lg pl-3 pr-1 py-4 cursor-pointer hover:border-orange-500 hover:shadow-md transition-all flex relative"
+                  onDoubleClick={viewOnly ? undefined : () => handleMarkFinished(item)}
+                  className={`bg-white border-2 border-orange-300 rounded-lg pl-3 pr-1 py-4 transition-all flex relative ${
+                    viewOnly ? '' : 'cursor-pointer hover:border-orange-500 hover:shadow-md'
+                  }`}
                   style={{ minHeight: '120px' }}
                 >
                   <div className="flex-1">
@@ -639,7 +702,7 @@ export default function KitchenDisplay() {
                     </div>
                   </div>
                   <div className="ml-0 pr-3 flex flex-col items-center justify-center" style={{ width: '150px', minHeight: '100%' }}>
-                    <div className="text-3xl font-mono font-bold text-orange-600">
+                    <div className="text-3xl font-mono font-bold text-blue-600">
                       {item.timer}
                     </div>
                     {item.customer_name && (

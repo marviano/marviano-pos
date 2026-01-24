@@ -1,7 +1,8 @@
 'use client';
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { useAuth } from '@/hooks/useAuth';
+import { isSuperAdmin } from '@/lib/auth';
 
 interface OrderItem {
   id: number;
@@ -35,13 +36,41 @@ interface GroupedOrderItem extends OrderItem {
 
 const getElectronAPI = () => (typeof window !== 'undefined' ? window.electronAPI : undefined);
 
-export default function BaristaDisplay() {
+export default function BaristaDisplay({ viewOnly = false }: { viewOnly?: boolean }) {
   const { user } = useAuth();
-  const businessId = user?.selectedBusinessId ?? 14;
   const [activeOrders, setActiveOrders] = useState<GroupedOrderItem[]>([]);
   const [finishedOrders, setFinishedOrders] = useState<GroupedOrderItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [currentTime, setCurrentTime] = useState(new Date());
+  const previousOrderIdsRef = useRef<Set<string>>(new Set());
+  const soundRef = useRef<HTMLAudioElement | null>(null);
+  
+  const businessId = user?.selectedBusinessId;
+  
+  if (!businessId) {
+    return (
+      <div className="h-screen flex items-center justify-center bg-gray-100">
+        <div className="text-center p-8 bg-white rounded-lg shadow-lg">
+          <h2 className="text-xl font-bold text-red-600 mb-2">No Business Selected</h2>
+          <p className="text-gray-700">Please log in and select a business to access the Barista Display.</p>
+        </div>
+      </div>
+    );
+  }
+
+  // Check permission
+  const hasPermission = user?.permissions?.includes('access_barista') || false;
+  
+  if (!isSuperAdmin(user) && !hasPermission) {
+    return (
+      <div className="h-screen flex items-center justify-center bg-gray-100">
+        <div className="text-center p-8 bg-white rounded-lg shadow-lg">
+          <h2 className="text-xl font-bold text-red-600 mb-2">Access Denied</h2>
+          <p className="text-gray-700">You do not have permission to access the Barista Display.</p>
+        </div>
+      </div>
+    );
+  }
 
   // Update timer every second
   useEffect(() => {
@@ -410,6 +439,31 @@ export default function BaristaDisplay() {
 
       setActiveOrders(active);
       setFinishedOrders(finished);
+      
+      // Check for new orders and play sound
+      if (!loading && previousOrderIdsRef.current.size > 0) {
+        const currentOrderIds = new Set(active.map(order => order.uuid_id));
+        const newOrderIds = [...currentOrderIds].filter(id => !previousOrderIdsRef.current.has(id));
+        
+        if (newOrderIds.length > 0) {
+          // Play sound for new orders
+          try {
+            if (!soundRef.current) {
+              soundRef.current = new Audio('/blacksmith_refine.mp3');
+              soundRef.current.volume = 0.7;
+            }
+            soundRef.current.play().catch(error => {
+              console.warn('Failed to play sound:', error);
+            });
+          } catch (error) {
+            console.warn('Error playing sound:', error);
+          }
+        }
+      }
+      
+      // Update previous order IDs
+      previousOrderIdsRef.current = new Set(active.map(order => order.uuid_id));
+      
       setLoading(false);
     } catch (error) {
       console.error('Error fetching orders:', error);
@@ -464,7 +518,14 @@ export default function BaristaDisplay() {
   useEffect(() => {
     fetchOrders();
     const interval = setInterval(fetchOrders, 5000);
-    return () => clearInterval(interval);
+    return () => {
+      clearInterval(interval);
+      // Cleanup audio
+      if (soundRef.current) {
+        soundRef.current.pause();
+        soundRef.current = null;
+      }
+    };
   }, [fetchOrders]);
 
   const handleMarkFinished = async (item: GroupedOrderItem) => {
@@ -752,8 +813,10 @@ export default function BaristaDisplay() {
               {activeOrders.map((item, index) => (
                 <div
                   key={`${item.uuid_id}-${index}`}
-                  onDoubleClick={() => handleMarkFinished(item)}
-                  className="bg-white border-2 border-blue-300 rounded-lg pl-3 pr-1 py-4 cursor-pointer hover:border-blue-500 hover:shadow-md transition-all flex relative"
+                  onDoubleClick={viewOnly ? undefined : () => handleMarkFinished(item)}
+                  className={`bg-white border-2 border-blue-300 rounded-lg pl-3 pr-1 py-4 transition-all flex relative ${
+                    viewOnly ? '' : 'cursor-pointer hover:border-blue-500 hover:shadow-md'
+                  }`}
                   style={{ minHeight: '120px' }}
                 >
                   <div className="flex-1">

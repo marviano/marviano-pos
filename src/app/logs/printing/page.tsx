@@ -54,7 +54,7 @@ export default function PrintingLogsPage() {
   const router = useRouter();
   const { user, isAuthenticated } = useAuth();
   const [isClient, setIsClient] = useState(false);
-  const businessId = user?.selectedBusinessId || 14; // Default to 14 if not set
+  const businessId = user?.selectedBusinessId;
 
   // Ensure we're on the client side
   useEffect(() => {
@@ -73,6 +73,18 @@ export default function PrintingLogsPage() {
       }
     }
   }, [isClient, isAuthenticated, router]);
+
+  // Redirect to login if no business is selected
+  useEffect(() => {
+    if (isClient && isAuthenticated && (!businessId)) {
+      console.log('🔍 [PrintingLogs] No business selected, redirecting to login');
+      if (process.env.NODE_ENV === 'development') {
+        router.replace('/login');
+      } else {
+        window.location.href = 'login.html';
+      }
+    }
+  }, [isClient, isAuthenticated, businessId, router]);
 
   // Get today's date in UTC+7 (Jakarta timezone)
   const getTodayInUTC7 = useCallback(() => {
@@ -116,6 +128,11 @@ export default function PrintingLogsPage() {
         throw new Error('Electron local database API is not available. This page requires offline database support.');
       }
       
+      if (!businessId) {
+        console.error('❌ [PrintingLogs] No business ID available');
+        return;
+      }
+
       console.log('📱 [PrintingLogs] Loading from local MySQL database (offline-first)');
       console.log('📱 [PrintingLogs] Fetching data for businessId:', businessId, 'from', fromDate, 'to', toDate);
       
@@ -354,7 +371,7 @@ export default function PrintingLogsPage() {
         <div className="flex items-center justify-between p-3 border-b border-gray-200 bg-white">
           <div>
             <h1 className="text-base font-bold text-gray-900">Printing Logs</h1>
-            <div className="text-xs text-gray-500 mt-0.5">Offline Database • Business ID: {businessId}</div>
+            <div className="text-xs text-gray-500 mt-0.5">Offline Database • Business ID: {businessId ?? 'N/A'}</div>
           </div>
           <button 
             onClick={handleClose} 

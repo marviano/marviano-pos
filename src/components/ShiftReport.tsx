@@ -135,10 +135,7 @@ const formatPlatformLabel = (platform: string): string => {
 const getElectronAPI = () => (typeof window !== 'undefined' ? window.electronAPI : undefined);
 
 export default function ShiftReport() {
-  // Get business ID from logged-in user (fallback to 14 for backward compatibility)
   const { user } = useAuth();
-  const businessId = user?.selectedBusinessId ?? 14;
-  
   const [viewMode, setViewMode] = useState<'list' | 'detail'>('list');
   const [selectedShift, setSelectedShift] = useState<Shift | null>(null);
   
@@ -147,6 +144,16 @@ export default function ShiftReport() {
   const [users, setUsers] = useState<UserOption[]>([]);
   const [selectedUserId, setSelectedUserId] = useState<string>('all');
   const [startDate, setStartDate] = useState<string>('');
+  
+  const businessId = user?.selectedBusinessId;
+  
+  if (!businessId) {
+    return (
+      <div className="p-4 bg-red-50 border border-red-200 rounded-lg">
+        <p className="text-red-700">No business selected. Please log in and select a business.</p>
+      </div>
+    );
+  }
   const [endDate, setEndDate] = useState<string>('');
   
   // Stats state for detail view

@@ -2,6 +2,7 @@
 
 import { useState, useEffect } from 'react';
 import { Printer, Save, TestTube, CheckCircle, XCircle, AlertCircle } from 'lucide-react';
+import { useAuth } from '@/hooks/useAuth';
 
 interface SystemPrinter {
   name: string;
@@ -48,6 +49,8 @@ const isPrinterConfigRow = (value: unknown): value is PrinterConfigRow => {
 };
 
 export default function PrinterSelector() {
+  const { user } = useAuth();
+  const businessId = user?.selectedBusinessId != null ? user.selectedBusinessId : undefined;
   const [systemPrinters, setSystemPrinters] = useState<SystemPrinter[]>([]);
   const [selectedPrinters, setSelectedPrinters] = useState<PrinterSelection>({
     receiptPrinter: '',
@@ -368,66 +371,74 @@ const testPrinter = async (printerType: keyof PrinterSelection) => {
     }
 
     setIsTesting(printerType);
-    
+
+    const runPrint = async (payload: Record<string, unknown>): Promise<PrintReceiptResult | undefined> => {
+      const raw = await window.electronAPI?.printReceipt?.(payload);
+      return isPrintReceiptResult(raw) ? raw : undefined;
+    };
+
     try {
-      // Get copies setting for this printer
       let copiesCount = 1;
-      if (printerType === 'receiptPrinter' || printerType === 'receiptizePrinter') {
-        copiesCount = copies[printerType] || 1;
+      let testData: Record<string, unknown>;
+
+      if (printerType === 'labelPrinter') {
+        // Label: use simple test print (no receipt template)
+        testData = {
+          type: 'test',
+          printerType: 'labelPrinter',
+          printerName,
+          marginAdjustMm: marginOffsets.labelPrinter,
+          content: `TEST PRINT - LABEL PRINTER\n\nThis is a test print to verify your printer is working correctly.\n\nPrinter: ${printerName}\nTime: ${new Date().toLocaleString()}\n\nIf you can see this, your printer is configured correctly!`,
+        };
+      } else {
+        // Printer 1 and Printer 2: use receipt template with sample data
+        copiesCount = copies[printerType as 'receiptPrinter' | 'receiptizePrinter'] || 1;
+        testData = {
+          printerType,
+          printerName,
+          marginAdjustMm: marginOffsets[printerType],
+          business_id: businessId,
+          items: [
+            { name: 'Test Item 1', quantity: 2, price: 15000, total_price: 30000 },
+            { name: 'Test Item 2', quantity: 1, price: 25000, total_price: 25000 },
+          ],
+          total: 55000,
+          final_amount: 55000,
+          paymentMethod: 'Cash',
+          amountReceived: 60000,
+          change: 5000,
+          date: new Date().toISOString(),
+          receiptNumber: 'TEST001',
+          cashier: 'Test Print',
+          pickupMethod: 'dine-in',
+          printer1Counter: 1,
+          printer2Counter: 1,
+          globalCounter: 1,
+          isBill: false,
+          id: 'test-print-' + Date.now(),
+        };
       }
 
-      // Use the existing print-receipt IPC handler for testing
-      const testData = {
-        type: 'test',
-        printerType: printerType,
-        printerName: printerName,
-        marginAdjustMm: marginOffsets[printerType],
-        content: `TEST PRINT - ${printerType.toUpperCase()}\n\nThis is a test print to verify your printer is working correctly.\n\nPrinter: ${printerName}\nTime: ${new Date().toLocaleString()}\n\nIf you can see this, your printer is configured correctly!`
-      };
-      
-      // Print multiple copies if configured
       let hasError = false;
       for (let copy = 1; copy <= copiesCount; copy++) {
-        if (copy > 1) {
-          // Small delay between copies
-          await new Promise(r => setTimeout(r, 300));
-        }
-        
-        const rawResult = await window.electronAPI?.printReceipt?.(testData);
-        const result: PrintReceiptResult | undefined = isPrintReceiptResult(rawResult) ? rawResult : undefined;
-        
+        if (copy > 1) await new Promise(r => setTimeout(r, 300));
+        const result = await runPrint(testData);
         if (result?.success) {
           if (copy === 1) {
-            console.log(`✅ Test print sent successfully to ${printerName} (${copiesCount} copy/copies)`);
+            console.log(`✅ Test print sent successfully to ${printerName}${copiesCount > 1 ? ` (${copiesCount} copy/copies)` : ''}`);
           }
         } else {
           hasError = true;
-          alert(`❌ Test print failed to ${printerName} (copy ${copy}/${copiesCount})
-
-Error: ${result?.error || 'Unknown error'}
-
-Troubleshooting:
-1. Make sure printer is connected and powered on
-2. Check Windows printer settings
-3. Try printing from another app first
-4. Restart the app and try again`);
+          alert(`❌ Test print failed to ${printerName}${copiesCount > 1 ? ` (copy ${copy}/${copiesCount})` : ''}\n\nError: ${result?.error || 'Unknown error'}\n\nTroubleshooting:\n1. Make sure printer is connected and powered on\n2. Check Windows printer settings\n3. Try printing from another app first\n4. Restart the app and try again`);
           break;
         }
       }
-      
       if (!hasError && copiesCount > 1) {
         console.log(`✅ All ${copiesCount} test print copies sent successfully`);
       }
-      
     } catch (error) {
       console.error('Error testing printer:', error);
-      alert(`❌ Test print failed: ${error}
-
-Please check:
-1. Printer is connected and powered on
-2. Printer drivers are installed correctly
-3. Try printing from another app first
-4. Restart the app and try again`);
+      alert(`❌ Test print failed: ${error}\n\nPlease check:\n1. Printer is connected and powered on\n2. Printer drivers are installed correctly\n3. Try printing from another app first\n4. Restart the app and try again`);
     } finally {
       setIsTesting(null);
     }

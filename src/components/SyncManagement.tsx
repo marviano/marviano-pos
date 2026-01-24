@@ -12,7 +12,8 @@ import {
   AlertTriangle,
   X,
   Copy,
-  Check
+  Check,
+  Download
 } from 'lucide-react';
 import { offlineSyncService } from '@/lib/offlineSync';
 import { smartSyncService } from '@/lib/smartSync';
@@ -44,18 +45,24 @@ interface SyncStatus {
 interface OfflineTransaction {
   id: string | number;
   business_id: number;
-  user_id: number;
+  user_id: number | null | undefined;
+  user_name?: string | null; // Kasir name
+  waiter_id?: number | null; // Waiter ID
   shift_uuid?: string; // Added shift_uuid
   payment_method: string;
   pickup_method: string;
-  total_amount: number;
-  final_amount: number;
+  total_amount: number | null | undefined;
+  voucher_discount?: number | null; // Discount/Voucher amount
+  final_amount: number | null | undefined;
   customer_name: string | null;
   customer_unit?: number | null;
   receipt_number: number | null;
   transaction_type: string;
   status: string;
-  created_at: string;
+  created_at: string | null | undefined;
+  sync_status?: string; // 'pending' | 'failed' | 'synced'
+  sync_attempts?: number; // Number of sync attempts
+  last_sync_attempt?: string | number | null; // Last sync attempt timestamp
 }
 
 interface OfflineTransactionItemRow {
@@ -106,19 +113,52 @@ const normalizeOfflineShifts = (rows: unknown): OfflineShift[] =>
 const isOfflineTransaction = (value: unknown): value is OfflineTransaction => {
   if (typeof value !== 'object' || value === null) return false;
   const record = value as Partial<OfflineTransaction>;
-  return (
+  // MySQL returns DECIMAL as string, Date as Date object or ISO string
+  // Allow final_amount to be number, string (will convert), or null/undefined
+  // Allow created_at to be string, Date object, or null/undefined
+  const finalAmountValid = (
+    typeof record.final_amount === 'number' ||
+    typeof record.final_amount === 'string' ||
+    record.final_amount === null ||
+    record.final_amount === undefined
+  );
+  const createdAtValid = (
+    typeof record.created_at === 'string' ||
+    (record.created_at as unknown) instanceof Date ||
+    record.created_at === null ||
+    record.created_at === undefined
+  );
+  const isValid = (
     (typeof record.id === 'number' || typeof record.id === 'string') &&
     typeof record.business_id === 'number' &&
-    typeof record.user_id === 'number' &&
+    (typeof record.user_id === 'number' || record.user_id === null || record.user_id === undefined) &&
     typeof record.payment_method === 'string' &&
     typeof record.pickup_method === 'string' &&
-    typeof record.final_amount === 'number' &&
-    typeof record.created_at === 'string'
+    finalAmountValid &&
+    createdAtValid
   );
+  // #region agent log
+  if (!isValid && value) {
+    fetch('http://127.0.0.1:7242/ingest/7b565785-72b5-49f7-b2c0-57606ea0d0b5',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'SyncManagement.tsx:137',message:'Transaction filtered out by normalization',data:{id:record.id,hasId:!!record.id,hasBusinessId:typeof record.business_id==='number',hasUserId:typeof record.user_id==='number',hasPaymentMethod:typeof record.payment_method==='string',hasPickupMethod:typeof record.pickup_method==='string',finalAmountValid,final_amount_value:record.final_amount,final_amount_type:typeof record.final_amount,createdAtValid,created_at_value:record.created_at,created_at_type:typeof record.created_at,isDate:(record.created_at as unknown) instanceof Date,sync_status:record.sync_status},timestamp:Date.now(),sessionId:'debug-session',runId:'run2',hypothesisId:'B'})}).catch(()=>{});
+  }
+  // #endregion
+  return isValid;
 };
 
-const normalizeOfflineTransactions = (rows: unknown): OfflineTransaction[] =>
-  Array.isArray(rows) ? rows.filter(isOfflineTransaction) : [];
+const normalizeOfflineTransactions = (rows: unknown): OfflineTransaction[] => {
+  if (!Array.isArray(rows)) return [];
+  return rows.filter(isOfflineTransaction).map((tx) => {
+    // Normalize final_amount: convert string to number if needed
+    if (typeof tx.final_amount === 'string') {
+      tx.final_amount = parseFloat(tx.final_amount) || 0;
+    }
+    // Normalize created_at: convert Date object to ISO string if needed
+    if ((tx.created_at as unknown) instanceof Date) {
+      tx.created_at = (tx.created_at as unknown as Date).toISOString();
+    }
+    return tx;
+  });
+};
 
 const isOfflineTransactionItemRow = (value: unknown): value is OfflineTransactionItemRow => {
   if (typeof value !== 'object' || value === null) return false;
@@ -206,9 +246,6 @@ const deepEqual = (obj1: unknown, obj2: unknown): boolean => {
 export default function SyncManagement() {
   const { user } = useAuth();
 
-  // Get business ID from logged-in user (fallback to 14 for backward compatibility)
-  const businessId = user?.selectedBusinessId ?? 14;
-
   const [syncStatus, setSyncStatus] = useState<SyncStatus>({
     isOnline: true,
     lastSync: null,
@@ -222,6 +259,17 @@ export default function SyncManagement() {
   // const [offlineShifts, setOfflineShifts] = useState<OfflineShift[]>([]);
   const [isLoadingOfflineData, setIsLoadingOfflineData] = useState(false);
   const [isInitialized, setIsInitialized] = useState(false);
+
+  // Get business ID from logged-in user
+  const businessId = user?.selectedBusinessId;
+  
+  if (!businessId) {
+    return (
+      <div className="p-4 bg-red-50 border border-red-200 rounded-lg">
+        <p className="text-red-700">No business selected. Please log in and select a business.</p>
+      </div>
+    );
+  }
   const [copiedUuid, setCopiedUuid] = useState<string | null>(null);
   const [offlineTransactionCount, setOfflineTransactionCount] = useState<number>(0);
   const [onlineTransactionCount, setOnlineTransactionCount] = useState<number>(0);
@@ -229,10 +277,6 @@ export default function SyncManagement() {
   const [showArchiveModal, setShowArchiveModal] = useState(false);
   const [checkingStatus, setCheckingStatus] = useState(false);
   const [checkResults, setCheckResults] = useState<Map<string, { exists: boolean; checked: boolean; identical?: boolean }>>(new Map());
-  const [resetSyncDateRange, setResetSyncDateRange] = useState<'today' | 'alltime' | 'custom'>('today');
-  const [resetSyncFromDate, setResetSyncFromDate] = useState<string>('');
-  const [resetSyncToDate, setResetSyncToDate] = useState<string>('');
-  const [isResettingSync, setIsResettingSync] = useState(false);
   const [showDeleteModal, setShowDeleteModal] = useState(false);
   const [showPasswordModal, setShowPasswordModal] = useState(false);
   const [passwordInput, setPasswordInput] = useState('');
@@ -247,11 +291,19 @@ export default function SyncManagement() {
   const [dangerFrom, setDangerFrom] = useState<string>('');
   const [dangerTo, setDangerTo] = useState<string>('');
   const [copiedSqlPreview, setCopiedSqlPreview] = useState<string | null>(null);
+  const [isResyncing, setIsResyncing] = useState(false);
+  const [resyncProgress, setResyncProgress] = useState<{ current: number; total: number; transactionId: string | number; status: string } | null>(null);
   const logsEndRef = useRef<HTMLDivElement>(null);
   const gatePasswordInputRef = useRef<HTMLInputElement>(null);
   // const activePasswordInputRef = useRef<HTMLInputElement>(null);
 
   const [autoSyncEnabled, setAutoSyncEnabledState] = useState<boolean>(true);
+  
+  // Printer audit log state for R/RR badges
+  const [receiptCounters, setReceiptCounters] = useState<Record<string, number>>({});
+  const [receiptizeCounters, setReceiptizeCounters] = useState<Record<string, number>>({});
+  const [receiptizePrintedIds, setReceiptizePrintedIds] = useState<Set<string>>(new Set());
+  const [employeesMap, setEmployeesMap] = useState<Map<number, { name: string; color: string | null }>>(new Map());
 
   // Initialize auto-sync enabled state
   useEffect(() => {
@@ -409,6 +461,77 @@ export default function SyncManagement() {
   //   }
   // }, [addLog, businessId]);
 
+  // Load printer audit logs to determine R/RR badges
+  const loadPrinterAuditLogs = useCallback(async () => {
+    const electronAPI = getElectronAPI();
+    if (!electronAPI?.getPrinter1AuditLog || !electronAPI?.getPrinter2AuditLog) {
+      return;
+    }
+
+    try {
+      // Fetch Receiptize (Printer2) audit log
+      const printer2Response = await electronAPI.getPrinter2AuditLog(undefined, undefined, 5000);
+      const printer2Entries = (Array.isArray(printer2Response?.entries) ? printer2Response.entries : []) as Array<{ transaction_id?: string; printer2_receipt_number?: number; is_reprint?: number }>;
+      
+      const receiptizeCountersMap: Record<string, number> = {};
+      const receiptizePrintedIdsSet = new Set<string>();
+
+      printer2Entries.forEach((entry) => {
+        if (entry.transaction_id && entry.printer2_receipt_number && entry.is_reprint === 0) {
+          const txId = String(entry.transaction_id);
+          receiptizeCountersMap[txId] = entry.printer2_receipt_number;
+          receiptizePrintedIdsSet.add(txId);
+        }
+      });
+
+      setReceiptizeCounters(receiptizeCountersMap);
+      setReceiptizePrintedIds(receiptizePrintedIdsSet);
+
+      // Fetch Receipt (Printer1) audit log
+      const printer1Response = await electronAPI.getPrinter1AuditLog(undefined, undefined, 5000);
+      const printer1Entries = (Array.isArray(printer1Response?.entries) ? printer1Response.entries : []) as Array<{ transaction_id?: string; printer1_receipt_number?: number; is_reprint?: number }>;
+
+      const receiptCountersMap: Record<string, number> = {};
+
+      printer1Entries.forEach((entry) => {
+        if (entry.transaction_id && entry.printer1_receipt_number && entry.is_reprint === 0) {
+          const txId = String(entry.transaction_id);
+          receiptCountersMap[txId] = entry.printer1_receipt_number;
+        }
+      });
+
+      setReceiptCounters(receiptCountersMap);
+    } catch (error) {
+      console.warn('Failed to load printer audit logs:', error);
+    }
+  }, []);
+
+  // Load employees to get waiter names
+  const loadEmployees = useCallback(async () => {
+    const electronAPI = getElectronAPI();
+    if (!electronAPI?.localDbGetEmployees) {
+      return;
+    }
+
+    try {
+      const allEmployees = await electronAPI.localDbGetEmployees();
+      const employeesArray = Array.isArray(allEmployees) ? allEmployees : [];
+      const map = new Map<number, { name: string; color: string | null }>();
+      
+      employeesArray.forEach((emp: { id?: number | string; nama_karyawan?: string; color?: string | null }) => {
+        const empId = typeof emp.id === 'number' ? emp.id : (typeof emp.id === 'string' ? parseInt(emp.id, 10) : null);
+        if (empId && typeof emp.nama_karyawan === 'string') {
+          const color = typeof emp.color === 'string' && emp.color ? emp.color : null;
+          map.set(empId, { name: emp.nama_karyawan, color });
+        }
+      });
+      
+      setEmployeesMap(map);
+    } catch (error) {
+      console.warn('Failed to load employees:', error);
+    }
+  }, []);
+
   // Load offline transactions
   const loadOfflineTransactions = useCallback(async () => {
     const electronAPI = getElectronAPI();
@@ -419,10 +542,32 @@ export default function SyncManagement() {
 
     setIsLoadingOfflineData(true);
     try {
+      // #region agent log
+      fetch('http://127.0.0.1:7242/ingest/7b565785-72b5-49f7-b2c0-57606ea0d0b5',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'SyncManagement.tsx:421',message:'Calling localDbGetUnsyncedTransactions with businessId',data:{businessId},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
+      // #endregion
       const transactions = await electronAPI.localDbGetUnsyncedTransactions(businessId);
+      // #region agent log
+      fetch('http://127.0.0.1:7242/ingest/7b565785-72b5-49f7-b2c0-57606ea0d0b5',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'SyncManagement.tsx:423',message:'Received raw transactions before normalization',data:(()=>{const t=transactions&&Array.isArray(transactions)&&transactions.length>0?(transactions[0] as Record<string,unknown>):null;return{rawCount:Array.isArray(transactions)?transactions.length:0,firstTx:t?{id:t.id,business_id:t.business_id,sync_status:t.sync_status,payment_method:t.payment_method,pickup_method:t.pickup_method,final_amount:t.final_amount,final_amount_type:typeof t.final_amount,created_at:t.created_at,created_at_type:typeof t.created_at,user_id:t.user_id}:null};})(),timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
+      // #endregion
       const normalized = normalizeOfflineTransactions(transactions);
+      // #region agent log
+      fetch('http://127.0.0.1:7242/ingest/7b565785-72b5-49f7-b2c0-57606ea0d0b5',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'SyncManagement.tsx:424',message:'After normalization',data:{rawCount:Array.isArray(transactions)?transactions.length:0,normalizedCount:normalized.length,filteredOut:Array.isArray(transactions)?transactions.length-normalized.length:0},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
+      // #endregion
       setOfflineTransactions(normalized);
-      addLog('success', `Loaded ${normalized.length} offline transactions pending upload`);
+      const pendingCount = normalized.filter(t => t.sync_status === 'pending' || !t.sync_status).length;
+      const failedCount = normalized.filter(t => t.sync_status === 'failed').length;
+      // #region agent log
+      fetch('http://127.0.0.1:7242/ingest/7b565785-72b5-49f7-b2c0-57606ea0d0b5',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'SyncManagement.tsx:429',message:'Final counts after normalization',data:{normalizedCount:normalized.length,pendingCount,failedCount},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
+      // #endregion
+      if (failedCount > 0) {
+        addLog('success', `Loaded ${normalized.length} offline transactions (${pendingCount} pending, ${failedCount} failed)`);
+      } else {
+        addLog('success', `Loaded ${normalized.length} offline transactions pending upload`);
+      }
+      
+      // Load printer audit logs and employees after loading transactions
+      await loadPrinterAuditLogs();
+      await loadEmployees();
     } catch (error) {
       addLog(
         'error',
@@ -431,7 +576,7 @@ export default function SyncManagement() {
     } finally {
       setIsLoadingOfflineData(false);
     }
-  }, [addLog, businessId]);
+  }, [addLog, businessId, loadPrinterAuditLogs, loadEmployees]);
 
   const fetchTransactionCounts = useCallback(async () => {
     try {
@@ -707,78 +852,6 @@ export default function SyncManagement() {
     }
   }, [offlineTransactions, businessId, addLog, loadOfflineTransactions, fetchTransactionCounts]);
 
-  // Reset transaction sync status by date range
-  const handleResetTransactionSyncStatus = useCallback(async () => {
-    let fromDate: string | null = null;
-    let toDate: string | null = null;
-    let dateRangeText = '';
-
-    if (resetSyncDateRange === 'today') {
-      const today = new Date();
-      today.setHours(0, 0, 0, 0);
-      fromDate = today.toISOString().split('T')[0];
-      toDate = today.toISOString().split('T')[0];
-      dateRangeText = 'hari ini';
-    } else if (resetSyncDateRange === 'alltime') {
-      dateRangeText = 'semua waktu';
-    } else if (resetSyncDateRange === 'custom') {
-      if (!resetSyncFromDate || !resetSyncToDate) {
-        addLog('error', 'Pilih tanggal mulai dan tanggal akhir untuk custom date range');
-        return;
-      }
-      fromDate = resetSyncFromDate;
-      toDate = resetSyncToDate;
-      dateRangeText = `${resetSyncFromDate} sampai ${resetSyncToDate}`;
-    }
-
-    const confirmMessage = resetSyncDateRange === 'alltime'
-      ? `Apakah Anda yakin ingin mengatur ulang status sinkronisasi untuk SEMUA transaksi (semua waktu)?\n\nIni akan mengatur semua transaksi kembali ke status 'pending' agar dapat di-sync ulang.`
-      : `Apakah Anda yakin ingin mengatur ulang status sinkronisasi untuk transaksi ${dateRangeText}?\n\nIni akan mengatur transaksi tersebut kembali ke status 'pending' agar dapat di-sync ulang.`;
-
-    if (!window.confirm(confirmMessage)) {
-      return;
-    }
-
-    setIsResettingSync(true);
-    addLog('info', `Mereset status sinkronisasi untuk transaksi ${dateRangeText}...`);
-
-    try {
-      const electronAPI = getElectronAPI();
-      if (!electronAPI?.localDbResetTransactionsSyncByDate) {
-        addLog('error', 'Reset sync status feature not available');
-        return;
-      }
-
-      const result = await electronAPI.localDbResetTransactionsSyncByDate({
-        businessId,
-        fromDate,
-        toDate
-      });
-
-      if (result.success) {
-        const count = result.count || 0;
-        if (count === 0) {
-          addLog('warning', `⚠️ Tidak ada transaksi yang ditemukan untuk di-reset ${dateRangeText}. Pastikan database yang digunakan benar (cek .env DB_HOST dan DB_NAME).`);
-        } else {
-          addLog('success', `✅ Berhasil reset status sinkronisasi untuk ${count} transaksi ${dateRangeText}`);
-        }
-        // Refresh offline transactions to reflect the change
-        await loadOfflineTransactions();
-        // Reset date range to today after successful reset
-        setResetSyncDateRange('today');
-        setResetSyncFromDate('');
-        setResetSyncToDate('');
-      } else {
-        addLog('error', `Gagal reset status sinkronisasi: ${result.error || 'Unknown error'}`);
-      }
-    } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-      addLog('error', `Gagal reset status sinkronisasi: ${errorMessage}`);
-      console.error('[RESET SYNC STATUS] Error:', error);
-    } finally {
-      setIsResettingSync(false);
-    }
-  }, [resetSyncDateRange, resetSyncFromDate, resetSyncToDate, businessId, addLog, loadOfflineTransactions]);
 
   // Update synced_at for transactions that exist on server
   const handleUpdateSyncedStatus = useCallback(async () => {
@@ -836,263 +909,10 @@ export default function SyncManagement() {
     }
   }, [checkResults, addLog, loadOfflineTransactions, fetchTransactionCounts]);
 
-  // Handle force overwrite (upload local to server, replacing server data)
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  const _handleForceOverwrite = useCallback(async () => {
-    if (checkResults.size === 0) {
-      addLog('warning', 'Silakan jalankan "Cek Status" terlebih dahulu');
-      return;
-    }
-
-    const transactionsToOverwrite: string[] = [];
-    checkResults.forEach((result, uuid) => {
-      // Condition: Exists on server AND is different (!identical) AND checked
-      if (result.checked && result.exists && !result.identical) {
-        transactionsToOverwrite.push(uuid);
-      }
-    });
-
-    if (transactionsToOverwrite.length === 0) {
-      addLog('info', 'Tidak ada transaksi mismatch yang dipilih untuk overwrite.');
-      return;
-    }
-
-    if (!window.confirm(`⚠️ FORCE OVERWRITE SERVER ⚠️\n\nAnda akan meng-upload ulang ${transactionsToOverwrite.length} transaksi dari local ke server.\n\nData di server akan DITIMPA/DIGANTI dengan data local.\nPastikan data local adalah yang benar.\n\nLanjutkan?`)) {
-      return;
-    }
-
-    const electronAPI = getElectronAPI();
-    if (!electronAPI) return;
-
-    setSyncStatus(prev => ({ ...prev, syncInProgress: true, error: null }));
-    addLog('info', `🔄 Meng-overwrite ${transactionsToOverwrite.length} transaksi di server...`);
-
-    let successCount = 0;
-    let errorCount = 0;
-
-    for (const uuid of transactionsToOverwrite) {
-      try {
-        // 1. Fetch full local data
-        // Use type assertion for now to bypass strict checks on dynamic API methods
-        const transactions = await (electronAPI.localDbGetTransactions as (businessId?: number | undefined, limit?: number | undefined) => Promise<UnknownRecord[]>)();
-        const transaction = Array.isArray(transactions) ? transactions.find((t: UnknownRecord) =>
-          String(t.id) === uuid || String(t.uuid_id) === uuid
-        ) : undefined;
-
-        if (!transaction) {
-          addLog('error', `❌ Gagal mengambil data local untuk ${uuid}`);
-          errorCount++;
-          continue;
-        }
-
-        const items = await (electronAPI.localDbGetTransactionItems as (uuid: string) => Promise<UnknownRecord[]>)(uuid);
-        const { customizations, options } = await (electronAPI.localDbGetTransactionItemCustomizationsNormalized as (uuid: string) => Promise<{ customizations: UnknownRecord[]; options: UnknownRecord[] }>)(uuid);
-
-        // Items with customizations
-        const itemsWithCustomizations = items.map((item: UnknownRecord) => {
-          const itemCusts = customizations.filter((c: UnknownRecord) => c.transaction_item_id === item.id || c.uuid_transaction_item_id === item.uuid_id);
-          const formattedCusts = itemCusts.map((c: UnknownRecord) => ({
-            ...c,
-            selected_options: options.filter((o: UnknownRecord) => o.transaction_item_customization_id === c.id)
-          }));
-          return { ...item, customizations: formattedCusts };
-        });
-
-        // Refunds
-        const refunds = await (electronAPI.localDbGetTransactionRefunds as (uuid: string) => Promise<UnknownRecord[]>)(uuid);
-
-        // 2. Construct Payload
-        const payload = {
-          ...transaction,
-          id: uuid, // Ensure UUID is used as ID
-          items: itemsWithCustomizations,
-          transaction_item_customizations: customizations,
-          transaction_item_customization_options: options,
-          transaction_refunds: refunds
-        };
-
-        // 3. Upload (POST /api/transactions)
-        const response = await fetch(getApiUrl('/api/transactions'), {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(payload),
-        });
-
-        if (!response.ok) {
-          throw new Error(`Server returned ${response.status}`);
-        }
-
-        // 4. Mark as synced locally
-        if (electronAPI.localDbMarkTransactionsSynced) {
-          await electronAPI.localDbMarkTransactionsSynced([uuid]);
-        }
-        successCount++;
-        addLog('success', `✅ Overwrite sukses: ${uuid}`);
-
-      } catch (error) {
-        console.error(`Error overwriting ${uuid}:`, error);
-        addLog('error', `❌ Gagal overwrite ${uuid}: ${error instanceof Error ? error.message : String(error)}`);
-        errorCount++;
-      }
-    }
-
-    addLog('info', `🏁 Selesai overwrite. Sukses: ${successCount}, Gagal: ${errorCount}`);
-    setSyncStatus(prev => ({ ...prev, syncInProgress: false }));
-
-    // Refresh lists
-    setCheckResults(new Map());
-    await loadOfflineTransactions();
-
-  }, [checkResults, addLog, loadOfflineTransactions]);
-
   // Restore database from server (Emergency recovery)
 
-  // Full database sync (Download from cloud)
-  const syncFromCloud = useCallback(async () => {
-    const electronAPI = getElectronAPI();
-    if (!electronAPI) {
-      addLog('error', 'Offline database not available');
-      return;
-    }
-
-    setSyncStatus(prev => ({ ...prev, syncInProgress: true, error: null }));
-    addLog('info', 'Starting download from cloud...');
-    setSyncProgress(50); // Start download at 50%
-
-    try {
-      const response = await fetch(getApiUrl('/api/sync'));
-      if (!response.ok) {
-        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
-      }
-
-      const jsonData: UnknownRecord = await response.json();
-      addLog('info', `Received data from cloud: ${JSON.stringify(jsonData.counts ?? {})}`);
-
-      const data = (jsonData.data ?? {}) as UnknownRecord;
-      // const targetBusinessId = Number(jsonData.businessId ?? 14);
-
-      // 1. SYNC DEPENDENCIES FIRST (Categories, Types, Options)
-      const category1 = toRecordArray(data.category1);
-      if (category1.length > 0 && electronAPI.localDbUpsertCategory1) {
-        await electronAPI.localDbUpsertCategory1(category1);
-        addLog('success', `✅ ${category1.length} category1 synced to local database`);
-      }
-
-      const category2 = toRecordArray(data.category2);
-      if (category2.length === 0) {
-        addLog('info', `ℹ️ No category2 data in sync response (this is normal if categories haven't changed)`);
-      } else if (!electronAPI.localDbUpsertCategory2) {
-        addLog('warning', `⚠️ category2 data received (${category2.length} records) but localDbUpsertCategory2 API not available`);
-      } else {
-        // Get junction table data (REQUIRED - junction table only, no business_id column)
-        const junctionTableData = (data.category2Businesses as Array<{ category2_id: number; business_id: number }> | undefined) || undefined;
-        if (!junctionTableData || junctionTableData.length === 0) {
-          addLog('warning', `⚠️ No junction table data provided for category2 (${category2.length} records) - skipping sync`);
-        } else {
-          await (electronAPI.localDbUpsertCategory2 as (rows: unknown[], junctionData?: Array<{ category2_id: number; business_id: number }>) => Promise<{ success: boolean }>)(category2, junctionTableData);
-          addLog('success', `✅ ${category2.length} category2 synced to local database with ${junctionTableData.length} business relationships`);
-        }
-      }
-
-      const customizationTypes = toRecordArray(data.customizationTypes);
-      if (customizationTypes.length > 0 && electronAPI.localDbUpsertCustomizationTypes) {
-        await electronAPI.localDbUpsertCustomizationTypes(customizationTypes);
-        addLog('success', `✅ ${customizationTypes.length} customization types synced to local database`);
-      }
-
-      const customizationOptions = toRecordArray(data.customizationOptions);
-      if (customizationOptions.length > 0 && electronAPI.localDbUpsertCustomizationOptions) {
-        await electronAPI.localDbUpsertCustomizationOptions(customizationOptions);
-        addLog('success', `✅ ${customizationOptions.length} customization options synced to local database`);
-      }
-
-      // 2. SYNC PRODUCTS
-      const products = Array.isArray(data.products) ? (data.products as UnknownRecord[]) : [];
-      if (products.length > 0 && electronAPI.localDbUpsertProducts) {
-        await electronAPI.localDbUpsertProducts(products);
-        addLog('success', `✅ ${products.length} products synced to local database`);
-      } else {
-        addLog('warning', `⚠️ No products found in sync data (received: ${products.length})`);
-      }
-
-      // 3. SYNC DEPENDENTS (Product Customizations, Bundle Items)
-      const productCustomizations = toRecordArray(data.productCustomizations);
-      if (productCustomizations.length > 0 && electronAPI.localDbUpsertProductCustomizations) {
-        await electronAPI.localDbUpsertProductCustomizations(productCustomizations);
-        addLog('success', `✅ ${productCustomizations.length} product customizations synced`);
-      }
-
-      const bundleItems = toRecordArray(data.bundleItems);
-      if (bundleItems.length > 0 && electronAPI.localDbUpsertBundleItems) {
-        await electronAPI.localDbUpsertBundleItems(bundleItems);
-        addLog('success', `✅ ${bundleItems.length} bundle items synced`);
-      }
-
-      // 4. SKIP TRANSACTION DATA DOWNLOAD
-      // ⚠️ Transaction data is NOT downloaded from server (UPLOAD ONLY)
-      // Reason: POS device is the source of truth for transaction data
-      // Downloading could overwrite local records with old/corrupted server data
-      // Transaction tables that are SKIPPED:
-      //   - transactions
-      //   - transaction_items
-      //   - transaction_item_customizations
-      //   - transaction_item_customization_options
-      //   - shifts
-      //   - transaction_refunds
-      //   - printer1_audit_log
-      //   - printer2_audit_log
-
-      addLog('info', '⚠️ Skipping transaction data download (upload-only for safety)');
-      addLog('info', '✅ Master data synced - transaction data protected from overwrite');
-
-      // SKIP PRINTER AUDIT LOGS AND PRINTER DAILY COUNTERS
-      // Local database is source of truth for printer data
-      // Printer audits/counters are local source of truth - not downloaded from server
-      addLog('info', '⚠️ Skipping printer audit logs and printer daily counters (local is source of truth)');
-
-      const paymentMethods = toRecordArray(data.paymentMethods);
-      if (paymentMethods.length > 0 && electronAPI.localDbUpsertPaymentMethods) {
-        await electronAPI.localDbUpsertPaymentMethods(paymentMethods);
-        addLog('success', `✅ ${paymentMethods.length} payment methods synced to local database`);
-      }
-
-      const banks = toRecordArray(data.banks);
-      if (banks.length > 0 && electronAPI.localDbUpsertBanks) {
-        await electronAPI.localDbUpsertBanks(banks);
-        addLog('success', `✅ ${banks.length} banks synced to local database`);
-      }
-
-      const organizations = toRecordArray(data.organizations);
-      if (organizations.length > 0 && electronAPI.localDbUpsertOrganizations) {
-        await electronAPI.localDbUpsertOrganizations(organizations);
-        addLog('success', `✅ ${organizations.length} organizations synced to local database`);
-      }
-
-      const managementGroups = toRecordArray(data.managementGroups);
-      if (managementGroups.length > 0 && electronAPI.localDbUpsertManagementGroups) {
-        await electronAPI.localDbUpsertManagementGroups(managementGroups);
-        addLog('success', `✅ ${managementGroups.length} management groups synced to local database`);
-      }
-
-      const clAccounts = toRecordArray(data.clAccounts);
-      if (clAccounts.length > 0 && electronAPI.localDbUpsertClAccounts) {
-        await electronAPI.localDbUpsertClAccounts(clAccounts);
-        addLog('success', `✅ ${clAccounts.length} CL accounts synced to local database`);
-      }
-
-      addLog('success', '🎉 Full database sync completed successfully!');
-
-      await updateSyncStatus(true);
-      await fetchTransactionCounts();
-    } catch (error) {
-      addLog('error', `❌ Full database sync failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
-      setSyncStatus(prev => ({
-        ...prev,
-        syncInProgress: false,
-        error: error instanceof Error ? error.message : 'Sync failed'
-      }));
-    }
-  }, [addLog, fetchTransactionCounts, updateSyncStatus]);
+  // REMOVED: syncFromCloud function - now using offlineSyncService.syncFromOnline() instead
+  // The redundant syncFromCloud implementation has been removed (was ~330 lines)
 
   // Upload products and prices from local to server (overwrite server)
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
@@ -1252,7 +1072,11 @@ export default function SyncManagement() {
       if (skipTransactions) {
         addLog('info', '⏭️ Skipping transaction upload (user requested)');
       } else {
-        const localTransactions = await electronAPI.localDbGetUnsyncedTransactions(14);
+        if (!businessId) {
+          addLog('error', 'No business ID available. Cannot fetch transactions.');
+          return;
+        }
+        const localTransactions = await electronAPI.localDbGetUnsyncedTransactions(businessId);
         const transactions = normalizeOfflineTransactions(localTransactions);
 
         if (transactions.length === 0) {
@@ -1523,26 +1347,92 @@ export default function SyncManagement() {
     }
   }, [addLog, loadOfflineTransactions, updateSyncStatus]);
 
+  // Re-sync ALL transactions (force re-upload to salespulse.cc)
+  const handleResyncAllTransactions = useCallback(async () => {
+    if (!isElectron) {
+      addLog('error', 'Offline database not available');
+      return;
+    }
+
+    const confirmMessage = `🔄 RE-SYNC SEMUA TRANSAKSI\n\n` +
+      `Anda akan mengunggah ulang SEMUA transaksi dari marviano-pos ke salespulse.cc.\n\n` +
+      `⚠️ PERINGATAN:\n` +
+      `• Proses ini akan mengunggah ulang semua transaksi (termasuk yang sudah di-sync)\n` +
+      `• Transaksi yang sudah ada di server akan ditandai sebagai duplicate dan di-skip\n` +
+      `• Proses ini mungkin memakan waktu lama tergantung jumlah transaksi\n\n` +
+      `Apakah Anda yakin ingin melanjutkan?`;
+
+    if (!window.confirm(confirmMessage)) {
+      addLog('info', 'Re-sync dibatalkan');
+      return;
+    }
+
+    setIsResyncing(true);
+    setResyncProgress(null);
+    addLog('info', '🔄 Memulai re-sync semua transaksi...');
+
+    try {
+      const result = await smartSyncService.resyncAllTransactions(
+        businessId,
+        (progress) => {
+          setResyncProgress(progress);
+          addLog('info', `📤 Memproses transaksi ${progress.current}/${progress.total}: ${progress.transactionId} - ${progress.status}`);
+        }
+      );
+
+      if (result.success) {
+        addLog('success', `✅ Re-sync selesai: ${result.syncedCount} berhasil, ${result.skippedCount} di-skip, ${result.failedCount} gagal`);
+        addLog('info', result.message);
+      } else {
+        addLog('error', `❌ Re-sync gagal: ${result.message}`);
+      }
+
+      // Reload offline transactions to reflect updated sync status
+      await loadOfflineTransactions();
+      await fetchTransactionCounts();
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+      addLog('error', `❌ Error during re-sync: ${errorMessage}`);
+      console.error('[RE-SYNC] Error:', error);
+    } finally {
+      setIsResyncing(false);
+      setResyncProgress(null);
+    }
+  }, [businessId, addLog, loadOfflineTransactions, fetchTransactionCounts]);
+
   // Download master data from server
   const handleFullSyncClick = useCallback(async () => {
     if (!isElectron) {
       addLog('error', 'Offline database not available');
       return;
     }
-    // Directly download from server
-    const electronAPI = getElectronAPI();
-    if (!electronAPI) {
-      addLog('error', 'Offline database not available');
-      return;
-    }
 
     setSyncStatus(prev => ({ ...prev, syncInProgress: true, error: null }));
     addLog('info', '🔄 Starting sync (downloading products/prices from server, overwriting local)...');
-    setSyncProgress(50);
+    setSyncProgress(0);
+
+    let unsubscribe: (() => void) | undefined;
 
     try {
+      // Check connection first
+      await offlineSyncService.forceConnectionCheck();
+      const status = offlineSyncService.getStatus();
+
+      if (!status.isOnline) {
+        throw new Error('Perangkat belum terhubung ke internet. Harap sambungkan terlebih dahulu.');
+      }
+
+      // Subscribe to progress updates
+      if (typeof offlineSyncService.subscribeSyncProgress === 'function') {
+        unsubscribe = offlineSyncService.subscribeSyncProgress(progress => {
+          if (progress !== null) {
+            setSyncProgress(progress);
+          }
+        });
+      }
+
       // Download master data from server (excludes transactions, shifts, refunds, printer audits)
-      await syncFromCloud();
+      await offlineSyncService.syncFromOnline(businessId);
 
       addLog('success', '🎉 Sync completed! Products/prices downloaded from server (local overwritten).');
       setSyncProgress(100);
@@ -1561,8 +1451,16 @@ export default function SyncManagement() {
         syncInProgress: false,
         error: error instanceof Error ? error.message : 'Sync failed'
       }));
+    } finally {
+      if (unsubscribe) {
+        try {
+          unsubscribe();
+        } catch (error) {
+          console.warn('Gagal unsubscribe dari progress sync:', error);
+        }
+      }
     }
-  }, [addLog, fetchTransactionCounts, isElectron, loadOfflineTransactions, syncFromCloud, updateSyncStatus]);
+  }, [addLog, fetchTransactionCounts, loadOfflineTransactions, updateSyncStatus]);
 
 
   // Archive all transactions
@@ -1913,7 +1811,11 @@ export default function SyncManagement() {
     addLog('info', '🔍 Searching for orphaned transactions...');
 
     try {
-      const allOfflineTransactionsRaw = await electronAPI.localDbGetTransactions(14, 10000);
+      if (!businessId) {
+        addLog('error', 'No business ID available. Cannot fetch transactions.');
+        return;
+      }
+      const allOfflineTransactionsRaw = await electronAPI.localDbGetTransactions(businessId, 10000);
       const allOfflineTransactions = normalizeOfflineTransactions(allOfflineTransactionsRaw);
 
       let onlineTransactionIds: string[] = [];
@@ -2238,10 +2140,10 @@ WHERE ${baseWhere};`;
 
               <button
                 onClick={handleFullSyncClick}
-                disabled={syncStatus.syncInProgress}
+                disabled={syncStatus.syncInProgress || isResyncing}
                 className={`
                   flex items-center justify-center gap-2 px-4 py-2 rounded-lg font-medium transition-all text-sm
-                  ${syncStatus.syncInProgress
+                  ${syncStatus.syncInProgress || isResyncing
                     ? 'bg-gray-400 text-white cursor-not-allowed'
                     : 'bg-blue-600 hover:bg-blue-700 text-white'
                   }
@@ -2249,115 +2151,56 @@ WHERE ${baseWhere};`;
               >
                 {syncStatus.syncInProgress ? (
                   <>
-                    <RefreshCw className="w-4 h-4 animate-spin" />
+                    <Download className="w-4 h-4 animate-spin" />
                     <span>Syncing...</span>
+                  </>
+                ) : (
+                  <>
+                    <Download className="w-4 h-4" />
+                    <div className="flex flex-col items-center">
+                      <span className="font-semibold">Download Master Data</span>
+                      <span className="text-xs opacity-80">Knowledge Base PoS</span>
+                    </div>
+                  </>
+                )}
+              </button>
+
+              <button
+                onClick={handleResyncAllTransactions}
+                disabled={syncStatus.syncInProgress || isResyncing}
+                className={`
+                  flex items-center justify-center gap-2 px-4 py-2 rounded-lg font-medium transition-all text-sm
+                  ${syncStatus.syncInProgress || isResyncing
+                    ? 'bg-gray-400 text-white cursor-not-allowed'
+                    : 'bg-green-600 hover:bg-green-700 text-white'
+                  }
+                `}
+                title="Re-upload semua transaksi dari marviano-pos ke salespulse.cc"
+              >
+                {isResyncing ? (
+                  <>
+                    <RefreshCw className="w-4 h-4 animate-spin" />
+                    <div className="flex flex-col items-start">
+                      <span className="font-semibold">Re-syncing...</span>
+                      {resyncProgress && (
+                        <span className="text-xs opacity-80">
+                          {resyncProgress.current}/{resyncProgress.total} - {resyncProgress.status}
+                        </span>
+                      )}
+                    </div>
                   </>
                 ) : (
                   <>
                     <RefreshCw className="w-4 h-4" />
                     <div className="flex flex-col items-start">
-                      <span className="font-semibold">Sinkronisasi Knowledge Base PoS</span>
-                      <span className="text-xs opacity-80">Download dari Server (Overwrite Local)</span>
+                      <span className="font-semibold">Re-sync Semua Transaksi</span>
+                      <span className="text-xs opacity-80">Upload ulang ke salespulse.cc</span>
                     </div>
                   </>
                 )}
               </button>
 
             </div>
-          </div>
-        </div>
-
-        {/* Reset Transaction Sync Status */}
-        <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-4 mb-6">
-          <div className="mb-4">
-            <h3 className="text-sm font-semibold text-gray-800 flex items-center gap-2">
-              <RefreshCw className="w-4 h-4" />
-              Reset Status Sinkronisasi Transaksi
-            </h3>
-            <p className="text-xs text-gray-500 mt-1">
-              Atur ulang status sinkronisasi transaksi ke &quot;pending&quot; untuk testing fitur sync
-            </p>
-          </div>
-
-          <div className="space-y-3">
-            {/* Date Range Selection */}
-            <div className="flex flex-col gap-2">
-              <label className="text-xs font-medium text-gray-700">Pilih Rentang Waktu:</label>
-              <div className="flex gap-2">
-                <button
-                  onClick={() => setResetSyncDateRange('today')}
-                  className={`px-3 py-1.5 text-xs rounded transition-colors ${
-                    resetSyncDateRange === 'today'
-                      ? 'bg-blue-100 text-blue-700 font-medium'
-                      : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
-                  }`}
-                >
-                  Hari Ini
-                </button>
-                <button
-                  onClick={() => setResetSyncDateRange('alltime')}
-                  className={`px-3 py-1.5 text-xs rounded transition-colors ${
-                    resetSyncDateRange === 'alltime'
-                      ? 'bg-blue-100 text-blue-700 font-medium'
-                      : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
-                  }`}
-                >
-                  Semua Waktu
-                </button>
-                <button
-                  onClick={() => setResetSyncDateRange('custom')}
-                  className={`px-3 py-1.5 text-xs rounded transition-colors ${
-                    resetSyncDateRange === 'custom'
-                      ? 'bg-blue-100 text-blue-700 font-medium'
-                      : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
-                  }`}
-                >
-                  Custom
-                </button>
-              </div>
-            </div>
-
-            {/* Custom Date Range Inputs */}
-            {resetSyncDateRange === 'custom' && (
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="block text-xs font-medium text-gray-700 mb-1">Dari Tanggal:</label>
-                  <input
-                    type="date"
-                    value={resetSyncFromDate}
-                    onChange={(e) => setResetSyncFromDate(e.target.value)}
-                    className="w-full px-2 py-1.5 text-xs border border-gray-300 rounded focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-                  />
-                </div>
-                <div>
-                  <label className="block text-xs font-medium text-gray-700 mb-1">Sampai Tanggal:</label>
-                  <input
-                    type="date"
-                    value={resetSyncToDate}
-                    onChange={(e) => setResetSyncToDate(e.target.value)}
-                    className="w-full px-2 py-1.5 text-xs border border-gray-300 rounded focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-                  />
-                </div>
-              </div>
-            )}
-
-            {/* Reset Button */}
-            <button
-              onClick={handleResetTransactionSyncStatus}
-              disabled={isResettingSync || (resetSyncDateRange === 'custom' && (!resetSyncFromDate || !resetSyncToDate))}
-              className="w-full flex items-center justify-center gap-2 px-4 py-2 text-xs font-medium bg-orange-50 hover:bg-orange-100 text-orange-700 rounded transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-            >
-              <RefreshCw className={`w-3.5 h-3.5 ${isResettingSync ? 'animate-spin' : ''}`} />
-              <span>
-                {isResettingSync
-                  ? 'Mereset...'
-                  : resetSyncDateRange === 'today'
-                  ? 'Reset Status Sync (Hari Ini)'
-                  : resetSyncDateRange === 'alltime'
-                  ? 'Reset Status Sync (Semua Waktu)'
-                  : 'Reset Status Sync (Custom Range)'}
-              </span>
-            </button>
           </div>
         </div>
 
@@ -2392,7 +2235,7 @@ WHERE ${baseWhere};`;
         )}
 
         {/* Two Column Layout: Logs and Offline Data */}
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6">
+        <div className="grid grid-cols-1 lg:grid-cols-[30%_70%] gap-6 mb-6">
           {/* Sync Logs */}
           <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-6 flex flex-col h-[420px]">
             <h2 className="text-sm font-semibold text-gray-800 flex items-center gap-2 mb-4 flex-shrink-0">
@@ -2489,11 +2332,15 @@ WHERE ${baseWhere};`;
                   <table className="w-full text-[10px]">
                     <thead className="bg-gray-50 sticky top-0">
                       <tr>
-                        <th className="px-2 py-1 text-left font-medium text-gray-700">#</th>
-                        <th className="px-2 py-1 text-center font-medium text-gray-700">UUID</th>
-                        <th className="px-2 py-1 text-left font-medium text-gray-700">Tanggal</th>
+                        <th className="px-2 py-1 text-left font-medium text-gray-700">R/RR</th>
+                        <th className="px-2 py-1 text-left font-medium text-gray-700">Waktu</th>
                         <th className="px-2 py-1 text-left font-medium text-gray-700">Total</th>
-                        <th className="px-2 py-1 text-left font-medium text-gray-700">Status</th>
+                        <th className="px-2 py-1 text-left font-medium text-gray-700">Disc/Vc</th>
+                        <th className="px-2 py-1 text-left font-medium text-gray-700">Final</th>
+                        <th className="px-2 py-1 text-left font-medium text-gray-700">Pelanggan</th>
+                        <th className="px-2 py-1 text-left font-medium text-gray-700">Waiter</th>
+                        <th className="px-2 py-1 text-left font-medium text-gray-700">Kasir</th>
+                        <th className="px-2 py-1 text-left font-medium text-gray-700">Sync Status</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-gray-200">
@@ -2504,63 +2351,109 @@ WHERE ${baseWhere};`;
                         const existsOnServer = checkResult?.exists || false;
                         const isIdentical = checkResult?.identical || false;
 
+                        // Determine R/RR badge
+                        const receiptizeCounter = receiptizeCounters[txUuid];
+                        const receiptCounter = receiptCounters[txUuid];
+                        const hasReceiptizeCounter = typeof receiptizeCounter === 'number' && receiptizeCounter > 0;
+                        const hasReceiptCounter = typeof receiptCounter === 'number' && receiptCounter > 0;
+                        const isInReceiptizeIds = receiptizePrintedIds.has(txUuid);
+                        const isReceiptize = isInReceiptizeIds || hasReceiptizeCounter;
+
+                        // Get waiter name
+                        const waiterId = transaction.waiter_id ? (typeof transaction.waiter_id === 'number' ? transaction.waiter_id : parseInt(String(transaction.waiter_id), 10)) : null;
+                        const waiter = waiterId ? employeesMap.get(waiterId) : null;
+
                         return (
                           <tr
                             key={transaction.id}
                             className={`hover:bg-gray-50 ${isChecked && existsOnServer ? 'bg-yellow-50' : ''
                               }`}
                           >
-                            <td className="px-2 py-1 font-medium text-blue-600">
-                              #{transaction.receipt_number || 'N/A'}
-                            </td>
-                            <td className="px-2 py-1 text-center">
-                              <div className="flex items-center justify-center gap-1">
-                                <button
-                                  onClick={() => {
-                                    handleCopyUuid(txUuid);
-                                  }}
-                                  className="p-0.5 hover:bg-gray-200 rounded transition-colors"
-                                  title={`Copy UUID: ${txUuid}`}
-                                >
-                                  <svg className="w-3 h-3 text-gray-500 hover:text-gray-700" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
-                                  </svg>
-                                </button>
-                                {isChecked && (
-                                  <span
-                                    className={`w-2 h-2 rounded-full ${isIdentical ? 'bg-green-500' :
-                                      existsOnServer ? 'bg-yellow-500' : 'bg-blue-500'
-                                      }`}
-                                    title={
-                                      isIdentical ? 'Identik dengan server (sudah di-update)' :
-                                        existsOnServer ? 'Ada di server tapi berbeda' : 'Belum ada di server'
-                                    }
-                                  />
+                            {/* R/RR Badge */}
+                            <td className="px-2 py-1">
+                              <div className="flex items-center gap-1">
+                                {isReceiptize ? (
+                                  <>
+                                    <span className="inline-flex items-center px-1 py-0.5 rounded text-[9px] font-medium bg-green-100 text-green-800">
+                                      RR
+                                    </span>
+                                    <span className="text-[9px] font-medium text-blue-600">
+                                      {hasReceiptizeCounter ? receiptizeCounter : (transaction.receipt_number || '-')}
+                                    </span>
+                                  </>
+                                ) : hasReceiptCounter ? (
+                                  <>
+                                    <span className="inline-flex items-center px-1 py-0.5 rounded text-[9px] font-medium bg-blue-100 text-blue-800">
+                                      R
+                                    </span>
+                                    <span className="text-[9px] font-medium text-blue-600">
+                                      {receiptCounter}
+                                    </span>
+                                  </>
+                                ) : (
+                                  <span className="text-[9px] text-gray-500">
+                                    {transaction.receipt_number || '-'}
+                                  </span>
                                 )}
                               </div>
                             </td>
+                            {/* Waktu */}
                             <td className="px-2 py-1 text-gray-600">
-                              {new Date(transaction.created_at).toLocaleString('id-ID')}
+                              {transaction.created_at ? new Date(transaction.created_at).toLocaleString('id-ID', {
+                                year: 'numeric',
+                                month: '2-digit',
+                                day: '2-digit',
+                                hour: '2-digit',
+                                minute: '2-digit'
+                              }) : 'N/A'}
                             </td>
+                            {/* Total */}
                             <td className="px-2 py-1 font-medium text-gray-900">
-                              {formatPrice(transaction.final_amount)}
+                              {formatPrice(transaction.total_amount ?? 0)}
                             </td>
+                            {/* Disc/Vc */}
+                            <td className="px-2 py-1 text-gray-600">
+                              {formatPrice(transaction.voucher_discount ?? 0)}
+                            </td>
+                            {/* Final */}
+                            <td className="px-2 py-1 font-medium text-gray-900">
+                              {formatPrice(transaction.final_amount ?? 0)}
+                            </td>
+                            {/* Pelanggan */}
+                            <td className="px-2 py-1 text-gray-600">
+                              {transaction.customer_name || 'Guest'}
+                            </td>
+                            {/* Waiter */}
+                            <td className="px-2 py-1">
+                              {waiter ? (
+                                <span className="text-[9px] text-gray-900">{waiter.name}</span>
+                              ) : (
+                                <span className="text-[9px] text-gray-400">-</span>
+                              )}
+                            </td>
+                            {/* Kasir */}
+                            <td className="px-2 py-1 text-gray-600 text-[9px]">
+                              {transaction.user_name || '-'}
+                            </td>
+                            {/* Sync Status */}
                             <td className="px-2 py-1">
                               <div className="flex items-center gap-1">
-                                <span className={`inline-flex px-1.5 py-0.5 text-[9px] font-semibold rounded-full ${transaction.status === 'paid' || transaction.status === 'completed'
-                                  ? 'bg-green-100 text-green-800'
-                                  : 'bg-yellow-100 text-yellow-800'
-                                  }`}>
-                                  {transaction.status === 'completed' ? 'paid' : transaction.status}
-                                </span>
-                                {isChecked && existsOnServer && !isIdentical && (
-                                  <span className="text-[8px] text-yellow-700" title="Sudah ada di server tapi berbeda">
-                                    ⚠️
+                                {transaction.sync_status === 'failed' ? (
+                                  <span 
+                                    className="inline-flex px-1.5 py-0.5 text-[9px] font-semibold rounded-full bg-red-100 text-red-800"
+                                    title={`Gagal upload${transaction.sync_attempts ? ` (${transaction.sync_attempts} percobaan)` : ''}`}
+                                  >
+                                    ❌ Failed
+                                    {transaction.sync_attempts && transaction.sync_attempts > 0 && (
+                                      <span className="ml-1">({transaction.sync_attempts})</span>
+                                    )}
                                   </span>
-                                )}
-                                {isChecked && isIdentical && (
-                                  <span className="text-[8px] text-green-700" title="Identik dengan server">
-                                    ✅
+                                ) : (
+                                  <span 
+                                    className="inline-flex px-1.5 py-0.5 text-[9px] font-semibold rounded-full bg-blue-100 text-blue-800"
+                                    title="Menunggu upload"
+                                  >
+                                    ⏳ Pending
                                   </span>
                                 )}
                               </div>
@@ -2643,7 +2536,7 @@ WHERE ${baseWhere};`;
                               </button>
                             </td>
                             <td className="px-3 py-2 text-gray-600">
-                              {new Date(transaction.created_at).toLocaleString('id-ID')}
+                              {transaction.created_at ? new Date(transaction.created_at).toLocaleString('id-ID') : 'N/A'}
                             </td>
                             <td className="px-3 py-2 text-gray-600">
                               {transaction.customer_name || 'Guest'}
@@ -2657,7 +2550,7 @@ WHERE ${baseWhere};`;
                               </span>
                             </td>
                             <td className="px-3 py-2 font-medium text-gray-900">
-                              {formatPrice(transaction.final_amount)}
+                              {formatPrice(transaction.final_amount ?? 0)}
                             </td>
                             <td className="px-3 py-2">
                               <span className={`inline-flex px-2 py-1 text-xs font-semibold rounded-full ${transaction.status === 'paid' || transaction.status === 'completed'

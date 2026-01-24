@@ -16,13 +16,11 @@ interface Business {
 
 export default function Login() {
   const router = useRouter();
-  const { isAuthenticated, login, loginOffline } = useAuth();
+  const { isAuthenticated, user, login, loginOffline, logout } = useAuth();
   const [isClient, setIsClient] = useState(false);
   const [isSyncing, setIsSyncing] = useState(false);
   const [syncStatus, setSyncStatus] = useState<string | null>(null);
   const [syncError, setSyncError] = useState<string | null>(null);
-  const [hasOfflineDb, setHasOfflineDb] = useState<boolean | null>(null);
-  const hasCheckedOfflineDb = useRef(false);
   const [syncProgress, setSyncProgress] = useState<number | null>(null);
   interface LoginResult {
     _businesses?: Business[];
@@ -49,20 +47,22 @@ export default function Login() {
     }
   }, []);
 
-  // Redirect to main page if already authenticated
+  // Redirect to main page if already authenticated (and has a business selected)
+  // If authenticated but no selectedBusinessId (e.g. user with 0 businesses, or corrupted state), clear session to avoid redirect loop
   useEffect(() => {
-    if (isClient && isAuthenticated) {
-      // console.log('🔍 Already authenticated, redirecting to POS');
+    if (!isClient || !isAuthenticated) return;
 
+    if (user?.selectedBusinessId != null) {
       if (process.env.NODE_ENV === 'development') {
-        // In development, use Next.js router
         router.replace('/');
       } else {
-        // In production (Electron file://), use window.location
         window.location.href = 'index.html';
       }
+    } else {
+      // Invalid: authenticated but no business (e.g. users with only reporting perms get businesses=[] from API)
+      logout({ redirect: false });
     }
-  }, [isClient, isAuthenticated, router]);
+  }, [isClient, isAuthenticated, user?.selectedBusinessId, router, logout]);
 
   const handleFullSync = useCallback(
     async (reason: 'initial' | 'manual') => {
@@ -75,7 +75,7 @@ export default function Login() {
         return false;
       }
 
-      if (!window.electronAPI?.checkOfflineDbExists) {
+      if (!window.electronAPI) {
         setSyncError('Fitur sinkronisasi offline tidak tersedia.');
         return false;
       }
@@ -95,7 +95,7 @@ export default function Login() {
           throw new Error('Perangkat belum terhubung ke internet. Harap sambungkan terlebih dahulu.');
         }
 
-        setSyncStatus('Menjalankan Sinkronisasi Knowledge Base PoS. Mohon tunggu...');
+        setSyncStatus('Menjalankan download master data. Mohon tunggu...');
         setSyncProgress(0);
 
         if (typeof offlineSyncService.subscribeSyncProgress === 'function') {
@@ -105,18 +105,9 @@ export default function Login() {
         }
 
         await offlineSyncService.syncFromOnline();
-        setSyncStatus('✅ Sinkronisasi Knowledge Base PoS selesai!');
+        setSyncStatus('✅ Download master data selesai!');
         setSyncProgress(100);
-        setHasOfflineDb(true);
         setSyncError(null); // Clear any previous errors
-
-        // Re-check to confirm DB now exists
-        try {
-          const result = await window.electronAPI.checkOfflineDbExists();
-          setHasOfflineDb(result.exists);
-        } catch (error) {
-          console.warn('Gagal memeriksa ulang database offline:', error);
-        }
 
         if (reason === 'manual') {
           setTimeout(() => setSyncStatus(null), 4000);
@@ -133,7 +124,7 @@ export default function Login() {
             message = error.message + '\n\nPeriksa apakah API server berjalan dan dapat diakses.';
           }
         }
-        console.error('❌ Sinkronisasi lengkap gagal:', error);
+        console.error('❌ Download master data gagal:', error);
         setSyncError(message);
         setSyncStatus(null); // Clear status to show error
         return false;
@@ -152,50 +143,15 @@ export default function Login() {
     [isSyncing]
   );
 
-  useEffect(() => {
-    if (!isClient || hasCheckedOfflineDb.current) {
-      return;
-    }
-
-    hasCheckedOfflineDb.current = true;
-
-    const bootstrapOfflineDb = async () => {
-      if (typeof window === 'undefined' || !window.electronAPI?.checkOfflineDbExists) {
-        setHasOfflineDb(true);
-        return;
-      }
-
-      try {
-        setSyncStatus('Memeriksa database offline...');
-        const result = await window.electronAPI.checkOfflineDbExists();
-        setHasOfflineDb(result.exists);
-
-        if (!result.exists) {
-          await handleFullSync('initial');
-        } else {
-          setSyncStatus(null);
-        }
-      } catch (error) {
-        console.error('Gagal memeriksa keberadaan database offline:', error);
-        setSyncError('Gagal memeriksa database offline.');
-      }
-    };
-
-    bootstrapOfflineDb();
-  }, [isClient, handleFullSync]);
-
   const effectiveSyncStatus = useMemo(() => {
     if (isSyncing) {
       return syncStatus ?? 'Menjalankan sinkronisasi...';
     }
-    if (hasOfflineDb === null) {
-      return 'Memeriksa database offline...';
-    }
     return syncStatus;
-  }, [isSyncing, syncStatus, hasOfflineDb]);
+  }, [isSyncing, syncStatus]);
 
   const handleLogin = async (email: string, password: string) => {
-    if (isSyncing || hasOfflineDb === null) {
+    if (isSyncing) {
       throw new Error('Tunggu hingga proses sinkronisasi selesai sebelum login.');
     }
 
@@ -207,6 +163,16 @@ export default function Login() {
       const businesses = loginResultTyped?._businesses || [];
       const isSuperAdmin = loginResultTyped?._isSuperAdmin || false;
 
+      // #region agent log
+      fetch('http://127.0.0.1:7242/ingest/7b565785-72b5-49f7-b2c0-57606ea0d0b5',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'login/page.tsx:handleLogin',message:'businesses from loginResult',data:{businessesLength:businesses.length,has_businesses:!!(loginResultTyped as any)?._businesses,isSuperAdmin},timestamp:Date.now(),sessionId:'debug-session',hypothesisId:'H1'})}).catch(()=>{});
+      // #endregion
+
+      if (businesses.length === 0) {
+        // #region agent log
+        fetch('http://127.0.0.1:7242/ingest/7b565785-72b5-49f7-b2c0-57606ea0d0b5',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'login/page.tsx:handleLogin',message:'throwing no businesses',data:{businessesLength:0},timestamp:Date.now(),sessionId:'debug-session',hypothesisId:'H2'})}).catch(()=>{});
+        // #endregion
+        throw new Error('Anda tidak terdaftar di bisnis manapun. Hubungi administrator untuk mendapatkan akses POS.');
+      }
       if (businesses.length > 1) {
         // Show business selection UI
         setPendingLogin({
@@ -215,8 +181,8 @@ export default function Login() {
           isSuperAdmin,
         });
       } else {
-        // Auto-select business if only one, or proceed with null if none
-        const selectedBusinessId = businesses.length === 1 ? businesses[0].id : null;
+        // Auto-select the single business
+        const selectedBusinessId = businesses[0].id;
         await authManager.completeLogin(loginResult as User & { _businesses?: unknown[]; _isSuperAdmin?: boolean }, selectedBusinessId);
         // Router will handle redirect via useEffect
       }
@@ -243,7 +209,7 @@ export default function Login() {
   };
 
   const handleOfflineLogin = async () => {
-    if (isSyncing || hasOfflineDb === null) {
+    if (isSyncing) {
       console.warn('Offline login diblokir saat sinkronisasi berjalan.');
       return;
     }
@@ -329,11 +295,11 @@ export default function Login() {
         onLogin={handleLogin}
         onOfflineLogin={handleOfflineLogin}
         onClose={handleClose}
-        isSyncing={isSyncing || hasOfflineDb === null}
+        isSyncing={isSyncing}
         syncStatus={effectiveSyncStatus}
         syncError={syncError}
         onSyncRequest={async () => { await handleFullSync('manual'); }}
-        hasOfflineDb={hasOfflineDb ?? false}
+        hasOfflineDb={true}
         syncProgress={syncProgress}
       />
     </div>

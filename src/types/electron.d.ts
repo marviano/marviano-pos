@@ -86,6 +86,7 @@ declare global {
       updateCustomerSlideshow: (data: unknown) => Promise<unknown>;
       getCustomerDisplayStatus: () => Promise<unknown>;
       createCustomerDisplay: () => Promise<unknown>;
+      createBaristaKitchenWindow: () => Promise<{ success: boolean; error?: string }>;
 
       // Customer display event listeners
       onOrderUpdate?: (callback: (data: unknown) => void) => void;
@@ -143,6 +144,7 @@ declare global {
 
       // Offline/local DB operations
       localDbUpsertCategories?: (rows: { category2_name: string; updated_at?: number }[]) => Promise<{ success: boolean }>;
+      downloadAndRewriteSyncImages?: (payload: { baseUrl: string; products: unknown[]; businesses: unknown[] }) => Promise<{ products: unknown[]; businesses: unknown[] }>;
       localDbGetCategories?: () => Promise<{ category2_name: string; updated_at: number }[]>;
       localDbUpsertProducts?: (rows: unknown[]) => Promise<{ success: boolean }>;
       localDbCleanupOrphanedProducts?: (businessId: number, syncedProductIds: number[]) => Promise<{ success: boolean; deletedCount?: number; deletedProductIds?: number[]; error?: string }>;
@@ -250,10 +252,10 @@ declare global {
       localDbUpsertTransactionRefunds?: (rows: unknown[]) => Promise<{ success: boolean; error?: string }>;
       localDbApplyTransactionRefund?: (payload: unknown) => Promise<{ success: boolean; error?: string }>;
       localDbGetUnsyncedTransactions?: (businessId?: number) => Promise<unknown[]>;
+      localDbGetAllTransactions?: (businessId?: number) => Promise<unknown[]>;
       localDbDeleteUnsyncedTransactions?: (businessId?: number) => Promise<{ success: boolean; deletedCount?: number; error?: string }>;
       localDbMarkTransactionsSynced?: (transactionIds: string[]) => Promise<unknown>;
       localDbResetTransactionSync?: (transactionId: string | number) => Promise<{ success: boolean; error?: string; affectedRows?: number }>;
-      localDbResetTransactionsSyncByDate?: (payload: { businessId: number; fromDate?: string | null; toDate?: string | null }) => Promise<{ success: boolean; count?: number; error?: string }>;
       localDbMarkTransactionsSyncedByIds?: (transactionIds: number[]) => Promise<{ success: boolean }>;
       localDbArchiveTransactions?: (payload: { businessId: number; from?: string | null; to?: string | null }) => Promise<number>;
       localDbDeleteTransactions?: (payload: { businessId: number; from?: string | null; to?: string | null }) => Promise<number>;
@@ -316,12 +318,15 @@ declare global {
       // Supporting tables
       localDbUpsertSource?: (rows: unknown[]) => Promise<{ success: boolean }>;
       localDbGetSource?: () => Promise<unknown[]>;
-      localDbUpsertPekerjaan?: (rows: unknown[]) => Promise<{ success: boolean }>;
-      localDbGetPekerjaan?: () => Promise<unknown[]>;
+      // Skip pekerjaan - not needed in POS app (CRM-only)
 
       // Banks
       localDbUpsertBanks?: (rows: unknown[]) => Promise<unknown>;
       localDbGetBanks?: () => Promise<unknown[]>;
+
+      // Receipt Settings and Templates
+      localDbUpsertReceiptSettings?: (rows: unknown[]) => Promise<{ success: boolean; error?: string }>;
+      localDbUpsertReceiptTemplates?: (rows: unknown[]) => Promise<{ success: boolean; error?: string }>;
 
       // Payment Methods
       localDbUpsertPaymentMethods?: (rows: unknown[]) => Promise<unknown>;
@@ -331,9 +336,7 @@ declare global {
       localDbUpsertOrganizations?: (rows: unknown[], skipOwnerValidation?: boolean) => Promise<{ success: boolean }>;
       localDbGetOrganizations?: () => Promise<unknown[]>;
 
-      // Management Groups
-      localDbUpsertManagementGroups?: (rows: unknown[]) => Promise<unknown>;
-      localDbGetManagementGroups?: () => Promise<unknown[]>;
+      // Skip management_groups - not needed in POS app (CRM-only)
 
       // Categories
       localDbUpsertCategory1?: (rows: unknown[]) => Promise<unknown>;

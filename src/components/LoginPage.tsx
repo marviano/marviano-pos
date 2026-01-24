@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useRef, useState } from 'react';
-import { X, Eye, EyeOff, ChevronDown, Settings, Loader2, RefreshCw, ChevronLeft, CheckCircle2, XCircle } from 'lucide-react';
+import { X, Eye, EyeOff, ChevronDown, Settings, Loader2, RefreshCw, ChevronLeft, CheckCircle2, XCircle, Download } from 'lucide-react';
 import Image from 'next/image';
 import { getMostRecentEmail, getSavedEmails } from '@/lib/savedLoginEmails';
 
@@ -526,12 +526,12 @@ export default function LoginPage({
                     {isSyncing ? (
                       <>
                         <Loader2 className="w-3 h-3 animate-spin" />
-                        Sedang Sinkronisasi
+                        Sedang Download
                       </>
                     ) : (
                       <>
-                        <RefreshCw className="w-3 h-3" />
-                        Sinkronisasi Knowledge Base PoS
+                        <Download className="w-3 h-3" />
+                        Download Master Data
                       </>
                     )}
                   </button>

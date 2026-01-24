@@ -215,20 +215,7 @@ async function initializeMySQLSchema() {
       UNIQUE KEY slug (slug),
       KEY owner_user_id (owner_user_id)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb3`,
-        // Management_groups table
-        `CREATE TABLE IF NOT EXISTS management_groups (
-      id INT NOT NULL AUTO_INCREMENT,
-      name VARCHAR(255) CHARACTER SET utf8mb4 NOT NULL,
-      permission_name VARCHAR(255) CHARACTER SET utf8mb4 NOT NULL,
-      description MEDIUMTEXT CHARACTER SET utf8mb4,
-      organization_id INT NOT NULL,
-      manager_user_id INT DEFAULT NULL,
-      created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-      updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-      PRIMARY KEY (id),
-      KEY idx_management_groups_organization (organization_id),
-      KEY idx_management_groups_manager (manager_user_id)
-    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+        // Skip management_groups table - not needed in POS app (CRM-only)
         // CL_accounts table
         `CREATE TABLE IF NOT EXISTS cl_accounts (
       id INT NOT NULL AUTO_INCREMENT,

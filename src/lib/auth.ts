@@ -303,6 +303,10 @@ class AuthManager {
           throw new Error('Invalid user payload received');
         }
 
+        // #region agent log
+        fetch('http://127.0.0.1:7242/ingest/7b565785-72b5-49f7-b2c0-57606ea0d0b5',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'auth.ts:login',message:'API response businesses',data:{hasBusinessesKey:'businesses' in data,dataBusinessesIsArray:Array.isArray((data as any).businesses),dataBusinessesLength:Array.isArray((data as any).businesses)?(data as any).businesses.length:typeof (data as any).businesses,_businessesLength:((data.businesses as unknown[])||[]).length},timestamp:Date.now(),sessionId:'debug-session',hypothesisId:'H1'})}).catch(()=>{});
+        // #endregion
+
         // Return user data with businesses for selection (don't set authenticated yet)
         interface UserWithBusinesses extends User {
           _businesses?: unknown[];
@@ -368,7 +372,7 @@ class AuthManager {
     return cachedUser;
   }
 
-  logout(): void {
+  logout(options?: { redirect?: boolean }): void {
     this.authState = {
       isAuthenticated: false,
       user: null,
@@ -393,7 +397,8 @@ class AuthManager {
       });
     }
 
-    if (typeof window !== 'undefined') {
+    const shouldRedirect = options?.redirect !== false;
+    if (shouldRedirect && typeof window !== 'undefined') {
       try {
         // Use root relative path which works for both dev (localhost:3000/login)
         // and production if configured correctly with simple routing

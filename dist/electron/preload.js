@@ -30,7 +30,9 @@ electron_1.contextBridge.exposeInMainWorld('electronAPI', {
     updateCustomerSlideshow: (data) => electron_1.ipcRenderer.invoke('update-customer-slideshow', data),
     getCustomerDisplayStatus: () => electron_1.ipcRenderer.invoke('get-customer-display-status'),
     createCustomerDisplay: () => electron_1.ipcRenderer.invoke('create-customer-display'),
+    createBaristaKitchenWindow: () => electron_1.ipcRenderer.invoke('create-barista-kitchen-window'),
     // Offline/local DB primitives
+    downloadAndRewriteSyncImages: (payload) => electron_1.ipcRenderer.invoke('download-and-rewrite-sync-images', payload),
     localDbUpsertCategories: (rows) => electron_1.ipcRenderer.invoke('localdb-upsert-categories', rows),
     localDbGetCategories: (businessId) => electron_1.ipcRenderer.invoke('localdb-get-categories', businessId),
     localDbUpsertProducts: (rows) => electron_1.ipcRenderer.invoke('localdb-upsert-products', rows),
@@ -78,8 +80,7 @@ electron_1.contextBridge.exposeInMainWorld('electronAPI', {
     // Supporting tables
     localDbUpsertSource: (rows) => electron_1.ipcRenderer.invoke('localdb-upsert-source', rows),
     localDbGetSource: () => electron_1.ipcRenderer.invoke('localdb-get-source'),
-    localDbUpsertPekerjaan: (rows) => electron_1.ipcRenderer.invoke('localdb-upsert-pekerjaan', rows),
-    localDbGetPekerjaan: () => electron_1.ipcRenderer.invoke('localdb-get-pekerjaan'),
+    // Skip pekerjaan - not needed in POS app (CRM-only)
     // Printer configurations
     localDbSavePrinterConfig: (printerType, systemPrinterName, extraSettings) => electron_1.ipcRenderer.invoke('localdb-save-printer-config', printerType, systemPrinterName, extraSettings),
     localDbGetPrinterConfigs: () => electron_1.ipcRenderer.invoke('localdb-get-printer-configs'),
@@ -120,10 +121,10 @@ electron_1.contextBridge.exposeInMainWorld('electronAPI', {
     localDbDeleteTransactions: (payload) => electron_1.ipcRenderer.invoke('localdb-delete-transactions', payload),
     localDbDeleteTransactionItems: (payload) => electron_1.ipcRenderer.invoke('localdb-delete-transaction-items', payload),
     localDbGetUnsyncedTransactions: (businessId) => electron_1.ipcRenderer.invoke('localdb-get-unsynced-transactions', businessId),
+    localDbGetAllTransactions: (businessId) => electron_1.ipcRenderer.invoke('localdb-get-all-transactions', businessId),
     localDbDeleteUnsyncedTransactions: (businessId) => electron_1.ipcRenderer.invoke('localdb-delete-unsynced-transactions', businessId),
     localDbMarkTransactionsSynced: (transactionIds) => electron_1.ipcRenderer.invoke('localdb-mark-transactions-synced', transactionIds),
     localDbResetTransactionSync: (transactionId) => electron_1.ipcRenderer.invoke('localdb-reset-transaction-sync', transactionId),
-    localDbResetTransactionsSyncByDate: (payload) => electron_1.ipcRenderer.invoke('localdb-reset-transactions-sync-by-date', payload),
     // Transaction Items
     localDbUpsertTransactionItems: (rows) => electron_1.ipcRenderer.invoke('localdb-upsert-transaction-items', rows),
     localDbGetTransactionItems: (transactionId) => electron_1.ipcRenderer.invoke('localdb-get-transaction-items', transactionId),
@@ -149,12 +150,13 @@ electron_1.contextBridge.exposeInMainWorld('electronAPI', {
     // Banks
     localDbUpsertBanks: (rows) => electron_1.ipcRenderer.invoke('localdb-upsert-banks', rows),
     localDbGetBanks: () => electron_1.ipcRenderer.invoke('localdb-get-banks'),
+    // Receipt Settings and Templates
+    localDbUpsertReceiptSettings: (rows) => electron_1.ipcRenderer.invoke('localdb-upsert-receipt-settings', rows),
+    localDbUpsertReceiptTemplates: (rows) => electron_1.ipcRenderer.invoke('localdb-upsert-receipt-templates', rows),
     // Organizations
     localDbUpsertOrganizations: (rows, skipValidation) => electron_1.ipcRenderer.invoke('localdb-upsert-organizations', rows, skipValidation),
     localDbGetOrganizations: () => electron_1.ipcRenderer.invoke('localdb-get-organizations'),
-    // Management Groups
-    localDbUpsertManagementGroups: (rows) => electron_1.ipcRenderer.invoke('localdb-upsert-management-groups', rows),
-    localDbGetManagementGroups: () => electron_1.ipcRenderer.invoke('localdb-get-management-groups'),
+    // Skip management_groups - not needed in POS app (CRM-only)
     // Category1
     localDbUpsertCategory1: (rows) => electron_1.ipcRenderer.invoke('localdb-upsert-category1', rows),
     localDbGetCategory1: () => electron_1.ipcRenderer.invoke('localdb-get-category1'),

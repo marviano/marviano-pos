@@ -52,6 +52,11 @@ export interface ReceiptTemplateData {
   reprintCount?: number;
   leftPadding: string;
   rightPadding: string;
+  // Receipt settings data
+  contactPhone?: string;
+  logo?: string; // HTML string for logo (img tag or empty)
+  address?: string;
+  footerText?: string;
 }
 
 export class ReceiptManagementService {
@@ -320,6 +325,12 @@ export class ReceiptManagementService {
       '{{cashier}}': data.cashier || 'N/A',
       '{{leftPadding}}': data.leftPadding || '7.00',
       '{{rightPadding}}': data.rightPadding || '7.00',
+      '{{reprintCount}}': data.reprintCount ? String(data.reprintCount) : '',
+      // Receipt settings placeholders
+      '{{contactPhone}}': data.contactPhone || '',
+      '{{logo}}': data.logo || '',
+      '{{address}}': data.address || '',
+      '{{footerText}}': data.footerText || '',
     };
 
     // Handle conditional sections
@@ -339,12 +350,10 @@ export class ReceiptManagementService {
       rendered = rendered.replace(/\{\{#ifBill\}\}[\s\S]*?\{\{\/ifBill\}\}/g, '');
     }
 
-    // Handle reprint notice
+    // Handle reprint notice - extract content and keep it (placeholders will be replaced later)
     if (data.isReprint && data.reprintCount) {
-      rendered = rendered.replace(
-        /\{\{#ifReprint\}\}[\s\S]*?\{\{\/ifReprint\}\}/g,
-        `<div class="reprint-notice" style="text-align: center; font-size: 10pt; font-weight: bold; margin: 1mm 0; color: #000;">REPRINT KE-${data.reprintCount}</div>`
-      );
+      // Extract content between {{#ifReprint}} and {{/ifReprint}}
+      rendered = rendered.replace(/\{\{#ifReprint\}\}([\s\S]*?)\{\{\/ifReprint\}\}/g, '$1');
     } else {
       rendered = rendered.replace(/\{\{#ifReprint\}\}[\s\S]*?\{\{\/ifReprint\}\}/g, '');
     }
@@ -361,7 +370,7 @@ export class ReceiptManagementService {
       rendered = rendered.replace(/\{\{#ifAmountReceived\}\}[\s\S]*?\{\{\/ifAmountReceived\}\}/g, '');
     }
 
-    // Replace all placeholders
+    // Replace all placeholders (do this last so conditional blocks are processed first)
     for (const [placeholder, value] of Object.entries(replacements)) {
       rendered = rendered.replace(new RegExp(placeholder.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g'), value);
     }

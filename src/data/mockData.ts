@@ -69,5 +69,6 @@ export const mockMenuItems = [
   { id: 7, name: "Settings", active: false },
   { id: 8, name: "Setelan Global", active: false },
   { id: 11, name: "Kitchen", active: false },
-  { id: 12, name: "Barista", active: false }
+  { id: 12, name: "Barista", active: false },
+  { id: 13, name: "Barista & Kitchen", active: false }
 ];

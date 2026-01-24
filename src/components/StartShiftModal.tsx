@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useRef } from 'react';
 import { generateUUID } from '@/lib/uuid';
+import { useAuth } from '@/hooks/useAuth';
 
 const getElectronAPI = () => (typeof window !== 'undefined' ? window.electronAPI : undefined);
 
@@ -31,12 +32,27 @@ interface StartShiftModalProps {
   businessId?: number;
 }
 
-export default function StartShiftModal({ isOpen, userId, userName, onShiftStarted, businessId = 14 }: StartShiftModalProps) {
+export default function StartShiftModal({ isOpen, userId, userName, onShiftStarted, businessId }: StartShiftModalProps) {
+  const { user } = useAuth();
   const [modalAwal, setModalAwal] = useState<string>('');
   const [isStartingShift, setIsStartingShift] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [sidebarWidth, setSidebarWidth] = useState<number>(96); // Default to 96px (w-24)
   const inputRef = useRef<HTMLInputElement>(null);
+  
+  // Use businessId from props, or fallback to user's selectedBusinessId
+  const effectiveBusinessId = businessId ?? user?.selectedBusinessId;
+  
+  if (!effectiveBusinessId) {
+    return (
+      <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+        <div className="bg-white rounded-lg p-6 max-w-md">
+          <h2 className="text-xl font-bold text-red-600 mb-2">No Business Selected</h2>
+          <p className="text-gray-700">Please log in and select a business to start a shift.</p>
+        </div>
+      </div>
+    );
+  }
 
   useEffect(() => {
     if (isOpen && inputRef.current) {
@@ -46,6 +62,29 @@ export default function StartShiftModal({ isOpen, userId, userName, onShiftStart
       }, 100);
     }
   }, [isOpen]);
+
+  // Poll every 3s while modal is open: if another PC opened a shift, close modal and show kasir
+  const onShiftStartedRef = useRef(onShiftStarted);
+  onShiftStartedRef.current = onShiftStarted;
+  useEffect(() => {
+    if (!isOpen || !effectiveBusinessId || !userId) return;
+    const electronAPI = getElectronAPI();
+    if (!electronAPI?.localDbGetActiveShift) return;
+
+    const poll = async () => {
+      try {
+        const res = await electronAPI?.localDbGetActiveShift?.(userId, effectiveBusinessId);
+        if (res?.shift) {
+          onShiftStartedRef.current();
+        }
+      } catch (e) {
+        console.warn('[StartShiftModal] Poll error:', e);
+      }
+    };
+
+    const t = setInterval(poll, 3000);
+    return () => clearInterval(t);
+  }, [isOpen, effectiveBusinessId, userId]);
 
   // Dynamically calculate sidebar width
   useEffect(() => {
@@ -99,7 +138,7 @@ export default function StartShiftModal({ isOpen, userId, userName, onShiftStart
 
     // Check if there's already an active shift (double-check)
     try {
-      const existingResponse = await electronAPI?.localDbGetActiveShift?.(userId, businessId);
+      const existingResponse = await electronAPI?.localDbGetActiveShift?.(userId, effectiveBusinessId);
       const existingShift = existingResponse?.shift ?? null;
       if (existingShift) {
         const ownerName = existingShift.user_name || 'Kasir lain';
@@ -138,7 +177,7 @@ export default function StartShiftModal({ isOpen, userId, userName, onShiftStart
       const uuid_id = generateUUID();
       const result = await electronAPI.localDbCreateShift({
         uuid_id,
-        business_id: businessId,
+        business_id: effectiveBusinessId,
         user_id: userId,
         user_name: userName,
         modal_awal: amount

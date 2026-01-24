@@ -5,6 +5,8 @@ import { Edit, List, LayoutGrid, Printer, Scissors } from 'lucide-react';
 import TableLayout from './TableLayout';
 import SplitBillModal from './SplitBillModal';
 import { useAuth } from '@/hooks/useAuth';
+import { hasPermission } from '@/lib/permissions';
+import { isSuperAdmin } from '@/lib/auth';
 
 interface PendingTransaction {
   id: string;
@@ -36,6 +38,7 @@ export default function ActiveOrdersTab({ businessId, isOpen, onLoadTransaction 
   const [printingBill, setPrintingBill] = useState<string | null>(null);
   const [showSplitBillModal, setShowSplitBillModal] = useState(false);
   const { user } = useAuth();
+  const canAccessSplitBillButton = isSuperAdmin(user) || hasPermission(user, 'access_kasir_splitbillpindahmeja_button');
 
   const fetchPendingTransactions = useCallback(async () => {
     try {
@@ -557,7 +560,13 @@ export default function ActiveOrdersTab({ businessId, isOpen, onLoadTransaction 
             </div>
             <button
               onClick={() => setShowSplitBillModal(true)}
-              className="px-[14px] py-[7px] text-sm rounded-lg transition-all flex items-center gap-1.5 bg-gradient-to-r from-purple-600 to-purple-700 text-white font-medium shadow-lg hover:shadow-xl hover:from-purple-700 hover:to-purple-800 active:scale-95 active:shadow-md focus:outline-none focus:ring-2 focus:ring-purple-500 focus:ring-offset-2"
+              disabled={!canAccessSplitBillButton}
+              className={`px-[14px] py-[7px] text-sm rounded-lg transition-all flex items-center gap-1.5 font-medium shadow-lg active:scale-95 active:shadow-md focus:outline-none focus:ring-2 focus:ring-purple-500 focus:ring-offset-2 ${
+                canAccessSplitBillButton
+                  ? 'bg-gradient-to-r from-purple-600 to-purple-700 text-white hover:shadow-xl hover:from-purple-700 hover:to-purple-800'
+                  : 'bg-gray-400 text-gray-200 cursor-not-allowed'
+              }`}
+              title={!canAccessSplitBillButton ? 'Anda tidak memiliki izin untuk mengakses fitur Split Bill/Pindah Meja' : undefined}
             >
               <Scissors className="w-3.5 h-3.5" />
               Split Bill/Pindah Meja

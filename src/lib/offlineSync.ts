@@ -63,46 +63,15 @@ class OfflineSyncService {
   };
 
   private listeners: Set<(status: SyncStatus) => void> = new Set();
-  private checkInterval: NodeJS.Timeout | null = null;
   private progressListeners: Set<(progress: number | null) => void> = new Set();
 
   constructor() {
     // console.log('🚀 [OFFLINE SYNC] Service initializing...');
     if (typeof window !== 'undefined') {
-      // Immediately check connection status on initialization
-      // console.log('🔍 [OFFLINE SYNC] Starting initial connection check...');
-      this.checkConnection();
-      this.initializeConnectionMonitoring();
+      // Use navigator.onLine for simple online status (same as smart sync)
+      this.syncStatus.isOnline = navigator.onLine;
+      this.syncStatus.internetConnected = navigator.onLine;
     }
-  }
-
-  /**
-   * Initialize connection monitoring
-   */
-  private initializeConnectionMonitoring() {
-    // console.log('🔄 [OFFLINE SYNC] Setting up connection monitoring...');
-    // Check online status periodically
-    this.checkInterval = setInterval(() => {
-      this.checkConnection();
-    }, 5000); // Check every 5 seconds
-
-    // Listen to browser online/offline events
-    window.addEventListener('online', () => {
-      // console.log('🌐 [OFFLINE SYNC] Browser detected: ONLINE');
-      // Don't immediately trust browser online event - verify with actual API call
-      setTimeout(() => {
-        this.checkConnection();
-      }, 1000); // Wait 1 second then verify
-    });
-
-    window.addEventListener('offline', () => {
-      // console.log('🌐 [OFFLINE SYNC] Browser detected: OFFLINE');
-      // Browser offline event is usually reliable
-      this.handleConnectionChange(false);
-    });
-
-    // Initial check
-    this.checkConnection();
   }
 
   /**
@@ -174,6 +143,7 @@ class OfflineSyncService {
 
   /**
    * Comprehensive connection check - separates internet vs database connectivity
+   * Only called manually via forceConnectionCheck()
    */
   private async checkConnection() {
     try {
@@ -192,28 +162,14 @@ class OfflineSyncService {
 
       // Determine overall online status
       // We're "online" only if we have internet connectivity (for sync purposes)
-      const wasInternetConnected = this.syncStatus.internetConnected;
-
       this.syncStatus.internetConnected = internetResult.connected;
       this.syncStatus.databaseConnected = databaseResult.connected;
       this.syncStatus.isOnline = internetResult.connected; // Only online if we have internet
-
-      // Log status changes (commented out to reduce log flooding)
-      // console.log(`📊 [CONNECTION CHECK] Status Update (${checkTime}ms):`);
-      // console.log(`   Internet: ${wasInternetConnected ? 'ONLINE' : 'OFFLINE'} → ${internetResult.connected ? 'ONLINE' : 'OFFLINE'}`);
-      // console.log(`   Database: ${wasDatabaseConnected ? 'ONLINE' : 'OFFLINE'} → ${databaseResult.connected ? 'ONLINE' : 'OFFLINE'}`);
-      // console.log(`   Overall:  ${wasOnline ? 'ONLINE' : 'OFFLINE'} → ${internetResult.connected ? 'ONLINE' : 'OFFLINE'}`);
-
-      // Trigger sync only if we just got internet connectivity back
-      if (!wasInternetConnected && this.syncStatus.internetConnected) {
-        this.syncFromOnline();
-      }
 
       this.notifyListeners();
 
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unknown error';
-      // console.log('❌ [CONNECTION CHECK] Connection check failed:', message);
 
       // Mark everything as failed on error
       this.syncStatus.internetConnected = false;
@@ -229,36 +185,47 @@ class OfflineSyncService {
     }
   }
 
-  /**
-   * Handle connection change (for browser events)
-   */
-  private handleConnectionChange(isOnline: boolean) {
-    console.log(`🌐 [BROWSER EVENT] Browser detected: ${isOnline ? 'ONLINE' : 'OFFLINE'}`);
-
-    // Browser events are usually reliable for internet connectivity
-    const wasInternetConnected = this.syncStatus.internetConnected;
-    this.syncStatus.internetConnected = isOnline;
-    this.syncStatus.isOnline = isOnline; // Overall status follows internet connectivity
-
-    // If we just came back online, trigger sync
-    if (!wasInternetConnected && isOnline) {
-      console.log('✅ [BROWSER EVENT] Internet restored - triggering sync');
-      this.syncFromOnline();
-    }
-
-    this.notifyListeners();
-  }
 
   /**
    * Sync data from online MySQL to local MySQL - COMPREHENSIVE SYNC
    * Downloads ALL POS tables for complete offline functionality
    * Uses smart sync to prevent server overload
+   * @param businessId - The business ID to sync data for (optional, will try to get from user context if not provided)
    */
-  async syncFromOnline() {
+  async syncFromOnline(businessId?: number) {
     const electronAPI = getElectronAPI();
     if (!electronAPI || this.syncStatus.syncInProgress || !this.syncStatus.isOnline) {
       return;
     }
+
+    // Try to get business_id from parameter or user context
+    let finalBusinessId = businessId;
+    if (!finalBusinessId || isNaN(finalBusinessId)) {
+      // Try to get from window.user or localStorage (if user is logged in)
+      try {
+        if (typeof window !== 'undefined') {
+          // Check if user data is available in window (set by auth system)
+          const userData = (window as { user?: { selectedBusinessId?: number } }).user;
+          if (userData?.selectedBusinessId) {
+            finalBusinessId = userData.selectedBusinessId;
+          } else {
+            // Try localStorage as fallback
+            const storedUser = localStorage.getItem('user');
+            if (storedUser) {
+              const parsedUser = JSON.parse(storedUser);
+              if (parsedUser?.selectedBusinessId) {
+                finalBusinessId = parsedUser.selectedBusinessId;
+              }
+            }
+          }
+        }
+      } catch (error) {
+        // Ignore errors when trying to get business_id from context
+      }
+    }
+
+    // When business_id is missing: call /api/sync without it to get login-only tables (organizations, businesses, roles, permissions, role_permissions, users).
+    // When business_id is present: full sync with /api/sync?business_id=...
 
     // console.log('🔄 Starting comprehensive sync from online database...');
     // console.log('📥 This will download ALL POS tables for complete offline functionality');
@@ -271,9 +238,11 @@ class OfflineSyncService {
 
     let apiUrl: string = 'URL tidak diketahui';
     try {
-      // Use the comprehensive sync endpoint
+      // Use /api/sync with business_id when available; without it for login-only (bootstrap) sync
       try {
-        const rawUrl = getApiUrl('/api/sync');
+        const rawUrl = (finalBusinessId != null && !isNaN(finalBusinessId))
+          ? getApiUrl(`/api/sync?business_id=${finalBusinessId}`)
+          : getApiUrl('/api/sync');
         apiUrl = cleanUrl(rawUrl);
         // Validate URL format
         try {
@@ -316,10 +285,29 @@ class OfflineSyncService {
         }
         
         const { data } = syncData;
-        
+
+        // Download product/business images and rewrite image_url to pos-image:// for offline display
+        try {
+          const baseUrl = new URL(apiUrl).origin;
+          const result = await electronAPI.downloadAndRewriteSyncImages?.({
+            baseUrl,
+            products: Array.isArray(data.products) ? data.products : [],
+            businesses: Array.isArray(data.businesses) ? data.businesses : []
+          });
+          // Use the mutated products/businesses from result if available (ensures rewritten URLs are used)
+          if (result?.products && Array.isArray(result.products)) {
+            data.products = result.products;
+          }
+          if (result?.businesses && Array.isArray(result.businesses)) {
+            data.businesses = result.businesses;
+          }
+        } catch (imgErr) {
+          console.warn('Image download during sync (non-fatal):', imgErr);
+        }
+
         // const targetBusinessId = Number(syncData.businessId ?? 14);
 
-          const totalSteps = 30; // Updated: added 2 steps for employees_position and employees
+          const totalSteps = 33; // Updated: added step for restaurant_layout_elements
           let completedSteps = 0;
           const advanceProgress = () => {
             completedSteps = Math.min(totalSteps, completedSteps + 1);
@@ -404,7 +392,10 @@ class OfflineSyncService {
                   })
                   .filter((id: number | null): id is number => id !== null);
                 
-                const businessId = syncData.businessId || 14; // Default to 14 if not provided
+                const businessId = syncData.businessId;
+                if (!businessId) {
+                  throw new Error('Business ID is required for employee cleanup');
+                }
                 
                 if (syncedEmployeeIds.length > 0 && electronAPI.localDbCleanupOrphanedEmployees) {
                   try {
@@ -462,7 +453,7 @@ class OfflineSyncService {
           // Sync Employees (depends on employees_position, users, businesses)
           if (Array.isArray(data.employees) && data.employees.length > 0) {
             // #region agent log
-            fetch('http://127.0.0.1:7242/ingest/7b565785-72b5-49f7-b2c0-57606ea0d0b5',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'offlineSync.ts:463',message:'Starting employees sync',data:{employeesCount:data.employees.length,employees:data.employees.map((e:any)=>({id:e.id,business_id:e.business_id,jabatan_id:e.jabatan_id,nama:e.nama_karyawan}))},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
+            fetch('http://127.0.0.1:7242/ingest/7b565785-72b5-49f7-b2c0-57606ea0d0b5',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'offlineSync.ts:463',message:'Starting employees sync',data:{employeesCount:data.employees.length,employees:data.employees.map((e:Record<string,unknown>)=>({id:e.id,business_id:e.business_id,jabatan_id:e.jabatan_id,nama:e.nama_karyawan}))},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
             // #endregion
             try {
               const result = await (electronAPI.localDbUpsertEmployees as (rows: unknown[], skipValidation?: boolean) => Promise<{ success: boolean; skipped?: number }>)?.(data.employees, true);
@@ -502,12 +493,13 @@ class OfflineSyncService {
           advanceProgress();
 
           if (Array.isArray(data.category2) && data.category2.length > 0) {
-            // Get junction table data (REQUIRED - junction table only, no business_id column)
+            // Junction table (category2_businesses) is optional; category2 main table is always upserted
             const junctionTableData = (data.category2Businesses as Array<{ category2_id: number; business_id: number }> | undefined) || undefined;
-            if (!junctionTableData || junctionTableData.length === 0) {
-            } else {
+            try {
               await (electronAPI.localDbUpsertCategory2 as (rows: unknown[], junctionData?: Array<{ category2_id: number; business_id: number }>) => Promise<{ success: boolean }>)?.(data.category2, junctionTableData);
-              // console.log(`✅ ${data.category2.length} category2 records synced to local database with ${junctionTableData.length} business relationships`);
+            } catch (err) {
+              console.error('❌ [SYNC] Failed to upsert category2:', err);
+              throw new Error(`Gagal menyinkronkan category2: ${err instanceof Error ? err.message : String(err)}`);
             }
           }
           advanceProgress();
@@ -647,16 +639,27 @@ class OfflineSyncService {
           }
           advanceProgress();
 
+          // Receipt Settings
+          if (Array.isArray(data.receiptSettings) && data.receiptSettings.length > 0) {
+            await (electronAPI.localDbUpsertReceiptSettings as (rows: unknown[]) => Promise<{ success: boolean }>)?.(data.receiptSettings);
+            // console.log(`✅ ${data.receiptSettings.length} receipt settings synced to local database`);
+          }
+          advanceProgress();
+
+          // Receipt Templates
+          if (Array.isArray(data.receiptTemplates) && data.receiptTemplates.length > 0) {
+            await (electronAPI.localDbUpsertReceiptTemplates as (rows: unknown[]) => Promise<{ success: boolean }>)?.(data.receiptTemplates);
+            // console.log(`✅ ${data.receiptTemplates.length} receipt templates synced to local database`);
+          }
+          advanceProgress();
+
           if (Array.isArray(data.organizations) && data.organizations.length > 0) {
             await (electronAPI.localDbUpsertOrganizations as (rows: unknown[]) => Promise<{ success: boolean }>)?.(data.organizations);
             // console.log(`✅ ${data.organizations.length} organizations synced to local database`);
           }
           advanceProgress();
 
-          if (Array.isArray(data.managementGroups) && data.managementGroups.length > 0) {
-            await (electronAPI.localDbUpsertManagementGroups as (rows: unknown[]) => Promise<{ success: boolean }>)?.(data.managementGroups);
-            // console.log(`✅ ${data.managementGroups.length} management groups synced to local database`);
-          }
+          // Skip management_groups - not needed in POS app (CRM-only)
           advanceProgress();
 
           // Categories and Customizations moved up
@@ -684,6 +687,26 @@ class OfflineSyncService {
           if (Array.isArray(data.restaurantTables) && data.restaurantTables.length > 0) {
             await (electronAPI.localDbUpsertRestaurantTables as (rows: unknown[]) => Promise<{ success: boolean }>)?.(data.restaurantTables);
             // console.log(`✅ ${data.restaurantTables.length} restaurant tables synced to local database`);
+          }
+          advanceProgress();
+
+          // #region agent log
+          fetch('http://127.0.0.1:7242/ingest/7b565785-72b5-49f7-b2c0-57606ea0d0b5',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'offlineSync.ts:692',message:'Checking restaurantLayoutElements in sync data',data:{hasRestaurantLayoutElements:Array.isArray(data.restaurantLayoutElements),elementCount:Array.isArray(data.restaurantLayoutElements)?data.restaurantLayoutElements.length:0,hasUpsertMethod:!!electronAPI.localDbUpsertRestaurantLayoutElements},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
+          // #endregion
+          // Restaurant Layout Elements (needs rooms due to foreign key)
+          if (Array.isArray(data.restaurantLayoutElements) && data.restaurantLayoutElements.length > 0) {
+            // #region agent log
+            fetch('http://127.0.0.1:7242/ingest/7b565785-72b5-49f7-b2c0-57606ea0d0b5',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'offlineSync.ts:696',message:'Upserting restaurantLayoutElements',data:{elementCount:data.restaurantLayoutElements.length,firstElement:data.restaurantLayoutElements[0]},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
+            // #endregion
+            const result = await (electronAPI.localDbUpsertRestaurantLayoutElements as (rows: unknown[]) => Promise<{ success: boolean }>)?.(data.restaurantLayoutElements);
+            // #region agent log
+            fetch('http://127.0.0.1:7242/ingest/7b565785-72b5-49f7-b2c0-57606ea0d0b5',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'offlineSync.ts:699',message:'restaurantLayoutElements upsert result',data:{success:result?.success},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
+            // #endregion
+            // console.log(`✅ ${data.restaurantLayoutElements.length} restaurant layout elements synced to local database`);
+          } else {
+            // #region agent log
+            fetch('http://127.0.0.1:7242/ingest/7b565785-72b5-49f7-b2c0-57606ea0d0b5',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'offlineSync.ts:702',message:'No restaurantLayoutElements in sync data',data:{isArray:Array.isArray(data.restaurantLayoutElements),length:Array.isArray(data.restaurantLayoutElements)?data.restaurantLayoutElements.length:'not array',hasData:!!data.restaurantLayoutElements},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
+            // #endregion
           }
           advanceProgress();
 
@@ -761,64 +784,6 @@ class OfflineSyncService {
     } catch (error) {
       this.checkConnection();
       return offlineFetch();
-    }
-  }
-
-  /**
-   * Sync printer audit logs to server
-   */
-  async syncPrinterAudits() {
-    const electronAPI = getElectronAPI();
-    if (!electronAPI || !this.syncStatus.isOnline) {
-      return;
-    }
-
-    try {
-      const unsyncedAudits = await (electronAPI.localDbGetUnsyncedPrinterAudits as () => Promise<{ p1?: unknown[]; p2?: unknown[] } | null>)?.();
-      const printer1Audits = Array.isArray(unsyncedAudits?.p1) ? unsyncedAudits.p1 : [];
-      const printer2Audits = Array.isArray(unsyncedAudits?.p2) ? unsyncedAudits.p2 : [];
-
-      if (printer1Audits.length === 0 && printer2Audits.length === 0) {
-        return;
-      }
-
-      const auditUrl = cleanUrl(getApiUrl('/api/printer-audits'));
-      const response = await fetch(auditUrl, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          printer1Audits,
-          printer2Audits
-        }),
-      });
-
-      if (response.ok) {
-        const result = await response.json();
-        console.log('✅ [PRINTER AUDIT SYNC] Printer audits synced successfully:', JSON.stringify(result, null, 2));
-
-        const toIdArray = (audits: unknown[]): number[] => {
-          return audits
-            .map((audit) => (audit as { id?: number | string })?.id)
-            .filter((id): id is number => typeof id === 'number')
-            .concat(
-              audits
-                .map((audit) => (audit as { id?: number | string })?.id)
-                .filter((id): id is string => typeof id === 'string')
-                .map((id) => parseInt(id, 10))
-                .filter((id) => !isNaN(id))
-            );
-        };
-        await (electronAPI.localDbMarkPrinterAuditsSynced as (payload: { p1Ids: number[]; p2Ids: number[] }) => Promise<{ success: boolean }>)?.({
-          p1Ids: toIdArray(printer1Audits),
-          p2Ids: toIdArray(printer2Audits),
-        });
-      } else {
-        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
-      }
-    } catch (error) {
-      console.error('Failed to sync printer audits:', error);
     }
   }
 
@@ -970,9 +935,7 @@ class OfflineSyncService {
    * Cleanup
    */
   destroy() {
-    if (this.checkInterval) {
-      clearInterval(this.checkInterval);
-    }
+    // No cleanup needed (removed automatic monitoring)
   }
 }
 

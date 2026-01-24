@@ -5,45 +5,33 @@ import path from 'path';
 
 export async function GET(request: NextRequest) {
   try {
-    // Get business_id from query parameter (default to 14 for backward compatibility)
+    // Get business_id from query parameter (required)
     const searchParams = request.nextUrl.searchParams;
     const businessIdParam = searchParams.get('business_id');
-    const BUSINESS_ID = businessIdParam ? parseInt(businessIdParam, 10) : 14;
+    if (!businessIdParam) {
+      return NextResponse.json(
+        { 
+          success: false, 
+          error: 'business_id query parameter is required'
+        },
+        { status: 400 }
+      );
+    }
+    const BUSINESS_ID = parseInt(businessIdParam, 10);
+    if (isNaN(BUSINESS_ID)) {
+      return NextResponse.json(
+        { 
+          success: false, 
+          error: 'Invalid business_id: must be a number'
+        },
+        { status: 400 }
+      );
+    }
     
     console.log(`🔄 Starting comprehensive sync for business ${BUSINESS_ID}...`);
     
     const syncResults: Record<string, unknown[]> = {};
     const counts: Record<string, number> = {};
-
-    // Sync Users
-    try {
-      const users = await queryVps<unknown[]>(`
-        SELECT id, email, password, name, googleId, createdAt, role_id, organization_id 
-        FROM users 
-        ORDER BY name ASC
-      `);syncResults.users = users || [];
-      counts.users = Array.isArray(users) ? users.length : 0;
-      console.log(`✅ Synced ${counts.users} users`);
-    } catch (error: unknown) {console.warn('⚠️ Failed to sync users:', error);
-      syncResults.users = [];
-      counts.users = 0;
-    }
-
-    // Sync Businesses
-    try {
-      const businesses = await queryVps<unknown[]>(`
-        SELECT id, name, permission_name, organization_id, status, management_group_id, image_url, created_at 
-        FROM businesses 
-        ORDER BY name ASC
-      `);
-      syncResults.businesses = businesses;
-      counts.businesses = businesses.length;
-      console.log(`✅ Synced ${businesses.length} businesses`);
-    } catch (error: unknown) {
-      console.warn('⚠️ Failed to sync businesses:', error);
-      syncResults.businesses = [];
-      counts.businesses = 0;
-    }
 
     // Sync Products using junction table
     try {
@@ -110,242 +98,19 @@ export async function GET(request: NextRequest) {
       counts.productBusinesses = 0;
     }
 
-    // Sync Categories (all categories from category2 table, including empty ones)
-    try {
-      const categories = await queryVps<unknown[]>(`
-        SELECT c2.name as category2_name
-        FROM category2 c2
-        WHERE c2.business_id = ? AND c2.is_active = 1
-        ORDER BY c2.display_order ASC, c2.name ASC
-      `, [BUSINESS_ID] as (string | number)[]);
-      interface CategoryRow {
-        category2_name: string;
-      }
-      const categoryArray = Array.isArray(categories) ? categories as CategoryRow[] : [];
-      syncResults.categories = categoryArray.map((cat) => ({ jenis: cat.category2_name }));
-      counts.categories = categoryArray.length;
-      console.log(`✅ Synced ${counts.categories} categories (including empty ones)`);
-    } catch (error: unknown) {
-      console.warn('⚠️ Failed to sync categories:', error);
-      syncResults.categories = [];
-      counts.categories = 0;
-    }
+    // Skip Categories (legacy format) - not needed, category2 is used instead
 
-    // Sync Ingredients
-    try {
-      const ingredients = await queryVps<unknown[]>(`
-        SELECT id, ingredient_code, nama, kategori, satuan_beli, isi_satuan_beli, satuan_keluar,
-               harga_beli, stok_min, status, business_id, created_at
-        FROM ingredients 
-        WHERE business_id = ? AND status = 'active'
-        ORDER BY nama ASC
-      `, [BUSINESS_ID] as (string | number)[]);
-      syncResults.ingredients = ingredients;
-      counts.ingredients = ingredients.length;
-      console.log(`✅ Synced ${ingredients.length} ingredients`);
-    } catch (error: unknown) {
-      console.warn('⚠️ Failed to sync ingredients:', error);
-      syncResults.ingredients = [];
-      counts.ingredients = 0;
-    }
-
-    // Sync COGS
-    try {
-      const cogs = await queryVps<unknown[]>(`
-        SELECT id, menu_code, ingredient_code, amount, created_at
-        FROM cogs 
-        ORDER BY menu_code ASC
-      `);
-      syncResults.cogs = cogs;
-      counts.cogs = cogs.length;
-      console.log(`✅ Synced ${cogs.length} COGS records`);
-    } catch (error: unknown) {
-      console.warn('⚠️ Failed to sync COGS:', error);
-      syncResults.cogs = [];
-      counts.cogs = 0;
-    }
-
-    // Sync Source
-    try {
-      const source = await queryVps<unknown[]>(`
-        SELECT id, source_name, created_at
-        FROM source 
-        ORDER BY source_name ASC
-      `);
-      syncResults.source = source;
-      counts.source = source.length;
-      console.log(`✅ Synced ${source.length} source records`);
-    } catch (error: unknown) {
-      console.warn('⚠️ Failed to sync source:', error);
-      syncResults.source = [];
-      counts.source = 0;
-    }
-
-    // Sync Pekerjaan
-    try {
-      const pekerjaan = await queryVps<unknown[]>(`
-        SELECT id, nama_pekerjaan, created_at
-        FROM pekerjaan 
-        ORDER BY nama_pekerjaan ASC
-      `);
-      syncResults.pekerjaan = pekerjaan;
-      counts.pekerjaan = pekerjaan.length;
-      console.log(`✅ Synced ${pekerjaan.length} pekerjaan records`);
-    } catch (error: unknown) {
-      console.warn('⚠️ Failed to sync pekerjaan:', error);
-      syncResults.pekerjaan = [];
-      counts.pekerjaan = 0;
-    }
-
-    // Sync Teams
-    try {
-      const teams = await queryVps<unknown[]>(`
-        SELECT id, name, description, organization_id, team_lead_id, business_id, color, is_active, created_at, updated_at
-        FROM teams 
-        WHERE is_active = 1
-        ORDER BY name ASC
-      `);
-      syncResults.teams = teams;
-      counts.teams = teams.length;
-      console.log(`✅ Synced ${teams.length} teams`);
-    } catch (error: unknown) {
-      console.warn('⚠️ Failed to sync teams:', error);
-      syncResults.teams = [];
-      counts.teams = 0;
-    }
-
-    // Sync Contacts
-    try {
-      const contacts = await queryVps<unknown[]>(`
-        SELECT id, no_ktp, nama, phone_number, tgl_lahir, no_kk, created_at, updated_at,
-               is_active, jenis_kelamin, kota, kecamatan, source_id, pekerjaan_id,
-               source_lainnya, alamat, team_id
-        FROM contacts 
-        WHERE is_active = 1
-        ORDER BY nama ASC
-      `);
-      syncResults.contacts = contacts;
-      counts.contacts = contacts.length;
-      console.log(`✅ Synced ${contacts.length} contacts`);
-    } catch (error: unknown) {
-      console.warn('⚠️ Failed to sync contacts:', error);
-      syncResults.contacts = [];
-      counts.contacts = 0;
-    }
-
-    // Sync Employees Position (must be before employees due to foreign key)
-    try {
-      console.log('🔄 [SYNC ROUTE] Fetching employees_position...');
-      const employeesPosition = await queryVps<unknown[]>(`
-        SELECT id, nama_jabatan, created_at, updated_at
-        FROM employees_position 
-        ORDER BY nama_jabatan ASC
-      `);
-      syncResults.employeesPosition = employeesPosition;
-      counts.employeesPosition = employeesPosition.length;
-      console.log(`✅ [SYNC ROUTE] Synced ${employeesPosition.length} employee positions`);
-      if (employeesPosition.length > 0) {
-        const first = employeesPosition[0] as Record<string, unknown>;
-        console.log(`   Sample: id=${first?.id}, nama_jabatan=${first?.nama_jabatan}`);
-      }
-    } catch (error: unknown) {
-      const errorMsg = error instanceof Error ? error.message : String(error);
-      console.error('❌ [SYNC ROUTE] Failed to sync employees_position:', errorMsg);
-      console.error('   Full error:', error);
-      syncResults.employeesPosition = [];
-      counts.employeesPosition = 0;
-    }
-
-    // Sync Employees
-    try {
-      console.log('🔄 [SYNC ROUTE] Fetching employees...');
-      const employees = await queryVps<unknown[]>(`
-        SELECT id, user_id, business_id, jabatan_id, no_ktp, phone, nama_karyawan,
-               jenis_kelamin, alamat, tanggal_lahir, tanggal_bekerja, pin, color,
-               created_at, updated_at
-        FROM employees 
-        ORDER BY nama_karyawan ASC
-      `);
-      syncResults.employees = employees;
-      counts.employees = employees.length;
-      console.log(`✅ [SYNC ROUTE] Synced ${employees.length} employees`);
-      if (employees.length > 0) {
-        const first = employees[0] as Record<string, unknown>;
-        console.log(`   Sample: id=${first?.id}, nama_karyawan=${first?.nama_karyawan}, color=${first?.color || 'NULL'}`);
-        console.log(`   Has color field: ${'color' in first}`);
-      }
-    } catch (error: unknown) {
-      const errorMsg = error instanceof Error ? error.message : String(error);
-      console.error('❌ [SYNC ROUTE] Failed to sync employees:', errorMsg);
-      console.error('   Full error:', error);
-      syncResults.employees = [];
-      counts.employees = 0;
-    }
-
-    // Sync Roles
-    try {
-      const roles = await queryVps<unknown[]>(`
-        SELECT id, name, description, organization_id, created_at, updated_at
-        FROM roles
-        ORDER BY name ASC
-      `);
-      syncResults.roles = roles;
-      counts.roles = roles.length;
-      console.log(`✅ Synced ${roles.length} roles`);
-    } catch (error: unknown) {
-      console.warn('⚠️ Failed to sync roles:', error);
-      syncResults.roles = [];
-      counts.roles = 0;
-    }
-
-    // Sync Permission Categories
-    try {
-      const permissionCategories = await queryVps<unknown[]>(`
-        SELECT id, name, description, organization_id, created_at
-        FROM permission_categories
-        ORDER BY name ASC
-      `);
-      syncResults.permissionCategories = permissionCategories;
-      counts.permissionCategories = permissionCategories.length;
-      console.log(`✅ Synced ${permissionCategories.length} permission categories`);
-    } catch (error: unknown) {
-      console.warn('⚠️ Failed to sync permission categories:', error);
-      syncResults.permissionCategories = [];
-      counts.permissionCategories = 0;
-    }
-
-    // Sync Permissions
-    try {
-      const permissions = await queryVps<unknown[]>(`
-        SELECT id, name, description, created_at, category_id, organization_id, business_id, status
-        FROM permissions
-        ORDER BY name ASC
-      `);
-      syncResults.permissions = permissions;
-      counts.permissions = permissions.length;
-      console.log(`✅ Synced ${permissions.length} permissions`);
-    } catch (error: unknown) {
-      console.warn('⚠️ Failed to sync permissions:', error);
-      syncResults.permissions = [];
-      counts.permissions = 0;
-    }
-
-    // Sync Role Permissions
-    try {
-      const rolePermissions = await queryVps<unknown[]>(`
-        SELECT role_id, permission_id
-        FROM role_permissions
-      `);
-      syncResults.rolePermissions = rolePermissions;
-      counts.rolePermissions = rolePermissions.length;
-      console.log(`✅ Synced ${rolePermissions.length} role-permission mappings`);
-    } catch (error: unknown) {
-      console.warn('⚠️ Failed to sync role permissions:', error);
-      syncResults.rolePermissions = [];
-      counts.rolePermissions = 0;
-    }
-
-    // Sync Banks
+    // Skip Ingredients - not needed in POS app
+    // Skip COGS - not needed in POS app
+    // Skip Source - not needed in POS app
+    // Skip Teams - not needed in POS app
+    // Skip Contacts - not needed in POS app
+    // Skip Employees Position - not needed in POS app
+    // Skip Employees - not needed in POS app
+    // Skip Roles - not needed in POS app
+    // Skip Permissions - not needed in POS app
+    // Skip Permission Categories - not needed in POS app
+    // Skip Role Permissions - not needed in POS app
 
     // Sync Payment Methods
     try {
@@ -397,21 +162,23 @@ export async function GET(request: NextRequest) {
       counts.organizations = 0;
     }
 
-    // Sync Management Groups
+    // Sync Businesses
     try {
-      const managementGroups = await queryVps<unknown[]>(`
-        SELECT id, name, permission_name, description, organization_id, manager_user_id, created_at, updated_at
-        FROM management_groups 
+      const businesses = await queryVps<unknown[]>(`
+        SELECT id, name, organization_id, permission_name, created_at, updated_at
+        FROM businesses 
         ORDER BY name ASC
       `);
-      syncResults.managementGroups = managementGroups;
-      counts.managementGroups = managementGroups.length;
-      console.log(`✅ Synced ${managementGroups.length} management groups`);
+      syncResults.businesses = businesses;
+      counts.businesses = businesses.length;
+      console.log(`✅ Synced ${businesses.length} businesses`);
     } catch (error: unknown) {
-      console.warn('⚠️ Failed to sync management groups:', error);
-      syncResults.managementGroups = [];
-      counts.managementGroups = 0;
+      console.warn('⚠️ Failed to sync businesses:', error);
+      syncResults.businesses = [];
+      counts.businesses = 0;
     }
+
+    // Skip Management Groups - not needed in POS app (CRM-only)
 
     // Sync Category1
     try {
@@ -551,130 +318,101 @@ export async function GET(request: NextRequest) {
       counts.bundleItems = 0;
     }
 
-    // Sync Transactions
+    // Sync Restaurant Rooms
     try {
-      const transactions = await queryVps<unknown[]>(`
-        SELECT 
-          t.uuid_id as id, t.business_id, t.user_id, pm.code as payment_method, t.pickup_method,
-          t.total_amount, t.voucher_discount, t.voucher_type, t.voucher_value, t.voucher_label, t.final_amount, t.amount_received, t.change_amount,
-          t.status, t.created_at, t.contact_id, t.customer_name, t.customer_unit, t.note, t.bank_name,
-          t.card_number, t.cl_account_id, t.cl_account_name, t.bank_id, t.receipt_number,
-          t.transaction_type, t.payment_method_id
-        FROM transactions t
-        LEFT JOIN payment_methods pm ON t.payment_method_id = pm.id
-        WHERE t.business_id = ? AND t.status != 'archived'
-        ORDER BY t.created_at DESC
+      const restaurantRooms = await queryVps<unknown[]>(`
+        SELECT id, business_id, name, canvas_width, canvas_height, font_size_multiplier, created_at, updated_at
+        FROM restaurant_rooms 
+        WHERE business_id = ?
+        ORDER BY name ASC
       `, [BUSINESS_ID] as (string | number)[]);
-      syncResults.transactions = transactions;
-      counts.transactions = transactions.length;
-      console.log(`✅ Synced ${transactions.length} transactions`);
+      syncResults.restaurantRooms = restaurantRooms;
+      counts.restaurantRooms = restaurantRooms.length;
+      console.log(`✅ Synced ${restaurantRooms.length} restaurant rooms`);
     } catch (error: unknown) {
-      console.warn('⚠️ Failed to sync transactions:', error);
-      syncResults.transactions = [];
-      counts.transactions = 0;
+      console.warn('⚠️ Failed to sync restaurant rooms:', error);
+      syncResults.restaurantRooms = [];
+      counts.restaurantRooms = 0;
     }
 
-    // Sync Transaction Items
+    // Sync Restaurant Tables
     try {
-      const transactionItems = await queryVps<unknown[]>(`
-        SELECT 
-          ti.uuid_id as id, ti.uuid_transaction_id as transaction_id, ti.product_id, ti.quantity,
-          ti.unit_price, ti.total_price, ti.custom_note, ti.bundle_selections_json, ti.created_at
-        FROM transaction_items ti
-        INNER JOIN transactions t ON ti.uuid_transaction_id = t.uuid_id
-        WHERE t.business_id = ?
-        ORDER BY ti.created_at DESC
+      const restaurantTables = await queryVps<unknown[]>(`
+        SELECT rt.id, rt.room_id, rt.table_number, rt.position_x, rt.position_y, 
+               rt.width, rt.height, rt.capacity, rt.shape, rt.created_at, rt.updated_at
+        FROM restaurant_tables rt
+        INNER JOIN restaurant_rooms rr ON rt.room_id = rr.id
+        WHERE rr.business_id = ?
+        ORDER BY rt.room_id ASC, rt.table_number ASC
       `, [BUSINESS_ID] as (string | number)[]);
-      syncResults.transactionItems = transactionItems;
-      counts.transactionItems = transactionItems.length;
-      console.log(`✅ Synced ${transactionItems.length} transaction items`);
+      syncResults.restaurantTables = restaurantTables;
+      counts.restaurantTables = restaurantTables.length;
+      console.log(`✅ Synced ${restaurantTables.length} restaurant tables`);
     } catch (error: unknown) {
-      console.warn('⚠️ Failed to sync transaction items:', error);
-      syncResults.transactionItems = [];
-      counts.transactionItems = 0;
+      console.warn('⚠️ Failed to sync restaurant tables:', error);
+      syncResults.restaurantTables = [];
+      counts.restaurantTables = 0;
     }
 
-    // Helper utilities for optional tables
-    const tableExists = async (tableName: string) => {
-      const result = await queryVps<Array<{ [key: string]: unknown }>>(`SHOW TABLES LIKE ?`, [tableName] as (string | number)[]);
-      return Array.isArray(result) && result.length > 0;
-    };
+    // Sync Restaurant Layout Elements
+    try {
+      const restaurantLayoutElements = await queryVps<unknown[]>(`
+        SELECT rle.id, rle.room_id, rle.label, rle.position_x, rle.position_y,
+               rle.width, rle.height, rle.element_type, rle.color, rle.text_color,
+               rle.created_at, rle.updated_at
+        FROM restaurant_layout_elements rle
+        INNER JOIN restaurant_rooms rr ON rle.room_id = rr.id
+        WHERE rr.business_id = ?
+        ORDER BY rle.room_id ASC, rle.label ASC
+      `, [BUSINESS_ID] as (string | number)[]);
+      syncResults.restaurantLayoutElements = restaurantLayoutElements;
+      counts.restaurantLayoutElements = restaurantLayoutElements.length;
+      console.log(`✅ Synced ${restaurantLayoutElements.length} restaurant layout elements`);
+    } catch (error: unknown) {
+      console.warn('⚠️ Failed to sync restaurant layout elements:', error);
+      syncResults.restaurantLayoutElements = [];
+      counts.restaurantLayoutElements = 0;
+    }
 
-    const tableHasColumn = async (tableName: 'printer1_audit_log' | 'printer2_audit_log', columnName: string) => {
-      const result = await queryVps<Array<{ [key: string]: unknown }>>(`SHOW COLUMNS FROM ${tableName} LIKE ?`, [columnName] as (string | number)[]);
-      return Array.isArray(result) && result.length > 0;
-    };
+    // Sync Receipt Settings (business-specific and global)
+    try {
+      const receiptSettings = await queryVps<unknown[]>(`
+        SELECT id, business_id, store_name, address, phone_number, contact_phone,
+               logo_base64, footer_text, partnership_contact, is_active, created_at, updated_at
+        FROM receipt_settings 
+        WHERE is_active = 1 AND (business_id = ? OR business_id IS NULL)
+        ORDER BY business_id ASC
+      `, [BUSINESS_ID] as (string | number)[]);
+      syncResults.receiptSettings = receiptSettings;
+      counts.receiptSettings = receiptSettings.length;
+      console.log(`✅ Synced ${receiptSettings.length} receipt settings`);
+    } catch (error: unknown) {
+      console.warn('⚠️ Failed to sync receipt settings:', error);
+      syncResults.receiptSettings = [];
+      counts.receiptSettings = 0;
+    }
 
-    const getTransactionIdColumn = async (tableName: 'printer1_audit_log' | 'printer2_audit_log') => {
-      if (await tableHasColumn(tableName, 'transaction_id')) return 'transaction_id';
-      if (await tableHasColumn(tableName, 'uuid_transaction_id')) return 'uuid_transaction_id';
-      return null;
-    };
+    // Sync Receipt Templates (business-specific and global)
+    try {
+      const receiptTemplates = await queryVps<unknown[]>(`
+        SELECT id, template_type, template_name, business_id, template_code,
+               is_active, is_default, version, created_at, updated_at
+        FROM receipt_templates 
+        WHERE is_active = 1 AND (business_id = ? OR business_id IS NULL)
+        ORDER BY template_type ASC, business_id ASC, is_default DESC, template_name ASC
+      `, [BUSINESS_ID] as (string | number)[]);
+      syncResults.receiptTemplates = receiptTemplates;
+      counts.receiptTemplates = receiptTemplates.length;
+      console.log(`✅ Synced ${receiptTemplates.length} receipt templates`);
+    } catch (error: unknown) {
+      console.warn('⚠️ Failed to sync receipt templates:', error);
+      syncResults.receiptTemplates = [];
+      counts.receiptTemplates = 0;
+    }
 
-    const trySyncPrinterAudits = async (
-      tableName: 'printer1_audit_log' | 'printer2_audit_log',
-      targetKey: 'printer1Audits' | 'printer2Audits'
-    ) => {
-      try {
-        if (!(await tableExists(tableName))) {
-          console.info(`ℹ️ Skipping ${tableName}: table not found`);
-          syncResults[targetKey] = [];
-          counts[targetKey] = 0;
-          return;
-        }
-
-        const transactionColumn = await getTransactionIdColumn(tableName);
-        if (!transactionColumn) {
-          console.info(`ℹ️ Skipping ${tableName}: transaction reference column missing`);
-          syncResults[targetKey] = [];
-          counts[targetKey] = 0;
-          return;
-        }
-
-        const hasGlobalCounter = await tableHasColumn(tableName, 'global_counter');
-        const hasIsReprint = await tableHasColumn(tableName, 'is_reprint');
-        const hasReprintCount = await tableHasColumn(tableName, 'reprint_count');
-        const selectFields: string[] = [
-          `${transactionColumn} AS transaction_id`,
-          tableName === 'printer1_audit_log' ? 'printer1_receipt_number' : 'printer2_receipt_number',
-        ];
-        if (tableName === 'printer2_audit_log') {
-          selectFields.push('print_mode', 'cycle_number');
-        }
-        if (hasGlobalCounter) {
-          selectFields.push('global_counter');
-        }
-        if (hasIsReprint) {
-          selectFields.push('is_reprint');
-        }
-        if (hasReprintCount) {
-          selectFields.push('reprint_count');
-        }
-        selectFields.push('printed_at', 'printed_at_epoch');
-
-        const audits = await queryVps<unknown[]>(`
-          SELECT 
-            ${selectFields.join(', ')}
-          FROM ${tableName}
-          WHERE ${transactionColumn} IN (
-            SELECT uuid_id FROM transactions WHERE business_id = ?
-          )
-          ORDER BY printed_at_epoch DESC
-          LIMIT 1000
-        `, [BUSINESS_ID] as (string | number)[]);
-
-        syncResults[targetKey] = audits;
-        counts[targetKey] = audits.length;
-        console.log(`✅ Synced ${audits.length} ${tableName.replace('_', ' ')} records`);
-      } catch (error: unknown) {
-        console.warn(`⚠️ Failed to sync ${tableName}:`, error);
-        syncResults[targetKey] = [];
-        counts[targetKey] = 0;
-      }
-    };
-
-    await trySyncPrinterAudits('printer1_audit_log', 'printer1Audits');
-    await trySyncPrinterAudits('printer2_audit_log', 'printer2Audits');
+    // Skip Transactions - POS is source of truth (upload-only, not downloaded)
+    // Skip Transaction Items - POS is source of truth (upload-only, not downloaded)
+    // Skip Printer Audit Logs - POS is source of truth (upload-only, not downloaded)
 
     const totalRecords = Object.values(counts).reduce((sum, count) => sum + count, 0);
     console.log(`🎉 Comprehensive sync completed: ${totalRecords} total records synced`);

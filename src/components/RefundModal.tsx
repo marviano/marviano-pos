@@ -37,20 +37,35 @@ const RefundModal: React.FC<RefundModalProps> = ({
 }) => {
   const { user } = useAuth();
   const [amount, setAmount] = useState<string>('');
-  const [reason, setReason] = useState<string>(REFUND_REASONS[0]);
+  const [reason, setReason] = useState<string>('');
   const [note, setNote] = useState<string>('');
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const totalRefunded = useMemo(() => {
+    // Always calculate from refunds array if it exists and has items
+    // This ensures we get the most accurate total refunded amount
+    if (transaction.refunds && Array.isArray(transaction.refunds) && transaction.refunds.length > 0) {
+      const calculated = transaction.refunds.reduce(
+        (sum, refund) => {
+          const amount = typeof refund.refund_amount === 'number' 
+            ? refund.refund_amount 
+            : (typeof refund.refund_amount === 'string' ? parseFloat(refund.refund_amount) : 0);
+          return sum + (Number.isNaN(amount) ? 0 : amount);
+        },
+        0
+      );
+      const result = Number.isNaN(calculated) ? 0 : Number(calculated.toFixed(2));
+      // If calculated from refunds is > 0, use it
+      if (result > 0) {
+        return result;
+      }
+    }
+    // Fallback: use refund_total if it's a valid number
     if (typeof transaction.refund_total === 'number' && !Number.isNaN(transaction.refund_total)) {
       return transaction.refund_total;
     }
-    const calculated = (transaction.refunds || []).reduce((sum, refund) => {
-      const amount = typeof refund.refund_amount === 'number' ? refund.refund_amount : 0;
-      return sum + (Number.isNaN(amount) ? 0 : amount);
-    }, 0);
-    return Number.isNaN(calculated) ? 0 : calculated;
+    return 0;
   }, [transaction.refund_total, transaction.refunds]);
 
   const outstandingAmount = useMemo(() => {
@@ -64,7 +79,7 @@ const RefundModal: React.FC<RefundModalProps> = ({
   const handleClose = () => {
     if (isSubmitting) return;
     setAmount('');
-    setReason(REFUND_REASONS[0]);
+    setReason('');
     setNote('');
     setError(null);
     onClose();
@@ -101,6 +116,11 @@ const RefundModal: React.FC<RefundModalProps> = ({
 
     if (numericAmount > outstandingAmount + 0.01) {
       setError('Nominal refund melebihi sisa yang dapat direfund');
+      return;
+    }
+
+    if (!reason || reason.trim() === '' || reason === 'pilih alasan') {
+      setError('Silakan pilih alasan refund');
       return;
     }
 
@@ -319,8 +339,19 @@ const RefundModal: React.FC<RefundModalProps> = ({
   }
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-50 p-4">
-      <div className="bg-white rounded-2xl shadow-2xl max-w-lg w-full p-6">
+    <div 
+      className="fixed inset-0 z-50 flex items-center justify-center p-4"
+      style={{ 
+        backgroundColor: 'rgba(0, 0, 0, 0.2)',
+        backdropFilter: 'blur(4px)',
+        WebkitBackdropFilter: 'blur(4px)'
+      }}
+      onClick={handleClose}
+    >
+      <div 
+        className="bg-white rounded-2xl shadow-2xl max-w-lg w-full p-6"
+        onClick={(e) => e.stopPropagation()}
+      >
         <div className="flex items-start justify-between mb-6">
           <div>
             <h2 className="text-xl font-semibold text-gray-900">Buat Refund</h2>
@@ -364,7 +395,7 @@ const RefundModal: React.FC<RefundModalProps> = ({
               step="100"
               value={amount}
               onChange={(e) => setAmount(e.target.value)}
-              className="w-full rounded-lg border-gray-300 focus:border-blue-500 focus:ring-blue-500 text-black"
+              className={`w-full rounded-lg border-gray-300 focus:border-blue-500 focus:ring-blue-500 ${amount ? 'text-black' : 'text-gray-400'}`}
               placeholder="Masukkan nominal"
               required
               disabled={outstandingAmount === 0}
@@ -376,10 +407,14 @@ const RefundModal: React.FC<RefundModalProps> = ({
               Alasan
             </label>
             <select
-              value={reason}
+              value={reason || 'pilih alasan'}
               onChange={(e) => setReason(e.target.value)}
-              className="w-full rounded-lg border-gray-300 focus:border-blue-500 focus:ring-blue-500 text-black"
+              className={`w-full rounded-lg border-gray-300 focus:border-blue-500 focus:ring-blue-500 ${reason && reason !== 'pilih alasan' ? 'text-black' : 'text-gray-400'}`}
+              required
             >
+              <option value="pilih alasan" disabled className="text-gray-400">
+                Pilih alasan
+              </option>
               {REFUND_REASONS.map((option) => (
                 <option key={option} value={option} className="text-black">
                   {option}
@@ -396,7 +431,7 @@ const RefundModal: React.FC<RefundModalProps> = ({
               value={note}
               onChange={(e) => setNote(e.target.value)}
               rows={3}
-              className="w-full rounded-lg border-gray-300 focus:border-blue-500 focus:ring-blue-500 text-black"
+              className={`w-full rounded-lg border-gray-300 focus:border-blue-500 focus:ring-blue-500 ${note ? 'text-black' : 'text-gray-400'}`}
               placeholder="Tambahkan catatan tambahan"
             />
           </div>

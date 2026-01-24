@@ -181,8 +181,6 @@ const getElectronAPI = () => (typeof window !== 'undefined' ? window.electronAPI
 
 export default function TransactionsReport() {
   const { user } = useAuth();
-  const businessId = user?.selectedBusinessId ?? 14;
-
   const [viewMode, setViewMode] = useState<'list' | 'detail'>('list');
   const [selectedTransaction, setSelectedTransaction] = useState<Transaction | null>(null);
   const [selectedTransactionItems, setSelectedTransactionItems] = useState<TransactionItem[]>([]);
@@ -191,6 +189,16 @@ export default function TransactionsReport() {
   const [transactions, setTransactions] = useState<Transaction[]>([]);
   const [filteredTransactions, setFilteredTransactions] = useState<Transaction[]>([]);
   const [users, setUsers] = useState<UserOption[]>([]);
+  
+  const businessId = user?.selectedBusinessId;
+  
+  if (!businessId) {
+    return (
+      <div className="p-4 bg-red-50 border border-red-200 rounded-lg">
+        <p className="text-red-700">No business selected. Please log in and select a business.</p>
+      </div>
+    );
+  }
   const [selectedUserId, setSelectedUserId] = useState<string>('all');
   const [startDate, setStartDate] = useState<string>('');
   const [endDate, setEndDate] = useState<string>('');

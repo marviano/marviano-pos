@@ -97,6 +97,19 @@ function BundleProductImage({
     );
   }
 
+  // Next.js Image doesn't support custom protocols like pos-image://
+  // Use regular <img> for pos-image:// URLs, Next.js Image for others
+  if (imageUrl.startsWith('pos-image://')) {
+    return (
+      <img
+        src={imageUrl}
+        alt={productName}
+        className="object-contain w-full h-full"
+        onError={() => setHasError(true)}
+      />
+    );
+  }
+
   return (
     <Image
       src={imageUrl}

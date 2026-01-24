@@ -20,6 +20,7 @@ export default function Home() {
   const [showUserDebug, setShowUserDebug] = useState(false);
   const userDebugButtonRef = useRef<HTMLButtonElement | null>(null);
   const userDebugPanelRef = useRef<HTMLDivElement | null>(null);
+  const [businessName, setBusinessName] = useState<string>('Loading...');
 
   // Get business ID from logged-in user (fallback to 14 for backward compatibility)
   // const businessId = user?.selectedBusinessId ?? 14;
@@ -93,6 +94,37 @@ export default function Home() {
     }
   }, [isClient, isAuthenticated]);
 
+  // Fetch business name when business ID changes
+  useEffect(() => {
+    if (!isClient || !isAuthenticated || !user?.selectedBusinessId) {
+      setBusinessName('No business selected');
+      return;
+    }
+
+    const fetchBusinessName = async () => {
+      try {
+        const electronAPI = typeof window !== 'undefined' ? window.electronAPI : undefined;
+        if (electronAPI?.localDbGetBusinesses) {
+          const businesses = await electronAPI.localDbGetBusinesses();
+          const businessesArray = (Array.isArray(businesses) ? businesses : []) as Array<{ id?: number; name?: string }>;
+          const business = businessesArray.find((b) => b.id === user.selectedBusinessId);
+          if (business?.name) {
+            setBusinessName(business.name);
+          } else {
+            setBusinessName(`Business ID: ${user.selectedBusinessId}`);
+          }
+        } else {
+          setBusinessName(`Business ID: ${user.selectedBusinessId}`);
+        }
+      } catch (error) {
+        console.error('❌ Error fetching business name:', error);
+        setBusinessName(`Business ID: ${user.selectedBusinessId}`);
+      }
+    };
+
+    fetchBusinessName();
+  }, [isClient, isAuthenticated, user?.selectedBusinessId]);
+
 
   // Redirect to login if not authenticated
   useEffect(() => {
@@ -108,6 +140,22 @@ export default function Home() {
       }
     }
   }, [isClient, isAuthenticated, router]);
+
+  // Redirect to login if no business is selected
+  useEffect(() => {
+    if (!isClient || !isAuthenticated || !user) return;
+    if (!user.selectedBusinessId) {
+      console.log('🔍 No business selected, redirecting to login');
+      // Use setTimeout to avoid potential race conditions
+      setTimeout(() => {
+        if (process.env.NODE_ENV === 'development') {
+          router.replace('/login');
+        } else {
+          window.location.href = 'login.html';
+        }
+      }, 100);
+    }
+  }, [isClient, isAuthenticated, user, router]);
 
   useEffect(() => {
     if (!showUserDebug) {
@@ -148,6 +196,24 @@ export default function Home() {
     );
   }
 
+  // Show loading if user data is not yet loaded
+  if (!user) {
+    return (
+      <div className="h-screen bg-gray-900 flex items-center justify-center overflow-hidden">
+        <div className="text-white text-lg">Loading user data...</div>
+      </div>
+    );
+  }
+
+  // Redirect if no business is selected (client-side redirect)
+  if (!user.selectedBusinessId) {
+    return (
+      <div className="h-screen bg-gray-900 flex items-center justify-center overflow-hidden">
+        <div className="text-white text-lg">Redirecting to login...</div>
+      </div>
+    );
+  }
+
   return (
     <div className="h-screen flex flex-col overflow-hidden">
       {/* Top Bar with User Info and Logout - Windows XP Style */}
@@ -161,7 +227,7 @@ export default function Home() {
       >
         <div className="flex items-center space-x-[8px] px-[8px]">
           <h1 className="text-[11px] font-bold text-white" style={{ textShadow: '0 1px 1px rgba(0,0,0,0.5)' }}>
-            MOMOYO MADIUN 1
+            {businessName}
           </h1>
           <div className="w-[1px] h-[20px] bg-[#1e4a8f]" style={{ boxShadow: '1px 0 0 rgba(255,255,255,0.1)' }}></div>
           <button
@@ -296,7 +362,7 @@ export default function Home() {
           </button>
           <div className="w-[1px] h-[20px] bg-[#1e4a8f]" style={{ boxShadow: '1px 0 0 rgba(255,255,255,0.1)' }}></div>
           <button
-            onClick={logout}
+            onClick={() => logout()}
             className="flex items-center space-x-[6px] text-[10px] font-medium px-[10px] py-[4px] rounded transition-all duration-200"
             style={{
               background: 'linear-gradient(135deg, #ef4444 0%, #dc2626 100%)',
@@ -507,6 +573,23 @@ export default function Home() {
                 <span className="ml-[6px]">
                   {user?.role_id !== null && user?.role_id !== undefined ? user.role_id : 'N/A'}
                 </span>
+              </div>
+              <div className="pt-[6px] border-t-2 border-[#808080]">
+                <span className="text-[#000080] font-bold">Selected Business:</span>
+                <div className="mt-[4px]">
+                  <div>
+                    <span className="text-[#000080]">Business ID:</span>
+                    <span className="ml-[6px] font-bold text-[#008000]">
+                      {user?.selectedBusinessId !== null && user?.selectedBusinessId !== undefined ? user.selectedBusinessId : 'N/A'}
+                    </span>
+                  </div>
+                  <div className="mt-[2px]">
+                    <span className="text-[#000080]">Business Name:</span>
+                    <span className="ml-[6px] font-bold">
+                      {businessName}
+                    </span>
+                  </div>
+                </div>
               </div>
               <div className="pt-[6px] border-t-2 border-[#808080]">
                 <span className="text-[#000080] font-bold">Permissions ({isSuperAdmin(user) ? 'ALL' : appPermissions.length}):</span>

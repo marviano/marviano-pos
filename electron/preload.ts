@@ -35,8 +35,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
   updateCustomerSlideshow: (data: UnknownRecord) => ipcRenderer.invoke('update-customer-slideshow', data),
   getCustomerDisplayStatus: () => ipcRenderer.invoke('get-customer-display-status'),
   createCustomerDisplay: () => ipcRenderer.invoke('create-customer-display'),
+  createBaristaKitchenWindow: () => ipcRenderer.invoke('create-barista-kitchen-window'),
 
   // Offline/local DB primitives
+  downloadAndRewriteSyncImages: (payload: { baseUrl: string; products: UnknownRecord[]; businesses: UnknownRecord[] }) =>
+    ipcRenderer.invoke('download-and-rewrite-sync-images', payload),
   localDbUpsertCategories: (rows: { jenis: string; updated_at?: number }[]) => ipcRenderer.invoke('localdb-upsert-categories', rows),
   localDbGetCategories: (businessId?: number) => ipcRenderer.invoke('localdb-get-categories', businessId),
   localDbUpsertProducts: (rows: UnknownRecord[]) => ipcRenderer.invoke('localdb-upsert-products', rows),
@@ -94,8 +97,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // Supporting tables
   localDbUpsertSource: (rows: UnknownRecord[]) => ipcRenderer.invoke('localdb-upsert-source', rows),
   localDbGetSource: () => ipcRenderer.invoke('localdb-get-source'),
-  localDbUpsertPekerjaan: (rows: UnknownRecord[]) => ipcRenderer.invoke('localdb-upsert-pekerjaan', rows),
-  localDbGetPekerjaan: () => ipcRenderer.invoke('localdb-get-pekerjaan'),
+  // Skip pekerjaan - not needed in POS app (CRM-only)
 
   // Printer configurations
   localDbSavePrinterConfig: (printerType: string, systemPrinterName: string, extraSettings?: UnknownRecord) =>
@@ -148,10 +150,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
   localDbDeleteTransactionItems: (payload: { businessId: number; from?: string | null; to?: string | null }) =>
     ipcRenderer.invoke('localdb-delete-transaction-items', payload),
   localDbGetUnsyncedTransactions: (businessId?: number) => ipcRenderer.invoke('localdb-get-unsynced-transactions', businessId),
+  localDbGetAllTransactions: (businessId?: number) => ipcRenderer.invoke('localdb-get-all-transactions', businessId),
   localDbDeleteUnsyncedTransactions: (businessId?: number) => ipcRenderer.invoke('localdb-delete-unsynced-transactions', businessId),
   localDbMarkTransactionsSynced: (transactionIds: string[]) => ipcRenderer.invoke('localdb-mark-transactions-synced', transactionIds),
   localDbResetTransactionSync: (transactionId: string) => ipcRenderer.invoke('localdb-reset-transaction-sync', transactionId),
-  localDbResetTransactionsSyncByDate: (payload: { businessId: number; fromDate?: string | null; toDate?: string | null }) => ipcRenderer.invoke('localdb-reset-transactions-sync-by-date', payload),
 
   // Transaction Items
   localDbUpsertTransactionItems: (rows: UnknownRecord[]) => ipcRenderer.invoke('localdb-upsert-transaction-items', rows),
@@ -181,13 +183,15 @@ contextBridge.exposeInMainWorld('electronAPI', {
   localDbUpsertBanks: (rows: UnknownRecord[]) => ipcRenderer.invoke('localdb-upsert-banks', rows),
   localDbGetBanks: () => ipcRenderer.invoke('localdb-get-banks'),
 
+  // Receipt Settings and Templates
+  localDbUpsertReceiptSettings: (rows: UnknownRecord[]) => ipcRenderer.invoke('localdb-upsert-receipt-settings', rows),
+  localDbUpsertReceiptTemplates: (rows: UnknownRecord[]) => ipcRenderer.invoke('localdb-upsert-receipt-templates', rows),
+
   // Organizations
   localDbUpsertOrganizations: (rows: UnknownRecord[], skipValidation?: boolean) => ipcRenderer.invoke('localdb-upsert-organizations', rows, skipValidation),
   localDbGetOrganizations: () => ipcRenderer.invoke('localdb-get-organizations'),
 
-  // Management Groups
-  localDbUpsertManagementGroups: (rows: UnknownRecord[]) => ipcRenderer.invoke('localdb-upsert-management-groups', rows),
-  localDbGetManagementGroups: () => ipcRenderer.invoke('localdb-get-management-groups'),
+  // Skip management_groups - not needed in POS app (CRM-only)
 
   // Category1
   localDbUpsertCategory1: (rows: UnknownRecord[]) => ipcRenderer.invoke('localdb-upsert-category1', rows),

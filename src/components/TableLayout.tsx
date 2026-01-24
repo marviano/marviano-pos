@@ -51,12 +51,20 @@ interface TableLayoutProps {
 
 export default function TableLayout({ onLoadTransaction }: TableLayoutProps = {} as TableLayoutProps) {
   const { user } = useAuth();
-  const businessId = user?.selectedBusinessId ?? 14;
-  
   const [rooms, setRooms] = useState<Room[]>([]);
   const [selectedRoom, setSelectedRoom] = useState<number | null>(null);
   const [tables, setTables] = useState<Table[]>([]);
   const [layoutElements, setLayoutElements] = useState<LayoutElement[]>([]);
+  
+  const businessId = user?.selectedBusinessId;
+  
+  if (!businessId) {
+    return (
+      <div className="p-4 bg-red-50 border border-red-200 rounded-lg">
+        <p className="text-red-700">No business selected. Please log in and select a business.</p>
+      </div>
+    );
+  }
   const [pendingTransactions, setPendingTransactions] = useState<PendingTransaction[]>([]);
   const [currentTime, setCurrentTime] = useState(new Date());
   const [loading, setLoading] = useState(true);
@@ -160,18 +168,43 @@ export default function TableLayout({ onLoadTransaction }: TableLayoutProps = {}
   }, [selectedRoom]);
 
   const fetchLayoutElements = useCallback(async () => {
-    if (!selectedRoom) return;
+    // #region agent log
+    fetch('http://127.0.0.1:7242/ingest/7b565785-72b5-49f7-b2c0-57606ea0d0b5',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'TableLayout.tsx:170',message:'fetchLayoutElements called',data:{selectedRoom,hasElectronAPI:!!window.electronAPI,hasMethod:!!window.electronAPI?.getRestaurantLayoutElements},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
+    // #endregion
+    if (!selectedRoom) {
+      // #region agent log
+      fetch('http://127.0.0.1:7242/ingest/7b565785-72b5-49f7-b2c0-57606ea0d0b5',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'TableLayout.tsx:174',message:'fetchLayoutElements early return - no selectedRoom',data:{selectedRoom},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
+      // #endregion
+      return;
+    }
     
     try {
       const electronAPI = window.electronAPI;
       if (!electronAPI?.getRestaurantLayoutElements) {
+        // #region agent log
+        fetch('http://127.0.0.1:7242/ingest/7b565785-72b5-49f7-b2c0-57606ea0d0b5',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'TableLayout.tsx:178',message:'getRestaurantLayoutElements not available',data:{hasElectronAPI:!!electronAPI},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
+        // #endregion
         console.error('getRestaurantLayoutElements not available');
         return;
       }
 
+      // #region agent log
+      fetch('http://127.0.0.1:7242/ingest/7b565785-72b5-49f7-b2c0-57606ea0d0b5',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'TableLayout.tsx:183',message:'Calling getRestaurantLayoutElements',data:{selectedRoom},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
+      // #endregion
       const elementsData = await electronAPI.getRestaurantLayoutElements(selectedRoom);
-      setLayoutElements(Array.isArray(elementsData) ? elementsData : []);
+      const elementsArray = Array.isArray(elementsData) ? elementsData : [];
+      // #region agent log
+      fetch('http://127.0.0.1:7242/ingest/7b565785-72b5-49f7-b2c0-57606ea0d0b5',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'TableLayout.tsx:186',message:'getRestaurantLayoutElements result',data:{elementCount:elementsArray.length,isArray:Array.isArray(elementsData),rawData:elementsData,firstElement:elementsArray[0]},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
+      // #endregion
+      console.log('[TableLayout] Layout elements fetched:', elementsArray.length, elementsArray);
+      setLayoutElements(elementsArray);
+      // #region agent log
+      fetch('http://127.0.0.1:7242/ingest/7b565785-72b5-49f7-b2c0-57606ea0d0b5',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'TableLayout.tsx:189',message:'setLayoutElements called',data:{elementCount:elementsArray.length},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
+      // #endregion
     } catch (error) {
+      // #region agent log
+      fetch('http://127.0.0.1:7242/ingest/7b565785-72b5-49f7-b2c0-57606ea0d0b5',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'TableLayout.tsx:191',message:'Error fetching layout elements',data:{error:error instanceof Error?error.message:String(error),selectedRoom},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
+      // #endregion
       console.error('Error fetching layout elements:', error);
     }
   }, [selectedRoom]);
@@ -371,60 +404,107 @@ export default function TableLayout({ onLoadTransaction }: TableLayoutProps = {}
           >
             {/* Layout Elements */}
             {(() => {
+              // #region agent log
+              fetch('http://127.0.0.1:7242/ingest/7b565785-72b5-49f7-b2c0-57606ea0d0b5',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'TableLayout.tsx:384',message:'Rendering layout elements section',data:{layoutElementsCount:layoutElements.length,selectedRoom,canvasSize,roomsCount:rooms.length},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})}).catch(()=>{});
+              // #endregion
               const selectedRoomData = rooms.find(r => r.id === selectedRoom);
               const fontSizeMultiplier = selectedRoomData?.font_size_multiplier ?? 1.0;
-              console.log('[TableLayout] Font size multiplier:', fontSizeMultiplier, 'for room:', selectedRoom);
+              const effectiveCanvasWidth = canvasSize.width || 800; // Fallback to 800 if not set
+              const effectiveCanvasHeight = canvasSize.height || 600; // Fallback to 600 if not set
+              
+              console.log('[TableLayout] Rendering layout elements:', {
+                count: layoutElements.length,
+                room: selectedRoom,
+                canvasSize,
+                effectiveCanvasWidth,
+                effectiveCanvasHeight,
+                elements: layoutElements
+              });
+              
+              // #region agent log
+              fetch('http://127.0.0.1:7242/ingest/7b565785-72b5-49f7-b2c0-57606ea0d0b5',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'TableLayout.tsx:397',message:'Before rendering elements check',data:{layoutElementsCount:layoutElements.length,canvasSize,effectiveCanvasWidth,effectiveCanvasHeight},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})}).catch(()=>{});
+              // #endregion
+              
+              if (layoutElements.length === 0) {
+                // #region agent log
+                fetch('http://127.0.0.1:7242/ingest/7b565785-72b5-49f7-b2c0-57606ea0d0b5',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'TableLayout.tsx:400',message:'No layout elements to render',data:{layoutElementsCount:layoutElements.length},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})}).catch(()=>{});
+                // #endregion
+                console.log('[TableLayout] No layout elements to render');
+                return null;
+              }
+              
               return layoutElements.map((element) => {
                 const posX = typeof element.position_x === 'string' ? parseFloat(element.position_x) : element.position_x;
                 const posY = typeof element.position_y === 'string' ? parseFloat(element.position_y) : element.position_y;
                 const widthPercent = typeof element.width === 'string' ? parseFloat(element.width) : element.width;
                 const heightPercent = typeof element.height === 'string' ? parseFloat(element.height) : element.height;
                 
-                const pixelX = (posX / 100) * canvasSize.width;
-                const pixelY = (posY / 100) * canvasSize.height;
-                const pixelWidth = (widthPercent / 100) * canvasSize.width;
-                const pixelHeight = (heightPercent / 100) * canvasSize.height;
+                const pixelX = (posX / 100) * effectiveCanvasWidth;
+                const pixelY = (posY / 100) * effectiveCanvasHeight;
+                const pixelWidth = (widthPercent / 100) * effectiveCanvasWidth;
+                const pixelHeight = (heightPercent / 100) * effectiveCanvasHeight;
 
                 const minDimension = Math.min(pixelWidth, pixelHeight);
                 const baseFontSize = Math.max(10, Math.min(20, minDimension * 0.3));
                 const fontSize = baseFontSize * fontSizeMultiplier;
 
-              const MIN_SIZE_PERCENT = 3;
-              const minPixelSize = Math.min(
-                (MIN_SIZE_PERCENT / 100) * canvasSize.width,
-                (MIN_SIZE_PERCENT / 100) * canvasSize.height
-              );
+                const MIN_SIZE_PERCENT = 3;
+                const minPixelSize = Math.min(
+                  (MIN_SIZE_PERCENT / 100) * effectiveCanvasWidth,
+                  (MIN_SIZE_PERCENT / 100) * effectiveCanvasHeight
+                );
 
-              return (
-                <div
-                  key={`element-${element.id}`}
-                  style={{
-                    position: 'absolute',
-                    left: pixelX,
-                    top: pixelY,
-                    width: Math.max(pixelWidth, minPixelSize),
-                    height: Math.max(pixelHeight, minPixelSize),
-                  }}
-                  className="cursor-default"
-                >
+                // #region agent log
+                fetch('http://127.0.0.1:7242/ingest/7b565785-72b5-49f7-b2c0-57606ea0d0b5',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'TableLayout.tsx:415',message:'Calculating element position and size',data:{elementId:element.id,label:element.label,posX,posY,widthPercent,heightPercent,pixelX,pixelY,pixelWidth,pixelHeight,effectiveCanvasWidth,effectiveCanvasHeight,isNaN:isNaN(pixelX)||isNaN(pixelY)||isNaN(pixelWidth)||isNaN(pixelHeight),isZero:pixelWidth===0||pixelHeight===0},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'E'})}).catch(()=>{});
+                // #endregion
+
+                console.log('[TableLayout] Rendering element:', {
+                  id: element.id,
+                  label: element.label,
+                  posX,
+                  posY,
+                  widthPercent,
+                  heightPercent,
+                  pixelX,
+                  pixelY,
+                  pixelWidth,
+                  pixelHeight,
+                  color: element.color
+                });
+
+                return (
                   <div
-                    className="w-full h-full flex items-center justify-center relative shadow-lg overflow-hidden"
+                    key={`element-${element.id}`}
                     style={{
-                      backgroundColor: element.color,
-                      color: element.text_color,
-                      minWidth: '30px',
-                      minHeight: '30px',
+                      position: 'absolute',
+                      left: `${pixelX}px`,
+                      top: `${pixelY}px`,
+                      width: `${Math.max(pixelWidth, minPixelSize)}px`,
+                      height: `${Math.max(pixelHeight, minPixelSize)}px`,
+                      zIndex: 1, // Ensure elements are visible above background but below tables
+                      pointerEvents: 'none', // Allow clicks to pass through to tables
                     }}
+                    className="cursor-default"
                   >
                     <div
-                      className="font-bold whitespace-nowrap text-center px-2"
-                      style={{ fontSize: `${fontSize}px` }}
+                      className="w-full h-full flex items-center justify-center relative shadow-lg overflow-hidden"
+                      style={{
+                        backgroundColor: element.color || '#9CA3AF',
+                        color: element.text_color || '#000000',
+                        minWidth: '30px',
+                        minHeight: '30px',
+                        border: '1px solid rgba(0,0,0,0.2)', // Add border to make it more visible
+                      }}
                     >
-                      {element.label}
+                      <div
+                        className="font-bold whitespace-nowrap text-center px-2"
+                        style={{ fontSize: `${fontSize}px` }}
+                      >
+                        {element.label}
+                      </div>
                     </div>
                   </div>
-                </div>
-              );
+                );
               });
             })()}
             
@@ -447,12 +527,11 @@ export default function TableLayout({ onLoadTransaction }: TableLayoutProps = {}
                 const pixelWidth = (widthPercent / 100) * canvasSize.width;
                 const pixelHeight = (heightPercent / 100) * canvasSize.height;
 
-                // Calculate dynamic font size based on table dimensions
-                // Base font size scales with the smaller dimension to ensure readability
+                // Calculate dynamic font size — scale down on small/square tables so layout stays neat
                 const minDimension = Math.min(pixelWidth, pixelHeight);
-                const baseFontSize = Math.max(10, Math.min(24, minDimension * 0.25)); // 25% of min dimension, clamped between 10-24px
-                const fontSize = baseFontSize * fontSizeMultiplier; // Apply global font size multiplier
-                const smallFontSize = Math.max(8, fontSize * 0.7); // 70% of main font size, min 8px
+                const baseFontSize = Math.max(7, Math.min(24, minDimension * 0.25)); // 25% of min, clamped 7–24px
+                const fontSize = baseFontSize * fontSizeMultiplier;
+                const smallFontSize = Math.max(6, fontSize * 0.7); // 70% of main, min 6px
 
               // Minimum size: 4% to ensure text is readable
               const MIN_SIZE_PERCENT = 4;
@@ -500,7 +579,7 @@ export default function TableLayout({ onLoadTransaction }: TableLayoutProps = {}
   );
 }
 
-// Table Display Component with timer and auto-adjusting font size
+// Table Display Component — timer/content layout aligned with salespulse (no overlap on square, narrow padding)
 function TableDisplay({
   table,
   pixelX,
@@ -524,14 +603,18 @@ function TableDisplay({
   currentTime: Date;
   onLoadTransaction?: (transactionId: string) => void;
 }) {
+  const timerFontSize = Math.max(6, fontSize * 0.9);
+  const timerPadV = Math.max(1, Math.round(timerFontSize * 0.12));
+  const timerPadH = Math.max(1, Math.round(timerFontSize * 0.22));
+  const timerTopPx = table.shape === 'circle' ? pixelHeight * 0.12 : 4;
+  const timerBlockHeight = timerFontSize + 2 * timerPadV;
+
   const formatTimer = (createdAt: string): string => {
     const created = new Date(createdAt);
     const diffMs = currentTime.getTime() - created.getTime();
-
     const totalSeconds = Math.floor(diffMs / 1000);
     const minutes = Math.floor(totalSeconds / 60);
     const seconds = totalSeconds % 60;
-
     return `${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
   };
 
@@ -552,6 +635,7 @@ function TableDisplay({
         top: pixelY,
         width: pixelWidth,
         height: pixelHeight,
+        zIndex: 2, // Ensure tables are above layout elements
       }}
       className={isOccupied && onLoadTransaction ? "cursor-pointer" : "cursor-default"}
       onClick={handleTableClick}
@@ -567,21 +651,21 @@ function TableDisplay({
           minHeight: '40px',
         }}
       >
-        {/* Timer area at the top */}
-        <div 
+        {/* Timer — scaled padding; top offset included in main content margin to avoid overlap on square */}
+        <div
           className="absolute left-1/2 -translate-x-1/2 text-center"
-          style={{ 
-            fontSize: `${Math.max(fontSize * 0.9, 12)}px`,
+          style={{
+            fontSize: `${timerFontSize}px`,
             fontWeight: 'bold',
             top: table.shape === 'circle' ? '12%' : '4px',
             maxWidth: '90%',
             overflow: 'hidden'
           }}
         >
-          <div 
-            className="bg-black/40 px-2 py-0.5 rounded text-white font-mono whitespace-nowrap"
+          <div
+            className="bg-black/40 rounded text-white font-mono whitespace-nowrap"
             style={{
-              WebkitTextStroke: '0.8px rgba(0, 0, 0, 0.9)',
+              padding: `${timerPadV}px ${timerPadH}px`,
               textShadow: '0 0 3px rgba(0, 0, 0, 0.6), 0 1px 2px rgba(0, 0, 0, 0.4)',
               letterSpacing: '0.5px'
             }}
@@ -590,24 +674,15 @@ function TableDisplay({
           </div>
         </div>
 
-        {/* Main content area */}
-        <div 
-          className="flex flex-col items-center justify-center flex-1 w-full px-1" 
-          style={{ marginTop: `${Math.max(fontSize * 0.9, 12) + 8}px` }}
+        {/* Main content: marginTop = timer top + timer height + buffer; narrow padding; leading-tight + gap-px */}
+        <div
+          className="flex flex-col items-center justify-center flex-1 w-full px-0.5 gap-px"
+          style={{ marginTop: `${timerTopPx + timerBlockHeight + 2}px` }}
         >
-          {/* Table number */}
-          <div
-            className="font-bold whitespace-nowrap"
-            style={{ fontSize: `${fontSize}px` }}
-          >
+          <div className="font-bold whitespace-nowrap leading-tight" style={{ fontSize: `${fontSize}px` }}>
             {table.table_number}
           </div>
-
-          {/* Capacity */}
-          <div
-            className="opacity-75 whitespace-nowrap"
-            style={{ fontSize: `${smallFontSize}px` }}
-          >
+          <div className="opacity-75 whitespace-nowrap leading-tight" style={{ fontSize: `${smallFontSize}px` }}>
             {table.capacity}p
           </div>
         </div>

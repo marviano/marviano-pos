@@ -254,9 +254,6 @@ const formatDateTime = (dateString: string): string => {
 export default function GantiShift() {
   const { user } = useAuth();
 
-  // Get business ID from logged-in user (fallback to 14 for backward compatibility)
-  const businessId = user?.selectedBusinessId ?? 14;
-
   const [activeShift, setActiveShift] = useState<Shift | null>(null);
   const [modalAwal, setModalAwal] = useState<string>('');
   const [isStartingShift, setIsStartingShift] = useState(false);
@@ -264,6 +261,17 @@ export default function GantiShift() {
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [isLoadingInitial, setIsLoadingInitial] = useState(true);
   const [isLoadingTabData, setIsLoadingTabData] = useState(false);
+  
+  // Get business ID from logged-in user
+  const businessId = user?.selectedBusinessId;
+  
+  if (!businessId) {
+    return (
+      <div className="p-4 bg-red-50 border border-red-200 rounded-lg">
+        <p className="text-red-700">No business selected. Please log in and select a business.</p>
+      </div>
+    );
+  }
   const [error, setError] = useState<string | null>(null);
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
   const [showEndShiftConfirm, setShowEndShiftConfirm] = useState(false);

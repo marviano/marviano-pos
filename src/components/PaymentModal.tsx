@@ -130,13 +130,24 @@ export default function PaymentModal({
   loadedTransactionInfo = null
 }: PaymentModalProps) {
   const { user } = useAuth();
-
-  // Get business ID from logged-in user (fallback to 14 for backward compatibility)
-  const businessId = user?.selectedBusinessId ?? 14;
   const [selectedPaymentMethod, setSelectedPaymentMethod] = useState<PaymentMethod>('cash');
   const [selectedPickupMethod, setSelectedPickupMethod] = useState<PickupMethod>('dine-in');
   const [amountReceived, setAmountReceived] = useState<string>('');
   const [customVoucherAmount, setCustomVoucherAmount] = useState<string>('');
+  
+  // Get business ID from logged-in user
+  const businessId = user?.selectedBusinessId;
+  
+  if (!businessId) {
+    return (
+      <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+        <div className="bg-white rounded-lg p-6 max-w-md">
+          <h2 className="text-xl font-bold text-red-600 mb-2">No Business Selected</h2>
+          <p className="text-gray-700">Please log in and select a business to proceed with payment.</p>
+        </div>
+      </div>
+    );
+  }
   const [customerName, setCustomerName] = useState<string>('');
   const [customerUnit, setCustomerUnit] = useState<string>('1');
   const [promotionSelection, setPromotionSelection] = useState<PromotionSelection>('none');
@@ -686,6 +697,11 @@ export default function PaymentModal({
 
           if (existingTransaction) {
             // Update existing transaction with payment info
+            // Preserve waiter_id from existing transaction when waiterId not provided (e.g. after Simpan Order
+            // we clear selectedWaiterId; Lihat does not restore it, so transactionData.waiter_id would overwrite with null)
+            // Always set sync_status: 'pending' so the completed transaction is queued for upload to salespulse;
+            // we must not inherit existingTransaction.sync_status (e.g. 'synced') or the row would never show in
+            // "Data offline yang akan diunggah" or getUnsynced.
             localTransactionData = {
               ...existingTransaction,
               ...transactionData,
@@ -693,13 +709,16 @@ export default function PaymentModal({
               uuid_id: loadedTransactionInfo.transactionId, // Preserve original UUID
               status: 'completed', // Update status to completed (removes from active orders)
               updated_at: new Date().toISOString(),
+              waiter_id: (waiterId != null && waiterId !== undefined) ? waiterId : (existingTransaction.waiter_id ?? null),
+              sync_status: 'pending',
             };
             console.log('📝 [PAYMENT] Updating existing transaction:', loadedTransactionInfo.transactionId);
           } else {
             // Fallback: create new transaction if existing not found
             localTransactionData = {
               ...transactionData,
-              receipt_number: null
+              receipt_number: null,
+              sync_status: 'pending',
             };
             console.warn('⚠️ [PAYMENT] Existing transaction not found, creating new one');
           }
@@ -707,7 +726,8 @@ export default function PaymentModal({
           // New transaction
           localTransactionData = {
             ...transactionData,
-            receipt_number: null // Initial local save has no receipt number yet
+            receipt_number: null, // Initial local save has no receipt number yet
+            sync_status: 'pending',
           };
         }
 
@@ -807,7 +827,6 @@ export default function PaymentModal({
         console.log('\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
 
         // Save transaction to local database (Blocking but fast)
-        // sync_status will be set to 'pending' by default in the database
         await electronAPI.localDbUpsertTransactions?.([localTransactionData]);
         
         // Always save transaction items from cart to ensure all items (including newly added ones) are saved
@@ -1800,6 +1819,14 @@ export default function PaymentModal({
     previousPaymentMethod.current = selectedPaymentMethod;
   }, [selectedPaymentMethod, bankId, cardNumber]);
 
+  // Auto-set "Jumlah yang diterima" to uang pas when selecting Debit, QR, E-Wallet, or CL
+  // Uses finalTotal so discount / custom nominal voucher / free are already applied
+  useEffect(() => {
+    if (['debit', 'qr', 'ewallet', 'cl'].includes(selectedPaymentMethod)) {
+      setAmountReceived(Math.ceil(finalTotal).toString());
+    }
+  }, [selectedPaymentMethod, finalTotal]);
+
   // Reset form when modal opens
   useEffect(() => {
     if (isOpen) {
@@ -2162,8 +2189,6 @@ export default function PaymentModal({
                           <button
                             onClick={() => {
                               setSelectedPaymentMethod('cl');
-                              // Clear and reset amount input for CL
-                              setAmountReceived('');
                               // Pindahkan fokus ke input nama pelanggan karena wajib diisi
                               setActiveInput('customer');
                               // Clear promotion when CL is selected

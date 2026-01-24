@@ -19,8 +19,8 @@ export function useAuth() {
     return authManager.loginOffline();
   };
 
-  const logout = () => {
-    authManager.logout();
+  const logout = (options?: { redirect?: boolean }) => {
+    authManager.logout(options);
   };
 
   return {

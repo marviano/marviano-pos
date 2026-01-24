@@ -56,7 +56,7 @@ export default function WaiterSelectionModal({
           if (electronAPI?.localDbGetEmployees) {
             const allEmployees = await electronAPI.localDbGetEmployees();
             // #region agent log
-            fetch('http://127.0.0.1:7242/ingest/7b565785-72b5-49f7-b2c0-57606ea0d0b5',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'WaiterSelectionModal.tsx:55',message:'Fetched allEmployees from localDb',data:{allEmployeesCount:Array.isArray(allEmployees)?allEmployees.length:0,allEmployees:Array.isArray(allEmployees)?allEmployees.map((e:any)=>({id:e.id,business_id:e.business_id,business_idType:typeof e.business_id,jabatan_id:e.jabatan_id,jabatan_idType:typeof e.jabatan_id,nama:e.nama_karyawan})):null},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
+            fetch('http://127.0.0.1:7242/ingest/7b565785-72b5-49f7-b2c0-57606ea0d0b5',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'WaiterSelectionModal.tsx:55',message:'Fetched allEmployees from localDb',data:{allEmployeesCount:Array.isArray(allEmployees)?allEmployees.length:0,allEmployees:Array.isArray(allEmployees)?allEmployees.map((e:Record<string,unknown>)=>({id:e.id,business_id:e.business_id,business_idType:typeof e.business_id,jabatan_id:e.jabatan_id,jabatan_idType:typeof e.jabatan_id,nama:e.nama_karyawan})):null},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
             // #endregion
             // Filter employees for this business and filter waiters (jabatan_id = 1)
             // Include employees with matching business_id OR business_id = null (shared/global employees)

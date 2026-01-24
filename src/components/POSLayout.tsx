@@ -18,9 +18,10 @@ import BaristaDisplay from './BaristaDisplay';
 import ReceiptTemplateSettings from './ReceiptTemplateSettings';
 import { mockMenuItems } from '@/data/mockData';
 import { fetchCategories, fetchProducts } from '@/lib/offlineDataFetcher';
-import { databaseHealthService } from '@/lib/databaseHealth';
+import { offlineSyncService } from '@/lib/offlineSync';
 import { useAuth } from '@/hooks/useAuth';
 import { isSuperAdmin } from '@/lib/auth';
+import { hasPermission } from '@/lib/permissions';
 import { ClipboardList, FilePlus, ChevronRight, Store, Globe } from 'lucide-react';
 
 type LocalCategory = {
@@ -68,17 +69,6 @@ if (typeof window !== 'undefined') {
 
 export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setActiveMenuItem: externalSetActiveMenuItem /*, shouldBlurKasir = false */ }: POSLayoutProps = {}) {
   const { user } = useAuth();
-  const permissions = user?.permissions ?? [];
-  const isAdmin = isSuperAdmin(user);
-
-  // Get business ID from logged-in user (fallback to 14 for backward compatibility)
-  const businessId = user?.selectedBusinessId ?? 14;
-  const canAccessSync = isAdmin ||
-    permissions.includes('setelan.sinkronisasi') ||
-    permissions.includes('marviano-pos_setelan_sinkronisasi');
-  const canAccessPrinter = isAdmin ||
-    permissions.includes('setelan.printersetup') ||
-    permissions.includes('marviano-pos_setelan_printer-setup');
   const [selectedCategory, setSelectedCategory] = useState('');
 
   // Use external state if provided, otherwise use internal state
@@ -87,27 +77,6 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
   
   // Sidebar visibility state - auto-hide for Kitchen/Barista displays
   const [sidebarVisible, setSidebarVisible] = useState(true);
-  
-  // Auto-hide sidebar when switching to Kitchen/Barista
-  useEffect(() => {
-    if (activeMenuItem === 'Kitchen' || activeMenuItem === 'Barista') {
-      setSidebarVisible(false);
-    } else {
-      setSidebarVisible(true);
-    }
-  }, [activeMenuItem]);
-  
-  // Wrapper for setActiveMenuItem with unsaved changes check
-  const setActiveMenuItemWithCheck = (item: string) => {
-    // If trying to change page and there are unsaved changes, show confirmation
-    if (activeMenuItem !== item && activeMenuItem === 'Kasir' && !checkUnsavedChanges()) {
-      return; // Don't change page if user cancels
-    }
-    const setter = externalSetActiveMenuItem ?? setInternalActiveMenuItem;
-    setter(item);
-  };
-  
-  const setActiveMenuItem = setActiveMenuItemWithCheck;
 
   // NEW STRUCTURE: 6 carts total - 1 offline + 5 online platforms
   // Each cart can contain both drinks AND bakery items
@@ -133,6 +102,38 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
   } | null>(null);
   const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false);
   
+  const [categories, setCategories] = useState<LocalCategory[]>([]); // Start with empty array
+  const [isLoadingCategories, setIsLoadingCategories] = useState(true);
+  const [products, setProducts] = useState<Product[]>([]); // Start with empty array
+  const [isLoadingProducts, setIsLoadingProducts] = useState(true);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [showStartShiftModal, setShowStartShiftModal] = useState(false);
+  const [hasCheckedShift, setHasCheckedShift] = useState(false);
+
+  // Early return if user is not loaded yet
+  if (!user) {
+    return (
+      <div className="h-screen flex items-center justify-center bg-gray-100">
+        <div className="text-center p-8 bg-white rounded-lg shadow-lg">
+          <h2 className="text-xl font-bold text-gray-600 mb-2">Loading...</h2>
+          <p className="text-gray-700">Loading user data...</p>
+        </div>
+      </div>
+    );
+  }
+
+  // Get business ID from logged-in user
+  const businessId = user.selectedBusinessId;
+  
+  const permissions = user.permissions ?? [];
+  const isAdmin = isSuperAdmin(user);
+  const canAccessSync = isAdmin ||
+    permissions.includes('setelan.sinkronisasi') ||
+    permissions.includes('marviano-pos_setelan_sinkronisasi');
+  const canAccessPrinter = isAdmin ||
+    permissions.includes('setelan.printersetup') ||
+    permissions.includes('marviano-pos_setelan_printer-setup');
+  
   // Helper function to check and prompt for unsaved changes
   const checkUnsavedChanges = (): boolean => {
     if (hasUnsavedChanges) {
@@ -152,13 +153,65 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
     return true; // Proceed with action
   };
   
-  const [categories, setCategories] = useState<LocalCategory[]>([]); // Start with empty array
-  const [isLoadingCategories, setIsLoadingCategories] = useState(true);
-  const [products, setProducts] = useState<Product[]>([]); // Start with empty array
-  const [isLoadingProducts, setIsLoadingProducts] = useState(true);
-  const [searchQuery, setSearchQuery] = useState('');
-  const [showStartShiftModal, setShowStartShiftModal] = useState(false);
-  const [hasCheckedShift, setHasCheckedShift] = useState(false);
+  // Wrapper for setActiveMenuItem with unsaved changes check
+  const setActiveMenuItemWithCheck = (item: string) => {
+    // If trying to change page and there are unsaved changes, show confirmation
+    if (activeMenuItem !== item && activeMenuItem === 'Kasir' && !checkUnsavedChanges()) {
+      return; // Don't change page if user cancels
+    }
+    const setter = externalSetActiveMenuItem ?? setInternalActiveMenuItem;
+    setter(item);
+  };
+  
+  const setActiveMenuItem = setActiveMenuItemWithCheck;
+  
+  // Auto-hide sidebar when switching to Kitchen/Barista
+  useEffect(() => {
+    if (activeMenuItem === 'Kitchen' || activeMenuItem === 'Barista') {
+      setSidebarVisible(false);
+    } else {
+      setSidebarVisible(true);
+    }
+  }, [activeMenuItem]);
+
+  // Handle opening Barista & Kitchen window
+  useEffect(() => {
+    if (activeMenuItem === 'Barista & Kitchen') {
+      const canAccess = isSuperAdmin(user) || hasPermission(user, 'access_baristaandkitchen');
+      
+      if (canAccess) {
+        const electronAPI = getElectronAPI();
+        if (electronAPI?.createBaristaKitchenWindow) {
+          electronAPI.createBaristaKitchenWindow()
+            .then((result) => {
+              console.log('✅ Barista & Kitchen window result:', result);
+              if (result?.success === false) {
+                console.error('❌ Failed to create window:', result.error);
+                alert(`Failed to open Barista & Kitchen window: ${result.error || 'Unknown error'}`);
+              }
+            })
+            .catch((error) => {
+              console.error('❌ Error creating Barista & Kitchen window:', error);
+              alert(`Error opening window: ${error instanceof Error ? error.message : String(error)}`);
+            });
+        } else {
+          console.error('❌ createBaristaKitchenWindow method not available');
+          alert('Window creation method not available. Please check Electron API.');
+        }
+      }
+    }
+  }, [activeMenuItem, user]);
+  
+  if (!businessId) {
+    return (
+      <div className="h-screen flex items-center justify-center bg-gray-100">
+        <div className="text-center p-8 bg-white rounded-lg shadow-lg">
+          <h2 className="text-xl font-bold text-red-600 mb-2">No Business Selected</h2>
+          <p className="text-gray-700">Please log in and select a business to access the POS system.</p>
+        </div>
+      </div>
+    );
+  }
 
   // Helper functions to get current cart based on online status and platform
   const getCurrentCart = (): CartItem[] => {
@@ -226,6 +279,8 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
   // Fetch categories from database with offline fallback
   // NEW: Fetch both drinks AND bakery categories together
   useEffect(() => {
+    if (!businessId || !fetchCategories) return;
+    
     let isCancelled = false;
     setIsLoadingCategories(true);
 
@@ -301,6 +356,8 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
   // Fetch products when category or tab changes with offline fallback
   // NEW: We need to determine transactionType from the selected category's products
   useEffect(() => {
+    if (!businessId || !fetchProducts) return;
+    
     let isCancelled = false;
 
     const loadProducts = async () => {
@@ -376,16 +433,18 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
     sendTabUpdate({ activeTab: tabName, isOnline: isOnlineTab, selectedPlatform: selectedOnlinePlatform });
   }, [isOnlineTab, selectedOnlinePlatform, sendTabUpdate]);
 
-  // Auto-sync products and prices on app startup to get latest data
+  // Auto-sync master data on app startup to get latest data
   useEffect(() => {
+    if (!businessId || !offlineSyncService) return;
+    
     const syncOnStartup = async () => {
       try {
-        // console.log('🔄 [STARTUP] Auto-syncing products and prices on app start...');
-        const success = await databaseHealthService.forceSync();
-        if (success) {
+        // console.log('🔄 [STARTUP] Auto-syncing master data on app start...');
+        // Use the complete sync function (same as manual sync button)
+        if (typeof offlineSyncService.syncFromOnline === 'function') {
+          await offlineSyncService.syncFromOnline(businessId);
           // Trigger UI refresh to show new data
           window.dispatchEvent(new CustomEvent('dataSynced'));
-        } else {
         }
       } catch (error) {
         console.error('❌ [STARTUP] Error syncing on startup:', error);
@@ -394,10 +453,12 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
     };
 
     syncOnStartup();
-  }, []);
+  }, [businessId]);
 
   // Listen for data sync events to refresh categories and products
   useEffect(() => {
+    if (!businessId || !fetchCategories || !fetchProducts) return;
+    
     const handleDataSynced = async () => {
       setIsLoadingCategories(true);
       setIsLoadingProducts(true);
@@ -471,7 +532,8 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
 
   // Check for active shift when Kasir page is active
   useEffect(() => {
-    if (activeMenuItem === 'Kasir' && user?.id && !hasCheckedShift) {
+    if (!businessId) return;
+    if (activeMenuItem === 'Kasir' && user.id && !hasCheckedShift) {
       const checkActiveShift = async () => {
         try {
           const electronAPI = getElectronAPI();
@@ -495,10 +557,11 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
       setHasCheckedShift(false);
       setShowStartShiftModal(false);
     }
-  }, [activeMenuItem, user?.id, businessId, hasCheckedShift]);
+  }, [activeMenuItem, user.id, businessId, hasCheckedShift]);
 
   // Fetch pending orders count when on Kasir page
   useEffect(() => {
+    if (!businessId) return;
     if (activeMenuItem === 'Kasir') {
       const fetchPendingCount = async () => {
         try {
@@ -540,7 +603,13 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
   }, [activeMenuItem, businessId]);
 
   // Load transaction into cart function
-  const loadTransactionIntoCart = async (transactionId: string) => {console.log('🔄 Loading transaction into cart:', transactionId);
+  const loadTransactionIntoCart = async (transactionId: string) => {
+    if (!businessId) {
+      console.error('❌ No business ID available');
+      return;
+    }
+    
+    console.log('🔄 Loading transaction into cart:', transactionId);
     try {
       const electronAPI = getElectronAPI();
       if (!electronAPI) {
@@ -818,7 +887,21 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
 
   const renderMainContent = () => {
     switch (activeMenuItem) {
-      case 'Kasir':
+      case 'Kasir': {
+        // Check permission to access Kasir page
+        const canAccessKasir = isSuperAdmin(user) || hasPermission(user, 'access_kasir');
+        if (!canAccessKasir) {
+          return (
+            <div className="flex-1 flex items-center justify-center">
+              <div className="text-center space-y-2">
+                <h2 className="text-lg font-semibold text-gray-700">Akses Ditolak</h2>
+                <p className="text-gray-500 text-sm">
+                  Anda tidak memiliki izin untuk mengakses halaman Kasir.
+                </p>
+              </div>
+            </div>
+          );
+        }
         return (
           <div className="flex-1 flex flex-col h-full min-h-0">
             {/* Kasir Tabs - NEW STRUCTURE */}
@@ -1073,15 +1156,46 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
             </div>
           </div>
         );
+      }
 
       case 'Daftar Transaksi':
         return <TransactionList businessId={businessId} onLoadTransaction={loadTransactionIntoCart} />;
 
-      case 'Ganti Shift':
+      case 'Ganti Shift': {
+        // Check permission to access Ganti Shift page
+        const canAccessGantiShift = isSuperAdmin(user) || hasPermission(user, 'access_gantishift');
+        if (!canAccessGantiShift) {
+          return (
+            <div className="flex-1 flex items-center justify-center">
+              <div className="text-center space-y-2">
+                <h2 className="text-lg font-semibold text-gray-700">Akses Ditolak</h2>
+                <p className="text-gray-500 text-sm">
+                  Anda tidak memiliki izin untuk mengakses halaman Ganti Shift.
+                </p>
+              </div>
+            </div>
+          );
+        }
         return <GantiShift />;
+      }
 
-      case 'Laporan':
+      case 'Laporan': {
+        // Check permission to access Laporan page
+        const canAccessLaporan = isSuperAdmin(user) || hasPermission(user, 'access_laporan');
+        if (!canAccessLaporan) {
+          return (
+            <div className="flex-1 flex items-center justify-center">
+              <div className="text-center space-y-2">
+                <h2 className="text-lg font-semibold text-gray-700">Akses Ditolak</h2>
+                <p className="text-gray-500 text-sm">
+                  Anda tidak memiliki izin untuk mengakses halaman Laporan.
+                </p>
+              </div>
+            </div>
+          );
+        }
         return <Laporan />;
+      }
 
       case 'Settings':
         if (!canAccessSync && !canAccessPrinter) {
@@ -1164,10 +1278,56 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
         );
 
       case 'Kitchen':
+        // Check permission before rendering
+        if (!isSuperAdmin(user) && !hasPermission(user, 'access_kitchen')) {
+          return (
+            <div className="flex-1 flex items-center justify-center">
+              <div className="text-center p-8 bg-white rounded-lg shadow-lg">
+                <h2 className="text-xl font-bold text-red-600 mb-2">Access Denied</h2>
+                <p className="text-gray-700">You do not have permission to access the Kitchen Display.</p>
+              </div>
+            </div>
+          );
+        }
         return <KitchenDisplay />;
 
       case 'Barista':
+        // Check permission before rendering
+        if (!isSuperAdmin(user) && !hasPermission(user, 'access_barista')) {
+          return (
+            <div className="flex-1 flex items-center justify-center">
+              <div className="text-center p-8 bg-white rounded-lg shadow-lg">
+                <h2 className="text-xl font-bold text-red-600 mb-2">Access Denied</h2>
+                <p className="text-gray-700">You do not have permission to access the Barista Display.</p>
+              </div>
+            </div>
+          );
+        }
         return <BaristaDisplay />;
+
+      case 'Barista & Kitchen':
+        // Check permissions before opening window
+        const canAccess = isSuperAdmin(user) || hasPermission(user, 'access_baristaandkitchen');
+        
+        if (!canAccess) {
+          return (
+            <div className="flex-1 flex items-center justify-center">
+              <div className="text-center p-8 bg-white rounded-lg shadow-lg">
+                <h2 className="text-xl font-bold text-red-600 mb-2">Access Denied</h2>
+                <p className="text-gray-700">You need access_baristaandkitchen permission to open this window.</p>
+              </div>
+            </div>
+          );
+        }
+
+        return (
+          <div className="flex-1 flex items-center justify-center">
+            <div className="text-center p-8 bg-white rounded-lg shadow-lg">
+              <h2 className="text-xl font-bold text-blue-600 mb-2">Barista & Kitchen Window</h2>
+              <p className="text-gray-700">A new window has been opened. You can close this view.</p>
+            </div>
+          </div>
+        );
 
       default:
         return (

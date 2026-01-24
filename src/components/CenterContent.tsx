@@ -14,6 +14,8 @@ import { offlineSyncService } from '@/lib/offlineSync';
 import { getApiUrl } from '@/lib/api';
 import { useAuth } from '@/hooks/useAuth';
 import { generateUUID } from '@/lib/uuid';
+import { hasPermission } from '@/lib/permissions';
+import { isSuperAdmin } from '@/lib/auth';
 
 interface BundleItem {
   id: number;
@@ -139,6 +141,21 @@ function ProductCardImage({
     );
   }
 
+  // Next.js Image doesn't support custom protocols like pos-image://
+  // Use regular <img> for pos-image:// URLs, Next.js Image for others
+  if (imageUrl.startsWith('pos-image://')) {
+    return (
+      <img
+        src={imageUrl}
+        alt={productName}
+        className="object-contain rounded-lg w-full h-full"
+        onError={() => {
+          setHasError(true);
+        }}
+      />
+    );
+  }
+
   return (
     <Image
       src={imageUrl}
@@ -147,7 +164,9 @@ function ProductCardImage({
       sizes="(max-width: 768px) 45vw, 200px"
       className="object-contain rounded-lg"
       unoptimized
-      onError={() => setHasError(true)}
+      onError={() => {
+        setHasError(true);
+      }}
     />
   );
 }
@@ -177,11 +196,21 @@ interface CenterContentProps {
 
 export default function CenterContent({ products, cartItems, setCartItems, transactionType, isLoadingProducts = false, isOnline = false, selectedOnlinePlatform = null, searchQuery = '', setSearchQuery, loadedTransactionInfo = null, onReloadTransaction, onClearLoadedTransaction, onUnsavedChangesChange }: CenterContentProps) {
   const { user } = useAuth();
-  const businessId = user?.selectedBusinessId ?? 14;
+  const canAccessBayarButton = isSuperAdmin(user) || hasPermission(user, 'access_kasir_bayar_button');
   const [showCustomizationModal, setShowCustomizationModal] = useState(false);
   const [showCustomNoteModal, setShowCustomNoteModal] = useState(false);
   const [showEditModal, setShowEditModal] = useState(false);
   const [showBundleModal, setShowBundleModal] = useState(false);
+  
+  const businessId = user?.selectedBusinessId;
+  
+  if (!businessId) {
+    return (
+      <div className="p-4 bg-red-50 border border-red-200 rounded-lg">
+        <p className="text-red-700">No business selected. Please log in and select a business.</p>
+      </div>
+    );
+  }
   const [selectedProduct, setSelectedProduct] = useState<Product | null>(null);
   const [selectedCartItem, setSelectedCartItem] = useState<CartItem | null>(null);
   const [copiedUuid, setCopiedUuid] = useState<string | null>(null);
@@ -633,7 +662,13 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
     // Clear cart immediately after payment completion (receipt printed)
     setCartItems([]);
     sendCartUpdate([]);
-    
+
+    // Reset cart to new state: clear customer name and selected waiter
+    setCustomerName('');
+    setSelectedWaiterId(null);
+    setSelectedWaiterName(null);
+    setSelectedWaiterColor(null);
+
     // Clear loaded transaction info if in "lihat" mode
     // This removes the yellow "opening" indicator
     if (loadedTransactionInfo && onClearLoadedTransaction) {
@@ -1367,9 +1402,15 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
             </button>
             <button
               onClick={() => setShowPaymentModal(true)}
-              disabled={cartItems.length === 0 || hasUnsavedChanges}
+              disabled={cartItems.length === 0 || hasUnsavedChanges || !canAccessBayarButton}
               className="flex-1 bg-green-500 hover:bg-green-600 disabled:bg-gray-400 disabled:cursor-not-allowed text-white py-1.5 px-3 rounded-lg transition-colors text-sm"
-              title={hasUnsavedChanges ? 'Simpan perubahan terlebih dahulu sebelum melakukan pembayaran' : 'Bayar'}
+              title={
+                !canAccessBayarButton 
+                  ? 'Anda tidak memiliki izin untuk mengakses tombol Bayar' 
+                  : hasUnsavedChanges 
+                    ? 'Simpan perubahan terlebih dahulu sebelum melakukan pembayaran' 
+                    : 'Bayar'
+              }
             >
               Bayar
             </button>
@@ -1719,10 +1760,13 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
           console.log('🔍 [CENTER CONTENT] Transaction saved successfully with waiterId:', selectedWaiterId);
           // Only clear cart for new orders, not for "lihat" mode
           if (!loadedTransactionInfo) {
-            // New order: clear cart after successful save
+            // New order: clear cart, customer name, and waiter after successful save
             setCartItems([]);
             sendCartUpdate([]);
-            // Note: We keep selectedWaiterId so it persists for the next order
+            setCustomerName('');
+            setSelectedWaiterId(null);
+            setSelectedWaiterName(null);
+            setSelectedWaiterColor(null);
           } else {
             // "Lihat" mode: reload transaction to get updated items with correct transactionItemId
             // After reload, all items will be locked, so unsaved changes flag will be cleared automatically

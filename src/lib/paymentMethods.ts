@@ -51,7 +51,10 @@ async function ensurePaymentMethodExists(paymentMethodCode: string, businessId?:
         value = now;
         break;
       case 'business_id':
-        value = businessId ?? (referenceRow[name] as number | undefined) ?? 14;
+        value = (businessId ?? (referenceRow[name] as number | undefined)) ?? null;
+        if (value === undefined || value === null) {
+          throw new Error('Business ID is required for payment method');
+        }
         break;
       case 'organization_id':
         value = (referenceRow[name] as number | undefined) ?? businessId ?? null;
