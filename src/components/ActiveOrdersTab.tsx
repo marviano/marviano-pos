@@ -1,9 +1,10 @@
 'use client';
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { Edit, List, LayoutGrid, Printer, Scissors } from 'lucide-react';
 import TableLayout from './TableLayout';
 import SplitBillModal from './SplitBillModal';
+import PrintBillModal, { type PrintBillModalData } from './PrintBillModal';
 import { useAuth } from '@/hooks/useAuth';
 import { hasPermission } from '@/lib/permissions';
 import { isSuperAdmin } from '@/lib/auth';
@@ -19,7 +20,13 @@ interface PendingTransaction {
   table_number?: string;
   room_name?: string;
   waiter_name?: string | null;
+  waiter_color?: string | null;
+  waiter_id?: number | null;
+  /** All distinct waiter names (transaction + item-level) for tooltip */
+  waiter_names_all?: string[];
+  pickup_method: 'dine-in' | 'take-away';
 }
+
 
 interface ActiveOrdersTabProps {
   businessId: number;
@@ -37,6 +44,18 @@ export default function ActiveOrdersTab({ businessId, isOpen, onLoadTransaction 
   const [viewMode, setViewMode] = useState<'list' | 'layout'>('list');
   const [printingBill, setPrintingBill] = useState<string | null>(null);
   const [showSplitBillModal, setShowSplitBillModal] = useState(false);
+  const [showPrintBillModal, setShowPrintBillModal] = useState(false);
+  const [printBillModalData, setPrintBillModalData] = useState<PrintBillModalData | null>(null);
+  const [openWaiterPopoverFor, setOpenWaiterPopoverFor] = useState<string | null>(null);
+  const waiterPopoverRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (openWaiterPopoverFor === null) return;
+    const close = (e: MouseEvent) => {
+      if (waiterPopoverRef.current && !waiterPopoverRef.current.contains(e.target as Node)) setOpenWaiterPopoverFor(null);
+    };
+    document.addEventListener('mousedown', close);
+    return () => document.removeEventListener('mousedown', close);
+  }, [openWaiterPopoverFor]);
   const { user } = useAuth();
   const canAccessSplitBillButton = isSuperAdmin(user) || hasPermission(user, 'access_kasir_splitbillpindahmeja_button');
 
@@ -60,16 +79,18 @@ export default function ActiveOrdersTab({ businessId, isOpen, onLoadTransaction 
       const tablesMap = new Map<number, { table_number: string; room_id: number }>();
       const roomsMap = new Map<number, string>();
       const employeesMap = new Map<number, string>();
+      const employeesColorMap = new Map<number, string | null>();
       
-      // Fetch employees to get waiter names
+      // Fetch employees to get waiter names and colors
       if (electronAPI.localDbGetEmployees) {
         try {
           const allEmployees = await electronAPI.localDbGetEmployees();
           const employeesArray = Array.isArray(allEmployees) ? allEmployees : [];
-          employeesArray.forEach((emp: { id?: number | string; nama_karyawan?: string }) => {
+          employeesArray.forEach((emp: { id?: number | string; nama_karyawan?: string; color?: string | null }) => {
             const empId = typeof emp.id === 'number' ? emp.id : (typeof emp.id === 'string' ? parseInt(emp.id, 10) : null);
-            if (empId && typeof emp.nama_karyawan === 'string') {
-              employeesMap.set(empId, emp.nama_karyawan);
+            if (empId) {
+              if (typeof emp.nama_karyawan === 'string') employeesMap.set(empId, emp.nama_karyawan);
+              employeesColorMap.set(empId, typeof emp.color === 'string' && emp.color ? emp.color : null);
             }
           });
           console.log('🔍 [ACTIVE ORDERS] Employees loaded:', {
@@ -123,6 +144,8 @@ export default function ActiveOrdersTab({ businessId, isOpen, onLoadTransaction 
             total_amount?: number;
             final_amount?: number;
             created_at?: string;
+            pickup_method?: string;
+            payment_method?: string;
           };
           
           // Only process pending transactions
@@ -163,11 +186,12 @@ export default function ActiveOrdersTab({ businessId, isOpen, onLoadTransaction 
             ? `${tableNumber}/${roomName}`
             : 'Take-away';
 
-          // Get waiter name
+          // Get waiter name and color
           const waiterId = typeof transaction.waiter_id === 'number' 
             ? transaction.waiter_id 
             : (typeof transaction.waiter_id === 'string' ? parseInt(transaction.waiter_id, 10) : null);
           const waiterName = waiterId && employeesMap.has(waiterId) ? employeesMap.get(waiterId)! : null;
+          const waiterColor = waiterId ? (employeesColorMap.get(waiterId) ?? null) : null;
           console.log('🔍 [ACTIVE ORDERS] Transaction waiter lookup:', {
             transactionId: txId,
             waiter_id_from_db: transaction.waiter_id,
@@ -176,6 +200,15 @@ export default function ActiveOrdersTab({ businessId, isOpen, onLoadTransaction 
             employeesMap_has_waiterId: waiterId ? employeesMap.has(waiterId) : false,
             waiterName: waiterName
           });
+
+          // Pickup method: use stored value, or default take-away for platform orders (gofood/grabfood/shopeefood/qpon/tiktok)
+          const platformPaymentMethods = ['gofood', 'grabfood', 'shopeefood', 'qpon', 'tiktok'];
+          const pm = typeof transaction.pickup_method === 'string' ? transaction.pickup_method : null;
+          const paymentMethod = typeof transaction.payment_method === 'string' ? (transaction.payment_method as string).toLowerCase() : '';
+          const pickupMethod: 'dine-in' | 'take-away' =
+            pm === 'take-away' || pm === 'dine-in' ? pm
+            : platformPaymentMethods.includes(paymentMethod) ? 'take-away'
+            : 'dine-in';
 
           pendingTransactionsWithItems.push({
             id: txId,
@@ -188,7 +221,30 @@ export default function ActiveOrdersTab({ businessId, isOpen, onLoadTransaction 
             table_number: tableRoomDisplay,
             room_name: roomName || undefined,
             waiter_name: waiterName,
+            waiter_color: waiterColor,
+            waiter_id: waiterId ?? null,
+            pickup_method: pickupMethod,
           });
+        }
+      }
+
+      // Fetch distinct item-level waiter IDs per transaction and enrich waiter display (primary + tooltip)
+      if (pendingTransactionsWithItems.length > 0 && electronAPI.localDbGetDistinctItemWaiterIdsByTransaction) {
+        try {
+          const txIds = pendingTransactionsWithItems.map((t) => t.uuid_id);
+          const itemWaiterIdsByTx = await electronAPI.localDbGetDistinctItemWaiterIdsByTransaction(txIds);
+          for (const t of pendingTransactionsWithItems) {
+            const itemWaiterIds = itemWaiterIdsByTx[t.uuid_id] || [];
+            const allWaiterIds = [...new Set([t.waiter_id, ...itemWaiterIds].filter((id): id is number => id != null))];
+            const primaryId = t.waiter_id ?? allWaiterIds[0];
+            if (allWaiterIds.length > 0) {
+              t.waiter_name = primaryId && employeesMap.has(primaryId) ? employeesMap.get(primaryId)! : (t.waiter_name ?? null);
+              t.waiter_color = primaryId ? (employeesColorMap.get(primaryId) ?? t.waiter_color) : t.waiter_color;
+            }
+            t.waiter_names_all = allWaiterIds.map((id) => employeesMap.get(id)).filter((n): n is string => Boolean(n));
+          }
+        } catch (e) {
+          console.warn('Failed to fetch item waiter IDs by transaction:', e);
         }
       }
 
@@ -246,16 +302,35 @@ export default function ActiveOrdersTab({ businessId, isOpen, onLoadTransaction 
     const diffMs = currentTime.getTime() - created.getTime();
 
     const totalSeconds = Math.floor(diffMs / 1000);
-    const minutes = Math.floor(totalSeconds / 60);
+    const totalMinutes = Math.floor(totalSeconds / 60);
     const seconds = totalSeconds % 60;
 
-    return `${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
+    if (totalMinutes >= 60) {
+      const hours = Math.floor(totalMinutes / 60);
+      const mins = totalMinutes % 60;
+      const hr = hours === 1 ? 'hr' : 'hrs';
+      const min = mins === 1 ? 'min' : 'mins';
+      return `${hours} ${hr} ${mins} ${min}`;
+    }
+    return `${totalMinutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
   };
 
   const formatPrice = (price: number): string => {
     // Round to integer and format with Indonesian locale (dots as thousand separators, no decimals)
     const roundedPrice = Math.round(price);
     return `Rp ${roundedPrice.toLocaleString('id-ID', { minimumFractionDigits: 0, maximumFractionDigits: 0 })}`;
+  };
+
+  // Format creation time like daftar transaksi (Waktu)
+  const formatCreatedAt = (dateString: string): string => {
+    const date = new Date(dateString);
+    return date.toLocaleString('id-ID', {
+      day: '2-digit',
+      month: '2-digit',
+      year: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+    });
   };
 
   const sumCustomizationPrice = (customizations?: Array<{ selected_options?: Array<{ price_adjustment?: number }> }>) => {
@@ -401,13 +476,12 @@ export default function ActiveOrdersTab({ businessId, isOpen, onLoadTransaction 
         const itemId = typeof item.id === 'number' ? item.id : (typeof item.id === 'string' ? parseInt(item.id, 10) : null);
         const itemCustomizations = itemId ? (customizationsMap.get(itemId) || []) : [];
         const itemQuantity = typeof item.quantity === 'number' ? item.quantity : (typeof item.quantity === 'string' ? parseInt(item.quantity, 10) : 1);
-        const itemCustomNote = typeof item.custom_note === 'string' ? item.custom_note : undefined;
 
         // Get base price
         const basePrice = typeof product.harga_jual === 'number' ? product.harga_jual : 0;
         const itemPrice = basePrice + sumCustomizationPrice(itemCustomizations);
 
-        // Format item name with customizations
+        // Format item name with customizations (exclude custom note on bill)
         let itemName = typeof product.nama === 'string' ? product.nama : '';
         if (itemCustomizations.length > 0) {
           const customizationText = itemCustomizations.map(c =>
@@ -415,13 +489,7 @@ export default function ActiveOrdersTab({ businessId, isOpen, onLoadTransaction 
           ).join(', ');
           itemName = `${itemName} (${customizationText})`;
         }
-        if (itemCustomNote) {
-          if (itemName.includes('(')) {
-            itemName = `${itemName}, ${itemCustomNote})`;
-          } else {
-            itemName = `${itemName} (${itemCustomNote})`;
-          }
-        }
+        // Do not append itemCustomNote to bill — customization note not shown on printed bill
 
         // Handle bundle selections if any
         const bundleSelectionsJson = typeof item.bundle_selections_json === 'string' ? item.bundle_selections_json : undefined;
@@ -456,9 +524,7 @@ export default function ActiveOrdersTab({ businessId, isOpen, onLoadTransaction 
                       }
                     });
                   }
-                  if (sp.customNote && sp.customNote.trim() !== '') {
-                    customizationDetails.push(sp.customNote.trim());
-                  }
+                  // Exclude custom note from bill — customization note not shown on printed bill
 
                   let subItemName = `  └ ${sp.product?.nama || ''}${selectionQty > 1 ? ` (×${selectionQty})` : ''}`;
                   if (customizationDetails.length > 0) {
@@ -518,30 +584,23 @@ export default function ActiveOrdersTab({ businessId, isOpen, onLoadTransaction 
         }
       }
 
-      // Prepare print data for bill (without payment fields)
-      const printData = {
-        type: 'transaction',
-        printerType: 'receiptPrinter',
-        printerName: '',
-        business_id: businessId,
-        items: receiptItems,
-        total: total,
-        date: typeof transaction.created_at === 'string' ? transaction.created_at : new Date().toISOString(),
-        tableNumber: tableNumber,
+      const modalData: PrintBillModalData = {
+        transactionId,
+        transaction,
+        receiptItems,
+        total,
+        tableNumber,
         cashier: cashierName,
+        date: typeof transaction.created_at === 'string' ? transaction.created_at : new Date().toISOString(),
         transactionType: typeof transaction.transaction_type === 'string' ? transaction.transaction_type : 'dine-in',
         pickupMethod: typeof transaction.pickup_method === 'string' ? transaction.pickup_method : 'dine-in',
-        isBill: true, // Flag to indicate this is a bill, not a receipt
+        businessId,
       };
-
-      // Print the bill
-      const printResult = await electronAPI.printReceipt?.(printData);
-      if (printResult && typeof printResult === 'object' && 'success' in printResult && !printResult.success) {
-        alert(`Gagal mencetak bill: ${(printResult as { error?: string }).error || 'Unknown error'}`);
-      }
+      setPrintBillModalData(modalData);
+      setShowPrintBillModal(true);
     } catch (error) {
-      console.error('Error printing bill:', error);
-      alert('Terjadi kesalahan saat mencetak bill');
+      console.error('Error preparing bill:', error);
+      alert('Terjadi kesalahan saat menyiapkan bill');
     } finally {
       setPrintingBill(null);
     }
@@ -605,7 +664,7 @@ export default function ActiveOrdersTab({ businessId, isOpen, onLoadTransaction 
           <TableLayout onLoadTransaction={onLoadTransaction} />
         </div>
       ) : (
-        <div className="flex-1 overflow-auto p-6">
+        <div className="flex-1 overflow-auto pt-0 pb-6 px-0">
           {loading && pendingTransactions.length === 0 && (
             <div className="flex items-center justify-center h-full">
               <div className="text-gray-600">Memuat data...</div>
@@ -629,92 +688,137 @@ export default function ActiveOrdersTab({ businessId, isOpen, onLoadTransaction 
 
           {pendingTransactions.length > 0 && (
             <div className="overflow-x-auto">
-              <table className="min-w-full divide-y divide-gray-200">
-                <thead className="bg-gray-50">
-                  <tr>
-                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                      Table/Room
-                    </th>
-                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                      Waiter
-                    </th>
-                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                      Nama Pelanggan
-                    </th>
-                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                      Total
-                    </th>
-                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                      Timer
-                    </th>
-                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                      Transaction ID
-                    </th>
-                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                      Action
-                    </th>
-                  </tr>
-                </thead>
-                <tbody className="bg-white divide-y divide-gray-200">
-                  {pendingTransactions.map((transaction) => (
-                    <tr key={transaction.id} className="hover:bg-gray-50">
-                      <td className="px-6 py-4 whitespace-nowrap">
-                        <div className="text-sm font-medium text-gray-900">
-                          {transaction.table_number}
-                        </div>
-                      </td>
-                      <td className="px-6 py-4 whitespace-nowrap">
-                        <div className="text-sm text-gray-900">
-                          {transaction.waiter_name || '-'}
-                        </div>
-                      </td>
-                      <td className="px-6 py-4 whitespace-nowrap">
-                        <div className="text-sm text-gray-900">
-                          {transaction.customer_name || '-'}
-                        </div>
-                      </td>
-                      <td className="px-6 py-4 whitespace-nowrap">
-                        <div className="text-sm font-medium text-gray-900">
-                          {formatPrice(transaction.final_amount)}
-                        </div>
-                      </td>
-                      <td className="px-6 py-4 whitespace-nowrap">
-                        <div className="text-sm font-mono text-gray-900">
-                          {formatTimer(transaction.created_at)}
-                        </div>
-                      </td>
-                      <td className="px-6 py-4 whitespace-nowrap">
-                        <div className="text-xs font-mono text-gray-600 bg-gray-50 px-2 py-1 rounded border border-gray-200">
-                          {transaction.uuid_id}
-                        </div>
-                      </td>
-                      <td className="px-6 py-4 whitespace-nowrap">
-                        <div className="flex gap-2">
-                          <button
-                            className="inline-flex items-center px-3 py-2 border border-gray-300 shadow-sm text-sm leading-4 font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500"
-                            onClick={() => {
-                              if (onLoadTransaction) {
-                                onLoadTransaction(transaction.uuid_id);
-                              }
-                            }}
-                          >
-                            <Edit className="w-4 h-4 mr-2" />
-                            Lihat
-                          </button>
-                          <button
-                            className="inline-flex items-center px-3 py-2 border border-gray-300 shadow-sm text-sm leading-4 font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 disabled:opacity-50 disabled:cursor-not-allowed"
-                            onClick={() => handlePrintBill(transaction.uuid_id)}
-                            disabled={printingBill === transaction.uuid_id}
-                          >
-                            <Printer className="w-4 h-4 mr-2" />
-                            {printingBill === transaction.uuid_id ? 'Mencetak...' : 'Print Bill'}
-                          </button>
-                        </div>
-                      </td>
+              <div className="bg-white shadow-sm border border-gray-200 overflow-hidden">
+                <table className="w-full text-sm text-left">
+                  <thead className="bg-gray-50 text-gray-900 font-semibold border-b border-gray-200 sticky top-0 z-10">
+                    <tr>
+                      <th className="pl-3 pr-2 py-3 text-[10px] font-medium text-gray-500 uppercase tracking-wider">
+                        Table/Room
+                      </th>
+                      <th className="px-2 py-3 text-[10px] font-medium text-gray-500 uppercase tracking-wider">
+                        Take Away / Dine In
+                      </th>
+                      <th className="px-2 py-3 text-[10px] font-medium text-gray-500 uppercase tracking-wider">
+                        Waiter
+                      </th>
+                      <th className="px-2 py-3 text-[10px] font-medium text-gray-500 uppercase tracking-wider">
+                        Nama Pelanggan
+                      </th>
+                      <th className="px-2 py-3 text-[10px] font-medium text-gray-500 uppercase tracking-wider">
+                        Total
+                      </th>
+                      <th className="px-2 py-3 text-[10px] font-medium text-gray-500 uppercase tracking-wider">
+                        Waktu Mulai
+                      </th>
+                      <th className="px-2 py-3 text-[10px] font-medium text-gray-500 uppercase tracking-wider">
+                        Timer
+                      </th>
+                      <th className="px-2 py-3 text-[10px] font-medium text-gray-500 uppercase tracking-wider">
+                        Transaction ID
+                      </th>
+                      <th className="px-2 py-3 text-[10px] font-medium text-gray-500 uppercase tracking-wider">
+                        Action
+                      </th>
                     </tr>
-                  ))}
-                </tbody>
-              </table>
+                  </thead>
+                  <tbody className="divide-y divide-gray-100">
+                    {pendingTransactions.map((transaction) => {
+                      const borderColor = transaction.waiter_color || undefined;
+                      return (
+                      <tr
+                        key={transaction.id}
+                        className="hover:bg-blue-50 transition-colors group"
+                        style={borderColor ? { boxShadow: `inset 10px 0 0 0 ${borderColor}` } : undefined}
+                      >
+                        <td className="pl-3 pr-2 py-3 whitespace-nowrap">
+                          <span className="text-xs font-medium text-gray-900">
+                            {transaction.table_number}
+                          </span>
+                        </td>
+                        <td className="px-2 py-3 whitespace-nowrap">
+                          <span className={`inline-flex px-1.5 py-0.5 text-xs font-semibold rounded-full ${transaction.pickup_method === 'take-away' ? 'bg-green-100 text-green-800' : 'bg-blue-100 text-blue-800'}`}>
+                            {transaction.pickup_method === 'take-away' ? 'Take Away' : 'Dine In'}
+                          </span>
+                        </td>
+                        <td className="px-2 py-3 whitespace-nowrap">
+                          <div
+                            className="relative inline-block"
+                            ref={openWaiterPopoverFor === transaction.uuid_id ? waiterPopoverRef : undefined}
+                          >
+                            <button
+                              type="button"
+                              onClick={(e) => { e.stopPropagation(); setOpenWaiterPopoverFor((id) => (id === transaction.uuid_id ? null : transaction.uuid_id)); }}
+                              className="text-left text-xs text-gray-900 hover:underline cursor-pointer rounded focus:outline-none focus:ring-2 focus:ring-blue-400"
+                              title={transaction.waiter_names_all && transaction.waiter_names_all.length > 1 ? transaction.waiter_names_all.join(', ') : undefined}
+                            >
+                              {transaction.waiter_name || '-'}
+                              {transaction.waiter_names_all && transaction.waiter_names_all.length > 1 && (
+                                <span className="text-gray-500 ml-0.5">(+{transaction.waiter_names_all.length - 1})</span>
+                              )}
+                            </button>
+                            {openWaiterPopoverFor === transaction.uuid_id && transaction.waiter_names_all && transaction.waiter_names_all.length > 0 && (
+                              <div className="absolute left-0 top-full mt-1 z-50 min-w-[120px] rounded-lg border border-gray-200 bg-white py-2 shadow-lg">
+                                <div className="px-3 py-1 text-xs font-semibold text-gray-500 uppercase">Waiters</div>
+                                {transaction.waiter_names_all.map((name, i) => (
+                                  <div key={i} className="px-3 py-1.5 text-sm text-gray-900">{name}</div>
+                                ))}
+                              </div>
+                            )}
+                          </div>
+                        </td>
+                        <td className="px-2 py-3 whitespace-nowrap">
+                          <span className="text-xs text-gray-900 truncate block max-w-[120px]" title={transaction.customer_name || '-'}>
+                            {transaction.customer_name || '-'}
+                          </span>
+                        </td>
+                        <td className="px-2 py-3 whitespace-nowrap">
+                          <span className="text-xs font-medium text-gray-900">
+                            {formatPrice(transaction.final_amount)}
+                          </span>
+                        </td>
+                        <td className="px-2 py-3 whitespace-nowrap">
+                          <span className="text-[10px] text-gray-900">
+                            {formatCreatedAt(transaction.created_at)}
+                          </span>
+                        </td>
+                        <td className="px-2 py-3 whitespace-nowrap">
+                          <span className="text-xs font-mono text-gray-900">
+                            {formatTimer(transaction.created_at)}
+                          </span>
+                        </td>
+                        <td className="px-2 py-3 whitespace-nowrap">
+                          <span className="text-[10px] text-gray-600 font-mono truncate block max-w-[140px]" title={transaction.uuid_id}>
+                            {transaction.uuid_id}
+                          </span>
+                        </td>
+                        <td className="px-2 py-3 whitespace-nowrap">
+                          <div className="flex gap-1.5">
+                            <button
+                              className="inline-flex items-center px-2 py-1.5 border border-gray-300 shadow-sm text-xs leading-4 font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500"
+                              onClick={() => {
+                                if (onLoadTransaction) {
+                                  onLoadTransaction(transaction.uuid_id);
+                                }
+                              }}
+                            >
+                              <Edit className="w-3.5 h-3.5 mr-1.5" />
+                              Lihat
+                            </button>
+                            <button
+                              className="inline-flex items-center px-2 py-1.5 border border-gray-300 shadow-sm text-xs leading-4 font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 disabled:opacity-50 disabled:cursor-not-allowed"
+                              onClick={() => handlePrintBill(transaction.uuid_id)}
+                              disabled={printingBill === transaction.uuid_id}
+                            >
+                              <Printer className="w-3.5 h-3.5 mr-1.5" />
+                              {printingBill === transaction.uuid_id ? 'Mencetak...' : 'Print Bill'}
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
+                    );})}
+                  </tbody>
+                </table>
+              </div>
             </div>
           )}
         </div>
@@ -726,6 +830,17 @@ export default function ActiveOrdersTab({ businessId, isOpen, onLoadTransaction 
         onClose={() => setShowSplitBillModal(false)}
         businessId={businessId}
         onRefresh={fetchPendingTransactions}
+      />
+
+      {/* Print Bill Modal */}
+      <PrintBillModal
+        isOpen={showPrintBillModal}
+        onClose={() => {
+          setShowPrintBillModal(false);
+          setPrintBillModalData(null);
+        }}
+        data={printBillModalData}
+        onPrinted={fetchPendingTransactions}
       />
     </div>
   );

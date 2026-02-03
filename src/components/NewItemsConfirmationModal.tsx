@@ -29,6 +29,8 @@ interface NewItemsConfirmationModalProps {
   newItems: CartItem[];
   tableName?: string | null;
   roomName?: string | null;
+  /** When true, disable confirm button to prevent double-submit (duplicate items on barista/kitchen). */
+  isSaving?: boolean;
 }
 
 export default function NewItemsConfirmationModal({
@@ -38,6 +40,7 @@ export default function NewItemsConfirmationModal({
   newItems,
   tableName,
   roomName,
+  isSaving = false,
 }: NewItemsConfirmationModalProps) {
   if (!isOpen) return null;
 
@@ -118,15 +121,17 @@ export default function NewItemsConfirmationModal({
         <div className="flex justify-end gap-3 p-4 border-t bg-gray-50">
           <button
             onClick={onClose}
-            className="px-4 py-2 text-gray-700 bg-white border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors"
+            disabled={isSaving}
+            className="px-4 py-2 text-gray-700 bg-white border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
           >
             Batal
           </button>
           <button
             onClick={onConfirm}
-            className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors"
+            disabled={isSaving}
+            className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
           >
-            Simpan
+            {isSaving ? 'Menyimpan...' : 'Simpan'}
           </button>
         </div>
       </div>

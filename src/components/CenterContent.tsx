@@ -1,7 +1,7 @@
 'use client';
 
 import { ShoppingCart, LayoutGrid, Search, X } from 'lucide-react';
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect, useMemo, useRef } from 'react';
 import Image from 'next/image';
 import ProductCustomizationModal from './ProductCustomizationModal';
 import CustomNoteModal from './CustomNoteModal';
@@ -85,6 +85,9 @@ interface CartItem {
   transactionItemId?: number; // ID of the transaction_item in database (for logging)
   transactionId?: string; // UUID of the transaction (for logging)
   tableId?: number | null; // Table ID (for logging)
+  /** Waiter who added this line item (for multi-waiter display in cart) */
+  waiterId?: number | null;
+  waiterName?: string | null;
 }
 
 interface Employee {
@@ -175,7 +178,7 @@ interface CenterContentProps {
   products: Product[];
   cartItems: CartItem[];
   setCartItems: (items: CartItem[]) => void;
-  transactionType: 'drinks' | 'bakery';
+  transactionType: 'drinks' | 'bakery' | 'foods';
   isLoadingProducts?: boolean;
   isOnline?: boolean;
   selectedOnlinePlatform?: 'qpon' | 'gofood' | 'grabfood' | 'shopeefood' | 'tiktok' | null;
@@ -186,15 +189,25 @@ interface CenterContentProps {
     tableName: string | null;
     roomName: string | null;
     customerName: string | null;
+    waiterId?: number | null;
     waiterName: string | null;
     waiterColor: string | null;
+    /** All distinct waiter names (transaction + item-level) for header "+N" and popover */
+    waiterNamesAll?: string[];
+    pickupMethod?: 'dine-in' | 'take-away';
+    voucher_discount?: number;
+    voucher_type?: string;
+    voucher_value?: number | null;
+    voucher_label?: string | null;
   } | null;
   onReloadTransaction?: (transactionId: string) => void;
   onClearLoadedTransaction?: () => void;
   onUnsavedChangesChange?: (hasUnsavedChanges: boolean) => void;
+  /** When this value changes (e.g. on New click), reset nama pelanggan and pilih waiter */
+  resetCustomerAndWaiterSignal?: number;
 }
 
-export default function CenterContent({ products, cartItems, setCartItems, transactionType, isLoadingProducts = false, isOnline = false, selectedOnlinePlatform = null, searchQuery = '', setSearchQuery, loadedTransactionInfo = null, onReloadTransaction, onClearLoadedTransaction, onUnsavedChangesChange }: CenterContentProps) {
+export default function CenterContent({ products, cartItems, setCartItems, transactionType, isLoadingProducts = false, isOnline = false, selectedOnlinePlatform = null, searchQuery = '', setSearchQuery, loadedTransactionInfo = null, onReloadTransaction, onClearLoadedTransaction, onUnsavedChangesChange, resetCustomerAndWaiterSignal }: CenterContentProps) {
   const { user } = useAuth();
   const canAccessBayarButton = isSuperAdmin(user) || hasPermission(user, 'access_kasir_bayar_button');
   const [showCustomizationModal, setShowCustomizationModal] = useState(false);
@@ -229,6 +242,19 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
   const [selectedWaiterName, setSelectedWaiterName] = useState<string | null>(null);
   const [selectedWaiterColor, setSelectedWaiterColor] = useState<string | null>(null);
   const [showWaiterModal, setShowWaiterModal] = useState(false);
+  const [showWaiterListPopover, setShowWaiterListPopover] = useState(false);
+  const waiterListPopoverRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!showWaiterListPopover) return;
+    const close = (e: MouseEvent) => {
+      if (waiterListPopoverRef.current && !waiterListPopoverRef.current.contains(e.target as Node)) setShowWaiterListPopover(false);
+    };
+    document.addEventListener('mousedown', close);
+    return () => document.removeEventListener('mousedown', close);
+  }, [showWaiterListPopover]);
+
+  // Take away / Dine in for Simpan Order (synced from loadedTransactionInfo when in lihat mode)
+  const [orderPickupMethod, setOrderPickupMethod] = useState<'dine-in' | 'take-away'>('dine-in');
 
   // Column count state - load from localStorage, default to 5
   const [columnCount, setColumnCount] = useState<number>(() => {
@@ -265,19 +291,40 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
     }
   }, [hasUnsavedChanges, onUnsavedChangesChange]);
 
-  // Populate customer name when transaction is loaded
+  // Populate customer name, waiter, and pickup method when transaction is loaded
   useEffect(() => {
-    if (loadedTransactionInfo?.customerName) {
-      setCustomerName(loadedTransactionInfo.customerName);
-    } else if (!loadedTransactionInfo) {
-      // Clear customer name when no transaction is loaded (e.g., when New button is clicked)
+    if (loadedTransactionInfo) {
+      setCustomerName(loadedTransactionInfo.customerName ?? '');
+      setSelectedWaiterId(loadedTransactionInfo.waiterId ?? null);
+      setSelectedWaiterName(loadedTransactionInfo.waiterName ?? null);
+      setSelectedWaiterColor(loadedTransactionInfo.waiterColor ?? null);
+      setOrderPickupMethod(loadedTransactionInfo.pickupMethod ?? 'dine-in');
+    } else {
       setCustomerName('');
-      // Clear waiter selection when no transaction is loaded
+      setSelectedWaiterId(null);
+      setSelectedWaiterName(null);
+      setSelectedWaiterColor(null);
+      // When no loaded transaction: platform tab -> take-away, offline -> dine-in
+      setOrderPickupMethod(isOnline && selectedOnlinePlatform ? 'take-away' : 'dine-in');
+    }
+  }, [loadedTransactionInfo, isOnline, selectedOnlinePlatform]);
+
+  // When switching to an online platform tab, automatically set pickup to take-away
+  useEffect(() => {
+    if (isOnline && selectedOnlinePlatform) {
+      setOrderPickupMethod('take-away');
+    }
+  }, [isOnline, selectedOnlinePlatform]);
+
+  // When parent triggers "New" (resetCustomerAndWaiterSignal increments), reset nama pelanggan and pilih waiter
+  useEffect(() => {
+    if (resetCustomerAndWaiterSignal !== undefined && resetCustomerAndWaiterSignal > 0) {
+      setCustomerName('');
       setSelectedWaiterId(null);
       setSelectedWaiterName(null);
       setSelectedWaiterColor(null);
     }
-  }, [loadedTransactionInfo]);
+  }, [resetCustomerAndWaiterSignal]);
 
   // Step 2: Access Control - Fetch current user's employee record
   useEffect(() => {
@@ -754,6 +801,7 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
                 const totalPrice = typeof transactionItem.total_price === 'number' ? transactionItem.total_price : (typeof transactionItem.total_price === 'string' ? parseFloat(String(transactionItem.total_price)) : 0);
                 const customNote = typeof transactionItem.custom_note === 'string' ? transactionItem.custom_note : null;
                 const bundleSelectionsJson = typeof transactionItem.bundle_selections_json === 'string' ? transactionItem.bundle_selections_json : (transactionItem.bundle_selections_json ? JSON.stringify(transactionItem.bundle_selections_json) : null);
+                const waiterIdItem = typeof transactionItem.waiter_id === 'number' ? transactionItem.waiter_id : (typeof transactionItem.waiter_id === 'string' ? parseInt(String(transactionItem.waiter_id), 10) : null);
                 
                 // Get created_at - preserve original timestamp
                 const createdAt = transactionItem.created_at ? String(transactionItem.created_at) : new Date().toISOString();
@@ -776,6 +824,7 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
                   custom_note: customNote,
                   bundle_selections_json: bundleSelectionsJson,
                   created_at: createdAt,
+                  waiter_id: waiterIdItem ?? null,
                   production_status: productionStatus,
                   production_started_at: productionStartedAt,
                   production_finished_at: productionFinishedAt,
@@ -868,6 +917,7 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
                 const unitPrice = typeof transactionItem.unit_price === 'number' ? transactionItem.unit_price : (typeof transactionItem.unit_price === 'string' ? parseFloat(String(transactionItem.unit_price)) : 0);
                 const customNote = typeof transactionItem.custom_note === 'string' ? transactionItem.custom_note : null;
                 const bundleSelectionsJson = typeof transactionItem.bundle_selections_json === 'string' ? transactionItem.bundle_selections_json : (transactionItem.bundle_selections_json ? JSON.stringify(transactionItem.bundle_selections_json) : null);
+                const waiterIdItem = typeof transactionItem.waiter_id === 'number' ? transactionItem.waiter_id : (typeof transactionItem.waiter_id === 'string' ? parseInt(String(transactionItem.waiter_id), 10) : null);
                 const createdAt = transactionItem.created_at ? String(transactionItem.created_at) : new Date().toISOString();
                 
                 // Preserve production_status for original record
@@ -891,6 +941,7 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
                   custom_note: customNote,
                   bundle_selections_json: bundleSelectionsJson,
                   created_at: createdAt,
+                  waiter_id: waiterIdItem ?? null,
                   production_status: productionStatus,
                   production_started_at: productionStartedAt,
                   production_finished_at: productionFinishedAt,
@@ -911,6 +962,7 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
                   custom_note: customNote,
                   bundle_selections_json: bundleSelectionsJson,
                   created_at: new Date().toISOString(), // Current timestamp for cancelled record
+                  waiter_id: waiterIdItem ?? null,
                   production_status: 'cancelled',
                   production_started_at: null,
                   production_finished_at: null,
@@ -1030,9 +1082,9 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
   }, 0);
 
   return (
-    <div className="flex-1 bg-gray-50 flex">
-      {/* Left Side - Cart Area */}
-      <div className={`w-[34%] flex flex-col relative ${loadedTransactionInfo ? 'bg-yellow-50' : ''}`} style={{ height: 'calc(100vh - 80px)', maxHeight: 'calc(100vh - 80px)' }}>
+    <div className="flex-1 flex">
+      {/* Left Side - Cart Area — distinct bg to separate from product area (indigo-50 ties to Offline tab; lihat mode keeps yellow) */}
+      <div className={`w-[34%] flex flex-col relative ${loadedTransactionInfo ? 'bg-yellow-50' : 'bg-indigo-50'}`} style={{ height: 'calc(100vh - 80px)', maxHeight: 'calc(100vh - 80px)' }}>
         {/* Opening Transaction Header - Only show in lihat mode */}
         {loadedTransactionInfo && (
           <div className="bg-yellow-100 border-b-2 border-yellow-400 px-4 py-2 flex-shrink-0">
@@ -1085,20 +1137,56 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
                 >
                   {copiedUuid === loadedTransactionInfo.transactionId ? 'Copied!' : 'Copy UUID'}
                 </button>
-                {loadedTransactionInfo.waiterName && (
+                {loadedTransactionInfo.waiterName || (loadedTransactionInfo.waiterNamesAll && loadedTransactionInfo.waiterNamesAll.length > 0) ? (
                   <>
                     <span className="text-yellow-700">|</span>
                     <span className="text-yellow-700">by</span>
-                    {loadedTransactionInfo.waiterColor ? (
-                      <span
-                        className="text-xs font-medium text-white px-2 py-1"
-                        style={{ backgroundColor: loadedTransactionInfo.waiterColor }}
+                    <div className="relative inline-block" ref={waiterListPopoverRef}>
+                      <button
+                        type="button"
+                        onClick={() => setShowWaiterListPopover((v) => !v)}
+                        className="inline-flex items-center gap-0.5 cursor-pointer rounded focus:outline-none focus:ring-2 focus:ring-yellow-500"
+                        title={loadedTransactionInfo.waiterNamesAll && loadedTransactionInfo.waiterNamesAll.length > 1 ? loadedTransactionInfo.waiterNamesAll.join(', ') : undefined}
                       >
-                        {loadedTransactionInfo.waiterName}
-                      </span>
-                    ) : (
-                      <span className="font-medium">{loadedTransactionInfo.waiterName}</span>
-                    )}
+                        {loadedTransactionInfo.waiterColor ? (
+                          <span
+                            className="text-xs font-medium text-white px-2 py-1"
+                            style={{ backgroundColor: loadedTransactionInfo.waiterColor }}
+                          >
+                            {loadedTransactionInfo.waiterName ?? loadedTransactionInfo.waiterNamesAll?.[0]}
+                            {loadedTransactionInfo.waiterNamesAll && loadedTransactionInfo.waiterNamesAll.length > 1 && (
+                              <span className="text-white/90 ml-0.5">(+{loadedTransactionInfo.waiterNamesAll.length - 1})</span>
+                            )}
+                          </span>
+                        ) : (
+                          <span className="font-medium">
+                            {loadedTransactionInfo.waiterName ?? loadedTransactionInfo.waiterNamesAll?.[0]}
+                            {loadedTransactionInfo.waiterNamesAll && loadedTransactionInfo.waiterNamesAll.length > 1 && (
+                              <span className="text-gray-500 ml-0.5">(+{loadedTransactionInfo.waiterNamesAll.length - 1})</span>
+                            )}
+                          </span>
+                        )}
+                      </button>
+                      {showWaiterListPopover && loadedTransactionInfo.waiterNamesAll && loadedTransactionInfo.waiterNamesAll.length > 0 && (
+                        <div className="absolute left-0 top-full mt-1 z-50 min-w-[120px] rounded-lg border border-gray-200 bg-white py-2 shadow-lg">
+                          <div className="px-3 py-1 text-xs font-semibold text-gray-500 uppercase">Waiters</div>
+                          {loadedTransactionInfo.waiterNamesAll.map((name, i) => (
+                            <div key={i} className="px-3 py-1.5 text-sm text-gray-900">{name}</div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  </>
+                ) : (
+                  <>
+                    <span className="text-yellow-700">|</span>
+                    <button
+                      type="button"
+                      onClick={() => setShowWaiterModal(true)}
+                      className="px-2 py-1 text-xs font-medium text-yellow-900 bg-amber-200 hover:bg-amber-300 border border-amber-400 rounded transition-colors"
+                    >
+                      Pilih Waiter
+                    </button>
                   </>
                 )}
                 {(loadedTransactionInfo.tableName || loadedTransactionInfo.roomName || loadedTransactionInfo.customerName) && (
@@ -1120,41 +1208,58 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
         )}
         <div className="flex-1 p-4 flex flex-col overflow-hidden">
 
-        {/* Customer Name and Waiter Selection - Same line, half each */}
+        {/* When viewing existing order: show "Adding items as" waiter so user can set who gets credit for new items */}
+        {loadedTransactionInfo && (
+          <div className="mb-3 flex-shrink-0">
+            <div className="flex items-center gap-2 flex-wrap">
+              <span className="text-sm text-gray-600">Menambah item sebagai:</span>
+              <button
+                type="button"
+                onClick={() => setShowWaiterModal(true)}
+                className={`min-h-8 px-3 py-1.5 transition-all hover:shadow-md cursor-pointer flex items-center justify-center rounded-lg border ${selectedWaiterName ? 'border-gray-300 bg-white' : 'border-amber-400 bg-amber-100'}`}
+                style={selectedWaiterColor ? { borderLeftColor: selectedWaiterColor, borderLeftWidth: '4px' } : undefined}
+                title="Klik untuk memilih waiter yang menambah item"
+              >
+                {selectedWaiterName ? (
+                  <span className="font-medium text-gray-800 text-sm">{selectedWaiterName}</span>
+                ) : (
+                  <span className="text-amber-800 text-sm font-medium">Pilih Waiter</span>
+                )}
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* Customer Name and Waiter Selection - hidden when viewing active order; header already shows waiter and customer */}
         {!loadedTransactionInfo && (
-          <div className="mb-4 flex-shrink-0">
-            <div className="grid grid-cols-2 gap-2">
-              {/* Customer Name Input - Left Half */}
+          <div className="mb-3 flex-shrink-0">
+            <div className="grid grid-cols-2 gap-2 items-stretch">
               <input
                 type="text"
                 value={customerName}
                 onChange={(e) => setCustomerName(e.target.value)}
                 placeholder="Nama pelanggan"
-                className="rounded-lg px-3 py-2 border-2 border-blue-500 text-base text-black placeholder:text-gray-400 focus:outline-none animate-pulse"
+                className="h-8 rounded-lg px-3 border-2 border-blue-500 text-sm text-black placeholder:text-gray-400 focus:outline-none animate-pulse box-border"
                 style={{ 
-                  padding: '1rem', 
                   animation: 'pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite',
-                  fontSize: 'clamp(0.875rem, 2.5vw, 1.125rem)' // Responsive font size: min 14px, scales with viewport, max 18px
+                  fontSize: 'clamp(0.8125rem, 2.2vw, 1rem)'
                 }}
               />
-
-              {/* Waiter Selection - Right Half */}
               <button
+                type="button"
                 onClick={() => setShowWaiterModal(true)}
-                className="w-full rounded-lg transition-all hover:shadow-lg cursor-pointer"
+                className={`h-8 w-full min-h-8 transition-all hover:shadow-lg cursor-pointer flex items-center justify-center overflow-hidden box-border ${selectedWaiterName ? 'rounded-none' : 'rounded-lg'}`}
                 style={{ 
                   backgroundColor: selectedWaiterColor || '#3B82F6',
-                  padding: '1rem'
+                  padding: '0 0.5rem'
                 }}
               >
                 {selectedWaiterName ? (
-                  <div className="bg-white rounded px-3 py-2 text-center">
-                    <span className="font-medium text-gray-800">
-                      {selectedWaiterName}
-                    </span>
-                  </div>
+                  <span className="font-medium text-gray-800 text-sm truncate block bg-white rounded-none px-2 pt-1 border border-black max-w-full" style={{ fontSize: 'clamp(0.8125rem, 2.2vw, 1rem)' }}>
+                    {selectedWaiterName}
+                  </span>
                 ) : (
-                  <span className="text-white">Pilih Waiter</span>
+                  <span className="text-white text-sm" style={{ fontSize: 'clamp(0.8125rem, 2.2vw, 1rem)' }}>Pilih Waiter</span>
                 )}
               </button>
             </div>
@@ -1234,6 +1339,13 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
                             <span className="text-gray-500">Note:</span>
                             <span className="text-gray-700 ml-1 italic">&ldquo;{item.customNote}&rdquo;</span>
                           </div>
+                        </div>
+                      )}
+
+                      {/* Waiter who added this item */}
+                      {item.waiterName && (
+                        <div className="mt-1">
+                          <span className="text-xs text-gray-500">by {item.waiterName}</span>
                         </div>
                       )}
 
@@ -1390,6 +1502,32 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
             </div>
           </div>
 
+          {/* Take Away / Dine In selector - only when offline (Simpan Order flow) */}
+          {!isOnline && (
+            <div className="mt-2">
+              <p className="text-xs text-gray-500 mb-1.5">Untuk Simpan Order:</p>
+              <div className="relative flex rounded-lg border border-gray-200 bg-gray-50 p-0.5">
+                <div
+                  className={`absolute top-0.5 bottom-0.5 left-0.5 w-[calc(50%-0.125rem)] bg-white rounded-md shadow-sm transition-transform duration-200 ease-out ${orderPickupMethod === 'dine-in' ? 'translate-x-0' : 'translate-x-full'}`}
+                />
+                <button
+                  type="button"
+                  onClick={() => setOrderPickupMethod('dine-in')}
+                  className={`relative z-10 flex-1 py-1.5 px-2 rounded-md text-xs font-medium transition-colors ${orderPickupMethod === 'dine-in' ? 'text-blue-700' : 'text-gray-600'}`}
+                >
+                  Dine In
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setOrderPickupMethod('take-away')}
+                  className={`relative z-10 flex-1 py-1.5 px-2 rounded-md text-xs font-medium transition-colors ${orderPickupMethod === 'take-away' ? 'text-green-700' : 'text-gray-600'}`}
+                >
+                  Take Away
+                </button>
+              </div>
+            </div>
+          )}
+
           {/* Action Buttons */}
           <div className="flex space-x-2 mt-3">
             <button
@@ -1419,8 +1557,8 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
         </div>
       </div>
 
-      {/* Right Side - Product Grid */}
-      <div className="w-[66%] p-4 flex flex-col h-full relative">
+      {/* Right Side - Product Grid — white bg contrasts with cart (indigo-50) for clear separation */}
+      <div className="w-[66%] p-4 flex flex-col h-full relative bg-white">
         {/* Column Count Control and Search */}
         <div className="flex items-center justify-between mb-3 flex-shrink-0 gap-4">
           <div className="flex items-center gap-2">
@@ -1575,12 +1713,12 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
                     key={product.id}
                     onClick={() => handleProductClick(product)}
                     disabled={loadingProductId === product.id || isDisabledOnline}
-                    className={`bg-white rounded-lg border border-gray-200 ${gridStyles.cardPadding} hover:shadow-md transition-shadow w-full text-left relative ${loadingProductId === product.id || isDisabledOnline ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'
+                    className={`bg-white rounded-xl border border-gray-200 shadow-md hover:shadow-lg hover:border-gray-300 ${gridStyles.cardPadding} transition-all duration-200 w-full text-left relative ${loadingProductId === product.id || isDisabledOnline ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'
                       }`}
                   >
                     {/* Loading Overlay */}
                     {loadingProductId === product.id && (
-                      <div className="absolute inset-0 bg-white/80 rounded-lg flex items-center justify-center z-10">
+                      <div className="absolute inset-0 bg-white/80 rounded-xl flex items-center justify-center z-10">
                         <div className="animate-spin rounded-full h-6 w-6 border-b-2 border-blue-600"></div>
                       </div>
                     )}
@@ -1678,6 +1816,7 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
         onClose={() => setShowPaymentModal(false)}
         initialCustomerName={customerName}
         loadedTransactionInfo={loadedTransactionInfo}
+        pickupMethod={orderPickupMethod}
         cartItems={cartItems as unknown as Array<{
           id: number;
           product: {
@@ -1708,7 +1847,7 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
           bundleSelections?: BundleSelection[];
         }>}
         onPaymentComplete={handlePaymentComplete}
-        transactionType={transactionType}
+        transactionType={transactionType === 'foods' ? 'drinks' : transactionType}
         isOnline={isOnline}
         selectedOnlinePlatform={selectedOnlinePlatform}
         waiterId={selectedWaiterId}
@@ -1719,6 +1858,7 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
         isOpen={showTableSelectionModal}
         onClose={() => setShowTableSelectionModal(false)}
         customerName={customerName}
+        pickupMethod={orderPickupMethod}
         loadedTransactionInfo={loadedTransactionInfo}
         onItemsLocked={(itemIds) => {
           // Mark items as locked after saving
@@ -1752,9 +1892,16 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
             }>;
           }>;
           customNote?: string;
-          bundleSelections?: unknown[];
+          bundleSelections?: Array<{
+            selectedProducts: Array<{
+              product: { id: number; nama: string };
+              quantity?: number;
+              customizations?: Array<{ selected_options: Array<{ option_name: string }> }>;
+              customNote?: string;
+            }>;
+          }>;
         }>}
-        transactionType={transactionType}
+        transactionType={transactionType === 'foods' ? 'drinks' : transactionType}
         waiterId={selectedWaiterId}
         onSuccess={() => {
           console.log('🔍 [CENTER CONTENT] Transaction saved successfully with waiterId:', selectedWaiterId);
@@ -1892,12 +2039,14 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
       <WaiterSelectionModal
         isOpen={showWaiterModal}
         onClose={() => setShowWaiterModal(false)}
-        onSelect={(employeeId, employeeName, employeeColor) => {
+        onSelect={async (employeeId, employeeName, employeeColor) => {
           console.log('🔍 [CENTER CONTENT] Waiter selected:', { employeeId, employeeName, employeeColor });
           setSelectedWaiterId(employeeId);
           setSelectedWaiterName(employeeName);
           setSelectedWaiterColor(employeeColor);
           setShowWaiterModal(false);
+          // When viewing existing order (lihat), do NOT update transaction-level waiter.
+          // This selection is only for "who is adding new items" (item-level waiter_id).
         }}
         businessId={businessId}
       />

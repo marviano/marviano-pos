@@ -58,6 +58,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // Businesses
   localDbUpsertBusinesses: (rows: UnknownRecord[]) => ipcRenderer.invoke('localdb-upsert-businesses', rows),
   localDbGetBusinesses: () => ipcRenderer.invoke('localdb-get-businesses'),
+  cacheBusinessLogoForLogin: (businessId: number, baseUrl?: string) => ipcRenderer.invoke('cache-business-logo-for-login', businessId, baseUrl),
+  getLoginLogo: () => ipcRenderer.invoke('get-login-logo'),
 
   // Employees Position
   localDbUpsertEmployeesPosition: (rows: UnknownRecord[]) => ipcRenderer.invoke('localdb-upsert-employees-position', rows),
@@ -142,7 +144,16 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // New enhanced offline support tables
   // Transactions
   localDbUpsertTransactions: (rows: UnknownRecord[]) => ipcRenderer.invoke('localdb-upsert-transactions', rows),
+  localDbUpdateTransactionVoucher: (transactionId: string, payload: { voucher_discount: number; voucher_type: string; voucher_value: number | null; voucher_label: string | null; final_amount: number }) =>
+    ipcRenderer.invoke('localdb-update-transaction-voucher', transactionId, payload),
+  localDbUpdateTransactionWaiter: (transactionId: string, waiterId: number | null) =>
+    ipcRenderer.invoke('localdb-update-transaction-waiter', transactionId, waiterId),
+  localDbGetTransactionCheckerPrinted: (transactionUuid: string) => ipcRenderer.invoke('localdb-get-transaction-checker-printed', transactionUuid),
+  localDbSetTransactionCheckerPrinted: (transactionUuid: string) => ipcRenderer.invoke('localdb-set-transaction-checker-printed', transactionUuid),
   localDbGetTransactions: (businessId?: number, limit?: number) => ipcRenderer.invoke('localdb-get-transactions', businessId, limit),
+  localDbUpdateTransactionShift: (transactionUuid: string, shiftUuid: string | null) => ipcRenderer.invoke('localdb-update-transaction-shift', transactionUuid, shiftUuid),
+  localDbDeleteSingleTransactionPreview: (transactionUuid: string) => ipcRenderer.invoke('localdb-delete-single-transaction-preview', transactionUuid),
+  localDbDeleteSingleTransaction: (transactionUuid: string) => ipcRenderer.invoke('localdb-delete-single-transaction', transactionUuid),
   localDbArchiveTransactions: (payload: { businessId: number; from?: string | null; to?: string | null }) =>
     ipcRenderer.invoke('localdb-archive-transactions', payload),
   localDbDeleteTransactions: (payload: { businessId: number; from?: string | null; to?: string | null }) =>
@@ -158,6 +169,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // Transaction Items
   localDbUpsertTransactionItems: (rows: UnknownRecord[]) => ipcRenderer.invoke('localdb-upsert-transaction-items', rows),
   localDbGetTransactionItems: (transactionId?: number | string) => ipcRenderer.invoke('localdb-get-transaction-items', transactionId),
+  localDbGetDistinctItemWaiterIdsByTransaction: (transactionIds: string[]) => ipcRenderer.invoke('localdb-get-distinct-item-waiter-ids-by-transaction', transactionIds),
   localDbGetTransactionItemCustomizationsNormalized: (transactionId: string) => ipcRenderer.invoke('localdb-get-transaction-item-customizations-normalized', transactionId),
   localDbUpsertTransactionItemCustomizations: (rows: UnknownRecord[]) => ipcRenderer.invoke('localdb-upsert-transaction-item-customizations', rows),
   localDbUpsertTransactionItemCustomizationOptions: (rows: UnknownRecord[]) => ipcRenderer.invoke('localdb-upsert-transaction-item-customization-options', rows),
@@ -170,7 +182,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   localDbGetSystemPosBusinesses: () => ipcRenderer.invoke('localdb-get-system-pos-businesses'),
   localDbGetSystemPosAllProducts: (businessId?: number) => ipcRenderer.invoke('localdb-get-system-pos-all-products', businessId),
   localDbGetSystemPosEmployees: () => ipcRenderer.invoke('localdb-get-system-pos-employees'),
-  localDbGetShiftRefunds: (userId: number | null, shiftStart: string, shiftEnd: string | null, businessId?: number, shiftUuid?: string | null) => ipcRenderer.invoke('localdb-get-shift-refunds', userId, shiftStart, shiftEnd, businessId, shiftUuid),
+  localDbGetShiftRefunds: (payload: { userId: number; businessId: number; shiftUuid?: string | null; shiftUuids?: string[]; shiftStart: string; shiftEnd?: string | null }) => ipcRenderer.invoke('localdb-get-shift-refunds', payload),
   localDbUpsertTransactionRefunds: (rows: UnknownRecord[]) => ipcRenderer.invoke('localdb-upsert-transaction-refunds', rows),
   localDbApplyTransactionRefund: (payload: UnknownRecord) => ipcRenderer.invoke('localdb-apply-transaction-refund', payload),
   localDbSplitBill: (payload: { sourceTransactionUuid: string; destinationTransactionUuid: string; itemIds: number[] }) => ipcRenderer.invoke('localdb-split-bill', payload),
@@ -216,7 +228,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   generateRandomSelections: (cycleNumber: number) => ipcRenderer.invoke('generate-random-selections', cycleNumber),
   logPrinter2Print: (transactionId: string, printer2ReceiptNumber: number, mode: 'auto' | 'manual', cycleNumber?: number, globalCounter?: number, isReprint?: boolean, reprintCount?: number) =>
     ipcRenderer.invoke('log-printer2-print', transactionId, printer2ReceiptNumber, mode, cycleNumber, globalCounter, isReprint, reprintCount),
-  getPrinter2AuditLog: (fromDate?: string, toDate?: string, limit?: number) => ipcRenderer.invoke('get-printer2-audit-log', fromDate, toDate, limit),
+  getPrinter2AuditLog: (fromDate?: string, toDate?: string, limit?: number, transactionId?: string) => ipcRenderer.invoke('get-printer2-audit-log', fromDate, toDate, limit, transactionId),
   queueTransactionForSystemPos: (transactionId: string) => ipcRenderer.invoke('queue-transaction-for-system-pos', transactionId),
   getSystemPosQueue: () => ipcRenderer.invoke('get-system-pos-queue'),
   markSystemPosSynced: (transactionId: string) => ipcRenderer.invoke('mark-system-pos-synced', transactionId),
@@ -226,7 +238,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   repopulateSystemPosQueue: (options?: { days?: number }) => ipcRenderer.invoke('repopulate-system-pos-queue', options),
   logPrinter1Print: (transactionId: string, printer1ReceiptNumber: number, globalCounter?: number, isReprint?: boolean, reprintCount?: number) =>
     ipcRenderer.invoke('log-printer1-print', transactionId, printer1ReceiptNumber, globalCounter, isReprint, reprintCount),
-  getPrinter1AuditLog: (fromDate?: string, toDate?: string, limit?: number) => ipcRenderer.invoke('get-printer1-audit-log', fromDate, toDate, limit),
+  getPrinter1AuditLog: (fromDate?: string, toDate?: string, limit?: number, transactionId?: string) => ipcRenderer.invoke('get-printer1-audit-log', fromDate, toDate, limit, transactionId),
+  moveTransactionToPrinter2: (transactionId: string) => ipcRenderer.invoke('move-transaction-to-printer2', transactionId),
 
   // Printer audit sync helpers
   localDbUpsertPrinterAudits: (printerType: 'receipt' | 'receiptize', rows: UnknownRecord[]) => ipcRenderer.invoke('localdb-upsert-printer-audits', { printerType, rows }),
@@ -248,10 +261,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
     modal_awal: number;
   }) => ipcRenderer.invoke('localdb-create-shift', shiftData),
   localDbEndShift: (shiftId: number) => ipcRenderer.invoke('localdb-end-shift', shiftId),
-  localDbGetShiftStatistics: (userId: number | null, shiftStart: string, shiftEnd: string | null, businessId?: number, shiftUuid?: string | null) => ipcRenderer.invoke('localdb-get-shift-statistics', userId, shiftStart, shiftEnd, businessId, shiftUuid),
-  localDbGetPaymentBreakdown: (userId: number | null, shiftStart: string, shiftEnd: string | null, businessId?: number) => ipcRenderer.invoke('localdb-get-payment-breakdown', userId, shiftStart, shiftEnd, businessId),
-  localDbGetCategory2Breakdown: (userId: number | null, shiftStart: string, shiftEnd: string | null, businessId?: number) => ipcRenderer.invoke('localdb-get-category2-breakdown', userId, shiftStart, shiftEnd, businessId),
-  localDbGetCashSummary: (userId: number | null, shiftStart: string, shiftEnd: string | null, businessId?: number, shiftUuid?: string | null) => ipcRenderer.invoke('localdb-get-cash-summary', userId, shiftStart, shiftEnd, businessId, shiftUuid),
+  localDbGetShiftStatistics: (userId: number | null, shiftStart: string, shiftEnd: string | null, businessId?: number, shiftUuid?: string | null, shiftUuids?: string[]) => ipcRenderer.invoke('localdb-get-shift-statistics', userId, shiftStart, shiftEnd, businessId, shiftUuid, shiftUuids),
+  localDbGetVoucherBreakdown: (userId: number | null, shiftStart: string, shiftEnd: string | null, businessId?: number, shiftUuid?: string | null, shiftUuids?: string[]) => ipcRenderer.invoke('localdb-get-voucher-breakdown', userId, shiftStart, shiftEnd, businessId, shiftUuid, shiftUuids),
+  localDbGetPaymentBreakdown: (userId: number | null, shiftStart: string, shiftEnd: string | null, businessId?: number, shiftUuid?: string | null, shiftUuids?: string[]) => ipcRenderer.invoke('localdb-get-payment-breakdown', userId, shiftStart, shiftEnd, businessId, shiftUuid ?? null, shiftUuids),
+  localDbGetCategory1Breakdown: (userId: number | null, shiftStart: string, shiftEnd: string | null, businessId?: number, shiftUuid?: string | null, shiftUuids?: string[]) => ipcRenderer.invoke('localdb-get-category1-breakdown', userId, shiftStart, shiftEnd, businessId, shiftUuid, shiftUuids),
+  localDbGetCategory2Breakdown: (userId: number | null, shiftStart: string, shiftEnd: string | null, businessId?: number, shiftUuid?: string | null, shiftUuids?: string[]) => ipcRenderer.invoke('localdb-get-category2-breakdown', userId, shiftStart, shiftEnd, businessId, shiftUuid, shiftUuids),
+  localDbGetCashSummary: (userId: number | null, shiftStart: string, shiftEnd: string | null, businessId?: number, shiftUuid?: string | null, shiftUuids?: string[]) => ipcRenderer.invoke('localdb-get-cash-summary', userId, shiftStart, shiftEnd, businessId, shiftUuid, shiftUuids),
   localDbGetShifts: (filters: { businessId?: number; startDate?: string; endDate?: string; userId?: number; limit?: number; offset?: number } | undefined) => ipcRenderer.invoke('localdb-get-shifts', filters),
   localDbGetShiftUsers: (businessId?: number) => ipcRenderer.invoke('localdb-get-shift-users', businessId),
   localDbGetUnsyncedShifts: (businessId?: number) => ipcRenderer.invoke('localdb-get-unsynced-shifts', businessId),
@@ -259,7 +274,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   localDbUpsertShifts: (rows: UnknownRecord[]) => ipcRenderer.invoke('localdb-upsert-shifts', rows),
   localDbCheckTodayTransactions: (userId: number, shiftStart: string, businessId?: number) => ipcRenderer.invoke('localdb-check-today-transactions', userId, shiftStart, businessId),
   localDbUpdateShiftStart: (shiftId: number, newStartTime: string) => ipcRenderer.invoke('localdb-update-shift-start', shiftId, newStartTime),
-  localDbGetProductSales: (userId: number | null, shiftStart: string, shiftEnd: string | null, businessId?: number) => ipcRenderer.invoke('localdb-get-product-sales', userId, shiftStart, shiftEnd, businessId),
+  localDbGetProductSales: (userId: number | null, shiftStart: string, shiftEnd: string | null, businessId?: number, shiftUuid?: string | null, shiftUuids?: string[]) => ipcRenderer.invoke('localdb-get-product-sales', userId, shiftStart, shiftEnd, businessId, shiftUuid, shiftUuids),
   printShiftBreakdown: (data: {
     user_name: string;
     shift_start: string;
@@ -270,6 +285,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     customizationSales: Array<{ option_id: number; option_name: string; customization_id: number; customization_name: string; total_quantity: number; total_revenue: number }>;
     paymentBreakdown: Array<{ payment_method_name: string; transaction_count: number; total_amount: number }>;
     category2Breakdown: Array<{ category2_name: string; category2_id: number; total_quantity: number; total_amount: number }>;
+    voucherBreakdown?: Record<string, { count: number; total: number }>;
     cashSummary: {
       cash_shift: number;
       cash_shift_sales?: number;
@@ -287,6 +303,27 @@ contextBridge.exposeInMainWorld('electronAPI', {
     business_id?: number;
     printerType?: string;
   }) => ipcRenderer.invoke('print-shift-breakdown', data),
+  printTransactionsReport: (payload: {
+    businessId: number;
+    businessName: string;
+    dateRangeStart: string;
+    dateRangeEnd: string;
+    transactions: Array<{
+      num: number;
+      badge: 'R' | 'RR';
+      uuid: string;
+      waktu: string;
+      metode: string;
+      diTa: string;
+      total: string;
+      discVc: string;
+      final: string;
+      refund: string;
+      pelanggan: string;
+      waiter: string;
+      kasir: string;
+    }>;
+  }) => ipcRenderer.invoke('print-transactions-report', payload),
 
   // Customer display event listeners
   onOrderUpdate: (callback: (data: UnknownRecord) => void) => {
@@ -317,15 +354,18 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   // Configuration Management
   getAppConfig: () => ipcRenderer.invoke('get-app-config'),
+  getEffectiveDbConfig: () => ipcRenderer.invoke('get-effective-db-config'),
   saveAppConfig: (config: { serverHost?: string; apiUrl?: string; dbUser?: string; dbPassword?: string; dbName?: string; dbPort?: number }) => ipcRenderer.invoke('save-app-config', config),
   resetAppConfig: () => ipcRenderer.invoke('reset-app-config'),
   testDbConnection: (config: { serverHost?: string; dbUser?: string; dbPassword?: string; dbName?: string; dbPort?: number }) => ipcRenderer.invoke('test-db-connection', config),
 
   // Receipt Template and Settings Management
-  getReceiptTemplate: (templateType: 'receipt' | 'bill', businessId?: number) => ipcRenderer.invoke('get-receipt-template', templateType, businessId),
-  getReceiptTemplates: (templateType: 'receipt' | 'bill', businessId?: number) => ipcRenderer.invoke('get-receipt-templates', templateType, businessId),
+  getReceiptTemplate: (templateType: 'receipt' | 'bill' | 'checker', businessId?: number) => ipcRenderer.invoke('get-receipt-template', templateType, businessId),
+  getReceiptTemplates: (templateType: 'receipt' | 'bill' | 'checker', businessId?: number) => ipcRenderer.invoke('get-receipt-templates', templateType, businessId),
+  getReceiptTemplateById: (id: number) => ipcRenderer.invoke('get-receipt-template-by-id', id),
   setDefaultReceiptTemplate: (templateType: 'receipt' | 'bill', templateName: string, businessId?: number) => ipcRenderer.invoke('set-default-receipt-template', templateType, templateName, businessId),
-  saveReceiptTemplate: (templateType: 'receipt' | 'bill', templateCode: string, businessId?: number) => ipcRenderer.invoke('save-receipt-template', templateType, templateCode, businessId),
+  saveReceiptTemplate: (templateType: 'receipt' | 'bill', templateCode: string, templateName?: string, businessId?: number, showNotes?: boolean) => ipcRenderer.invoke('save-receipt-template', templateType, templateCode, templateName, businessId, showNotes),
+  updateReceiptTemplate: (id: number, templateCode: string, templateName?: string | null, showNotes?: boolean) => ipcRenderer.invoke('update-receipt-template', id, templateCode, templateName, showNotes),
   getReceiptSettings: (businessId?: number) => ipcRenderer.invoke('get-receipt-settings', businessId),
   saveReceiptSettings: (settings: {
     store_name?: string | null;

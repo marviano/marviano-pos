@@ -137,11 +137,8 @@ const isOfflineTransaction = (value: unknown): value is OfflineTransaction => {
     finalAmountValid &&
     createdAtValid
   );
-  // #region agent log
   if (!isValid && value) {
-    fetch('http://127.0.0.1:7242/ingest/7b565785-72b5-49f7-b2c0-57606ea0d0b5',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'SyncManagement.tsx:137',message:'Transaction filtered out by normalization',data:{id:record.id,hasId:!!record.id,hasBusinessId:typeof record.business_id==='number',hasUserId:typeof record.user_id==='number',hasPaymentMethod:typeof record.payment_method==='string',hasPickupMethod:typeof record.pickup_method==='string',finalAmountValid,final_amount_value:record.final_amount,final_amount_type:typeof record.final_amount,createdAtValid,created_at_value:record.created_at,created_at_type:typeof record.created_at,isDate:(record.created_at as unknown) instanceof Date,sync_status:record.sync_status},timestamp:Date.now(),sessionId:'debug-session',runId:'run2',hypothesisId:'B'})}).catch(()=>{});
   }
-  // #endregion
   return isValid;
 };
 
@@ -542,23 +539,11 @@ export default function SyncManagement() {
 
     setIsLoadingOfflineData(true);
     try {
-      // #region agent log
-      fetch('http://127.0.0.1:7242/ingest/7b565785-72b5-49f7-b2c0-57606ea0d0b5',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'SyncManagement.tsx:421',message:'Calling localDbGetUnsyncedTransactions with businessId',data:{businessId},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
-      // #endregion
       const transactions = await electronAPI.localDbGetUnsyncedTransactions(businessId);
-      // #region agent log
-      fetch('http://127.0.0.1:7242/ingest/7b565785-72b5-49f7-b2c0-57606ea0d0b5',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'SyncManagement.tsx:423',message:'Received raw transactions before normalization',data:(()=>{const t=transactions&&Array.isArray(transactions)&&transactions.length>0?(transactions[0] as Record<string,unknown>):null;return{rawCount:Array.isArray(transactions)?transactions.length:0,firstTx:t?{id:t.id,business_id:t.business_id,sync_status:t.sync_status,payment_method:t.payment_method,pickup_method:t.pickup_method,final_amount:t.final_amount,final_amount_type:typeof t.final_amount,created_at:t.created_at,created_at_type:typeof t.created_at,user_id:t.user_id}:null};})(),timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
-      // #endregion
       const normalized = normalizeOfflineTransactions(transactions);
-      // #region agent log
-      fetch('http://127.0.0.1:7242/ingest/7b565785-72b5-49f7-b2c0-57606ea0d0b5',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'SyncManagement.tsx:424',message:'After normalization',data:{rawCount:Array.isArray(transactions)?transactions.length:0,normalizedCount:normalized.length,filteredOut:Array.isArray(transactions)?transactions.length-normalized.length:0},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
-      // #endregion
       setOfflineTransactions(normalized);
       const pendingCount = normalized.filter(t => t.sync_status === 'pending' || !t.sync_status).length;
       const failedCount = normalized.filter(t => t.sync_status === 'failed').length;
-      // #region agent log
-      fetch('http://127.0.0.1:7242/ingest/7b565785-72b5-49f7-b2c0-57606ea0d0b5',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'SyncManagement.tsx:429',message:'Final counts after normalization',data:{normalizedCount:normalized.length,pendingCount,failedCount},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
-      // #endregion
       if (failedCount > 0) {
         addLog('success', `Loaded ${normalized.length} offline transactions (${pendingCount} pending, ${failedCount} failed)`);
       } else {
@@ -1599,31 +1584,29 @@ export default function SyncManagement() {
       }
 
       // ============================================
-      // DATABASE 1: LOCAL MYSQL
+      // DATABASE 1: LOCAL (salespulse + system_pos)
       // ============================================
-      console.log('[CLEANUP] 📦 [Database 1/2] Local MySQL - Starting deletion...');
-      addLog('info', '📦 [Database 1/2] Local MySQL - Starting deletion...');
+      console.log('[CLEANUP] 📦 [Database 1/2] Local (salespulse + system_pos) - Starting deletion...');
+      addLog('info', '📦 [Database 1/2] Local (salespulse + system_pos) - Starting deletion...');
       const offlineResult = await electronAPI.localDbDeleteTransactionsByRole();
-      console.log('[CLEANUP] [Local MySQL] Result:', offlineResult);
+      console.log('[CLEANUP] [Local] Result:', offlineResult);
 
       if (offlineResult.success && offlineResult.details) {
         const d = offlineResult.details;
         console.log(`[CLEANUP] [Local MySQL] Target User IDs: ${d.targetUserIds?.join(', ') || 'NULL'}`);
-        console.log(`[CLEANUP] [Local MySQL] printer1_audit_log: ${d.printer1_audit_log} rows`);
-        console.log(`[CLEANUP] [Local MySQL] printer2_audit_log: ${d.printer2_audit_log} rows`);
-        console.log(`[CLEANUP] [Local MySQL] transaction_items: ${d.transaction_items} rows`);
         console.log(`[CLEANUP] [Local MySQL] transactions: ${d.transactions} rows`);
+        console.log(`[CLEANUP] [system_pos] queue: ${(d as { system_pos_queue?: number }).system_pos_queue ?? 0}, transactions: ${(d as { system_pos_transactions?: number }).system_pos_transactions ?? 0}`);
+        console.log(`[CLEANUP] [Counters] reset for businesses: ${(d as { counters_reset_businesses?: number[] }).counters_reset_businesses?.join(', ') ?? 'none'}`);
 
-        addLog('success', `✅ [Local MySQL] Target User IDs: ${d.targetUserIds?.join(', ') || 'NULL'}`);
-        addLog('info', `   └─ printer1_audit_log: ${d.printer1_audit_log} rows deleted`);
-        addLog('info', `   └─ printer2_audit_log: ${d.printer2_audit_log} rows deleted`);
-        addLog('info', `   └─ transaction_items: ${d.transaction_items} rows deleted`);
-        addLog('info', `   └─ transactions: ${d.transactions} rows deleted`);
-        addLog('success', `✅ [Local MySQL] Completed: ${d.transactions} transactions, ${d.transaction_items} items`);
+        addLog('success', `✅ [Local MySQL + system_pos] Target User IDs: ${d.targetUserIds?.join(', ') || 'NULL'}`);
+        addLog('info', `   └─ transactions: ${d.transactions} deleted (salespulse)`);
+        addLog('info', `   └─ system_pos: ${(d as { system_pos_transactions?: number }).system_pos_transactions ?? 0} transactions, ${(d as { system_pos_queue?: number }).system_pos_queue ?? 0} queue rows`);
+        addLog('info', `   └─ printer daily counters reset for: ${(d as { counters_reset_businesses?: number[] }).counters_reset_businesses?.join(', ') ?? 'none'}`);
+        addLog('success', `✅ [Local] Completed: ${d.transactions} transactions, ${d.transaction_items} items`);
       } else {
         const errorMsg = offlineResult.error || 'Unknown error';
-        console.error(`[CLEANUP] [Local MySQL] ❌ Failed: ${errorMsg}`);
-        addLog('error', `❌ [Local MySQL] Failed: ${errorMsg}`);
+        console.error(`[CLEANUP] [Local] ❌ Failed: ${errorMsg}`);
+        addLog('error', `❌ [Local (salespulse + system_pos)] Failed: ${errorMsg}`);
       }
 
       // ============================================
@@ -1753,16 +1736,21 @@ export default function SyncManagement() {
 
       // Delete from online database
       try {
-        const response = await fetch(getApiUrl('/api/transactions/delete'), {
+        const apiUrl = getApiUrl('/api/transactions/delete');
+        const body = { business_id: businessId, from: dangerRange.fromIso, to: dangerRange.toIso };
+        const response = await fetch(apiUrl, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
           },
-          body: JSON.stringify({ business_id: businessId, from: dangerRange.fromIso, to: dangerRange.toIso })
+          body: JSON.stringify(body)
         });
+        const responseText = await response.text();
+        let parsed: { deleted?: number; error?: string } = {};
+        try { parsed = JSON.parse(responseText); } catch { parsed = {}; }
 
         if (response.ok) {
-          const data = await response.json();
+          const data = parsed as { deleted?: number };
           addLog('success', `✅ Deleted ${data.deleted} online transactions permanently${rangeSuffix}`);
         } else {
           addLog('warning', '⚠️ Could not delete online transactions (may be offline)');
@@ -2006,16 +1994,16 @@ export default function SyncManagement() {
 SET status = 'archived', updated_at = ${UPDATED_AT_PLACEHOLDER}
 WHERE ${baseWhere};
 
--- Purge local printer audits for archived transactions
+-- Purge local printer audits (by uuid_id, not id)
 DELETE FROM printer1_audit_log
 WHERE transaction_id IN (
-  SELECT id FROM transactions
+  SELECT uuid_id FROM transactions
   WHERE ${archivedWhere}
 );
 
 DELETE FROM printer2_audit_log
 WHERE transaction_id IN (
-  SELECT id FROM transactions
+  SELECT uuid_id FROM transactions
   WHERE ${archivedWhere}
 );`;
   }, [buildSqlWherePreview]);
@@ -2034,29 +2022,37 @@ WHERE ${archivedWhere};`;
 
   const offlineDeletePreview = useMemo(() => {
     const baseWhere = buildSqlWherePreview();
-    return `-- Delete local printer audits first
+    return `-- salespulse: printer audits (by uuid_id), then transactions (CASCADE removes items, etc.)
 DELETE FROM printer1_audit_log
 WHERE transaction_id IN (
-  SELECT id FROM transactions
+  SELECT uuid_id FROM transactions
   WHERE ${baseWhere}
 );
 
 DELETE FROM printer2_audit_log
 WHERE transaction_id IN (
-  SELECT id FROM transactions
-  WHERE ${baseWhere}
-);
-
--- Then delete items and transactions
-DELETE FROM transaction_items
-WHERE transaction_id IN (
-  SELECT id FROM transactions
+  SELECT uuid_id FROM transactions
   WHERE ${baseWhere}
 );
 
 DELETE FROM transactions
-WHERE ${baseWhere};`;
-  }, [buildSqlWherePreview]);
+WHERE ${baseWhere};
+
+-- system_pos: queue then transactions (same UUIDs)
+DELETE FROM system_pos_queue
+WHERE transaction_id IN (
+  SELECT uuid_id FROM transactions WHERE ${baseWhere}
+);
+DELETE FROM transactions
+WHERE uuid_id IN (
+  SELECT uuid_id FROM transactions WHERE ${baseWhere}
+);
+-- (runs in system_pos DB)
+
+-- Reset printer daily counters
+DELETE FROM printer_daily_counters
+WHERE business_id = ${businessId ?? '?'};`;
+  }, [buildSqlWherePreview, businessId]);
 
   const onlineDeletePreview = useMemo(() => {
     const aliasWhere = buildSqlWherePreview('t');
@@ -2670,7 +2666,7 @@ WHERE ${baseWhere};`;
             </h3>
             <p className="text-gray-600 mb-4">
               {activePasswordAction === 'delete'
-                ? 'This will PERMANENTLY DELETE all transactions in both online and offline databases. This action CANNOT be undone.'
+                ? 'This will PERMANENTLY DELETE all transactions from salespulse, system_pos, and db_host (selected business). Printer daily counters will be reset. This action CANNOT be undone.'
                 : 'This will archive all transactions in both online and offline databases. Archived data can be restored if needed.'}
             </p>
             <div className="mb-4">
@@ -2792,7 +2788,8 @@ WHERE ${baseWhere};`;
                     : `All transactions for business ID ${businessId}`}
                 </li>
                 <li>All transaction items</li>
-                <li>Data in both online and offline databases</li>
+                <li>Data in salespulse, system_pos, and db_host (selected business)</li>
+                <li>Printer daily counters will be reset</li>
                 <li>This action CANNOT be undone</li>
               </ul>
             </div>
@@ -2860,7 +2857,7 @@ WHERE ${baseWhere};`;
                     <h4 className="font-semibold text-gray-900 text-lg">Cleanup Test Transactions</h4>
                   </div>
                   <p className="text-sm text-gray-700 mb-4">
-                    Permanently delete ALL test transactions from all 2 databases (Local MySQL, SalesPulse MySQL).
+                    Permanently delete ALL test transactions from salespulse, system_pos, and SalesPulse API. Printer daily counters (and any other counters) are reset for each affected business.
                   </p>
                   <div className="bg-red-100 border border-red-300 rounded-lg p-3 mb-4">
                     <p className="text-xs text-red-800 font-medium mb-1">
@@ -2889,16 +2886,19 @@ WHERE ${baseWhere};`;
                     )}
                   </button>
                   <p className="text-xs text-red-700 mt-3">
-                    ⚠️ This action cannot be undone. All transactions, transaction items, and audit logs matching the criteria will be permanently deleted from all 3 databases.
+                    ⚠️ This action cannot be undone. All transactions, items, and audit logs matching the criteria are permanently deleted from salespulse, system_pos, and online. Counters are reset.
                   </p>
                 </div>
 
-                {/* Card 2: Bulk Actions (Date-Range Based) */}
+                {/* Card 2: Delete whole transactions (Date-Range Based) */}
                 <div className="border-2 border-orange-200 rounded-lg p-5 bg-gradient-to-br from-orange-50 to-yellow-50">
                   <div className="flex items-center gap-2 mb-4">
                     <Archive className="w-5 h-5 text-orange-600" />
-                    <h4 className="font-semibold text-gray-900 text-lg">Bulk Actions</h4>
+                    <h4 className="font-semibold text-gray-900 text-lg">Delete whole transactions</h4>
                   </div>
+                  <p className="text-sm text-gray-700 mb-4">
+                    Delete all transactions for the selected business from salespulse, system_pos, and db_host. Optional date filter below. Printer daily counters (and any other counters) are reset for this business.
+                  </p>
 
                   {/* Date Range Filters */}
                   <div className="mb-4">
@@ -2967,7 +2967,7 @@ WHERE ${baseWhere};`;
                       <h5 className="font-semibold text-gray-900 text-sm">SQL Queries to be Executed (Preview)</h5>
                       <button
                         onClick={() => {
-                          const fullSql = `-- Archive (Keeps Data)\n-- Local MySQL:\n${offlineArchivePreview}\n\n-- Online MySQL:\n${onlineArchivePreview}\n\n-- Delete (Permanent)\n-- Local MySQL:\n${offlineDeletePreview}\n\n-- Online MySQL:\n${onlineDeletePreview}`;
+                          const fullSql = `-- Archive (Keeps Data)\n-- Local MySQL:\n${offlineArchivePreview}\n\n-- Online MySQL:\n${onlineArchivePreview}\n\n-- Delete (Permanent)\n-- Local (salespulse + system_pos + counter reset):\n${offlineDeletePreview}\n\n-- Online MySQL (SalesPulse API):\n${onlineDeletePreview}`;
                           copySqlToClipboard(fullSql, 'bulkActions');
                         }}
                         className="flex items-center gap-1 px-2 py-1 text-xs bg-gray-100 hover:bg-gray-200 rounded transition-colors"
@@ -3002,9 +3002,9 @@ WHERE ${baseWhere};`;
                           <Trash2 className="w-3 h-3 text-red-600" />
                           <strong className="text-red-900 text-xs">Delete (Permanent):</strong>
                         </div>
-                        <div className="text-red-700 text-xs mb-1">-- Local MySQL:</div>
+                        <div className="text-red-700 text-xs mb-1">-- Local (salespulse + system_pos + counter reset):</div>
                         <pre className="text-red-900 whitespace-pre-wrap text-xs mb-2">{offlineDeletePreview}</pre>
-                        <div className="text-red-700 text-xs mb-1">-- Online MySQL:</div>
+                        <div className="text-red-700 text-xs mb-1">-- Online MySQL (SalesPulse API):</div>
                         <pre className="text-red-900 whitespace-pre-wrap text-xs">{onlineDeletePreview}</pre>
                       </div>
                     </div>

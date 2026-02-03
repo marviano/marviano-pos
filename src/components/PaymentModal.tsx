@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useEffect, useRef } from 'react';
-import { X, Delete } from 'lucide-react';
+import { X, Delete, Trash2 } from 'lucide-react';
 import TransactionConfirmationDialog from './TransactionConfirmationDialog';
 import { offlineSyncService } from '@/lib/offlineSync';
 import { smartSyncService } from '@/lib/smartSync';
@@ -74,6 +74,15 @@ type ReceiptItem = {
   quantity: number;
   price: number;
   total_price: number;
+  /** Sent so backend can hide note for Nona Laras template */
+  customNote?: string;
+  /** Backend expects snake_case for print; used only when template show_notes is true */
+  custom_note?: string;
+  customizations?: unknown;
+  /** category1_id for checker slip: 1 → itemsCategory1, 2 or other → itemsCategory2 */
+  category1_id?: number | null;
+  /** category1_name for checker section header (e.g. Makanan, Minuman) */
+  category1_name?: string | null;
 };
 
 const getElectronAPI = () => (typeof window !== 'undefined' ? window.electronAPI : undefined);
@@ -109,13 +118,24 @@ interface PaymentModalProps {
     customerName: string | null;
     waiterName: string | null;
     waiterColor: string | null;
+    pickupMethod?: 'dine-in' | 'take-away';
+    voucher_discount?: number;
+    voucher_type?: string;
+    voucher_value?: number | null;
+    voucher_label?: string | null;
   } | null;
+  /** Pickup method selected in cart (Take Away / Dine In) - carried over when opening payment */
+  pickupMethod?: 'dine-in' | 'take-away';
   waiterId?: number | null;
 }
 
 type PaymentMethod = 'cash' | 'debit' | 'qr' | 'ewallet' | 'cl' | 'voucher' | 'qpon' | 'gofood' | 'grabfood' | 'shopeefood' | 'tiktok';
-type PromotionSelection = 'none' | 'percent_30' | 'percent_35' | 'percent_50' | 'custom' | 'free';
+type PromotionSelection = 'none' | 'percent_10' | 'percent_15' | 'percent_20' | 'percent_25' | 'percent_30' | 'percent_35' | 'percent_50' | 'custom' | 'free';
 type PickupMethod = 'dine-in' | 'take-away';
+
+// Popular banks in debit selector: BCA (1), BNI (19), Mandiri (3)
+const POPULAR_BANK_IDS = [1, 19, 3];
+const POPULAR_BANK_LABELS: Record<number, string> = { 1: 'BCA', 19: 'BNI', 3: 'Mandiri' };
 
 export default function PaymentModal({
   isOpen,
@@ -127,7 +147,8 @@ export default function PaymentModal({
   selectedOnlinePlatform = null,
   initialCustomerName = '',
   waiterId = null,
-  loadedTransactionInfo = null
+  loadedTransactionInfo = null,
+  pickupMethod: cartPickupMethod = 'dine-in'
 }: PaymentModalProps) {
   const { user } = useAuth();
   const [selectedPaymentMethod, setSelectedPaymentMethod] = useState<PaymentMethod>('cash');
@@ -157,6 +178,8 @@ export default function PaymentModal({
   const [banks, setBanks] = useState<Array<{ id: number, bank_code: string, bank_name: string, is_popular: boolean }>>([]);
   const [bankSearchTerm, setBankSearchTerm] = useState<string>('');
   const [showBankDropdown, setShowBankDropdown] = useState<boolean>(false);
+  const [showOtherBanks, setShowOtherBanks] = useState<boolean>(false);
+  const [otherBankSearchTerm, setOtherBankSearchTerm] = useState<string>('');
   const [isProcessing, setIsProcessing] = useState(false);
   const [showConfirmation, setShowConfirmation] = useState(false);
   const [showDebitModal, setShowDebitModal] = useState(false);
@@ -166,12 +189,17 @@ export default function PaymentModal({
   const [cardNumberError, setCardNumberError] = useState<string>('');
   const cardNumberRef = useRef<HTMLInputElement>(null);
   const previousPaymentMethod = useRef<PaymentMethod>(selectedPaymentMethod);
-  const promotionOptions: Array<{ id: PromotionSelection; label: string }> = [
-    { id: 'percent_30', label: 'Diskon 30%' },
-    { id: 'percent_35', label: 'Diskon 35%' },
-    { id: 'percent_50', label: 'Diskon 50%' },
-    { id: 'custom', label: 'Custom Nominal' },
-    { id: 'free', label: 'FREE' }
+  const percentDiscountOptions: Array<{ id: PromotionSelection; label: string }> = [
+    { id: 'percent_10', label: '10%' },
+    { id: 'percent_15', label: '15%' },
+    { id: 'percent_20', label: '20%' },
+    { id: 'percent_25', label: '25%' },
+    { id: 'percent_30', label: '30%' },
+    { id: 'percent_35', label: '35%' },
+    { id: 'percent_50', label: '50%' },
+  ];
+  const otherPromotionOptions: Array<{ id: PromotionSelection; label: string }> = [
+    { id: 'free', label: 'FREE' },
   ];
 
   const trimmedCustomerName = customerName.trim();
@@ -222,6 +250,37 @@ export default function PaymentModal({
       setCustomerName('');
     }
   }, [isOpen, initialCustomerName]);
+
+  // Pre-fill promotion from loaded transaction (runs after reset when opening with loaded tx that has voucher)
+  useEffect(() => {
+    if (!isOpen || !loadedTransactionInfo) return;
+    const rawVd = loadedTransactionInfo.voucher_discount;
+    const vd = typeof rawVd === 'number' && !Number.isNaN(rawVd) ? rawVd : (typeof rawVd === 'string' ? parseFloat(rawVd) : 0);
+    const disc = Number.isNaN(vd) ? 0 : vd;
+    const vt = (loadedTransactionInfo.voucher_type ?? '').toLowerCase();
+    const rawVv = loadedTransactionInfo.voucher_value;
+    const nvv = typeof rawVv === 'number' && !Number.isNaN(rawVv) ? rawVv : (typeof rawVv === 'string' ? parseFloat(rawVv) : NaN);
+    const val = Number.isNaN(nvv) ? NaN : nvv;
+    if (vt === 'free') {
+      setPromotionSelection('free');
+      setCustomVoucherAmount('');
+      return;
+    }
+    if (vt === 'percent' && !Number.isNaN(val)) {
+      const s = `percent_${Math.round(val)}` as PromotionSelection;
+      if (['percent_10', 'percent_15', 'percent_20', 'percent_25', 'percent_30', 'percent_35', 'percent_50'].includes(s)) {
+        setPromotionSelection(s);
+        setCustomVoucherAmount('');
+        return;
+      }
+    }
+    if (vt === 'nominal' && (disc > 0 || (!Number.isNaN(val) && val > 0))) {
+      const amt = disc > 0 ? disc : val;
+      setPromotionSelection('custom');
+      setCustomVoucherAmount(String(Math.round(amt)));
+      return;
+    }
+  }, [isOpen, loadedTransactionInfo]);
 
   // Calculate order totals
   const getOnlinePriceForPlatform = (product: ProductInfo): number | null => {
@@ -301,12 +360,20 @@ export default function PaymentModal({
 
   const promotionDetails = (() => {
     switch (promotionSelection) {
+      case 'percent_10':
+        return { type: 'percent' as const, value: 10, label: '10%', discount: Math.round(orderTotal * 0.1) };
+      case 'percent_15':
+        return { type: 'percent' as const, value: 15, label: '15%', discount: Math.round(orderTotal * 0.15) };
+      case 'percent_20':
+        return { type: 'percent' as const, value: 20, label: '20%', discount: Math.round(orderTotal * 0.2) };
+      case 'percent_25':
+        return { type: 'percent' as const, value: 25, label: '25%', discount: Math.round(orderTotal * 0.25) };
       case 'percent_30':
-        return { type: 'percent' as const, value: 30, label: 'Diskon 30%', discount: Math.round(orderTotal * 0.3) };
+        return { type: 'percent' as const, value: 30, label: '30%', discount: Math.round(orderTotal * 0.3) };
       case 'percent_35':
-        return { type: 'percent' as const, value: 35, label: 'Diskon 35%', discount: Math.round(orderTotal * 0.35) };
+        return { type: 'percent' as const, value: 35, label: '35%', discount: Math.round(orderTotal * 0.35) };
       case 'percent_50':
-        return { type: 'percent' as const, value: 50, label: 'Diskon 50%', discount: Math.round(orderTotal * 0.5) };
+        return { type: 'percent' as const, value: 50, label: '50%', discount: Math.round(orderTotal * 0.5) };
       case 'custom': {
         const nominal = parseFloat(customVoucherAmount) || 0;
         const effectiveNominal = Math.min(nominal, orderTotal);
@@ -446,15 +513,12 @@ export default function PaymentModal({
       return;
     }
 
-    if (activeInput === 'voucher') {
-      if (promotionSelection !== 'custom') {
-        setPromotionSelection('custom');
-        setCustomVoucherAmount('');
-      }
+    if (activeInput === 'voucher' && promotionSelection === 'custom') {
       setCustomVoucherAmount(prev => updateAmountString(prev, value, orderTotal));
       return;
     }
 
+    // Amount input, or voucher inactive (e.g. just switched) – route to amount
     setAmountReceived(prev => updateAmountString(prev, value));
   };
 
@@ -490,11 +554,38 @@ export default function PaymentModal({
     }
   };
 
+  const handleClose = async () => {
+    if (loadedTransactionInfo?.transactionId && businessId) {
+      const api = getElectronAPI();
+      if (api?.localDbUpdateTransactionVoucher) {
+        const voucherType = promotionSelection === 'none' ? 'none' : promotionDetails.type;
+        const voucherValue = promotionDetails.type === 'percent' ? (promotionDetails.value ?? null)
+          : promotionDetails.type === 'nominal' ? (promotionDetails.value ?? null)
+            : promotionDetails.type === 'free' ? 100 : null;
+        const voucherLabel = promotionDetails.label || null;
+        try {
+          await api.localDbUpdateTransactionVoucher(loadedTransactionInfo.transactionId, {
+            voucher_discount: voucherDiscount,
+            voucher_type: voucherType,
+            voucher_value: voucherValue,
+            voucher_label: voucherLabel,
+            final_amount: finalTotal,
+          });
+        } catch (e) {
+          console.warn('Failed to persist voucher on modal close:', e);
+        }
+      }
+    }
+    onClose();
+  };
+
   const handleDebitModalClose = () => {
     setShowDebitModal(false);
     setBankError('');
     setCardNumberError('');
     setShowBankDropdown(false);
+    setShowOtherBanks(false);
+    setOtherBankSearchTerm('');
   };
 
   const handleDebitModalSave = () => {
@@ -502,17 +593,6 @@ export default function PaymentModal({
       setBankError('Pilih bank terlebih dahulu');
       return;
     }
-    if (!cardNumber || cardNumber.length !== 16) {
-      setCardNumberError('Masukkan nomor kartu debit yang valid (16 digit)');
-      setTimeout(() => {
-        if (cardNumberRef.current) {
-          cardNumberRef.current.focus();
-          cardNumberRef.current.select();
-        }
-      }, 100);
-      return;
-    }
-
     setBankError('');
     setCardNumberError('');
     setShowDebitModal(false);
@@ -525,27 +605,15 @@ export default function PaymentModal({
       return;
     }
 
-    // Validate debit card information
+    // Validate debit: only bank selection is required
     if (selectedPaymentMethod === 'debit') {
       if (!bankId) {
         setBankError('Pilih bank terlebih dahulu');
         setShowDebitModal(true);
         return;
       }
-      if (!cardNumber || cardNumber.length !== 16) {
-        setShowDebitModal(true);
-        setCardNumberError('Masukkan nomor kartu debit yang valid (16 digit)');
-        setTimeout(() => {
-          if (cardNumberRef.current) {
-            cardNumberRef.current.focus();
-            cardNumberRef.current.select();
-          }
-        }, 100);
-        return;
-      } else {
-        setBankError('');
-        setCardNumberError('');
-      }
+      setBankError('');
+      setCardNumberError('');
     }
 
     // Validate City Ledger customer name
@@ -686,7 +754,7 @@ export default function PaymentModal({
         }
 
         // For existing transactions (lihat mode), fetch and update existing transaction
-        let localTransactionData;
+        let localTransactionData: Record<string, unknown>;
         if (loadedTransactionInfo?.transactionId) {
           // Fetch existing transaction to preserve existing data
           const allTransactions = await electronAPI.localDbGetTransactions?.(businessId, 10000);
@@ -731,10 +799,11 @@ export default function PaymentModal({
           };
         }
 
-        // For existing transactions (lihat mode), fetch existing items to get their uuid_id and production_status
+        // For existing transactions (lihat mode), fetch existing items to get their uuid_id, production_status, and waiter_id
         // This prevents duplicates when paying - we'll update existing items instead of creating new ones
         const existingItemsMap = new Map<number, string>(); // transactionItemId -> uuid_id
         const existingItemsProductionStatusMap = new Map<number, string | null>(); // transactionItemId -> production_status
+        const existingItemsWaiterIdMap = new Map<number, number | null>(); // transactionItemId -> waiter_id (who added this item)
         if (loadedTransactionInfo?.transactionId) {
           try {
             const existingItems = await electronAPI.localDbGetTransactionItems?.(transactionId);
@@ -743,9 +812,11 @@ export default function PaymentModal({
               const itemId = typeof item.id === 'number' ? item.id : (typeof item.id === 'string' ? parseInt(item.id, 10) : null);
               const itemUuidId = typeof item.uuid_id === 'string' ? item.uuid_id : (item.uuid_id ? String(item.uuid_id) : null);
               const productionStatus = typeof item.production_status === 'string' ? item.production_status : (item.production_status === null ? null : null);
+              const waiterIdFromItem = typeof item.waiter_id === 'number' ? item.waiter_id : (typeof item.waiter_id === 'string' ? parseInt(String(item.waiter_id), 10) : null);
               if (itemId && itemUuidId) {
                 existingItemsMap.set(itemId, itemUuidId);
                 existingItemsProductionStatusMap.set(itemId, productionStatus);
+                existingItemsWaiterIdMap.set(itemId, waiterIdFromItem ?? null);
               }
             });
             console.log('🔍 [PAYMENT] Found existing items:', existingItemsMap.size, 'items with uuid_id');
@@ -786,6 +857,9 @@ export default function PaymentModal({
             ? existingItemsProductionStatusMap.get(itemTransactionId)!
             : null; // New items get null (will be sent to kitchen/barista)
 
+          const effectiveWaiterId = itemTransactionId != null && !isNaN(itemTransactionId) && existingItemsWaiterIdMap.has(itemTransactionId)
+            ? (existingItemsWaiterIdMap.get(itemTransactionId) ?? waiterId ?? (localTransactionData as { waiter_id?: number | null }).waiter_id ?? null)
+            : (waiterId ?? (localTransactionData as { waiter_id?: number | null }).waiter_id ?? null);
           return {
             id: itemTransactionId || generateTransactionItemId(), // Use existing ID if available, otherwise generate
             uuid_id: itemUuidId, // Use existing UUID if item already exists, otherwise generate new one
@@ -799,6 +873,7 @@ export default function PaymentModal({
             custom_note: item.customNote || null,
             bundle_selections_json: item.bundleSelections ? JSON.stringify(item.bundleSelections) : null,
             created_at: transactionData.created_at,
+            waiter_id: effectiveWaiterId,
             production_status: existingProductionStatus, // Preserve existing status for previously saved items, null for new items
             production_started_at: null,
             production_finished_at: null,
@@ -1079,9 +1154,80 @@ export default function PaymentModal({
         // 5. PRINTING LOGIC (Run after UI close)
         // Note: Using a timeout to ensure it runs out-of-band of the render cycle
         setTimeout(async () => {
-          // Determine user-selected print targets
+          // Check for Single Printer Mode setting
+          let singlePrinterModeEnabled = false;
+          let printer2AuditLogChance: number | null = null;
+          try {
+            const configsRaw = await window.electronAPI?.localDbGetPrinterConfigs?.();
+            if (Array.isArray(configsRaw)) {
+              type PrinterConfig = { printer_type?: string; extra_settings?: string | Record<string, unknown> | null };
+              (configsRaw as PrinterConfig[]).forEach((config) => {
+                if (config?.printer_type === 'singlePrinterMode' && config?.extra_settings) {
+                  try {
+                    const extra = typeof config.extra_settings === 'string'
+                      ? JSON.parse(config.extra_settings)
+                      : config.extra_settings;
+                    if (extra && typeof extra === 'object' && typeof extra.enabled === 'boolean') {
+                      singlePrinterModeEnabled = extra.enabled;
+                    }
+                    // Load printer2AuditLogChance if present
+                    if (extra && typeof extra === 'object' && 'printer2AuditLogChance' in extra) {
+                      const chance = (extra as { printer2AuditLogChance?: number | null }).printer2AuditLogChance;
+                      if (typeof chance === 'number' && chance >= 0 && chance <= 100) {
+                        printer2AuditLogChance = chance;
+                      }
+                    }
+                  } catch (parseError) {
+                    console.warn('⚠️ Failed to parse singlePrinterMode extra_settings:', parseError);
+                  }
+                }
+              });
+            }
+          } catch (configError) {
+            console.warn('⚠️ Failed to load singlePrinterMode setting, checking localStorage:', configError);
+            // Fallback to localStorage
+            try {
+              const savedMode = localStorage.getItem('single-printer-mode');
+              singlePrinterModeEnabled = savedMode === 'true';
+            } catch (localStorageError) {
+              console.warn('⚠️ Failed to load singlePrinterMode from localStorage:', localStorageError);
+            }
+          }
+          
+          // Helper function to determine which audit log to use when Single Printer Mode + Randomization is enabled
+          // This function is called once per transaction to ensure consistent randomization
+          let randomizationResult: boolean | null = null;
+          const shouldLogToPrinter2Audit = (): boolean => {
+            if (!singlePrinterModeEnabled || printer2AuditLogChance === null || printer2AuditLogChance <= 0) {
+              return false; // No randomization, use default behavior
+            }
+            // Only calculate once per transaction
+            if (randomizationResult === null) {
+              // Generate random number between 0-100 and check if it's less than the percentage
+              const randomValue = Math.random() * 100;
+              randomizationResult = randomValue < printer2AuditLogChance;
+              console.log(`🎲 [RANDOMIZATION] Random value: ${randomValue.toFixed(2)}%, Threshold: ${printer2AuditLogChance}%, Result: ${randomizationResult ? 'Printer 2 audit log' : 'Printer 1 audit log'}`);
+            }
+            return randomizationResult;
+          };
+          
+          // Determine user-selected print targets (original target for database tracking)
+          const originalTarget = target;
           const shouldPrintReceipt = target === 'receipt';
           const shouldPrintReceiptize = target === 'receiptize';
+          
+          // Override printing behavior if Single Printer Mode is enabled
+          // Database will still track original printer assignment, but all printing goes to Printer 1
+          let actualPrintReceipt = shouldPrintReceipt;
+          let actualPrintReceiptize = shouldPrintReceiptize;
+          
+          if (singlePrinterModeEnabled) {
+            // In single printer mode, always print to Printer 1
+            // But keep original target for database tracking
+            actualPrintReceipt = true; // Always print to Printer 1
+            actualPrintReceiptize = false; // Never print to Printer 2
+            console.log(`🖨️ [SINGLE PRINTER MODE] Enabled - All printing will go to Printer 1. Original target: ${originalTarget}`);
+          }
 
           // Fetch global display counter (used to hide multiple printers)
           let globalCounter = 1;
@@ -1143,29 +1289,24 @@ export default function PaymentModal({
             // Add customization prices for main item only
             itemPrice += sumCustomizationPrice(item.customizations);
 
-            // Format item name with customizations and custom note if any
-            let itemName = item.product.nama;
-            if (item.customizations && item.customizations.length > 0) {
-              const customizationText = item.customizations.map(c =>
-                `${c.customization_name}: ${c.selected_options.map(opt => opt.option_name).join(', ')}`
-              ).join(', ');
-              itemName = `${itemName} (${customizationText})`;
-            }
-            // Add custom note if exists
-            if (item.customNote) {
-              if (itemName.includes('(')) {
-                itemName = `${itemName}, ${item.customNote})`;
-              } else {
-                itemName = `${itemName} (${item.customNote})`;
-              }
-            }
+            // Send plain product name only; note/customizations go in custom_note/customizations
+            // so the backend can show them only when template "show note" is enabled.
+            const itemName = item.product.nama;
+            const productWithCat = item.product as { category1_id?: number | null; category1_name?: string | null };
+            const category1Id = productWithCat.category1_id ?? null;
+            const category1Name = productWithCat.category1_name ?? null;
 
-            // Add main bundle item
+            // Add main bundle item (custom_note/customizations for backend; backend shows only when show_notes is true)
             receiptItems.push({
               name: itemName,
               quantity: item.quantity,
               price: itemPrice,
-              total_price: itemPrice * item.quantity
+              total_price: itemPrice * item.quantity,
+              customNote: item.customNote || undefined,
+              custom_note: item.customNote || undefined,
+              customizations: item.customizations,
+              category1_id: category1Id,
+              category1_name: category1Name,
             });
 
             // Add bundle selections as sub-items
@@ -1176,29 +1317,12 @@ export default function PaymentModal({
                   const selectionQty =
                     typeof sp.quantity === 'number' && !Number.isNaN(sp.quantity) ? sp.quantity : 1;
                   const totalQty = item.quantity * selectionQty;
-                  const customizationDetails: string[] = [];
 
-                  if (sp.customizations && sp.customizations.length > 0) {
-                    sp.customizations.forEach(customization => {
-                      const optionNames = customization.selected_options.map(opt => opt.option_name).join(', ');
-                      if (optionNames) {
-                        customizationDetails.push(
-                          customization.customization_name
-                            ? `${customization.customization_name}: ${optionNames}`
-                            : optionNames
-                        );
-                      }
-                    });
-                  }
-
-                  if (sp.customNote && sp.customNote.trim() !== '') {
-                    customizationDetails.push(sp.customNote.trim());
-                  }
-
-                  let subItemName = `  └ ${sp.product.nama}${selectionQty > 1 ? ` (×${selectionQty})` : ''}`;
-                  if (customizationDetails.length > 0) {
-                    subItemName = `${subItemName} (${customizationDetails.join(', ')})`;
-                  }
+                  // Plain name only; note/customizations sent separately so backend can hide when show_notes is false
+                  const subItemName = `  └ ${sp.product.nama}${selectionQty > 1 ? ` (×${selectionQty})` : ''}`;
+                  const subProductWithCat = sp.product as { category1_id?: number | null; category1_name?: string | null };
+                  const subCategory1Id = subProductWithCat.category1_id ?? category1Id;
+                  const subCategory1Name = subProductWithCat.category1_name ?? category1Name;
 
                   const perUnitAdjustment = sumCustomizationPrice(sp.customizations);
                   const perUnitTotal = perUnitAdjustment;
@@ -1207,34 +1331,44 @@ export default function PaymentModal({
                     name: subItemName,
                     quantity: totalQty,
                     price: perUnitTotal,
-                    total_price: perUnitTotal * totalQty
+                    total_price: perUnitTotal * totalQty,
+                    customNote: sp.customNote || undefined,
+                    custom_note: sp.customNote || undefined,
+                    customizations: sp.customizations,
+                    category1_id: subCategory1Id,
+                    category1_name: subCategory1Name,
                   });
                 });
               });
             }
           });
 
-          // Append voucher discount as a negative line on the receipt when applied
-          if (voucherDiscount > 0) {
-            receiptItems.push({
-              name: promotionLabel ? `Diskon Voucher (${promotionLabel})` : 'Diskon Voucher',
-              quantity: 1,
-              price: -voucherDiscount,
-              total_price: -voucherDiscount
-            });
-          }
+          // Voucher discount is shown in the receipt summary block (Discount/Voucher, Grand Total), not as a product line
+          // Use saved transaction (localTransactionData) as source of truth so receipt print matches DB
+          const savedVoucherDiscount = typeof (localTransactionData as Record<string, unknown>).voucher_discount === 'number'
+            ? (localTransactionData as Record<string, unknown>).voucher_discount as number
+            : 0;
+          const savedFinalAmount = typeof (localTransactionData as Record<string, unknown>).final_amount === 'number'
+            ? (localTransactionData as Record<string, unknown>).final_amount as number
+            : finalTotal;
+          const savedTotal = typeof (localTransactionData as Record<string, unknown>).total_amount === 'number'
+            ? (localTransactionData as Record<string, unknown>).total_amount as number
+            : orderTotal;
 
           // Get user info from auth
           const cashierName = user?.name || 'Kasir';
 
-          // Prepare receipt print data
+          // Prepare receipt print data (total = subtotal before discount; final_amount = amount after discount for template)
           const printData = {
             type: 'transaction',
             printerType: 'receiptPrinter',
             printerName: '', // Will be auto-determined from saved printer config
             business_id: transactionData.business_id, // Include business_id for fetching business name
             items: receiptItems,
-            total: finalTotal,
+            total: savedTotal, // Subtotal (Total Harga) before discount
+            final_amount: savedFinalAmount, // Amount after discount (Grand Total / Pembayaran Sebenarnya)
+            voucherDiscount: savedVoucherDiscount > 0 ? savedVoucherDiscount : undefined,
+            voucherLabel: savedVoucherDiscount > 0 ? (String((localTransactionData as Record<string, unknown>).voucher_label ?? '') || promotionLabel || 'Voucher') : undefined,
             paymentMethod: selectedPaymentMethod === 'cash' ? 'Cash' :
               selectedPaymentMethod === 'debit' ? 'Debit Card' :
                 selectedPaymentMethod === 'qr' ? 'QR Code' :
@@ -1252,6 +1386,7 @@ export default function PaymentModal({
             receiptNumber: transactionData.id, // Use 19-digit transaction UUID as nomor pesanan
             tableNumber: getTableNumber(),
             cashier: cashierName,
+            customerName: customerName.trim() || '',
             transactionType: transactionType,
             pickupMethod: finalPickupMethod,
             globalCounter
@@ -1261,22 +1396,32 @@ export default function PaymentModal({
           let printer1Counter: number | undefined = undefined;
           let printer2Counter: number | undefined = undefined;
 
-          // Get printer configs to read copies setting
+          // Get printer configs to read copies setting (cash vs non-cash)
+          const isCashPayment = selectedPaymentMethod === 'cash';
           let printer1Copies = 1;
           let printer2Copies = 1;
           try {
             const configsRaw = await window.electronAPI?.localDbGetPrinterConfigs?.();
             if (Array.isArray(configsRaw)) {
               type PrinterConfig = { printer_type?: string; extra_settings?: string | Record<string, unknown> | null };
+              const resolveCopies = (extra: Record<string, unknown> | null): number => {
+                if (!extra || typeof extra !== 'object') return 1;
+                if (isCashPayment) {
+                  const c = extra.copies;
+                  return typeof c === 'number' && !Number.isNaN(c) && c > 0 ? Math.min(10, Math.floor(c)) : 1;
+                }
+                const nc = extra.nonCashCopies;
+                if (typeof nc === 'number' && !Number.isNaN(nc) && nc > 0) return Math.min(10, Math.floor(nc));
+                const c = extra.copies;
+                return typeof c === 'number' && !Number.isNaN(c) && c > 0 ? Math.min(10, Math.floor(c)) : 1;
+              };
               (configsRaw as PrinterConfig[]).forEach((config) => {
                 if (config?.printer_type === 'receiptPrinter' && config?.extra_settings) {
                   try {
                     const extra = typeof config.extra_settings === 'string'
-                      ? JSON.parse(config.extra_settings)
-                      : config.extra_settings;
-                    if (extra && typeof extra === 'object' && typeof extra.copies === 'number' && extra.copies > 0) {
-                      printer1Copies = extra.copies;
-                    }
+                      ? JSON.parse(config.extra_settings) as Record<string, unknown>
+                      : config.extra_settings as Record<string, unknown>;
+                    printer1Copies = resolveCopies(extra);
                   } catch (parseError) {
                     console.warn('⚠️ Failed to parse Printer 1 extra_settings:', parseError);
                   }
@@ -1284,11 +1429,9 @@ export default function PaymentModal({
                 if (config?.printer_type === 'receiptizePrinter' && config?.extra_settings) {
                   try {
                     const extra = typeof config.extra_settings === 'string'
-                      ? JSON.parse(config.extra_settings)
-                      : config.extra_settings;
-                    if (extra && typeof extra === 'object' && typeof extra.copies === 'number' && extra.copies > 0) {
-                      printer2Copies = extra.copies;
-                    }
+                      ? JSON.parse(config.extra_settings) as Record<string, unknown>
+                      : config.extra_settings as Record<string, unknown>;
+                    printer2Copies = resolveCopies(extra);
                   } catch (parseError) {
                     console.warn('⚠️ Failed to parse Printer 2 extra_settings:', parseError);
                   }
@@ -1299,8 +1442,8 @@ export default function PaymentModal({
             console.warn('⚠️ Failed to load printer configs for copies setting:', configError);
           }
 
-          // Print to Printer 1 if selected
-          if (shouldPrintReceipt) {
+          // Print to Printer 1 if selected (or if Single Printer Mode is enabled)
+          if (actualPrintReceipt) {
             try {
               // Get Printer 1 counter and increment
               printer1Counter = 1;
@@ -1336,16 +1479,44 @@ export default function PaymentModal({
               }
 
               // Log to audit BEFORE printing (so reprint is possible even if print fails)
+              // With Single Printer Mode + Randomization: randomly decide which audit log to use
+              // Without randomization: use default behavior (original target determines audit log)
               try {
-                const logResult = await window.electronAPI?.logPrinter1Print?.(transactionData.id, printer1Counter, globalCounter);
-                if (isSuccessResponse(logResult) && !logResult.success) {
-                  console.error('❌ Failed to log Printer 1 audit:', logResult?.error);
-                  console.warn('⚠️ Transaction saved but audit log failed - receipt badge may not appear correctly');
-                } else if (!isSuccessResponse(logResult)) {
-                  console.warn('⚠️ Failed to log Printer 1 audit: Invalid response', logResult);
+                let shouldLogToPrinter1 = true;
+                
+                if (singlePrinterModeEnabled && printer2AuditLogChance !== null && printer2AuditLogChance > 0) {
+                  // Randomization is enabled - randomly decide which audit log to use
+                  const logToPrinter2 = shouldLogToPrinter2Audit();
+                  if (logToPrinter2) {
+                    // Randomization decided Printer 2 - skip logging here, will be handled in Single Printer Mode section
+                    shouldLogToPrinter1 = false;
+                    console.log(`🖨️ [SINGLE PRINTER MODE + RANDOMIZATION] Randomization decided Printer 2 audit log, skipping Printer 1 audit log (will log in Single Printer Mode section)`);
+                  } else {
+                    // Randomization decided Printer 1 - log here
+                    shouldLogToPrinter1 = true;
+                  }
+                } else if (singlePrinterModeEnabled && originalTarget === 'receiptize') {
+                  // Single Printer Mode without randomization: original target 'receiptize' → log to Printer 2 audit (handled in Single Printer Mode section)
+                  shouldLogToPrinter1 = false;
+                }
+                
+                if (shouldLogToPrinter1) {
+                  // Log to Printer 1 audit
+                  const logResult = await window.electronAPI?.logPrinter1Print?.(transactionData.id, printer1Counter, globalCounter);
+                  if (isSuccessResponse(logResult) && !logResult.success) {
+                    console.error('❌ Failed to log Printer 1 audit:', logResult?.error);
+                    console.warn('⚠️ Transaction saved but audit log failed - receipt badge may not appear correctly');
+                  } else if (!isSuccessResponse(logResult)) {
+                    console.warn('⚠️ Failed to log Printer 1 audit: Invalid response', logResult);
+                  } else {
+                    console.log(`✅ [SINGLE PRINTER MODE${printer2AuditLogChance !== null && printer2AuditLogChance > 0 ? ' + RANDOMIZATION' : ''}] Logged to Printer 1 audit log`);
+                  }
+                } else {
+                  // Skipping Printer 1 audit log - will be handled in Single Printer Mode section (for Printer 2 audit) or already handled
+                  console.log(`🖨️ [SINGLE PRINTER MODE] Skipping Printer 1 audit log (will be handled in Single Printer Mode section)`);
                 }
               } catch (logError) {
-                console.error('❌ Error logging Printer 1 audit:', logError);
+                console.error('❌ Error logging audit:', logError);
                 console.warn('⚠️ Transaction saved but audit log failed - receipt badge may not appear correctly');
               }
 
@@ -1368,8 +1539,8 @@ export default function PaymentModal({
             }
           }
 
-          // Printer 2 manual print if selected via confirmation dialog
-          if (shouldPrintReceiptize) {
+          // Printer 2 manual print if selected via confirmation dialog (only if Single Printer Mode is disabled)
+          if (actualPrintReceiptize) {
             try {
               // Get Printer 2 counter and increment
               printer2Counter = 1;
@@ -1389,95 +1560,172 @@ export default function PaymentModal({
                 }
               }
 
-              // Create printer2Data with receiptizePrinter counter
-              const printer2Data = {
-                ...printData,
-                printerType: 'receiptizePrinter',
-                receiptNumber: transactionData.id,
-                printer2Counter: printer2Counter, // Receiptize printer daily counter (only for receiptizePrinter)
-                printer1Counter: undefined // Explicitly clear printer1Counter for Printer 2
-              };
-              console.log(`📋 [PRINT] Printer 2 data prepared with counter: ${printer2Counter} (transaction: ${transactionData.id})`);
-              console.log(`🔍 [DEBUG] printer2Data object:`, JSON.stringify({
-                printerType: printer2Data.printerType,
-                printer2Counter: printer2Data.printer2Counter,
-                printer1Counter: printer2Data.printer1Counter,
-                globalCounter: printer2Data.globalCounter,
-                tableNumber: printer2Data.tableNumber
-              }, null, 2));
-              
-              // Verify counter is actually set before printing
-              if (typeof printer2Data.printer2Counter !== 'number' || printer2Data.printer2Counter <= 0) {
-                console.error(`❌ [PRINT] ERROR: printer2Counter is invalid! Value: ${printer2Data.printer2Counter}, Type: ${typeof printer2Data.printer2Counter}`);
-              }
-
-              // Log to audit FIRST (before queueing) - System POS sync requires printer audit to exist
-              // This ensures the audit is in local database before the transaction is queued
-              let auditLogSuccess = false;
-              try {
-                const logResult = await window.electronAPI?.logPrinter2Print?.(transactionData.id, printer2Counter, 'manual', undefined, globalCounter);
-                if (isSuccessResponse(logResult) && !logResult.success) {
-                  console.error('❌ Failed to log Printer 2 audit:', logResult?.error);
-                  console.warn('⚠️ Transaction saved but audit log failed - receiptize badge may not appear correctly');
-                } else if (!isSuccessResponse(logResult)) {
-                  console.warn('⚠️ Failed to log Printer 2 audit: Invalid response', logResult);
-                } else {
-                  auditLogSuccess = true;
-                  // Small delay to ensure database commit is complete before queueing
-                  await new Promise(resolve => setTimeout(resolve, 100));
+                // Create printer2Data with receiptizePrinter counter
+                const printer2Data = {
+                  ...printData,
+                  printerType: 'receiptizePrinter',
+                  receiptNumber: transactionData.id,
+                  printer2Counter: printer2Counter, // Receiptize printer daily counter (only for receiptizePrinter)
+                  printer1Counter: undefined // Explicitly clear printer1Counter for Printer 2
+                };
+                console.log(`📋 [PRINT] Printer 2 data prepared with counter: ${printer2Counter} (transaction: ${transactionData.id})`);
+                console.log(`🔍 [DEBUG] printer2Data object:`, JSON.stringify({
+                  printerType: printer2Data.printerType,
+                  printer2Counter: printer2Data.printer2Counter,
+                  printer1Counter: printer2Data.printer1Counter,
+                  globalCounter: printer2Data.globalCounter,
+                  tableNumber: printer2Data.tableNumber
+                }, null, 2));
+                
+                // Verify counter is actually set before printing
+                if (typeof printer2Data.printer2Counter !== 'number' || printer2Data.printer2Counter <= 0) {
+                  console.error(`❌ [PRINT] ERROR: printer2Counter is invalid! Value: ${printer2Data.printer2Counter}, Type: ${typeof printer2Data.printer2Counter}`);
                 }
-              } catch (logError) {
-                console.error('❌ Error logging Printer 2 audit:', logError);
-                console.warn('⚠️ Transaction saved but audit log failed - receiptize badge may not appear correctly');
-              }
 
-              // Insert transaction into system_pos database AFTER audit is saved and committed
-              // System POS database is on localhost MySQL for local transaction storage
-              // This ensures the printer audit exists in local database before insertion
-              if (auditLogSuccess) {
+                // Log to audit FIRST (before queueing) - System POS sync requires printer audit to exist
+                // This ensures the audit is in local database before the transaction is queued
+                let auditLogSuccess = false;
                 try {
-                  const insertResult = await window.electronAPI?.queueTransactionForSystemPos?.(transactionData.id);
-                  if (insertResult?.success) {
-                    console.log(`✅ [SYSTEM POS] Inserted transaction ${transactionData.id} into system_pos database`);
-                  } else if (insertResult?.alreadyQueued) {
-                    console.log(`✅ [SYSTEM POS] Transaction ${transactionData.id} already exists in system_pos`);
+                  const logResult = await window.electronAPI?.logPrinter2Print?.(transactionData.id, printer2Counter, 'manual', undefined, globalCounter);
+                  if (isSuccessResponse(logResult) && !logResult.success) {
+                    console.error('❌ Failed to log Printer 2 audit:', logResult?.error);
+                    console.warn('⚠️ Transaction saved but audit log failed - receiptize badge may not appear correctly');
+                  } else if (!isSuccessResponse(logResult)) {
+                    console.warn('⚠️ Failed to log Printer 2 audit: Invalid response', logResult);
                   } else {
-                    console.warn(`⚠️ [SYSTEM POS] Failed to insert transaction ${transactionData.id}:`, insertResult?.error);
+                    auditLogSuccess = true;
+                    // Small delay to ensure database commit is complete before queueing
+                    await new Promise(resolve => setTimeout(resolve, 100));
                   }
-                } catch (insertError) {
-                  console.error('❌ [SYSTEM POS] Error inserting transaction into system_pos:', insertError);
-                  // Don't fail the transaction if System POS insertion fails
+                } catch (logError) {
+                  console.error('❌ Error logging Printer 2 audit:', logError);
+                  console.warn('⚠️ Transaction saved but audit log failed - receiptize badge may not appear correctly');
                 }
-              }
 
-              // Print after logging - loop for copies
-              await new Promise(r => setTimeout(r, 500));
-              for (let copy = 1; copy <= printer2Copies; copy++) {
-                if (copy > 1) {
-                  // Small delay between copies
-                  await new Promise(r => setTimeout(r, 300));
+
+                // Insert transaction into system_pos database AFTER audit is saved and committed
+                // System POS database is on localhost MySQL for local transaction storage
+                // This ensures the printer audit exists in local database before insertion
+                if (auditLogSuccess) {
+                  try {
+                    const insertResult = await window.electronAPI?.queueTransactionForSystemPos?.(transactionData.id);
+                    if (insertResult?.success) {
+                      console.log(`✅ [SYSTEM POS] Inserted transaction ${transactionData.id} into system_pos database`);
+                    } else if (insertResult?.alreadyQueued) {
+                      console.log(`✅ [SYSTEM POS] Transaction ${transactionData.id} already exists in system_pos`);
+                    } else {
+                      console.warn(`⚠️ [SYSTEM POS] Failed to insert transaction ${transactionData.id}:`, insertResult?.error);
+                    }
+                  } catch (insertError) {
+                    console.error('❌ [SYSTEM POS] Error inserting transaction into system_pos:', insertError);
+                    // Don't fail the transaction if System POS insertion fails
+                  }
                 }
-                const printResult = await window.electronAPI?.printReceipt?.(printer2Data);
-                if (isSuccessResponse(printResult) && !printResult.success) {
-                  console.error(`❌ Printer 2 failed (copy ${copy}/${printer2Copies}):`, printResult?.error);
-                } else if (copy === 1) {
-                  console.log(`✅ Printer 2 print successful (${printer2Copies} copy/copies)`);
+
+                // Print after logging - loop for copies
+                await new Promise(r => setTimeout(r, 500));
+                for (let copy = 1; copy <= printer2Copies; copy++) {
+                  if (copy > 1) {
+                    // Small delay between copies
+                    await new Promise(r => setTimeout(r, 300));
+                  }
+                  const printResult = await window.electronAPI?.printReceipt?.(printer2Data);
+                  if (isSuccessResponse(printResult) && !printResult.success) {
+                    console.error(`❌ Printer 2 failed (copy ${copy}/${printer2Copies}):`, printResult?.error);
+                  } else if (copy === 1) {
+                    console.log(`✅ Printer 2 print successful (${printer2Copies} copy/copies)`);
+                  }
                 }
+              } catch (printError) {
+                console.error('❌ Error printing to Printer 2:', printError);
               }
-            } catch (printError) {
-              console.error('❌ Error printing to Printer 2:', printError);
+          }
+          
+          // Handle Single Printer Mode: Log to Printer 2 audit if original target was 'receiptize' (even though we printed to Printer 1)
+          // OR if randomization decided to log to Printer 2 audit
+          if (singlePrinterModeEnabled && (originalTarget === 'receiptize' || (printer2AuditLogChance !== null && printer2AuditLogChance > 0))) {
+            // Check if we should log to Printer 2 audit
+            let shouldLogToPrinter2 = false;
+            
+            if (printer2AuditLogChance !== null && printer2AuditLogChance > 0) {
+              // Randomization is enabled - use randomization result
+              shouldLogToPrinter2 = shouldLogToPrinter2Audit();
+            } else {
+              // No randomization - use original target behavior
+              shouldLogToPrinter2 = originalTarget === 'receiptize';
+            }
+            
+            if (shouldLogToPrinter2) {
+              // Single Printer Mode: Don't print to Printer 2, but log to Printer 2 audit for database tracking.
+              // Use Printer 1 daily counter (same as receipt) and do NOT increment Printer 2 — one physical
+              // printer means one strictly ordered daily sequence. Audit log choice (P1 vs P2) is tracking only.
+              try {
+                const counterForP2Audit = typeof printer1Counter === 'number' && printer1Counter > 0
+                  ? printer1Counter
+                  : 1;
+                if (typeof printer1Counter !== 'number' || printer1Counter <= 0) {
+                  console.warn('⚠️ [SINGLE PRINTER MODE] Printer 1 counter missing for P2 audit, using 1');
+                }
+
+                // Log to Printer 2 audit using Printer 1 counter (no Printer 2 increment)
+                let auditLogSuccess = false;
+                try {
+                  const logResult = await window.electronAPI?.logPrinter2Print?.(transactionData.id, counterForP2Audit, 'manual', undefined, globalCounter);
+                  if (isSuccessResponse(logResult) && !logResult.success) {
+                    console.error('❌ Failed to log Printer 2 audit (Single Printer Mode):', logResult?.error);
+                  } else {
+                    auditLogSuccess = true;
+                    console.log(`✅ [SINGLE PRINTER MODE${printer2AuditLogChance !== null && printer2AuditLogChance > 0 ? ' + RANDOMIZATION' : ''}] Logged to Printer 2 audit (Printer 1 counter: ${counterForP2Audit}) for database tracking`);
+                  }
+                } catch (logError) {
+                  console.error('❌ Error logging Printer 2 audit (Single Printer Mode):', logError);
+                }
+
+                // Insert transaction into system_pos database if audit was successful
+                if (auditLogSuccess) {
+                  try {
+                    const insertResult = await window.electronAPI?.queueTransactionForSystemPos?.(transactionData.id);
+                    if (insertResult?.success) {
+                      console.log(`✅ [SYSTEM POS] Inserted transaction ${transactionData.id} into system_pos database`);
+                    } else if (insertResult?.alreadyQueued) {
+                      console.log(`✅ [SYSTEM POS] Transaction ${transactionData.id} already exists in system_pos`);
+                    } else {
+                      console.warn(`⚠️ [SYSTEM POS] Failed to insert transaction ${transactionData.id}:`, insertResult?.error);
+                    }
+                  } catch (insertError) {
+                    console.error('❌ [SYSTEM POS] Error inserting transaction into system_pos:', insertError);
+                  }
+                }
+              } catch (error) {
+                console.error('❌ Error processing Printer 2 database tracking (Single Printer Mode):', error);
+              }
+            } else {
+              // Randomization decided Printer 1, but we're in Single Printer Mode with original target 'receiptize'
+              // The Printer 1 audit logging section should have already handled this, so we skip here
+              console.log(`🖨️ [SINGLE PRINTER MODE + RANDOMIZATION] Randomization decided Printer 1 audit log, skipping Printer 2 audit log`);
             }
           }
 
+          // Print labels only if not already printed (e.g. at Simpan Order or Tambah Order)
+          const txRecord = transactionData as Record<string, unknown>;
+          const transactionUuid = (txRecord.uuid_id != null ? String(txRecord.uuid_id) : String(transactionData.id)) as string;
+          const checkerPrintedResult = await window.electronAPI?.localDbGetTransactionCheckerPrinted?.(transactionUuid);
+          const skipLabelPrint = checkerPrintedResult?.success === true && checkerPrintedResult?.checker_printed === true;
+
+          if (!skipLabelPrint) {
           // Print labels for each order item
           try {
-            // Get the counter to use (from the selected printer)
+            // Labels use the same daily counter as the receipt. In Single Printer Mode, always use
+            // Printer 1 counter (same logic as receipt) so the sequence stays strictly ordered.
             let labelCounter: number = 1;
-            if (shouldPrintReceipt && typeof printer1Counter === 'number') {
+            if (singlePrinterModeEnabled && typeof printer1Counter === 'number') {
+              // Single Printer Mode: always use Printer 1 counter (do not use P2)
               labelCounter = printer1Counter;
-            } else if (shouldPrintReceiptize && typeof printer2Counter === 'number') {
+            } else if (actualPrintReceipt && typeof printer1Counter === 'number') {
+              labelCounter = printer1Counter;
+            } else if (actualPrintReceiptize && typeof printer2Counter === 'number') {
               labelCounter = printer2Counter;
-            } else if (!shouldPrintReceipt && shouldPrintReceiptize && window.electronAPI?.getPrinterCounter) {
+            } else if (!actualPrintReceipt && actualPrintReceiptize && window.electronAPI?.getPrinterCounter) {
               try {
                 const counterResult = await window.electronAPI.getPrinterCounter('receiptizePrinter', businessId, false); // Don't increment
                 if (isCounterResponse(counterResult) && counterResult.success === true && typeof counterResult.counter === 'number' && counterResult.counter > 0) {
@@ -1686,12 +1934,80 @@ export default function PaymentModal({
               }
             }
 
-            // Print all labels in a single batch
-            if (allLabels.length > 0) {
-              // console.log(`🏷️ Printing ${allLabels.length} labels in batch...`);
+            // Build orderContext for checker templates that use {{waiterName}}, {{customerName}}, {{tableName}}, {{orderTime}}, {{items}}
+            const escapeHtmlForChecker = (s: string) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+            let waiterNameForChecker = loadedTransactionInfo?.waiterName ?? '';
+            if (!waiterNameForChecker && (localTransactionData as Record<string, unknown>)?.waiter_id != null) {
+              try {
+                const employees = await window.electronAPI?.localDbGetEmployees?.();
+                const arr = Array.isArray(employees) ? employees : [];
+                const waiterId = (localTransactionData as Record<string, unknown>).waiter_id as number;
+                const waiter = arr.find((e: Record<string, unknown>) => (e.id as number) === waiterId || Number(e.id) === waiterId);
+                if (waiter && typeof waiter.nama_karyawan === 'string') {
+                  waiterNameForChecker = waiter.nama_karyawan;
+                }
+              } catch (_) {
+                // ignore
+              }
+            }
+            const itemCellContent = (ri: ReceiptItem) => {
+              let text = ri.name;
+              if (ri.customNote || ri.custom_note) {
+                text += '\nCatatan: ' + (ri.customNote || ri.custom_note);
+              }
+              if (ri.customizations && Array.isArray(ri.customizations)) {
+                const opts = (ri.customizations as Array<{ selected_options?: Array<{ option_name?: string }> }>).flatMap(
+                  (c) => (c.selected_options || []).map((o) => o.option_name || '')
+                ).filter(Boolean);
+                if (opts.length) {
+                  text += '\n' + opts.join(', ');
+                }
+              }
+              return escapeHtmlForChecker(text).replace(/\n/g, '<br/>');
+            };
+            const rowHtml = (ri: ReceiptItem) => `<tr><td>${itemCellContent(ri)}</td><td style="text-align: right;">${ri.quantity}</td><td style="text-align: right;">${ri.total_price}</td></tr>`;
+            // Group by actual category (category1_name) so Section 1 = one category (e.g. Makanan), Section 2 = other (e.g. Minuman)
+            const key = (ri: ReceiptItem) => (ri.category1_name ?? '').trim() || `_id_${ri.category1_id ?? 'null'}`;
+            const byCategory = new Map<string, ReceiptItem[]>();
+            for (const ri of receiptItems) {
+              const k = key(ri);
+              if (!byCategory.has(k)) byCategory.set(k, []);
+              byCategory.get(k)!.push(ri);
+            }
+            const sortedKeys = Array.from(byCategory.keys()).filter(k => !k.startsWith('_id_')).sort();
+            const otherKeys = Array.from(byCategory.keys()).filter(k => k.startsWith('_id_'));
+            const [firstKey, secondKey] = sortedKeys.length >= 2
+              ? [sortedKeys[0], sortedKeys[1]]
+              : sortedKeys.length === 1
+                ? [sortedKeys[0], otherKeys[0] ?? '']
+                : [otherKeys[0] ?? '', otherKeys[1] ?? ''];
+            const cat1Items = (firstKey ? byCategory.get(firstKey) : []) ?? [];
+            const cat2Items = (secondKey ? byCategory.get(secondKey) : []) ?? [];
+            const category1Name = ((cat1Items[0]?.category1_name ?? firstKey.replace(/^_id_/, '')) || 'Kategori 1').trim() || 'Kategori 1';
+            const category2Name = ((cat2Items[0]?.category1_name ?? secondKey.replace(/^_id_/, '')) || '').trim() || '';
+            const lineHtml = (ri: ReceiptItem) => `<div class="item-line">- ${ri.quantity}x ${itemCellContent(ri)}</div>`;
+            const itemsCategory1 = cat1Items.map(lineHtml).join('');
+            const itemsCategory2 = cat2Items.map(lineHtml).join('');
+            const orderContextForChecker = {
+              waiterName: waiterNameForChecker,
+              customerName: String(loadedTransactionInfo?.customerName ?? (localTransactionData as Record<string, unknown>)?.customer_name ?? ''),
+              tableName: loadedTransactionInfo?.tableName ?? '',
+              orderTime: String((localTransactionData as Record<string, unknown>)?.created_at ?? transactionData.created_at ?? new Date().toISOString()),
+              itemsHtml: receiptItems.map(rowHtml).join(''),
+              itemsHtmlCategory1: itemsCategory1,
+              itemsHtmlCategory2: itemsCategory2,
+              category1Name,
+              category2Name,
+            };
+
+            // Print all labels in a single batch (use checker template when set in Settings → Template Struk → Template Label/Checker)
+            // When checker template uses {{items}}, backend prints one order-summary slip using orderContext; otherwise prints per-item labels.
+            if (allLabels.length > 0 || (orderContextForChecker.itemsHtml && orderContextForChecker.orderTime)) {
               const batchResult = await window.electronAPI?.printLabelsBatch?.({
                 labels: allLabels,
-                printerType: 'labelPrinter'
+                printerType: 'labelPrinter',
+                business_id: transactionData.business_id,
+                orderContext: orderContextForChecker
               });
 
               if (!isSuccessResponse(batchResult) || !batchResult.success) {
@@ -1699,11 +2015,13 @@ export default function PaymentModal({
                 console.error(`❌ Batch label print failed:`, errorMessage);
               } else {
                 // console.log(`✅ Successfully printed ${allLabels.length} labels in batch`);
+                await window.electronAPI?.localDbSetTransactionCheckerPrinted?.(transactionUuid);
               }
             }
           } catch (labelError) {
             console.error('❌ Error printing labels:', labelError);
             // Don't fail the transaction if label printing fails
+          }
           }
         }, 10); // Small delay to ensure UI updates first
       } else {
@@ -1793,6 +2111,8 @@ export default function PaymentModal({
       setBankSearchTerm(selectedBank?.bank_name ?? '');
     } else {
       setShowBankDropdown(false);
+      setShowOtherBanks(false);
+      setOtherBankSearchTerm('');
       if (selectedBank) {
         setBankSearchTerm(selectedBank.bank_name);
       }
@@ -1810,14 +2130,14 @@ export default function PaymentModal({
     if (
       selectedPaymentMethod === 'debit' &&
       previous !== 'debit' &&
-      (!bankId || !cardNumber || cardNumber.length !== 16)
+      !bankId
     ) {
       setBankError('');
       setCardNumberError('');
       setShowDebitModal(true);
     }
     previousPaymentMethod.current = selectedPaymentMethod;
-  }, [selectedPaymentMethod, bankId, cardNumber]);
+  }, [selectedPaymentMethod, bankId]);
 
   // Auto-set "Jumlah yang diterima" to uang pas when selecting Debit, QR, E-Wallet, or CL
   // Uses finalTotal so discount / custom nominal voucher / free are already applied
@@ -1831,40 +2151,51 @@ export default function PaymentModal({
   useEffect(() => {
     if (isOpen) {
       setAmountReceived('');
-      setCustomVoucherAmount('');
       setCustomerName('');
       setCustomerUnit('1');
-      setPromotionSelection('none');
       setBankId('');
       setCardNumber('');
       setBankSearchTerm('');
       setShowBankDropdown(false);
+      setShowOtherBanks(false);
+      setOtherBankSearchTerm('');
+      const vt = (loadedTransactionInfo?.voucher_type ?? '').toLowerCase();
+      const vd = typeof loadedTransactionInfo?.voucher_discount === 'number' ? loadedTransactionInfo.voucher_discount : (typeof loadedTransactionInfo?.voucher_discount === 'string' ? parseFloat(loadedTransactionInfo.voucher_discount) : 0);
+      const hasLoadedVoucher = vt === 'free' || (vt === 'percent' && (vd > 0 || loadedTransactionInfo?.voucher_value != null)) || (vt === 'nominal' && (vd > 0 || loadedTransactionInfo?.voucher_value != null));
+      if (!hasLoadedVoucher) {
+        setCustomVoucherAmount('');
+        setPromotionSelection('none');
+      }
       // Don't reset payment method if it's an online order with a selected platform
       if (!isOnline || !selectedOnlinePlatform) {
         setSelectedPaymentMethod('cash');
       }
-      // Don't reset pickup method if it's an online order
-      if (!isOnline) {
-        setSelectedPickupMethod('dine-in');
+      // Set pickup method: from loaded transaction (lihat mode), or keep take-away for online, or use cart selection
+      if (isOnline) {
+        setSelectedPickupMethod('take-away');
+      } else if (loadedTransactionInfo?.pickupMethod) {
+        setSelectedPickupMethod(loadedTransactionInfo.pickupMethod);
+      } else {
+        setSelectedPickupMethod(cartPickupMethod);
       }
       setActiveInput('amount');
       setIsProcessing(false);
       setShowConfirmation(false);
       setCardNumberError('');
     }
-  }, [isOpen, isOnline, selectedOnlinePlatform]);
+  }, [isOpen, isOnline, selectedOnlinePlatform, loadedTransactionInfo, cartPickupMethod]);
 
   if (!isOpen) return null;
 
   return (
     <>
       <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-50 p-2">
-        <div className="bg-white rounded-2xl w-[98vw] max-w-[1350px] h-[92vh] max-h-[700px] overflow-y-auto shadow-xl">
+        <div className="bg-white rounded-2xl w-[98vw] max-w-[1650px] h-[94vh] max-h-[900px] overflow-y-auto shadow-xl">
           {/* Header */}
           <div className="flex items-center justify-between p-6 pb-4">
             <h2 className="text-xl font-bold text-gray-900">Payment</h2>
             <button
-              onClick={onClose}
+              onClick={() => handleClose()}
               className="w-10 h-10 bg-gray-100 hover:bg-gray-200 rounded-full flex items-center justify-center transition-colors"
             >
               <X size={20} className="text-gray-600" />
@@ -1872,7 +2203,7 @@ export default function PaymentModal({
           </div>
 
           <div className="px-6 pb-6 h-full">
-            <div className="grid grid-cols-1 lg:grid-cols-2 gap-8 h-full">
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-8 h-full min-h-0">
               {/* Left Side - Bill Details and Pickup Method */}
               <div className="space-y-2">
                 {/* Customer Name and Pickup Method */}
@@ -2038,21 +2369,13 @@ export default function PaymentModal({
                       <span className="text-sm font-medium text-gray-600">{formatPrice(originalPrice)}</span>
                     </div>
                     {selectedPaymentMethod === 'debit' && (
-                      <div className="rounded-lg border border-blue-100 bg-blue-50 p-3 space-y-2">
+                      <div className="rounded-lg border border-blue-100 bg-blue-50 p-3">
                         <div className="flex justify-between items-center">
                           <span className="text-xs text-blue-700 font-semibold uppercase tracking-wide">
                             Bank
                           </span>
                           <span className={`text-sm font-semibold ${selectedBank ? 'text-blue-900' : 'text-red-600'}`}>
                             {selectedBank?.bank_name || 'Belum dipilih'}
-                          </span>
-                        </div>
-                        <div className="flex justify-between items-center">
-                          <span className="text-xs text-blue-700 font-semibold uppercase tracking-wide">
-                            Nomor Kartu
-                          </span>
-                          <span className={`text-sm font-semibold ${cardNumber ? 'text-blue-900' : 'text-red-600'}`}>
-                            {cardNumber || 'Belum diisi'}
                           </span>
                         </div>
                       </div>
@@ -2122,11 +2445,12 @@ export default function PaymentModal({
               </div>
 
               {/* Right Side - Keypad */}
-              <div className="space-y-4">
-                {/* Customer Name Input and Pickup Toggle */}
-                {/* Payment Method Selection */}
-                <div>
-                  <h3 className="text-sm font-semibold text-gray-800 mb-2">Pilih Metode Pembayaran</h3>
+              <div className="flex flex-col h-full min-h-0">
+                <div className="flex-1 min-h-0 overflow-y-auto space-y-4 pr-1">
+                  {/* Customer Name Input and Pickup Toggle */}
+                  {/* Payment Method Selection */}
+                  <div>
+                    <h3 className="text-sm font-semibold text-gray-800 mb-2">Pilih Metode Pembayaran</h3>
                   <div className="space-y-2">
                     {/* Show locked platform payment method for online orders */}
                     {isOnline && selectedOnlinePlatform && (
@@ -2212,65 +2536,108 @@ export default function PaymentModal({
                 </div>
                 {!isOnline && (
                   <div className={`space-y-2 ${promotionsDisabled ? 'opacity-60' : ''}`}>
-                    <div className="flex flex-wrap gap-2 mt-3">
-                      {promotionOptions.map(option => (
-                        <button
-                          key={option.id}
-                          onClick={() => !promotionsDisabled && handlePromotionSelect(option.id)}
-                          disabled={promotionsDisabled}
-                          className={`px-3 py-2 rounded-lg border text-xs font-medium transition-colors ${promotionSelection === option.id && !promotionsDisabled
-                            ? 'bg-green-100 border-green-400 text-green-800 shadow-sm'
-                            : promotionsDisabled
+                    {/* Diskon & Potongan group */}
+                    <div className="mt-3">
+                      <div className="flex items-center gap-3 mb-2">
+                        <span className="text-xs font-semibold text-gray-600 uppercase tracking-wide whitespace-nowrap">
+                          Diskon &amp; Potongan
+                        </span>
+                        <div className="flex-1 h-px bg-gray-300" />
+                      </div>
+                      <div className="flex flex-wrap gap-2">
+                        {percentDiscountOptions.map(option => (
+                          <button
+                            key={option.id}
+                            onClick={() => !promotionsDisabled && handlePromotionSelect(option.id)}
+                            disabled={promotionsDisabled}
+                            className={`px-3 py-2 rounded-lg border text-xs font-medium transition-colors ${promotionSelection === option.id && !promotionsDisabled
+                              ? 'bg-green-100 border-green-400 text-green-800 shadow-sm'
+                              : promotionsDisabled
+                                ? 'bg-gray-100 border-gray-200 text-gray-400 cursor-not-allowed'
+                                : 'bg-white border-gray-300 text-gray-700 hover:bg-gray-100'
+                              }`}
+                          >
+                            {option.label}
+                          </button>
+                        ))}
+                        {otherPromotionOptions.map(option => (
+                          <button
+                            key={option.id}
+                            onClick={() => !promotionsDisabled && handlePromotionSelect(option.id)}
+                            disabled={promotionsDisabled}
+                            className={`px-3 py-2 rounded-lg border text-xs font-medium transition-colors ${promotionSelection === option.id && !promotionsDisabled
+                              ? 'bg-green-100 border-green-400 text-green-800 shadow-sm'
+                              : promotionsDisabled
+                                ? 'bg-gray-100 border-gray-200 text-gray-400 cursor-not-allowed'
+                                : 'bg-white border-gray-300 text-gray-700 hover:bg-gray-100'
+                              }`}
+                          >
+                            {option.label}
+                          </button>
+                        ))}
+                        {promotionSelection !== 'none' && (
+                          <button
+                            onClick={() => !promotionsDisabled && handlePromotionSelect('none')}
+                            disabled={promotionsDisabled}
+                            className={`inline-flex items-center gap-1.5 px-3 py-2 rounded-lg border text-xs font-medium ${promotionsDisabled
                               ? 'bg-gray-100 border-gray-200 text-gray-400 cursor-not-allowed'
-                              : 'bg-white border-gray-300 text-gray-700 hover:bg-gray-100'
-                            }`}
-                        >
-                          {option.label}
-                        </button>
-                      ))}
-                      {promotionSelection !== 'none' && (
+                              : 'bg-white border-red-300 text-red-600 hover:bg-red-50 hover:border-red-400'
+                              }`}
+                          >
+                            <Trash2 size={14} />
+                            Hapus Promo
+                          </button>
+                        )}
+                      </div>
+                      {/* Row 2: Custom Nominal + textbox blended as one control (always shown, input disabled when inactive) */}
+                      <div
+                        className={`flex mt-2 w-full max-w-sm overflow-hidden rounded-lg border-2 transition-colors ${
+                          promotionSelection === 'custom' && activeInput === 'voucher'
+                            ? 'border-green-400 ring-2 ring-green-200 ring-offset-0'
+                            : promotionSelection === 'custom'
+                              ? 'border-gray-300'
+                              : 'border-gray-200'
+                        }`}
+                      >
                         <button
-                          onClick={() => !promotionsDisabled && handlePromotionSelect('none')}
+                          type="button"
+                          onClick={() => !promotionsDisabled && handlePromotionSelect('custom')}
                           disabled={promotionsDisabled}
-                          className={`px-3 py-2 rounded-lg border text-xs font-medium ${promotionsDisabled
-                            ? 'bg-gray-100 border-gray-200 text-gray-400 cursor-not-allowed'
-                            : 'bg-white border-gray-200 text-gray-500 hover:bg-gray-100'
-                            }`}
+                          className={`shrink-0 px-3 py-2.5 border-r-2 text-xs font-medium transition-colors ${
+                            promotionSelection === 'custom' && !promotionsDisabled
+                              ? 'bg-green-100 border-green-300 text-green-800'
+                              : promotionsDisabled
+                                ? 'bg-gray-100 border-gray-200 text-gray-400 cursor-not-allowed'
+                                : 'bg-gray-50 border-gray-200 text-gray-700 hover:bg-gray-100'
+                          }`}
                         >
-                          Hapus Promo
+                          Custom Nominal
                         </button>
-                      )}
-                    </div>
-                    {promotionSelection === 'custom' && (
-                      <div className="max-w-xs">
-                        <label className="block text-xs font-medium text-gray-600 mb-1">
-                          Nominal Voucher Custom
-                        </label>
                         <input
                           type="text"
                           value={
-                            promotionValue && promotionValue > 0
+                            promotionSelection === 'custom' && promotionValue && promotionValue > 0
                               ? `Rp ${promotionValue.toLocaleString('id-ID')}`
                               : ''
                           }
                           readOnly
-                          onClick={() => setActiveInput('voucher')}
-                          className={`w-full px-3 py-2 text-sm font-semibold border-2 rounded-lg transition-all duration-300 ${activeInput === 'voucher'
-                            ? 'border-green-400 bg-green-50 shadow-lg shadow-green-200 animate-pulse text-gray-800 cursor-pointer'
-                            : 'border-gray-200 bg-white hover:bg-gray-50 text-gray-800 cursor-pointer'
-                            }`}
+                          disabled={promotionSelection !== 'custom'}
+                          onClick={() => {
+                            if (promotionSelection === 'custom' && !promotionsDisabled) {
+                              setActiveInput('voucher');
+                            }
+                          }}
+                          className={`flex-1 min-w-0 px-3 py-2.5 text-sm font-semibold bg-transparent outline-none transition-colors placeholder:text-gray-400 ${
+                            promotionSelection !== 'custom'
+                              ? 'text-gray-400 cursor-not-allowed bg-gray-50'
+                              : activeInput === 'voucher'
+                                ? 'bg-green-50 text-gray-800 cursor-pointer'
+                                : 'bg-white text-gray-800 cursor-pointer hover:bg-gray-50'
+                          }`}
                           placeholder="Rp 0"
                         />
-                        <p className="text-[11px] text-gray-500 mt-1">
-                          Gunakan keypad di kanan untuk memasukkan nominal voucher.
-                        </p>
                       </div>
-                    )}
-                    {!promotionsDisabled && isPromotionApplied && promotionLabel && (
-                      <p className="text-xs text-green-700 font-medium">
-                        Promo terpilih: {promotionLabel}
-                      </p>
-                    )}
+                    </div>
                   </div>
                 )}
 
@@ -2365,10 +2732,9 @@ export default function PaymentModal({
                     </div>
                   )}
 
-
-
-                  {/* Numeric Keypad */}
-                  <div className="grid grid-cols-4 gap-2">
+                </div>
+                {/* Numeric Keypad - fixed position */}
+                <div className="flex-shrink-0 grid grid-cols-4 gap-2 mt-4">
                     {/* Row 1: 7, 8, 9, backspace */}
                     <button
                       onClick={() => handleKeypadInput('7')}
@@ -2504,121 +2870,101 @@ export default function PaymentModal({
             <div className="mb-4">
               <h3 className="text-lg font-semibold text-gray-900">Lengkapi Informasi Debit</h3>
               <p className="text-sm text-gray-500 mt-1">
-                Pilih bank dan masukkan nomor kartu debit pelanggan.
+                Pilih bank untuk pembayaran debit.
               </p>
             </div>
             <div className="space-y-4">
               <div>
-                <label className="block text-xs font-medium text-gray-700 mb-1">
+                <label className="block text-xs font-medium text-gray-700 mb-2">
                   Pilih Bank
                 </label>
-                <div className="relative bank-dropdown">
-                  <input
-                    type="text"
-                    value={bankSearchTerm}
-                    onChange={(e) => {
-                      setBankSearchTerm(e.target.value);
-                      setShowBankDropdown(true);
-                    }}
-                    onFocus={() => {
-                      setShowBankDropdown(true);
-                      setActiveInput('amount');
-                    }}
-                    onBlur={() => {
-                      setTimeout(() => setShowBankDropdown(false), 200);
-                    }}
-                    className={`w-full p-2 text-sm font-medium border rounded-md text-gray-800 bg-white focus:border-blue-400 focus:ring-1 focus:ring-blue-100 ${bankError ? 'border-red-400' : 'border-gray-300'
-                      }`}
-                    placeholder="Cari bank... (BCA, BRI, Mandiri)"
-                  />
-
-                  {showBankDropdown && (
-                    <div className="absolute z-10 w-full mt-1 bg-white border border-gray-300 rounded-lg shadow-lg max-h-60 overflow-y-auto">
-                      {banks.filter(bank =>
-                        bank.is_popular &&
-                        (bank.bank_name.toLowerCase().includes(bankSearchTerm.toLowerCase()) ||
-                          bank.bank_code.toLowerCase().includes(bankSearchTerm.toLowerCase()))
-                      ).map(bank => (
-                        <div
-                          key={bank.id}
-                          onClick={(e) => {
-                            e.preventDefault();
-                            e.stopPropagation();
-                            setBankId(bank.id.toString());
-                            setBankSearchTerm(bank.bank_name);
-                            setShowBankDropdown(false);
-                            setBankError('');
-                          }}
-                          onMouseDown={(e) => {
-                            e.preventDefault();
-                          }}
-                          className="px-3 py-2 hover:bg-blue-50 cursor-pointer border-b border-gray-100"
-                        >
-                          <div className="flex items-center justify-between">
-                            <span className="font-medium text-gray-900 text-sm">{bank.bank_name}</span>
-                            <span className="text-xs bg-blue-100 text-blue-800 px-2 py-1 rounded">Popular</span>
-                          </div>
-                        </div>
-                      ))}
-
-                      {banks.filter(bank =>
-                        !bank.is_popular &&
-                        (bank.bank_name.toLowerCase().includes(bankSearchTerm.toLowerCase()) ||
-                          bank.bank_code.toLowerCase().includes(bankSearchTerm.toLowerCase()))
-                      ).map(bank => (
-                        <div
-                          key={bank.id}
-                          onClick={(e) => {
-                            e.preventDefault();
-                            e.stopPropagation();
-                            setBankId(bank.id.toString());
-                            setBankSearchTerm(bank.bank_name);
-                            setShowBankDropdown(false);
-                            setBankError('');
-                          }}
-                          onMouseDown={(e) => {
-                            e.preventDefault();
-                          }}
-                          className="px-3 py-2 hover:bg-blue-50 cursor-pointer border-b border-gray-100"
-                        >
-                          <div className="flex items-center justify-between">
-                            <span className="font-medium text-gray-900 text-sm">{bank.bank_name}</span>
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                  )}
+                <div className="grid grid-cols-4 gap-2">
+                  {POPULAR_BANK_IDS.map((id) => {
+                    const bank = banks.find((b) => b.id === id);
+                    const label = bank?.bank_name ?? POPULAR_BANK_LABELS[id];
+                    const isSelected = bankId === id.toString();
+                    return (
+                      <button
+                        key={id}
+                        type="button"
+                        onClick={() => {
+                          setBankId(id.toString());
+                          setBankSearchTerm(bank?.bank_name ?? label);
+                          setBankError('');
+                          setShowOtherBanks(false);
+                        }}
+                        className={`w-full min-w-0 px-4 py-2.5 rounded-lg text-sm font-semibold border-2 transition-colors ${
+                          isSelected
+                            ? 'border-blue-600 bg-blue-50 text-blue-800'
+                            : 'border-gray-200 bg-white text-gray-800 hover:border-blue-300 hover:bg-blue-50/50'
+                        }`}
+                      >
+                        {label}
+                      </button>
+                    );
+                  })}
+                  <button
+                    type="button"
+                    onClick={() => setShowOtherBanks(!showOtherBanks)}
+                    className={`w-full min-w-0 px-4 py-2.5 rounded-lg text-sm font-semibold border-2 transition-colors ${
+                      showOtherBanks
+                        ? 'border-blue-600 bg-blue-50 text-blue-800'
+                        : 'border-gray-200 bg-white text-gray-800 hover:border-blue-300 hover:bg-blue-50/50'
+                    }`}
+                  >
+                    Lainnya
+                  </button>
                 </div>
+
+                {showOtherBanks && (
+                  <div className="mt-3 relative bank-dropdown">
+                    <input
+                      type="text"
+                      value={otherBankSearchTerm}
+                      onChange={(e) => {
+                        setOtherBankSearchTerm(e.target.value);
+                        setShowBankDropdown(true);
+                      }}
+                      onFocus={() => setShowBankDropdown(true)}
+                      onBlur={() => setTimeout(() => setShowBankDropdown(false), 200)}
+                      className={`w-full p-2 text-sm font-medium border rounded-md text-gray-800 bg-white focus:border-blue-400 focus:ring-1 focus:ring-blue-100 ${bankError ? 'border-red-400' : 'border-gray-300'}`}
+                      placeholder="Cari bank..."
+                    />
+                    {showBankDropdown && (
+                      <div className="absolute z-10 w-full mt-1 bg-white border border-gray-300 rounded-lg shadow-lg max-h-52 overflow-y-auto">
+                        {banks
+                          .filter(
+                            (bank) =>
+                              !POPULAR_BANK_IDS.includes(bank.id) &&
+                              (bank.bank_name.toLowerCase().includes(otherBankSearchTerm.toLowerCase()) ||
+                                bank.bank_code.toLowerCase().includes(otherBankSearchTerm.toLowerCase()))
+                          )
+                          .map((bank) => {
+                            const isSelected = bankId === bank.id.toString();
+                            return (
+                              <div
+                                key={bank.id}
+                                onClick={(e) => {
+                                  e.preventDefault();
+                                  e.stopPropagation();
+                                  setBankId(bank.id.toString());
+                                  setBankSearchTerm(bank.bank_name);
+                                  setBankError('');
+                                }}
+                                onMouseDown={(e) => e.preventDefault()}
+                                className={`px-3 py-2 hover:bg-blue-50 cursor-pointer border-b border-gray-100 ${isSelected ? 'bg-blue-50' : ''}`}
+                              >
+                                <span className="font-medium text-gray-900 text-sm">{bank.bank_name}</span>
+                              </div>
+                            );
+                          })}
+                      </div>
+                    )}
+                  </div>
+                )}
+
                 {bankError && (
                   <p className="mt-2 text-xs text-red-600 font-medium">{bankError}</p>
-                )}
-              </div>
-
-              <div>
-                <label className="block text-xs font-medium text-gray-700 mb-1">
-                  Nomor Kartu (16 digit)
-                </label>
-                <input
-                  ref={cardNumberRef}
-                  type="text"
-                  value={cardNumber}
-                  onChange={(e) => handleCardNumberChange(e.target.value)}
-                  onFocus={() => {
-                    setActiveInput('amount');
-                  }}
-                  className={`w-full p-2 text-sm border rounded-md bg-white focus:border-blue-400 focus:ring-1 focus:ring-blue-100 placeholder:text-gray-400 placeholder:opacity-70 ${cardNumberError ? 'border-red-500 bg-red-50 text-red-800' : 'border-gray-300 text-gray-900'
-                    }`}
-                  placeholder="1234567890123456"
-                  maxLength={16}
-                />
-                {cardNumberError ? (
-                  <p className="text-xs text-red-600 mt-1 font-medium">
-                    {cardNumberError}
-                  </p>
-                ) : (
-                  <p className="text-xs text-gray-500 mt-1">
-                    Masukkan 16 digit nomor kartu debit.
-                  </p>
                 )}
               </div>
             </div>

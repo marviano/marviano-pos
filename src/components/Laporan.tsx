@@ -1,4 +1,4 @@
-﻿'use client';
+'use client';
 
 import { useState } from 'react';
 import { Clock, FileText, Receipt, XCircle, Scissors } from 'lucide-react';
@@ -32,15 +32,15 @@ export default function Laporan() {
   return (
     <div className="flex-1 flex flex-col h-full bg-gray-50 overflow-hidden">
       {/* Header & Tabs */}
-      <div className="bg-white border-b border-gray-200 px-6 py-4">
-        <h1 className="text-2xl font-bold text-gray-900 mb-4">Laporan</h1>
-        <div className="flex flex-wrap items-center gap-4">
+      <div className="bg-white border-b border-gray-200 px-6 pt-4">
+        {/* Tab strip — tab-like appearance */}
+        <div className="flex border-b border-gray-200 -mb-px gap-0">
           <button
             onClick={() => setActiveTab('shift')}
-            className={`flex items-center space-x-2 px-4 py-2 rounded-lg font-medium transition-colors ${
+            className={`flex items-center space-x-2 px-4 py-3 text-sm font-medium transition-colors border-b-2 -mb-px ${
               activeTab === 'shift'
-                ? 'bg-blue-600 text-white'
-                : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+                ? 'border-blue-600 text-blue-600 bg-white'
+                : 'border-transparent text-gray-600 hover:text-gray-900 hover:border-gray-300'
             }`}
           >
             <Clock className="w-4 h-4" />
@@ -48,32 +48,21 @@ export default function Laporan() {
           </button>
           <button
             onClick={() => setActiveTab('transactions')}
-            className={`flex items-center space-x-2 px-4 py-2 rounded-lg font-medium transition-colors ${
+            className={`flex items-center space-x-2 px-4 py-3 text-sm font-medium transition-colors border-b-2 -mb-px ${
               activeTab === 'transactions'
-                ? 'bg-blue-600 text-white'
-                : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+                ? 'border-blue-600 text-blue-600 bg-white'
+                : 'border-transparent text-gray-600 hover:text-gray-900 hover:border-gray-300'
             }`}
           >
             <Receipt className="w-4 h-4" />
             <span>Semua Transaksi</span>
           </button>
-          
-          {/* Log Section Separator */}
-          <div className="flex items-center gap-4">
-            <div className="h-6 w-px bg-gray-300"></div>
-            <div className="flex items-center gap-2">
-              <span className="text-xs font-semibold text-gray-500 uppercase tracking-wider">Log</span>
-              <div className="h-4 w-px bg-gray-300"></div>
-            </div>
-          </div>
-
-          {/* Log Section Buttons */}
           <button
             onClick={() => setActiveTab('cancelled')}
-            className={`flex items-center space-x-2 px-4 py-2 rounded-lg font-medium transition-colors ${
+            className={`flex items-center space-x-2 px-4 py-3 text-sm font-medium transition-colors border-b-2 -mb-px ${
               activeTab === 'cancelled'
-                ? 'bg-blue-600 text-white'
-                : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+                ? 'border-blue-600 text-blue-600 bg-white'
+                : 'border-transparent text-gray-600 hover:text-gray-900 hover:border-gray-300'
             }`}
           >
             <XCircle className="w-4 h-4" />
@@ -81,27 +70,22 @@ export default function Laporan() {
           </button>
           <button
             onClick={() => setActiveTab('splitbill')}
-            className={`flex items-center space-x-2 px-4 py-2 rounded-lg font-medium transition-colors ${
+            className={`flex items-center space-x-2 px-4 py-3 text-sm font-medium transition-colors border-b-2 -mb-px ${
               activeTab === 'splitbill'
-                ? 'bg-blue-600 text-white'
-                : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+                ? 'border-blue-600 text-blue-600 bg-white'
+                : 'border-transparent text-gray-600 hover:text-gray-900 hover:border-gray-300'
             }`}
           >
             <Scissors className="w-4 h-4" />
             <span>Split Bill/Pindah Meja</span>
           </button>
-          
-          {/* Placeholder for future tabs */}
-          <div className="flex items-center gap-4">
-            <div className="h-6 w-px bg-gray-300"></div>
-            <button
-              disabled
-              className="flex items-center space-x-2 px-4 py-2 rounded-lg font-medium bg-gray-100 text-gray-400 cursor-not-allowed"
-            >
-              <FileText className="w-4 h-4" />
-              <span>Laporan Penjualan (Coming Soon)</span>
-            </button>
-          </div>
+          <button
+            disabled
+            className="flex items-center space-x-2 px-4 py-3 text-sm font-medium border-b-2 -mb-px border-transparent text-gray-400 cursor-not-allowed bg-gray-50/50"
+          >
+            <FileText className="w-4 h-4" />
+            <span>Laporan Penjualan (Coming Soon)</span>
+          </button>
         </div>
       </div>
 

@@ -2,8 +2,9 @@
 
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { useRouter } from 'next/navigation';
-import { Clock, CreditCard, RefreshCw, Search, Filter, ChevronUp, ChevronDown, Wifi, WifiOff } from 'lucide-react';
+import { Clock, CreditCard, RefreshCw, Search, Filter, ChevronUp, ChevronDown, ChevronRight, Wifi, WifiOff, Calendar, X, Trash2, Columns } from 'lucide-react';
 import TransactionDetailModal, { TransactionDetail, TransactionRefund } from './TransactionDetailModal';
+import Printer1ToPrinter2Manager from './Printer1ToPrinter2Manager';
 import { useAuth } from '@/hooks/useAuth';
 import { hasPermission } from '@/lib/permissions';
 import { isSuperAdmin } from '@/lib/auth';
@@ -42,6 +43,8 @@ interface Transaction {
   transaction_type: 'drinks' | 'bakery';
   status: string;
   created_at: string;
+  updated_at?: string | null;
+  paid_at?: string | null;
   user_name?: string;
   business_name?: string;
   voucher_type?: 'none' | 'percent' | 'nominal' | 'free';
@@ -49,6 +52,49 @@ interface Transaction {
   voucher_label?: string | null;
   refund_status?: string | null;
   refund_total?: number | null;
+}
+
+/** Column keys and labels for Daftar Transaksi. Order defines table column order. */
+const TRANSACTION_COLUMNS: Array<{ key: string; label: string; sortKey: string | null }> = [
+  { key: 'receipt_number', label: '#', sortKey: 'receipt_number' },
+  { key: 'created_at', label: 'Waktu', sortKey: 'created_at' },
+  { key: 'updated_at', label: 'Updated at', sortKey: 'updated_at' },
+  { key: 'paid_at', label: 'Paid at', sortKey: 'paid_at' },
+  { key: 'payment_method', label: 'Metode', sortKey: 'payment_method' },
+  { key: 'pickup_method', label: 'DI/TA', sortKey: 'pickup_method' },
+  { key: 'total_amount', label: 'Total', sortKey: 'total_amount' },
+  { key: 'voucher_discount', label: 'Disc/Vc', sortKey: 'voucher_discount' },
+  { key: 'final_amount', label: 'Final', sortKey: 'final_amount' },
+  { key: 'refund_total', label: 'Refund', sortKey: 'refund_total' },
+  { key: 'customer_name', label: 'Pelanggan', sortKey: 'customer_name' },
+  { key: 'waiter', label: 'Waiter', sortKey: null },
+  { key: 'user_name', label: 'Kasir', sortKey: 'user_name' },
+  { key: 'shift', label: 'Shift', sortKey: null },
+  { key: 'actions', label: '→', sortKey: null },
+];
+
+const COLUMN_VISIBILITY_STORAGE_KEY = 'transactionListColumnVisibility';
+
+function getDefaultColumnVisibility(): Record<string, boolean> {
+  const out: Record<string, boolean> = {};
+  TRANSACTION_COLUMNS.forEach((c) => { out[c.key] = true; });
+  return out;
+}
+
+function loadColumnVisibility(): Record<string, boolean> {
+  if (typeof window === 'undefined') return getDefaultColumnVisibility();
+  try {
+    const raw = localStorage.getItem(COLUMN_VISIBILITY_STORAGE_KEY);
+    if (!raw) return getDefaultColumnVisibility();
+    const parsed = JSON.parse(raw) as Record<string, boolean>;
+    const def = getDefaultColumnVisibility();
+    TRANSACTION_COLUMNS.forEach((c) => {
+      if (typeof parsed[c.key] === 'boolean') def[c.key] = parsed[c.key];
+    });
+    return def;
+  } catch {
+    return getDefaultColumnVisibility();
+  }
 }
 
 interface TransactionListProps {
@@ -80,6 +126,8 @@ interface ElectronTransaction {
   transaction_type: string;
   status: string;
   created_at: string;
+  updated_at?: string | null;
+  paid_at?: string | null;
   shift_uuid?: string;
   refund_total?: number | null;
   refund_status?: string | null;
@@ -159,6 +207,16 @@ interface ElectronAPI {
   localDbGetSystemPosBusinesses?: () => Promise<ElectronBusiness[]>;
   localDbGetSystemPosAllProducts?: (businessId?: number) => Promise<ElectronProduct[]>;
   localDbGetSystemPosEmployees?: () => Promise<Array<{ id: number | string; nama_karyawan?: string; color?: string | null }>>;
+  localDbGetShifts?: (filters?: { businessId?: number; startDate?: string; endDate?: string; limit?: number }) => Promise<{ shifts: Array<{ uuid_id?: string; shift_start?: string; user_name?: string }> }>;
+  localDbUpdateTransactionShift?: (transactionUuid: string, shiftUuid: string | null) => Promise<{ success: boolean; error?: string }>;
+  localDbDeleteSingleTransactionPreview?: (transactionUuid: string) => Promise<{
+    success: boolean;
+    error?: string;
+    transactionUuid?: string;
+    queries?: Array<{ sql: string; params: (string | number)[]; description: string }>;
+    systemPosQueries?: Array<{ sql: string; params: (string | number)[]; description: string }>;
+  }>;
+  localDbDeleteSingleTransaction?: (transactionUuid: string) => Promise<{ success: boolean; error?: string }>;
 }
 
 export default function TransactionList({ businessId, onLoadTransaction }: TransactionListProps) {
@@ -169,6 +227,7 @@ export default function TransactionList({ businessId, onLoadTransaction }: Trans
   const [error, setError] = useState<string | null>(null);
   const [searchTerm, setSearchTerm] = useState('');
   const [filterMethod, setFilterMethod] = useState<string>('all');
+  const [shiftFilterUuid, setShiftFilterUuid] = useState<string>(''); // '' = All, 'none' = No shift, else shift uuid (for all users)
   
   // Use businessId from props, or fallback to user's selectedBusinessId
   const effectiveBusinessId = businessId ?? user?.selectedBusinessId;
@@ -185,11 +244,64 @@ export default function TransactionList({ businessId, onLoadTransaction }: Trans
   const [receiptizePrintedIds, setReceiptizePrintedIds] = useState<Set<string>>(() => new Set());
   const [receiptizeCounters, setReceiptizeCounters] = useState<Record<string, number>>({});
   const [receiptCounters, setReceiptCounters] = useState<Record<string, number>>({});
+  const [shiftLabelByUuid, setShiftLabelByUuid] = useState<Record<string, string>>({});
   const [showAllTransactions, setShowAllTransactions] = useState(false);
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
   const [voucherClickCount, setVoucherClickCount] = useState(0);
   const [showPrintingLogs, setShowPrintingLogs] = useState(false);
   const [employeesMap, setEmployeesMap] = useState<Map<number, { name: string; color: string | null }>>(new Map());
+  const [itemWaiterIdsByTx, setItemWaiterIdsByTx] = useState<Record<string, number[]>>({});
+  const [openWaiterPopoverFor, setOpenWaiterPopoverFor] = useState<string | null>(null);
+  const waiterPopoverRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (openWaiterPopoverFor === null) return;
+    const close = (e: MouseEvent) => {
+      if (waiterPopoverRef.current && !waiterPopoverRef.current.contains(e.target as Node)) setOpenWaiterPopoverFor(null);
+    };
+    document.addEventListener('mousedown', close);
+    return () => document.removeEventListener('mousedown', close);
+  }, [openWaiterPopoverFor]);
+  const [headerClickCount, setHeaderClickCount] = useState(0);
+  const [showPrinterManager, setShowPrinterManager] = useState(false);
+  const headerClickTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const [showBindShiftModal, setShowBindShiftModal] = useState(false);
+  const [transactionToBind, setTransactionToBind] = useState<Transaction | null>(null);
+  const [bindShiftList, setBindShiftList] = useState<Array<{ uuid_id: string; shift_start: string; user_name: string }>>([]);
+  const [isLoadingBindShifts, setIsLoadingBindShifts] = useState(false);
+  const [selectedBindShiftUuid, setSelectedBindShiftUuid] = useState<string | null>(null);
+  const [isSavingBindShift, setIsSavingBindShift] = useState(false);
+  const [bindShiftError, setBindShiftError] = useState<string | null>(null);
+  const [showDeleteTxModal, setShowDeleteTxModal] = useState(false);
+  const [transactionToDelete, setTransactionToDelete] = useState<Transaction | null>(null);
+  const [deletePreview, setDeletePreview] = useState<{ queries: Array<{ sql: string; params: (string | number)[]; description: string }>; systemPosQueries: Array<{ sql: string; params: (string | number)[]; description: string }> } | null>(null);
+  const [isLoadingDeletePreview, setIsLoadingDeletePreview] = useState(false);
+  const [isDeletingTx, setIsDeletingTx] = useState(false);
+  const [deleteTxError, setDeleteTxError] = useState<string | null>(null);
+  const [columnVisibility, setColumnVisibility] = useState<Record<string, boolean>>(loadColumnVisibility);
+  const [showColumnPicker, setShowColumnPicker] = useState(false);
+  const columnPickerRef = useRef<HTMLDivElement>(null);
+
+  // Persist column visibility to localStorage when it changes
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    try {
+      localStorage.setItem(COLUMN_VISIBILITY_STORAGE_KEY, JSON.stringify(columnVisibility));
+    } catch {
+      // ignore
+    }
+  }, [columnVisibility]);
+
+  // Close column picker on click outside
+  useEffect(() => {
+    if (!showColumnPicker) return;
+    const handleClick = (e: MouseEvent) => {
+      if (columnPickerRef.current && !columnPickerRef.current.contains(e.target as Node)) {
+        setShowColumnPicker(false);
+      }
+    };
+    document.addEventListener('mousedown', handleClick);
+    return () => document.removeEventListener('mousedown', handleClick);
+  }, [showColumnPicker]);
 
   // Get today's date in UTC+7 timezone
   // Import from shared utility for consistency
@@ -216,11 +328,27 @@ export default function TransactionList({ businessId, onLoadTransaction }: Trans
   const canViewPrintingLogs = hasPermission(user, 'daftartransaksi.viewprintinglogs');
   const canViewOfflineSystemPosSwitch = isSuperAdmin(user); // Only super admin can see the switch
   const canRefund = isSuperAdmin(user) || hasPermission(user, 'daftartransaksi.refund');
+  const canAccessPrinterManager = isSuperAdmin(user) || hasPermission(user, 'access_printer1printer2manager');
+  const canBindToShift = isSuperAdmin(user);
+  const canDeleteTransaction = isSuperAdmin(user);
+
+  const visibleColumns = TRANSACTION_COLUMNS.filter((c) => columnVisibility[c.key] !== false);
+
+  const setColumnVisible = (key: string, visible: boolean) => {
+    setColumnVisibility((prev) => ({ ...prev, [key]: visible }));
+  };
 
   // Check for conflicting permissions (Super Admin bypasses this check)
   const hasConflictingPermissions = !isSuperAdmin(user) && canViewUserDataOnly && canViewAllData;
 
-  // Fetch transaction details from offline or system_pos database
+  // Cleanup timeout on unmount
+  useEffect(() => {
+    return () => {
+      if (headerClickTimeoutRef.current) {
+        clearTimeout(headerClickTimeoutRef.current);
+      }
+    };
+  }, []);
   const fetchTransactionDetail = async (transactionId: string) => {
     setIsLoadingDetail(true);
     try {
@@ -658,6 +786,8 @@ export default function TransactionList({ businessId, onLoadTransaction }: Trans
           waiter_id: typeof tx.waiter_id === 'number' ? tx.waiter_id : (typeof tx.waiter_id === 'string' ? parseInt(tx.waiter_id, 10) : null),
           status: tx.status || 'paid',
           created_at: tx.created_at,
+          updated_at: tx.updated_at ?? null,
+          paid_at: tx.paid_at ?? null,
           shift_uuid: tx.shift_uuid, // Include shift_uuid
           refund_total: refundTotal,
           refund_status: refundStatus,
@@ -688,6 +818,33 @@ export default function TransactionList({ businessId, onLoadTransaction }: Trans
       }
 
       setTransactions(filteredTransactions);
+
+      // Fetch shifts for date range to build shift labels (Shift 1, Shift 2, ...)
+      if (!useSystemPos && electronAPI.localDbGetShifts) {
+        try {
+          const startDate = `${fromDate}T00:00:00.000Z`;
+          const endDate = `${toDate}T23:59:59.999Z`;
+          const { shifts } = await electronAPI.localDbGetShifts({
+            businessId: effectiveBusinessId,
+            startDate,
+            endDate,
+            limit: 200
+          });
+          const sorted = [...(shifts || [])].sort(
+            (a, b) => new Date(a.shift_start || 0).getTime() - new Date(b.shift_start || 0).getTime()
+          );
+          const map: Record<string, string> = {};
+          sorted.forEach((s, i) => {
+            const uuid = s.uuid_id;
+            if (uuid) map[uuid] = `Shift ${i + 1}`;
+          });
+          setShiftLabelByUuid(map);
+        } catch {
+          setShiftLabelByUuid({});
+        }
+      } else {
+        setShiftLabelByUuid({});
+      }
 
       // Fetch original Receiptize counters (from Printer2 audit log)
       const receiptizeResult = await fetchReceiptizePrintedIds();
@@ -723,6 +880,145 @@ export default function TransactionList({ businessId, onLoadTransaction }: Trans
       setIsLoading(false);
     }
   }, [isSystemPosMode, fromDate, toDate, effectiveBusinessId, fetchReceiptizePrintedIds, fetchReceiptPrintedIds, canViewUserDataOnly, canViewAllData, canViewPastData, user]);
+
+  // Fetch shifts for Bind to Shift modal (super admin only)
+  useEffect(() => {
+    if (!showBindShiftModal || !transactionToBind || isSystemPosMode) {
+      setBindShiftList([]);
+      return;
+    }
+    const electronAPI = (typeof window !== 'undefined' ? (window as { electronAPI?: ElectronAPI }).electronAPI : undefined);
+    if (!electronAPI?.localDbGetShifts) {
+      setBindShiftList([]);
+      return;
+    }
+    let cancelled = false;
+    setIsLoadingBindShifts(true);
+    setBindShiftError(null);
+    const txDate = new Date(transactionToBind.created_at);
+    const y = txDate.getFullYear(), m = txDate.getMonth(), d = txDate.getDate();
+    const start = new Date(y, m, d - 1);
+    const end = new Date(y, m, d + 2);
+    const startDate = start.toISOString().slice(0, 10) + 'T00:00:00.000Z';
+    const endDate = end.toISOString().slice(0, 10) + 'T23:59:59.999Z';
+    electronAPI.localDbGetShifts({
+      businessId: transactionToBind.business_id,
+      startDate,
+      endDate,
+      limit: 100
+    }).then((res) => {
+      if (cancelled) return;
+      const raw = (res?.shifts || []) as Array<{ uuid_id?: string; shift_start?: string; user_name?: string }>;
+      const sorted = [...raw].sort(
+        (a, b) => new Date(a.shift_start || 0).getTime() - new Date(b.shift_start || 0).getTime()
+      );
+      setBindShiftList(sorted.filter((s) => s.uuid_id).map((s) => ({
+        uuid_id: s.uuid_id!,
+        shift_start: s.shift_start || '',
+        user_name: s.user_name || '—'
+      })));
+    }).catch((err) => {
+      if (!cancelled) setBindShiftError(err instanceof Error ? err.message : 'Gagal memuat shift');
+    }).finally(() => {
+      if (!cancelled) setIsLoadingBindShifts(false);
+    });
+    return () => { cancelled = true; };
+  }, [showBindShiftModal, transactionToBind, isSystemPosMode]);
+
+  const handleOpenBindShift = (transaction: Transaction) => {
+    setTransactionToBind(transaction);
+    setSelectedBindShiftUuid(transaction.shift_uuid ?? null);
+    setShowBindShiftModal(true);
+    setBindShiftError(null);
+  };
+
+  const handleConfirmBindShift = async () => {
+    if (!transactionToBind) return;
+    // selectedBindShiftUuid can be null to unbind
+    const electronAPI = (typeof window !== 'undefined' ? (window as { electronAPI?: ElectronAPI }).electronAPI : undefined);
+    if (!electronAPI?.localDbUpdateTransactionShift) return;
+    setIsSavingBindShift(true);
+    setBindShiftError(null);
+    try {
+      const result = await electronAPI.localDbUpdateTransactionShift(transactionToBind.id, selectedBindShiftUuid ?? null);
+      if (result?.success) {
+        setShowBindShiftModal(false);
+        setTransactionToBind(null);
+        setSelectedBindShiftUuid(null);
+        await fetchTransactions();
+      } else {
+        setBindShiftError(result?.error || 'Gagal mengikat shift');
+      }
+    } catch (err) {
+      setBindShiftError(err instanceof Error ? err.message : 'Gagal mengikat shift');
+    } finally {
+      setIsSavingBindShift(false);
+    }
+  };
+
+  // Delete single transaction: load preview when modal opens
+  useEffect(() => {
+    if (!showDeleteTxModal || !transactionToDelete) {
+      setDeletePreview(null);
+      return;
+    }
+    const electronAPI = (typeof window !== 'undefined' ? (window as { electronAPI?: ElectronAPI }).electronAPI : undefined);
+    if (!electronAPI?.localDbDeleteSingleTransactionPreview) {
+      setDeleteTxError('API tidak tersedia');
+      return;
+    }
+    let cancelled = false;
+    setIsLoadingDeletePreview(true);
+    setDeleteTxError(null);
+    electronAPI.localDbDeleteSingleTransactionPreview(transactionToDelete.id).then((res) => {
+      if (cancelled) return;
+      if (res?.success && res.queries && res.systemPosQueries) {
+        setDeletePreview({ queries: res.queries, systemPosQueries: res.systemPosQueries });
+        setDeleteTxError(null);
+      } else {
+        setDeletePreview(null);
+        setDeleteTxError(res?.error || 'Gagal memuat preview');
+      }
+    }).catch((err) => {
+      if (!cancelled) {
+        setDeletePreview(null);
+        setDeleteTxError(err instanceof Error ? err.message : 'Gagal memuat preview');
+      }
+    }).finally(() => {
+      if (!cancelled) setIsLoadingDeletePreview(false);
+    });
+    return () => { cancelled = true; };
+  }, [showDeleteTxModal, transactionToDelete]);
+
+  const handleOpenDeleteTransaction = (transaction: Transaction) => {
+    setTransactionToDelete(transaction);
+    setShowDeleteTxModal(true);
+    setDeleteTxError(null);
+    setDeletePreview(null);
+  };
+
+  const handleConfirmDeleteTransaction = async () => {
+    if (!transactionToDelete) return;
+    const electronAPI = (typeof window !== 'undefined' ? (window as { electronAPI?: ElectronAPI }).electronAPI : undefined);
+    if (!electronAPI?.localDbDeleteSingleTransaction) return;
+    setIsDeletingTx(true);
+    setDeleteTxError(null);
+    try {
+      const result = await electronAPI.localDbDeleteSingleTransaction(transactionToDelete.id);
+      if (result?.success) {
+        setShowDeleteTxModal(false);
+        setTransactionToDelete(null);
+        setDeletePreview(null);
+        await fetchTransactions();
+      } else {
+        setDeleteTxError(result?.error || 'Gagal menghapus transaksi');
+      }
+    } catch (err) {
+      setDeleteTxError(err instanceof Error ? err.message : 'Gagal menghapus transaksi');
+    } finally {
+      setIsDeletingTx(false);
+    }
+  };
 
   // Fetch employees to get waiter names
   useEffect(() => {
@@ -765,12 +1061,48 @@ export default function TransactionList({ businessId, onLoadTransaction }: Trans
     initialLoad();
   }, [fetchTransactions]);
 
+  // Fetch distinct item-level waiter IDs per transaction (for multi-waiter tooltip)
+  useEffect(() => {
+    if (transactions.length === 0) {
+      setItemWaiterIdsByTx({});
+      return;
+    }
+    const electronAPI = typeof window !== 'undefined' ? (window as { electronAPI?: { localDbGetDistinctItemWaiterIdsByTransaction?: (ids: string[]) => Promise<Record<string, number[]>> } }).electronAPI : undefined;
+    if (!electronAPI?.localDbGetDistinctItemWaiterIdsByTransaction) return;
+    const ids = transactions.map((t) => t.id);
+    electronAPI.localDbGetDistinctItemWaiterIdsByTransaction(ids).then(setItemWaiterIdsByTx).catch(() => setItemWaiterIdsByTx({}));
+  }, [transactions]);
+
   useEffect(() => {
     setShowAllTransactions(false);
     setReceiptizeCounters({});
     setReceiptizePrintedIds(new Set<string>());
     setReceiptCounters({});
   }, [effectiveBusinessId, fromDate, toDate, isSystemPosMode]);
+
+  // #region agent log
+  useEffect(() => {
+    if (transactions.length === 0) return;
+    const t = setTimeout(() => {
+      const table = document.querySelector('table.w-full.text-sm');
+      if (!table) {
+        if (typeof fetch === 'function') {
+          fetch('http://127.0.0.1:7242/ingest/7b565785-72b5-49f7-b2c0-57606ea0d0b5', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ location: 'TransactionList.tsx:useEffect', message: 'Table not found in DOM', data: { transactionsLength: transactions.length }, timestamp: Date.now(), sessionId: 'debug-session', hypothesisId: 'H2' }) }).catch(() => {});
+        }
+        return;
+      }
+      const th6 = table.querySelector('thead tr th:nth-child(6)');
+      const td6 = table.querySelector('tbody tr td:nth-child(6)');
+      const thStyle = th6 ? window.getComputedStyle(th6).textAlign : null;
+      const tdStyle = td6 ? window.getComputedStyle(td6).textAlign : null;
+      const thInline = th6 && (th6 as HTMLElement).getAttribute ? (th6 as HTMLElement).getAttribute('style') : null;
+      if (typeof fetch === 'function') {
+        fetch('http://127.0.0.1:7242/ingest/7b565785-72b5-49f7-b2c0-57606ea0d0b5', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ location: 'TransactionList.tsx:useEffect', message: 'Computed style Disc/Vc column', data: { thComputedTextAlign: thStyle, tdComputedTextAlign: tdStyle, thInlineStyle: thInline }, timestamp: Date.now(), sessionId: 'debug-session', hypothesisId: 'H3' }) }).catch(() => {});
+      }
+    }, 300);
+    return () => clearTimeout(t);
+  }, [transactions.length]);
+  // #endregion
 
   // State for refresh click counter (value is only used internally by React state)
   const [, setRefreshClickCount] = useState(0);
@@ -823,10 +1155,11 @@ export default function TransactionList({ businessId, onLoadTransaction }: Trans
     setLastRefreshClick(now);
   }, [fetchTransactions, lastRefreshClick]);
 
-  // Format date for display
+  // Format date for display (GMT+7 / WIB)
   const formatDate = (dateString: string) => {
     const date = new Date(dateString);
     return date.toLocaleString('id-ID', {
+      timeZone: 'Asia/Jakarta',
       day: '2-digit',
       month: '2-digit',
       year: 'numeric',
@@ -931,36 +1264,38 @@ export default function TransactionList({ businessId, onLoadTransaction }: Trans
   };
 
   // Apply Receiptize filter unless full list unlocked
-  // In default mode, only show transactions that are in receiptizePrintedIds (printed to Printer2/receiptize)
-  // If no receiptize data is available, show all transactions (fallback)
+  // In default mode, only show transactions that are in receiptizePrintedIds (printed to Printer2/receiptize).
+  // If no receiptize data is available, show empty list — never fall back to all transactions.
   let baseTransactions: Transaction[];
-  
+
   if (showAllTransactions) {
     baseTransactions = transactions;
   } else if (receiptizePrintedIds.size > 0) {
     const filtered = transactions.filter(transaction => {
       const txId = String(transaction.id);
       const isInSet = receiptizePrintedIds.has(txId);
-      
-      
       // Show if transaction is in receiptizePrintedIds (meaning it was printed to Printer2/receiptize)
-      // This is more reliable than checking counters since IDs are set even for reprints
       return isInSet;
     });
-    
-    // If filter resulted in no transactions, show all instead (fallback for ID mismatch issues)
-    if (filtered.length === 0 && transactions.length > 0) {
-      console.warn('⚠️ [TransactionList] Receiptize filter returned 0 transactions, showing all transactions as fallback');
-      baseTransactions = transactions;
-    } else {
-      baseTransactions = filtered;
-    }
+    baseTransactions = filtered;
   } else {
-    // Fallback: show all if no receiptize data available
-    baseTransactions = transactions;
+    // No receiptize data: show empty list (no fallback to all transactions)
+    baseTransactions = [];
   }
-  
 
+  // Creation-order rank (1-based) for default receiptize view: # = 1,2,3... by created_at asc.
+  // Only used when !showAllTransactions; view-all keeps daily counter.
+  const creationOrderRank: Record<string, number> = (() => {
+    if (showAllTransactions || baseTransactions.length === 0) return {};
+    const sorted = [...baseTransactions].sort((a, b) => {
+      const tA = new Date(a.created_at).getTime();
+      const tB = new Date(b.created_at).getTime();
+      return tA - tB;
+    });
+    const rank: Record<string, number> = {};
+    sorted.forEach((tx, idx) => { rank[String(tx.id)] = idx + 1; });
+    return rank;
+  })();
 
   const resolveReceiptSequence = (tx: Transaction) => {
     const txId = String(tx.id);
@@ -994,7 +1329,11 @@ export default function TransactionList({ businessId, onLoadTransaction }: Trans
 
       const matchesFilter = filterMethod === 'all' || transaction.payment_method === filterMethod;
 
-      return matchesSearch && matchesFilter;
+      const matchesShiftFilter =
+        shiftFilterUuid === '' ||
+        (shiftFilterUuid === 'none' ? !transaction.shift_uuid : transaction.shift_uuid === shiftFilterUuid);
+
+      return matchesSearch && matchesFilter && matchesShiftFilter;
     })
     .sort((a, b) => {
       let aValue: string | number = a[sortField as keyof Transaction] as string | number;
@@ -1002,14 +1341,19 @@ export default function TransactionList({ businessId, onLoadTransaction }: Trans
 
       // Handle different data types
       if (sortField === 'receipt_number') {
-        aValue = resolveReceiptSequence(a);
-        bValue = resolveReceiptSequence(b);
+        if (!showAllTransactions && Object.keys(creationOrderRank).length > 0) {
+          aValue = creationOrderRank[String(a.id)] ?? 0;
+          bValue = creationOrderRank[String(b.id)] ?? 0;
+        } else {
+          aValue = resolveReceiptSequence(a);
+          bValue = resolveReceiptSequence(b);
+        }
       } else if (sortField === 'id' || sortField === 'total_amount' || sortField === 'voucher_discount' || sortField === 'final_amount' || sortField === 'amount_received' || sortField === 'change_amount' || sortField === 'customer_unit' || sortField === 'refund_total') {
         aValue = typeof aValue === 'string' ? parseFloat(aValue) : (aValue as number || 0);
         bValue = typeof bValue === 'string' ? parseFloat(bValue) : (bValue as number || 0);
-      } else if (sortField === 'created_at') {
-        aValue = new Date(aValue as string).getTime();
-        bValue = new Date(bValue as string).getTime();
+      } else if (sortField === 'created_at' || sortField === 'updated_at' || sortField === 'paid_at') {
+        aValue = (aValue && typeof aValue === 'string') ? new Date(aValue).getTime() : 0;
+        bValue = (bValue && typeof bValue === 'string') ? new Date(bValue).getTime() : 0;
       } else {
         // String fields
         aValue = (aValue?.toString().toLowerCase() || '') as string;
@@ -1054,8 +1398,21 @@ export default function TransactionList({ businessId, onLoadTransaction }: Trans
     return { totalCustomerUnit: totalCU, totalTransactionCount: txCount };
   })();
 
-  // Aggregations for footer
+  // Aggregations for footer: count and total amount per payment method (based on table shown)
   const paymentMethodCounts: Record<string, number> = {
+    cash: 0,
+    debit: 0,
+    qr: 0,
+    ewallet: 0,
+    cl: 0,
+    voucher: 0,
+    qpon: 0,
+    gofood: 0,
+    grabfood: 0,
+    shopeefood: 0,
+    tiktok: 0,
+  };
+  const paymentMethodTotals: Record<string, number> = {
     cash: 0,
     debit: 0,
     qr: 0,
@@ -1074,7 +1431,10 @@ export default function TransactionList({ businessId, onLoadTransaction }: Trans
   let voucherCount = 0;
 
   filteredTransactions.forEach((t) => {
-    paymentMethodCounts[t.payment_method] = (paymentMethodCounts[t.payment_method] || 0) + 1;
+    const code = getPaymentMethodCode(t);
+    paymentMethodCounts[code] = (paymentMethodCounts[code] || 0) + 1;
+    const amount = typeof t.final_amount === 'string' ? parseFloat(t.final_amount) : t.final_amount;
+    paymentMethodTotals[code] = (paymentMethodTotals[code] || 0) + (isNaN(amount) ? 0 : amount);
     if (t.pickup_method === 'dine-in') dineInCount += 1;
     if (t.pickup_method === 'take-away') takeAwayCount += 1;
     const vd = typeof t.voucher_discount === 'string' ? parseFloat(t.voucher_discount) : t.voucher_discount;
@@ -1098,19 +1458,52 @@ export default function TransactionList({ businessId, onLoadTransaction }: Trans
       <div className="flex items-center justify-center min-h-[400px]">
         <div className="text-center p-8 bg-red-50 rounded-lg border border-red-200">
           <div className="text-red-600 text-lg font-semibold mb-2">Permission Error</div>
-          <div className="text-red-700">User have both permissions, contact admin</div>
-        </div>
+          <div className="text-red-700">User have both permissions, contact admin        </div>
       </div>
-    );
+      {showPrinterManager && (
+        <Printer1ToPrinter2Manager onClose={() => setShowPrinterManager(false)} />
+      )}
+    </div>
+  );
+}
+
+
+  // #region agent log
+  if (typeof fetch === 'function') {
+    fetch('http://127.0.0.1:7242/ingest/7b565785-72b5-49f7-b2c0-57606ea0d0b5', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ location: 'TransactionList.tsx:mainReturn', message: 'TransactionList main return', data: { filteredCount: filteredTransactions.length, isLoading, hasTable: filteredTransactions.length > 0 }, timestamp: Date.now(), sessionId: 'debug-session', hypothesisId: 'H2' }) }).catch(() => {});
   }
-
-
+  // #endregion
   return (
-    <div className="flex-1 flex flex-col bg-white h-full">
-      <div className="flex-1 flex flex-col max-w-7xl mx-auto w-full px-3 py-6">
+    <div className="flex-1 flex flex-col bg-white h-full w-full min-w-0 overflow-x-hidden">
+      <div className="flex-1 flex flex-col w-full min-w-0 max-w-[95%] xl:max-w-[1600px] mx-auto px-4 sm:px-6 py-6">
         {/* Header */}
         <div className="mb-6 flex items-center justify-between">
-          <h1 className="text-2xl font-bold text-gray-800">
+          <h1 
+            className="text-2xl font-bold text-gray-800 cursor-pointer select-none"
+            onClick={() => {
+              if (!canAccessPrinterManager) return;
+              
+              // Clear existing timeout
+              if (headerClickTimeoutRef.current) {
+                clearTimeout(headerClickTimeoutRef.current);
+              }
+              
+              const newCount = headerClickCount + 1;
+              setHeaderClickCount(newCount);
+              
+              // Reset counter after 2 seconds
+              headerClickTimeoutRef.current = setTimeout(() => {
+                setHeaderClickCount(0);
+              }, 2000);
+              
+              // If clicked 5 times, open the manager
+              if (newCount >= 5) {
+                setShowPrinterManager(true);
+                setHeaderClickCount(0);
+              }
+            }}
+            title={canAccessPrinterManager ? "Click 5 times to open Printer 1 → Printer 2 Manager" : undefined}
+          >
             Daftar Transaksi | {new Date(fromDate).toLocaleDateString('id-ID', {
               day: 'numeric',
               month: 'short',
@@ -1147,7 +1540,7 @@ export default function TransactionList({ businessId, onLoadTransaction }: Trans
         </div>
 
         {/* Summary Cards */}
-        <div className="grid grid-cols-1 md:grid-cols-6 gap-4 mb-6 flex-shrink-0">
+        <div className="grid grid-cols-1 md:grid-cols-6 gap-4 mb-1 flex-shrink-0">
           {/* Payment Methods Card */}
           <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-4 md:col-span-3">
             <div className="flex items-center gap-2 mb-3">
@@ -1157,61 +1550,61 @@ export default function TransactionList({ businessId, onLoadTransaction }: Trans
             <div className="grid grid-cols-4 gap-x-3 gap-y-1.5 text-xs">
               {/* Column 1 */}
               <div className="space-y-1.5">
-                <div className="flex justify-between">
+                <div className="flex justify-between items-baseline gap-1">
                   <span className="text-gray-600">Cash</span>
-                  <span className="font-medium text-gray-900">{paymentMethodCounts.cash}</span>
+                  <span className="font-medium text-gray-900 text-right tabular-nums shrink-0">{paymentMethodCounts.cash} · {formatPrice(paymentMethodTotals.cash)}</span>
                 </div>
-                <div className="flex justify-between">
+                <div className="flex justify-between items-baseline gap-1">
                   <span className="text-gray-600">Debit</span>
-                  <span className="font-medium text-gray-900">{paymentMethodCounts.debit}</span>
+                  <span className="font-medium text-gray-900 text-right tabular-nums shrink-0">{paymentMethodCounts.debit} · {formatPrice(paymentMethodTotals.debit)}</span>
                 </div>
-                <div className="flex justify-between">
+                <div className="flex justify-between items-baseline gap-1">
                   <span className="text-gray-600">QR</span>
-                  <span className="font-medium text-gray-900">{paymentMethodCounts.qr}</span>
+                  <span className="font-medium text-gray-900 text-right tabular-nums shrink-0">{paymentMethodCounts.qr} · {formatPrice(paymentMethodTotals.qr)}</span>
                 </div>
               </div>
 
               {/* Column 2 */}
               <div className="space-y-1.5">
-                <div className="flex justify-between">
+                <div className="flex justify-between items-baseline gap-1">
                   <span className="text-gray-600">E-Wallet</span>
-                  <span className="font-medium text-gray-900">{paymentMethodCounts.ewallet}</span>
+                  <span className="font-medium text-gray-900 text-right tabular-nums shrink-0">{paymentMethodCounts.ewallet} · {formatPrice(paymentMethodTotals.ewallet)}</span>
                 </div>
-                <div className="flex justify-between">
+                <div className="flex justify-between items-baseline gap-1">
                   <span className="text-gray-600">CL</span>
-                  <span className="font-medium text-gray-900">{paymentMethodCounts.cl}</span>
+                  <span className="font-medium text-gray-900 text-right tabular-nums shrink-0">{paymentMethodCounts.cl} · {formatPrice(paymentMethodTotals.cl)}</span>
                 </div>
-                <div className="flex justify-between">
+                <div className="flex justify-between items-baseline gap-1">
                   <span className="text-gray-600">GoFood</span>
-                  <span className="font-medium text-gray-900">{paymentMethodCounts.gofood}</span>
+                  <span className="font-medium text-gray-900 text-right tabular-nums shrink-0">{paymentMethodCounts.gofood} · {formatPrice(paymentMethodTotals.gofood)}</span>
                 </div>
               </div>
 
               {/* Column 3 */}
               <div className="space-y-1.5">
-                <div className="flex justify-between">
+                <div className="flex justify-between items-baseline gap-1">
                   <span className="text-gray-600">GrabFood</span>
-                  <span className="font-medium text-gray-900">{paymentMethodCounts.grabfood}</span>
+                  <span className="font-medium text-gray-900 text-right tabular-nums shrink-0">{paymentMethodCounts.grabfood} · {formatPrice(paymentMethodTotals.grabfood)}</span>
                 </div>
-                <div className="flex justify-between">
+                <div className="flex justify-between items-baseline gap-1">
                   <span className="text-gray-600">ShopeeFood</span>
-                  <span className="font-medium text-gray-900">{paymentMethodCounts.shopeefood}</span>
+                  <span className="font-medium text-gray-900 text-right tabular-nums shrink-0">{paymentMethodCounts.shopeefood} · {formatPrice(paymentMethodTotals.shopeefood)}</span>
                 </div>
               </div>
 
               {/* Column 4 */}
               <div className="space-y-1.5">
-                <div className="flex justify-between">
+                <div className="flex justify-between items-baseline gap-1">
                   <span className="text-gray-600">TikTok</span>
-                  <span className="font-medium text-gray-900">{paymentMethodCounts.tiktok}</span>
+                  <span className="font-medium text-gray-900 text-right tabular-nums shrink-0">{paymentMethodCounts.tiktok} · {formatPrice(paymentMethodTotals.tiktok)}</span>
                 </div>
-                <div className="flex justify-between">
+                <div className="flex justify-between items-baseline gap-1">
                   <span className="text-gray-600">Qpon</span>
-                  <span className="font-medium text-gray-900">{paymentMethodCounts.qpon}</span>
+                  <span className="font-medium text-gray-900 text-right tabular-nums shrink-0">{paymentMethodCounts.qpon} · {formatPrice(paymentMethodTotals.qpon)}</span>
                 </div>
-                <div className="flex justify-between">
+                <div className="flex justify-between items-baseline gap-1">
                   <span className="text-gray-600">Voucher</span>
-                  <span className="font-medium text-gray-900">{paymentMethodCounts.voucher}</span>
+                  <span className="font-medium text-gray-900 text-right tabular-nums shrink-0">{paymentMethodCounts.voucher} · {formatPrice(paymentMethodTotals.voucher)}</span>
                 </div>
               </div>
             </div>
@@ -1291,65 +1684,154 @@ export default function TransactionList({ businessId, onLoadTransaction }: Trans
           />
         </div>
 
-        {/* Search and Filter */}
-        <div className="flex flex-col sm:flex-row gap-4 mb-6 flex-shrink-0">
-          <div className="flex-1 relative">
-            <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 text-gray-400 w-4 h-4" />
-            <input
-              type="text"
-              placeholder="Cari transaksi..."
-              value={searchTerm}
-              onChange={(e) => setSearchTerm(e.target.value)}
-              className="w-full pl-10 pr-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent text-black"
-            />
+        {/* Search and Filter — same style as Semua Transaksi, full width */}
+        <div className="w-full bg-gray-50 rounded-lg p-3 mb-1 flex-shrink-0">
+          <div className="flex flex-wrap items-center gap-2 w-full">
+            <div className="flex flex-wrap items-center gap-2 flex-1 min-w-0">
+              <div className="relative flex-1 min-w-[100px] max-w-[153px]">
+                <Search className="absolute left-2 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-gray-400" />
+                <input
+                  type="text"
+                  value={searchTerm}
+                  onChange={(e) => setSearchTerm(e.target.value)}
+                  placeholder="Search..."
+                  className="w-full pl-8 pr-7 py-1.5 border border-gray-300 rounded text-xs focus:ring-2 focus:ring-blue-500 focus:border-blue-500 text-gray-900"
+                />
+                {searchTerm && (
+                  <button
+                    onClick={() => setSearchTerm('')}
+                    className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600"
+                  >
+                    <X className="w-3 h-3" />
+                  </button>
+                )}
+              </div>
+              <div className="min-w-0 max-w-[130px]">
+                <div className="relative">
+                  <Calendar className="absolute left-2 top-1/2 -translate-y-1/2 w-3 h-3 text-gray-400" />
+                  <input
+                    type="date"
+                    value={fromDate}
+                    onChange={(e) => setFromDate(e.target.value)}
+                    className="w-full pl-7 pr-2 py-1.5 border border-gray-300 rounded text-xs focus:ring-2 focus:ring-blue-500 focus:border-blue-500 text-gray-900"
+                  />
+                </div>
+              </div>
+              <div className="min-w-0 max-w-[130px]">
+                <div className="relative">
+                  <Calendar className="absolute left-2 top-1/2 -translate-y-1/2 w-3 h-3 text-gray-400" />
+                  <input
+                    type="date"
+                    value={toDate}
+                    onChange={(e) => setToDate(e.target.value)}
+                    className="w-full pl-7 pr-2 py-1.5 border border-gray-300 rounded text-xs focus:ring-2 focus:ring-blue-500 focus:border-blue-500 text-gray-900"
+                  />
+                </div>
+              </div>
+              <div className="min-w-0 max-w-[120px]">
+                <div className="relative">
+                  <select
+                    value={shiftFilterUuid}
+                    onChange={(e) => setShiftFilterUuid(e.target.value)}
+                    className="w-full pl-2 pr-6 py-1.5 border border-gray-300 rounded text-xs focus:ring-2 focus:ring-blue-500 focus:border-blue-500 appearance-none bg-white text-gray-900"
+                    title="Filter by shift"
+                  >
+                    <option value="">Shift: All</option>
+                    <option value="none">Shift: No shift</option>
+                    {Object.entries(shiftLabelByUuid)
+                      .sort((a, b) => a[1].localeCompare(b[1]))
+                      .map(([uuid, label]) => (
+                        <option key={uuid} value={uuid}>
+                          Shift: {label}
+                        </option>
+                      ))}
+                  </select>
+                  <ChevronDown className="absolute right-2 top-1/2 -translate-y-1/2 w-3 h-3 text-gray-400 pointer-events-none" />
+                </div>
+              </div>
+              <div className="min-w-0 max-w-[110px]">
+                <div className="relative">
+                  <CreditCard className="absolute left-2 top-1/2 -translate-y-1/2 w-3 h-3 text-gray-400" />
+                  <select
+                    value={filterMethod}
+                    onChange={(e) => setFilterMethod(e.target.value)}
+                    className="w-full pl-6 pr-6 py-1.5 border border-gray-300 rounded text-xs focus:ring-2 focus:ring-blue-500 focus:border-blue-500 appearance-none bg-white text-gray-900"
+                  >
+                    <option value="all">All</option>
+                    <option value="cash">Cash</option>
+                    <option value="debit">Debit</option>
+                    <option value="qr">QR Code</option>
+                    <option value="ewallet">E-Wallet</option>
+                    <option value="cl">City Ledger</option>
+                    <option value="voucher">Voucher</option>
+                    <option value="gofood">GoFood</option>
+                    <option value="grabfood">GrabFood</option>
+                    <option value="shopeefood">ShopeeFood</option>
+                    <option value="qpon">Qpon</option>
+                    <option value="tiktok">TikTok</option>
+                  </select>
+                  <ChevronDown className="absolute right-2 top-1/2 -translate-y-1/2 w-3 h-3 text-gray-400 pointer-events-none" />
+                </div>
+              </div>
+              <div className="relative" ref={columnPickerRef}>
+                <button
+                  type="button"
+                  onClick={() => setShowColumnPicker((v) => !v)}
+                  title="Tampilkan / sembunyikan kolom"
+                  className="flex items-center justify-center min-w-8 px-2 py-1.5 text-gray-700 bg-white border border-gray-300 hover:bg-gray-50 rounded transition-colors flex-shrink-0"
+                >
+                  <Columns className="w-3.5 h-3.5" />
+                </button>
+                {showColumnPicker && (
+                  <div className="absolute right-0 top-full mt-1 z-50 w-56 bg-white border border-gray-200 rounded-lg shadow-lg p-3 max-h-80 overflow-y-auto">
+                    <p className="text-xs font-semibold text-gray-700 mb-2">Tampilkan kolom</p>
+                    <div className="space-y-1.5">
+                      {TRANSACTION_COLUMNS.map((col) => (
+                        <label key={col.key} className="flex items-center gap-2 cursor-pointer hover:bg-gray-50 rounded px-2 py-1">
+                          <input
+                            type="checkbox"
+                            checked={columnVisibility[col.key] !== false}
+                            onChange={() => setColumnVisible(col.key, columnVisibility[col.key] === false)}
+                            className="w-4 h-4 text-blue-600 rounded border-gray-300"
+                          />
+                          <span className="text-xs text-gray-800">{col.label || col.key}</span>
+                        </label>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+              <button
+                onClick={handleRefresh}
+                disabled={isLoading}
+                title="Refresh"
+                className="flex items-center justify-center min-w-8 px-2 py-1.5 text-white bg-blue-600 hover:bg-blue-700 rounded border border-blue-600 transition-colors disabled:opacity-50 flex-shrink-0"
+              >
+                <RefreshCw className={`w-3.5 h-3.5 ${isLoading ? 'animate-spin' : ''}`} />
+              </button>
+              <button
+                onClick={() => {
+                  setSearchTerm('');
+                  setFilterMethod('all');
+                  setShiftFilterUuid('');
+                  const gmt7Offset = 7 * 60 * 60 * 1000;
+                  const now = new Date();
+                  const nowGmt7 = new Date(now.getTime() + gmt7Offset);
+                  const end = new Date(nowGmt7);
+                  const start = new Date(nowGmt7);
+                  start.setUTCDate(start.getUTCDate() - 30);
+                  const formatDateInput = (d: Date) =>
+                    `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}-${String(d.getUTCDate()).padStart(2, '0')}`;
+                  setToDate(formatDateInput(end));
+                  setFromDate(formatDateInput(start));
+                }}
+                className="flex items-center gap-1.5 px-2.5 py-1.5 text-xs bg-gray-200 hover:bg-gray-300 text-gray-700 rounded transition-colors flex-shrink-0"
+              >
+                <X className="w-3 h-3" />
+                Clear
+              </button>
+            </div>
           </div>
-
-          <div className="flex items-center gap-2">
-            <label className="text-sm font-medium text-gray-700">Dari:</label>
-            <input
-              type="date"
-              value={fromDate}
-              onChange={(e) => setFromDate(e.target.value)}
-              className="px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent text-black"
-            />
-            <label className="text-sm font-medium text-gray-700">Sampai:</label>
-            <input
-              type="date"
-              value={toDate}
-              onChange={(e) => setToDate(e.target.value)}
-              className="px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent text-black"
-            />
-          </div>
-
-          <div className="relative">
-            <Filter className="absolute left-3 top-1/2 transform -translate-y-1/2 text-gray-400 w-4 h-4" />
-            <select
-              value={filterMethod}
-              onChange={(e) => setFilterMethod(e.target.value)}
-              className="pl-10 pr-8 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent appearance-none bg-white text-black"
-            >
-              <option value="all" className="text-black">Semua Metode</option>
-              <option value="cash" className="text-black">Cash</option>
-              <option value="debit" className="text-black">Debit</option>
-              <option value="qr" className="text-black">QR Code</option>
-              <option value="ewallet" className="text-black">E-Wallet</option>
-              <option value="cl" className="text-black">City Ledger</option>
-              <option value="voucher" className="text-black">Voucher</option>
-              <option value="gofood" className="text-black">GoFood</option>
-              <option value="grabfood" className="text-black">GrabFood</option>
-              <option value="shopeefood" className="text-black">ShopeeFood</option>
-              <option value="qpon" className="text-black">Qpon</option>
-              <option value="tiktok" className="text-black">TikTok</option>
-            </select>
-          </div>
-
-          <button
-            onClick={handleRefresh}
-            className="flex items-center space-x-2 bg-blue-500 hover:bg-blue-600 text-white px-4 py-2 rounded-lg transition-colors"
-          >
-            <RefreshCw className="w-4 h-4" />
-            <span>Refresh</span>
-          </button>
         </div>
 
         {/* Error Message */}
@@ -1391,8 +1873,8 @@ export default function TransactionList({ businessId, onLoadTransaction }: Trans
           </div>
         )}
 
-        {/* Transactions Table Container */}
-        <div className="flex-1 flex flex-col min-h-0 mb-8" style={{ maxHeight: 'calc(100vh - 390px)' }}>
+        {/* Transactions Table Container — min-w-0 so wide table scrolls inside page instead of growing layout */}
+        <div className="flex-1 flex flex-col min-h-0 min-w-0 mb-8" style={{ maxHeight: 'calc(100vh - 390px)' }}>
           {filteredTransactions.length === 0 ? (
             <div className="flex-1 flex items-center justify-center">
               <div className="text-center">
@@ -1402,355 +1884,145 @@ export default function TransactionList({ businessId, onLoadTransaction }: Trans
               </div>
             </div>
           ) : (
-            <div className="flex flex-col bg-white rounded-lg border border-gray-200 overflow-hidden h-full">
-              <div className="overflow-y-auto flex-1">
-                <table className="w-full table-fixed">
-                  <thead className="bg-gray-50 sticky top-0 z-10">
-                    <tr>
-                      <th
-                        className="px-2 py-3 text-left text-[10px] font-medium text-gray-500 uppercase tracking-wider cursor-pointer hover:bg-gray-100 select-none w-16"
-                        onClick={() => handleSort('receipt_number')}
-                      >
-                        <div className="flex items-center gap-1">
-                          <span className="text-[10px]">#</span>
-                          {getSortIcon('receipt_number')}
-                        </div>
-                      </th>
-                      <th className="px-2 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider w-24">
-                        <div className="flex items-center gap-1">
-                          <span className="text-xs">UUID</span>
-                        </div>
-                      </th>
-                      <th
-                        className="px-6 py-3 text-left text-[10px] font-medium text-gray-500 uppercase tracking-wider cursor-pointer hover:bg-gray-100 select-none"
-                        onClick={() => handleSort('created_at')}
-                      >
-                        <div className="flex items-center gap-1">
-                          Waktu
-                          {getSortIcon('created_at')}
-                        </div>
-                      </th>
-                      <th
-                        className="px-2 py-3 text-left text-[10px] font-medium text-gray-500 uppercase tracking-wider cursor-pointer hover:bg-gray-100 select-none w-28"
-                        onClick={() => handleSort('payment_method')}
-                      >
-                        <div className="flex items-center gap-1">
-                          <span className="text-[10px]">Metode</span>
-                          {getSortIcon('payment_method')}
-                        </div>
-                      </th>
-                      <th
-                        className="px-2 py-3 text-left text-[10px] font-medium text-gray-500 uppercase tracking-wider cursor-pointer hover:bg-gray-100 select-none w-16"
-                        onClick={() => handleSort('pickup_method')}
-                      >
-                        <div className="flex items-center gap-1">
-                          <span className="text-[10px]">DI/TA</span>
-                          {getSortIcon('pickup_method')}
-                        </div>
-                      </th>
-                      <th
-                        className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider cursor-pointer hover:bg-gray-100 select-none"
-                        onClick={() => handleSort('total_amount')}
-                      >
-                        <div className="flex items-center gap-1">
-                          Total
-                          {getSortIcon('total_amount')}
-                        </div>
-                      </th>
-                      <th
-                        className="px-6 py-3 text-left text-[10px] font-medium text-gray-500 uppercase tracking-wider cursor-pointer hover:bg-gray-100 select-none"
-                        onClick={() => handleSort('voucher_discount')}
-                      >
-                        <div className="flex items-center gap-1">
-                          Disc/Vc
-                          {getSortIcon('voucher_discount')}
-                        </div>
-                      </th>
-                      <th
-                        className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider cursor-pointer hover:bg-gray-100 select-none"
-                        onClick={() => handleSort('final_amount')}
-                      >
-                        <div className="flex items-center gap-1">
-                          Final
-                          {getSortIcon('final_amount')}
-                        </div>
-                      </th>
-                      <th
-                        className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider cursor-pointer hover:bg-gray-100 select-none"
-                        onClick={() => handleSort('refund_total')}
-                      >
-                        <div className="flex items-center gap-1">
-                          Refund
-                          {getSortIcon('refund_total')}
-                        </div>
-                      </th>
-                      <th
-                        className="px-6 py-3 text-left text-[10px] font-medium text-gray-500 uppercase tracking-wider cursor-pointer hover:bg-gray-100 select-none"
-                        onClick={() => handleSort('customer_name')}
-                      >
-                        <div className="flex items-center gap-1">
-                          Pelanggan
-                          {getSortIcon('customer_name')}
-                        </div>
-                      </th>
-                      <th
-                        className="px-3 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider cursor-pointer hover:bg-gray-100 select-none w-24"
-                      >
-                        <div className="flex items-center gap-1">
-                          Waiter
-                        </div>
-                      </th>
-                      <th
-                        className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider cursor-pointer hover:bg-gray-100 select-none"
-                        onClick={() => handleSort('user_name')}
-                      >
-                        <div className="flex items-center gap-1">
-                          Kasir
-                          {getSortIcon('user_name')}
-                        </div>
-                      </th>
+            <div className="flex-1 overflow-auto p-4 min-h-0 min-w-0">
+              <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
+                <table className="w-full text-sm" style={{ tableLayout: 'auto' }}>
+                  <thead className="bg-gray-50 text-gray-900 font-semibold border-b border-gray-200 sticky top-0 z-10">
+                    <tr className="[&_th]:align-middle">
+                      {visibleColumns.map((col) => (
+                        <th
+                          key={col.key}
+                          style={{ textAlign: 'center', padding: col.key === 'actions' ? '4px' : '4px 6px', margin: 0, width: col.key === 'actions' ? 28 : undefined }}
+                          className={`text-[10px] font-medium text-gray-500 uppercase tracking-wider select-none whitespace-nowrap ${col.sortKey ? 'cursor-pointer hover:bg-gray-100' : ''}`}
+                          onClick={col.sortKey ? () => handleSort(col.sortKey!) : undefined}
+                        >
+                          {col.label} {col.sortKey ? getSortIcon(col.sortKey) : null}
+                        </th>
+                      ))}
                     </tr>
                   </thead>
-                  <tbody className="bg-white divide-y divide-gray-200">
-                    {filteredTransactions.map((transaction, index) => (
+                  <tbody className="divide-y divide-gray-100 [&_td]:align-middle">
+                    {filteredTransactions.map((transaction) => (
                       <tr
                         key={transaction.id}
-                        className={`cursor-pointer transition-colors ${transaction.status === 'pending' ? 'bg-orange-50 hover:bg-orange-100' : (index % 2 === 0 ? 'bg-blue-50 hover:bg-gray-50' : 'bg-white hover:bg-gray-50')} ${loadingTransactionId === transaction.id ? 'opacity-50' : ''}`}
+                        className={`hover:bg-blue-50 cursor-pointer transition-colors group ${loadingTransactionId === transaction.id ? 'opacity-50' : ''}`}
                         onClick={() => handleRowClick(transaction)}
                       >
-                        <td className="px-2 py-4 whitespace-nowrap">
-                          <div className="flex items-center gap-1">
-                            {(() => {
-                              // For pending (unpaid) transactions, show "-" instead of receipt number
-                              if (transaction.status === 'pending') {
-                                return (
-                                  <span className="text-xs text-gray-400">-</span>
-                                );
-                              }
-                              
-                              const txId = String(transaction.id);
-                              const receiptizeCounter = receiptizeCounters[txId];
-                              const receiptCounter = receiptCounters[txId];
-                              const hasReceiptizeCounter = typeof receiptizeCounter === 'number' && receiptizeCounter > 0;
-                              const hasReceiptCounter = typeof receiptCounter === 'number' && receiptCounter > 0;
-                              const isInReceiptizeIds = receiptizePrintedIds.has(txId);
-
-                              // Determine if this is a receiptize transaction (printed to Printer2)
-                              // A transaction is receiptize if it's in receiptizePrintedIds OR has a receiptize counter
-                              const isReceiptize = isInReceiptizeIds || hasReceiptizeCounter;
-
-                              // Determine the number to display using resolveReceiptSequence logic
-                              let displayNumber: number;
-                              if (hasReceiptizeCounter) {
-                                displayNumber = receiptizeCounter;
-                              } else if (hasReceiptCounter) {
-                                displayNumber = receiptCounter;
-                              } else {
-                                // Fallback to transaction receipt_number
-                                displayNumber = typeof transaction.receipt_number === 'number' && transaction.receipt_number > 0
-                                  ? transaction.receipt_number
-                                  : 0;
-                              }
-
-                              // Receiptize transaction (printed to Printer2/receiptize)
-                              if (isReceiptize) {
-                                if (showAllTransactions) {
-                                  // Show all mode: Show RR badge to distinguish from R transactions
-                                  return (
-                                    <>
-                                      <span className="inline-flex items-center px-1 py-0.5 rounded text-xs font-medium bg-green-100 text-green-800">
-                                        RR
-                                      </span>
-                                      <span className="text-xs font-medium text-blue-600">
-                                        {displayNumber}
-                                      </span>
-                                    </>
-                                  );
-                                } else {
-                                  // Default mode: Show just the number without badge (to avoid suspicion)
-                                  return (
-                                    <span className="text-xs font-medium text-blue-600">
-                                      {displayNumber}
-                                    </span>
-                                  );
-                                }
-                              }
-
-                              // Receipt transaction (printed to Printer1/receipt, but NOT to Printer2)
-                              // Only show in "show all" mode (after 5x refresh clicks)
-                              if (showAllTransactions && hasReceiptCounter && !isReceiptize) {
-                                return (
-                                  <>
-                                    <span className="inline-flex items-center px-1 py-0.5 rounded text-xs font-medium bg-blue-100 text-blue-800">
-                                      R
-                                    </span>
-                                    <span className="text-xs font-medium text-blue-600">
-                                      {displayNumber}
-                                    </span>
-                                  </>
-                                );
-                              }
-
-                              // Fallback: Show number if available (for transactions without audit log entries)
-                              // This handles cases where audit logs are empty or not yet synced
-                              if (displayNumber > 0) {
-                                // In default mode, if we can't determine receiptize vs receipt, show without badge
-                                // In show all mode, if neither counter exists, also show without badge
-                                return (
-                                  <span className="text-xs font-medium text-blue-600">
-                                    {displayNumber}
-                                  </span>
-                                );
-                              }
-
-                              // Last resort: Show N/A
-                              return (
-                                <span className="inline-flex items-center px-1 py-0.5 rounded text-xs font-medium bg-gray-100 text-gray-600">
-                                  N/A
-                                </span>
-                              );
-                            })()}
-                          </div>
-                        </td>
-                        <td className="px-2 py-4 whitespace-nowrap">
-                          <button
-                            onClick={(e) => {
-                              e.stopPropagation(); // Prevent row click
-                              handleCopyUuid(String(transaction.id), e);
+                        {visibleColumns.map((col) => (
+                          <td
+                            key={col.key}
+                            style={{
+                              textAlign: 'center',
+                              padding: col.key === 'actions' ? '4px' : '4px 6px',
+                              margin: 0,
+                              width: col.key === 'actions' ? 28 : undefined
                             }}
-                            className="px-2 py-1 text-xs text-gray-600 hover:bg-gray-200 rounded transition-colors border border-gray-300 hover:border-gray-400"
-                            title={`Copy UUID: ${String(transaction.id)}`}
+                            className={
+                              col.key === 'customer_name' || col.key === 'user_name' ? 'min-w-0 align-middle' :
+                              col.key === 'waiter' ? 'whitespace-nowrap' :
+                              col.key === 'voucher_discount' ? 'whitespace-nowrap cursor-pointer tabular-nums' :
+                              col.key === 'refund_total' ? 'whitespace-nowrap tabular-nums' :
+                              col.key === 'actions' ? '' : 'whitespace-nowrap'
+                            }
+                            onClick={col.key === 'voucher_discount' ? (e) => { e.stopPropagation(); setVoucherClickCount(prev => { const next = prev + 1; if (next >= 5 && canViewPrintingLogs) { setShowPrintingLogs(true); return 0; } return next; }); } : undefined}
                           >
-                            Copy UUID
-                          </button>
-                        </td>
-                        <td className="px-6 py-4 whitespace-nowrap">
-                          <span className="text-[10px] text-gray-900">
-                            {formatDate(transaction.created_at)}
-                          </span>
-                        </td>
-                        <td className="px-2 py-4 whitespace-nowrap">
-                          <div className="flex flex-col gap-1">
-                            <span className={`inline-flex px-1.5 py-0.5 text-xs font-semibold rounded-full ${getPaymentMethodColor(transaction)}`}>
-                              {getPaymentMethodLabel(transaction)}
-                            </span>
-                            {transaction.status === 'pending' && (
-                              <span className="inline-flex px-1.5 py-0.5 text-[10px] font-semibold rounded-full bg-orange-100 text-orange-800">
-                                Belum Bayar
-                              </span>
+                            {col.key === 'receipt_number' && (
+                              <div className="flex items-center justify-center gap-1">
+                                {transaction.status === 'pending' ? (
+                                  <span className="text-xs text-gray-400">-</span>
+                                ) : (() => {
+                                  const txId = String(transaction.id);
+                                  const receiptizeCounter = receiptizeCounters[txId];
+                                  const receiptCounter = receiptCounters[txId];
+                                  const hasReceiptizeCounter = typeof receiptizeCounter === 'number' && receiptizeCounter > 0;
+                                  const hasReceiptCounter = typeof receiptCounter === 'number' && receiptCounter > 0;
+                                  const isInReceiptizeIds = receiptizePrintedIds.has(txId);
+                                  const isReceiptize = isInReceiptizeIds || hasReceiptizeCounter;
+                                  let displayNumber: number;
+                                  if (hasReceiptizeCounter) displayNumber = receiptizeCounter;
+                                  else if (hasReceiptCounter) displayNumber = receiptCounter;
+                                  else displayNumber = typeof transaction.receipt_number === 'number' && transaction.receipt_number > 0 ? transaction.receipt_number : 0;
+                                  const numberToShow = !showAllTransactions && creationOrderRank[txId] != null ? creationOrderRank[txId]! : displayNumber;
+                                  if (isReceiptize) {
+                                    if (showAllTransactions) return <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-xs font-medium bg-green-100 text-green-800"><span>{displayNumber}</span><span className="inline-block min-w-[1.75rem] text-center">RR</span></span>;
+                                    return <span className="text-xs font-medium text-blue-600">{numberToShow}</span>;
+                                  }
+                                  if (showAllTransactions && hasReceiptCounter && !isReceiptize) return <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-xs font-medium bg-blue-100 text-blue-800"><span>{displayNumber}</span><span className="inline-block min-w-[1.75rem] text-center">R</span></span>;
+                                  if (numberToShow > 0) return <span className="text-xs font-medium text-blue-600">{numberToShow}</span>;
+                                  return <span className="inline-flex items-center px-1 py-0.5 rounded text-xs font-medium bg-gray-100 text-gray-600">N/A</span>;
+                                })()}
+                              </div>
                             )}
-                          </div>
-                        </td>
-                        <td className="px-2 py-4 whitespace-nowrap">
-                          <span className="text-xs text-gray-900 capitalize">
-                            {transaction.pickup_method.replace('-', ' ')}
-                          </span>
-                        </td>
-                        <td className="px-6 py-4 whitespace-nowrap">
-                          <span className="text-xs font-medium text-gray-900">
-                            {formatPrice(transaction.total_amount)}
-                          </span>
-                        </td>
-                        <td
-                          className="px-6 py-4 whitespace-nowrap cursor-pointer"
-                          onClick={() => {
-                            setVoucherClickCount(prev => {
-                              const newCount = prev + 1;
-                              if (newCount >= 5 && canViewPrintingLogs) {
-                                setShowPrintingLogs(true);
-                                return 0; // Reset counter
-                              }
-                              return newCount;
-                            });
-                          }}
-                        >
-                          {transaction.voucher_discount > 0 ? (
-                            <div className="flex flex-col">
-                              <span className="text-xs text-green-600 font-medium">
-                                -{formatPrice(transaction.voucher_discount)}
-                              </span>
-                              {transaction.voucher_label && (
-                                <span className="text-[10px] text-green-500 font-medium">
-                                  {transaction.voucher_label}
+                            {col.key === 'created_at' && <span className="text-[10px] text-gray-900">{formatDate(transaction.created_at)}</span>}
+                            {col.key === 'updated_at' && <span className="text-[10px] text-gray-700">{transaction.updated_at ? formatDate(transaction.updated_at) : '-'}</span>}
+                            {col.key === 'paid_at' && <span className="text-[10px] text-gray-700">{transaction.paid_at ? formatDate(transaction.paid_at) : '-'}</span>}
+                            {col.key === 'payment_method' && (
+                              <div className="flex flex-col gap-1 items-center">
+                                <span className={`inline-flex px-1.5 py-0.5 text-xs font-semibold rounded-full ${getPaymentMethodColor(transaction)}`}>
+                                  {getPaymentMethodLabel(transaction)}
                                 </span>
-                              )}
-                            </div>
-                          ) : (
-                            <span className="text-xs text-gray-400">-</span>
-                          )}
-                        </td>
-                        <td className="px-6 py-4 whitespace-nowrap">
-                          <span className="text-xs font-bold text-gray-900">
-                            {formatPrice(transaction.final_amount)}
-                          </span>
-                        </td>
-                        <td className="px-4 py-4 whitespace-nowrap">
-                          {(() => {
-                            // Convert refund_total to number if it's a string, handle null/undefined
-                            const refundAmount = transaction.refund_total !== null && transaction.refund_total !== undefined
-                              ? (typeof transaction.refund_total === 'number' 
-                                  ? transaction.refund_total 
-                                  : parseFloat(String(transaction.refund_total)))
-                              : 0;
-                            
-                            if (refundAmount > 0) {
+                                {transaction.status === 'pending' && (
+                                  <span className="inline-flex px-1.5 py-0.5 text-[10px] font-semibold rounded-full bg-orange-100 text-orange-800">Belum Bayar</span>
+                                )}
+                              </div>
+                            )}
+                            {col.key === 'pickup_method' && <span className="text-xs text-gray-900 capitalize">{transaction.pickup_method.replace('-', ' ')}</span>}
+                            {col.key === 'total_amount' && <span className="text-xs font-medium text-gray-900 tabular-nums">{formatPrice(transaction.total_amount)}</span>}
+                            {col.key === 'voucher_discount' && (
+                              transaction.voucher_discount > 0 ? (
+                                <div style={{ textAlign: 'center' }} className="flex flex-col items-center">
+                                  <span className="text-xs text-green-600 font-medium tabular-nums">-{formatPrice(transaction.voucher_discount)}</span>
+                                  {transaction.voucher_label && <span className="text-[10px] text-green-500 font-medium">{transaction.voucher_label}</span>}
+                                </div>
+                              ) : <span className="text-xs text-gray-400">-</span>
+                            )}
+                            {col.key === 'final_amount' && <span className="text-xs font-bold text-gray-900 tabular-nums">{formatPrice(transaction.final_amount)}</span>}
+                            {col.key === 'refund_total' && (() => {
+                              const refundAmount = transaction.refund_total != null ? (typeof transaction.refund_total === 'number' ? transaction.refund_total : parseFloat(String(transaction.refund_total))) : 0;
+                              if (refundAmount > 0) return (
+                                <div style={{ textAlign: 'center' }} className="flex flex-col items-center">
+                                  <span className="text-xs text-red-600 font-medium tabular-nums">-{formatPrice(refundAmount)}</span>
+                                  {transaction.refund_status && <span className={`text-[10px] font-medium ${transaction.refund_status === 'full' ? 'text-red-600' : 'text-orange-600'}`}>{transaction.refund_status === 'full' ? 'Full' : 'Partial'}</span>}
+                                </div>
+                              );
+                              return <span className="text-xs text-gray-400">-</span>;
+                            })()}
+                            {col.key === 'customer_name' && <span className="text-xs text-gray-900 truncate block" title={transaction.customer_name || 'Guest'}>{transaction.customer_name || 'Guest'}</span>}
+                            {col.key === 'waiter' && (() => {
+                              const itemIds = itemWaiterIdsByTx[transaction.id] || [];
+                              const allIds = [...new Set([transaction.waiter_id, ...itemIds].filter((id): id is number => id != null))];
+                              const primaryId = transaction.waiter_id ?? allIds[0];
+                              const names = allIds.map((id) => employeesMap.get(id)?.name).filter((n): n is string => Boolean(n));
                               return (
-                                <div className="flex flex-col">
-                                  <span className="text-xs text-red-600 font-medium">
-                                    -{formatPrice(refundAmount)}
-                                  </span>
-                                  {transaction.refund_status && (
-                                    <span className={`text-[10px] font-medium ${transaction.refund_status === 'full'
-                                        ? 'text-red-600'
-                                        : 'text-orange-600'
-                                      }`}>
-                                      {transaction.refund_status === 'full' ? 'Full' : 'Partial'}
-                                    </span>
+                                <div className="relative inline-block" ref={openWaiterPopoverFor === transaction.id ? waiterPopoverRef : undefined}>
+                                  <button type="button" onClick={(e) => { e.stopPropagation(); setOpenWaiterPopoverFor((id) => (id === transaction.id ? null : transaction.id)); }} className="cursor-pointer rounded focus:outline-none focus:ring-2 focus:ring-blue-400" title={names.length > 1 ? names.join(', ') : undefined}>
+                                    {!primaryId || !employeesMap.has(primaryId) ? <span className="text-xs text-gray-900">-</span> : (() => {
+                                      const waiter = employeesMap.get(primaryId)!;
+                                      const hasMultiple = allIds.length > 1;
+                                      if (waiter.color) return <span className="text-xs font-medium text-white px-2 py-1 inline-block" style={{ backgroundColor: waiter.color }}>{waiter.name}{hasMultiple && <span className="text-white/80 ml-0.5">(+{allIds.length - 1})</span>}</span>;
+                                      return <span className="text-xs text-gray-900">{waiter.name}{hasMultiple && <span className="text-gray-500 ml-0.5">(+{allIds.length - 1})</span>}</span>;
+                                    })()}
+                                  </button>
+                                  {openWaiterPopoverFor === transaction.id && names.length > 0 && (
+                                    <div className="absolute left-1/2 -translate-x-1/2 top-full mt-1 z-50 min-w-[120px] rounded-lg border border-gray-200 bg-white py-2 shadow-lg">
+                                      <div className="px-3 py-1 text-xs font-semibold text-gray-500 uppercase">Waiters</div>
+                                      {names.map((name, i) => <div key={i} className="px-3 py-1.5 text-sm text-gray-900">{name}</div>)}
+                                    </div>
                                   )}
                                 </div>
                               );
-                            }
-                            return <span className="text-xs text-gray-400">-</span>;
-                          })()}
-                        </td>
-                        <td className="px-6 py-4">
-                          <span
-                            className="text-xs text-gray-900 truncate block max-w-[120px]"
-                            title={transaction.customer_name || 'Guest'}
-                          >
-                            {transaction.customer_name || 'Guest'}
-                          </span>
-                        </td>
-                        <td className="px-3 py-4 whitespace-nowrap">
-                          {(() => {
-                            if (!transaction.waiter_id || !employeesMap.has(transaction.waiter_id)) {
-                              return <span className="text-xs text-gray-900">-</span>;
-                            }
-                            const waiter = employeesMap.get(transaction.waiter_id)!;
-                            const color = waiter.color;
-                            
-                            if (color) {
-                              return (
-                                <span
-                                  className="text-xs font-medium text-white px-2 py-1"
-                                  style={{ backgroundColor: color }}
-                                >
-                                  {waiter.name}
-                                </span>
-                              );
-                            }
-                            
-                            return <span className="text-xs text-gray-900">{waiter.name}</span>;
-                          })()}
-                        </td>
-                        <td className="px-6 py-4">
-                          <span
-                            className="text-xs text-gray-900 truncate block max-w-[120px]"
-                            title={transaction.user_name || 'Unknown'}
-                          >
-                            {transaction.user_name || 'Unknown'}
-                          </span>
-                        </td>
+                            })()}
+                            {col.key === 'user_name' && <span className="text-xs text-gray-900 truncate block" title={transaction.user_name || 'Unknown'}>{transaction.user_name || 'Unknown'}</span>}
+                            {col.key === 'shift' && (
+                              <div className="flex flex-col items-center gap-0.5">
+                                <span className="text-xs text-gray-700" title={transaction.shift_uuid ?? undefined}>{transaction.shift_uuid ? (shiftLabelByUuid[transaction.shift_uuid] ?? '-') : '-'}</span>
+                                {canBindToShift && <button type="button" onClick={(e) => { e.stopPropagation(); handleOpenBindShift(transaction); }} className="text-[10px] text-blue-600 hover:text-blue-800 hover:underline">{transaction.shift_uuid ? 'Ubah' : 'Bind'}</button>}
+                                {canDeleteTransaction && <button type="button" onClick={(e) => { e.stopPropagation(); handleOpenDeleteTransaction(transaction); }} className="text-[10px] text-red-600 hover:text-red-800 hover:underline flex items-center gap-0.5 justify-center" title="Hapus transaksi (Super Admin)"><Trash2 className="w-3 h-3" /> Hapus</button>}
+                              </div>
+                            )}
+                            {col.key === 'actions' && <ChevronRight className="w-4 h-4 text-gray-400 group-hover:text-blue-500 transition-colors" />}
+                          </td>
+                        ))}
                       </tr>
                     ))}
                   </tbody>
@@ -1770,6 +2042,145 @@ export default function TransactionList({ businessId, onLoadTransaction }: Trans
         canRefund={canRefund}
         onTransactionUpdated={handleTransactionUpdated}
       />
+
+      {/* Delete Transaction Modal (Super Admin only) */}
+      {showDeleteTxModal && transactionToDelete && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4" onClick={() => !isDeletingTx && setShowDeleteTxModal(false)}>
+          <div className="bg-white rounded-xl shadow-xl max-w-2xl w-full max-h-[90vh] overflow-hidden flex flex-col" onClick={(e) => e.stopPropagation()}>
+            <div className="p-6 border-b border-gray-200">
+              <h3 className="text-lg font-semibold text-gray-900 flex items-center gap-2">
+                <Trash2 className="w-5 h-5 text-red-600" />
+                Hapus transaksi
+              </h3>
+              <p className="text-sm text-gray-600 mt-1">
+                Transaksi #{transactionToDelete.receipt_number ?? transactionToDelete.id.slice(0, 8)} — ID: <code className="text-xs bg-gray-100 px-1 rounded">{transactionToDelete.id}</code>
+              </p>
+              <p className="text-xs text-amber-700 mt-2 bg-amber-50 border border-amber-200 rounded p-2">
+                Hanya transaksi ini yang akan dihapus. Penghapusan akan menghapus dari semua tabel terkait (items, customizations, refunds, printer audit, system_pos).
+              </p>
+            </div>
+            <div className="flex-1 overflow-y-auto p-6">
+              {deleteTxError && (
+                <p className="text-sm text-red-600 mb-3">{deleteTxError}</p>
+              )}
+              {isLoadingDeletePreview ? (
+                <p className="text-sm text-gray-500">Memuat preview query...</p>
+              ) : deletePreview ? (
+                <div className="space-y-4">
+                  <div>
+                    <p className="text-xs font-semibold text-gray-700 mb-1">Main DB (salespulse):</p>
+                    <pre className="text-xs bg-gray-900 text-gray-100 p-3 rounded-lg overflow-x-auto max-h-48 overflow-y-auto">
+                      {deletePreview.queries.map((q, i) => (
+                        <span key={i} className="block text-green-300 mb-1">
+                          {q.description}: {q.sql} {JSON.stringify(q.params)}
+                        </span>
+                      ))}
+                    </pre>
+                  </div>
+                  <div>
+                    <p className="text-xs font-semibold text-gray-700 mb-1">System POS DB:</p>
+                    <pre className="text-xs bg-gray-900 text-gray-100 p-3 rounded-lg overflow-x-auto max-h-32 overflow-y-auto">
+                      {deletePreview.systemPosQueries.map((q, i) => (
+                        <span key={i} className="block text-green-300 mb-1">
+                          {q.description}: {q.sql} {JSON.stringify(q.params)}
+                        </span>
+                      ))}
+                    </pre>
+                  </div>
+                </div>
+              ) : null}
+            </div>
+            <div className="flex justify-end gap-2 p-6 border-t border-gray-200 bg-gray-50">
+              <button
+                type="button"
+                onClick={() => { setShowDeleteTxModal(false); setTransactionToDelete(null); setDeletePreview(null); setDeleteTxError(null); }}
+                disabled={isDeletingTx}
+                className="px-4 py-2 text-sm font-medium text-gray-700 bg-white border border-gray-300 hover:bg-gray-50 disabled:opacity-50 rounded-lg"
+              >
+                Batal
+              </button>
+              <button
+                type="button"
+                onClick={handleConfirmDeleteTransaction}
+                disabled={isDeletingTx || isLoadingDeletePreview || !deletePreview}
+                className="px-4 py-2 text-sm font-medium text-white bg-red-600 hover:bg-red-700 disabled:opacity-50 rounded-lg flex items-center gap-2"
+              >
+                {isDeletingTx ? 'Menghapus...' : 'Ya, Hapus transaksi'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Bind to Shift Modal (Super Admin only) */}
+      {showBindShiftModal && transactionToBind && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4" onClick={() => setShowBindShiftModal(false)}>
+          <div className="bg-white rounded-xl shadow-xl max-w-md w-full p-6" onClick={(e) => e.stopPropagation()}>
+            <h3 className="text-lg font-semibold text-gray-900 mb-2">Bind transaksi ke shift</h3>
+            <p className="text-sm text-gray-600 mb-4">
+              Transaksi #{transactionToBind.receipt_number ?? transactionToBind.id.slice(0, 8)} — pilih shift:
+            </p>
+            {bindShiftError && (
+              <p className="text-sm text-red-600 mb-2">{bindShiftError}</p>
+            )}
+            {isLoadingBindShifts ? (
+              <p className="text-sm text-gray-500 py-4">Memuat daftar shift...</p>
+            ) : bindShiftList.length === 0 ? (
+              <p className="text-sm text-gray-500 py-4">Tidak ada shift untuk periode transaksi ini.</p>
+            ) : (
+              <ul className="space-y-2 max-h-64 overflow-y-auto mb-4">
+                <li>
+                  <label className="flex items-center gap-3 p-2 rounded-lg hover:bg-gray-50 cursor-pointer">
+                    <input
+                      type="radio"
+                      name="bindShift"
+                      checked={selectedBindShiftUuid === null}
+                      onChange={() => setSelectedBindShiftUuid(null)}
+                      className="w-4 h-4 text-blue-600"
+                    />
+                    <span className="text-sm text-gray-800">— Tidak ada shift (lepas)</span>
+                  </label>
+                </li>
+                {bindShiftList.map((shift, idx) => (
+                  <li key={shift.uuid_id}>
+                    <label className="flex items-center gap-3 p-2 rounded-lg hover:bg-gray-50 cursor-pointer">
+                      <input
+                        type="radio"
+                        name="bindShift"
+                        checked={selectedBindShiftUuid === shift.uuid_id}
+                        onChange={() => setSelectedBindShiftUuid(shift.uuid_id)}
+                        className="w-4 h-4 text-blue-600"
+                      />
+                      <span className="text-sm font-medium text-gray-900">Shift {idx + 1}</span>
+                      <span className="text-sm text-gray-800">{shift.user_name}</span>
+                      <span className="text-xs text-gray-600">
+                        {new Date(shift.shift_start).toLocaleString('id-ID', { timeZone: 'Asia/Jakarta', dateStyle: 'short', timeStyle: 'short' })}
+                      </span>
+                    </label>
+                  </li>
+                ))}
+              </ul>
+            )}
+            <div className="flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => { setShowBindShiftModal(false); setTransactionToBind(null); setSelectedBindShiftUuid(null); setBindShiftError(null); }}
+                className="px-4 py-2 text-sm font-medium text-gray-700 bg-gray-100 hover:bg-gray-200 rounded-lg"
+              >
+                Batal
+              </button>
+              <button
+                type="button"
+                onClick={handleConfirmBindShift}
+                disabled={isSavingBindShift || isLoadingBindShifts}
+                className="px-4 py-2 text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 disabled:opacity-50 rounded-lg"
+              >
+                {isSavingBindShift ? 'Menyimpan...' : 'Simpan'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Printing Logs Modal */}
       {showPrintingLogs && (
@@ -1822,6 +2233,9 @@ export default function TransactionList({ businessId, onLoadTransaction }: Trans
           </div>
         </div>
       )}
+      {showPrinterManager && (
+        <Printer1ToPrinter2Manager onClose={() => setShowPrinterManager(false)} />
+      )}
     </div>
   );
 }
@@ -1868,5 +2282,5 @@ function GrandTotalCard({ totalRevenue, totalRefund, totalCustomerUnit, totalTra
         </div>
       </div>
     </div>
-  );
-}
+    );
+  }

@@ -1,8 +1,8 @@
 'use client';
 
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { X, Eye, EyeOff, ChevronDown, Settings, Loader2, RefreshCw, ChevronLeft, CheckCircle2, XCircle, Download } from 'lucide-react';
-import Image from 'next/image';
+import { getApiUrl } from '@/lib/api';
 import { getMostRecentEmail, getSavedEmails } from '@/lib/savedLoginEmails';
 
 interface LoginPageProps {
@@ -15,6 +15,7 @@ interface LoginPageProps {
   syncError?: string | null;
   hasOfflineDb?: boolean;
   syncProgress?: number | null;
+  refreshLoginLogoAt?: number;
 }
 
 export default function LoginPage({
@@ -27,6 +28,7 @@ export default function LoginPage({
   syncError = null,
   hasOfflineDb = true,
   syncProgress = null,
+  refreshLoginLogoAt,
 }: LoginPageProps) {
   const [email, setEmail] = useState(() => getMostRecentEmail() ?? '');
   const [password, setPassword] = useState('');
@@ -45,10 +47,12 @@ export default function LoginPage({
     dbName?: string;
     dbPort?: number;
   }>({});
+  const [effectiveDbConfig, setEffectiveDbConfig] = useState<{ host: string; database: string; source: 'saved' | 'env' | 'default' } | null>(null);
   const [isLoadingConfig, setIsLoadingConfig] = useState(true);
   const [isSavingConfig, setIsSavingConfig] = useState(false);
   const [isTestingConnection, setIsTestingConnection] = useState(false);
   const [connectionTestResult, setConnectionTestResult] = useState<{ success: boolean; message?: string; error?: string } | null>(null);
+  const [loginLogoDataUrl, setLoginLogoDataUrl] = useState<string | null>(null);
 
   useEffect(() => {
     const emails = getSavedEmails();
@@ -61,13 +65,26 @@ export default function LoginPage({
     });
   }, []);
 
-  // Load app config when settings view opens
+  // Load app config and effective DB config when settings view opens
   useEffect(() => {
     if (isSettingsView && typeof window !== 'undefined' && window.electronAPI?.getAppConfig) {
       setIsLoadingConfig(true);
-      window.electronAPI.getAppConfig().then((result) => {
-        if (result?.success && result.config) {
-          setAppConfig(result.config);
+      Promise.all([
+        window.electronAPI.getAppConfig(),
+        window.electronAPI.getEffectiveDbConfig?.() ?? Promise.resolve({ success: false }),
+      ]).then(([configResult, effectiveResult]) => {
+        if (configResult?.success && configResult.config) {
+          setAppConfig(configResult.config);
+        }
+        if (effectiveResult?.success && typeof (effectiveResult as { host?: string }).host === 'string') {
+          const eff = effectiveResult as unknown as { host: string; database?: string; source?: 'saved' | 'env' | 'default' };
+          setEffectiveDbConfig({
+            host: eff.host,
+            database: eff.database ?? 'salespulse',
+            source: eff.source ?? 'default',
+          });
+        } else {
+          setEffectiveDbConfig(null);
         }
         setIsLoadingConfig(false);
       }).catch((error) => {
@@ -76,6 +93,34 @@ export default function LoginPage({
       });
     }
   }, [isSettingsView]);
+
+  // Load cached business logo (offline-first). Uses last_business_id_for_login_logo so the
+  // login screen shows the last selected business's logo. Caches from that id first when
+  // available, then loads the file Electron wrote.
+  const loadLoginLogo = useCallback(async () => {
+    if (typeof window === 'undefined' || !window.electronAPI?.getLoginLogo) return;
+    const lastBusinessId = typeof window !== 'undefined' ? localStorage.getItem('last_business_id_for_login_logo') : null;
+    if (lastBusinessId && window.electronAPI?.cacheBusinessLogoForLogin) {
+      try {
+        const baseUrl = (getApiUrl('') || '').replace(/\/$/, '') || undefined;
+        await window.electronAPI.cacheBusinessLogoForLogin(Number(lastBusinessId), baseUrl);
+      } catch {
+        // ignore; getLoginLogo will use whatever is already cached
+      }
+    }
+    try {
+      const r = await window.electronAPI.getLoginLogo();
+      if (r?.dataUrl) setLoginLogoDataUrl(r.dataUrl);
+    } catch {
+      // ignore
+    }
+  }, []);
+  useEffect(() => {
+    void loadLoginLogo();
+    const t1 = setTimeout(() => void loadLoginLogo(), 100);
+    const t2 = setTimeout(() => void loadLoginLogo(), 500);
+    return () => { clearTimeout(t1); clearTimeout(t2); };
+  }, [loadLoginLogo, refreshLoginLogoAt]);
 
   useEffect(() => {
     if (!isDropdownOpen) {
@@ -135,16 +180,26 @@ export default function LoginPage({
           
           {/* Content */}
           <div className="relative z-10 h-full flex flex-col items-center justify-center text-white p-8">
-            {/* Logo */}
-            <div className="mb-8">
-              <Image
-                src="images/momoyo-logo.png"
-                alt="Momoyo Logo"
-                width={120}
-                 height={120}
-                 className="w-30 h-30 object-contain"
-               />
-             </div>
+            {/* Logo: cached business logo (offline-first) or inline placeholder */}
+            <div className="mb-8 flex items-center justify-center" style={{ width: 120, height: 120 }}>
+              {loginLogoDataUrl ? (
+                <img
+                  src={loginLogoDataUrl}
+                  alt="Business logo"
+                  width={120}
+                  height={120}
+                  className="max-w-[120px] max-h-[120px] object-contain"
+                />
+              ) : (
+                <img
+                  src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120' viewBox='0 0 120 120'%3E%3Crect fill='%23374151' width='120' height='120' rx='12'/%3E%3Ctext x='60' y='68' font-family='system-ui,sans-serif' font-size='24' fill='%239ca3af' text-anchor='middle'%3ELogo%3C/text%3E%3C/svg%3E"
+                  alt="Logo"
+                  width={120}
+                  height={120}
+                  className="max-w-[120px] max-h-[120px] object-contain"
+                />
+              )}
+            </div>
             
             
             {/* App Details */}
@@ -221,6 +276,17 @@ export default function LoginPage({
                           />
                         </div>
                         
+                        {/* Current DB in use (so user sees what app actually uses) */}
+                        {effectiveDbConfig && (
+                          <div className="text-[10px] text-gray-600 bg-gray-50 border border-gray-200 rounded px-2 py-1.5 mb-2">
+                            <span className="font-medium text-gray-700">Database yang dipakai saat ini: </span>
+                            <span className="text-gray-800">{effectiveDbConfig.host}</span>
+                            <span className="text-gray-500"> / {effectiveDbConfig.database}</span>
+                            <span className="text-gray-500">
+                              {' '}({effectiveDbConfig.source === 'saved' ? 'dari pengaturan tersimpan' : effectiveDbConfig.source === 'env' ? 'dari .env' : 'default localhost'})
+                            </span>
+                          </div>
+                        )}
                         {/* Database Configuration Grid */}
                         <div className="relative border border-gray-300 rounded p-2.5 pt-3.5">
                           <div className="absolute -top-2 left-3 bg-white px-1.5">
@@ -422,10 +488,19 @@ export default function LoginPage({
                                 }
                                 const result = await electronAPI.resetAppConfig();
                                 if (result?.success) {
-                                  // Reload config to show .env defaults
-                                  const configResult = await electronAPI.getAppConfig();
-                                  if (configResult?.success) {
-                                    setAppConfig(configResult.config || {});
+                                  // Reload config and effective DB to show .env defaults
+                                  const [configResult, effectiveResult] = await Promise.all([
+                                    electronAPI.getAppConfig(),
+                                    electronAPI.getEffectiveDbConfig?.(),
+                                  ]);
+                                  if (configResult?.success) setAppConfig(configResult.config || {});
+                                  if (effectiveResult?.success && typeof (effectiveResult as { host?: string }).host === 'string') {
+                                    const eff = effectiveResult as unknown as { host: string; database?: string; source?: 'saved' | 'env' | 'default' };
+                                    setEffectiveDbConfig({
+                                      host: eff.host,
+                                      database: eff.database ?? 'salespulse',
+                                      source: eff.source ?? 'default',
+                                    });
                                   }
                                   alert('Konfigurasi berhasil direset ke default (.env). Aplikasi perlu dimulai ulang untuk menerapkan perubahan.');
                                 } else {
@@ -455,6 +530,16 @@ export default function LoginPage({
                               try {
                                 const result = await window.electronAPI.saveAppConfig(appConfig);
                                 if (result?.success) {
+                                  // Refresh effective DB so "Database yang dipakai saat ini" updates
+                                  const effectiveResult = await window.electronAPI.getEffectiveDbConfig?.();
+                                  if (effectiveResult?.success && typeof (effectiveResult as { host?: string }).host === 'string') {
+                                    const eff = effectiveResult as unknown as { host: string; database?: string; source?: 'saved' | 'env' | 'default' };
+                                    setEffectiveDbConfig({
+                                      host: eff.host,
+                                      database: eff.database ?? 'salespulse',
+                                      source: eff.source ?? 'default',
+                                    });
+                                  }
                                   alert('Pengaturan database dan API berhasil disimpan! Aplikasi perlu dimulai ulang untuk menerapkan perubahan.');
                                   // Clear cached API URL to force reload
                                   if (typeof window !== 'undefined' && 'localStorage' in window) {

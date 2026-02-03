@@ -48,6 +48,18 @@ interface PendingTransaction {
   created_at: string;
 }
 
+interface BundleSelectionItem {
+  category2_id?: number;
+  category2_name?: string;
+  selectedProducts: {
+    product: { id: number; nama: string };
+    quantity?: number;
+    customizations?: { selected_options: { option_name: string }[] }[];
+    customNote?: string;
+  }[];
+  requiredQuantity?: number;
+}
+
 interface CartItem {
   id: number;
   product: {
@@ -72,7 +84,7 @@ interface CartItem {
     }[];
   }[];
   customNote?: string;
-  bundleSelections?: unknown[];
+  bundleSelections?: BundleSelectionItem[];
   isLocked?: boolean;
   transactionItemId?: number;
   transactionId?: string;
@@ -86,6 +98,7 @@ interface TableSelectionModalProps {
   transactionType: 'drinks' | 'bakery';
   onSuccess: () => void;
   customerName?: string;
+  pickupMethod?: 'dine-in' | 'take-away';
   loadedTransactionInfo?: {
     transactionId: string;
     tableName: string | null;
@@ -107,6 +120,7 @@ export default function TableSelectionModal({
   transactionType,
   onSuccess,
   customerName = '',
+  pickupMethod = 'dine-in',
   loadedTransactionInfo = null,
   onItemsLocked,
   waiterId = null,
@@ -138,6 +152,7 @@ export default function TableSelectionModal({
   const [newItemsToSave, setNewItemsToSave] = useState<CartItem[]>([]);
   const [pendingTableId, setPendingTableId] = useState<number | null>(null);
   const hasCheckedLihatMode = useRef(false);
+  const saveNewItemsInProgressRef = useRef(false);
 
   const canvasRef = useRef<HTMLDivElement>(null);
   const canvasContainerRef = useRef<HTMLDivElement>(null);
@@ -404,7 +419,7 @@ export default function TableSelectionModal({
     await savePendingTransaction(tableId);
   };
 
-  const savePendingTransaction = async (tableId: number) => {
+  const savePendingTransaction = async (tableId: number | null) => {
     setIsSaving(true);
     try {
       const electronAPI = getElectronAPI();
@@ -445,7 +460,7 @@ export default function TableSelectionModal({
         user_id: user?.id ? parseInt(String(user.id)) : 1,
         waiter_id: waiterId || null,
         payment_method: 'cash',
-        pickup_method: 'dine-in' as const,
+        pickup_method: (pickupMethod === 'take-away' ? 'take-away' : 'dine-in') as 'take-away' | 'dine-in',
         total_amount: orderTotal,
         voucher_discount: 0,
         voucher_type: 'none' as const,
@@ -468,7 +483,7 @@ export default function TableSelectionModal({
         cl_account_name: null,
         transaction_type: transactionType,
         payment_method_id: 1, // Cash default
-        table_id: tableId,
+        table_id: tableId ?? null,
         receipt_number: null,
       };
 
@@ -517,6 +532,7 @@ export default function TableSelectionModal({
           custom_note: item.customNote || null,
           bundle_selections_json: item.bundleSelections ? JSON.stringify(item.bundleSelections) : null,
           created_at: transactionData.created_at,
+          waiter_id: waiterId ?? null,
           production_status: null,
           production_started_at: null,
           production_finished_at: null,
@@ -683,6 +699,220 @@ export default function TableSelectionModal({
           console.log(`✅ Saved ${transactionItemCustomizationOptions.length} customization option(s)`);
         }
       }
+
+      // Print labels for new order and mark checker as printed (so payment won't re-print)
+      const MAX_CUSTOMIZATION_LENGTH_PER_LABEL = 70;
+      const splitCustomizationsForLabels = (text: string): string[] => {
+        if (!text || text.length <= MAX_CUSTOMIZATION_LENGTH_PER_LABEL) return [text];
+        const parts = text.split('/');
+        const chunks: string[] = [];
+        let currentChunk = '';
+        for (const part of parts) {
+          const wouldExceed = currentChunk ? (currentChunk + '/' + part).length > MAX_CUSTOMIZATION_LENGTH_PER_LABEL : part.length > MAX_CUSTOMIZATION_LENGTH_PER_LABEL;
+          if (wouldExceed && currentChunk) {
+            chunks.push(currentChunk);
+            currentChunk = part;
+          } else if (wouldExceed && !currentChunk) {
+            const words = part.split(' ');
+            let wordChunk = '';
+            for (const word of words) {
+              if ((wordChunk + ' ' + word).length > MAX_CUSTOMIZATION_LENGTH_PER_LABEL && wordChunk) {
+                chunks.push(wordChunk.trim());
+                wordChunk = word;
+              } else {
+                wordChunk = wordChunk ? wordChunk + ' ' + word : word;
+              }
+            }
+            currentChunk = wordChunk;
+          } else {
+            currentChunk = currentChunk ? currentChunk + '/' + part : part;
+          }
+        }
+        if (currentChunk) chunks.push(currentChunk);
+        return chunks.length > 0 ? chunks : [text];
+      };
+      const finalPickupMethod = pickupMethod === 'take-away' ? 'Take Away' : 'Dine In';
+      const orderTime = transactionData.created_at;
+      const newOrderLabels: Array<{
+        printerType: string;
+        counter: number;
+        itemNumber: number;
+        totalItems: number;
+        pickupMethod: string;
+        productName: string;
+        customizations: string;
+        customNote: string;
+        orderTime: string;
+        labelContinuation?: string;
+      }> = [];
+      let newOrderItemNumber = 0;
+      for (const item of cartItems) {
+        const isBundle = item.bundleSelections && (item.bundleSelections as unknown[]).length > 0;
+        if (isBundle) {
+          for (const bundleSel of item.bundleSelections as Array<{ selectedProducts: Array<{ quantity?: number; product: { nama: string }; customizations?: Array<{ selected_options: Array<{ option_name: string }> }>; customNote?: string }> }>) {
+            for (const selectedProduct of bundleSel.selectedProducts) {
+              const selectionQty = typeof selectedProduct.quantity === 'number' && !Number.isNaN(selectedProduct.quantity) ? selectedProduct.quantity : 1;
+              const totalQty = item.quantity * selectionQty;
+              const allOptions: string[] = [];
+              if (selectedProduct.customizations?.length) {
+                selectedProduct.customizations.forEach((c: { selected_options: Array<{ option_name: string }> }) => {
+                  c.selected_options.forEach(opt => allOptions.push(opt.option_name));
+                });
+              }
+              if (selectedProduct.customNote?.trim()) allOptions.push(selectedProduct.customNote.trim());
+              const customizationText = allOptions.join('/');
+              const customizationChunks = splitCustomizationsForLabels(customizationText);
+              for (let qty = 0; qty < totalQty; qty++) {
+                newOrderItemNumber++;
+                for (let chunkIndex = 0; chunkIndex < customizationChunks.length; chunkIndex++) {
+                  const isMultiLabel = customizationChunks.length > 1;
+                  const labelNumber = chunkIndex + 1;
+                  const totalLabels = customizationChunks.length;
+                  newOrderLabels.push({
+                    printerType: 'labelPrinter',
+                    counter: 1,
+                    itemNumber: newOrderItemNumber,
+                    totalItems: 0,
+                    pickupMethod: finalPickupMethod,
+                    productName: selectedProduct.product.nama,
+                    customizations: customizationChunks[chunkIndex],
+                    customNote: '',
+                    orderTime,
+                    labelContinuation: isMultiLabel ? `${labelNumber}/${totalLabels}` : undefined
+                  });
+                }
+              }
+            }
+          }
+        } else {
+          const allOptions: string[] = [];
+          if (item.customizations?.length) {
+            item.customizations.forEach(c => {
+              c.selected_options.forEach(opt => allOptions.push(opt.option_name));
+            });
+          }
+          if (item.customNote) allOptions.push(item.customNote);
+          const customizationText = allOptions.join('/');
+          const customizationChunks = splitCustomizationsForLabels(customizationText);
+          for (let qty = 0; qty < item.quantity; qty++) {
+            newOrderItemNumber++;
+            for (let chunkIndex = 0; chunkIndex < customizationChunks.length; chunkIndex++) {
+              const isMultiLabel = customizationChunks.length > 1;
+              const labelNumber = chunkIndex + 1;
+              const totalLabels = customizationChunks.length;
+              newOrderLabels.push({
+                printerType: 'labelPrinter',
+                counter: 1,
+                itemNumber: newOrderItemNumber,
+                totalItems: 0,
+                pickupMethod: finalPickupMethod,
+                productName: item.product.nama || '',
+                customizations: customizationChunks[chunkIndex],
+                customNote: '',
+                orderTime,
+                labelContinuation: isMultiLabel ? `${labelNumber}/${totalLabels}` : undefined
+              });
+            }
+          }
+        }
+      }
+      const newOrderTotalItems = newOrderItemNumber;
+      newOrderLabels.forEach(l => { l.totalItems = newOrderTotalItems; });
+
+      // Build orderContext for checker templates that use {{waiterName}}, {{customerName}}, {{tableName}}, {{orderTime}}, {{items}}
+      const escapeHtmlForChecker = (s: string) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+      let waiterNameForChecker = '';
+      if (waiterId && window.electronAPI?.localDbGetEmployees) {
+        try {
+          const employees = await window.electronAPI.localDbGetEmployees();
+          const arr = Array.isArray(employees) ? employees : [];
+          const waiter = arr.find((emp: { id?: number; nama_karyawan?: string }) =>
+            (typeof emp.id === 'number' ? emp.id : parseInt(String(emp.id), 10)) === waiterId
+          );
+          if (waiter && typeof waiter.nama_karyawan === 'string') {
+            waiterNameForChecker = waiter.nama_karyawan;
+          }
+        } catch (_) {
+          // ignore
+        }
+      }
+      const rowForItem = (item: typeof cartItems[0]) => {
+        let unitPrice = item.product.harga_jual || 0;
+        if (item.customizations?.length) {
+          item.customizations.forEach(c => c.selected_options.forEach(o => { unitPrice += o.price_adjustment || 0; }));
+        }
+        const subtotal = unitPrice * item.quantity;
+        let cellText = item.product.nama || '';
+        if (item.customNote?.trim()) {
+          cellText += '\nCatatan: ' + item.customNote.trim();
+        }
+        if (item.customizations?.length) {
+          const opts = item.customizations.flatMap(c => c.selected_options.map(o => o.option_name || '')).filter(Boolean);
+          if (opts.length) cellText += '\n' + opts.join(', ');
+        }
+        const cellHtml = escapeHtmlForChecker(cellText).replace(/\n/g, '<br/>');
+        return `<tr><td>${cellHtml}</td><td style="text-align: right;">${item.quantity}</td><td style="text-align: right;">${subtotal}</td></tr>`;
+      };
+      const lineForItem = (item: typeof cartItems[0]) => {
+        let unitPrice = item.product.harga_jual || 0;
+        if (item.customizations?.length) {
+          item.customizations.forEach(c => c.selected_options.forEach(o => { unitPrice += o.price_adjustment || 0; }));
+        }
+        const subtotal = unitPrice * item.quantity;
+        let cellText = item.product.nama || '';
+        if (item.customNote?.trim()) cellText += '\nCatatan: ' + item.customNote.trim();
+        if (item.customizations?.length) {
+          const opts = item.customizations.flatMap(c => c.selected_options.map(o => o.option_name || '')).filter(Boolean);
+          if (opts.length) cellText += '\n' + opts.join(', ');
+        }
+        const cellHtml = escapeHtmlForChecker(cellText).replace(/\n/g, '<br/>');
+        return `<div class="item-line">- ${item.quantity}x ${cellHtml}</div>`;
+      };
+      const category1NameFromProduct = (item: typeof cartItems[0]) => ((item.product as { category1_name?: string | null }).category1_name ?? '').trim();
+      const category1IdFromProduct = (item: typeof cartItems[0]) => (item.product as { category1_id?: number | null }).category1_id ?? null;
+      const key = (item: typeof cartItems[0]) => category1NameFromProduct(item) || `_id_${category1IdFromProduct(item) ?? 'null'}`;
+      const byCategory = new Map<string, typeof cartItems>();
+      for (const item of cartItems) {
+        const k = key(item);
+        if (!byCategory.has(k)) byCategory.set(k, []);
+        byCategory.get(k)!.push(item);
+      }
+      const sortedKeys = Array.from(byCategory.keys()).filter(k => !k.startsWith('_id_')).sort();
+      const otherKeys = Array.from(byCategory.keys()).filter(k => k.startsWith('_id_'));
+      const [firstKey, secondKey] = sortedKeys.length >= 2 ? [sortedKeys[0], sortedKeys[1]] : sortedKeys.length === 1 ? [sortedKeys[0], otherKeys[0] ?? ''] : [otherKeys[0] ?? '', otherKeys[1] ?? ''];
+      const cat1Items = (firstKey ? byCategory.get(firstKey) : []) ?? [];
+      const cat2Items = (secondKey ? byCategory.get(secondKey) : []) ?? [];
+      const orderContextRows = cartItems.map(rowForItem).join('');
+      const orderContextRowsCategory1 = cat1Items.map(lineForItem).join('');
+      const orderContextRowsCategory2 = cat2Items.map(lineForItem).join('');
+      const category1Name = (cat1Items[0] && category1NameFromProduct(cat1Items[0])) || firstKey.replace(/^_id_/, '') || 'Kategori 1';
+      const category2Name = (cat2Items[0] && category1NameFromProduct(cat2Items[0])) || secondKey.replace(/^_id_/, '') || '';
+      const orderContextForChecker = {
+        waiterName: waiterNameForChecker,
+        customerName: customerName.trim() || '',
+        tableName: tableId != null ? (tables.find(t => t.id === tableId)?.table_number ?? `Meja ${tableId}`) : '',
+        orderTime: transactionData.created_at,
+        itemsHtml: orderContextRows,
+        itemsHtmlCategory1: orderContextRowsCategory1,
+        itemsHtmlCategory2: orderContextRowsCategory2,
+        category1Name,
+        category2Name,
+      };
+
+      if ((newOrderLabels.length > 0 || orderContextForChecker.itemsHtml) && window.electronAPI?.printLabelsBatch) {
+        try {
+          await window.electronAPI.printLabelsBatch({
+            labels: newOrderLabels.length > 0 ? newOrderLabels : [{ orderTime: orderContextForChecker.orderTime, productName: '', counter: 1, itemNumber: 1, totalItems: 1, pickupMethod: pickupMethod === 'take-away' ? 'Take Away' : 'Dine In' }],
+            printerType: 'labelPrinter',
+            business_id: businessId ?? undefined,
+            orderContext: orderContextForChecker
+          });
+          await window.electronAPI?.localDbSetTransactionCheckerPrinted?.(transactionId);
+        } catch (labelErr) {
+          console.error('❌ Error printing checker for new order:', labelErr);
+        }
+      }
+
       console.log('✅ Pending transaction saved:', transactionId);
       console.log('✅ Table ID:', tableId);
       console.log('✅ Items saved:', transactionItems.length);
@@ -749,11 +979,18 @@ export default function TableSelectionModal({
         ? existingTransaction.final_amount 
         : (typeof existingTransaction.final_amount === 'string' ? parseFloat(existingTransaction.final_amount) : 0);
 
+      const originalTxWaiterId = existingTransaction.waiter_id != null ? existingTransaction.waiter_id : null;
+      // #region agent log
+      if (typeof fetch === 'function') {
+        fetch('http://127.0.0.1:7242/ingest/7b565785-72b5-49f7-b2c0-57606ea0d0b5', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ location: 'TableSelectionModal:saveNewItemsToExistingTransaction', message: 'Building updatedTransactionData', data: { waiterIdProp: waiterId, originalTxWaiterId, overwriting: waiterId != null ? waiterId : originalTxWaiterId }, timestamp: Date.now(), sessionId: 'debug-session', runId: 'run1', hypothesisId: 'H2' }) }).catch(() => {});
+      }
+      // #endregion
       const updatedTransactionData = {
         ...existingTransaction,
         total_amount: existingTotal + newItemsTotal,
         final_amount: existingFinal + newItemsTotal,
         updated_at: new Date().toISOString(),
+        waiter_id: originalTxWaiterId,
       };
 
       // Prepare transaction items for new items only
@@ -786,6 +1023,7 @@ export default function TableSelectionModal({
           custom_note: item.customNote || null,
           bundle_selections_json: item.bundleSelections ? JSON.stringify(item.bundleSelections) : null,
           created_at: new Date().toISOString(),
+          waiter_id: waiterId != null ? waiterId : (existingTransaction.waiter_id as number | null) ?? null,
           production_status: null,
           production_started_at: null,
           production_finished_at: null,
@@ -959,6 +1197,202 @@ export default function TableSelectionModal({
       console.log('✅ New items saved to existing transaction:', transactionId);
       console.log('✅ New items saved:', transactionItems.length);
 
+      // Print checker (labels) for the newly added items only (same template logic as payment)
+      const orderTime = typeof existingTransaction.created_at === 'string' ? existingTransaction.created_at : new Date().toISOString();
+      const finalPickupMethod = pickupMethod === 'take-away' ? 'take-away' : 'dine-in';
+      const MAX_CUSTOMIZATION_LENGTH_PER_LABEL = 70;
+      const splitCustomizations = (text: string): string[] => {
+        if (!text || text.length <= MAX_CUSTOMIZATION_LENGTH_PER_LABEL) return [text];
+        const parts = text.split('/');
+        const chunks: string[] = [];
+        let currentChunk = '';
+        for (const part of parts) {
+          const wouldExceed = currentChunk ? (currentChunk + '/' + part).length > MAX_CUSTOMIZATION_LENGTH_PER_LABEL : part.length > MAX_CUSTOMIZATION_LENGTH_PER_LABEL;
+          if (wouldExceed && currentChunk) {
+            chunks.push(currentChunk);
+            currentChunk = part;
+          } else if (wouldExceed && !currentChunk) {
+            const words = part.split(' ');
+            let wordChunk = '';
+            for (const word of words) {
+              if ((wordChunk + ' ' + word).length > MAX_CUSTOMIZATION_LENGTH_PER_LABEL && wordChunk) {
+                chunks.push(wordChunk.trim());
+                wordChunk = word;
+              } else {
+                wordChunk = wordChunk ? wordChunk + ' ' + word : word;
+              }
+            }
+            currentChunk = wordChunk;
+          } else {
+            currentChunk = currentChunk ? currentChunk + '/' + part : part;
+          }
+        }
+        if (currentChunk) chunks.push(currentChunk);
+        return chunks.length > 0 ? chunks : [text];
+      };
+      const allLabels: Array<{
+        printerType: string;
+        counter: number;
+        itemNumber: number;
+        totalItems: number;
+        pickupMethod: string;
+        productName: string;
+        customizations: string;
+        customNote: string;
+        orderTime: string;
+        labelContinuation?: string;
+      }> = [];
+      let currentItemNumber = 0;
+      const labelCounter = 1;
+      for (const item of itemsToSave) {
+        const isBundle = item.bundleSelections && item.bundleSelections.length > 0;
+        if (isBundle) {
+          for (const bundleSel of item.bundleSelections!) {
+            for (const selectedProduct of bundleSel.selectedProducts) {
+              const selectionQty = typeof selectedProduct.quantity === 'number' && !Number.isNaN(selectedProduct.quantity) ? selectedProduct.quantity : 1;
+              const totalQty = item.quantity * selectionQty;
+              const allOptions: string[] = [];
+              if (selectedProduct.customizations?.length) {
+                selectedProduct.customizations.forEach((c: { selected_options: { option_name: string }[] }) => {
+                  c.selected_options.forEach(opt => allOptions.push(opt.option_name));
+                });
+              }
+              if (selectedProduct.customNote?.trim()) allOptions.push(selectedProduct.customNote.trim());
+              const customizationText = allOptions.join('/');
+              const customizationChunks = splitCustomizations(customizationText);
+              for (let qty = 0; qty < totalQty; qty++) {
+                currentItemNumber++;
+                for (let chunkIndex = 0; chunkIndex < customizationChunks.length; chunkIndex++) {
+                  const isMultiLabel = customizationChunks.length > 1;
+                  const labelNumber = chunkIndex + 1;
+                  const totalLabels = customizationChunks.length;
+                  allLabels.push({
+                    printerType: 'labelPrinter',
+                    counter: labelCounter,
+                    itemNumber: currentItemNumber,
+                    totalItems: 0,
+                    pickupMethod: finalPickupMethod,
+                    productName: selectedProduct.product.nama,
+                    customizations: customizationChunks[chunkIndex],
+                    customNote: '',
+                    orderTime,
+                    labelContinuation: isMultiLabel ? `${labelNumber}/${totalLabels}` : undefined
+                  });
+                }
+              }
+            }
+          }
+        } else {
+          const allOptions: string[] = [];
+          if (item.customizations?.length) {
+            item.customizations.forEach(c => {
+              c.selected_options.forEach(opt => allOptions.push(opt.option_name));
+            });
+          }
+          if (item.customNote) allOptions.push(item.customNote);
+          const customizationText = allOptions.join('/');
+          const customizationChunks = splitCustomizations(customizationText);
+          for (let qty = 0; qty < item.quantity; qty++) {
+            currentItemNumber++;
+            for (let chunkIndex = 0; chunkIndex < customizationChunks.length; chunkIndex++) {
+              const isMultiLabel = customizationChunks.length > 1;
+              const labelNumber = chunkIndex + 1;
+              const totalLabels = customizationChunks.length;
+              allLabels.push({
+                printerType: 'labelPrinter',
+                counter: labelCounter,
+                itemNumber: currentItemNumber,
+                totalItems: 0,
+                pickupMethod: finalPickupMethod,
+                productName: item.product.nama || '',
+                customizations: customizationChunks[chunkIndex],
+                customNote: '',
+                orderTime,
+                labelContinuation: isMultiLabel ? `${labelNumber}/${totalLabels}` : undefined
+              });
+            }
+          }
+        }
+      }
+      const totalItems = currentItemNumber;
+      allLabels.forEach(l => { l.totalItems = totalItems; });
+
+      // Build orderContext so order-summary checker template ({{items}}) shows the newly added products
+      const escapeHtmlForChecker = (s: string) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+      const rowForNewItem = (item: typeof itemsToSave[0]) => {
+        let unitPrice = item.product.harga_jual || 0;
+        if (item.customizations?.length) {
+          item.customizations.forEach(c => c.selected_options.forEach(o => { unitPrice += o.price_adjustment || 0; }));
+        }
+        const subtotal = unitPrice * item.quantity;
+        let cellText = item.product.nama || '';
+        if (item.customNote?.trim()) cellText += '\nCatatan: ' + item.customNote.trim();
+        if (item.customizations?.length) {
+          const opts = item.customizations.flatMap(c => c.selected_options.map(o => o.option_name || '')).filter(Boolean);
+          if (opts.length) cellText += '\n' + opts.join(', ');
+        }
+        const cellHtml = escapeHtmlForChecker(cellText).replace(/\n/g, '<br/>');
+        return `<tr><td>${cellHtml}</td><td style="text-align: right;">${item.quantity}</td><td style="text-align: right;">${subtotal}</td></tr>`;
+      };
+      const lineForNewItem = (item: typeof itemsToSave[0]) => {
+        let unitPrice = item.product.harga_jual || 0;
+        if (item.customizations?.length) {
+          item.customizations.forEach(c => c.selected_options.forEach(o => { unitPrice += o.price_adjustment || 0; }));
+        }
+        const subtotal = unitPrice * item.quantity;
+        let cellText = item.product.nama || '';
+        if (item.customNote?.trim()) cellText += '\nCatatan: ' + item.customNote.trim();
+        if (item.customizations?.length) {
+          const opts = item.customizations.flatMap(c => c.selected_options.map(o => o.option_name || '')).filter(Boolean);
+          if (opts.length) cellText += '\n' + opts.join(', ');
+        }
+        const cellHtml = escapeHtmlForChecker(cellText).replace(/\n/g, '<br/>');
+        return `<div class="item-line">- ${item.quantity}x ${cellHtml}</div>`;
+      };
+      const category1NameFromNewItem = (item: typeof itemsToSave[0]) => ((item.product as { category1_name?: string | null }).category1_name ?? '').trim();
+      const category1IdNew = (item: typeof itemsToSave[0]) => (item.product as { category1_id?: number | null }).category1_id ?? null;
+      const keyNew = (item: typeof itemsToSave[0]) => category1NameFromNewItem(item) || `_id_${category1IdNew(item) ?? 'null'}`;
+      const byCategoryNew = new Map<string, typeof itemsToSave>();
+      for (const item of itemsToSave) {
+        const k = keyNew(item);
+        if (!byCategoryNew.has(k)) byCategoryNew.set(k, []);
+        byCategoryNew.get(k)!.push(item);
+      }
+      const sortedKeysNew = Array.from(byCategoryNew.keys()).filter(k => !k.startsWith('_id_')).sort();
+      const otherKeysNew = Array.from(byCategoryNew.keys()).filter(k => k.startsWith('_id_'));
+      const [firstKeyNew, secondKeyNew] = sortedKeysNew.length >= 2 ? [sortedKeysNew[0], sortedKeysNew[1]] : sortedKeysNew.length === 1 ? [sortedKeysNew[0], otherKeysNew[0] ?? ''] : [otherKeysNew[0] ?? '', otherKeysNew[1] ?? ''];
+      const cat1New = (firstKeyNew ? byCategoryNew.get(firstKeyNew) : []) ?? [];
+      const cat2New = (secondKeyNew ? byCategoryNew.get(secondKeyNew) : []) ?? [];
+      const newItemsRows = itemsToSave.map(rowForNewItem).join('');
+      const newItemsRowsCategory1 = cat1New.map(lineForNewItem).join('');
+      const newItemsRowsCategory2 = cat2New.map(lineForNewItem).join('');
+      const category1NameNew = (cat1New[0] && category1NameFromNewItem(cat1New[0])) || firstKeyNew.replace(/^_id_/, '') || 'Kategori 1';
+      const category2NameNew = (cat2New[0] && category1NameFromNewItem(cat2New[0])) || secondKeyNew.replace(/^_id_/, '') || '';
+      const orderContextForNewItems = {
+        waiterName: loadedTransactionInfo?.waiterName ?? '',
+        customerName: loadedTransactionInfo?.customerName ?? '',
+        tableName: loadedTransactionInfo?.tableName ?? '',
+        orderTime,
+        itemsHtml: newItemsRows,
+        itemsHtmlCategory1: newItemsRowsCategory1,
+        itemsHtmlCategory2: newItemsRowsCategory2,
+        category1Name: category1NameNew,
+        category2Name: category2NameNew,
+      };
+
+      if ((allLabels.length > 0 || orderContextForNewItems.itemsHtml) && window.electronAPI?.printLabelsBatch) {
+        try {
+          await window.electronAPI.printLabelsBatch({
+            labels: allLabels,
+            printerType: 'labelPrinter',
+            business_id: businessId ?? undefined,
+            orderContext: orderContextForNewItems
+          });
+        } catch (labelErr) {
+          console.error('❌ Error printing checker for new items:', labelErr);
+        }
+      }
+
       // Mark new items as locked by calling callback
       if (onItemsLocked) {
         const newItemIds = itemsToSave.map(item => item.id);
@@ -986,8 +1420,16 @@ export default function TableSelectionModal({
 
   const handleConfirmNewItems = async () => {
     if (newItemsToSave.length === 0 || !pendingTableId) return;
-    setShowConfirmationModal(false);
-    await saveNewItemsToExistingTransaction(newItemsToSave);
+    // Prevent double-submit: avoid duplicate items on barista/kitchen display
+    if (saveNewItemsInProgressRef.current) return;
+    saveNewItemsInProgressRef.current = true;
+    try {
+      // Keep confirmation modal open (with saving state) until save + checker print finish, then close both modals
+      await saveNewItemsToExistingTransaction(newItemsToSave);
+      setShowConfirmationModal(false);
+    } finally {
+      saveNewItemsInProgressRef.current = false;
+    }
   };
 
   if (!isOpen) return null;
@@ -1004,6 +1446,17 @@ export default function TableSelectionModal({
           <div className="flex items-center justify-between p-4 border-b gap-4">
             <div className="flex items-center gap-4 flex-1 min-w-0">
               <h2 className="text-xl font-bold text-gray-900 whitespace-nowrap">Pilih Meja</h2>
+              {/* Simpan Take Away - when pickup is take-away and new order, allow saving without table */}
+              {pickupMethod === 'take-away' && !loadedTransactionInfo && (
+                <button
+                  type="button"
+                  onClick={() => savePendingTransaction(null)}
+                  disabled={isSaving || cartItems.length === 0}
+                  className="px-4 py-2 bg-green-600 hover:bg-green-700 disabled:bg-gray-400 disabled:cursor-not-allowed text-white text-sm font-medium rounded-lg whitespace-nowrap"
+                >
+                  {isSaving ? 'Menyimpan...' : 'Simpan Take Away'}
+                </button>
+              )}
               {/* Room Selector */}
               {!loading && !error && rooms.length > 0 && (
                 <div className="flex flex-wrap gap-2 flex-1 min-w-0">
@@ -1243,6 +1696,7 @@ export default function TableSelectionModal({
           }
         }}
         onConfirm={handleConfirmNewItems}
+        isSaving={isSaving}
         newItems={newItemsToSave.map(item => ({
           ...item,
           product: {

@@ -62,10 +62,17 @@ export default function PrinterSelector() {
     labelPrinter: 0,
     receiptizePrinter: 0
   });
-  const [copies, setCopies] = useState<Record<'receiptPrinter' | 'receiptizePrinter', number>>({
+  const [copies, setCopies] = useState<Record<'receiptPrinter' | 'labelPrinter' | 'receiptizePrinter', number>>({
+    receiptPrinter: 1,
+    labelPrinter: 1,
+    receiptizePrinter: 1
+  });
+  const [nonCashCopies, setNonCashCopies] = useState<Record<'receiptPrinter' | 'receiptizePrinter', number>>({
     receiptPrinter: 1,
     receiptizePrinter: 1
   });
+  const [singlePrinterMode, setSinglePrinterMode] = useState<boolean>(false);
+  const [printer2AuditLogChance, setPrinter2AuditLogChance] = useState<number | null>(null);
   const [isScanning, setIsScanning] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [isTesting, setIsTesting] = useState<string | null>(null);
@@ -96,13 +103,59 @@ export default function PrinterSelector() {
           labelPrinter: 0,
           receiptizePrinter: 0
         };
-        const copiesSettings: Record<'receiptPrinter' | 'receiptizePrinter', number> = {
+        const copiesSettings: Record<'receiptPrinter' | 'labelPrinter' | 'receiptizePrinter', number> = {
+          receiptPrinter: 1,
+          labelPrinter: 1,
+          receiptizePrinter: 1
+        };
+        const nonCashCopiesSettings: Record<'receiptPrinter' | 'receiptizePrinter', number> = {
           receiptPrinter: 1,
           receiptizePrinter: 1
         };
+        let singlePrinterModeValue = false;
+        let printer2AuditLogChanceValue: number | null = null;
         
         configs.forEach((config: PrinterConfigRow) => {
-          if (!config || typeof config.system_printer_name !== 'string') {
+          if (!config) {
+            return;
+          }
+          
+          // Handle singlePrinterMode config (doesn't require system_printer_name)
+          if (config.printer_type === 'singlePrinterMode') {
+            if (config.extra_settings) {
+              try {
+                const extra =
+                  typeof config.extra_settings === 'string'
+                    ? JSON.parse(config.extra_settings)
+                    : config.extra_settings;
+                if (
+                  extra &&
+                  typeof extra === 'object' &&
+                  'enabled' in extra &&
+                  typeof (extra as { enabled?: boolean }).enabled === 'boolean'
+                ) {
+                  singlePrinterModeValue = (extra as { enabled: boolean }).enabled;
+                }
+                // Load printer2AuditLogChance if present
+                if (
+                  extra &&
+                  typeof extra === 'object' &&
+                  'printer2AuditLogChance' in extra &&
+                  typeof (extra as { printer2AuditLogChance?: number | null }).printer2AuditLogChance === 'number'
+                ) {
+                  const chance = (extra as { printer2AuditLogChance: number }).printer2AuditLogChance;
+                  if (chance >= 0 && chance <= 100) {
+                    printer2AuditLogChanceValue = chance;
+                  }
+                }
+              } catch (parseError) {
+                console.error('Failed to parse extra_settings for singlePrinterMode:', parseError);
+              }
+            }
+            return;
+          }
+          
+          if (typeof config.system_printer_name !== 'string') {
             return;
           }
           let marginAdjustMm = 0;
@@ -132,6 +185,23 @@ export default function PrinterSelector() {
               ) {
                 copiesValue = (extra as { copies: number }).copies!;
               }
+              let nonCashCopiesValue = copiesValue;
+              if (
+                (config.printer_type === 'receiptPrinter' || config.printer_type === 'receiptizePrinter') &&
+                extra &&
+                typeof extra === 'object' &&
+                'nonCashCopies' in extra &&
+                typeof (extra as { nonCashCopies?: number }).nonCashCopies === 'number' &&
+                !Number.isNaN((extra as { nonCashCopies?: number }).nonCashCopies) &&
+                (extra as { nonCashCopies?: number }).nonCashCopies! > 0
+              ) {
+                nonCashCopiesValue = (extra as { nonCashCopies: number }).nonCashCopies!;
+              }
+              if (config.printer_type === 'receiptPrinter') {
+                nonCashCopiesSettings.receiptPrinter = nonCashCopiesValue;
+              } else if (config.printer_type === 'receiptizePrinter') {
+                nonCashCopiesSettings.receiptizePrinter = nonCashCopiesValue;
+              }
             } catch (parseError) {
               console.error('Failed to parse extra_settings for printer config:', parseError);
             }
@@ -146,6 +216,7 @@ export default function PrinterSelector() {
             case 'labelPrinter':
               selections.labelPrinter = config.system_printer_name;
               margins.labelPrinter = marginAdjustMm;
+              copiesSettings.labelPrinter = copiesValue;
               break;
             case 'receiptizePrinter':
               selections.receiptizePrinter = config.system_printer_name;
@@ -155,9 +226,13 @@ export default function PrinterSelector() {
           }
         });
         
+        setSinglePrinterMode(singlePrinterModeValue);
+        setPrinter2AuditLogChance(printer2AuditLogChanceValue);
+        
         setSelectedPrinters(selections);
         setMarginOffsets(margins);
         setCopies(copiesSettings);
+        setNonCashCopies(nonCashCopiesSettings);
         return;
       }
       
@@ -180,6 +255,16 @@ export default function PrinterSelector() {
           console.error('Failed to parse printer-margin-offsets from localStorage:', marginError);
         }
       }
+      
+      // Load singlePrinterMode from localStorage as fallback
+      const savedSinglePrinterMode = localStorage.getItem('single-printer-mode');
+      if (savedSinglePrinterMode !== null) {
+        try {
+          setSinglePrinterMode(savedSinglePrinterMode === 'true');
+        } catch (error) {
+          console.error('Failed to parse single-printer-mode from localStorage:', error);
+        }
+      }
     } catch (error) {
       console.error('Error loading saved printer selections:', error);
     }
@@ -194,14 +279,18 @@ export default function PrinterSelector() {
       const savePromises = [];
       const buildExtraSettings = (printerType: keyof PrinterSelection) => {
         const marginAdjust = marginOffsets[printerType];
-        const copiesValue = (printerType === 'receiptPrinter' || printerType === 'receiptizePrinter')
+        const copiesValue = (printerType === 'receiptPrinter' || printerType === 'labelPrinter' || printerType === 'receiptizePrinter')
           ? (copies[printerType] || 1)
           : undefined;
-        const settings: { marginAdjustMm: number; copies?: number } = {
+        const settings: { marginAdjustMm: number; copies?: number; nonCashCopies?: number } = {
           marginAdjustMm: typeof marginAdjust === 'number' && !Number.isNaN(marginAdjust) ? marginAdjust : 0,
         };
         if (copiesValue !== undefined) {
           settings.copies = typeof copiesValue === 'number' && !Number.isNaN(copiesValue) && copiesValue > 0 ? copiesValue : 1;
+        }
+        if (printerType === 'receiptPrinter' || printerType === 'receiptizePrinter') {
+          const nonCashValue = nonCashCopies[printerType] ?? 1;
+          settings.nonCashCopies = typeof nonCashValue === 'number' && !Number.isNaN(nonCashValue) && nonCashValue > 0 ? nonCashValue : 1;
         }
         return settings;
       };
@@ -224,6 +313,17 @@ export default function PrinterSelector() {
         );
       }
       
+      // Save singlePrinterMode setting with printer2AuditLogChance
+      const singlePrinterModeSettings: { enabled: boolean; printer2AuditLogChance?: number | null } = {
+        enabled: singlePrinterMode
+      };
+      if (printer2AuditLogChance !== null && printer2AuditLogChance >= 0 && printer2AuditLogChance <= 100) {
+        singlePrinterModeSettings.printer2AuditLogChance = printer2AuditLogChance;
+      }
+      savePromises.push(
+        window.electronAPI?.localDbSavePrinterConfig?.('singlePrinterMode', 'enabled', singlePrinterModeSettings)
+      );
+      
       const results = await Promise.all(savePromises);
       const hasError = results.some(result => !result?.success);
       
@@ -235,6 +335,7 @@ export default function PrinterSelector() {
         // Also save to localStorage as backup
         localStorage.setItem('printer-selections', JSON.stringify(selections));
         localStorage.setItem('printer-margin-offsets', JSON.stringify(marginOffsets));
+        localStorage.setItem('single-printer-mode', String(singlePrinterMode));
       }
       
       // Reset success status after 3 seconds
@@ -332,9 +433,17 @@ Please try:
     }));
   };
 
-  const handleCopiesChange = (printerType: 'receiptPrinter' | 'receiptizePrinter', value: number) => {
+  const handleCopiesChange = (printerType: 'receiptPrinter' | 'receiptizePrinter' | 'labelPrinter', value: number) => {
     const numValue = Math.max(1, Math.floor(value));
     setCopies(prev => ({
+      ...prev,
+      [printerType]: numValue
+    }));
+  };
+
+  const handleNonCashCopiesChange = (printerType: 'receiptPrinter' | 'receiptizePrinter', value: number) => {
+    const numValue = Math.max(1, Math.floor(value));
+    setNonCashCopies(prev => ({
       ...prev,
       [printerType]: numValue
     }));
@@ -502,7 +611,12 @@ const testPrinter = async (printerType: keyof PrinterSelection) => {
                 </div>
                 <div className="w-16">
                   <label className="block text-sm font-medium text-gray-700">
-                    Copies
+                    Copies (cash)
+                  </label>
+                </div>
+                <div className="w-20">
+                  <label className="block text-sm font-medium text-gray-700">
+                    Non-cash copies
                   </label>
                 </div>
               </div>
@@ -526,6 +640,15 @@ const testPrinter = async (printerType: keyof PrinterSelection) => {
                   value={copies.receiptPrinter}
                   onChange={(e) => handleCopiesChange('receiptPrinter', Number(e.target.value))}
                   className="w-16 border border-gray-300 rounded-lg px-2 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500 text-gray-900 bg-white text-center"
+                />
+                <input
+                  type="number"
+                  min={1}
+                  max={10}
+                  value={nonCashCopies.receiptPrinter}
+                  onChange={(e) => handleNonCashCopiesChange('receiptPrinter', Number(e.target.value))}
+                  className="w-20 border border-gray-300 rounded-lg px-2 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500 text-gray-900 bg-white text-center"
+                  title="Copies when payment is not cash (e.g. card, QR, e-wallet)"
                 />
               </div>
             </div>
@@ -601,7 +724,12 @@ const testPrinter = async (printerType: keyof PrinterSelection) => {
                 </div>
                 <div className="w-16">
                   <label className="block text-sm font-medium text-gray-700">
-                    Copies
+                    Copies (cash)
+                  </label>
+                </div>
+                <div className="w-20">
+                  <label className="block text-sm font-medium text-gray-700">
+                    Non-cash copies
                   </label>
                 </div>
               </div>
@@ -625,6 +753,15 @@ const testPrinter = async (printerType: keyof PrinterSelection) => {
                   value={copies.receiptizePrinter}
                   onChange={(e) => handleCopiesChange('receiptizePrinter', Number(e.target.value))}
                   className="w-16 border border-gray-300 rounded-lg px-2 py-2 focus:outline-none focus:ring-2 focus:ring-purple-500 text-gray-900 bg-white text-center"
+                />
+                <input
+                  type="number"
+                  min={1}
+                  max={10}
+                  value={nonCashCopies.receiptizePrinter}
+                  onChange={(e) => handleNonCashCopiesChange('receiptizePrinter', Number(e.target.value))}
+                  className="w-20 border border-gray-300 rounded-lg px-2 py-2 focus:outline-none focus:ring-2 focus:ring-purple-500 text-gray-900 bg-white text-center"
+                  title="Copies when payment is not cash (e.g. card, QR, e-wallet)"
                 />
               </div>
             </div>
@@ -677,14 +814,14 @@ const testPrinter = async (printerType: keyof PrinterSelection) => {
           </div>
         </div>
 
-        {/* Printer 3: Label Printer */}
+        {/* Printer 3: Label/Checker Printer */}
         <div className="bg-white rounded-lg border border-gray-200 p-6 shadow-sm">
           <div className="flex items-center justify-between mb-4">
             <div className="flex items-center space-x-3">
               <Printer className="w-6 h-6 text-green-600" />
               <div>
-                <h3 className="font-semibold text-gray-800">Printer 3: Label Printer</h3>
-                <p className="text-sm text-gray-500">Order labels</p>
+                <h3 className="font-semibold text-gray-800">Printer 3: Label/Checker Printer</h3>
+                <p className="text-sm text-gray-500">Order labels / checker</p>
               </div>
             </div>
             {getStatusIcon(selectedPrinters.labelPrinter)}
@@ -692,21 +829,40 @@ const testPrinter = async (printerType: keyof PrinterSelection) => {
 
           <div className="space-y-3">
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-2">
-                Select Printer
-              </label>
-              <select
-                value={selectedPrinters.labelPrinter}
-                onChange={(e) => handlePrinterSelection('labelPrinter', e.target.value)}
-                className="w-full border border-gray-300 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-green-500 text-gray-900 bg-white"
-              >
-                <option value="">Choose a printer...</option>
-                {systemPrinters.map((printer) => (
-                  <option key={printer.name} value={printer.name}>
-                    {printer.displayName}
-                  </option>
-                ))}
-              </select>
+              <div className="flex items-center gap-2">
+                <div className="flex-1">
+                  <label className="block text-sm font-medium text-gray-700">
+                    Select Printer
+                  </label>
+                </div>
+                <div className="w-16">
+                  <label className="block text-sm font-medium text-gray-700">
+                    Copies
+                  </label>
+                </div>
+              </div>
+              <div className="flex items-center gap-2 -mt-1">
+                <select
+                  value={selectedPrinters.labelPrinter}
+                  onChange={(e) => handlePrinterSelection('labelPrinter', e.target.value)}
+                  className="flex-1 border border-gray-300 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-green-500 text-gray-900 bg-white"
+                >
+                  <option value="">Choose a printer...</option>
+                  {systemPrinters.map((printer) => (
+                    <option key={printer.name} value={printer.name}>
+                      {printer.displayName}
+                    </option>
+                  ))}
+                </select>
+                <input
+                  type="number"
+                  min={1}
+                  max={10}
+                  value={copies.labelPrinter}
+                  onChange={(e) => handleCopiesChange('labelPrinter', Number(e.target.value))}
+                  className="w-16 border border-gray-300 rounded-lg px-2 py-2 focus:outline-none focus:ring-2 focus:ring-green-500 text-gray-900 bg-white text-center"
+                />
+              </div>
             </div>
 
             <div>
@@ -756,6 +912,73 @@ const testPrinter = async (printerType: keyof PrinterSelection) => {
             </button>
           </div>
         </div>
+      </div>
+
+      {/* Single Printer Mode Toggle */}
+      <div className="bg-white rounded-lg border border-gray-200 shadow-sm p-6">
+        <div className="flex items-center justify-between mb-4">
+          <div className="flex-1">
+            <h3 className="text-lg font-semibold text-gray-800 mb-2">Single Printer Mode</h3>
+            <p className="text-sm text-gray-600">
+              When enabled, all transactions will be printed on Printer 1 only, regardless of which side of the confirmation button is clicked. 
+              The receipt will show Printer 1's daily counter, but the database will still track the original printer assignment.
+            </p>
+          </div>
+          <label className="relative inline-flex items-center cursor-pointer ml-4">
+            <input
+              type="checkbox"
+              checked={singlePrinterMode}
+              onChange={(e) => {
+                setSinglePrinterMode(e.target.checked);
+                // Auto-save on change
+                setTimeout(() => {
+                  handleSave();
+                }, 100);
+              }}
+              className="sr-only peer"
+            />
+            <div className="w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-blue-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-600"></div>
+          </label>
+        </div>
+        
+        {/* Randomize Printer 1 and Printer 2 Audit Log Database Saving */}
+        {singlePrinterMode && (
+          <div className="mt-4 pt-4 border-t border-gray-200">
+            <div className="flex items-center justify-between mb-2">
+              <div className="flex-1">
+                <h4 className="text-sm font-semibold text-gray-800 mb-1">Randomize Printer 1 and Printer 2 Audit Log Database Saving</h4>
+                <p className="text-xs text-gray-600">
+                  When enabled, transactions will randomly be saved to Printer 1 or Printer 2 audit log based on the percentage below. 
+                  Leave empty or set to 0 to disable randomization (default behavior).
+                </p>
+              </div>
+            </div>
+            <div className="flex items-center gap-3 mt-3">
+              <label className="text-sm font-medium text-gray-700 whitespace-nowrap">
+                Printer 2 Audit Log Chance (%):
+              </label>
+              <input
+                type="number"
+                min={0}
+                max={100}
+                step={1}
+                value={printer2AuditLogChance === null ? '' : printer2AuditLogChance}
+                onChange={(e) => {
+                  const value = e.target.value === '' ? null : Number(e.target.value);
+                  if (value === null || (value >= 0 && value <= 100)) {
+                    setPrinter2AuditLogChance(value);
+                    // Auto-save on change
+                    setTimeout(() => {
+                      handleSave();
+                    }, 500);
+                  }
+                }}
+                placeholder="0-100"
+                className="w-24 border border-gray-300 rounded-lg px-3 py-2 text-black focus:outline-none focus:ring-2 focus:ring-blue-500"
+              />
+            </div>
+          </div>
+        )}
       </div>
 
       {/* Save Button */}

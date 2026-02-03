@@ -74,9 +74,9 @@ export default function PrintingLogsPage() {
     }
   }, [isClient, isAuthenticated, router]);
 
-  // Redirect to login if no business is selected
+  // Redirect to login if no business is selected (use == null to allow businessId 0)
   useEffect(() => {
-    if (isClient && isAuthenticated && (!businessId)) {
+    if (isClient && isAuthenticated && businessId == null) {
       console.log('🔍 [PrintingLogs] No business selected, redirecting to login');
       if (process.env.NODE_ENV === 'development') {
         router.replace('/login');

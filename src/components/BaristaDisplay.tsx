@@ -1,6 +1,7 @@
 'use client';
 
 import { useState, useEffect, useCallback, useRef } from 'react';
+import { Volume2 } from 'lucide-react';
 import { useAuth } from '@/hooks/useAuth';
 import { isSuperAdmin } from '@/lib/auth';
 
@@ -18,7 +19,9 @@ interface OrderItem {
   table_number: string | null;
   room_name: string | null;
   customer_name: string | null;
+  pickup_method?: 'dine-in' | 'take-away';
   created_at: string;
+  platform_label: string;
   customizations: Array<{
     customization_name: string;
     options: Array<{
@@ -26,6 +29,21 @@ interface OrderItem {
       price_adjustment: number;
     }>;
   }>;
+}
+
+const OFFLINE_PAYMENT_CODES = new Set(['cash', 'debit', 'qr', 'ewallet', 'cl', 'voucher', 'offline', 'tunai', 'edc']);
+
+function getPlatformLabel(paymentMethod: string | null | undefined): string {
+  const code = (paymentMethod || '').toString().trim().toLowerCase();
+  if (!code || OFFLINE_PAYMENT_CODES.has(code)) return 'Offline';
+  switch (code) {
+    case 'gofood': return 'GoFood';
+    case 'grabfood': return 'GrabFood';
+    case 'shopeefood': return 'ShopeeFood';
+    case 'qpon': return 'Qpon';
+    case 'tiktok': return 'TikTok';
+    default: return code.charAt(0).toUpperCase() + code.slice(1);
+  }
 }
 
 interface GroupedOrderItem extends OrderItem {
@@ -36,15 +54,19 @@ interface GroupedOrderItem extends OrderItem {
 
 const getElectronAPI = () => (typeof window !== 'undefined' ? window.electronAPI : undefined);
 
-export default function BaristaDisplay({ viewOnly = false }: { viewOnly?: boolean }) {
+export default function BaristaDisplay({ viewOnly = false, legacyCardLayout = false }: { viewOnly?: boolean; legacyCardLayout?: boolean }) {
   const { user } = useAuth();
   const [activeOrders, setActiveOrders] = useState<GroupedOrderItem[]>([]);
   const [finishedOrders, setFinishedOrders] = useState<GroupedOrderItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [currentTime, setCurrentTime] = useState(new Date());
   const previousOrderIdsRef = useRef<Set<string>>(new Set());
+  const hasCompletedInitialFetchRef = useRef(false);
   const soundRef = useRef<HTMLAudioElement | null>(null);
-  
+  const firstTextWrapperRef = useRef<HTMLDivElement | null>(null);
+  const firstProductNameRef = useRef<HTMLDivElement | null>(null);
+  const firstCardRef = useRef<HTMLDivElement | null>(null);
+
   const businessId = user?.selectedBusinessId;
   
   if (!businessId) {
@@ -58,8 +80,10 @@ export default function BaristaDisplay({ viewOnly = false }: { viewOnly?: boolea
     );
   }
 
-  // Check permission
-  const hasPermission = user?.permissions?.includes('access_barista') || false;
+  // Check permission - if viewOnly, also check for access_baristaandkitchen
+  const hasBaristaPermission = user?.permissions?.includes('access_barista') || false;
+  const hasBaristaKitchenPermission = user?.permissions?.includes('access_baristaandkitchen') || false;
+  const hasPermission = hasBaristaPermission || (viewOnly && hasBaristaKitchenPermission);
   
   if (!isSuperAdmin(user) && !hasPermission) {
     return (
@@ -235,6 +259,13 @@ export default function BaristaDisplay({ viewOnly = false }: { viewOnly?: boolea
             table_number: tableNumber || null,
             room_name: roomName || null,
             customer_name: customerName || null,
+            pickup_method: (() => {
+              const paymentCode = (typeof tx.payment_method === 'string' ? tx.payment_method : (tx.payment_method != null ? String(tx.payment_method) : '')).trim().toLowerCase();
+              const isPlatformOrder = !!paymentCode && !OFFLINE_PAYMENT_CODES.has(paymentCode);
+              if (isPlatformOrder) return 'take-away' as const;
+              return (typeof tx.pickup_method === 'string' && (tx.pickup_method === 'take-away' || tx.pickup_method === 'dine-in')) ? tx.pickup_method as 'dine-in' | 'take-away' : 'dine-in';
+            })(),
+            platform_label: getPlatformLabel(typeof tx.payment_method === 'string' ? tx.payment_method : (tx.payment_method != null ? String(tx.payment_method) : undefined)),
             created_at: (() => {
               const txCreatedAt = typeof tx.created_at === 'string' ? tx.created_at : (tx.created_at instanceof Date ? tx.created_at.toISOString() : null);
               const itemCreatedAt = typeof item.created_at === 'string' ? item.created_at : (item.created_at instanceof Date ? item.created_at.toISOString() : null);
@@ -312,8 +343,9 @@ export default function BaristaDisplay({ viewOnly = false }: { viewOnly?: boolea
         groupItemsMap.get(signature)!.push(item);
 
         // Since each item has unique signature (includes uuid_id), this will always be a new entry
-        // Build display text
-        let displayText = `${item.quantity}x ${item.product_name}`;
+        // Build display text: 1x [platform name] [product name] for online; 1x [product name] for offline
+        const platformPrefix = item.platform_label === 'Offline' ? '' : `[${item.platform_label}] `;
+        let displayText = `${item.quantity}x ${platformPrefix}${item.product_name}`;
         
         // Add customizations
         const customizationTexts: string[] = [];
@@ -440,18 +472,20 @@ export default function BaristaDisplay({ viewOnly = false }: { viewOnly?: boolea
       setActiveOrders(active);
       setFinishedOrders(finished);
       
-      // Check for new orders and play sound
-      if (!loading && previousOrderIdsRef.current.size > 0) {
+      // Check for new orders and play sound (only on standalone Barista display, not in Barista & Kitchen combined view)
+      // Use hasCompletedInitialFetchRef so we also play when first order arrives after empty list (no sound on very first page load)
+      if (!viewOnly && !loading && hasCompletedInitialFetchRef.current) {
         const currentOrderIds = new Set(active.map(order => order.uuid_id));
         const newOrderIds = [...currentOrderIds].filter(id => !previousOrderIdsRef.current.has(id));
         
         if (newOrderIds.length > 0) {
-          // Play sound for new orders
           try {
             if (!soundRef.current) {
-              soundRef.current = new Audio('/blacksmith_refine.mp3');
+              soundRef.current = new Audio('./blacksmith_refine.mp3');
               soundRef.current.volume = 0.7;
             }
+            soundRef.current.pause();
+            soundRef.current.currentTime = 0;
             soundRef.current.play().catch(error => {
               console.warn('Failed to play sound:', error);
             });
@@ -461,6 +495,7 @@ export default function BaristaDisplay({ viewOnly = false }: { viewOnly?: boolea
         }
       }
       
+      hasCompletedInitialFetchRef.current = true;
       // Update previous order IDs
       previousOrderIdsRef.current = new Set(active.map(order => order.uuid_id));
       
@@ -518,15 +553,18 @@ export default function BaristaDisplay({ viewOnly = false }: { viewOnly?: boolea
   useEffect(() => {
     fetchOrders();
     const interval = setInterval(fetchOrders, 5000);
+    return () => clearInterval(interval);
+  }, [fetchOrders]);
+
+  // Cleanup audio only on unmount (not when polling effect re-runs, so sound can finish playing)
+  useEffect(() => {
     return () => {
-      clearInterval(interval);
-      // Cleanup audio
       if (soundRef.current) {
         soundRef.current.pause();
         soundRef.current = null;
       }
     };
-  }, [fetchOrders]);
+  }, []);
 
   const handleMarkFinished = async (item: GroupedOrderItem) => {
     console.log('🔵 handleMarkFinished called for item:', item);
@@ -796,70 +834,129 @@ export default function BaristaDisplay({ viewOnly = false }: { viewOnly?: boolea
     );
   }
 
+  const playTestSound = () => {
+    try {
+      const audio = new Audio('./blacksmith_refine.mp3');
+      audio.volume = 0.7;
+      audio.play().catch((err) => console.warn('Test sound failed:', err));
+    } catch (err) {
+      console.warn('Test sound failed:', err);
+    }
+  };
+
   return (
-    <div className="flex-1 flex h-full bg-gray-50">
+    <div className="flex-1 flex h-full bg-gray-50" title="BaristaDisplay ROOT">
       {/* Column 1: Active Orders */}
-      <div className="w-1/2 border-r border-gray-300 flex flex-col">
-        <div className="bg-blue-500 text-white px-6 py-4 flex-shrink-0">
+      <div className="w-1/2 border-r border-gray-300 flex flex-col bg-indigo-50/50" title="BARISTA ACTIVE COLUMN">
+        <div className="bg-blue-500 text-white px-6 py-4 flex-shrink-0 flex items-center justify-between">
           <h2 className="text-2xl font-bold">Barista - Pesanan Aktif</h2>
+          <button
+            type="button"
+            onClick={playTestSound}
+            className="p-1.5 rounded hover:bg-blue-600 transition-colors"
+            title="Test sound"
+          >
+            <Volume2 className="w-5 h-5" />
+          </button>
         </div>
-        <div className="flex-1 overflow-y-auto px-1 py-4">
+        <div className={`flex-1 overflow-y-auto px-0.5 py-3 ${legacyCardLayout ? 'bg-yellow-50' : 'bg-white'}`} title="SCROLL CONTAINER (active)">
           {activeOrders.length === 0 ? (
             <div className="text-center text-gray-500 mt-8">
               <p>Tidak ada pesanan aktif</p>
             </div>
           ) : (
-            <div className="space-y-2">
+            <div className={`space-y-2 ${legacyCardLayout ? 'bg-lime-50' : ''}`} title="LIST WRAPPER">
               {activeOrders.map((item, index) => (
                 <div
                   key={`${item.uuid_id}-${index}`}
+                  ref={index === 0 ? firstCardRef : undefined}
                   onDoubleClick={viewOnly ? undefined : () => handleMarkFinished(item)}
-                  className={`bg-white border-2 border-blue-300 rounded-lg pl-3 pr-1 py-4 transition-all flex relative ${
-                    viewOnly ? '' : 'cursor-pointer hover:border-blue-500 hover:shadow-md'
-                  }`}
-                  style={{ minHeight: '120px' }}
+                  className={legacyCardLayout
+                    ? `w-full min-w-0 border-2 border-blue-300 rounded-lg p-2 transition-all flex relative bg-amber-100 ${viewOnly ? '' : 'cursor-pointer hover:border-blue-500 hover:shadow-md'}`
+                    : `w-full min-w-0 border-2 border-gray-800 rounded-lg p-2.5 transition-all flex flex-col relative bg-white shadow-sm ${viewOnly ? '' : 'cursor-pointer hover:border-blue-700 hover:shadow-md'}`
+                  }
+                  style={{ minHeight: legacyCardLayout ? '100px' : '60px' }}
+                  title="CARD"
                 >
-                  <div className="flex-1">
-                    <div className="text-lg font-semibold text-gray-900">
-                      {item.total_quantity}x {item.product_name}
-                      {item.customizations && item.customizations.length > 0 && (
-                        <span className="text-blue-700 font-bold">
-                          {' '}
-                          {item.customizations.map((customization, idx) => (
-                            <span key={idx}>
-                              {customization.options.map((option, optIdx) => (
-                                <span key={optIdx}>
-                                  +{option.option_name}
-                                  {optIdx < customization.options.length - 1 && ', '}
+                  {legacyCardLayout ? (
+                    <>
+                      <div ref={index === 0 ? firstTextWrapperRef : undefined} className="flex-1 flex flex-col gap-0.5 min-w-0 basis-0 overflow-visible">
+                        <div ref={index === 0 ? firstProductNameRef : undefined} className="text-lg font-semibold text-gray-900 break-all">
+                          {item.total_quantity}x [{item.platform_label}] {item.product_name}
+                        </div>
+                        {item.customizations && item.customizations.length > 0 && (
+                          <div className="text-blue-700 font-bold text-base flex flex-wrap break-words">
+                            {item.customizations.map((customization, idx) => (
+                              <span key={idx}>
+                                {customization.options.map((option, optIdx) => (
+                                  <span key={optIdx}>
+                                    +{option.option_name}
+                                    {optIdx < customization.options.length - 1 && ', '}
+                                  </span>
+                                ))}
+                                {idx < item.customizations.length - 1 && ', '}
+                              </span>
+                            ))}
+                          </div>
+                        )}
+                        {item.custom_note && (
+                          <div className="text-purple-700 font-bold text-base break-words">
+                            note: {item.custom_note}
+                          </div>
+                        )}
+                      </div>
+                      <div className="flex-shrink-0 w-[100px] flex flex-col items-center justify-center p-1.5 bg-orange-200" style={{ minHeight: '100%' }}>
+                        <div className="text-2xl font-mono font-bold text-blue-600">{item.timer}</div>
+                        {item.customer_name && (
+                          <div className="text-base text-gray-600 font-semibold text-center mt-1 truncate max-w-full" title={item.customer_name}>{item.customer_name}</div>
+                        )}
+                        {item.pickup_method === 'take-away' ? (
+                          <div className="text-sm font-bold text-green-700 text-center mt-0.5 uppercase">Take Away</div>
+                        ) : item.table_number ? (
+                          <div className="text-base text-gray-600 font-semibold text-center mt-0.5">{item.table_number}</div>
+                        ) : null}
+                      </div>
+                    </>
+                  ) : (
+                    <div ref={index === 0 ? firstTextWrapperRef : undefined} className="flex flex-col gap-0.5 min-w-0 overflow-visible" title="TEXT WRAPPER">
+                      <div
+                        ref={index === 0 ? firstProductNameRef : undefined}
+                        className="text-base font-bold text-black grid gap-x-2 items-center"
+                        style={{ gridTemplateColumns: '1fr 6rem 7rem 5rem' }}
+                        title={`${item.total_quantity}x ${item.product_name}`}
+                      >
+                        <span className="min-w-0 break-words">{item.total_quantity}x {item.product_name}</span>
+                        <span className="text-black font-semibold truncate" title={item.pickup_method === 'take-away' ? 'Take Away' : (item.table_number || '-')}>{item.pickup_method === 'take-away' ? 'Take Away' : (item.table_number || '-')}</span>
+                        <span className="text-black font-semibold truncate" title={item.customer_name || '-'}>{item.customer_name || '-'}</span>
+                        <span className="text-xl font-mono font-bold text-blue-700 shrink-0">{item.timer}</span>
+                      </div>
+                      {(item.custom_note || (item.customizations && item.customizations.length > 0)) && (
+                        <div className="text-sm text-black break-words flex flex-wrap gap-x-1 font-medium">
+                          {item.customizations && item.customizations.length > 0 && (
+                            <span className="text-blue-900">
+                              {item.customizations.map((customization, idx) => (
+                                <span key={idx}>
+                                  {customization.options.map((option, optIdx) => (
+                                    <span key={optIdx}>
+                                      +{option.option_name}
+                                      {optIdx < customization.options.length - 1 && ', '}
+                                    </span>
+                                  ))}
+                                  {idx < item.customizations.length - 1 && ', '}
                                 </span>
                               ))}
-                              {idx < item.customizations.length - 1 && ', '}
                             </span>
-                          ))}
-                        </span>
-                      )}
-                      {item.custom_note && (
-                        <span className="text-purple-700 font-bold">
-                          {' '}note: {item.custom_note}
-                        </span>
+                          )}
+                          {item.custom_note && (
+                            <span className="text-purple-900">
+                              {item.customizations && item.customizations.length > 0 && ' | '}
+                              note: {item.custom_note}
+                            </span>
+                          )}
+                        </div>
                       )}
                     </div>
-                  </div>
-                  <div className="ml-0 pr-3 flex flex-col items-center justify-center" style={{ width: '150px', minHeight: '100%' }}>
-                    <div className="text-3xl font-mono font-bold text-blue-600">
-                      {item.timer}
-                    </div>
-                    {item.customer_name && (
-                      <div className="text-xl text-gray-600 font-semibold text-center mt-2">
-                        {item.customer_name}
-                      </div>
-                    )}
-                    {item.table_number && (
-                      <div className="text-xl text-gray-600 font-semibold text-center mt-1">
-                        {item.table_number}
-                      </div>
-                    )}
-                  </div>
+                  )}
                 </div>
               ))}
             </div>
@@ -868,51 +965,113 @@ export default function BaristaDisplay({ viewOnly = false }: { viewOnly?: boolea
       </div>
 
       {/* Column 2: Finished Orders */}
-      <div className="w-1/2 flex flex-col">
+      <div className="w-1/2 flex flex-col bg-indigo-50/30" title="BARISTA FINISHED COLUMN">
         <div className="bg-green-500 text-white px-6 py-4 flex-shrink-0">
           <h2 className="text-2xl font-bold">Barista - Pesanan Selesai</h2>
         </div>
-        <div className="flex-1 overflow-y-auto px-1 py-4">
+        <div className={`flex-1 overflow-y-auto px-0.5 py-3 ${legacyCardLayout ? 'bg-yellow-50' : 'bg-white'}`} title="SCROLL CONTAINER (finished)">
           {finishedOrders.length === 0 ? (
             <div className="text-center text-gray-500 mt-8">
               <p>Tidak ada pesanan selesai</p>
             </div>
           ) : (
-            <div className="space-y-2">
+            <div className={`space-y-2 ${legacyCardLayout ? 'bg-lime-50' : ''}`} title="LIST WRAPPER (finished)">
               {finishedOrders.map((item, index) => {
                 const duration = formatDuration(item.production_started_at, item.production_finished_at);
+                if (legacyCardLayout) {
+                  return (
+                    <div key={`${item.uuid_id}-${index}`} className="border-2 border-gray-300 rounded-lg p-2 opacity-75 bg-amber-100" title="FINISHED CARD">
+                      <div className="flex flex-col gap-1 min-w-0">
+                        <div className="text-lg font-semibold text-gray-600 break-all">
+                          {item.total_quantity}x {item.platform_label === 'Offline' ? '' : `[${item.platform_label}] `}{item.product_name}
+                        </div>
+                        {item.customizations && item.customizations.length > 0 && (
+                          <div className="text-blue-700 font-bold text-base flex flex-wrap break-words">
+                            {item.customizations.map((customization, idx) => (
+                              <span key={idx}>
+                                {customization.options.map((option, optIdx) => (
+                                  <span key={optIdx}>
+                                    +{option.option_name}
+                                    {optIdx < customization.options.length - 1 && ', '}
+                                  </span>
+                                ))}
+                                {idx < item.customizations.length - 1 && ', '}
+                              </span>
+                            ))}
+                          </div>
+                        )}
+                        {item.custom_note && (
+                          <div className="text-purple-700 font-bold text-base break-words">note: {item.custom_note}</div>
+                        )}
+                      </div>
+                      {(item.table_number || item.pickup_method === 'take-away' || item.production_started_at || item.production_finished_at) && (
+                        <div className="text-xs text-gray-500 mt-1">
+                          {(() => {
+                            const tableText = item.pickup_method === 'take-away' ? 'Take Away | ' : (item.table_number ? `${item.table_number} | ` : '');
+                            const startTimeSource = item.production_started_at || item.created_at;
+                            const startTime = startTimeSource ? new Date(startTimeSource).toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit', hour12: false }) : null;
+                            const endTime = item.production_finished_at ? new Date(item.production_finished_at).toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit', hour12: false }) : null;
+                            let durationText = '';
+                            if (startTimeSource && item.production_finished_at) {
+                              const start = new Date(startTimeSource);
+                              const end = new Date(item.production_finished_at);
+                              const diffMinutes = Math.floor((end.getTime() - start.getTime()) / (1000 * 60));
+                              durationText = ` | Waktu penyelesaian: ${diffMinutes} Menit`;
+                            }
+                            return `${tableText}${startTime ? `Mulai: ${startTime}` : ''}${startTime && endTime ? ' | ' : ''}${endTime ? `Selesai: ${endTime}` : ''}${durationText}`;
+                          })()}
+                        </div>
+                      )}
+                    </div>
+                  );
+                }
                 return (
                   <div
                     key={`${item.uuid_id}-${index}`}
-                    className="bg-gray-100 border-2 border-gray-300 rounded-lg p-4 opacity-75"
+                    className="border-2 border-gray-700 rounded-lg p-2.5 bg-white"
+                    title="FINISHED CARD"
                   >
-                    <div className="text-lg font-semibold text-gray-600">
-                      {item.display_text}
+                    <div className="flex flex-col gap-0.5 min-w-0">
+                      <div
+                        className="text-base font-bold text-gray-900 grid gap-x-2 items-center line-through"
+                        style={{ gridTemplateColumns: '1fr 6rem 7rem 9rem' }}
+                      >
+                        <span className="min-w-0 break-words">{item.total_quantity}x {item.product_name}</span>
+                        <span className="text-gray-900 font-semibold truncate">{item.pickup_method === 'take-away' ? 'Take Away' : (item.table_number || '-')}</span>
+                        <span className="text-gray-900 font-semibold truncate">{item.customer_name || '-'}</span>
+                        {(() => {
+                          const startTimeSource = item.production_started_at || item.created_at;
+                          const startTime = startTimeSource ? new Date(startTimeSource).toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit', hour12: false }) : null;
+                          const endTime = item.production_finished_at ? new Date(item.production_finished_at).toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit', hour12: false }) : null;
+                          return <span className="font-mono text-gray-800 text-sm shrink-0">{startTime && endTime ? `${startTime} - ${endTime}` : (startTime || '-')}</span>;
+                        })()}
+                      </div>
+                      {(item.custom_note || (item.customizations && item.customizations.length > 0)) && (
+                        <div className="text-sm text-gray-900 break-words flex flex-wrap gap-x-1 font-medium line-through">
+                          {item.customizations && item.customizations.length > 0 && (
+                            <span className="text-blue-900">
+                              {item.customizations.map((customization, idx) => (
+                                <span key={idx}>
+                                  {customization.options.map((option, optIdx) => (
+                                    <span key={optIdx}>
+                                      +{option.option_name}
+                                      {optIdx < customization.options.length - 1 && ', '}
+                                    </span>
+                                  ))}
+                                  {idx < item.customizations.length - 1 && ', '}
+                                </span>
+                              ))}
+                            </span>
+                          )}
+                          {item.custom_note && (
+                            <span className="text-purple-900">
+                              {item.customizations && item.customizations.length > 0 && ' | '}
+                              note: {item.custom_note}
+                            </span>
+                          )}
+                        </div>
+                      )}
                     </div>
-                  {(item.table_number || item.production_started_at || item.production_finished_at) && (
-                    <div className="text-xs text-gray-500 mt-1">
-                      {(() => {
-                        const tableText = item.table_number ? `${item.table_number} | ` : '';
-                        // Use production_started_at if available, otherwise fall back to created_at
-                        const startTimeSource = item.production_started_at || item.created_at;
-                        const startTime = startTimeSource 
-                          ? new Date(startTimeSource).toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit', hour12: false })
-                          : null;
-                        const endTime = item.production_finished_at 
-                          ? new Date(item.production_finished_at).toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit', hour12: false })
-                          : null;
-                        let durationText = '';
-                        if (startTimeSource && item.production_finished_at) {
-                          const start = new Date(startTimeSource);
-                          const end = new Date(item.production_finished_at);
-                          const diffMs = end.getTime() - start.getTime();
-                          const diffMinutes = Math.floor(diffMs / (1000 * 60));
-                          durationText = ` | Waktu penyelesaian: ${diffMinutes} Menit`;
-                        }
-                        return `${tableText}${startTime ? `Mulai: ${startTime}` : ''}${startTime && endTime ? ' | ' : ''}${endTime ? `Selesai: ${endTime}` : ''}${durationText}`;
-                      })()}
-                    </div>
-                  )}
                   </div>
                 );
               })}

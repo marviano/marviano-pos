@@ -105,8 +105,96 @@ export async function GET(request: NextRequest) {
     // Skip Source - not needed in POS app
     // Skip Teams - not needed in POS app
     // Skip Contacts - not needed in POS app
-    // Skip Employees Position - not needed in POS app
-    // Skip Employees - not needed in POS app
+    // Sync Employees Position (must be before employees due to foreign key)
+    try {
+      const employeesPosition = await queryVps<unknown[]>(`
+        SELECT id, nama_jabatan, created_at, updated_at
+        FROM employees_position 
+        ORDER BY nama_jabatan ASC
+      `);
+      syncResults.employeesPosition = employeesPosition;
+      counts.employeesPosition = employeesPosition.length;
+      console.log(`✅ Synced ${employeesPosition.length} employees position records`);
+      try {
+        const logPath1 = path.join(process.cwd(), '.cursor', 'debug.log');
+        fs.appendFileSync(logPath1, JSON.stringify({location:'sync/route.ts:112',message:'Fetched employees_position from VPS',data:{count:employeesPosition.length,firstFew:Array.isArray(employeesPosition)?(employeesPosition as Array<Record<string,unknown>>).slice(0,3).map((ep)=>({id:ep.id,nama_jabatan:ep.nama_jabatan})):[]},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})+'\n');
+      } catch {
+        // Silently ignore logging errors
+      }
+    } catch (error: unknown) {
+      console.warn('⚠️ Failed to sync employees_position:', error);
+      syncResults.employeesPosition = [];
+      counts.employeesPosition = 0;
+    }
+
+    // Sync Employees (for all businesses in the same organization)
+    // This ensures employees are synced even if their business_id was changed
+    try {
+      // First, get the organization_id for the business
+      const businessInfo = await queryVps<Array<{ organization_id: number }>>(`
+        SELECT organization_id
+        FROM businesses 
+        WHERE id = ?
+        LIMIT 1
+      `, [BUSINESS_ID] as (string | number)[]);
+      
+      const organizationId = businessInfo && businessInfo.length > 0 ? businessInfo[0].organization_id : null;
+      
+      try {
+        const logPathCheck = path.join(process.cwd(), '.cursor', 'debug.log');
+        fs.appendFileSync(logPathCheck, JSON.stringify({location:'sync/route.ts:136',message:'Checking business organization',data:{businessId:BUSINESS_ID,organizationId:organizationId,businessInfoFound:!!businessInfo&&businessInfo.length>0},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})+'\n');
+      } catch {
+        // Silently ignore logging errors
+      }
+      
+      let employees: unknown[] = [];
+      if (organizationId) {
+        // Fetch employees for all businesses in the same organization
+        employees = await queryVps<unknown[]>(`
+          SELECT e.id, e.user_id, e.business_id, e.jabatan_id, e.no_ktp, e.phone, e.nama_karyawan,
+                 e.jenis_kelamin, e.alamat, e.tanggal_lahir, e.tanggal_bekerja, e.pin, e.color,
+                 e.created_at, e.updated_at
+          FROM employees e
+          INNER JOIN businesses b ON e.business_id = b.id
+          WHERE b.organization_id = ?
+          ORDER BY e.business_id ASC, e.nama_karyawan ASC
+        `, [organizationId] as (string | number)[]);
+        console.log(`✅ Synced ${employees.length} employees for organization ${organizationId} (includes all businesses)`);
+      } else {
+        // Fallback: fetch employees for the specific business only
+        employees = await queryVps<unknown[]>(`
+          SELECT id, user_id, business_id, jabatan_id, no_ktp, phone, nama_karyawan,
+                 jenis_kelamin, alamat, tanggal_lahir, tanggal_bekerja, pin, color,
+                 created_at, updated_at
+          FROM employees 
+          WHERE business_id = ?
+          ORDER BY nama_karyawan ASC
+        `, [BUSINESS_ID] as (string | number)[]);
+        console.log(`✅ Synced ${employees.length} employees for business ${BUSINESS_ID} (fallback: organization not found)`);
+      }
+      
+      syncResults.employees = employees;
+      counts.employees = employees.length;
+      
+      try {
+        const logPath2 = path.join(process.cwd(), '.cursor', 'debug.log');
+        fs.appendFileSync(logPath2, JSON.stringify({location:'sync/route.ts:165',message:'Fetched employees from VPS',data:{businessId:BUSINESS_ID,organizationId:organizationId,count:employees.length,employees:Array.isArray(employees)?(employees as Array<Record<string,unknown>>).map((e)=>({id:e.id,business_id:e.business_id,nama_karyawan:e.nama_karyawan,jabatan_id:e.jabatan_id})):[]},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})+'\n');
+      } catch {
+        // Silently ignore logging errors
+      }
+    } catch (error: unknown) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      console.error('❌ Failed to sync employees:', errorMessage);
+      try {
+        const logPathError = path.join(process.cwd(), '.cursor', 'debug.log');
+        fs.appendFileSync(logPathError, JSON.stringify({location:'sync/route.ts:175',message:'Error fetching employees',data:{businessId:BUSINESS_ID,error:errorMessage},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})+'\n');
+      } catch {
+        // Silently ignore logging errors
+      }
+      syncResults.employees = [];
+      counts.employees = 0;
+    }
+
     // Skip Roles - not needed in POS app
     // Skip Permissions - not needed in POS app
     // Skip Permission Categories - not needed in POS app
@@ -165,7 +253,7 @@ export async function GET(request: NextRequest) {
     // Sync Businesses
     try {
       const businesses = await queryVps<unknown[]>(`
-        SELECT id, name, organization_id, permission_name, created_at, updated_at
+        SELECT id, name, organization_id, permission_name, image_url, created_at, updated_at
         FROM businesses 
         ORDER BY name ASC
       `);
@@ -396,7 +484,7 @@ export async function GET(request: NextRequest) {
     try {
       const receiptTemplates = await queryVps<unknown[]>(`
         SELECT id, template_type, template_name, business_id, template_code,
-               is_active, is_default, version, created_at, updated_at
+               is_active, is_default, COALESCE(show_notes, 0) AS show_notes, version, created_at, updated_at
         FROM receipt_templates 
         WHERE is_active = 1 AND (business_id = ? OR business_id IS NULL)
         ORDER BY template_type ASC, business_id ASC, is_default DESC, template_name ASC
@@ -417,14 +505,12 @@ export async function GET(request: NextRequest) {
     const totalRecords = Object.values(counts).reduce((sum, count) => sum + count, 0);
     console.log(`🎉 Comprehensive sync completed: ${totalRecords} total records synced`);
 
-    // #region agent log - server side
     try {
       const logPath3 = path.join(process.cwd(), '.cursor', 'debug.log');
       fs.appendFileSync(logPath3, JSON.stringify({location:'sync/route.ts:683',message:'Returning sync response',data:{allKeys:Object.keys(syncResults)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})+'\n');
     } catch {
       // Silently ignore logging errors
     }
-    // #endregion
 
     return NextResponse.json({
       success: true,

@@ -369,7 +369,39 @@ class OfflineSyncService {
           }
           advanceProgress();
 
-          // Pass 8: Retry employees now that users, businesses, and employees_position might exist (WITH validation)
+          // 6. Businesses (needs organizations) — before Pass 8 so system_pos employees upsert has FK refs
+          if (Array.isArray(data.businesses) && data.businesses.length > 0) {
+            try {
+              const result = await (electronAPI.localDbUpsertBusinesses as (rows: unknown[]) => Promise<{ success: boolean }>)?.(data.businesses);
+              if (result && !result.success) {
+                // Businesses upsert returned success=false
+              }
+            } catch (err) {
+              console.error('❌ [SYNC] Failed to upsert businesses:', err);
+              throw new Error(`Gagal menyinkronkan businesses: ${err instanceof Error ? err.message : String(err)}`);
+            }
+          }
+          advanceProgress();
+
+          // Sync Employees Position (must be before employees due to foreign key) — before Pass 8
+          if (Array.isArray(data.employeesPosition) && data.employeesPosition.length > 0) {
+            try {
+              const result = await (electronAPI.localDbUpsertEmployeesPosition as (rows: unknown[]) => Promise<{ success: boolean }>)?.(data.employeesPosition);
+              if (result && !result.success) {
+                // EmployeesPosition upsert returned success=false
+              }
+            } catch (err) {
+              console.error('❌ [SYNC] Failed to upsert employeesPosition:', err);
+              if (err instanceof Error) {
+                console.error('❌ [SYNC] Error details:', err.message, err.stack);
+              }
+              throw new Error(`Gagal menyinkronkan employeesPosition: ${err instanceof Error ? err.message : String(err)}`);
+            }
+          } else {
+          }
+          advanceProgress();
+
+          // Pass 8: Retry employees now that users, businesses, and employees_position exist (WITH validation)
           if (Array.isArray(data.employees) && data.employees.length > 0) {
             try {
               const result = await (electronAPI.localDbUpsertEmployees as (rows: unknown[], skipValidation?: boolean) => Promise<{ success: boolean; skipped?: number; error?: string }>)?.(data.employees, false);
@@ -418,57 +450,16 @@ class OfflineSyncService {
           }
           advanceProgress();
 
-          // 6. Businesses (needs organizations)
-          if (Array.isArray(data.businesses) && data.businesses.length > 0) {
-            try {
-              const result = await (electronAPI.localDbUpsertBusinesses as (rows: unknown[]) => Promise<{ success: boolean }>)?.(data.businesses);
-              if (result && !result.success) {
-                // Businesses upsert returned success=false
-              }
-            } catch (err) {
-              console.error('❌ [SYNC] Failed to upsert businesses:', err);
-              throw new Error(`Gagal menyinkronkan businesses: ${err instanceof Error ? err.message : String(err)}`);
-            }
-          }
-          advanceProgress();
-
-          // Sync Employees Position (must be before employees due to foreign key)
-          if (Array.isArray(data.employeesPosition) && data.employeesPosition.length > 0) {
-            try {
-              const result = await (electronAPI.localDbUpsertEmployeesPosition as (rows: unknown[]) => Promise<{ success: boolean }>)?.(data.employeesPosition);
-              if (result && !result.success) {
-                // EmployeesPosition upsert returned success=false
-              }
-            } catch (err) {
-              console.error('❌ [SYNC] Failed to upsert employeesPosition:', err);
-              if (err instanceof Error) {
-                console.error('❌ [SYNC] Error details:', err.message, err.stack);
-              }
-              throw new Error(`Gagal menyinkronkan employeesPosition: ${err instanceof Error ? err.message : String(err)}`);
-            }
-          } else {
-          }
-          advanceProgress();
-
-          // Sync Employees (depends on employees_position, users, businesses)
+          // Sync Employees (depends on employees_position, users, businesses — now synced before Pass 8)
           if (Array.isArray(data.employees) && data.employees.length > 0) {
-            // #region agent log
-            fetch('http://127.0.0.1:7242/ingest/7b565785-72b5-49f7-b2c0-57606ea0d0b5',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'offlineSync.ts:463',message:'Starting employees sync',data:{employeesCount:data.employees.length,employees:data.employees.map((e:Record<string,unknown>)=>({id:e.id,business_id:e.business_id,jabatan_id:e.jabatan_id,nama:e.nama_karyawan}))},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
-            // #endregion
             try {
               const result = await (electronAPI.localDbUpsertEmployees as (rows: unknown[], skipValidation?: boolean) => Promise<{ success: boolean; skipped?: number }>)?.(data.employees, true);
-              // #region agent log
-              fetch('http://127.0.0.1:7242/ingest/7b565785-72b5-49f7-b2c0-57606ea0d0b5',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'offlineSync.ts:466',message:'Employees sync result',data:{success:result?.success,skipped:result?.skipped,error:result&&'error' in result?result.error:null},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
-              // #endregion
               if (result && !result.success) {
                 if (result && 'error' in result) {
                   console.error('Employees error:', result.error);
                 }
               }
             } catch (err) {
-              // #region agent log
-              fetch('http://127.0.0.1:7242/ingest/7b565785-72b5-49f7-b2c0-57606ea0d0b5',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'offlineSync.ts:472',message:'Employees sync error',data:{error:err instanceof Error?err.message:String(err)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
-              // #endregion
               console.error('Failed to upsert employees:', err);
               if (err instanceof Error) {
                 console.error('Error details:', err.message, err.stack);
@@ -641,15 +632,23 @@ class OfflineSyncService {
 
           // Receipt Settings
           if (Array.isArray(data.receiptSettings) && data.receiptSettings.length > 0) {
-            await (electronAPI.localDbUpsertReceiptSettings as (rows: unknown[]) => Promise<{ success: boolean }>)?.(data.receiptSettings);
-            // console.log(`✅ ${data.receiptSettings.length} receipt settings synced to local database`);
+            const result = await (electronAPI.localDbUpsertReceiptSettings as (rows: unknown[]) => Promise<{ success: boolean; error?: string }>)?.(data.receiptSettings);
+            if (result && !result.success) {
+              const errMsg = result.error ?? 'Unknown error';
+              console.error('[OFFLINE SYNC] Receipt settings upsert failed:', errMsg);
+              throw new Error(`Gagal menyinkronkan pengaturan struk: ${errMsg}`);
+            }
           }
           advanceProgress();
 
-          // Receipt Templates
+          // Receipt Templates (download master data: upsert to primary MySQL)
           if (Array.isArray(data.receiptTemplates) && data.receiptTemplates.length > 0) {
-            await (electronAPI.localDbUpsertReceiptTemplates as (rows: unknown[]) => Promise<{ success: boolean }>)?.(data.receiptTemplates);
-            // console.log(`✅ ${data.receiptTemplates.length} receipt templates synced to local database`);
+            const result = await (electronAPI.localDbUpsertReceiptTemplates as (rows: unknown[]) => Promise<{ success: boolean; error?: string }>)?.(data.receiptTemplates);
+            if (result && !result.success) {
+              const errMsg = result.error ?? 'Unknown error';
+              console.error('[OFFLINE SYNC] Receipt templates upsert failed:', errMsg);
+              throw new Error(`Gagal menyinkronkan template struk: ${errMsg}`);
+            }
           }
           advanceProgress();
 
@@ -690,23 +689,10 @@ class OfflineSyncService {
           }
           advanceProgress();
 
-          // #region agent log
-          fetch('http://127.0.0.1:7242/ingest/7b565785-72b5-49f7-b2c0-57606ea0d0b5',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'offlineSync.ts:692',message:'Checking restaurantLayoutElements in sync data',data:{hasRestaurantLayoutElements:Array.isArray(data.restaurantLayoutElements),elementCount:Array.isArray(data.restaurantLayoutElements)?data.restaurantLayoutElements.length:0,hasUpsertMethod:!!electronAPI.localDbUpsertRestaurantLayoutElements},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
-          // #endregion
           // Restaurant Layout Elements (needs rooms due to foreign key)
           if (Array.isArray(data.restaurantLayoutElements) && data.restaurantLayoutElements.length > 0) {
-            // #region agent log
-            fetch('http://127.0.0.1:7242/ingest/7b565785-72b5-49f7-b2c0-57606ea0d0b5',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'offlineSync.ts:696',message:'Upserting restaurantLayoutElements',data:{elementCount:data.restaurantLayoutElements.length,firstElement:data.restaurantLayoutElements[0]},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
-            // #endregion
             const result = await (electronAPI.localDbUpsertRestaurantLayoutElements as (rows: unknown[]) => Promise<{ success: boolean }>)?.(data.restaurantLayoutElements);
-            // #region agent log
-            fetch('http://127.0.0.1:7242/ingest/7b565785-72b5-49f7-b2c0-57606ea0d0b5',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'offlineSync.ts:699',message:'restaurantLayoutElements upsert result',data:{success:result?.success},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
-            // #endregion
             // console.log(`✅ ${data.restaurantLayoutElements.length} restaurant layout elements synced to local database`);
-          } else {
-            // #region agent log
-            fetch('http://127.0.0.1:7242/ingest/7b565785-72b5-49f7-b2c0-57606ea0d0b5',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'offlineSync.ts:702',message:'No restaurantLayoutElements in sync data',data:{isArray:Array.isArray(data.restaurantLayoutElements),length:Array.isArray(data.restaurantLayoutElements)?data.restaurantLayoutElements.length:'not array',hasData:!!data.restaurantLayoutElements},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
-            // #endregion
           }
           advanceProgress();
 

@@ -3,9 +3,8 @@
 /**
  * Utility helpers for caching login emails locally.
  *
- * Note: This cache is intentionally client-side only.
- * If we ever switch this to SQLite, keep it local-only
- * and do not replicate to the VPS database.
+ * Note: This cache is intentionally client-side only (localStorage).
+ * Do not replicate to the VPS database.
  */
 
 const STORAGE_KEY = 'marviano_saved_login_emails';

@@ -46,18 +46,17 @@ const receiptTemplate = `<!DOCTYPE html>
     .summary-line { display: flex; justify-content: space-between; margin-bottom: 0.5mm; font-size: 9pt; font-weight: 500; }
     .summary-label { font-weight: 500; }
     .summary-value { font-weight: 700; }
-    .footer { margin-top: 2mm; font-size: 8pt; text-align: left; line-height: 1.3; font-weight: 500; }
+    .footer { margin-top: 2mm; font-size: 8pt; text-align: center; line-height: 1.3; font-weight: 500; }
   </style>
 </head>
 <body>
-  <div class="contact">{{contactPhone}}</div>
-  
   {{logo}}
   <div class="branch">{{businessName}}</div>
   {{#ifReprint}}
   <div class="reprint-notice" style="text-align: center; font-size: 10pt; font-weight: bold; margin: 1mm 0; color: #000;">REPRINT KE-{{reprintCount}}</div>
   {{/ifReprint}}
   <div class="address">{{address}}</div>
+  <div class="contact">{{contactPhone}}</div>
   
   <div class="transaction-type">{{transactionDisplay}} {{displayCounter}}</div>
   
@@ -80,8 +79,8 @@ const receiptTemplate = `<!DOCTYPE html>
     <span class="info-value">{{cashier}}</span>
   </div>
   <div class="info-line">
-    <span class="info-label">Saluran:</span>
-    <span class="info-value">Toko Offline</span>
+    <span class="info-label">Nama Pelanggan:</span>
+    <span class="info-value">{{customerName}}</span>
   </div>
   
   <div class="dashed-line"></div>
@@ -104,10 +103,6 @@ const receiptTemplate = `<!DOCTYPE html>
   </div>
   <div class="summary-line">
     <span class="summary-label">Total Harga:</span>
-    <span class="summary-value">{{total}}</span>
-  </div>
-  <div class="summary-line">
-    <span class="summary-label">Nominal Pendapatan:</span>
     <span class="summary-value">{{total}}</span>
   </div>
   
@@ -174,7 +169,7 @@ const billTemplate = `<!DOCTYPE html>
     .summary-line { display: flex; justify-content: space-between; margin-bottom: 0.5mm; font-size: 9pt; font-weight: 500; }
     .summary-label { font-weight: 500; }
     .summary-value { font-weight: 700; }
-    .footer { margin-top: 2mm; font-size: 8pt; text-align: left; line-height: 1.3; font-weight: 500; }
+    .footer { margin-top: 2mm; font-size: 8pt; text-align: center; line-height: 1.3; font-weight: 500; }
   </style>
 </head>
 <body>
@@ -198,6 +193,10 @@ const billTemplate = `<!DOCTYPE html>
   <div class="info-line">
     <span class="info-label">Operator Kasir:</span>
     <span class="info-value">{{cashier}}</span>
+  </div>
+  <div class="info-line">
+    <span class="info-label">Nama Pelanggan:</span>
+    <span class="info-value">{{customerName}}</span>
   </div>
   <div class="info-line">
     <span class="info-label">Saluran:</span>
@@ -226,6 +225,16 @@ const billTemplate = `<!DOCTYPE html>
     <span class="summary-label">Total Harga:</span>
     <span class="summary-value">{{total}}</span>
   </div>
+  {{#ifVoucher}}
+  <div class="summary-line">
+    <span class="summary-label">Diskon ({{voucherLabel}}):</span>
+    <span class="summary-value">-{{voucherDiscount}}</span>
+  </div>
+  <div class="summary-line">
+    <span class="summary-label">Total Bayar:</span>
+    <span class="summary-value">{{finalAmount}}</span>
+  </div>
+  {{/ifVoucher}}
   
   <div class="dashed-line"></div>
   
@@ -271,7 +280,7 @@ const refundTemplate = `<!DOCTYPE html>
     .summary-line { display: flex; justify-content: space-between; margin-bottom: 0.5mm; font-size: 9pt; font-weight: 500; }
     .summary-label { font-weight: 500; }
     .summary-value { font-weight: 700; }
-    .footer { margin-top: 2mm; font-size: 8pt; text-align: left; line-height: 1.3; font-weight: 500; }
+    .footer { margin-top: 2mm; font-size: 8pt; text-align: center; line-height: 1.3; font-weight: 500; }
   </style>
 </head>
 <body>
@@ -299,6 +308,10 @@ const refundTemplate = `<!DOCTYPE html>
   <div class="info-line">
     <span class="info-label">Operator Kasir:</span>
     <span class="info-value">{{cashier}}</span>
+  </div>
+  <div class="info-line">
+    <span class="info-label">Nama Pelanggan:</span>
+    <span class="info-value">{{customerName}}</span>
   </div>
   <div class="info-line">
     <span class="info-label">Saluran:</span>

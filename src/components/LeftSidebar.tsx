@@ -96,7 +96,8 @@ export default function LeftSidebar({ menuItems, activeMenuItem, onMenuItemClick
       <div className="flex-1 overflow-y-auto overflow-x-hidden px-2 min-h-0">
         <div className="py-1">
           {menuItems.map((item) => {
-            // Settings - requires permissions
+            // Settings - requires at least one of: sync, printer, slideshow, or template permission
+            // Hide Settings menu completely if user doesn't have any of these permissions
             if (item.name === 'Settings') {
               const canAccessSync = isAdmin ||
                 permissions.includes('setelan.sinkronisasi') ||
@@ -104,16 +105,19 @@ export default function LeftSidebar({ menuItems, activeMenuItem, onMenuItemClick
               const canAccessPrinter = isAdmin ||
                 permissions.includes('setelan.printersetup') ||
                 permissions.includes('marviano-pos_setelan_printer-setup');
-              const canAccessSettings = canAccessSync || canAccessPrinter;
-              
-              /* console.log(`🔧 [SIDEBAR DEBUG] 'Settings' access:`, {
-                isAdmin,
-                hasSyncPerm: permissions.includes('setelan.sinkronisasi'),
-                hasPrinterPerm: permissions.includes('setelan.printersetup'),
-                access: canAccessSettings
-              }); */
+              const canAccessSlideshow = isAdmin || permissions.includes('access_slideshowmanager');
+              const canAccessTemplateStruk = isAdmin || permissions.includes('access_templatestruk');
+              const canAccessSettings = canAccessSync || canAccessPrinter || canAccessSlideshow || canAccessTemplateStruk;
 
+              // Hide Settings menu if user doesn't have any of the required permissions
               if (!canAccessSettings) {
+                return null;
+              }
+            }
+
+            // Kasir - requires access_kasir permission
+            if (item.name === 'Kasir') {
+              if (!isAdmin && !hasPermission(user, 'access_kasir')) {
                 return null;
               }
             }
@@ -133,11 +137,38 @@ export default function LeftSidebar({ menuItems, activeMenuItem, onMenuItemClick
             }
 
             // Barista & Kitchen - requires access_baristaandkitchen permission
+            // Check for both possible formats: access_baristaandkitchen and access_barista_and_kitchen
             if (item.name === 'Barista & Kitchen') {
-              if (!isAdmin && !hasPermission(user, 'access_baristaandkitchen')) {
+              const perm1 = hasPermission(user, 'access_baristaandkitchen');
+              const perm2 = hasPermission(user, 'access_barista_and_kitchen');
+              const hasAccess = isAdmin || perm1 || perm2;
+              
+              if (!hasAccess) {
                 return null;
               }
             }
+
+            // Laporan - requires access_laporan permission
+            if (item.name === 'Laporan') {
+              if (!isAdmin && !hasPermission(user, 'access_laporan')) {
+                return null;
+              }
+            }
+
+            // Ganti Shift - requires access_gantishift permission
+            if (item.name === 'Ganti Shift') {
+              if (!isAdmin && !hasPermission(user, 'access_gantishift')) {
+                return null;
+              }
+            }
+
+            // Daftar Transaksi - requires access_daftartransaksi permission
+            if (item.name === 'Daftar Transaksi') {
+              if (!isAdmin && !hasPermission(user, 'access_daftartransaksi')) {
+                return null;
+              }
+            }
+
             // Setelan Global - always accessible, but display as "Setelan"
             const displayName = item.name === 'Setelan Global' ? 'Setelan' : item.name;
             

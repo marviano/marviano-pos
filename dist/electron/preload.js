@@ -49,6 +49,8 @@ electron_1.contextBridge.exposeInMainWorld('electronAPI', {
     // Businesses
     localDbUpsertBusinesses: (rows) => electron_1.ipcRenderer.invoke('localdb-upsert-businesses', rows),
     localDbGetBusinesses: () => electron_1.ipcRenderer.invoke('localdb-get-businesses'),
+    cacheBusinessLogoForLogin: (businessId, baseUrl) => electron_1.ipcRenderer.invoke('cache-business-logo-for-login', businessId, baseUrl),
+    getLoginLogo: () => electron_1.ipcRenderer.invoke('get-login-logo'),
     // Employees Position
     localDbUpsertEmployeesPosition: (rows) => electron_1.ipcRenderer.invoke('localdb-upsert-employees-position', rows),
     localDbGetEmployeesPosition: () => electron_1.ipcRenderer.invoke('localdb-get-employees-position'),
@@ -116,7 +118,14 @@ electron_1.contextBridge.exposeInMainWorld('electronAPI', {
     // New enhanced offline support tables
     // Transactions
     localDbUpsertTransactions: (rows) => electron_1.ipcRenderer.invoke('localdb-upsert-transactions', rows),
+    localDbUpdateTransactionVoucher: (transactionId, payload) => electron_1.ipcRenderer.invoke('localdb-update-transaction-voucher', transactionId, payload),
+    localDbUpdateTransactionWaiter: (transactionId, waiterId) => electron_1.ipcRenderer.invoke('localdb-update-transaction-waiter', transactionId, waiterId),
+    localDbGetTransactionCheckerPrinted: (transactionUuid) => electron_1.ipcRenderer.invoke('localdb-get-transaction-checker-printed', transactionUuid),
+    localDbSetTransactionCheckerPrinted: (transactionUuid) => electron_1.ipcRenderer.invoke('localdb-set-transaction-checker-printed', transactionUuid),
     localDbGetTransactions: (businessId, limit) => electron_1.ipcRenderer.invoke('localdb-get-transactions', businessId, limit),
+    localDbUpdateTransactionShift: (transactionUuid, shiftUuid) => electron_1.ipcRenderer.invoke('localdb-update-transaction-shift', transactionUuid, shiftUuid),
+    localDbDeleteSingleTransactionPreview: (transactionUuid) => electron_1.ipcRenderer.invoke('localdb-delete-single-transaction-preview', transactionUuid),
+    localDbDeleteSingleTransaction: (transactionUuid) => electron_1.ipcRenderer.invoke('localdb-delete-single-transaction', transactionUuid),
     localDbArchiveTransactions: (payload) => electron_1.ipcRenderer.invoke('localdb-archive-transactions', payload),
     localDbDeleteTransactions: (payload) => electron_1.ipcRenderer.invoke('localdb-delete-transactions', payload),
     localDbDeleteTransactionItems: (payload) => electron_1.ipcRenderer.invoke('localdb-delete-transaction-items', payload),
@@ -128,6 +137,7 @@ electron_1.contextBridge.exposeInMainWorld('electronAPI', {
     // Transaction Items
     localDbUpsertTransactionItems: (rows) => electron_1.ipcRenderer.invoke('localdb-upsert-transaction-items', rows),
     localDbGetTransactionItems: (transactionId) => electron_1.ipcRenderer.invoke('localdb-get-transaction-items', transactionId),
+    localDbGetDistinctItemWaiterIdsByTransaction: (transactionIds) => electron_1.ipcRenderer.invoke('localdb-get-distinct-item-waiter-ids-by-transaction', transactionIds),
     localDbGetTransactionItemCustomizationsNormalized: (transactionId) => electron_1.ipcRenderer.invoke('localdb-get-transaction-item-customizations-normalized', transactionId),
     localDbUpsertTransactionItemCustomizations: (rows) => electron_1.ipcRenderer.invoke('localdb-upsert-transaction-item-customizations', rows),
     localDbUpsertTransactionItemCustomizationOptions: (rows) => electron_1.ipcRenderer.invoke('localdb-upsert-transaction-item-customization-options', rows),
@@ -140,7 +150,7 @@ electron_1.contextBridge.exposeInMainWorld('electronAPI', {
     localDbGetSystemPosBusinesses: () => electron_1.ipcRenderer.invoke('localdb-get-system-pos-businesses'),
     localDbGetSystemPosAllProducts: (businessId) => electron_1.ipcRenderer.invoke('localdb-get-system-pos-all-products', businessId),
     localDbGetSystemPosEmployees: () => electron_1.ipcRenderer.invoke('localdb-get-system-pos-employees'),
-    localDbGetShiftRefunds: (userId, shiftStart, shiftEnd, businessId, shiftUuid) => electron_1.ipcRenderer.invoke('localdb-get-shift-refunds', userId, shiftStart, shiftEnd, businessId, shiftUuid),
+    localDbGetShiftRefunds: (payload) => electron_1.ipcRenderer.invoke('localdb-get-shift-refunds', payload),
     localDbUpsertTransactionRefunds: (rows) => electron_1.ipcRenderer.invoke('localdb-upsert-transaction-refunds', rows),
     localDbApplyTransactionRefund: (payload) => electron_1.ipcRenderer.invoke('localdb-apply-transaction-refund', payload),
     localDbSplitBill: (payload) => electron_1.ipcRenderer.invoke('localdb-split-bill', payload),
@@ -175,7 +185,7 @@ electron_1.contextBridge.exposeInMainWorld('electronAPI', {
     savePrinter2AutomationSelections: (businessId, cycleNumber, selections) => electron_1.ipcRenderer.invoke('save-printer2-automation-selections', businessId, cycleNumber, selections),
     generateRandomSelections: (cycleNumber) => electron_1.ipcRenderer.invoke('generate-random-selections', cycleNumber),
     logPrinter2Print: (transactionId, printer2ReceiptNumber, mode, cycleNumber, globalCounter, isReprint, reprintCount) => electron_1.ipcRenderer.invoke('log-printer2-print', transactionId, printer2ReceiptNumber, mode, cycleNumber, globalCounter, isReprint, reprintCount),
-    getPrinter2AuditLog: (fromDate, toDate, limit) => electron_1.ipcRenderer.invoke('get-printer2-audit-log', fromDate, toDate, limit),
+    getPrinter2AuditLog: (fromDate, toDate, limit, transactionId) => electron_1.ipcRenderer.invoke('get-printer2-audit-log', fromDate, toDate, limit, transactionId),
     queueTransactionForSystemPos: (transactionId) => electron_1.ipcRenderer.invoke('queue-transaction-for-system-pos', transactionId),
     getSystemPosQueue: () => electron_1.ipcRenderer.invoke('get-system-pos-queue'),
     markSystemPosSynced: (transactionId) => electron_1.ipcRenderer.invoke('mark-system-pos-synced', transactionId),
@@ -184,7 +194,8 @@ electron_1.contextBridge.exposeInMainWorld('electronAPI', {
     debugSystemPosTransaction: (transactionId) => electron_1.ipcRenderer.invoke('debug-system-pos-transaction', transactionId),
     repopulateSystemPosQueue: (options) => electron_1.ipcRenderer.invoke('repopulate-system-pos-queue', options),
     logPrinter1Print: (transactionId, printer1ReceiptNumber, globalCounter, isReprint, reprintCount) => electron_1.ipcRenderer.invoke('log-printer1-print', transactionId, printer1ReceiptNumber, globalCounter, isReprint, reprintCount),
-    getPrinter1AuditLog: (fromDate, toDate, limit) => electron_1.ipcRenderer.invoke('get-printer1-audit-log', fromDate, toDate, limit),
+    getPrinter1AuditLog: (fromDate, toDate, limit, transactionId) => electron_1.ipcRenderer.invoke('get-printer1-audit-log', fromDate, toDate, limit, transactionId),
+    moveTransactionToPrinter2: (transactionId) => electron_1.ipcRenderer.invoke('move-transaction-to-printer2', transactionId),
     // Printer audit sync helpers
     localDbUpsertPrinterAudits: (printerType, rows) => electron_1.ipcRenderer.invoke('localdb-upsert-printer-audits', { printerType, rows }),
     localDbUpsertPrinterDailyCounters: (rows) => electron_1.ipcRenderer.invoke('localdb-upsert-printer-daily-counters', rows),
@@ -197,10 +208,12 @@ electron_1.contextBridge.exposeInMainWorld('electronAPI', {
     localDbGetActiveShift: (userId, businessId) => electron_1.ipcRenderer.invoke('localdb-get-active-shift', userId, businessId),
     localDbCreateShift: (shiftData) => electron_1.ipcRenderer.invoke('localdb-create-shift', shiftData),
     localDbEndShift: (shiftId) => electron_1.ipcRenderer.invoke('localdb-end-shift', shiftId),
-    localDbGetShiftStatistics: (userId, shiftStart, shiftEnd, businessId, shiftUuid) => electron_1.ipcRenderer.invoke('localdb-get-shift-statistics', userId, shiftStart, shiftEnd, businessId, shiftUuid),
-    localDbGetPaymentBreakdown: (userId, shiftStart, shiftEnd, businessId) => electron_1.ipcRenderer.invoke('localdb-get-payment-breakdown', userId, shiftStart, shiftEnd, businessId),
-    localDbGetCategory2Breakdown: (userId, shiftStart, shiftEnd, businessId) => electron_1.ipcRenderer.invoke('localdb-get-category2-breakdown', userId, shiftStart, shiftEnd, businessId),
-    localDbGetCashSummary: (userId, shiftStart, shiftEnd, businessId, shiftUuid) => electron_1.ipcRenderer.invoke('localdb-get-cash-summary', userId, shiftStart, shiftEnd, businessId, shiftUuid),
+    localDbGetShiftStatistics: (userId, shiftStart, shiftEnd, businessId, shiftUuid, shiftUuids) => electron_1.ipcRenderer.invoke('localdb-get-shift-statistics', userId, shiftStart, shiftEnd, businessId, shiftUuid, shiftUuids),
+    localDbGetVoucherBreakdown: (userId, shiftStart, shiftEnd, businessId, shiftUuid, shiftUuids) => electron_1.ipcRenderer.invoke('localdb-get-voucher-breakdown', userId, shiftStart, shiftEnd, businessId, shiftUuid, shiftUuids),
+    localDbGetPaymentBreakdown: (userId, shiftStart, shiftEnd, businessId, shiftUuid, shiftUuids) => electron_1.ipcRenderer.invoke('localdb-get-payment-breakdown', userId, shiftStart, shiftEnd, businessId, shiftUuid ?? null, shiftUuids),
+    localDbGetCategory1Breakdown: (userId, shiftStart, shiftEnd, businessId, shiftUuid, shiftUuids) => electron_1.ipcRenderer.invoke('localdb-get-category1-breakdown', userId, shiftStart, shiftEnd, businessId, shiftUuid, shiftUuids),
+    localDbGetCategory2Breakdown: (userId, shiftStart, shiftEnd, businessId, shiftUuid, shiftUuids) => electron_1.ipcRenderer.invoke('localdb-get-category2-breakdown', userId, shiftStart, shiftEnd, businessId, shiftUuid, shiftUuids),
+    localDbGetCashSummary: (userId, shiftStart, shiftEnd, businessId, shiftUuid, shiftUuids) => electron_1.ipcRenderer.invoke('localdb-get-cash-summary', userId, shiftStart, shiftEnd, businessId, shiftUuid, shiftUuids),
     localDbGetShifts: (filters) => electron_1.ipcRenderer.invoke('localdb-get-shifts', filters),
     localDbGetShiftUsers: (businessId) => electron_1.ipcRenderer.invoke('localdb-get-shift-users', businessId),
     localDbGetUnsyncedShifts: (businessId) => electron_1.ipcRenderer.invoke('localdb-get-unsynced-shifts', businessId),
@@ -208,8 +221,9 @@ electron_1.contextBridge.exposeInMainWorld('electronAPI', {
     localDbUpsertShifts: (rows) => electron_1.ipcRenderer.invoke('localdb-upsert-shifts', rows),
     localDbCheckTodayTransactions: (userId, shiftStart, businessId) => electron_1.ipcRenderer.invoke('localdb-check-today-transactions', userId, shiftStart, businessId),
     localDbUpdateShiftStart: (shiftId, newStartTime) => electron_1.ipcRenderer.invoke('localdb-update-shift-start', shiftId, newStartTime),
-    localDbGetProductSales: (userId, shiftStart, shiftEnd, businessId) => electron_1.ipcRenderer.invoke('localdb-get-product-sales', userId, shiftStart, shiftEnd, businessId),
+    localDbGetProductSales: (userId, shiftStart, shiftEnd, businessId, shiftUuid, shiftUuids) => electron_1.ipcRenderer.invoke('localdb-get-product-sales', userId, shiftStart, shiftEnd, businessId, shiftUuid, shiftUuids),
     printShiftBreakdown: (data) => electron_1.ipcRenderer.invoke('print-shift-breakdown', data),
+    printTransactionsReport: (payload) => electron_1.ipcRenderer.invoke('print-transactions-report', payload),
     // Customer display event listeners
     onOrderUpdate: (callback) => {
         electron_1.ipcRenderer.on('order-update', (event, data) => callback(data));
@@ -230,14 +244,17 @@ electron_1.contextBridge.exposeInMainWorld('electronAPI', {
     restoreFromServer: (options) => electron_1.ipcRenderer.invoke('restore-from-server', options),
     // Configuration Management
     getAppConfig: () => electron_1.ipcRenderer.invoke('get-app-config'),
+    getEffectiveDbConfig: () => electron_1.ipcRenderer.invoke('get-effective-db-config'),
     saveAppConfig: (config) => electron_1.ipcRenderer.invoke('save-app-config', config),
     resetAppConfig: () => electron_1.ipcRenderer.invoke('reset-app-config'),
     testDbConnection: (config) => electron_1.ipcRenderer.invoke('test-db-connection', config),
     // Receipt Template and Settings Management
     getReceiptTemplate: (templateType, businessId) => electron_1.ipcRenderer.invoke('get-receipt-template', templateType, businessId),
     getReceiptTemplates: (templateType, businessId) => electron_1.ipcRenderer.invoke('get-receipt-templates', templateType, businessId),
+    getReceiptTemplateById: (id) => electron_1.ipcRenderer.invoke('get-receipt-template-by-id', id),
     setDefaultReceiptTemplate: (templateType, templateName, businessId) => electron_1.ipcRenderer.invoke('set-default-receipt-template', templateType, templateName, businessId),
-    saveReceiptTemplate: (templateType, templateCode, businessId) => electron_1.ipcRenderer.invoke('save-receipt-template', templateType, templateCode, businessId),
+    saveReceiptTemplate: (templateType, templateCode, templateName, businessId, showNotes) => electron_1.ipcRenderer.invoke('save-receipt-template', templateType, templateCode, templateName, businessId, showNotes),
+    updateReceiptTemplate: (id, templateCode, templateName, showNotes) => electron_1.ipcRenderer.invoke('update-receipt-template', id, templateCode, templateName, showNotes),
     getReceiptSettings: (businessId) => electron_1.ipcRenderer.invoke('get-receipt-settings', businessId),
     saveReceiptSettings: (settings, businessId) => electron_1.ipcRenderer.invoke('save-receipt-settings', settings, businessId),
     // Activity Logs

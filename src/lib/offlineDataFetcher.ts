@@ -42,7 +42,7 @@ export interface Category {
  */
 export async function fetchProducts(
   category2Name?: string,
-  transactionType?: 'drinks' | 'bakery',
+  transactionType?: 'drinks' | 'bakery' | 'foods',
   options?: { isOnline?: boolean, forceOnline?: boolean, platform?: 'qpon' | 'gofood' | 'grabfood' | 'shopeefood' | 'tiktok', businessId?: number }
 ): Promise<Product[]> {
   // Use Electron MySQL connection (direct MySQL queries via IPC)
@@ -77,7 +77,7 @@ export async function fetchProducts(
  */
 async function fetchProductsFromMySQL(
   category2Name?: string,
-  transactionType?: 'drinks' | 'bakery',
+  transactionType?: 'drinks' | 'bakery' | 'foods',
   options?: { isOnline?: boolean, platform?: 'qpon' | 'gofood' | 'grabfood' | 'shopeefood' | 'tiktok', businessId?: number }
 ): Promise<Product[]> {try {
     const electronAPI = typeof window !== 'undefined' ? (window as { electronAPI?: UnknownRecord }).electronAPI : undefined;if (!electronAPI) {
@@ -106,6 +106,8 @@ async function fetchProductsFromMySQL(
         });
       } else if (transactionType === 'bakery') {
         products = products.filter((p: UnknownRecord) => p.category1_name === 'Bakery');
+      } else if (transactionType === 'foods') {
+        products = products.filter((p: UnknownRecord) => p.category1_name === 'Makanan');
       }}
 
     // Filter by platform if in online mode
@@ -160,7 +162,7 @@ async function fetchProductsFromMySQL(
  * Fetch categories from MySQL database via Electron IPC (direct MySQL connection)
  */
 export async function fetchCategories(
-  transactionType?: 'drinks' | 'bakery',
+  transactionType?: 'drinks' | 'bakery' | 'foods',
   options?: { isOnline?: boolean, platform?: 'qpon' | 'gofood' | 'grabfood' | 'shopeefood' | 'tiktok', businessId?: number }
 ): Promise<Category[]> {
   // Use Electron MySQL connection (direct MySQL queries via IPC)
@@ -194,7 +196,7 @@ export async function fetchCategories(
  * Categories are derived from products (category2 names from active products)
  */
 async function fetchCategoriesFromMySQL(
-  transactionType?: 'drinks' | 'bakery',
+  transactionType?: 'drinks' | 'bakery' | 'foods',
   options?: { isOnline?: boolean, platform?: 'qpon' | 'gofood' | 'grabfood' | 'shopeefood' | 'tiktok', businessId?: number }
 ): Promise<Category[]> {try {
     const electronAPI = typeof window !== 'undefined' ? (window as { electronAPI?: UnknownRecord }).electronAPI : undefined;if (!electronAPI?.localDbGetAllProducts) {
@@ -204,7 +206,7 @@ async function fetchCategoriesFromMySQL(
 
     const businessId = options?.businessId;
     const allProductsResult = await (electronAPI.localDbGetAllProducts as (businessId?: number) => Promise<unknown[]>)(businessId);
-    const allProducts: UnknownRecord[] = Array.isArray(allProductsResult) ? allProductsResult as UnknownRecord[] : [];// Filter products by transaction type using category1_name
+    const allProducts: UnknownRecord[] = Array.isArray(allProductsResult) ? allProductsResult as UnknownRecord[] : [];    // Filter products by transaction type using category1_name
     let filteredProducts = allProducts;
     if (transactionType) {
       if (transactionType === 'bakery') {
@@ -213,6 +215,8 @@ async function fetchCategoriesFromMySQL(
         filteredProducts = allProducts.filter((p: UnknownRecord) =>
           p.category1_name && (p.category1_name === 'Minuman' || p.category1_name === 'Dessert')
         );
+      } else if (transactionType === 'foods') {
+        filteredProducts = allProducts.filter((p: UnknownRecord) => p.category1_name === 'Makanan');
       }
     }
 

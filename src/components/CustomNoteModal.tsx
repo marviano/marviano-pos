@@ -56,7 +56,7 @@ export default function CustomNoteModal({ isOpen, onClose, product, effectivePri
       >
         {/* Header */}
         <div className="flex items-center justify-between p-6 pb-4">
-          <h2 className="text-xl font-bold text-gray-900">Add to Cart</h2>
+          <h2 className="text-xl font-bold text-gray-900">Tambahkan ke Keranjang</h2>
           <button
             onClick={handleClose}
             className="w-10 h-10 bg-gray-100 hover:bg-gray-200 rounded-full flex items-center justify-center transition-colors"
@@ -78,7 +78,7 @@ export default function CustomNoteModal({ isOpen, onClose, product, effectivePri
           {/* Custom Note Section */}
           <div className="mb-6">
             <label className="block text-sm font-medium text-gray-700 mb-2">
-              Custom Note (Optional)
+              Note Kustom (Opsional)
             </label>
             <textarea
               ref={textareaRef}
@@ -103,13 +103,13 @@ export default function CustomNoteModal({ isOpen, onClose, product, effectivePri
               onClick={handleClose}
               className="flex-1 py-3 px-4 bg-gray-200 hover:bg-gray-300 text-gray-800 rounded-lg font-medium transition-colors"
             >
-              Cancel
+              Batal
             </button>
             <button
               onClick={handleConfirm}
               className="flex-1 py-3 px-4 bg-green-500 hover:bg-green-600 text-white rounded-lg font-medium transition-colors"
             >
-              Add to Cart
+              Tambahkan
             </button>
           </div>
         </div>

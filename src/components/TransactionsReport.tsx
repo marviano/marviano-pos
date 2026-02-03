@@ -7,7 +7,7 @@
  * This ensures consistent reporting regardless of the user's local timezone.
  */
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import {
   Calendar,
   User,
@@ -19,11 +19,12 @@ import {
   CreditCard,
   Search,
   X,
-  CheckCircle,
-  XCircle,
-  Clock
+  Printer
 } from 'lucide-react';
 import { useAuth } from '@/hooks/useAuth';
+import { hasPermission } from '@/lib/permissions';
+import { isSuperAdmin } from '@/lib/auth';
+import TransactionDetailModal, { type TransactionDetail, type TransactionRefund } from './TransactionDetailModal';
 
 // Types
 interface Transaction {
@@ -31,6 +32,7 @@ interface Transaction {
   business_id: number;
   user_id: number;
   user_name?: string;
+  waiter_id?: number | null;
   shift_uuid?: string;
   payment_method: string;
   payment_method_id?: number;
@@ -177,18 +179,48 @@ const formatPlatform = (platform: string | undefined): string => {
   return PLATFORM_LABELS[platform.toLowerCase()] || platform;
 };
 
+// Payment method label/color for Daftar Transaksi-style table
+const PAYMENT_LABELS: Record<string, string> = {
+  cash: 'Cash', debit: 'Debit', qr: 'QR Code', ewallet: 'E-Wallet', cl: 'City Ledger',
+  voucher: 'Voucher', qpon: 'Qpon', gofood: 'GoFood', grabfood: 'GrabFood', shopeefood: 'ShopeeFood', tiktok: 'TikTok',
+};
+const PAYMENT_COLORS: Record<string, string> = {
+  cash: 'bg-green-100 text-green-800', debit: 'bg-blue-100 text-blue-800', qr: 'bg-purple-100 text-purple-800',
+  ewallet: 'bg-orange-100 text-orange-800', cl: 'bg-gray-100 text-gray-800', voucher: 'bg-yellow-100 text-yellow-800',
+  qpon: 'bg-indigo-100 text-indigo-800', gofood: 'bg-teal-100 text-teal-800', grabfood: 'bg-green-100 text-green-800',
+  shopeefood: 'bg-orange-100 text-orange-800', tiktok: 'bg-red-100 text-red-800',
+};
+const getPaymentLabel = (method: string) => PAYMENT_LABELS[method?.toLowerCase()] || method;
+const getPaymentColor = (method: string) => PAYMENT_COLORS[method?.toLowerCase()] || 'bg-gray-100 text-gray-800';
+
 const getElectronAPI = () => (typeof window !== 'undefined' ? window.electronAPI : undefined);
 
 export default function TransactionsReport() {
   const { user } = useAuth();
-  const [viewMode, setViewMode] = useState<'list' | 'detail'>('list');
-  const [selectedTransaction, setSelectedTransaction] = useState<Transaction | null>(null);
-  const [selectedTransactionItems, setSelectedTransactionItems] = useState<TransactionItem[]>([]);
+  const [detailTransaction, setDetailTransaction] = useState<TransactionDetail | null>(null);
+  const [isDetailModalOpen, setIsDetailModalOpen] = useState(false);
+  const [isLoadingDetail, setIsLoadingDetail] = useState(false);
+  const canRefund = user ? (isSuperAdmin(user) || hasPermission(user, 'daftartransaksi.refund')) : false;
 
   // Filters
   const [transactions, setTransactions] = useState<Transaction[]>([]);
   const [filteredTransactions, setFilteredTransactions] = useState<Transaction[]>([]);
   const [users, setUsers] = useState<UserOption[]>([]);
+  const [receiptCounters, setReceiptCounters] = useState<Record<string, number>>({});
+  const [receiptizeCounters, setReceiptizeCounters] = useState<Record<string, number>>({});
+  const [employeesMap, setEmployeesMap] = useState<Map<number, { name: string; color: string | null }>>(new Map());
+  const [itemWaiterIdsByTx, setItemWaiterIdsByTx] = useState<Record<string, number[]>>({});
+  const [openWaiterPopoverFor, setOpenWaiterPopoverFor] = useState<string | null>(null);
+  const waiterPopoverRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (openWaiterPopoverFor === null) return;
+    const close = (e: MouseEvent) => {
+      if (waiterPopoverRef.current && !waiterPopoverRef.current.contains(e.target as Node)) setOpenWaiterPopoverFor(null);
+    };
+    document.addEventListener('mousedown', close);
+    return () => document.removeEventListener('mousedown', close);
+  }, [openWaiterPopoverFor]);
+  const [businessName, setBusinessName] = useState<string>('');
   
   const businessId = user?.selectedBusinessId;
   
@@ -205,28 +237,19 @@ export default function TransactionsReport() {
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [selectedPaymentMethod, setSelectedPaymentMethod] = useState<string>('all');
   const [selectedStatus, setSelectedStatus] = useState<string>('all');
-  const [selectedSyncStatus, setSelectedSyncStatus] = useState<string>('all');
-
   const [isLoading, setIsLoading] = useState(false);
-  const [showFilters, setShowFilters] = useState(true);
-
-  // Stats
-  const [stats, setStats] = useState({
-    totalTransactions: 0,
-    totalAmount: 0,
-    totalFinalAmount: 0,
-    totalDiscount: 0,
-    syncedCount: 0,
-    unsyncedCount: 0,
-  });
-
-  // Load users on mount
+  // Load users and business name on mount
   useEffect(() => {
     const loadUsers = async () => {
       const electronAPI = getElectronAPI();
       if (electronAPI?.localDbGetShiftUsers) {
-        const usersData = await electronAPI.localDbGetShiftUsers();
+        const usersData = await electronAPI.localDbGetShiftUsers(businessId);
         setUsers(usersData as UserOption[]);
+      }
+      if (businessId && (electronAPI as { localDbGetBusinesses?: () => Promise<Array<{ id: number; name: string }>> })?.localDbGetBusinesses) {
+        const businesses = await (electronAPI as { localDbGetBusinesses: () => Promise<Array<{ id: number; name: string }>> }).localDbGetBusinesses();
+        const biz = businesses?.find((b: { id: number; name: string }) => b.id === businessId);
+        if (biz) setBusinessName(biz.name);
       }
     };
     loadUsers();
@@ -250,9 +273,33 @@ export default function TransactionsReport() {
 
     setEndDate(formatDateInput(end));
     setStartDate(formatDateInput(start));
+  }, [businessId]);
+
+  // Load employees for Waiter column
+  useEffect(() => {
+    const loadEmployees = async () => {
+      const electronAPI = getElectronAPI();
+      const api = electronAPI as { localDbGetEmployees?: () => Promise<Array<{ id?: number | string; nama_karyawan?: string; color?: string | null }>> };
+      if (!api?.localDbGetEmployees) return;
+      try {
+        const allEmployees = await api.localDbGetEmployees();
+        const arr = Array.isArray(allEmployees) ? allEmployees : [];
+        const map = new Map<number, { name: string; color: string | null }>();
+        arr.forEach((emp: { id?: number | string; nama_karyawan?: string; color?: string | null }) => {
+          const empId = typeof emp.id === 'number' ? emp.id : (typeof emp.id === 'string' ? parseInt(emp.id, 10) : null);
+          if (empId != null && !isNaN(empId) && typeof emp.nama_karyawan === 'string') {
+            map.set(empId, { name: emp.nama_karyawan, color: typeof emp.color === 'string' ? emp.color : null });
+          }
+        });
+        setEmployeesMap(map);
+      } catch (e) {
+        console.warn('Failed to fetch employees:', e);
+      }
+    };
+    loadEmployees();
   }, []);
 
-  // Fetch transactions
+  // Fetch transactions and audit logs for R/RR counters
   const fetchTransactions = useCallback(async () => {
     setIsLoading(true);
     try {
@@ -265,10 +312,47 @@ export default function TransactionsReport() {
       // Get all transactions (no limit for comprehensive report)
       const allTransactions = await electronAPI.localDbGetTransactions(businessId, 50000);
 
-      if (Array.isArray(allTransactions)) {
-        setTransactions(allTransactions as Transaction[]);
-      } else {
-        setTransactions([]);
+      const txList = Array.isArray(allTransactions) ? (allTransactions as Transaction[]) : [];
+      setTransactions(txList);
+
+      // Fetch audit logs for selected date range to build R/RR counters
+      if (startDate && endDate) {
+        const getP1 = (electronAPI as { getPrinter1AuditLog?: (from?: string, to?: string, limit?: number) => Promise<{ entries?: Array<{ transaction_id?: string; printer1_receipt_number?: number; is_reprint?: number }> }> }).getPrinter1AuditLog;
+        const getP2 = (electronAPI as { getPrinter2AuditLog?: (from?: string, to?: string, limit?: number) => Promise<{ entries?: Array<{ transaction_id?: string; printer2_receipt_number?: number; is_reprint?: number }> }> }).getPrinter2AuditLog;
+
+        const originalReceipt: Record<string, number> = {};
+        const originalReceiptize: Record<string, number> = {};
+
+        if (getP2) {
+          try {
+            const r2 = await getP2(startDate, endDate, 5000);
+            const entries = Array.isArray(r2?.entries) ? r2.entries : [];
+            for (const e of entries) {
+              if (e?.transaction_id == null || e?.is_reprint === 1) continue;
+              const txId = String(e.transaction_id);
+              const v = Number(e.printer2_receipt_number);
+              if (!isNaN(v) && !(txId in originalReceiptize)) originalReceiptize[txId] = v;
+            }
+            setReceiptizeCounters(originalReceiptize);
+          } catch (_) {
+            setReceiptizeCounters({});
+          }
+        }
+        if (getP1) {
+          try {
+            const r1 = await getP1(startDate, endDate, 5000);
+            const entries = Array.isArray(r1?.entries) ? r1.entries : [];
+            for (const e of entries) {
+              if (e?.transaction_id == null || e?.is_reprint === 1) continue;
+              const txId = String(e.transaction_id);
+              const v = Number(e.printer1_receipt_number);
+              if (!isNaN(v) && !(txId in originalReceipt)) originalReceipt[txId] = v;
+            }
+            setReceiptCounters(originalReceipt);
+          } catch (_) {
+            setReceiptCounters({});
+          }
+        }
       }
     } catch (error) {
       console.error('Error fetching transactions:', error);
@@ -276,14 +360,14 @@ export default function TransactionsReport() {
     } finally {
       setIsLoading(false);
     }
-  }, [businessId]);
+  }, [businessId, startDate, endDate]);
 
   // Initial load
   useEffect(() => {
     fetchTransactions();
   }, [fetchTransactions]);
 
-  // Apply filters
+  // Apply filters — show only transactions that have R or RR in the selected date range
   useEffect(() => {
     let filtered = [...transactions];
 
@@ -296,6 +380,14 @@ export default function TransactionsReport() {
       const { dayEndUtc } = getGmt7DayBounds(endDate);
       filtered = filtered.filter(tx => new Date(tx.created_at).getTime() <= dayEndUtc.getTime());
     }
+
+    // Restrict to transactions that have at least one R or RR in the date range
+    filtered = filtered.filter(tx => {
+      const txId = String(tx.id);
+      const hasR = typeof receiptCounters[txId] === 'number' && receiptCounters[txId] > 0;
+      const hasRR = typeof receiptizeCounters[txId] === 'number' && receiptizeCounters[txId] > 0;
+      return hasR || hasRR;
+    });
 
     // User filter
     if (selectedUserId !== 'all') {
@@ -312,15 +404,6 @@ export default function TransactionsReport() {
       filtered = filtered.filter(tx => tx.status === selectedStatus);
     }
 
-    // Sync status filter
-    if (selectedSyncStatus !== 'all') {
-      if (selectedSyncStatus === 'synced') {
-        filtered = filtered.filter(tx => tx.synced_at != null);
-      } else if (selectedSyncStatus === 'unsynced') {
-        filtered = filtered.filter(tx => tx.synced_at == null);
-      }
-    }
-
     // Search filter (receipt number, customer name, UUID)
     if (searchQuery.trim()) {
       const query = searchQuery.toLowerCase().trim();
@@ -332,48 +415,107 @@ export default function TransactionsReport() {
     }
 
     setFilteredTransactions(filtered);
+  }, [transactions, startDate, endDate, receiptCounters, receiptizeCounters, selectedUserId, selectedPaymentMethod, selectedStatus, searchQuery]);
 
-    // Calculate stats
-    const totalAmount = filtered.reduce((sum, tx) => sum + (tx.total_amount || 0), 0);
-    const totalFinalAmount = filtered.reduce((sum, tx) => sum + (tx.final_amount || 0), 0);
-    const totalDiscount = totalAmount - totalFinalAmount;
-    const syncedCount = filtered.filter(tx => tx.synced_at != null).length;
-    const unsyncedCount = filtered.filter(tx => tx.synced_at == null).length;
+  // Fetch distinct item-level waiter IDs per transaction (for multi-waiter tooltip)
+  useEffect(() => {
+    if (transactions.length === 0) {
+      setItemWaiterIdsByTx({});
+      return;
+    }
+    const electronAPI = getElectronAPI() as { localDbGetDistinctItemWaiterIdsByTransaction?: (ids: string[]) => Promise<Record<string, number[]>> };
+    if (!electronAPI?.localDbGetDistinctItemWaiterIdsByTransaction) return;
+    const ids = transactions.map((t) => t.id);
+    electronAPI.localDbGetDistinctItemWaiterIdsByTransaction(ids).then(setItemWaiterIdsByTx).catch(() => setItemWaiterIdsByTx({}));
+  }, [transactions]);
 
-    setStats({
-      totalTransactions: filtered.length,
-      totalAmount,
-      totalFinalAmount,
-      totalDiscount,
-      syncedCount,
-      unsyncedCount,
-    });
-  }, [transactions, startDate, endDate, selectedUserId, selectedPaymentMethod, selectedStatus, selectedSyncStatus, searchQuery]);
-
-  // Load transaction details
+  // Load full transaction detail and open TransactionDetailModal (same as Daftar Transaksi)
   const loadTransactionDetails = async (transaction: Transaction) => {
-    setIsLoading(true);
+    if (transaction.status === 'pending') return;
+    setIsLoadingDetail(true);
+    setDetailTransaction(null);
+    setIsDetailModalOpen(true);
     try {
-      const electronAPI = getElectronAPI();
-      if (!electronAPI?.localDbGetTransactionItems) {
+      const electronAPI = getElectronAPI() as {
+        localDbGetTransactions?: (bid: number, limit: number) => Promise<unknown[]>;
+        localDbGetTransactionItems?: (uuid: string) => Promise<unknown[]>;
+        localDbGetAllProducts?: (bid?: number) => Promise<Array<{ id: number; nama: string }>>;
+        localDbGetUsers?: () => Promise<Array<{ id: number; name: string }>>;
+        localDbGetBusinesses?: () => Promise<Array<{ id: number; name: string }>>;
+        localDbGetTransactionRefunds?: (uuid: string) => Promise<TransactionRefund[]>;
+      };
+      if (!electronAPI?.localDbGetTransactions || !electronAPI?.localDbGetTransactionItems) {
+        setIsDetailModalOpen(false);
         return;
       }
-
-      const allItems = await electronAPI.localDbGetTransactionItems(transaction.id);
-      const itemsArray = Array.isArray(allItems) ? allItems : [];
-      // Filter out cancelled items - they should not appear in transaction details
-      const activeItems = (itemsArray as Array<{ production_status?: string | null }>).filter((item) => {
-        const productionStatus = typeof item.production_status === 'string' ? item.production_status : null;
-        return productionStatus !== 'cancelled';
+      const txList = (await electronAPI.localDbGetTransactions(businessId, 10000)) as Array<Record<string, unknown>>;
+      const tx = txList.find((t) => String(t.id) === String(transaction.id)) as Record<string, unknown> | undefined;
+      if (!tx) {
+        setIsDetailModalOpen(false);
+        return;
+      }
+      const transactionUuid = String(tx.id);
+      const allItems = (await electronAPI.localDbGetTransactionItems(transactionUuid)) as Array<{ production_status?: string | null; product_id: number; product_name?: string; quantity: number; unit_price: number; total_price: number; custom_note?: string | null; customizations?: unknown; bundleSelections?: unknown; id: string }>;
+      const items = (Array.isArray(allItems) ? allItems : []).filter((item) => item.production_status !== 'cancelled');
+      const products = electronAPI.localDbGetAllProducts ? await electronAPI.localDbGetAllProducts(businessId) : [];
+      const usersList = electronAPI.localDbGetUsers ? await electronAPI.localDbGetUsers() : [];
+      const businessesList = electronAPI.localDbGetBusinesses ? await electronAPI.localDbGetBusinesses() : [];
+      const refunds: TransactionRefund[] = electronAPI.localDbGetTransactionRefunds ? await electronAPI.localDbGetTransactionRefunds(transaction.id) : [];
+      const userObj = usersList.find((u) => u.id === (tx.user_id as number));
+      const businessObj = businessesList.find((b) => b.id === (tx.business_id as number));
+      const refundTotalValue = (tx.refund_total as number) ?? refunds.reduce((s, r) => s + (r.refund_amount ?? 0), 0);
+      const finalAmount = Number(tx.final_amount ?? 0);
+      const refundStatusValue = refundTotalValue > 0 ? (refundTotalValue >= finalAmount - 0.01 ? 'full' : 'partial') : 'none';
+      const mappedItems = items.map((item) => {
+        const product = products.find((p) => p.id === (typeof item.product_id === 'number' ? item.product_id : Number(item.product_id)));
+        const productName = (item.product_name && String(item.product_name).trim()) || (product?.nama && String(product.nama).trim()) || 'Unknown Product';
+        const customizations = Array.isArray(item.customizations) ? item.customizations : item.customizations ? [item.customizations] : [];
+        const parsePrice = (v: unknown): number => (typeof v === 'number' && !isNaN(v) ? v : (Number(v) || 0));
+        return {
+          id: item.id,
+          product_name: productName,
+          quantity: item.quantity,
+          unit_price: parsePrice(item.unit_price),
+          total_price: parsePrice(item.total_price),
+          custom_note: item.custom_note || undefined,
+          customizations,
+          bundleSelections: item.bundleSelections,
+        };
       });
-      setSelectedTransactionItems(activeItems as TransactionItem[]);
-      setSelectedTransaction(transaction);
-      setViewMode('detail');
-    } catch (error) {
-      console.error('Error loading transaction details:', error);
+      const response: TransactionDetail = {
+        ...tx,
+        id: transactionUuid,
+        user_name: userObj?.name ?? 'Unknown User',
+        business_name: businessObj?.name ?? 'Unknown Business',
+        payment_method: (tx.payment_method as TransactionDetail['payment_method']) ?? 'cash',
+        pickup_method: (tx.pickup_method as TransactionDetail['pickup_method']) ?? 'dine-in',
+        transaction_type: (tx.transaction_type as TransactionDetail['transaction_type']) ?? 'drinks',
+        voucher_type: (tx.voucher_type as TransactionDetail['voucher_type']) ?? 'none',
+        items: mappedItems,
+        refunds,
+        refund_total: refundTotalValue,
+        refund_status: refundStatusValue,
+      } as TransactionDetail;
+      setDetailTransaction(response);
+    } catch (err) {
+      console.error('Error loading transaction details:', err);
+      setIsDetailModalOpen(false);
     } finally {
-      setIsLoading(false);
+      setIsLoadingDetail(false);
     }
+  };
+
+  const handleCloseDetailModal = () => {
+    setIsDetailModalOpen(false);
+    setDetailTransaction(null);
+  };
+
+  const handleTransactionUpdated = (updated: TransactionDetail) => {
+    setDetailTransaction(updated);
+    setTransactions((prev) =>
+      prev.map((t) => (t.id === updated.id ? { ...t, refund_status: updated.refund_status ?? t.refund_status, refund_total: updated.refund_total ?? t.refund_total } : t))
+    );
+    fetchTransactions();
   };
 
   // Export to CSV
@@ -424,498 +566,374 @@ export default function TransactionsReport() {
     document.body.removeChild(link);
   };
 
+  // User id -> name for Kasir column
+  const userIdToName = Object.fromEntries((users || []).map(u => [u.user_id, u.user_name]));
+
+  // Resolve # (daily counter): RR first, then R, then receipt_number
+  const resolveReceiptSequence = (tx: Transaction) => {
+    const txId = String(tx.id);
+    const rr = receiptizeCounters[txId];
+    if (typeof rr === 'number' && rr > 0) return rr;
+    const r = receiptCounters[txId];
+    if (typeof r === 'number' && r > 0) return r;
+    return typeof tx.receipt_number === 'number' ? tx.receipt_number : 0;
+  };
+
+  // Print report for selected date range (like Ganti Shift)
+  const handlePrintReport = async () => {
+    const electronAPI = getElectronAPI() as { printTransactionsReport?: (payload: {
+      businessId: number;
+      businessName: string;
+      dateRangeStart: string;
+      dateRangeEnd: string;
+      transactions: Array<{
+        num: number;
+        badge: 'R' | 'RR';
+        uuid: string;
+        waktu: string;
+        metode: string;
+        diTa: string;
+        total: string;
+        discVc: string;
+        final: string;
+        refund: string;
+        pelanggan: string;
+        waiter: string;
+        kasir: string;
+      }>;
+    }) => Promise<{ success: boolean; error?: string }> };
+    if (!electronAPI?.printTransactionsReport) {
+      alert('Print tidak tersedia. Pastikan aplikasi berjalan di Electron.');
+      return;
+    }
+    const rows = filteredTransactions.map(tx => {
+      const txId = String(tx.id);
+      const hasRR = typeof receiptizeCounters[txId] === 'number' && receiptizeCounters[txId] > 0;
+      const hasR = typeof receiptCounters[txId] === 'number' && receiptCounters[txId] > 0;
+      const num = resolveReceiptSequence(tx);
+      const badge: 'R' | 'RR' = hasRR ? 'RR' : 'R';
+      const waiterName = (tx as Transaction & { waiter_id?: number | null }).waiter_id != null && employeesMap.has((tx as Transaction & { waiter_id: number }).waiter_id)
+        ? employeesMap.get((tx as Transaction & { waiter_id: number }).waiter_id)!.name
+        : '-';
+      return {
+        num,
+        badge,
+        uuid: tx.id,
+        waktu: formatDate(tx.created_at) + ' ' + formatTime(tx.created_at),
+        metode: getPaymentLabel(tx.payment_method),
+        diTa: (tx.pickup_method || '').replace('-', ' ') || '-',
+        total: formatRupiah(tx.total_amount || 0),
+        discVc: (tx.voucher_discount ?? 0) > 0 ? formatRupiah(tx.voucher_discount ?? 0) : '-',
+        final: formatRupiah(tx.final_amount || 0),
+        refund: (tx.refund_total ?? 0) > 0 ? formatRupiah(tx.refund_total ?? 0) : '-',
+        pelanggan: tx.customer_name || 'Guest',
+        waiter: waiterName,
+        kasir: userIdToName[tx.user_id] ?? '-',
+      };
+    });
+    try {
+      const result = await electronAPI.printTransactionsReport({
+        businessId,
+        businessName: businessName || 'Business',
+        dateRangeStart: startDate,
+        dateRangeEnd: endDate,
+        transactions: rows,
+      });
+      if (!result?.success && result?.error) alert(result.error);
+    } catch (err) {
+      console.error('Print error:', err);
+      alert('Gagal mencetak laporan');
+    }
+  };
+
   // Get unique payment methods from transactions
   const paymentMethods = Array.from(new Set(transactions.map(tx => tx.payment_method))).sort();
 
-  if (viewMode === 'detail' && selectedTransaction) {
-    const transaction = selectedTransaction;
-
-    return (
-      <div className="flex-1 flex flex-col bg-gray-50 overflow-hidden">
-        {/* Detail Header */}
-        <div className="bg-white border-b border-gray-200 px-6 py-4 flex items-center justify-between shadow-sm">
-          <div className="flex items-center space-x-4">
-            <button
-              onClick={() => setViewMode('list')}
-              className="p-2 hover:bg-gray-100 rounded-full transition-colors"
-            >
-              <ChevronRight className="w-6 h-6 text-gray-900 rotate-180" />
-            </button>
-            <div>
-              <h2 className="text-xl font-bold text-gray-900">Transaction Details</h2>
-              <p className="text-sm text-gray-600">
-                Receipt #{transaction.receipt_number} • {formatDateTime(transaction.created_at)}
-              </p>
-            </div>
-          </div>
-          <div className="flex items-center gap-2">
-            {transaction.synced_at ? (
-              <span className="flex items-center gap-1 px-3 py-1 bg-green-100 text-green-800 rounded-full text-sm font-medium">
-                <CheckCircle className="w-4 h-4" />
-                Synced
-              </span>
-            ) : (
-              <span className="flex items-center gap-1 px-3 py-1 bg-yellow-100 text-yellow-800 rounded-full text-sm font-medium">
-                <Clock className="w-4 h-4" />
-                Not Synced
-              </span>
-            )}
-          </div>
-        </div>
-
-        {/* Detail Content */}
-        <div className="flex-1 overflow-y-auto p-6 space-y-6">
-          {/* Transaction Info Cards */}
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
-            <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-4">
-              <div className="text-sm font-medium text-gray-600 mb-1">Customer</div>
-              <div className="text-lg font-bold text-gray-900">
-                {transaction.customer_name || 'Guest'}
-              </div>
-              {transaction.customer_unit && (
-                <div className="text-sm text-gray-600 mt-1">Unit {transaction.customer_unit}</div>
-              )}
-            </div>
-
-            <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-4">
-              <div className="text-sm font-medium text-gray-600 mb-1">Payment Method</div>
-              <div className="text-lg font-bold text-gray-900">
-                {formatPaymentMethod(transaction.payment_method)}
-              </div>
-              <div className="text-sm text-gray-600 mt-1">
-                {formatPlatform(transaction.platform)}
-              </div>
-            </div>
-
-            <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-4">
-              <div className="text-sm font-medium text-gray-600 mb-1">Amount</div>
-              <div className="text-lg font-bold text-gray-900">
-                {formatRupiah(transaction.final_amount)}
-              </div>
-              {transaction.voucher_discount && transaction.voucher_discount > 0 && (
-                <div className="text-sm text-green-600 mt-1">
-                  Discount: {formatRupiah(transaction.voucher_discount)}
-                </div>
-              )}
-            </div>
-
-            <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-4">
-              <div className="text-sm font-medium text-gray-600 mb-1">Status</div>
-              <div className="flex flex-col gap-2">
-                <span className={`inline-flex items-center px-2 py-1 rounded-full text-xs font-medium ${transaction.status === 'paid' || transaction.status === 'completed'
-                    ? 'bg-green-100 text-green-800'
-                    : 'bg-yellow-100 text-yellow-800'
-                  }`}>
-                  {transaction.status === 'completed' ? 'paid' : transaction.status}
-                </span>
-                {transaction.refund_status && (
-                  <span className="inline-flex items-center px-2 py-1 rounded-full text-xs font-medium bg-red-100 text-red-800">
-                    {transaction.refund_status}
-                  </span>
-                )}
-              </div>
-            </div>
-          </div>
-
-          {/* Items Table */}
-          <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
-            <div className="px-6 py-4 border-b border-gray-200">
-              <h3 className="text-lg font-semibold text-gray-900">Items</h3>
-            </div>
-            <div className="overflow-x-auto">
-              <table className="w-full text-sm text-left">
-                <thead className="bg-gray-50 text-gray-900 font-medium border-b border-gray-200">
-                  <tr>
-                    <th className="px-6 py-3">Product</th>
-                    <th className="px-6 py-3 text-right">Qty</th>
-                    <th className="px-6 py-3 text-right">Unit Price</th>
-                    <th className="px-6 py-3 text-right">Total</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-gray-100">
-                  {selectedTransactionItems.length > 0 ? (
-                    selectedTransactionItems.map((item, idx) => (
-                      <tr key={idx} className="hover:bg-gray-50">
-                        <td className="px-6 py-3">
-                          <div className="font-medium text-gray-900">{item.product_name || `Product #${item.product_id}`}</div>
-                          {item.custom_note && (
-                            <div className="text-xs text-gray-600 mt-1">Note: {item.custom_note}</div>
-                          )}
-                        </td>
-                        <td className="px-6 py-3 text-right font-medium text-gray-900">{item.quantity}</td>
-                        <td className="px-6 py-3 text-right font-medium text-gray-900">{formatRupiah(item.unit_price)}</td>
-                        <td className="px-6 py-3 text-right font-medium text-gray-900">{formatRupiah(item.total_price)}</td>
-                      </tr>
-                    ))
-                  ) : (
-                    <tr>
-                      <td colSpan={4} className="px-6 py-8 text-center text-gray-500">No items found</td>
-                    </tr>
-                  )}
-                </tbody>
-                {selectedTransactionItems.length > 0 && (
-                  <tfoot className="bg-gray-50 font-semibold text-gray-900">
-                    <tr>
-                      <td className="px-6 py-3" colSpan={3}>Total</td>
-                      <td className="px-6 py-3 text-right">
-                        {formatRupiah(selectedTransactionItems.reduce((sum, item) => sum + item.total_price, 0))}
-                      </td>
-                    </tr>
-                  </tfoot>
-                )}
-              </table>
-            </div>
-          </div>
-
-          {/* Additional Info */}
-          <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
-            <h3 className="text-lg font-semibold text-gray-900 mb-4">Additional Information</h3>
-            <div className="grid grid-cols-2 gap-4 text-sm">
-              <div>
-                <span className="text-gray-600">UUID:</span>
-                <span className="ml-2 font-mono text-xs text-gray-900">{transaction.id}</span>
-              </div>
-              <div>
-                <span className="text-gray-600">Receipt Number:</span>
-                <span className="ml-2 font-medium text-gray-900">#{transaction.receipt_number}</span>
-              </div>
-              <div>
-                <span className="text-gray-600">Transaction Type:</span>
-                <span className="ml-2 font-medium text-gray-900">{transaction.transaction_type}</span>
-              </div>
-              <div>
-                <span className="text-gray-600">Pickup Method:</span>
-                <span className="ml-2 font-medium text-gray-900">{transaction.pickup_method}</span>
-              </div>
-              {transaction.amount_received && (
-                <div>
-                  <span className="text-gray-600">Amount Received:</span>
-                  <span className="ml-2 font-medium text-gray-900">{formatRupiah(transaction.amount_received)}</span>
-                </div>
-              )}
-              {transaction.change_amount && transaction.change_amount > 0 && (
-                <div>
-                  <span className="text-gray-600">Change:</span>
-                  <span className="ml-2 font-medium text-gray-900">{formatRupiah(transaction.change_amount)}</span>
-                </div>
-              )}
-            </div>
-          </div>
-        </div>
-      </div>
-    );
-  }
-
-  // List View
+  // List View — row click opens TransactionDetailModal (same as Daftar Transaksi)
   return (
+    <>
     <div className="flex-1 flex flex-col overflow-hidden bg-gray-50">
-      {/* Header */}
-      <div className="bg-white border-b border-gray-200 px-6 py-4">
-        <div className="flex items-center justify-between mb-4">
-          <h1 className="text-2xl font-bold text-gray-900">All Transactions</h1>
-          <div className="flex gap-2">
-            <button
-              onClick={fetchTransactions}
-              disabled={isLoading}
-              className="flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg transition-colors disabled:opacity-50"
-            >
-              <RefreshCw className={`w-4 h-4 ${isLoading ? 'animate-spin' : ''}`} />
-              Refresh
-            </button>
-            <button
-              onClick={exportToCSV}
-              disabled={filteredTransactions.length === 0}
-              className="flex items-center gap-2 px-4 py-2 bg-green-600 hover:bg-green-700 text-white rounded-lg transition-colors disabled:opacity-50"
-            >
-              <Download className="w-4 h-4" />
-              Export CSV
-            </button>
-            <button
-              onClick={() => setShowFilters(!showFilters)}
-              className="flex items-center gap-2 px-4 py-2 bg-gray-100 hover:bg-gray-200 text-gray-700 rounded-lg transition-colors"
-            >
-              <Filter className="w-4 h-4" />
-              {showFilters ? 'Hide Filters' : 'Show Filters'}
-            </button>
-          </div>
-        </div>
-
-        {/* Stats Cards */}
-        <div className="grid grid-cols-2 md:grid-cols-6 gap-3 mb-4">
-          <div className="bg-blue-50 rounded-lg p-3 border border-blue-200">
-            <div className="text-xs text-blue-600 font-medium mb-1">Total Transactions</div>
-            <div className="text-lg font-bold text-blue-900">{stats.totalTransactions}</div>
-          </div>
-          <div className="bg-green-50 rounded-lg p-3 border border-green-200">
-            <div className="text-xs text-green-600 font-medium mb-1">Total Amount</div>
-            <div className="text-lg font-bold text-green-900">{formatRupiah(stats.totalAmount)}</div>
-          </div>
-          <div className="bg-purple-50 rounded-lg p-3 border border-purple-200">
-            <div className="text-xs text-purple-600 font-medium mb-1">Final Amount</div>
-            <div className="text-lg font-bold text-purple-900">{formatRupiah(stats.totalFinalAmount)}</div>
-          </div>
-          <div className="bg-orange-50 rounded-lg p-3 border border-orange-200">
-            <div className="text-xs text-orange-600 font-medium mb-1">Total Discount</div>
-            <div className="text-lg font-bold text-orange-900">{formatRupiah(stats.totalDiscount)}</div>
-          </div>
-          <div className="bg-teal-50 rounded-lg p-3 border border-teal-200">
-            <div className="text-xs text-teal-600 font-medium mb-1">Synced</div>
-            <div className="text-lg font-bold text-teal-900">{stats.syncedCount}</div>
-          </div>
-          <div className="bg-yellow-50 rounded-lg p-3 border border-yellow-200">
-            <div className="text-xs text-yellow-600 font-medium mb-1">Not Synced</div>
-            <div className="text-lg font-bold text-yellow-900">{stats.unsyncedCount}</div>
-          </div>
-        </div>
-
-        {/* Filters */}
-        {showFilters && (
-          <div className="bg-gray-50 rounded-lg p-4 space-y-3">
-            {/* Search */}
-            <div className="relative">
-              <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
-              <input
-                type="text"
-                value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
-                placeholder="Search by receipt #, customer name, or UUID..."
-                className="w-full pl-10 pr-10 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500 text-gray-900"
-              />
-              {searchQuery && (
-                <button
-                  onClick={() => setSearchQuery('')}
-                  className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600"
-                >
-                  <X className="w-4 h-4" />
-                </button>
-              )}
-            </div>
-
-            {/* Filter Grid */}
-            <div className="grid grid-cols-1 md:grid-cols-6 gap-3">
-              {/* Date Range */}
-              <div>
-                <label className="block text-xs font-medium text-gray-700 mb-1">Start Date</label>
+      {/* Header — filters and Export/Print in one row; Export/Print stuck right */}
+      <div className="bg-white border-b border-gray-200 px-6 py-3">
+        <div className="bg-gray-50 rounded-lg p-3">
+            <div className="flex flex-wrap items-center gap-2">
+              <div className="flex flex-wrap items-center gap-2 flex-1 min-w-0">
+              {/* Search — no label, placeholder only */}
+              <div className="relative flex-1 min-w-[100px] max-w-[153px]">
+                <Search className="absolute left-2 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-gray-400" />
+                <input
+                  type="text"
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
+                  placeholder="Search..."
+                  className="w-full pl-8 pr-7 py-1.5 border border-gray-300 rounded text-xs focus:ring-2 focus:ring-blue-500 focus:border-blue-500 text-gray-900"
+                />
+                {searchQuery && (
+                  <button
+                    onClick={() => setSearchQuery('')}
+                    className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600"
+                  >
+                    <X className="w-3 h-3" />
+                  </button>
+                )}
+              </div>
+              {/* Start — date picker, default range; no label */}
+              <div className="min-w-0 max-w-[130px]">
                 <div className="relative">
-                  <Calendar className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
+                  <Calendar className="absolute left-2 top-1/2 -translate-y-1/2 w-3 h-3 text-gray-400" />
                   <input
                     type="date"
                     value={startDate}
                     onChange={(e) => setStartDate(e.target.value)}
-                    className="w-full pl-10 pr-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500 text-gray-900"
+                    className="w-full pl-7 pr-2 py-1.5 border border-gray-300 rounded text-xs focus:ring-2 focus:ring-blue-500 focus:border-blue-500 text-gray-900"
                   />
                 </div>
               </div>
-              <div>
-                <label className="block text-xs font-medium text-gray-700 mb-1">End Date</label>
+              {/* End — date picker; no label */}
+              <div className="min-w-0 max-w-[130px]">
                 <div className="relative">
-                  <Calendar className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
+                  <Calendar className="absolute left-2 top-1/2 -translate-y-1/2 w-3 h-3 text-gray-400" />
                   <input
                     type="date"
                     value={endDate}
                     onChange={(e) => setEndDate(e.target.value)}
-                    className="w-full pl-10 pr-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500 text-gray-900"
+                    className="w-full pl-7 pr-2 py-1.5 border border-gray-300 rounded text-xs focus:ring-2 focus:ring-blue-500 focus:border-blue-500 text-gray-900"
                   />
                 </div>
               </div>
-
-              {/* User */}
-              <div>
-                <label className="block text-xs font-medium text-gray-700 mb-1">User</label>
+              {/* User — default All; no label */}
+              <div className="min-w-0 max-w-[110px]">
                 <div className="relative">
-                  <User className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
+                  <User className="absolute left-2 top-1/2 -translate-y-1/2 w-3 h-3 text-gray-400" />
                   <select
                     value={selectedUserId}
                     onChange={(e) => setSelectedUserId(e.target.value)}
-                    className="w-full pl-10 pr-8 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500 appearance-none bg-white text-gray-900"
+                    className="w-full pl-6 pr-6 py-1.5 border border-gray-300 rounded text-xs focus:ring-2 focus:ring-blue-500 focus:border-blue-500 appearance-none bg-white text-gray-900"
                   >
-                    <option value="all">All Users</option>
+                    <option value="all">All</option>
                     {users.map(user => (
                       <option key={user.user_id} value={user.user_id}>{user.user_name}</option>
                     ))}
                   </select>
-                  <ChevronDown className="absolute right-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400 pointer-events-none" />
+                  <ChevronDown className="absolute right-2 top-1/2 -translate-y-1/2 w-3 h-3 text-gray-400 pointer-events-none" />
                 </div>
               </div>
-
-              {/* Payment Method */}
-              <div>
-                <label className="block text-xs font-medium text-gray-700 mb-1">Payment</label>
+              {/* Payment — default All; no label */}
+              <div className="min-w-0 max-w-[110px]">
                 <div className="relative">
-                  <CreditCard className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
+                  <CreditCard className="absolute left-2 top-1/2 -translate-y-1/2 w-3 h-3 text-gray-400" />
                   <select
                     value={selectedPaymentMethod}
                     onChange={(e) => setSelectedPaymentMethod(e.target.value)}
-                    className="w-full pl-10 pr-8 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500 appearance-none bg-white text-gray-900"
+                    className="w-full pl-6 pr-6 py-1.5 border border-gray-300 rounded text-xs focus:ring-2 focus:ring-blue-500 focus:border-blue-500 appearance-none bg-white text-gray-900"
                   >
-                    <option value="all">All Methods</option>
+                    <option value="all">All</option>
                     {paymentMethods.map(method => (
                       <option key={method} value={method}>{formatPaymentMethod(method)}</option>
                     ))}
                   </select>
-                  <ChevronDown className="absolute right-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400 pointer-events-none" />
+                  <ChevronDown className="absolute right-2 top-1/2 -translate-y-1/2 w-3 h-3 text-gray-400 pointer-events-none" />
                 </div>
               </div>
-
-              {/* Status */}
-              <div>
-                <label className="block text-xs font-medium text-gray-700 mb-1">Status</label>
+              {/* Status — default All; no label */}
+              <div className="min-w-0 max-w-[100px]">
                 <select
                   value={selectedStatus}
                   onChange={(e) => setSelectedStatus(e.target.value)}
-                  className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500 bg-white text-gray-900"
+                  className="w-full px-2 py-1.5 border border-gray-300 rounded text-xs focus:ring-2 focus:ring-blue-500 focus:border-blue-500 bg-white text-gray-900"
                 >
-                  <option value="all">All Status</option>
+                  <option value="all">All</option>
                   <option value="completed">Completed</option>
                   <option value="pending">Pending</option>
                   <option value="cancelled">Cancelled</option>
                 </select>
               </div>
-
-              {/* Sync Status */}
-              <div>
-                <label className="block text-xs font-medium text-gray-700 mb-1">Sync Status</label>
-                <select
-                  value={selectedSyncStatus}
-                  onChange={(e) => setSelectedSyncStatus(e.target.value)}
-                  className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500 bg-white text-gray-900"
-                >
-                  <option value="all">All</option>
-                  <option value="synced">Synced</option>
-                  <option value="unsynced">Not Synced</option>
-                </select>
-              </div>
-            </div>
-
-            {/* Clear Filters */}
-            <div className="flex justify-end">
+              {/* Refresh — icon only, same height as dropdowns/inputs (py-1.5 + border to match) */}
+              <button
+                onClick={fetchTransactions}
+                disabled={isLoading}
+                title="Refresh"
+                className="flex items-center justify-center min-w-8 px-2 py-1.5 text-white bg-blue-600 hover:bg-blue-700 rounded border border-blue-600 transition-colors disabled:opacity-50 flex-shrink-0"
+              >
+                <RefreshCw className={`w-3.5 h-3.5 ${isLoading ? 'animate-spin' : ''}`} />
+              </button>
+              {/* Clear All Filters — same line */}
               <button
                 onClick={() => {
                   setSearchQuery('');
                   setSelectedUserId('all');
                   setSelectedPaymentMethod('all');
                   setSelectedStatus('all');
-                  setSelectedSyncStatus('all');
-
-                  // Reset to last 30 days in GMT+7
                   const gmt7Offset = 7 * 60 * 60 * 1000;
                   const now = new Date();
                   const nowGmt7 = new Date(now.getTime() + gmt7Offset);
-
                   const end = new Date(nowGmt7);
                   const start = new Date(nowGmt7);
                   start.setUTCDate(start.getUTCDate() - 30);
-
-                  const formatDateInput = (date: Date) => {
-                    const year = date.getUTCFullYear();
-                    const month = String(date.getUTCMonth() + 1).padStart(2, '0');
-                    const day = String(date.getUTCDate()).padStart(2, '0');
-                    return `${year}-${month}-${day}`;
-                  };
-
+                  const formatDateInput = (d: Date) =>
+                    `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}-${String(d.getUTCDate()).padStart(2, '0')}`;
                   setEndDate(formatDateInput(end));
                   setStartDate(formatDateInput(start));
                 }}
-                className="flex items-center gap-2 px-3 py-1 text-sm bg-gray-200 hover:bg-gray-300 text-gray-700 rounded-lg transition-colors"
+                className="flex items-center gap-1.5 px-2.5 py-1.5 text-xs bg-gray-200 hover:bg-gray-300 text-gray-700 rounded transition-colors flex-shrink-0"
               >
-                <X className="w-4 h-4" />
-                Clear All Filters
+                <X className="w-3 h-3" />
+                Clear
               </button>
+              </div>
+              {/* Export CSV & Print — stuck right, same size */}
+              <div className="flex items-center gap-2 flex-shrink-0">
+                <button
+                  onClick={exportToCSV}
+                  disabled={filteredTransactions.length === 0}
+                  className="flex items-center justify-center gap-1.5 min-w-[7.5rem] px-3 py-1.5 text-sm bg-green-600 hover:bg-green-700 text-white rounded-lg transition-colors disabled:opacity-50"
+                >
+                  <Download className="w-3.5 h-3.5 flex-shrink-0" />
+                  Export CSV
+                </button>
+                <button
+                  onClick={handlePrintReport}
+                  disabled={filteredTransactions.length === 0}
+                  className="flex items-center justify-center gap-1.5 min-w-[7.5rem] px-3 py-1.5 text-sm bg-green-600 hover:bg-green-700 text-white rounded-lg transition-colors disabled:opacity-50"
+                >
+                  <Printer className="w-3.5 h-3.5 flex-shrink-0" />
+                  Print
+                </button>
+              </div>
             </div>
           </div>
-        )}
       </div>
 
-      {/* Table */}
+      {/* Table — Daftar Transaksi style: #, UUID, Waktu, Metode, DI/TA, Total, Disc/Vc, Final, Refund, Pelanggan, Waiter, Kasir */}
       <div className="flex-1 overflow-auto p-4">
         <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
           <table className="w-full text-sm text-left">
             <thead className="bg-gray-50 text-gray-900 font-semibold border-b border-gray-200">
               <tr>
-                <th className="px-4 py-3">Receipt #</th>
-                <th className="px-4 py-3">Date</th>
-                <th className="px-4 py-3">Customer</th>
-                <th className="px-4 py-3">Payment</th>
-                <th className="px-4 py-3">Platform</th>
-                <th className="px-4 py-3 text-right">Amount</th>
-                <th className="px-4 py-3 text-center">Status</th>
-                <th className="px-4 py-3 text-center">Sync</th>
-                <th className="px-4 py-3"></th>
+                <th className="pl-3 pr-2 py-3 text-[10px] font-medium text-gray-500 uppercase tracking-wider" style={{ minWidth: '4rem' }}>#</th>
+                <th className="px-2 py-3 text-[10px] font-medium text-gray-500 uppercase tracking-wider">UUID</th>
+                <th className="px-2 py-3 text-[10px] font-medium text-gray-500 uppercase tracking-wider">Waktu</th>
+                <th className="px-2 py-3 text-[10px] font-medium text-gray-500 uppercase tracking-wider">Metode</th>
+                <th className="px-2 py-3 text-[10px] font-medium text-gray-500 uppercase tracking-wider w-16">DI/TA</th>
+                <th className="px-2 py-3 text-[10px] font-medium text-gray-500 uppercase tracking-wider">Total</th>
+                <th className="px-2 py-3 text-[10px] font-medium text-gray-500 uppercase tracking-wider">Disc/Vc</th>
+                <th className="px-2 py-3 text-[10px] font-medium text-gray-500 uppercase tracking-wider">Final</th>
+                <th className="px-4 py-3 text-[10px] font-medium text-gray-500 uppercase tracking-wider">Refund</th>
+                <th className="px-2 py-3 text-[10px] font-medium text-gray-500 uppercase tracking-wider">Pelanggan</th>
+                <th className="px-2 py-3 text-[10px] font-medium text-gray-500 uppercase tracking-wider w-24">Waiter</th>
+                <th className="px-2 py-3 text-[10px] font-medium text-gray-500 uppercase tracking-wider" style={{ width: '12%' }}>Kasir</th>
+                <th className="px-2 py-3 w-8"></th>
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-100">
               {isLoading ? (
                 <tr>
-                  <td colSpan={9} className="px-4 py-12 text-center">
+                  <td colSpan={13} className="px-4 py-12 text-center">
                     <RefreshCw className="w-8 h-8 text-blue-600 animate-spin mx-auto mb-2" />
                     <p className="text-gray-600">Loading transactions...</p>
                   </td>
                 </tr>
               ) : filteredTransactions.length > 0 ? (
-                filteredTransactions.map((transaction) => (
-                  <tr
-                    key={transaction.id}
-                    onClick={() => loadTransactionDetails(transaction)}
-                    className="hover:bg-blue-50 cursor-pointer transition-colors group"
-                  >
-                    <td className="px-4 py-3">
-                      <div className="font-medium text-blue-600">#{transaction.receipt_number || 'N/A'}</div>
-                    </td>
-                    <td className="px-4 py-3">
-                      <div className="font-medium text-gray-900">{formatDate(transaction.created_at)}</div>
-                      <div className="text-xs text-gray-500">{formatTime(transaction.created_at)}</div>
-                    </td>
-                    <td className="px-4 py-3">
-                      <div className="font-medium text-gray-900">{transaction.customer_name || 'Guest'}</div>
-                      {transaction.customer_unit && (
-                        <div className="text-xs text-gray-500">Unit {transaction.customer_unit}</div>
-                      )}
-                    </td>
-                    <td className="px-4 py-3">
-                      <span className="inline-flex px-2 py-1 text-xs font-semibold rounded-full bg-blue-100 text-blue-800">
-                        {formatPaymentMethod(transaction.payment_method)}
-                      </span>
-                    </td>
-                    <td className="px-4 py-3">
-                      <span className="text-gray-600 text-xs">
-                        {formatPlatform(transaction.platform)}
-                      </span>
-                    </td>
-                    <td className="px-4 py-3 text-right font-medium text-gray-900">
-                      {formatRupiah(transaction.final_amount)}
-                      {transaction.voucher_discount && transaction.voucher_discount > 0 && (
-                        <div className="text-xs text-green-600">-{formatRupiah(transaction.voucher_discount)}</div>
-                      )}
-                    </td>
-                    <td className="px-4 py-3 text-center">
-                      <span className={`inline-flex items-center px-2 py-1 rounded-full text-xs font-medium ${transaction.status === 'paid' || transaction.status === 'completed'
-                          ? 'bg-green-100 text-green-800'
-                          : transaction.status === 'cancelled'
-                            ? 'bg-red-100 text-red-800'
-                            : 'bg-yellow-100 text-yellow-800'
-                        }`}>
-                        {transaction.status === 'completed' ? 'paid' : transaction.status}
-                      </span>
-                    </td>
-                    <td className="px-4 py-3 text-center">
-                      {transaction.synced_at ? (
-                        <CheckCircle className="w-5 h-5 text-green-600 mx-auto" />
-                      ) : (
-                        <XCircle className="w-5 h-5 text-yellow-600 mx-auto" />
-                      )}
-                    </td>
-                    <td className="px-4 py-3 text-right">
-                      <ChevronRight className="w-5 h-5 text-gray-400 group-hover:text-blue-500 transition-colors" />
-                    </td>
-                  </tr>
-                ))
+                filteredTransactions.map((transaction) => {
+                  const txId = String(transaction.id);
+                  const hasRR = typeof receiptizeCounters[txId] === 'number' && receiptizeCounters[txId] > 0;
+                  const hasR = typeof receiptCounters[txId] === 'number' && receiptCounters[txId] > 0;
+                  const displayNum = resolveReceiptSequence(transaction);
+                  const waiterId = (transaction as Transaction & { waiter_id?: number | null }).waiter_id;
+                  const itemIds = itemWaiterIdsByTx[transaction.id] || [];
+                  const allWaiterIds = [...new Set([waiterId, ...itemIds].filter((id): id is number => id != null))];
+                  const primaryWaiterId = waiterId ?? allWaiterIds[0];
+                  const waiterName = primaryWaiterId != null && employeesMap.has(primaryWaiterId) ? employeesMap.get(primaryWaiterId)!.name : '-';
+                  const waiterNamesTooltip = allWaiterIds.length > 1 ? allWaiterIds.map((id) => employeesMap.get(id)?.name).filter(Boolean).join(', ') : undefined;
+                  return (
+                    <tr
+                      key={transaction.id}
+                      onClick={() => loadTransactionDetails(transaction)}
+                      className="hover:bg-blue-50 cursor-pointer transition-colors group"
+                    >
+                      <td className="pl-3 pr-2 py-3 whitespace-nowrap" style={{ minWidth: '4rem' }}>
+                        {hasRR ? (
+                          <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-xs font-medium bg-green-100 text-green-800">
+                            <span>{displayNum}</span>
+                            <span className="inline-block min-w-[1.75rem] text-center">RR</span>
+                          </span>
+                        ) : hasR ? (
+                          <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-xs font-medium bg-blue-100 text-blue-800">
+                            <span>{displayNum}</span>
+                            <span className="inline-block min-w-[1.75rem] text-center">R</span>
+                          </span>
+                        ) : (
+                          <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-xs font-medium bg-gray-100 text-gray-600">
+                            <span>{displayNum}</span>
+                          </span>
+                        )}
+                      </td>
+                      <td className="pl-2 pr-2 py-3 whitespace-nowrap font-mono text-[10px] text-gray-600 truncate max-w-[80px]" title={transaction.id}>{transaction.id}</td>
+                      <td className="px-2 py-3 whitespace-nowrap text-[10px] text-gray-900">{formatDate(transaction.created_at)} {formatTime(transaction.created_at)}</td>
+                      <td className="px-2 py-3 whitespace-nowrap">
+                        <span className={`inline-flex px-1.5 py-0.5 text-xs font-semibold rounded-full ${getPaymentColor(transaction.payment_method)}`}>
+                          {getPaymentLabel(transaction.payment_method)}
+                        </span>
+                      </td>
+                      <td className="px-2 py-3 whitespace-nowrap text-xs text-gray-900 capitalize">{(transaction.pickup_method || '').replace('-', ' ')}</td>
+                      <td className="px-2 py-3 whitespace-nowrap text-xs font-medium text-gray-900">{formatRupiah(transaction.total_amount ?? 0)}</td>
+                      <td className="px-2 py-3 whitespace-nowrap">
+                        {(transaction.voucher_discount ?? 0) > 0 ? (
+                          <span className="text-xs text-green-600 font-medium">-{formatRupiah(transaction.voucher_discount ?? 0)}</span>
+                        ) : (
+                          <span className="text-xs text-gray-400">-</span>
+                        )}
+                      </td>
+                      <td className="px-2 py-3 whitespace-nowrap text-xs font-bold text-gray-900">{formatRupiah(transaction.final_amount ?? 0)}</td>
+                      <td className="px-4 py-3 whitespace-nowrap">
+                        {(transaction.refund_total ?? 0) > 0 ? (
+                          <span className="text-xs text-red-600 font-medium">-{formatRupiah(transaction.refund_total ?? 0)}</span>
+                        ) : (
+                          <span className="text-xs text-gray-400">-</span>
+                        )}
+                      </td>
+                      <td className="px-2 py-3 truncate max-w-[120px] text-xs text-gray-900" title={transaction.customer_name || 'Guest'}>{transaction.customer_name || 'Guest'}</td>
+                      <td className="px-2 py-3 whitespace-nowrap text-xs text-gray-900">
+                        <div
+                          className="relative inline-block"
+                          ref={openWaiterPopoverFor === String(transaction.id) ? waiterPopoverRef : undefined}
+                        >
+                          <button
+                            type="button"
+                            onClick={(e) => { e.stopPropagation(); setOpenWaiterPopoverFor((id) => (id === String(transaction.id) ? null : String(transaction.id))); }}
+                            className="cursor-pointer rounded focus:outline-none focus:ring-2 focus:ring-blue-400 hover:underline"
+                            title={waiterNamesTooltip}
+                          >
+                            {waiterName}
+                            {allWaiterIds.length > 1 && <span className="text-gray-500 ml-0.5">(+{allWaiterIds.length - 1})</span>}
+                          </button>
+                          {openWaiterPopoverFor === String(transaction.id) && (() => {
+                            const names = allWaiterIds.map((id) => employeesMap.get(id)?.name).filter(Boolean) as string[];
+                            return names.length > 0 ? (
+                              <div className="absolute left-0 top-full mt-1 z-50 min-w-[120px] rounded-lg border border-gray-200 bg-white py-2 shadow-lg">
+                                <div className="px-3 py-1 text-xs font-semibold text-gray-500 uppercase">Waiters</div>
+                                {names.map((name, i) => (
+                                  <div key={i} className="px-3 py-1.5 text-sm text-gray-900">{name}</div>
+                                ))}
+                              </div>
+                            ) : null;
+                          })()}
+                        </div>
+                      </td>
+                      <td className="px-2 py-3 text-xs text-gray-900">{userIdToName[transaction.user_id] ?? '-'}</td>
+                      <td className="px-2 py-3 text-right">
+                        <ChevronRight className="w-4 h-4 text-gray-400 group-hover:text-blue-500 transition-colors" />
+                      </td>
+                    </tr>
+                  );
+                })
               ) : (
                 <tr>
-                  <td colSpan={9} className="px-4 py-12 text-center">
+                  <td colSpan={13} className="px-4 py-12 text-center">
                     <div className="flex flex-col items-center justify-center text-gray-500">
                       <Filter className="w-12 h-12 mb-3 text-gray-300" />
                       <p className="font-medium">No transactions found</p>
-                      <p className="text-sm mt-1">Try adjusting your filters</p>
+                      <p className="text-sm mt-1">Pilih rentang tanggal dan pastikan ada transaksi dengan R/RR</p>
                     </div>
                   </td>
                 </tr>
@@ -925,6 +943,16 @@ export default function TransactionsReport() {
         </div>
       </div>
     </div>
+
+    <TransactionDetailModal
+      isOpen={isDetailModalOpen}
+      onClose={handleCloseDetailModal}
+      transaction={detailTransaction}
+      isLoading={isLoadingDetail}
+      canRefund={canRefund}
+      onTransactionUpdated={handleTransactionUpdated}
+    />
+    </>
   );
 }
 

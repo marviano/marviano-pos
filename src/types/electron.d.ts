@@ -26,7 +26,9 @@ declare global {
       total_revenue: number;
     }>;
     paymentBreakdown: Array<{ payment_method_name: string; transaction_count: number; total_amount: number }>;
+    category1Breakdown?: Array<{ category1_name: string; category1_id: number; total_quantity: number; total_amount: number }>;
     category2Breakdown: Array<{ category2_name: string; category2_id: number; total_quantity: number; total_amount: number }>;
+    voucherBreakdown?: Record<string, { count: number; total: number }>;
     cashSummary: {
       cash_shift: number;
       cash_shift_sales?: number;
@@ -61,7 +63,13 @@ declare global {
       // POS functionality
       printReceipt: (data: unknown) => Promise<unknown>;
       printLabel: (data: unknown) => Promise<unknown>;
-      printLabelsBatch: (data: { labels: unknown[]; printerName?: string; printerType?: string }) => Promise<{ success: boolean; error?: string }>;
+      printLabelsBatch: (data: {
+        labels: unknown[];
+        printerName?: string;
+        printerType?: string;
+        business_id?: number;
+        orderContext?: { waiterName?: string; customerName?: string; tableName?: string; orderTime?: string; itemsHtml?: string; itemsHtmlCategory1?: string; itemsHtmlCategory2?: string; category1Name?: string; category2Name?: string };
+      }) => Promise<{ success: boolean; error?: string }>;
       openCashDrawer: () => Promise<unknown>;
       playSound: (soundType: string) => Promise<unknown>;
       // System printers
@@ -207,8 +215,22 @@ declare global {
 
       // Transaction operations
       localDbGetTransactions?: (businessId?: number, limit?: number) => Promise<unknown[]>;
+      localDbUpdateTransactionShift?: (transactionUuid: string, shiftUuid: string | null) => Promise<{ success: boolean; error?: string }>;
+      localDbDeleteSingleTransactionPreview?: (transactionUuid: string) => Promise<{
+        success: boolean;
+        error?: string;
+        transactionUuid?: string;
+        queries?: Array<{ sql: string; params: (string | number)[]; description: string }>;
+        systemPosQueries?: Array<{ sql: string; params: (string | number)[]; description: string }>;
+      }>;
+      localDbDeleteSingleTransaction?: (transactionUuid: string) => Promise<{ success: boolean; error?: string }>;
       localDbUpsertTransactions?: (rows: unknown[]) => Promise<unknown>;
+      localDbUpdateTransactionVoucher?: (transactionId: string, payload: { voucher_discount: number; voucher_type: string; voucher_value: number | null; voucher_label: string | null; final_amount: number }) => Promise<{ success: boolean; error?: string }>;
+      localDbUpdateTransactionWaiter?: (transactionId: string, waiterId: number | null) => Promise<{ success: boolean; error?: string }>;
+      localDbGetTransactionCheckerPrinted?: (transactionUuid: string) => Promise<{ success: boolean; checker_printed: boolean }>;
+      localDbSetTransactionCheckerPrinted?: (transactionUuid: string) => Promise<{ success: boolean }>;
       localDbGetTransactionItems?: (transactionId?: number | string) => Promise<unknown[]>;
+      localDbGetDistinctItemWaiterIdsByTransaction?: (transactionIds: string[]) => Promise<Record<string, number[]>>;
       localDbGetTransactionItemCustomizationsNormalized?: (transactionId: string) => Promise<{
         customizations: Array<{
           id: number;
@@ -234,6 +256,7 @@ declare global {
         userId: number;
         businessId: number;
         shiftUuid?: string | null;
+        shiftUuids?: string[];
         shiftStart: string;
         shiftEnd?: string | null;
       }) => Promise<Array<{
@@ -271,6 +294,8 @@ declare global {
       // Businesses
       localDbUpsertBusinesses?: (rows: unknown[]) => Promise<{ success: boolean }>;
       localDbGetBusinesses?: () => Promise<unknown[]>;
+      cacheBusinessLogoForLogin?: (businessId: number, baseUrl?: string) => Promise<{ success: boolean }>;
+      getLoginLogo?: () => Promise<{ dataUrl: string | null }>;
 
       // Ingredients
       localDbUpsertIngredients?: (rows: unknown[]) => Promise<{ success: boolean }>;
@@ -408,25 +433,33 @@ declare global {
           variance_label: 'balanced' | 'plus' | 'minus';
         };
       }>;
-      localDbGetShiftStatistics?: (userId: number | null, shiftStart: string, shiftEnd: string | null, businessId?: number, shiftUuid?: string | null) => Promise<{
+      localDbGetShiftStatistics?: (userId: number | null, shiftStart: string, shiftEnd: string | null, businessId?: number, shiftUuid?: string | null, shiftUuids?: string[]) => Promise<{
         order_count: number;
         total_amount: number;
         total_discount: number;
         voucher_count: number;
+        total_cu: number;
       }>;
-      localDbGetPaymentBreakdown?: (userId: number | null, shiftStart: string, shiftEnd: string | null, businessId?: number) => Promise<Array<{
+      localDbGetVoucherBreakdown?: (userId: number | null, shiftStart: string, shiftEnd: string | null, businessId?: number, shiftUuid?: string | null, shiftUuids?: string[]) => Promise<Record<string, { count: number; total: number }>>;
+      localDbGetPaymentBreakdown?: (userId: number | null, shiftStart: string, shiftEnd: string | null, businessId?: number, shiftUuid?: string | null, shiftUuids?: string[]) => Promise<Array<{
         payment_method_name: string;
         payment_method_code: string;
         transaction_count: number;
         total_amount: number;
       }>>;
-      localDbGetCategory2Breakdown?: (userId: number | null, shiftStart: string, shiftEnd: string | null, businessId?: number) => Promise<Array<{
+      localDbGetCategory1Breakdown?: (userId: number | null, shiftStart: string, shiftEnd: string | null, businessId?: number, shiftUuid?: string | null, shiftUuids?: string[]) => Promise<Array<{
+        category1_name: string;
+        category1_id: number;
+        total_quantity: number;
+        total_amount: number;
+      }>>;
+      localDbGetCategory2Breakdown?: (userId: number | null, shiftStart: string, shiftEnd: string | null, businessId?: number, shiftUuid?: string | null, shiftUuids?: string[]) => Promise<Array<{
         category2_name: string;
         category2_id: number;
         total_quantity: number;
         total_amount: number;
       }>>;
-      localDbGetCashSummary?: (userId: number | null, shiftStart: string, shiftEnd: string | null, businessId?: number, shiftUuid?: string | null) => Promise<{
+      localDbGetCashSummary?: (userId: number | null, shiftStart: string, shiftEnd: string | null, businessId?: number, shiftUuid?: string | null, shiftUuids?: string[]) => Promise<{
         cash_shift: number;
         cash_shift_sales: number;
         cash_shift_refunds: number;
@@ -445,7 +478,7 @@ declare global {
         earliestTime: string | null;
       }>;
       localDbUpdateShiftStart?: (shiftId: number, newStartTime: string) => Promise<{ success: boolean; error?: string }>;
-      localDbGetProductSales?: (userId: number | null, shiftStart: string, shiftEnd: string | null, businessId?: number) => Promise<{
+      localDbGetProductSales?: (userId: number | null, shiftStart: string, shiftEnd: string | null, businessId?: number, shiftUuid?: string | null, shiftUuids?: string[]) => Promise<{
         products: Array<{
           product_id: number;
           product_name: string;
@@ -469,6 +502,27 @@ declare global {
         }>;
       }>;
       printShiftBreakdown?: (data: ShiftPrintBreakdownPayload) => Promise<{ success: boolean; error?: string }>;
+      printTransactionsReport?: (payload: {
+        businessId: number;
+        businessName: string;
+        dateRangeStart: string;
+        dateRangeEnd: string;
+        transactions: Array<{
+          num: number;
+          badge: 'R' | 'RR';
+          uuid: string;
+          waktu: string;
+          metode: string;
+          diTa: string;
+          total: string;
+          discVc: string;
+          final: string;
+          refund: string;
+          pelanggan: string;
+          waiter: string;
+          kasir: string;
+        }>;
+      }) => Promise<{ success: boolean; error?: string }>;
 
       // Printer configurations
       localDbSavePrinterConfig?: (printerType: string, systemPrinterName: string, extraSettings?: Record<string, unknown>) => Promise<{ success: boolean; error?: string }>;
@@ -487,9 +541,10 @@ declare global {
       savePrinter2AutomationSelections?: (businessId: number, cycleNumber: number, selections: number[]) => Promise<{ success: boolean }>;
       generateRandomSelections?: (cycleNumber: number) => Promise<{ success: boolean; selections: number[] }>;
       logPrinter2Print?: (transactionId: string, printer2ReceiptNumber: number, mode: 'auto' | 'manual', cycleNumber?: number, globalCounter?: number | null, isReprint?: boolean, reprintCount?: number) => Promise<{ success: boolean }>;
-      getPrinter2AuditLog?: (fromDate?: string, toDate?: string, limit?: number) => Promise<{ success: boolean; entries: unknown[] }>;
+      getPrinter2AuditLog?: (fromDate?: string, toDate?: string, limit?: number, transactionId?: string) => Promise<{ success: boolean; entries: unknown[] }>;
       logPrinter1Print?: (transactionId: string, printer1ReceiptNumber: number, globalCounter?: number | null, isReprint?: boolean, reprintCount?: number) => Promise<{ success: boolean }>;
-      getPrinter1AuditLog?: (fromDate?: string, toDate?: string, limit?: number) => Promise<{ success: boolean; entries: unknown[] }>;
+      getPrinter1AuditLog?: (fromDate?: string, toDate?: string, limit?: number, transactionId?: string) => Promise<{ success: boolean; entries: unknown[] }>;
+      moveTransactionToPrinter2?: (transactionId: string) => Promise<{ success: boolean; error?: string }>;
       queueTransactionForSystemPos?: (transactionId: string) => Promise<{ success: boolean; alreadyQueued?: boolean; alreadySynced?: boolean; error?: string }>;
       getSystemPosQueue?: () => Promise<{ success: boolean; queue: Array<{ id: number; transaction_id: string; queued_at: number; synced_at: number | null; retry_count: number; last_error: string | null }> }>;
       markSystemPosSynced?: (transactionId: string) => Promise<{ success: boolean }>;
@@ -549,15 +604,18 @@ declare global {
 
       // Configuration Management
       getAppConfig?: () => Promise<{ success: boolean; config: { serverHost?: string; apiUrl?: string; dbUser?: string; dbPassword?: string; dbName?: string; dbPort?: number } | null; error?: string }>;
+      getEffectiveDbConfig?: () => Promise<{ success: boolean; host?: string; database?: string; port?: number; source?: 'saved' | 'env' | 'default'; error?: string }>;
       saveAppConfig?: (config: { serverHost?: string; apiUrl?: string; dbUser?: string; dbPassword?: string; dbName?: string; dbPort?: number }) => Promise<{ success: boolean; error?: string }>;
       resetAppConfig?: () => Promise<{ success: boolean; error?: string }>;
       testDbConnection?: (config: { serverHost?: string; dbUser?: string; dbPassword?: string; dbName?: string; dbPort?: number }) => Promise<{ success: boolean; message?: string; error?: string }>;
 
       // Receipt Template and Settings Management
-      getReceiptTemplate?: (templateType: 'receipt' | 'bill', businessId?: number) => Promise<{ success: boolean; template: string | null; error?: string }>;
-      getReceiptTemplates?: (templateType: 'receipt' | 'bill', businessId?: number) => Promise<{ success: boolean; templates: Array<{ id: number; name: string; is_default: boolean }>; error?: string }>;
-      setDefaultReceiptTemplate?: (templateType: 'receipt' | 'bill', templateName: string, businessId?: number) => Promise<{ success: boolean; error?: string }>;
-      saveReceiptTemplate?: (templateType: 'receipt' | 'bill', templateCode: string, businessId?: number) => Promise<{ success: boolean; error?: string }>;
+      getReceiptTemplate?: (templateType: 'receipt' | 'bill' | 'checker', businessId?: number) => Promise<{ success: boolean; template: string | null; error?: string }>;
+      getReceiptTemplates?: (templateType: 'receipt' | 'bill' | 'checker', businessId?: number) => Promise<{ success: boolean; templates: Array<{ id: number; name: string; is_default: boolean }>; error?: string }>;
+      getReceiptTemplateById?: (id: number) => Promise<{ success: boolean; templateCode: string | null; showNotes?: boolean; error?: string }>;
+      setDefaultReceiptTemplate?: (templateType: 'receipt' | 'bill' | 'checker', templateName: string, businessId?: number) => Promise<{ success: boolean; error?: string }>;
+      saveReceiptTemplate?: (templateType: 'receipt' | 'bill' | 'checker', templateCode: string, templateName?: string, businessId?: number, showNotes?: boolean) => Promise<{ success: boolean; error?: string }>;
+      updateReceiptTemplate?: (id: number, templateCode: string, templateName?: string | null, showNotes?: boolean) => Promise<{ success: boolean; error?: string }>;
       getReceiptSettings?: (businessId?: number) => Promise<{
         success: boolean;
         settings: {

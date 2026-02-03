@@ -40,6 +40,9 @@ exports.getConfigValue = getConfigValue;
 exports.getServerHost = getServerHost;
 exports.getApiUrl = getApiUrl;
 exports.getDbConfig = getDbConfig;
+exports.getLocalDbConfig = getLocalDbConfig;
+exports.getVpsDbConfig = getVpsDbConfig;
+exports.getMirrorDbConfig = getMirrorDbConfig;
 const fs = __importStar(require("fs"));
 const path = __importStar(require("path"));
 const electron_1 = require("electron");
@@ -141,11 +144,45 @@ function getApiUrl() {
  * Get database configuration with fallbacks
  */
 function getDbConfig() {
+    const rawUser = getConfigValue('dbUser', 'DB_USER') || 'root';
+    const user = (typeof rawUser === 'string' ? rawUser : String(rawUser)).trim() || 'root';
     return {
         host: getServerHost(),
-        user: getConfigValue('dbUser', 'DB_USER') || 'root',
+        user,
         password: getConfigValue('dbPassword', 'DB_PASSWORD') || '',
         database: getConfigValue('dbName', 'DB_NAME') || 'salespulse',
         port: getConfigValue('dbPort') || parseInt(process.env.DB_PORT || '3306', 10),
     };
+}
+/** Local MySQL (localhost). Used for dual-write when primary is salespulse. */
+function getLocalDbConfig() {
+    return {
+        host: 'localhost',
+        user: process.env.DB_USER || 'root',
+        password: process.env.DB_PASSWORD || '',
+        database: process.env.DB_NAME || 'salespulse',
+        port: parseInt(process.env.DB_PORT || '3306', 10),
+    };
+}
+/** Salespulse VPS MySQL. Set DB_VPS_HOST (and optionally DB_VPS_USER, etc.) in .env for dual-write. */
+function getVpsDbConfig() {
+    const host = process.env.DB_VPS_HOST?.trim();
+    if (!host)
+        return null;
+    return {
+        host,
+        user: process.env.DB_VPS_USER || process.env.DB_USER || 'root',
+        password: process.env.DB_VPS_PASSWORD ?? process.env.DB_PASSWORD ?? '',
+        database: process.env.DB_VPS_NAME || process.env.DB_NAME || 'salespulse',
+        port: parseInt(process.env.DB_VPS_PORT || process.env.DB_PORT || '3306', 10),
+    };
+}
+/** Mirror DB for dual-write: if primary is localhost, mirror = VPS; else mirror = localhost. Null if no mirror (e.g. DB_VPS_HOST not set when primary is localhost). */
+function getMirrorDbConfig() {
+    const primary = getDbConfig();
+    const isPrimaryLocal = primary.host === 'localhost' || primary.host === '127.0.0.1';
+    if (isPrimaryLocal) {
+        return getVpsDbConfig();
+    }
+    return getLocalDbConfig();
 }

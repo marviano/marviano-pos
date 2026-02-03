@@ -303,9 +303,6 @@ class AuthManager {
           throw new Error('Invalid user payload received');
         }
 
-        // #region agent log
-        fetch('http://127.0.0.1:7242/ingest/7b565785-72b5-49f7-b2c0-57606ea0d0b5',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'auth.ts:login',message:'API response businesses',data:{hasBusinessesKey:'businesses' in data,dataBusinessesIsArray:Array.isArray((data as any).businesses),dataBusinessesLength:Array.isArray((data as any).businesses)?(data as any).businesses.length:typeof (data as any).businesses,_businessesLength:((data.businesses as unknown[])||[]).length},timestamp:Date.now(),sessionId:'debug-session',hypothesisId:'H1'})}).catch(()=>{});
-        // #endregion
 
         // Return user data with businesses for selection (don't set authenticated yet)
         interface UserWithBusinesses extends User {
@@ -432,16 +429,23 @@ class AuthManager {
     if (!user) {
       return false;
     }
-    return user.role_name?.toLowerCase() === 'super admin';
+    return isSuperAdminRole(user.role_name);
   }
 }
 
 export const authManager = AuthManager.getInstance();
+
+/** Normalize role string and check for super admin (handles "super admin", "superadmin", "Super Admin", etc.) */
+function isSuperAdminRole(roleName?: string | null): boolean {
+  if (!roleName || typeof roleName !== 'string') return false;
+  const normalized = roleName.toLowerCase().replace(/\s+/g, '');
+  return normalized === 'superadmin';
+}
 
 // Utility function to check if a user is super admin
 export function isSuperAdmin(user: User | null): boolean {
   if (!user) {
     return false;
   }
-  return user.role_name?.toLowerCase() === 'super admin';
+  return isSuperAdminRole(user.role_name) || isSuperAdminRole(String(user.role ?? ''));
 }

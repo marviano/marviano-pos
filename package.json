@@ -52,8 +52,8 @@
     "wait-on": "^9.0.1"
   },
   "build": {
-    "appId": "com.marviano.pos",
-    "productName": "Marviano POS",
+    "appId": "com.salespos.app",
+    "productName": "SalesPOS",
     "directories": {
       "output": "dist-electron"
     },

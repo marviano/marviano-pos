@@ -5,6 +5,7 @@ import { useRouter } from 'next/navigation';
 import { X } from 'lucide-react';
 import LoginPage from '@/components/LoginPage';
 import { useAuth } from '@/hooks/useAuth';
+import { getApiUrl } from '@/lib/api';
 import { offlineSyncService } from '@/lib/offlineSync';
 import { authManager, type User } from '@/lib/auth';
 
@@ -32,6 +33,7 @@ export default function Login() {
     businesses: Business[];
     isSuperAdmin: boolean;
   } | null>(null);
+  const [loginLogoRefreshAt, setLoginLogoRefreshAt] = useState<number | undefined>(undefined);
 
   // Ensure we're on the client side to prevent hydration mismatch
   useEffect(() => {
@@ -105,6 +107,11 @@ export default function Login() {
         }
 
         await offlineSyncService.syncFromOnline();
+        const lastBusinessId = localStorage.getItem('last_business_id_for_login_logo');
+        if (lastBusinessId) {
+          window.electronAPI?.cacheBusinessLogoForLogin?.(Number(lastBusinessId));
+          setLoginLogoRefreshAt(Date.now());
+        }
         setSyncStatus('✅ Download master data selesai!');
         setSyncProgress(100);
         setSyncError(null); // Clear any previous errors
@@ -163,28 +170,33 @@ export default function Login() {
       const businesses = loginResultTyped?._businesses || [];
       const isSuperAdmin = loginResultTyped?._isSuperAdmin || false;
 
-      // #region agent log
-      fetch('http://127.0.0.1:7242/ingest/7b565785-72b5-49f7-b2c0-57606ea0d0b5',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'login/page.tsx:handleLogin',message:'businesses from loginResult',data:{businessesLength:businesses.length,has_businesses:!!(loginResultTyped as any)?._businesses,isSuperAdmin},timestamp:Date.now(),sessionId:'debug-session',hypothesisId:'H1'})}).catch(()=>{});
-      // #endregion
+      // Super admin with 0 businesses: use synthetic business so they can proceed
+      let effectiveBusinesses = businesses;
+      if (isSuperAdmin && businesses.length === 0) {
+        effectiveBusinesses = [{ id: 0, name: 'All Businesses', permission_name: 'super_admin' }];
+      }
 
-      if (businesses.length === 0) {
-        // #region agent log
-        fetch('http://127.0.0.1:7242/ingest/7b565785-72b5-49f7-b2c0-57606ea0d0b5',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'login/page.tsx:handleLogin',message:'throwing no businesses',data:{businessesLength:0},timestamp:Date.now(),sessionId:'debug-session',hypothesisId:'H2'})}).catch(()=>{});
-        // #endregion
+      if (effectiveBusinesses.length === 0) {
         throw new Error('Anda tidak terdaftar di bisnis manapun. Hubungi administrator untuk mendapatkan akses POS.');
       }
-      if (businesses.length > 1) {
-        // Show business selection UI
+
+      // 2+ businesses: show business selection (same for super admin and others)
+      if (effectiveBusinesses.length > 1) {
         setPendingLogin({
           user: loginResult,
-          businesses,
+          businesses: effectiveBusinesses,
           isSuperAdmin,
         });
       } else {
-        // Auto-select the single business
-        const selectedBusinessId = businesses[0].id;
+        const selectedBusinessId = effectiveBusinesses[0].id;
+        if (typeof window !== 'undefined') {
+          localStorage.setItem('last_business_id_for_login_logo', String(selectedBusinessId));
+          if (window.electronAPI?.cacheBusinessLogoForLogin) {
+            const baseUrl = (getApiUrl('') || '').replace(/\/$/, '') || undefined;
+            await window.electronAPI.cacheBusinessLogoForLogin(selectedBusinessId, baseUrl);
+          }
+        }
         await authManager.completeLogin(loginResult as User & { _businesses?: unknown[]; _isSuperAdmin?: boolean }, selectedBusinessId);
-        // Router will handle redirect via useEffect
       }
     } catch (error) {
       console.error('Login failed:', error);
@@ -198,6 +210,13 @@ export default function Login() {
     }
 
     try {
+      if (businessId != null && typeof window !== 'undefined') {
+        localStorage.setItem('last_business_id_for_login_logo', String(businessId));
+        if (window.electronAPI?.cacheBusinessLogoForLogin) {
+          const baseUrl = (getApiUrl('') || '').replace(/\/$/, '') || undefined;
+          await window.electronAPI.cacheBusinessLogoForLogin(businessId, baseUrl);
+        }
+      }
       await authManager.completeLogin(pendingLogin.user as User & { _businesses?: unknown[]; _isSuperAdmin?: boolean }, businessId);
       setPendingLogin(null);
       // Router will handle redirect via useEffect
@@ -230,8 +249,16 @@ export default function Login() {
     }
   };
 
-  // Don't render if already authenticated (will redirect) or during SSR
-  if (!isClient || isAuthenticated) {
+  // Don't render form during SSR, or when authenticated with a business (redirecting).
+  // When authenticated but no selectedBusinessId we call logout in effect — show form so we're not stuck on Loading.
+  if (!isClient) {
+    return (
+      <div className="h-screen bg-gray-900 flex items-center justify-center overflow-hidden">
+        <div className="text-white text-lg">Loading...</div>
+      </div>
+    );
+  }
+  if (isAuthenticated && user?.selectedBusinessId != null) {
     return (
       <div className="h-screen bg-gray-900 flex items-center justify-center overflow-hidden">
         <div className="text-white text-lg">Loading...</div>
@@ -301,6 +328,7 @@ export default function Login() {
         onSyncRequest={async () => { await handleFullSync('manual'); }}
         hasOfflineDb={true}
         syncProgress={syncProgress}
+        refreshLoginLogoAt={loginLogoRefreshAt}
       />
     </div>
   );

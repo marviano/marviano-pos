@@ -6,9 +6,10 @@ import { useAuth } from '@/hooks/useAuth';
 import { isSuperAdmin } from '@/lib/auth';
 import POSLayout from '@/components/POSLayout';
 import OfflineStatus from '@/components/OfflineStatus';
-import { LogOut, X } from 'lucide-react';
+import { LogOut, X, RefreshCw, Monitor, Download } from 'lucide-react';
 import { databaseHealthService } from '@/lib/databaseHealth';
 import { smartSyncService } from '@/lib/smartSync';
+import { offlineSyncService } from '@/lib/offlineSync';
 // import { systemPosSyncService } from '@/lib/systemPosSync';
 
 export default function Home() {
@@ -17,6 +18,7 @@ export default function Home() {
   const [isClient, setIsClient] = useState(false);
   const [databaseStatus, setDatabaseStatus] = useState<string>('Checking...');
   const [isSyncing, setIsSyncing] = useState(false);
+  const [isDownloading, setIsDownloading] = useState(false);
   const [showUserDebug, setShowUserDebug] = useState(false);
   const userDebugButtonRef = useRef<HTMLButtonElement | null>(null);
   const userDebugPanelRef = useRef<HTMLDivElement | null>(null);
@@ -96,7 +98,7 @@ export default function Home() {
 
   // Fetch business name when business ID changes
   useEffect(() => {
-    if (!isClient || !isAuthenticated || !user?.selectedBusinessId) {
+    if (!isClient || !isAuthenticated || user?.selectedBusinessId == null) {
       setBusinessName('No business selected');
       return;
     }
@@ -144,7 +146,7 @@ export default function Home() {
   // Redirect to login if no business is selected
   useEffect(() => {
     if (!isClient || !isAuthenticated || !user) return;
-    if (!user.selectedBusinessId) {
+    if (user.selectedBusinessId == null) {
       console.log('🔍 No business selected, redirecting to login');
       // Use setTimeout to avoid potential race conditions
       setTimeout(() => {
@@ -206,7 +208,8 @@ export default function Home() {
   }
 
   // Redirect if no business is selected (client-side redirect)
-  if (!user.selectedBusinessId) {
+  // Use == null to allow selectedBusinessId 0 (e.g. super admin synthetic business)
+  if (user.selectedBusinessId == null) {
     return (
       <div className="h-screen bg-gray-900 flex items-center justify-center overflow-hidden">
         <div className="text-white text-lg">Redirecting to login...</div>
@@ -243,88 +246,161 @@ export default function Home() {
           <div className="w-[1px] h-[20px] bg-[#1e4a8f]" style={{ boxShadow: '1px 0 0 rgba(255,255,255,0.1)' }}></div>
           <OfflineStatus />
         </div>
-        <div className="flex items-center space-x-[4px] px-[4px]">
+        <div className="flex items-center space-x-[6px] px-[4px]">
           <div className="w-[1px] h-[20px] bg-[#1e4a8f]" style={{ boxShadow: '1px 0 0 rgba(255,255,255,0.1)' }}></div>
-          <div 
-            className="flex items-center gap-[6px] px-[8px] py-[4px] transition-all duration-300 ease-in-out"
-            style={{
-              background: 'rgba(255, 255, 255, 0.15)',
-              backdropFilter: 'blur(8px)',
-              border: '1px solid rgba(255, 255, 255, 0.2)',
-              boxShadow: '0 2px 4px rgba(0,0,0,0.2), inset 0 1px 0 rgba(255,255,255,0.3)'
-            }}
-          >
-            <span className="text-[10px] text-white font-medium" style={{ textShadow: '0 1px 2px rgba(0,0,0,0.5)' }}>Database:</span>
-            {isSyncing && (
-              <span className="inline-block w-[6px] h-[6px] bg-white rounded-full animate-pulse" style={{ boxShadow: '0 0 4px rgba(255,255,255,0.8)' }}></span>
-            )}
-            <span className="text-[10px] text-white" style={{ textShadow: '0 1px 2px rgba(0,0,0,0.5)' }}>{databaseStatus}</span>
-            <button
-              onClick={async () => {setIsSyncing(true);
-                setDatabaseStatus('Syncing...');
-                try {
-                  // Upload any pending local transactions to cloud
-                  console.log('🔄 [SYNC] Starting upload sync...');const syncResult = await smartSyncService.forceSync();console.log('✅ [SYNC] Upload sync completed', syncResult);
-
-                  // Show user-friendly status message
-                  if (syncResult.success) {
-                    if (syncResult.syncedCount === 0) {
-                      setDatabaseStatus('No pending transactions');
-                    } else {
-                      setDatabaseStatus(`Synced ${syncResult.syncedCount} transaction(s)`);
-                    }
+          <span className="text-[10px] text-white font-medium" style={{ textShadow: '0 1px 2px rgba(0,0,0,0.5)' }}>Database:</span>
+          {isSyncing && (
+            <span className="inline-block w-[6px] h-[6px] bg-white rounded-full animate-pulse" style={{ boxShadow: '0 0 4px rgba(255,255,255,0.8)' }}></span>
+          )}
+          <span className="text-[10px] text-white" style={{ textShadow: '0 1px 2px rgba(0,0,0,0.5)' }}>{databaseStatus}</span>
+          <button
+            onClick={async () => {
+              setIsSyncing(true);
+              setDatabaseStatus('Syncing...');
+              try {
+                console.log('🔄 [SYNC] Starting upload sync...');
+                const syncResult = await smartSyncService.forceSync();
+                console.log('✅ [SYNC] Upload sync completed', syncResult);
+                if (syncResult.success) {
+                  if (syncResult.syncedCount === 0) {
+                    setDatabaseStatus('No pending transactions');
                   } else {
-                    setDatabaseStatus(syncResult.message || 'Sync failed');
+                    setDatabaseStatus(`Synced ${syncResult.syncedCount} transaction(s)`);
                   }
-
-                  // Trigger data refresh event for POSLayout
+                } else {
+                  setDatabaseStatus(syncResult.message || 'Sync failed');
+                }
+                window.dispatchEvent(new CustomEvent('dataSynced'));
+              } catch (error) {
+                console.error('❌ Sync failed:', error);
+                setDatabaseStatus('Sync failed');
+              } finally {
+                setIsSyncing(false);
+              }
+            }}
+            disabled={isSyncing}
+            className="flex items-center justify-center w-[22px] h-[22px] disabled:opacity-50 disabled:cursor-not-allowed"
+            style={{
+              background: 'linear-gradient(to bottom, #ece9d8 0%, #d4d0c8 100%)',
+              border: '1px solid #808080',
+              borderTopColor: '#ffffff',
+              borderLeftColor: '#ffffff',
+              borderRightColor: '#404040',
+              borderBottomColor: '#404040',
+              boxShadow: '1px 1px 0 rgba(0,0,0,0.1)',
+              color: '#000000',
+              fontFamily: 'Tahoma, "MS Sans Serif", sans-serif'
+            }}
+            onMouseEnter={(e) => {
+              if (!isSyncing) {
+                e.currentTarget.style.background = 'linear-gradient(to bottom, #f5f3e8 0%, #e0dcc8 100%)';
+              }
+            }}
+            onMouseLeave={(e) => {
+              if (!isSyncing) {
+                e.currentTarget.style.background = 'linear-gradient(to bottom, #ece9d8 0%, #d4d0c8 100%)';
+                e.currentTarget.style.boxShadow = '1px 1px 0 rgba(0,0,0,0.1)';
+                e.currentTarget.style.borderTopColor = '#ffffff';
+                e.currentTarget.style.borderLeftColor = '#ffffff';
+                e.currentTarget.style.borderRightColor = '#404040';
+                e.currentTarget.style.borderBottomColor = '#404040';
+              }
+            }}
+            onMouseDown={(e) => {
+              if (!isSyncing) {
+                e.currentTarget.style.boxShadow = 'inset 1px 1px 2px rgba(0,0,0,0.2)';
+                e.currentTarget.style.borderTopColor = '#404040';
+                e.currentTarget.style.borderLeftColor = '#404040';
+                e.currentTarget.style.borderRightColor = '#ffffff';
+                e.currentTarget.style.borderBottomColor = '#ffffff';
+              }
+            }}
+            onMouseUp={(e) => {
+              if (!isSyncing) {
+                e.currentTarget.style.boxShadow = '1px 1px 0 rgba(0,0,0,0.1)';
+                e.currentTarget.style.borderTopColor = '#ffffff';
+                e.currentTarget.style.borderLeftColor = '#ffffff';
+                e.currentTarget.style.borderRightColor = '#404040';
+                e.currentTarget.style.borderBottomColor = '#404040';
+              }
+            }}
+            title="Sync database"
+          >
+            <RefreshCw className={`w-[10px] h-[10px] ${isSyncing ? 'animate-spin' : ''}`} style={{ color: '#000000' }} strokeWidth={2.5} />
+          </button>
+          {typeof window !== 'undefined' && window.electronAPI && (
+            <button
+              onClick={async () => {
+                setIsDownloading(true);
+                setDatabaseStatus('Downloading...');
+                try {
+                  await offlineSyncService.forceConnectionCheck();
+                  const status = offlineSyncService.getStatus();
+                  if (!status.isOnline) {
+                    setDatabaseStatus('Offline');
+                    return;
+                  }
+                  await offlineSyncService.syncFromOnline(user?.selectedBusinessId ?? undefined);
+                  setDatabaseStatus('Master data downloaded');
                   window.dispatchEvent(new CustomEvent('dataSynced'));
-                } catch (error) {console.error('❌ Sync failed:', error);
-                  setDatabaseStatus('Sync failed');
+                } catch (error) {
+                  console.error('Download master data failed:', error);
+                  setDatabaseStatus(error instanceof Error ? error.message : 'Download failed');
                 } finally {
-                  setIsSyncing(false);
+                  setIsDownloading(false);
                 }
               }}
-              disabled={isSyncing}
-              className="px-[10px] py-[4px] text-[10px] font-medium rounded disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-200"
+              disabled={isDownloading}
+              className="flex items-center justify-center w-[22px] h-[22px] disabled:opacity-50 disabled:cursor-not-allowed"
               style={{
-                background: isSyncing 
-                  ? 'linear-gradient(135deg, #6b7280 0%, #4b5563 100%)'
-                  : 'linear-gradient(135deg, #3b82f6 0%, #2563eb 100%)',
-                border: 'none',
-                color: '#ffffff',
-                textShadow: '0 1px 2px rgba(0,0,0,0.3)',
-                boxShadow: isSyncing 
-                  ? 'inset 0 2px 4px rgba(0,0,0,0.3)'
-                  : '0 2px 4px rgba(0,0,0,0.3), inset 0 1px 0 rgba(255,255,255,0.2)'
+                background: 'linear-gradient(to bottom, #ece9d8 0%, #d4d0c8 100%)',
+                border: '1px solid #808080',
+                borderTopColor: '#ffffff',
+                borderLeftColor: '#ffffff',
+                borderRightColor: '#404040',
+                borderBottomColor: '#404040',
+                boxShadow: '1px 1px 0 rgba(0,0,0,0.1)',
+                color: '#000000',
+                fontFamily: 'Tahoma, "MS Sans Serif", sans-serif'
               }}
               onMouseEnter={(e) => {
-                if (!isSyncing) {
-                  e.currentTarget.style.background = 'linear-gradient(135deg, #2563eb 0%, #1d4ed8 100%)';
-                  e.currentTarget.style.boxShadow = '0 3px 6px rgba(0,0,0,0.4), inset 0 1px 0 rgba(255,255,255,0.2)';
+                if (!isDownloading) {
+                  e.currentTarget.style.background = 'linear-gradient(to bottom, #f5f3e8 0%, #e0dcc8 100%)';
                 }
               }}
               onMouseLeave={(e) => {
-                if (!isSyncing) {
-                  e.currentTarget.style.background = 'linear-gradient(135deg, #3b82f6 0%, #2563eb 100%)';
-                  e.currentTarget.style.boxShadow = '0 2px 4px rgba(0,0,0,0.3), inset 0 1px 0 rgba(255,255,255,0.2)';
+                if (!isDownloading) {
+                  e.currentTarget.style.background = 'linear-gradient(to bottom, #ece9d8 0%, #d4d0c8 100%)';
+                  e.currentTarget.style.boxShadow = '1px 1px 0 rgba(0,0,0,0.1)';
+                  e.currentTarget.style.borderTopColor = '#ffffff';
+                  e.currentTarget.style.borderLeftColor = '#ffffff';
+                  e.currentTarget.style.borderRightColor = '#404040';
+                  e.currentTarget.style.borderBottomColor = '#404040';
                 }
               }}
               onMouseDown={(e) => {
-                if (!isSyncing) {
-                  e.currentTarget.style.boxShadow = 'inset 0 2px 4px rgba(0,0,0,0.3)';
+                if (!isDownloading) {
+                  e.currentTarget.style.boxShadow = 'inset 1px 1px 2px rgba(0,0,0,0.2)';
+                  e.currentTarget.style.borderTopColor = '#404040';
+                  e.currentTarget.style.borderLeftColor = '#404040';
+                  e.currentTarget.style.borderRightColor = '#ffffff';
+                  e.currentTarget.style.borderBottomColor = '#404040';
                 }
               }}
               onMouseUp={(e) => {
-                if (!isSyncing) {
-                  e.currentTarget.style.boxShadow = '0 2px 4px rgba(0,0,0,0.3), inset 0 1px 0 rgba(255,255,255,0.2)';
+                if (!isDownloading) {
+                  e.currentTarget.style.boxShadow = '1px 1px 0 rgba(0,0,0,0.1)';
+                  e.currentTarget.style.borderTopColor = '#ffffff';
+                  e.currentTarget.style.borderLeftColor = '#ffffff';
+                  e.currentTarget.style.borderRightColor = '#404040';
+                  e.currentTarget.style.borderBottomColor = '#404040';
                 }
               }}
-              title="Sync database"
+              title="Download master data"
             >
-              Sync Tx
+              <Download className={`w-[10px] h-[10px] ${isDownloading ? 'animate-spin' : ''}`} style={{ color: '#000000' }} strokeWidth={2.5} />
             </button>
-          </div>
+          )}
           <div className="w-[1px] h-[20px] bg-[#1e4a8f]" style={{ boxShadow: '1px 0 0 rgba(255,255,255,0.1)' }}></div>
           <button
             onClick={async () => {
@@ -334,61 +410,90 @@ export default function Home() {
                 alert(result.message || 'Customer display created');
               }
             }}
-            className="flex items-center space-x-[6px] text-[10px] font-medium px-[10px] py-[4px] rounded transition-all duration-200"
+            className="flex items-center justify-center w-[22px] h-[22px]"
             style={{
-              background: 'linear-gradient(135deg, #10b981 0%, #059669 100%)',
-              border: 'none',
-              color: '#ffffff',
-              textShadow: '0 1px 2px rgba(0,0,0,0.3)',
-              boxShadow: '0 2px 4px rgba(0,0,0,0.3), inset 0 1px 0 rgba(255,255,255,0.2)'
+              background: 'linear-gradient(to bottom, #ece9d8 0%, #d4d0c8 100%)',
+              border: '1px solid #808080',
+              borderTopColor: '#ffffff',
+              borderLeftColor: '#ffffff',
+              borderRightColor: '#404040',
+              borderBottomColor: '#404040',
+              boxShadow: '1px 1px 0 rgba(0,0,0,0.1)',
+              color: '#000000',
+              fontFamily: 'Tahoma, "MS Sans Serif", sans-serif'
             }}
             onMouseEnter={(e) => {
-              e.currentTarget.style.background = 'linear-gradient(135deg, #059669 0%, #047857 100%)';
-              e.currentTarget.style.boxShadow = '0 3px 6px rgba(0,0,0,0.4), inset 0 1px 0 rgba(255,255,255,0.2)';
+              e.currentTarget.style.background = 'linear-gradient(to bottom, #f5f3e8 0%, #e0dcc8 100%)';
             }}
             onMouseLeave={(e) => {
-              e.currentTarget.style.background = 'linear-gradient(135deg, #10b981 0%, #059669 100%)';
-              e.currentTarget.style.boxShadow = '0 2px 4px rgba(0,0,0,0.3), inset 0 1px 0 rgba(255,255,255,0.2)';
+              e.currentTarget.style.background = 'linear-gradient(to bottom, #ece9d8 0%, #d4d0c8 100%)';
+              e.currentTarget.style.boxShadow = '1px 1px 0 rgba(0,0,0,0.1)';
+              e.currentTarget.style.borderTopColor = '#ffffff';
+              e.currentTarget.style.borderLeftColor = '#ffffff';
+              e.currentTarget.style.borderRightColor = '#404040';
+              e.currentTarget.style.borderBottomColor = '#404040';
             }}
             onMouseDown={(e) => {
-              e.currentTarget.style.boxShadow = 'inset 0 2px 4px rgba(0,0,0,0.3)';
+              e.currentTarget.style.boxShadow = 'inset 1px 1px 2px rgba(0,0,0,0.2)';
+              e.currentTarget.style.borderTopColor = '#404040';
+              e.currentTarget.style.borderLeftColor = '#404040';
+              e.currentTarget.style.borderRightColor = '#ffffff';
+              e.currentTarget.style.borderBottomColor = '#ffffff';
             }}
             onMouseUp={(e) => {
-              e.currentTarget.style.boxShadow = '0 2px 4px rgba(0,0,0,0.3), inset 0 1px 0 rgba(255,255,255,0.2)';
+              e.currentTarget.style.boxShadow = '1px 1px 0 rgba(0,0,0,0.1)';
+              e.currentTarget.style.borderTopColor = '#ffffff';
+              e.currentTarget.style.borderLeftColor = '#ffffff';
+              e.currentTarget.style.borderRightColor = '#404040';
+              e.currentTarget.style.borderBottomColor = '#404040';
             }}
             title="Create Customer Display"
           >
-            <span>Customer Display</span>
+            <Monitor className="w-[10px] h-[10px]" style={{ color: '#000000' }} strokeWidth={2.5} />
           </button>
           <div className="w-[1px] h-[20px] bg-[#1e4a8f]" style={{ boxShadow: '1px 0 0 rgba(255,255,255,0.1)' }}></div>
           <button
             onClick={() => logout()}
-            className="flex items-center space-x-[6px] text-[10px] font-medium px-[10px] py-[4px] rounded transition-all duration-200"
+            className="flex items-center justify-center w-[22px] h-[22px]"
             style={{
-              background: 'linear-gradient(135deg, #ef4444 0%, #dc2626 100%)',
-              border: 'none',
-              color: '#ffffff',
-              textShadow: '0 1px 2px rgba(0,0,0,0.3)',
-              boxShadow: '0 2px 4px rgba(0,0,0,0.3), inset 0 1px 0 rgba(255,255,255,0.2)'
+              background: 'linear-gradient(to bottom, #ece9d8 0%, #d4d0c8 100%)',
+              border: '1px solid #808080',
+              borderTopColor: '#ffffff',
+              borderLeftColor: '#ffffff',
+              borderRightColor: '#404040',
+              borderBottomColor: '#404040',
+              boxShadow: '1px 1px 0 rgba(0,0,0,0.1)',
+              color: '#000000',
+              fontFamily: 'Tahoma, "MS Sans Serif", sans-serif'
             }}
             onMouseEnter={(e) => {
-              e.currentTarget.style.background = 'linear-gradient(135deg, #dc2626 0%, #b91c1c 100%)';
-              e.currentTarget.style.boxShadow = '0 3px 6px rgba(0,0,0,0.4), inset 0 1px 0 rgba(255,255,255,0.2)';
+              e.currentTarget.style.background = 'linear-gradient(to bottom, #f5f3e8 0%, #e0dcc8 100%)';
             }}
             onMouseLeave={(e) => {
-              e.currentTarget.style.background = 'linear-gradient(135deg, #ef4444 0%, #dc2626 100%)';
-              e.currentTarget.style.boxShadow = '0 2px 4px rgba(0,0,0,0.3), inset 0 1px 0 rgba(255,255,255,0.2)';
+              e.currentTarget.style.background = 'linear-gradient(to bottom, #ece9d8 0%, #d4d0c8 100%)';
+              e.currentTarget.style.boxShadow = '1px 1px 0 rgba(0,0,0,0.1)';
+              e.currentTarget.style.borderTopColor = '#ffffff';
+              e.currentTarget.style.borderLeftColor = '#ffffff';
+              e.currentTarget.style.borderRightColor = '#404040';
+              e.currentTarget.style.borderBottomColor = '#404040';
             }}
             onMouseDown={(e) => {
-              e.currentTarget.style.boxShadow = 'inset 0 2px 4px rgba(0,0,0,0.3)';
+              e.currentTarget.style.boxShadow = 'inset 1px 1px 2px rgba(0,0,0,0.2)';
+              e.currentTarget.style.borderTopColor = '#404040';
+              e.currentTarget.style.borderLeftColor = '#404040';
+              e.currentTarget.style.borderRightColor = '#ffffff';
+              e.currentTarget.style.borderBottomColor = '#ffffff';
             }}
             onMouseUp={(e) => {
-              e.currentTarget.style.boxShadow = '0 2px 4px rgba(0,0,0,0.3), inset 0 1px 0 rgba(255,255,255,0.2)';
+              e.currentTarget.style.boxShadow = '1px 1px 0 rgba(0,0,0,0.1)';
+              e.currentTarget.style.borderTopColor = '#ffffff';
+              e.currentTarget.style.borderLeftColor = '#ffffff';
+              e.currentTarget.style.borderRightColor = '#404040';
+              e.currentTarget.style.borderBottomColor = '#404040';
             }}
             title="Logout"
           >
-            <LogOut className="w-[11px] h-[11px]" />
-            <span>Logout</span>
+            <LogOut className="w-[10px] h-[10px]" style={{ color: '#000000' }} strokeWidth={2.5} />
           </button>
           <div className="w-[1px] h-[20px] bg-[#1e4a8f]" style={{ boxShadow: '1px 0 0 rgba(255,255,255,0.1)' }}></div>
           <button
@@ -403,7 +508,7 @@ export default function Home() {
                 window.electronAPI.minimizeWindow();
               }
             }}
-            className="w-[22px] h-[22px] flex items-center justify-center"
+            className="w-[22px] h-[22px] flex items-end justify-center pb-[5px]"
             style={{
               background: 'linear-gradient(to bottom, #ece9d8 0%, #d4d0c8 100%)',
               border: '1px solid #808080',
@@ -412,7 +517,8 @@ export default function Home() {
               borderRightColor: '#404040',
               borderBottomColor: '#404040',
               boxShadow: '1px 1px 0 rgba(0,0,0,0.1)',
-              touchAction: 'manipulation'
+              touchAction: 'manipulation',
+              fontFamily: 'Tahoma, "MS Sans Serif", sans-serif'
             }}
             onMouseDown={(e) => {
               e.currentTarget.style.boxShadow = 'inset 1px 1px 2px rgba(0,0,0,0.2)';
@@ -437,7 +543,7 @@ export default function Home() {
             }}
             title="Minimize"
           >
-            <span className="text-[12px] font-bold" style={{ color: '#800000' }}>_</span>
+            <div style={{ width: '10px', height: '1px', backgroundColor: '#000000' }} aria-hidden />
           </button>
           <div className="w-[1px] h-[20px] bg-[#1e4a8f]" style={{ boxShadow: '1px 0 0 rgba(255,255,255,0.1)' }}></div>
           <button
@@ -461,7 +567,8 @@ export default function Home() {
               borderRightColor: '#404040',
               borderBottomColor: '#404040',
               boxShadow: '1px 1px 0 rgba(0,0,0,0.1)',
-              touchAction: 'manipulation'
+              touchAction: 'manipulation',
+              fontFamily: 'Tahoma, "MS Sans Serif", sans-serif'
             }}
             onMouseDown={(e) => {
               e.currentTarget.style.boxShadow = 'inset 1px 1px 2px rgba(0,0,0,0.2)';
@@ -486,7 +593,7 @@ export default function Home() {
             }}
             title="Close"
           >
-            <X className="w-[10px] h-[10px]" style={{ color: '#800000' }} />
+            <X className="w-[10px] h-[10px]" style={{ color: '#000000' }} strokeWidth={2.5} />
           </button>
         </div>
 

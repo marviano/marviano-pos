@@ -10,6 +10,7 @@ interface TransactionItem {
   quantity: number;
   unit_price: number;
   total_price: number;
+  waiter_id?: number | null; // Employee who added this line item (per-waiter achievement)
   customizations?: {
     customization_id: number;
     customization_name: string;
@@ -126,8 +127,9 @@ export async function POST(request: NextRequest) {
       receipt_number,
       transaction_type,
       status,
-      created_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      created_at,
+      paid_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `, [
         transactionData.id, // Use UUID from client
         transactionData.business_id,
@@ -153,7 +155,8 @@ export async function POST(request: NextRequest) {
         receiptNumber,
         transactionData.transaction_type,
         (transactionData as { status?: string }).status || 'paid',
-        createdAt // Use provided or current timestamp
+        createdAt, // Use provided or current timestamp
+        (transactionData as { status?: string }).status === 'pending' ? null : createdAt // paid_at: set when status is completed/paid
       ] as (string | number | null)[]);
       
 
@@ -174,8 +177,9 @@ export async function POST(request: NextRequest) {
             customizations_json,
             custom_note,
             bundle_selections_json,
+            waiter_id,
             created_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())
         `, [
           item.id || randomUUID(), // Use item UUID or generate one
           Math.floor(Math.random() * 1000000) + 100000, // Generate integer ID for old transaction_id column
@@ -186,7 +190,8 @@ export async function POST(request: NextRequest) {
           item.total_price,
           item.customizations ? JSON.stringify(item.customizations) : null,
           item.customNote || null,
-          item.bundleSelections ? JSON.stringify(item.bundleSelections) : null
+          item.bundleSelections ? JSON.stringify(item.bundleSelections) : null,
+          item.waiter_id ?? null
         ] as (string | number | null)[]);
       }
 
@@ -266,6 +271,7 @@ export async function GET(request: NextRequest) {
         t.status,
         t.created_at,
         t.updated_at,
+        t.paid_at,
         t.contact_id,
         t.customer_name,
         t.customer_unit,

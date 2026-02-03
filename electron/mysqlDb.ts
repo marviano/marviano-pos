@@ -2,7 +2,7 @@ import mysql, { Pool, PoolConnection } from 'mysql2/promise';
 import * as path from 'path';
 import * as fs from 'fs';
 import { app } from 'electron';
-import { getDbConfig } from './configManager';
+import { getDbConfig, getMirrorDbConfig } from './configManager';
 
 /**
  * MySQL Database Helper Module
@@ -11,6 +11,7 @@ import { getDbConfig } from './configManager';
 
 let mysqlPool: Pool | null = null; // Main database: salespulse
 let systemPosPool: Pool | null = null; // Printer 2 transactions: system_pos
+let mirrorPool: Pool | null = null; // Dual-write: localhost + salespulse (template struk tab)
 
 /**
  * Initialize MySQL connection pool
@@ -82,6 +83,54 @@ export function getMySQLPool(): Pool {
     return initializeMySQLPool();
   }
   return mysqlPool;
+}
+
+/**
+ * Get mirror pool for dual-write (template struk tab: localhost + salespulse).
+ * Created only when getMirrorDbConfig() returns a config (e.g. DB_VPS_HOST set when primary is localhost).
+ */
+function getMirrorPool(): Pool | null {
+  const mirrorConfig = getMirrorDbConfig();
+  if (!mirrorConfig) return null;
+  if (mirrorPool) return mirrorPool;
+  mirrorPool = mysql.createPool({
+    host: mirrorConfig.host,
+    user: mirrorConfig.user,
+    password: mirrorConfig.password,
+    database: mirrorConfig.database,
+    port: mirrorConfig.port,
+    waitForConnections: true,
+    connectionLimit: 5,
+    queueLimit: 0,
+    enableKeepAlive: true,
+    keepAliveInitialDelay: 0,
+  });
+  mirrorPool.getConnection()
+    .then(conn => {
+      console.log(`✅ Mirror MySQL pool initialized (${mirrorConfig.host})`);
+      conn.release();
+    })
+    .catch(err => {
+      console.warn('⚠️ Mirror MySQL pool connection failed:', err.message);
+    });
+  return mirrorPool;
+}
+
+/**
+ * Run the same write (INSERT/UPDATE/UPSERT) on the mirror DB for dual-write.
+ * Does not throw; logs and returns on failure so primary save still succeeds.
+ */
+export async function executeOnMirror(
+  sql: string,
+  params: (string | number | null | boolean)[] = []
+): Promise<void> {
+  const pool = getMirrorPool();
+  if (!pool) return;
+  try {
+    await pool.execute(sql, params);
+  } catch (error) {
+    console.warn('⚠️ Mirror write failed (primary save succeeded):', (error as Error)?.message);
+  }
 }
 
 /**
@@ -186,25 +235,34 @@ export async function executeUpdate(
   }
 }
 
+export type ExecuteTransactionOptions = {
+  /** When true, run SET FOREIGN_KEY_CHECKS=0 for this connection so inserts succeed on empty DB (e.g. structure-only restore). */
+  disableForeignKeyChecks?: boolean;
+};
+
 /**
  * Execute multiple queries in a transaction
  */
 export async function executeTransaction(
-  queries: Array<{ sql: string; params?: (string | number | null | boolean)[] }>
+  queries: Array<{ sql: string; params?: (string | number | null | boolean)[] }>,
+  options?: ExecuteTransactionOptions
 ): Promise<void> {
   const pool = getMySQLPool();
   const connection = await pool.getConnection();
-  
+  const disableFk = options?.disableForeignKeyChecks === true;
+
   try {
+    if (disableFk) {
+      await connection.execute('SET FOREIGN_KEY_CHECKS = 0', []);
+    }
     await connection.beginTransaction();
-    console.log(`🔄 [TRANSACTION] Started transaction with ${queries.length} queries`);
-    
+    console.log(`🔄 [TRANSACTION] Started transaction with ${queries.length} queries${disableFk ? ' (FK checks off)' : ''}`);
+
     for (let i = 0; i < queries.length; i++) {
       const { sql, params = [] } = queries[i];
       try {
         const [result] = await connection.execute(sql, params) as [mysql.ResultSetHeader, unknown];
         if (i < 5 || i === queries.length - 1) {
-          // Log first 5 and last query for debugging
           console.log(`  ✓ Query ${i + 1}/${queries.length}: ${result.affectedRows} rows affected`);
         }
       } catch (queryError) {
@@ -213,7 +271,7 @@ export async function executeTransaction(
         throw queryError;
       }
     }
-    
+
     await connection.commit();
     console.log(`✅ [TRANSACTION] Committed successfully - ${queries.length} queries executed`);
   } catch (error) {
@@ -228,6 +286,13 @@ export async function executeTransaction(
     });
     throw error;
   } finally {
+    if (disableFk) {
+      try {
+        await connection.execute('SET FOREIGN_KEY_CHECKS = 1', []);
+      } catch (e) {
+        console.warn('⚠️ [TRANSACTION] Failed to restore FOREIGN_KEY_CHECKS:', (e as Error)?.message);
+      }
+    }
     connection.release();
   }
 }
@@ -264,13 +329,15 @@ export async function getConnection(): Promise<PoolConnection> {
 
 /**
  * Initialize System POS MySQL connection pool (for printer 2 transactions)
+ * Uses same host/user/password/port as main DB (getDbConfig: pos-config.json + env)
+ * so packaged clients that configure DB only via pos-config.json work for system_pos too.
  */
 export function initializeSystemPosPool(): Pool {
   if (systemPosPool) {
     return systemPosPool;
   }
 
-  // Load environment variables (same as main pool)
+  // Load .env so process.env.DB_* are available when present
   try {
     const dotenv = require('dotenv');
     const possibleEnvPaths = [
@@ -278,29 +345,37 @@ export function initializeSystemPosPool(): Pool {
       path.join(app.getAppPath(), '.env'),
       path.join(path.dirname(app.getPath('exe')), '.env')
     ];
-
-    let envLoaded = false;
     for (const envPath of possibleEnvPaths) {
       if (fs.existsSync(envPath)) {
         dotenv.config({ path: envPath });
-        envLoaded = true;
         break;
       }
     }
-
-    if (!envLoaded) {
-      console.warn('⚠️ No .env file found for MySQL credentials, falling back to defaults');
-    }
-  } catch (dotenvErr) {
-    console.warn('⚠️ dotenv module not available, using environment defaults');
+  } catch {
+    // ignore
   }
 
+  // Prefer .env credentials for system_pos so we don't need GRANT CREATE/REFERENCES for limited users (e.g. client).
+  // When DB_HOST/DB_USER/DB_PASSWORD are set (e.g. from .env), use them; otherwise fall back to pos-config / getDbConfig().
+  const useEnv =
+    process.env.DB_HOST?.trim() &&
+    process.env.DB_USER?.trim() &&
+    process.env.DB_PASSWORD !== undefined;
+
+  const host = useEnv ? process.env.DB_HOST!.trim() : getDbConfig().host;
+  let user = useEnv ? process.env.DB_USER!.trim() : getDbConfig().user;
+  if (!user || !String(user).trim()) user = 'root';
+  const password = useEnv ? String(process.env.DB_PASSWORD) : getDbConfig().password;
+  const port = useEnv
+    ? parseInt(process.env.DB_PORT || '3306', 10)
+    : getDbConfig().port;
+
   systemPosPool = mysql.createPool({
-    host: process.env.DB_HOST || 'localhost',
-    user: process.env.DB_USER || 'root',
-    password: process.env.DB_PASSWORD || '',
+    host,
+    user,
+    password,
     database: 'system_pos', // Always use system_pos database for printer 2 transactions
-    port: parseInt(process.env.DB_PORT || '3306'),
+    port,
     waitForConnections: true,
     connectionLimit: 10,
     queueLimit: 0,
@@ -359,6 +434,58 @@ export async function executeSystemPosQueryOne<T = unknown>(
 ): Promise<T | null> {
   const results = await executeSystemPosQuery<T>(sql, params);
   return results.length > 0 ? results[0] : null;
+}
+
+/**
+ * Execute DDL (e.g. CREATE TABLE) on System POS database. No return value.
+ */
+export async function executeSystemPosDdl(sql: string): Promise<void> {
+  const pool = getSystemPosPool();
+  try {
+    await pool.execute(sql, []);
+  } catch (error) {
+    console.error('❌ System POS MySQL DDL error:', error);
+    console.error('SQL:', sql);
+    throw error;
+  }
+}
+
+/**
+ * Execute DDL on main DB, but silently ignore ER_DUP_FIELDNAME (1060) and ER_DUP_KEYNAME (1061).
+ * Use for ALTER ADD COLUMN/INDEX when columns may already exist.
+ */
+export async function executeDdlIgnoreDup(sql: string): Promise<void> {
+  const pool = getMySQLPool();
+  try {
+    await pool.execute(sql, []);
+  } catch (error: unknown) {
+    const err = error as { errno?: number; code?: string };
+    if (err.errno === 1060 || err.errno === 1061 || err.code === 'ER_DUP_FIELDNAME' || err.code === 'ER_DUP_KEYNAME') {
+      return; /* column/index already exists */
+    }
+    console.error('❌ MySQL DDL error (main DB):', error);
+    console.error('SQL:', sql);
+    throw error;
+  }
+}
+
+/**
+ * Execute DDL, but silently ignore ER_DUP_FIELDNAME (1060) and ER_DUP_KEYNAME (1061).
+ * Use for ALTER ADD COLUMN/INDEX when columns may already exist. No console logging for those.
+ */
+export async function executeSystemPosDdlIgnoreDup(sql: string): Promise<void> {
+  const pool = getSystemPosPool();
+  try {
+    await pool.execute(sql, []);
+  } catch (error: unknown) {
+    const err = error as { errno?: number; code?: string };
+    if (err.errno === 1060 || err.errno === 1061 || err.code === 'ER_DUP_FIELDNAME' || err.code === 'ER_DUP_KEYNAME') {
+      return; /* column/index already exists */
+    }
+    console.error('❌ System POS MySQL DDL error:', error);
+    console.error('SQL:', sql);
+    throw error;
+  }
 }
 
 /**
@@ -470,15 +597,19 @@ export async function testDatabaseConnection(config: {
       // Check if it's a network connection issue
       const isNetworkConnection = host !== 'localhost' && host !== '127.0.0.1';
       if (isNetworkConnection) {
+        // MySQL error often contains client IP: "Access denied for user 'client'@'192.168.1.75'"
+        const clientIpMatch = error.message?.match(/user\s+'[^']+'@'([^']+)'/);
+        const clientIp = clientIpMatch ? clientIpMatch[1] : 'IP_komputer_ini';
         errorMessage = `Username atau password salah untuk koneksi jaringan ke ${host}.\n\n` +
           `Kemungkinan penyebab:\n` +
-          `1. User '${user}' belum dibuat untuk koneksi dari IP ${host}\n` +
-          `2. Password berbeda untuk user network vs localhost\n\n` +
-          `Solusi: Di MySQL server, jalankan:\n` +
-          `CREATE USER '${user}'@'${host}' IDENTIFIED BY 'password_yang_sama';\n` +
-          `GRANT ALL PRIVILEGES ON ${database}.* TO '${user}'@'${host}';\n` +
+          `1. User '${user}' belum dibuat untuk koneksi dari IP komputer ini (${clientIp})\n` +
+          `2. Password salah atau berbeda\n` +
+          `3. Komputer ini di subnet lain (bukan 192.168.1.x)\n\n` +
+          `Solusi: Di MySQL server (${host}), jalankan:\n` +
+          `CREATE USER '${user}'@'${clientIp}' IDENTIFIED BY 'password_yang_sama';\n` +
+          `GRANT ALL PRIVILEGES ON ${database}.* TO '${user}'@'${clientIp}';\n` +
           `FLUSH PRIVILEGES;\n\n` +
-          `Atau untuk seluruh subnet:\n` +
+          `Atau untuk seluruh subnet 192.168.1.x:\n` +
           `CREATE USER '${user}'@'192.168.1.%' IDENTIFIED BY 'password_yang_sama';\n` +
           `GRANT ALL PRIVILEGES ON ${database}.* TO '${user}'@'192.168.1.%';\n` +
           `FLUSH PRIVILEGES;`;
@@ -655,12 +786,62 @@ export async function insertTransactionToSystemPos(transactionId: string): Promi
       }
     }
 
+    // Step 7b: Ensure table_id exists in system_pos.restaurant_tables (FK constraint)
+    // If the transaction has a table_id but that table doesn't exist in system_pos, use NULL
+    let transactionForInsert = transaction;
+    const tableId = transaction.table_id;
+    if (tableId != null && tableId !== '') {
+      const tableIdNum = typeof tableId === 'number' ? tableId : Number(tableId);
+      if (!Number.isNaN(tableIdNum)) {
+        const tableExists = await executeSystemPosQueryOne<{ id: number }>(
+          'SELECT id FROM restaurant_tables WHERE id = ? LIMIT 1',
+          [tableIdNum]
+        );
+        if (!tableExists) {
+          transactionForInsert = { ...transaction, table_id: null };
+          console.warn(`⚠️ [SYSTEM POS] table_id ${tableIdNum} not found in system_pos.restaurant_tables, inserting transaction with table_id=NULL`);
+        }
+      }
+    }
+
+    // Step 7c: Ensure payment_method_id exists in system_pos.payment_methods (FK constraint)
+    const paymentMethodId = typeof transaction.payment_method_id === 'number'
+      ? transaction.payment_method_id
+      : (transaction.payment_method_id ? Number(transaction.payment_method_id) : 1);
+    if (!Number.isNaN(paymentMethodId) && paymentMethodId > 0) {
+      const pmExists = await executeSystemPosQueryOne<{ id: number }>(
+        'SELECT id FROM payment_methods WHERE id = ? LIMIT 1',
+        [paymentMethodId]
+      );
+      if (!pmExists) {
+        const pm = await executeQueryOne<Record<string, unknown>>(
+          'SELECT * FROM payment_methods WHERE id = ?',
+          [paymentMethodId]
+        );
+        if (pm) {
+          try {
+            const pmFields = Object.keys(pm);
+            const pmValues = pmFields.map(f => convertToMySQLParam(pm[f]));
+            const pmPlaceholders = pmFields.map(() => '?').join(', ');
+            await executeSystemPosUpdate(
+              `INSERT INTO payment_methods (${pmFields.join(', ')}) VALUES (${pmPlaceholders}) ON DUPLICATE KEY UPDATE name=VALUES(name), code=VALUES(code), description=VALUES(description), is_active=VALUES(is_active), requires_additional_info=VALUES(requires_additional_info), updated_at=VALUES(updated_at)`,
+              pmValues
+            );
+            console.log(`✅ [SYSTEM POS] Ensured payment_method id=${paymentMethodId} in system_pos.payment_methods`);
+          } catch (pmErr: unknown) {
+            const msg = pmErr instanceof Error ? pmErr.message : String(pmErr);
+            console.warn(`⚠️ [SYSTEM POS] Could not ensure payment_method ${paymentMethodId} in system_pos:`, msg);
+          }
+        }
+      }
+    }
+
     // Step 8: Insert all data into system_pos DB using transaction
     const queries: Array<{ sql: string; params?: (string | number | null | boolean)[] }> = [];
 
     // Insert transaction
-    const txFields = Object.keys(transaction);
-    const txValues = txFields.map(field => convertToMySQLParam(transaction[field]));
+    const txFields = Object.keys(transactionForInsert);
+    const txValues = txFields.map(field => convertToMySQLParam(transactionForInsert[field]));
     const txPlaceholders = txFields.map(() => '?').join(', ');
     queries.push({
       sql: `INSERT INTO transactions (${txFields.join(', ')}) VALUES (${txPlaceholders})`,

@@ -27,7 +27,7 @@ import { ClipboardList, FilePlus, ChevronRight, Store, Globe } from 'lucide-reac
 type LocalCategory = {
   jenis: string;
   active: boolean;
-  productType?: 'drinks' | 'bakery'; // NEW: Track whether this is a drinks or bakery category
+  productType?: 'drinks' | 'bakery' | 'foods'; // NEW: Track whether this is a drinks, bakery, or foods category
 };
 
 interface Product {
@@ -97,8 +97,15 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
     tableName: string | null;
     roomName: string | null;
     customerName: string | null;
+    waiterId: number | null;
     waiterName: string | null;
     waiterColor: string | null;
+    waiterNamesAll?: string[];
+    pickupMethod?: 'dine-in' | 'take-away';
+    voucher_discount?: number;
+    voucher_type?: string;
+    voucher_value?: number | null;
+    voucher_label?: string | null;
   } | null>(null);
   const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false);
   
@@ -107,8 +114,12 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
   const [products, setProducts] = useState<Product[]>([]); // Start with empty array
   const [isLoadingProducts, setIsLoadingProducts] = useState(true);
   const [searchQuery, setSearchQuery] = useState('');
+  // All products across category2 for global search (lazy-loaded when user types in search)
+  const [allProductsForSearch, setAllProductsForSearch] = useState<Product[] | null>(null);
+  const [isLoadingAllProductsForSearch, setIsLoadingAllProductsForSearch] = useState(false);
   const [showStartShiftModal, setShowStartShiftModal] = useState(false);
   const [hasCheckedShift, setHasCheckedShift] = useState(false);
+  const [newOrderResetSignal, setNewOrderResetSignal] = useState(0);
 
   // Early return if user is not loaded yet
   if (!user) {
@@ -133,7 +144,9 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
   const canAccessPrinter = isAdmin ||
     permissions.includes('setelan.printersetup') ||
     permissions.includes('marviano-pos_setelan_printer-setup');
-  
+  const canAccessSlideshow = isAdmin || permissions.includes('access_slideshowmanager');
+  const canAccessTemplateStruk = isAdmin || permissions.includes('access_templatestruk');
+
   // Helper function to check and prompt for unsaved changes
   const checkUnsavedChanges = (): boolean => {
     if (hasUnsavedChanges) {
@@ -263,6 +276,7 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
     setSelectedOnlinePlatform(null);
     setShowActiveOrders(false);
     setLoadedTransactionInfo(null); // Reset transaction info
+    setNewOrderResetSignal(s => s + 1); // Tell CenterContent to reset nama pelanggan and pilih waiter
   };
 
   // Send tab updates to customer display (includes cart items for the active tab)
@@ -286,14 +300,19 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
 
     const loadCategories = async () => {
       try {
-        // Fetch both drinks and bakery categories
-        const [drinksCategories, bakeryCategories] = await Promise.all([
+        // Fetch drinks, bakery, and foods categories
+        const [drinksCategories, bakeryCategories, foodsCategories] = await Promise.all([
           fetchCategories('drinks', {
             isOnline: isOnlineTab,
             platform: isOnlineTab ? (selectedOnlinePlatform ?? undefined) : undefined,
             businessId: businessId
           }) as Promise<Array<{ jenis: string; active?: boolean }>>,
           fetchCategories('bakery', {
+            isOnline: isOnlineTab,
+            platform: isOnlineTab ? (selectedOnlinePlatform ?? undefined) : undefined,
+            businessId: businessId
+          }) as Promise<Array<{ jenis: string; active?: boolean }>>,
+          fetchCategories('foods', {
             isOnline: isOnlineTab,
             platform: isOnlineTab ? (selectedOnlinePlatform ?? undefined) : undefined,
             businessId: businessId
@@ -322,8 +341,17 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
             productType: 'bakery' as const
           }));
 
-        // Combine: drinks first, then bakery
-        const validCategories: LocalCategory[] = [...taggedDrinks, ...taggedBakery];
+        // Tag foods categories
+        const taggedFoods = foodsCategories
+          .filter(cat => cat.jenis && cat.jenis.trim() !== '')
+          .map(cat => ({
+            jenis: cat.jenis,
+            active: cat.active ?? true,
+            productType: 'foods' as const
+          }));
+
+        // Combine: drinks first, then bakery, then foods
+        const validCategories: LocalCategory[] = [...taggedDrinks, ...taggedBakery, ...taggedFoods];
 
         if (validCategories.length > 0) {
           setCategories(validCategories);
@@ -371,9 +399,9 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
 
       setIsLoadingProducts(true);
       try {
-        // Try both drinks and bakery - the category will naturally filter to the right products
-        // We fetch both types and let the API/database filter by category2_name
-        const [drinksData, bakeryData] = await Promise.all([
+        // Try drinks, bakery, and foods - the category will naturally filter to the right products
+        // We fetch all types and let the API/database filter by category2_name
+        const [drinksData, bakeryData, foodsData] = await Promise.all([
           fetchProducts(selectedCategory, 'drinks', {
             isOnline: isOnlineTab,
             platform: isOnlineTab ? (selectedOnlinePlatform ?? undefined) : undefined,
@@ -383,11 +411,16 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
             isOnline: isOnlineTab,
             platform: isOnlineTab ? (selectedOnlinePlatform ?? undefined) : undefined,
             businessId: businessId
+          }),
+          fetchProducts(selectedCategory, 'foods', {
+            isOnline: isOnlineTab,
+            platform: isOnlineTab ? (selectedOnlinePlatform ?? undefined) : undefined,
+            businessId: businessId
           })
         ]);
 
         // Combine results - only one will have data for this category
-        const productsData = [...drinksData, ...bakeryData];
+        const productsData = [...drinksData, ...bakeryData, ...foodsData];
 
         if (!isCancelled) {
           // FIX: Update both states together to minimize re-renders
@@ -410,6 +443,51 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
     };
   }, [selectedCategory, isOnlineTab, selectedOnlinePlatform, businessId]); // Re-fetch when category or tab changes
 
+  // Invalidate global-search cache when business or platform changes so next search refetches
+  useEffect(() => {
+    setAllProductsForSearch(null);
+  }, [businessId, isOnlineTab, selectedOnlinePlatform]);
+
+  // Clear search when user changes category 2 so the view shows the new category without old search
+  useEffect(() => {
+    setSearchQuery('');
+  }, [selectedCategory]);
+
+  // When user has a search query, load all products (across category2) for global search
+  useEffect(() => {
+    if (!businessId || !fetchProducts || !searchQuery.trim()) return;
+
+    let isCancelled = false;
+
+    const loadAllForSearch = async () => {
+      if (allProductsForSearch !== null) return; // Already have cache
+      setIsLoadingAllProductsForSearch(true);
+      try {
+        const opts = {
+          isOnline: isOnlineTab,
+          platform: isOnlineTab ? (selectedOnlinePlatform ?? undefined) : undefined,
+          businessId,
+        };
+        const [drinksData, bakeryData, foodsData] = await Promise.all([
+          fetchProducts(undefined, 'drinks', opts),
+          fetchProducts(undefined, 'bakery', opts),
+          fetchProducts(undefined, 'foods', opts),
+        ]);
+        const merged = [...drinksData, ...bakeryData, ...foodsData];
+        if (!isCancelled) setAllProductsForSearch(merged);
+      } catch (error) {
+        if (!isCancelled) {
+          console.error('❌ Error loading all products for search:', error);
+          setAllProductsForSearch([]);
+        }
+      } finally {
+        if (!isCancelled) setIsLoadingAllProductsForSearch(false);
+      }
+    };
+
+    loadAllForSearch();
+    return () => { isCancelled = true; };
+  }, [searchQuery.trim(), businessId, isOnlineTab, selectedOnlinePlatform, allProductsForSearch]);
 
   // Reset platform selection when switching away from online tab
   useEffect(() => {
@@ -464,14 +542,19 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
       setIsLoadingProducts(true);
 
       try {
-        // Fetch both drinks and bakery categories
-        const [drinksCategories, bakeryCategories] = await Promise.all([
+        // Fetch drinks, bakery, and foods categories
+        const [drinksCategories, bakeryCategories, foodsCategories] = await Promise.all([
           fetchCategories('drinks', {
             isOnline: isOnlineTab,
             platform: isOnlineTab ? (selectedOnlinePlatform ?? undefined) : undefined,
             businessId: businessId
           }),
           fetchCategories('bakery', {
+            isOnline: isOnlineTab,
+            platform: isOnlineTab ? (selectedOnlinePlatform ?? undefined) : undefined,
+            businessId: businessId
+          }),
+          fetchCategories('foods', {
             isOnline: isOnlineTab,
             platform: isOnlineTab ? (selectedOnlinePlatform ?? undefined) : undefined,
             businessId: businessId
@@ -496,13 +579,22 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
             productType: 'bakery' as const
           }));
 
-        const validCategories: LocalCategory[] = [...taggedDrinks, ...taggedBakery];
+        // Tag foods categories
+        const taggedFoods = (foodsCategories as Array<{ jenis: string; active?: boolean }>)
+          .filter(cat => cat.jenis && cat.jenis.trim() !== '')
+          .map(cat => ({
+            jenis: cat.jenis,
+            active: cat.active ?? true,
+            productType: 'foods' as const
+          }));
+
+        const validCategories: LocalCategory[] = [...taggedDrinks, ...taggedBakery, ...taggedFoods];
         setCategories(validCategories);
 
         if (validCategories.length > 0 && validCategories[0].jenis) {
           setSelectedCategory(validCategories[0].jenis);
-          // Fetch products from both drinks and bakery
-          const [drinksProducts, bakeryProducts] = await Promise.all([
+          // Fetch products from drinks, bakery, and foods
+          const [drinksProducts, bakeryProducts, foodsProducts] = await Promise.all([
             fetchProducts(validCategories[0].jenis, 'drinks', {
               isOnline: isOnlineTab,
               platform: isOnlineTab ? (selectedOnlinePlatform ?? undefined) : undefined,
@@ -512,9 +604,14 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
               isOnline: isOnlineTab,
               platform: isOnlineTab ? (selectedOnlinePlatform ?? undefined) : undefined,
               businessId: businessId
+            }),
+            fetchProducts(validCategories[0].jenis, 'foods', {
+              isOnline: isOnlineTab,
+              platform: isOnlineTab ? (selectedOnlinePlatform ?? undefined) : undefined,
+              businessId: businessId
             })
           ]);
-          setProducts([...drinksProducts, ...bakeryProducts]);
+          setProducts([...drinksProducts, ...bakeryProducts, ...foodsProducts]);
         }
       } catch (error) {
         console.error('❌ Error refreshing after sync:', error);
@@ -530,10 +627,11 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
     };
   }, [isOnlineTab, selectedOnlinePlatform, businessId]);
 
-  // Check for active shift when Kasir page is active
+  // Check for active shift when Kasir page is active (only if user has access_kasir)
+  const canAccessKasir = isSuperAdmin(user) || hasPermission(user, 'access_kasir');
   useEffect(() => {
     if (!businessId) return;
-    if (activeMenuItem === 'Kasir' && user.id && !hasCheckedShift) {
+    if (activeMenuItem === 'Kasir' && canAccessKasir && user.id && !hasCheckedShift) {
       const checkActiveShift = async () => {
         try {
           const electronAPI = getElectronAPI();
@@ -557,7 +655,7 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
       setHasCheckedShift(false);
       setShowStartShiftModal(false);
     }
-  }, [activeMenuItem, user.id, businessId, hasCheckedShift]);
+  }, [activeMenuItem, canAccessKasir, user.id, businessId, hasCheckedShift]);
 
   // Fetch pending orders count when on Kasir page
   useEffect(() => {
@@ -758,6 +856,25 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
         }
       });
 
+      // Fetch employees once for transaction waiter and per-item waiter names
+      let employeesArray: Array<{ id?: number | string; nama_karyawan?: string; color?: string | null }> = [];
+      if (electronAPI.localDbGetEmployees) {
+        try {
+          const allEmployees = await electronAPI.localDbGetEmployees();
+          employeesArray = Array.isArray(allEmployees) ? allEmployees : [];
+        } catch (e) {
+          console.warn('Failed to fetch employees for waiter names:', e);
+        }
+      }
+      const resolveWaiterName = (empId: number | null): string | null => {
+        if (empId == null) return null;
+        const emp = employeesArray.find((e: { id?: number | string }) => {
+          const eid = typeof e.id === 'number' ? e.id : (typeof e.id === 'string' ? parseInt(String(e.id), 10) : null);
+          return eid === empId;
+        });
+        return emp && typeof (emp as { nama_karyawan?: string }).nama_karyawan === 'string' ? (emp as { nama_karyawan: string }).nama_karyawan : null;
+      };
+
       // Convert transaction items to cart items
       // Filter out cancelled items - they should not be loaded into cart
       const activeItems = itemsArray.filter((item) => {
@@ -800,6 +917,9 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
         // ALL items in "lihat" mode should be locked (they've all been saved to the transaction)
         const isItemLocked = true;
 
+        const itemWaiterId = typeof item.waiter_id === 'number' ? item.waiter_id : (typeof item.waiter_id === 'string' ? parseInt(String(item.waiter_id), 10) : null);
+        const itemWaiterName = resolveWaiterName(itemWaiterId ?? null);
+
         return {
           id: Date.now() + Math.random(), // Generate unique ID for cart
           product: {
@@ -830,6 +950,8 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
           transactionItemId: itemId || 0, // Database transaction_item ID
           transactionId: transactionId, // Transaction UUID
           tableId: transactionTableId,
+          waiterId: itemWaiterId ?? undefined,
+          waiterName: itemWaiterName ?? undefined,
         };
       }).filter((item) => item !== null) as CartItem[];
 
@@ -838,36 +960,49 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
       setIsOnlineTab(false);
       setSelectedOnlinePlatform(null);
       
-      // Fetch waiter information if waiter_id exists
-      let waiterName: string | null = null;
-      let waiterColor: string | null = null;
+      // Transaction-level waiter (and all waiters for header "+N" / popover)
       const waiterId = typeof transaction.waiter_id === 'number' ? transaction.waiter_id : (typeof transaction.waiter_id === 'string' ? parseInt(transaction.waiter_id, 10) : null);
-      if (waiterId && electronAPI.localDbGetEmployees) {
-        try {
-          const allEmployees = await electronAPI.localDbGetEmployees();
-          const employeesArray = Array.isArray(allEmployees) ? allEmployees : [];
-          const waiter = employeesArray.find((emp: { id?: number | string; nama_karyawan?: string; color?: string | null }) => {
-            const empId = typeof emp.id === 'number' ? emp.id : (typeof emp.id === 'string' ? parseInt(emp.id, 10) : null);
-            return empId === waiterId;
-          });
-          if (waiter && typeof waiter.nama_karyawan === 'string') {
-            waiterName = waiter.nama_karyawan;
-            waiterColor = typeof waiter.color === 'string' && waiter.color ? waiter.color : null;
-          }
-        } catch (error) {
-          console.warn('Failed to fetch waiter information:', error);
-        }
+      const waiterIdsFromItems = activeItems.map((i: Record<string, unknown>) => typeof i.waiter_id === 'number' ? i.waiter_id : (typeof i.waiter_id === 'string' ? parseInt(String(i.waiter_id), 10) : null));
+      const allWaiterIds = [...new Set([waiterId, ...waiterIdsFromItems].filter((id): id is number => id != null))];
+      const waiterNamesAll = allWaiterIds.map((id) => resolveWaiterName(id)).filter((n): n is string => Boolean(n));
+      let waiterName: string | null = waiterId != null ? resolveWaiterName(waiterId) : null;
+      let waiterColor: string | null = null;
+      if (waiterId != null) {
+        const waiter = employeesArray.find((emp: { id?: number | string; color?: string | null }) => {
+          const empId = typeof emp.id === 'number' ? emp.id : (typeof emp.id === 'string' ? parseInt(String(emp.id), 10) : null);
+          return empId === waiterId;
+        });
+        waiterColor = waiter && typeof (waiter as { color?: string | null }).color === 'string' && (waiter as { color: string }).color ? (waiter as { color: string }).color : null;
       }
 
-      // Set loaded transaction info for display
+      // Set loaded transaction info for display (include voucher for pre-fill in Payment Modal)
       const customerName = typeof transaction.customer_name === 'string' ? transaction.customer_name : null;
+      const vd = typeof transaction.voucher_discount === 'number' ? transaction.voucher_discount : (typeof transaction.voucher_discount === 'string' ? parseFloat(transaction.voucher_discount as string) : 0);
+      const vt = typeof transaction.voucher_type === 'string' ? transaction.voucher_type : undefined;
+      const vv = typeof transaction.voucher_value === 'number' ? transaction.voucher_value : (typeof transaction.voucher_value === 'string' ? parseFloat(transaction.voucher_value as string) : null);
+      const vl = typeof transaction.voucher_label === 'string' ? transaction.voucher_label : null;
+      // Pickup method: use stored value, or default take-away for platform orders (gofood/grabfood/shopeefood/qpon/tiktok)
+      const platformPaymentMethods = ['gofood', 'grabfood', 'shopeefood', 'qpon', 'tiktok'];
+      const pm = typeof transaction.pickup_method === 'string' ? transaction.pickup_method : null;
+      const paymentMethod = typeof transaction.payment_method === 'string' ? (transaction.payment_method as string).toLowerCase() : '';
+      const pickupMethod: 'dine-in' | 'take-away' =
+        pm === 'take-away' || pm === 'dine-in' ? pm
+        : platformPaymentMethods.includes(paymentMethod) ? 'take-away'
+        : 'dine-in';
       setLoadedTransactionInfo({
         transactionId: transactionId,
         tableName,
         roomName,
         customerName,
+        waiterId: waiterId ?? null,
         waiterName,
         waiterColor,
+        waiterNamesAll: waiterNamesAll.length > 0 ? waiterNamesAll : undefined,
+        pickupMethod,
+        voucher_discount: Number.isNaN(vd) ? 0 : vd,
+        voucher_type: vt,
+        voucher_value: vv != null && !Number.isNaN(vv) ? vv : null,
+        voucher_label: vl,
       });
 
       // Switch to Kasir page if not already there
@@ -888,8 +1023,7 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
   const renderMainContent = () => {
     switch (activeMenuItem) {
       case 'Kasir': {
-        // Check permission to access Kasir page
-        const canAccessKasir = isSuperAdmin(user) || hasPermission(user, 'access_kasir');
+        // Check permission to access Kasir page (canAccessKasir from component scope)
         if (!canAccessKasir) {
           return (
             <div className="flex-1 flex items-center justify-center">
@@ -904,11 +1038,11 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
         }
         return (
           <div className="flex-1 flex flex-col h-full min-h-0">
-            {/* Kasir Tabs - NEW STRUCTURE */}
-            <div className="bg-white border-b border-gray-200 px-4 py-3 relative">
-              <div className="flex space-x-3 flex-wrap items-center justify-between">
+            {/* Kasir Tabs — toolbar; faint blue glow under bar (z-10 so shadow isn't covered by content below) */}
+            <div className="bg-slate-100 border-b border-slate-200 px-4 py-3 relative z-10 shadow-[0_6px_18px_0_rgba(59,130,246,0.2),0_3px_10px_0_rgba(59,130,246,0.12)]">
+              <div className="flex space-x-3 flex-wrap items-center justify-between gap-2">
                 <div className="flex space-x-3 flex-wrap items-center">
-                  {/* Offline Tab */}
+                  {/* Offline Tab — selected = filled, unselected = outline (UI pattern for tabs) */}
                   <button
                     onClick={() => {
                       if (!checkUnsavedChanges()) return;
@@ -916,195 +1050,171 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
                       setSelectedOnlinePlatform(null);
                       setShowActiveOrders(false);
                     }}
-                    className={`group relative px-6 py-2.5 rounded-xl font-semibold text-sm transition-all duration-300 flex items-center gap-2.5 ${
+                    className={`group relative px-5 py-2.5 rounded-md font-semibold text-sm transition-all duration-200 flex items-center gap-2 shrink-0 ${
                       !isOnlineTab && !showActiveOrders
-                        ? 'bg-gradient-to-r from-indigo-500 to-indigo-600 text-white shadow-lg hover:shadow-xl hover:scale-105 active:scale-100 border border-indigo-400/20'
-                        : 'bg-white text-gray-700 hover:bg-gray-50 shadow-md hover:shadow-lg hover:scale-105 active:scale-100 border-2 border-indigo-500/30 hover:border-indigo-500/50'
+                        ? 'bg-indigo-600 text-white shadow-md hover:bg-indigo-700 active:scale-[0.98]'
+                        : 'bg-white text-slate-700 border border-slate-300 hover:bg-indigo-50 hover:border-indigo-400 active:scale-[0.98]'
                     }`}
                   >
-                    <Store className={`w-4 h-4 transition-transform duration-300 ${!isOnlineTab && !showActiveOrders ? 'group-hover:scale-110' : 'group-hover:scale-110'}`} />
+                    <Store className="w-4 h-4 shrink-0" />
                     <span>Offline</span>
-                    {!isOnlineTab && !showActiveOrders && (
-                      <div className="absolute inset-0 rounded-xl bg-white/0 group-hover:bg-white/10 transition-colors duration-300"></div>
-                    )}
                   </button>
 
-                  {/* Online Section with Platform Buttons - Disabled in "lihat" mode */}
-                  <div className={`flex items-center rounded-xl overflow-hidden shadow-md transition-all duration-300 ${
+                  {/* Online Section with Platform Buttons — selected = filled cyan, unselected = outline */}
+                  <div className={`flex items-center rounded-md overflow-hidden border transition-all duration-200 ${
                     isOnlineTab && !showActiveOrders && !loadedTransactionInfo 
-                      ? 'bg-gradient-to-r from-cyan-500 to-cyan-600 border border-cyan-400/20' 
-                      : 'bg-white border-2 border-cyan-500/30'
-                    } ${loadedTransactionInfo ? 'opacity-50 cursor-not-allowed' : ''}`}>
+                      ? 'bg-cyan-600 shadow-md border-cyan-600' 
+                      : 'bg-white border-slate-300 hover:border-cyan-400'
+                    } ${loadedTransactionInfo ? 'opacity-50 cursor-not-allowed' : ''}`}
+                  >
                     <div
-                      className={`px-4 py-2.5 font-semibold text-sm flex items-center gap-2 transition-all duration-300 ${
+                      className={`px-4 py-2.5 font-semibold text-sm flex items-center gap-2 shrink-0 ${
                         isOnlineTab && !showActiveOrders && !loadedTransactionInfo 
                           ? 'text-white' 
-                          : 'text-gray-700'
+                          : 'text-slate-700'
                         } ${loadedTransactionInfo ? 'cursor-not-allowed' : 'cursor-default'}`}
                     >
                       <Globe className="w-4 h-4" />
                       <span>Online</span>
                     </div>
 
-                    <div className="flex h-full border-l border-cyan-400/20">
+                    <div className={`flex h-full ${isOnlineTab && !showActiveOrders && !loadedTransactionInfo ? 'border-l border-cyan-400/40' : 'border-l border-slate-200'}`}>
                       <button
                         onClick={() => {
-                          if (loadedTransactionInfo) return; // Disabled in lihat mode
+                          if (loadedTransactionInfo) return;
                           if (!checkUnsavedChanges()) return;
                           setSelectedOnlinePlatform('gofood');
                           setIsOnlineTab(true);
                           setShowActiveOrders(false);
                         }}
                         disabled={!!loadedTransactionInfo}
-                        className={`group relative px-4 py-2.5 text-sm font-semibold transition-all duration-300 h-full ${
+                        className={`px-3 py-2.5 text-sm font-semibold transition-all duration-200 h-full shrink-0 ${
                           selectedOnlinePlatform === 'gofood' && isOnlineTab && !showActiveOrders && !loadedTransactionInfo
-                            ? 'bg-gradient-to-r from-green-500 to-green-600 text-white shadow-inner'
+                            ? 'bg-green-600 text-white'
                             : isOnlineTab && !showActiveOrders && !loadedTransactionInfo 
-                              ? 'text-white hover:bg-cyan-700/50' 
-                              : 'text-gray-700 hover:bg-gray-100'
-                          } ${loadedTransactionInfo ? 'opacity-50 cursor-not-allowed' : 'hover:scale-105'}`}
+                              ? 'text-white hover:bg-cyan-500/80' 
+                              : 'text-slate-700 hover:bg-slate-100'
+                        } ${loadedTransactionInfo ? 'cursor-not-allowed' : ''}`}
                       >
                         GoFood
-                        {selectedOnlinePlatform === 'gofood' && isOnlineTab && !showActiveOrders && !loadedTransactionInfo && (
-                          <div className="absolute inset-0 bg-white/0 group-hover:bg-white/10 transition-colors duration-300"></div>
-                        )}
                       </button>
                       <button
                         onClick={() => {
-                          if (loadedTransactionInfo) return; // Disabled in lihat mode
+                          if (loadedTransactionInfo) return;
                           if (!checkUnsavedChanges()) return;
                           setSelectedOnlinePlatform('grabfood');
                           setIsOnlineTab(true);
                           setShowActiveOrders(false);
                         }}
                         disabled={!!loadedTransactionInfo}
-                        className={`group relative px-4 py-2.5 text-sm font-semibold transition-all duration-300 h-full ${
+                        className={`px-3 py-2.5 text-sm font-semibold transition-all duration-200 h-full shrink-0 ${
                           selectedOnlinePlatform === 'grabfood' && isOnlineTab && !showActiveOrders && !loadedTransactionInfo
-                            ? 'bg-gradient-to-r from-green-500 to-green-600 text-white shadow-inner'
+                            ? 'bg-green-600 text-white'
                             : isOnlineTab && !showActiveOrders && !loadedTransactionInfo 
-                              ? 'text-white hover:bg-cyan-700/50' 
-                              : 'text-gray-700 hover:bg-gray-100'
-                          } ${loadedTransactionInfo ? 'opacity-50 cursor-not-allowed' : 'hover:scale-105'}`}
+                              ? 'text-white hover:bg-cyan-500/80' 
+                              : 'text-slate-700 hover:bg-slate-100'
+                        } ${loadedTransactionInfo ? 'cursor-not-allowed' : ''}`}
                       >
                         Grab
-                        {selectedOnlinePlatform === 'grabfood' && isOnlineTab && !showActiveOrders && !loadedTransactionInfo && (
-                          <div className="absolute inset-0 bg-white/0 group-hover:bg-white/10 transition-colors duration-300"></div>
-                        )}
                       </button>
                       <button
                         onClick={() => {
-                          if (loadedTransactionInfo) return; // Disabled in lihat mode
+                          if (loadedTransactionInfo) return;
                           if (!checkUnsavedChanges()) return;
                           setSelectedOnlinePlatform('shopeefood');
                           setIsOnlineTab(true);
                           setShowActiveOrders(false);
                         }}
                         disabled={!!loadedTransactionInfo}
-                        className={`group relative px-4 py-2.5 text-sm font-semibold transition-all duration-300 h-full ${
+                        className={`px-3 py-2.5 text-sm font-semibold transition-all duration-200 h-full shrink-0 ${
                           selectedOnlinePlatform === 'shopeefood' && isOnlineTab && !showActiveOrders && !loadedTransactionInfo
-                            ? 'bg-gradient-to-r from-green-500 to-green-600 text-white shadow-inner'
+                            ? 'bg-green-600 text-white'
                             : isOnlineTab && !showActiveOrders && !loadedTransactionInfo 
-                              ? 'text-white hover:bg-cyan-700/50' 
-                              : 'text-gray-700 hover:bg-gray-100'
-                          } ${loadedTransactionInfo ? 'opacity-50 cursor-not-allowed' : 'hover:scale-105'}`}
+                              ? 'text-white hover:bg-cyan-500/80' 
+                              : 'text-slate-700 hover:bg-slate-100'
+                        } ${loadedTransactionInfo ? 'cursor-not-allowed' : ''}`}
                       >
                         Shopee
-                        {selectedOnlinePlatform === 'shopeefood' && isOnlineTab && !showActiveOrders && !loadedTransactionInfo && (
-                          <div className="absolute inset-0 bg-white/0 group-hover:bg-white/10 transition-colors duration-300"></div>
-                        )}
                       </button>
                       <button
                         onClick={() => {
-                          if (loadedTransactionInfo) return; // Disabled in lihat mode
+                          if (loadedTransactionInfo) return;
                           if (!checkUnsavedChanges()) return;
                           setSelectedOnlinePlatform('qpon');
                           setIsOnlineTab(true);
                           setShowActiveOrders(false);
                         }}
                         disabled={!!loadedTransactionInfo}
-                        className={`group relative px-4 py-2.5 text-sm font-semibold transition-all duration-300 h-full ${
+                        className={`px-3 py-2.5 text-sm font-semibold transition-all duration-200 h-full shrink-0 ${
                           selectedOnlinePlatform === 'qpon' && isOnlineTab && !showActiveOrders && !loadedTransactionInfo
-                            ? 'bg-gradient-to-r from-green-500 to-green-600 text-white shadow-inner'
+                            ? 'bg-green-600 text-white'
                             : isOnlineTab && !showActiveOrders && !loadedTransactionInfo 
-                              ? 'text-white hover:bg-cyan-700/50' 
-                              : 'text-gray-700 hover:bg-gray-100'
-                          } ${loadedTransactionInfo ? 'opacity-50 cursor-not-allowed' : 'hover:scale-105'}`}
+                              ? 'text-white hover:bg-cyan-500/80' 
+                              : 'text-slate-700 hover:bg-slate-100'
+                        } ${loadedTransactionInfo ? 'cursor-not-allowed' : ''}`}
                       >
                         Qpon
-                        {selectedOnlinePlatform === 'qpon' && isOnlineTab && !showActiveOrders && !loadedTransactionInfo && (
-                          <div className="absolute inset-0 bg-white/0 group-hover:bg-white/10 transition-colors duration-300"></div>
-                        )}
                       </button>
                       <button
                         onClick={() => {
-                          if (loadedTransactionInfo) return; // Disabled in lihat mode
+                          if (loadedTransactionInfo) return;
                           if (!checkUnsavedChanges()) return;
                           setSelectedOnlinePlatform('tiktok');
                           setIsOnlineTab(true);
                           setShowActiveOrders(false);
                         }}
                         disabled={!!loadedTransactionInfo}
-                        className={`group relative px-4 py-2.5 text-sm font-semibold transition-all duration-300 h-full rounded-r-xl ${
+                        className={`px-3 py-2.5 text-sm font-semibold transition-all duration-200 h-full shrink-0 rounded-r-md ${
                           selectedOnlinePlatform === 'tiktok' && isOnlineTab && !showActiveOrders && !loadedTransactionInfo
-                            ? 'bg-gradient-to-r from-green-500 to-green-600 text-white shadow-inner'
+                            ? 'bg-green-600 text-white'
                             : isOnlineTab && !showActiveOrders && !loadedTransactionInfo 
-                              ? 'text-white hover:bg-cyan-700/50' 
-                              : 'text-gray-700 hover:bg-gray-100'
-                          } ${loadedTransactionInfo ? 'opacity-50 cursor-not-allowed' : 'hover:scale-105'}`}
+                              ? 'text-white hover:bg-cyan-500/80' 
+                              : 'text-slate-700 hover:bg-slate-100'
+                        } ${loadedTransactionInfo ? 'cursor-not-allowed' : ''}`}
                       >
                         TikTok
-                        {selectedOnlinePlatform === 'tiktok' && isOnlineTab && !showActiveOrders && !loadedTransactionInfo && (
-                          <div className="absolute inset-0 rounded-r-xl bg-white/0 group-hover:bg-white/10 transition-colors duration-300"></div>
-                        )}
                       </button>
                     </div>
                   </div>
                 </div>
 
-                {/* New and Active Orders Buttons - Right Side */}
-                <div className="flex items-center gap-3">
-                  {/* New Button */}
+                {/* New and Active Orders — primary action (New) = filled; Active Orders = tab pattern */}
+                <div className="flex items-center gap-3 shrink-0">
+                  {/* New — primary CTA: solid, one color, clear hover */}
                   <button
                     onClick={clearAllCarts}
-                    className="group relative px-6 py-2.5 rounded-xl font-semibold text-sm transition-all duration-300 flex items-center gap-2.5 bg-gradient-to-r from-blue-500 to-blue-600 text-white hover:from-blue-600 hover:to-blue-700 shadow-lg hover:shadow-xl hover:scale-105 active:scale-100 border border-blue-400/20"
+                    className="px-5 py-2.5 rounded-md font-semibold text-sm transition-all duration-200 flex items-center gap-2 bg-blue-600 text-white shadow-md hover:bg-blue-700 active:scale-[0.98]"
                   >
-                    <FilePlus className="w-4 h-4 transition-transform duration-300 group-hover:rotate-90" />
+                    <FilePlus className="w-4 h-4 shrink-0" />
                     <span>New</span>
-                    <div className="absolute inset-0 rounded-xl bg-white/0 group-hover:bg-white/10 transition-colors duration-300"></div>
                   </button>
 
-                  {/* Active Orders Tab Button */}
+                  {/* Active Orders — selected = filled, unselected = outline */}
                   <button
                     onClick={() => {
-                      // If trying to close Active Orders and there are unsaved changes, show confirmation
-                      if (showActiveOrders && !checkUnsavedChanges()) {
-                        return; // Don't close if user cancels
-                      }
+                      if (showActiveOrders && !checkUnsavedChanges()) return;
                       setShowActiveOrders(!showActiveOrders);
                       if (!showActiveOrders) {
                         setIsOnlineTab(false);
                         setSelectedOnlinePlatform(null);
                       }
                     }}
-                    className={`group relative px-6 py-2.5 rounded-xl font-semibold text-sm transition-all duration-300 flex items-center gap-2.5 ${
+                    className={`px-5 py-2.5 rounded-md font-semibold text-sm transition-all duration-200 flex items-center gap-2 shrink-0 ${
                       showActiveOrders
-                        ? 'bg-gradient-to-r from-emerald-500 to-emerald-600 text-white shadow-lg hover:shadow-xl hover:scale-105 active:scale-100 border border-emerald-400/20'
-                        : 'bg-white text-gray-700 hover:bg-gray-50 shadow-md hover:shadow-lg hover:scale-105 active:scale-100 border-2 border-emerald-500/30 hover:border-emerald-500/50'
+                        ? 'bg-emerald-600 text-white shadow-md hover:bg-emerald-700 active:scale-[0.98]'
+                        : 'bg-white text-slate-700 border border-slate-300 hover:bg-emerald-50 hover:border-emerald-400 active:scale-[0.98]'
                     }`}
                   >
-                    <ClipboardList className={`w-4 h-4 transition-transform duration-300 ${showActiveOrders ? 'group-hover:scale-110' : 'group-hover:scale-110'}`} />
+                    <ClipboardList className="w-4 h-4 shrink-0" />
                     <span>Active Orders</span>
                     {pendingOrdersCount > 0 && (
-                      <span className={`ml-1 inline-flex items-center justify-center min-w-[22px] h-5 px-2 text-xs font-bold leading-none rounded-full transition-all duration-300 ${
+                      <span className={`ml-1 inline-flex items-center justify-center min-w-[22px] h-5 px-2 text-xs font-bold leading-none rounded-full ${
                         showActiveOrders 
-                          ? 'text-emerald-600 bg-white shadow-sm' 
-                          : 'text-white bg-gradient-to-r from-red-500 to-red-600 shadow-md'
+                          ? 'text-emerald-600 bg-white' 
+                          : 'text-white bg-red-500'
                       }`}>
                         {pendingOrdersCount > 99 ? '99+' : pendingOrdersCount}
                       </span>
-                    )}
-                    {showActiveOrders && (
-                      <div className="absolute inset-0 rounded-xl bg-white/0 group-hover:bg-white/10 transition-colors duration-300"></div>
                     )}
                   </button>
                 </div>
@@ -1126,11 +1236,11 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
               {!showActiveOrders && (
                 <>
                   <CenterContent
-                    products={products}
+                    products={searchQuery.trim() ? (allProductsForSearch ?? products) : products}
                     cartItems={getCurrentCart()}
                     setCartItems={setCurrentCart}
-                    transactionType={categories.find(c => c.jenis === selectedCategory)?.productType || 'drinks'}
-                    isLoadingProducts={isLoadingProducts}
+                    transactionType={(categories.find(c => c.jenis === selectedCategory)?.productType || 'drinks') as 'drinks' | 'bakery' | 'foods'}
+                    isLoadingProducts={isLoadingProducts || (!!searchQuery.trim() && allProductsForSearch === null && isLoadingAllProductsForSearch)}
                     isOnline={isOnlineTab}
                     selectedOnlinePlatform={selectedOnlinePlatform}
                     searchQuery={searchQuery}
@@ -1142,6 +1252,7 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
                       setHasUnsavedChanges(false);
                     }}
                     onUnsavedChangesChange={setHasUnsavedChanges}
+                    resetCustomerAndWaiterSignal={newOrderResetSignal}
                   />
 
                   {/* Right Sidebar - Categories from database */}
@@ -1158,8 +1269,28 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
         );
       }
 
-      case 'Daftar Transaksi':
+      case 'Daftar Transaksi': {
+        // Check permission to access Daftar Transaksi page
+        const canAccessDaftarTransaksi = isSuperAdmin(user) || hasPermission(user, 'access_daftartransaksi');
+        if (!canAccessDaftarTransaksi) {
+          return (
+            <div className="flex-1 flex items-center justify-center">
+              <div className="text-center space-y-2">
+                <h2 className="text-lg font-semibold text-gray-700">Akses Ditolak</h2>
+                <p className="text-gray-500 text-sm">
+                  Anda tidak memiliki izin untuk mengakses halaman Daftar Transaksi.
+                </p>
+              </div>
+            </div>
+          );
+        }
+        // #region agent log
+        if (typeof fetch === 'function') {
+          fetch('http://127.0.0.1:7242/ingest/7b565785-72b5-49f7-b2c0-57606ea0d0b5', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ location: 'POSLayout.tsx:DaftarTransaksi', message: 'Rendering TransactionList for Daftar Transaksi', data: { activeMenuItem }, timestamp: Date.now(), sessionId: 'debug-session', hypothesisId: 'H1' }) }).catch(() => {});
+        }
+        // #endregion
         return <TransactionList businessId={businessId} onLoadTransaction={loadTransactionIntoCart} />;
+      }
 
       case 'Ganti Shift': {
         // Check permission to access Ganti Shift page
@@ -1198,7 +1329,7 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
       }
 
       case 'Settings':
-        if (!canAccessSync && !canAccessPrinter) {
+        if (!canAccessSync && !canAccessPrinter && !canAccessSlideshow && !canAccessTemplateStruk) {
           return (
             <div className="flex-1 flex items-center justify-center">
               <div className="text-center space-y-2">
@@ -1226,15 +1357,17 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
                     Sinkronisasi
                   </button>
                 )}
-                <button
-                  onClick={() => setActiveSettingsTab('slideshow')}
-                  className={`py-2 px-1 border-b-2 font-semibold text-lg ${activeSettingsTab === 'slideshow'
-                    ? 'border-blue-500 text-blue-600'
-                    : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
-                    }`}
-                >
-                  Slideshow Manager
-                </button>
+                {canAccessSlideshow && (
+                  <button
+                    onClick={() => setActiveSettingsTab('slideshow')}
+                    className={`py-2 px-1 border-b-2 font-semibold text-lg ${activeSettingsTab === 'slideshow'
+                      ? 'border-blue-500 text-blue-600'
+                      : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
+                      }`}
+                  >
+                    Slideshow Manager
+                  </button>
+                )}
                 {canAccessPrinter && (
                   <button
                     onClick={() => setActiveSettingsTab('printers')}
@@ -1246,24 +1379,26 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
                     Printer Setup
                   </button>
                 )}
-                <button
-                  onClick={() => setActiveSettingsTab('receipt-template')}
-                  className={`py-2 px-1 border-b-2 font-semibold text-lg ${activeSettingsTab === 'receipt-template'
-                    ? 'border-blue-500 text-blue-600'
-                    : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
-                    }`}
-                >
-                  Template Struk
-                </button>
+                {canAccessTemplateStruk && (
+                  <button
+                    onClick={() => setActiveSettingsTab('receipt-template')}
+                    className={`py-2 px-1 border-b-2 font-semibold text-lg ${activeSettingsTab === 'receipt-template'
+                      ? 'border-blue-500 text-blue-600'
+                      : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
+                      }`}
+                  >
+                    Template Struk
+                  </button>
+                )}
               </nav>
             </div>
 
             {/* Settings Content - Scrollable vertically only */}
             <div className="flex-1 overflow-y-auto overflow-x-hidden min-w-0">
               {activeSettingsTab === 'sync' && canAccessSync && <SyncManagement />}
-              {activeSettingsTab === 'slideshow' && <SlideshowManager />}
+              {activeSettingsTab === 'slideshow' && canAccessSlideshow && <SlideshowManager />}
               {activeSettingsTab === 'printers' && canAccessPrinter && <PrinterSetup />}
-              {activeSettingsTab === 'receipt-template' && <ReceiptTemplateSettings />}
+              {activeSettingsTab === 'receipt-template' && canAccessTemplateStruk && <ReceiptTemplateSettings />}
             </div>
           </div>
         );
@@ -1372,8 +1507,8 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
         {renderMainContent()}
       </div>
 
-      {/* Start Shift Modal - Only show on Kasir page */}
-      {activeMenuItem === 'Kasir' && user && (
+      {/* Start Shift Modal - Only show on Kasir page when user has access_kasir */}
+      {activeMenuItem === 'Kasir' && canAccessKasir && user && (
         <StartShiftModal
           isOpen={showStartShiftModal}
           userId={typeof user.id === 'string' ? parseInt(user.id, 10) : user.id}

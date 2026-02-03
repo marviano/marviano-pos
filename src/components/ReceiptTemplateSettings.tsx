@@ -1,8 +1,119 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import { Save, FileText, Settings, Image, Phone, MapPin, Building2, Printer } from 'lucide-react';
+import { Save, FileText, Settings, Image, Phone, MapPin, Building2, Printer, Copy, X, Pencil, Eye } from 'lucide-react';
 import { useAuth } from '@/hooks/useAuth';
+
+/** Preview: show placeholders as bold {{something}}, strip conditionals. */
+function renderReceiptPreview(code: string): string {
+  let html = code;
+  // Fix CSS: replace padding placeholders in <style> with numbers so layout works (centering, etc.)
+  html = html.replace(/(<style[^>]*>)([\s\S]*?)(<\/style>)/gi, (_: string, open: string, css: string, close: string) => {
+    const fixed = css.replace(/\{\{leftPadding\}\}/g, '7').replace(/\{\{rightPadding\}\}/g, '7');
+    return open + fixed + close;
+  });
+  // Strip conditionals: no reprint, include amount-received block, no voucher
+  html = html.replace(/\{\{#ifReprint\}\}[\s\S]*?\{\{\/ifReprint\}\}/g, '');
+  const ifAmount = html.match(/\{\{#ifAmountReceived\}\}([\s\S]*?)\{\{\/ifAmountReceived\}\}/);
+  if (ifAmount) html = html.replace(/\{\{#ifAmountReceived\}\}[\s\S]*?\{\{\/ifAmountReceived\}\}/g, ifAmount[1]);
+  else html = html.replace(/\{\{#ifAmountReceived\}\}[\s\S]*?\{\{\/ifAmountReceived\}\}/g, '');
+  html = html.replace(/\{\{#ifVoucher\}\}[\s\S]*?\{\{\/ifVoucher\}\}/g, '');
+  html = html.replace(/\{\{#ifBill\}\}[\s\S]*?\{\{\/ifBill\}\}/g, '');
+  html = html.replace(/\{\{#ifReceipt\}\}[\s\S]*?\{\{\/ifReceipt\}\}/g, '');
+  // Show all {{placeholder}} as bold (style block already fixed, so CSS stays valid)
+  html = html.replace(/\{\{([^{}]+)\}\}/g, '<strong>{{$1}}</strong>');
+  // Logo: wrap in .logo-container so it centers like real receipt (same structure as print)
+  html = html.replace(/<strong>\{\{logo\}\}<\/strong>/g, '<div class="logo-container"><strong>{{logo}}</strong></div>');
+  // Center receipt in preview iframe (body is 42ch; iframe is wider — avoid left-aligned slip)
+  html = html.replace('</head>', '<style data-preview>body{margin-left:auto;margin-right:auto;}</style></head>');
+  return html;
+}
+
+type TemplateType = 'receipt' | 'bill' | 'checker';
+
+type TemplateModalMode = 'edit' | 'duplicate' | 'create';
+
+const DEFAULT_MINIMAL_TEMPLATE = `<!DOCTYPE html>
+<html>
+<head><meta charset="UTF-8"><style>body{font-family:Arial;width:42ch;font-size:10pt;padding:2mm 7mm;} .dashed-line{border-top:1px dashed #000;margin:1.5mm 0;} table{width:100%;border-collapse:collapse;} td{padding:0.5mm 0;} .footer{text-align:center;font-size:8pt;margin-top:2mm;}</style></head>
+<body>
+<div class="branch">{{businessName}}</div>
+<div class="address">{{address}}</div>
+<div class="contact">{{contactPhone}}</div>
+<div class="dashed-line"></div>
+<table><tr><th>Nama Produk</th><th>Harga</th><th>Jumlah</th><th>Subtotal</th></tr>{{items}}</table>
+<div class="dashed-line"></div>
+<div>Total: {{total}}</div>
+<div class="footer">{{footerText}}</div>
+</body>
+</html>`;
+
+/** Default checker (label) template – placeholders: {{counter}}, {{itemNumber}}, {{totalItems}}, {{pickupMethod}}, {{productName}}, {{customizations}}, {{orderTime}}, {{labelContinuation}} */
+const DEFAULT_CHECKER_TEMPLATE = `<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <style>
+    @page { size: 40mm auto; margin: 0; }
+    * { margin: 0; padding: 0; box-sizing: border-box; color: black; }
+    body {
+      font-family: 'Arial', 'Helvetica', sans-serif;
+      width: 22ch;
+      max-width: 22ch;
+      font-size: 8pt;
+      font-weight: 600;
+      line-height: 1.4;
+      padding: 3mm 0 3mm 3mm;
+      word-wrap: break-word;
+      overflow-wrap: break-word;
+      color: black;
+      display: flex;
+      flex-direction: column;
+      height: 100%;
+      min-height: 100%;
+    }
+    .content { flex: 1; }
+    .row { display: table; width: calc(100% + 3mm); table-layout: fixed; margin-right: -3mm; }
+    .row > div { display: table-cell; }
+    .counter { font-size: 9pt; font-weight: 700; }
+    .pickup { text-align: left; font-size: 7pt; font-weight: 700; text-transform: uppercase; }
+    .product { text-align: left; font-size: 7pt; font-weight: 600; }
+    .customizations { text-align: left; font-size: 7pt; font-weight: 500; }
+    .number { font-size: 9pt; font-weight: 700; text-align: right; }
+    .continuation { font-size: 7pt; font-weight: 600; color: #666; text-align: center; }
+    .footer { margin-top: auto; padding-top: 2mm; }
+    .time { text-align: left; font-size: 7pt; font-weight: 500; }
+  </style>
+</head>
+<body>
+  <div class="content">
+    <div class="row">
+      <div class="counter">{{counter}}</div>
+      <div class="continuation">{{labelContinuation}}</div>
+      <div class="number">{{itemNumber}}/{{totalItems}}</div>
+    </div>
+    <div class="pickup">{{pickupMethod}}</div>
+    <div class="product">{{productName}}</div>
+    <div class="customizations">{{customizations}}</div>
+  </div>
+  <div class="footer">
+    <div class="time">{{orderTime}}</div>
+  </div>
+</body>
+</html>`;
+
+interface EditTemplateModal {
+  mode: TemplateModalMode;
+  type: TemplateType;
+  templateId: number;
+  templateName: string;
+  code: string;
+  newName: string;
+  setAsDefault: boolean;
+  showNotes: boolean;
+  /** True if this template is the default (used for printing). */
+  isDefault: boolean;
+}
 
 interface ReceiptSettings {
   id?: number;
@@ -21,7 +132,7 @@ interface ReceiptSettings {
 
 export default function ReceiptTemplateSettings() {
   const { user } = useAuth();
-  const [activeTab, setActiveTab] = useState<'settings' | 'receipt' | 'bill'>('settings');
+  const [activeTab, setActiveTab] = useState<'settings' | 'receipt' | 'bill' | 'checker'>('settings');
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
@@ -37,13 +148,22 @@ export default function ReceiptTemplateSettings() {
     partnership_contact: '',
   });
 
-  // Template selection state
+  // Template selection state (name for API; id for UI so only one card shows as selected)
   const [selectedReceiptTemplate, setSelectedReceiptTemplate] = useState<string | null>(null);
+  const [selectedReceiptTemplateId, setSelectedReceiptTemplateId] = useState<number | null>(null);
   const [selectedBillTemplate, setSelectedBillTemplate] = useState<string | null>(null);
+  const [selectedBillTemplateId, setSelectedBillTemplateId] = useState<number | null>(null);
+  const [selectedCheckerTemplate, setSelectedCheckerTemplate] = useState<string | null>(null);
+  const [selectedCheckerTemplateId, setSelectedCheckerTemplateId] = useState<number | null>(null);
   const [availableTemplates, setAvailableTemplates] = useState<{
     receipt: Array<{ id: number; name: string; is_default: boolean }>;
     bill: Array<{ id: number; name: string; is_default: boolean }>;
-  }>({ receipt: [], bill: [] });
+    checker: Array<{ id: number; name: string; is_default: boolean }>;
+  }>({ receipt: [], bill: [], checker: [] });
+
+  // Copy & Edit template modal
+  const [editModal, setEditModal] = useState<EditTemplateModal | null>(null);
+  const [editModalLoading, setEditModalLoading] = useState(false);
 
   const businessId = user?.selectedBusinessId ?? undefined;
 
@@ -80,9 +200,10 @@ export default function ReceiptTemplateSettings() {
     try {
       setLoading(true);
       // Load templates for each type
-      const [receiptResult, billResult] = await Promise.all([
+      const [receiptResult, billResult, checkerResult] = await Promise.all([
         window.electronAPI?.getReceiptTemplates?.('receipt', businessId),
         window.electronAPI?.getReceiptTemplates?.('bill', businessId),
+        window.electronAPI?.getReceiptTemplates?.('checker', businessId),
       ]);
 
       if (receiptResult?.success) {
@@ -90,6 +211,9 @@ export default function ReceiptTemplateSettings() {
         const defaultTemplate = receiptResult.templates?.find(t => t.is_default);
         if (defaultTemplate) {
           setSelectedReceiptTemplate(defaultTemplate.name);
+          setSelectedReceiptTemplateId(defaultTemplate.id);
+        } else {
+          setSelectedReceiptTemplateId(null);
         }
       }
       if (billResult?.success) {
@@ -97,6 +221,19 @@ export default function ReceiptTemplateSettings() {
         const defaultTemplate = billResult.templates?.find(t => t.is_default);
         if (defaultTemplate) {
           setSelectedBillTemplate(defaultTemplate.name);
+          setSelectedBillTemplateId(defaultTemplate.id);
+        } else {
+          setSelectedBillTemplateId(null);
+        }
+      }
+      if (checkerResult?.success) {
+        setAvailableTemplates(prev => ({ ...prev, checker: checkerResult.templates || [] }));
+        const defaultTemplate = checkerResult.templates?.find(t => t.is_default);
+        if (defaultTemplate) {
+          setSelectedCheckerTemplate(defaultTemplate.name);
+          setSelectedCheckerTemplateId(defaultTemplate.id);
+        } else {
+          setSelectedCheckerTemplateId(null);
         }
       }
     } catch (error) {
@@ -125,7 +262,7 @@ export default function ReceiptTemplateSettings() {
     }
   };
 
-  const handleSelectTemplate = async (type: 'receipt' | 'bill', templateName: string) => {
+  const handleSelectTemplate = async (type: 'receipt' | 'bill' | 'checker', templateName: string, templateId?: number) => {
     try {
       setSaving(true);
       setMessage(null);
@@ -133,11 +270,15 @@ export default function ReceiptTemplateSettings() {
       if (result?.success) {
         if (type === 'receipt') {
           setSelectedReceiptTemplate(templateName);
+          if (templateId != null) setSelectedReceiptTemplateId(templateId);
         } else if (type === 'bill') {
           setSelectedBillTemplate(templateName);
+          if (templateId != null) setSelectedBillTemplateId(templateId);
+        } else if (type === 'checker') {
+          setSelectedCheckerTemplate(templateName);
+          if (templateId != null) setSelectedCheckerTemplateId(templateId);
         }
         setMessage({ type: 'success', text: `Template ${templateName} dipilih sebagai default` });
-        // Reload templates to update is_default flags
         await loadAvailableTemplates();
       } else {
         setMessage({ type: 'error', text: result?.error || `Gagal memilih template` });
@@ -145,6 +286,118 @@ export default function ReceiptTemplateSettings() {
     } catch (error) {
       console.error(`Error selecting template:`, error);
       setMessage({ type: 'error', text: `Gagal memilih template` });
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const openTemplateEditor = async (mode: TemplateModalMode, type: TemplateType, template: { id: number; name: string; is_default?: boolean }) => {
+    try {
+      setEditModalLoading(true);
+      setMessage(null);
+      const result = await window.electronAPI?.getReceiptTemplateById?.(template.id);
+      if (!result?.success || result.templateCode == null) {
+        setMessage({ type: 'error', text: result?.error || 'Gagal memuat kode template' });
+        return;
+      }
+      setEditModal({
+        mode,
+        type,
+        templateId: template.id,
+        templateName: template.name,
+        code: result.templateCode,
+        newName: mode === 'duplicate' ? `${template.name} (Salinan)` : template.name,
+        setAsDefault: false,
+        showNotes: result.showNotes ?? false,
+        isDefault: template.is_default ?? false,
+      });
+    } catch (error) {
+      console.error('Error loading template:', error);
+      setMessage({ type: 'error', text: 'Gagal memuat template' });
+    } finally {
+      setEditModalLoading(false);
+    }
+  };
+
+  const handleEditTemplate = (type: TemplateType, template: { id: number; name: string; is_default?: boolean }) =>
+    openTemplateEditor('edit', type, template);
+
+  const handleDuplikatEdit = (type: TemplateType, template: { id: number; name: string; is_default?: boolean }) =>
+    openTemplateEditor('duplicate', type, template);
+
+  const openCreateTemplate = (type: TemplateType) => {
+    setEditModal({
+      mode: 'create',
+      type,
+      templateId: 0,
+      templateName: '',
+      code: type === 'checker' ? DEFAULT_CHECKER_TEMPLATE : DEFAULT_MINIMAL_TEMPLATE,
+      newName: '',
+      setAsDefault: false,
+      showNotes: false,
+      isDefault: false,
+    });
+  };
+
+  const handleCloseEditModal = () => {
+    setEditModal(null);
+  };
+
+  const handleSaveTemplate = async () => {
+    if (!editModal) return;
+    if (!editModal.newName.trim()) {
+      setMessage({ type: 'error', text: editModal.mode === 'duplicate' || editModal.mode === 'create' ? 'Nama template baru wajib diisi' : 'Nama template wajib diisi' });
+      return;
+    }
+    try {
+      setSaving(true);
+      setMessage(null);
+      if (editModal.mode === 'edit') {
+        const newName = editModal.newName.trim();
+        const result = await window.electronAPI?.updateReceiptTemplate?.(editModal.templateId, editModal.code, newName, editModal.showNotes);
+        if (!result?.success) {
+          setMessage({ type: 'error', text: result?.error || 'Gagal menyimpan perubahan' });
+          return;
+        }
+        const nameChanged = newName !== editModal.templateName;
+        if (nameChanged) {
+          if (selectedReceiptTemplate === editModal.templateName) setSelectedReceiptTemplate(newName);
+          if (selectedBillTemplate === editModal.templateName) setSelectedBillTemplate(newName);
+          if (selectedCheckerTemplate === editModal.templateName) setSelectedCheckerTemplate(newName);
+          setAvailableTemplates(prev => ({
+            ...prev,
+            receipt: prev.receipt.map(t => t.id === editModal.templateId ? { ...t, name: newName } : t),
+            bill: prev.bill.map(t => t.id === editModal.templateId ? { ...t, name: newName } : t),
+            checker: prev.checker.map(t => t.id === editModal.templateId ? { ...t, name: newName } : t),
+          }));
+        }
+        await loadAvailableTemplates();
+        setMessage({ type: 'success', text: `Template "${newName}" berhasil diperbarui` });
+      } else {
+        const result = await window.electronAPI?.saveReceiptTemplate?.(
+          editModal.type,
+          editModal.code,
+          editModal.newName.trim(),
+          businessId,
+          editModal.showNotes
+        );
+        if (!result?.success) {
+          setMessage({ type: 'error', text: result?.error || 'Gagal menyimpan template' });
+          return;
+        }
+        if (editModal.setAsDefault) {
+          await window.electronAPI?.setDefaultReceiptTemplate?.(editModal.type, editModal.newName.trim(), businessId);
+          if (editModal.type === 'receipt') setSelectedReceiptTemplate(editModal.newName.trim());
+          else if (editModal.type === 'bill') setSelectedBillTemplate(editModal.newName.trim());
+          else if (editModal.type === 'checker') setSelectedCheckerTemplate(editModal.newName.trim());
+        }
+        await loadAvailableTemplates();
+        setMessage({ type: 'success', text: editModal.mode === 'create' ? `Template "${editModal.newName.trim()}" berhasil dibuat` : `Template "${editModal.newName.trim()}" berhasil disimpan` });
+      }
+      handleCloseEditModal();
+    } catch (error) {
+      console.error('Error saving template:', error);
+      setMessage({ type: 'error', text: 'Gagal menyimpan template' });
     } finally {
       setSaving(false);
     }
@@ -162,29 +415,73 @@ export default function ReceiptTemplateSettings() {
     }
   };
 
-  const handleTestPrint = async (templateType: 'receipt' | 'bill') => {
+  const handleTestPrint = async (templateType: 'receipt' | 'bill' | 'checker') => {
     try {
       setSaving(true);
       setMessage(null);
 
-      // Create test data - always use printer 1 (receiptPrinter)
-      const testData = {
-        type: 'test' as const,
-        printerType: 'receiptPrinter', // Always use printer 1
+      if (templateType === 'checker') {
+        // Test print checker (label) – uses checker template when set; prints to label printer
+        const testData: Record<string, unknown> = {
+          type: 'test',
+          printerType: 'labelPrinter',
+          business_id: businessId || undefined,
+          id: 'test-checker-' + Date.now(),
+        };
+        const configsRaw = await window.electronAPI?.localDbGetPrinterConfigs?.();
+        if (Array.isArray(configsRaw)) {
+          const labelConfig = configsRaw.find(
+            (c: unknown) => (c as { printer_type?: string })?.printer_type === 'labelPrinter'
+          ) as { system_printer_name?: string } | undefined;
+          if (labelConfig?.system_printer_name?.trim()) {
+            testData.printerName = String(labelConfig.system_printer_name).trim();
+          }
+        }
+        const printResult = await window.electronAPI?.printReceipt?.(testData);
+        if (printResult && typeof printResult === 'object' && 'success' in printResult) {
+          const result = printResult as { success: boolean; error?: string };
+          if (result.success) {
+            setMessage({ type: 'success', text: 'Test print checker berhasil dikirim ke printer label' });
+          } else {
+            setMessage({ type: 'error', text: result.error || 'Gagal mencetak test checker' });
+          }
+        } else {
+          setMessage({ type: 'success', text: 'Test print checker berhasil dikirim ke printer label' });
+        }
+        setSaving(false);
+        return;
+      }
+
+      // Use Printer 1 (receiptPrinter): fetch from config and pass printerName so it's used
+      let printerName: string | undefined;
+      let marginAdjustMm: number | undefined;
+      const configsRaw = await window.electronAPI?.localDbGetPrinterConfigs?.();
+      if (Array.isArray(configsRaw)) {
+        const receiptConfig = configsRaw.find(
+          (c: unknown) => (c as { printer_type?: string })?.printer_type === 'receiptPrinter'
+        ) as { system_printer_name?: string; extra_settings?: string | Record<string, unknown> } | undefined;
+        if (receiptConfig?.system_printer_name?.trim()) {
+          printerName = String(receiptConfig.system_printer_name).trim();
+        }
+        if (receiptConfig?.extra_settings) {
+          try {
+            const extra = typeof receiptConfig.extra_settings === 'string'
+              ? JSON.parse(receiptConfig.extra_settings) as Record<string, unknown>
+              : receiptConfig.extra_settings as Record<string, unknown>;
+            if (extra && typeof extra.marginAdjustMm === 'number' && !Number.isNaN(extra.marginAdjustMm)) {
+              marginAdjustMm = extra.marginAdjustMm;
+            }
+          } catch { /* ignore */ }
+        }
+      }
+
+      const testData: Record<string, unknown> = {
+        type: 'test',
+        printerType: 'receiptPrinter',
         business_id: businessId || undefined,
         items: [
-          {
-            name: 'Test Item 1',
-            quantity: 2,
-            price: 15000,
-            total_price: 30000,
-          },
-          {
-            name: 'Test Item 2',
-            quantity: 1,
-            price: 25000,
-            total_price: 25000,
-          },
+          { name: 'Test Item 1', quantity: 2, price: 15000, total_price: 30000 },
+          { name: 'Test Item 2', quantity: 1, price: 25000, total_price: 25000 },
         ],
         total: 55000,
         final_amount: 55000,
@@ -201,6 +498,8 @@ export default function ReceiptTemplateSettings() {
         isBill: templateType === 'bill',
         id: 'test-print-' + Date.now(),
       };
+      if (printerName) testData.printerName = printerName;
+      if (typeof marginAdjustMm === 'number' && !Number.isNaN(marginAdjustMm)) testData.marginAdjustMm = marginAdjustMm;
 
       const printResult = await window.electronAPI?.printReceipt?.(testData);
       
@@ -287,6 +586,17 @@ export default function ReceiptTemplateSettings() {
             <FileText className="w-4 h-4" />
             Template Bill
           </button>
+          <button
+            onClick={() => setActiveTab('checker')}
+            className={`py-4 px-1 border-b-2 font-medium text-sm flex items-center gap-2 ${
+              activeTab === 'checker'
+                ? 'border-blue-500 text-blue-600'
+                : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
+            }`}
+          >
+            <Printer className="w-4 h-4" />
+            Template Label/Checker
+          </button>
         </nav>
       </div>
 
@@ -301,7 +611,7 @@ export default function ReceiptTemplateSettings() {
             <div className="space-y-4">
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1">
-                  Nama Toko
+                  Nama Toko (store_name)
                 </label>
                 <input
                   type="text"
@@ -310,11 +620,12 @@ export default function ReceiptTemplateSettings() {
                   className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 text-gray-900 placeholder:text-gray-500"
                   placeholder="Contoh: MOMOYO"
                 />
+                <p className="text-xs text-gray-500 mt-1">Untuk referensi / custom template. Nama cabang di struk default dari bisnis yang dipilih.</p>
               </div>
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1 flex items-center gap-2">
                   <MapPin className="w-4 h-4" />
-                  Alamat
+                  Alamat (<strong className="font-semibold">{'{{address}}'}</strong> di template)
                 </label>
                 <textarea
                   value={settings.address || ''}
@@ -323,7 +634,7 @@ export default function ReceiptTemplateSettings() {
                   className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 text-gray-900 placeholder:text-gray-500"
                   placeholder="Jl. Kalimantan no. 21, Kartoharjo&#10;Kec. Kartoharjo, Kota Madiun"
                 />
-                <p className="text-xs text-gray-500 mt-1">Gunakan &lt;br&gt; untuk baris baru</p>
+                <p className="text-xs text-gray-500 mt-1">Tampil di struk. Gunakan &lt;br&gt; untuk baris baru.</p>
               </div>
             </div>
           </div>
@@ -336,7 +647,7 @@ export default function ReceiptTemplateSettings() {
             <div className="space-y-4">
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1">
-                  Nomor Telepon
+                  Nomor Telepon (phone_number)
                 </label>
                 <input
                   type="text"
@@ -348,7 +659,7 @@ export default function ReceiptTemplateSettings() {
               </div>
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1">
-                  Kontak (Teks di Header)
+                  Kontak di header struk (<strong className="font-semibold">{'{{contactPhone}}'}</strong>)
                 </label>
                 <input
                   type="text"
@@ -357,10 +668,11 @@ export default function ReceiptTemplateSettings() {
                   className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 text-gray-900 placeholder:text-gray-500"
                   placeholder="silahkan hubungi: 0813-9888-8568"
                 />
+                <p className="text-xs text-gray-500 mt-1">Teks di bagian atas struk (<strong className="font-semibold">{'{{contactPhone}}'}</strong>).</p>
               </div>
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1">
-                  Kontak Partnership
+                  Kontak Partnership (partnership_contact)
                 </label>
                 <input
                   type="text"
@@ -376,19 +688,20 @@ export default function ReceiptTemplateSettings() {
           <div className="bg-white rounded-lg shadow p-6">
             <h3 className="text-lg font-semibold text-gray-900 mb-4 flex items-center gap-2">
               <Image className="w-5 h-5" />
-              Logo
+              Logo (<strong className="font-semibold">{'{{logo}}'}</strong> di template)
             </h3>
             <div className="space-y-4">
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1">
-                  Upload Logo
+                  Upload logo / Gambar picker
                 </label>
                 <input
                   type="file"
                   accept="image/*"
                   onChange={handleLogoUpload}
-                  className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 file:mr-4 file:py-2 file:px-4 file:rounded file:border-0 file:bg-gray-100 file:text-gray-700 hover:file:bg-gray-200"
                 />
+                <p className="text-xs text-gray-500 mt-1">Tampil di struk sebagai <strong className="font-semibold">{'{{logo}}'}</strong>. PNG/JPG disarankan.</p>
                 {settings.logo_base64 && (
                   <div className="mt-4">
                     <p className="text-sm text-gray-600 mb-2">Preview:</p>
@@ -397,6 +710,13 @@ export default function ReceiptTemplateSettings() {
                       alt="Logo preview"
                       className="max-h-32 border border-gray-300 rounded"
                     />
+                    <button
+                      type="button"
+                      onClick={() => setSettings({ ...settings, logo_base64: '' })}
+                      className="mt-2 px-3 py-1.5 text-sm text-red-700 border border-red-300 rounded-md hover:bg-red-50"
+                    >
+                      Hapus logo
+                    </button>
                   </div>
                 )}
               </div>
@@ -404,10 +724,10 @@ export default function ReceiptTemplateSettings() {
           </div>
 
           <div className="bg-white rounded-lg shadow p-6">
-            <h3 className="text-lg font-semibold text-gray-900 mb-4">Footer Text</h3>
+            <h3 className="text-lg font-semibold text-gray-900 mb-4">Teks Footer (<strong className="font-semibold">{'{{footerText}}'}</strong>)</h3>
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-1">
-                Teks Footer
+                Teks footer struk
               </label>
               <textarea
                 value={settings.footer_text || ''}
@@ -416,7 +736,7 @@ export default function ReceiptTemplateSettings() {
                 className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 font-mono text-sm text-gray-900 placeholder:text-gray-500"
                 placeholder="Pendapat Anda sangat penting bagi kami.&#10;Untuk kritik dan saran silahkan hubungi :&#10;0812-1822-2666"
               />
-              <p className="text-xs text-gray-500 mt-1">Gunakan &lt;p&gt; untuk paragraf baru</p>
+              <p className="text-xs text-gray-500 mt-1">Tampil di bawah struk (rata kiri-kanan). Gunakan <strong className="font-semibold">{'<br>'}</strong> untuk baris baru, <strong className="font-semibold">{'<p>...</p>'}</strong> untuk paragraf.</p>
             </div>
           </div>
 
@@ -437,42 +757,77 @@ export default function ReceiptTemplateSettings() {
       {activeTab === 'receipt' && (
         <div className="space-y-4">
           <div className="bg-white rounded-lg shadow p-6">
-            <div className="flex items-center justify-between mb-4">
+            <div className="flex items-center justify-between mb-4 flex-wrap gap-2">
               <h3 className="text-lg font-semibold text-gray-900">Pilih Template Struk (Receipt)</h3>
-              <button
-                onClick={handleTestPrint.bind(null, 'receipt')}
-                disabled={saving || !selectedReceiptTemplate}
-                className="px-4 py-2 bg-green-600 text-white rounded-md hover:bg-green-700 disabled:bg-gray-400 disabled:cursor-not-allowed flex items-center gap-2"
-              >
-                <Printer className="w-4 h-4" />
-                Test Print
-              </button>
+              <div className="flex gap-2">
+                <button
+                  type="button"
+                  onClick={() => openCreateTemplate('receipt')}
+                  disabled={saving || editModalLoading}
+                  className="px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 disabled:bg-gray-400 disabled:cursor-not-allowed flex items-center gap-2"
+                >
+                  <FileText className="w-4 h-4" />
+                  Buat template baru
+                </button>
+                <button
+                  onClick={handleTestPrint.bind(null, 'receipt')}
+                  disabled={saving || !selectedReceiptTemplate}
+                  className="px-4 py-2 bg-green-600 text-white rounded-md hover:bg-green-700 disabled:bg-gray-400 disabled:cursor-not-allowed flex items-center gap-2"
+                >
+                  <Printer className="w-4 h-4" />
+                  Test Print
+                </button>
+              </div>
             </div>
             {loading ? (
               <div className="text-center py-8 text-gray-500">Memuat template...</div>
             ) : (
               <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
                 {availableTemplates.receipt.map((template) => (
-                  <button
+                  <div
                     key={template.id}
-                    onClick={() => handleSelectTemplate('receipt', template.name)}
-                    disabled={saving}
-                    className={`p-4 border-2 rounded-lg text-left transition-all ${
-                      selectedReceiptTemplate === template.name
+                    className={`p-4 border-2 rounded-lg transition-all ${
+                      selectedReceiptTemplateId === template.id
                         ? 'border-blue-500 bg-blue-50'
                         : 'border-gray-200 hover:border-gray-300 hover:bg-gray-50'
-                    } ${saving ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'}`}
+                    }`}
                   >
-                    <div className="flex items-center justify-between mb-2">
-                      <span className="font-semibold text-gray-900">{template.name}</span>
-                      {template.is_default && (
-                        <span className="text-xs bg-green-100 text-green-800 px-2 py-1 rounded">Default</span>
+                    <button
+                      onClick={() => handleSelectTemplate('receipt', template.name, template.id)}
+                      disabled={saving}
+                      className="w-full text-left cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                      <div className="flex items-center justify-between mb-2">
+                        <span className="font-semibold text-gray-900">{template.name}</span>
+                        {template.is_default && (
+                          <span className="text-xs bg-green-100 text-green-800 px-2 py-1 rounded">Default</span>
+                        )}
+                      </div>
+                      {selectedReceiptTemplateId === template.id && (
+                        <div className="text-sm text-blue-600 mt-2">✓ Dipilih</div>
                       )}
+                    </button>
+                    <div className="mt-3 flex gap-2">
+                      <button
+                        type="button"
+                        onClick={() => handleEditTemplate('receipt', template)}
+                        disabled={saving || editModalLoading}
+                        className="flex-1 px-3 py-1.5 text-sm border border-gray-300 rounded-md hover:bg-gray-100 text-gray-700 flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
+                      >
+                        <Pencil className="w-4 h-4" />
+                        Edit
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleDuplikatEdit('receipt', template)}
+                        disabled={saving || editModalLoading}
+                        className="flex-1 px-3 py-1.5 text-sm border border-gray-300 rounded-md hover:bg-gray-100 text-gray-700 flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
+                      >
+                        <Copy className="w-4 h-4" />
+                        Duplikat
+                      </button>
                     </div>
-                    {selectedReceiptTemplate === template.name && (
-                      <div className="text-sm text-blue-600 mt-2">✓ Dipilih</div>
-                    )}
-                  </button>
+                  </div>
                 ))}
                 {availableTemplates.receipt.length === 0 && (
                   <div className="col-span-full text-center py-8 text-gray-500">
@@ -489,42 +844,77 @@ export default function ReceiptTemplateSettings() {
       {activeTab === 'bill' && (
         <div className="space-y-4">
           <div className="bg-white rounded-lg shadow p-6">
-            <div className="flex items-center justify-between mb-4">
+            <div className="flex items-center justify-between mb-4 flex-wrap gap-2">
               <h3 className="text-lg font-semibold text-gray-900">Pilih Template Bill</h3>
-              <button
-                onClick={handleTestPrint.bind(null, 'bill')}
-                disabled={saving || !selectedBillTemplate}
-                className="px-4 py-2 bg-green-600 text-white rounded-md hover:bg-green-700 disabled:bg-gray-400 disabled:cursor-not-allowed flex items-center gap-2"
-              >
-                <Printer className="w-4 h-4" />
-                Test Print
-              </button>
+              <div className="flex gap-2">
+                <button
+                  type="button"
+                  onClick={() => openCreateTemplate('bill')}
+                  disabled={saving || editModalLoading}
+                  className="px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 disabled:bg-gray-400 disabled:cursor-not-allowed flex items-center gap-2"
+                >
+                  <FileText className="w-4 h-4" />
+                  Buat template baru
+                </button>
+                <button
+                  onClick={handleTestPrint.bind(null, 'bill')}
+                  disabled={saving || !selectedBillTemplate}
+                  className="px-4 py-2 bg-green-600 text-white rounded-md hover:bg-green-700 disabled:bg-gray-400 disabled:cursor-not-allowed flex items-center gap-2"
+                >
+                  <Printer className="w-4 h-4" />
+                  Test Print
+                </button>
+              </div>
             </div>
             {loading ? (
               <div className="text-center py-8 text-gray-500">Memuat template...</div>
             ) : (
               <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
                 {availableTemplates.bill.map((template) => (
-                  <button
+                  <div
                     key={template.id}
-                    onClick={() => handleSelectTemplate('bill', template.name)}
-                    disabled={saving}
-                    className={`p-4 border-2 rounded-lg text-left transition-all ${
-                      selectedBillTemplate === template.name
+                    className={`p-4 border-2 rounded-lg transition-all ${
+                      selectedBillTemplateId === template.id
                         ? 'border-blue-500 bg-blue-50'
                         : 'border-gray-200 hover:border-gray-300 hover:bg-gray-50'
-                    } ${saving ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'}`}
+                    }`}
                   >
-                    <div className="flex items-center justify-between mb-2">
-                      <span className="font-semibold text-gray-900">{template.name}</span>
-                      {template.is_default && (
-                        <span className="text-xs bg-green-100 text-green-800 px-2 py-1 rounded">Default</span>
+                    <button
+                      onClick={() => handleSelectTemplate('bill', template.name, template.id)}
+                      disabled={saving}
+                      className="w-full text-left cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                      <div className="flex items-center justify-between mb-2">
+                        <span className="font-semibold text-gray-900">{template.name}</span>
+                        {template.is_default && (
+                          <span className="text-xs bg-green-100 text-green-800 px-2 py-1 rounded">Default</span>
+                        )}
+                      </div>
+                      {selectedBillTemplateId === template.id && (
+                        <div className="text-sm text-blue-600 mt-2">✓ Dipilih</div>
                       )}
+                    </button>
+                    <div className="mt-3 flex gap-2">
+                      <button
+                        type="button"
+                        onClick={() => handleEditTemplate('bill', template)}
+                        disabled={saving || editModalLoading}
+                        className="flex-1 px-3 py-1.5 text-sm border border-gray-300 rounded-md hover:bg-gray-100 text-gray-700 flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
+                      >
+                        <Pencil className="w-4 h-4" />
+                        Edit
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleDuplikatEdit('bill', template)}
+                        disabled={saving || editModalLoading}
+                        className="flex-1 px-3 py-1.5 text-sm border border-gray-300 rounded-md hover:bg-gray-100 text-gray-700 flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
+                      >
+                        <Copy className="w-4 h-4" />
+                        Duplikat
+                      </button>
                     </div>
-                    {selectedBillTemplate === template.name && (
-                      <div className="text-sm text-blue-600 mt-2">✓ Dipilih</div>
-                    )}
-                  </button>
+                  </div>
                 ))}
                 {availableTemplates.bill.length === 0 && (
                   <div className="col-span-full text-center py-8 text-gray-500">
@@ -533,6 +923,227 @@ export default function ReceiptTemplateSettings() {
                 )}
               </div>
             )}
+          </div>
+        </div>
+      )}
+
+      {/* Template Label/Checker Tab (label/checker – same template logic as struk) */}
+      {activeTab === 'checker' && (
+        <div className="space-y-4">
+          <div className="bg-white rounded-lg shadow p-6">
+            <div className="flex items-center justify-between mb-4 flex-wrap gap-2">
+              <h3 className="text-lg font-semibold text-gray-900">Template Label/Checker (Label Pesanan)</h3>
+              <div className="flex gap-2">
+                <button
+                  type="button"
+                  onClick={() => openCreateTemplate('checker')}
+                  disabled={saving || editModalLoading}
+                  className="px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 disabled:bg-gray-400 disabled:cursor-not-allowed flex items-center gap-2"
+                >
+                  <FileText className="w-4 h-4" />
+                  Buat template baru
+                </button>
+                <button
+                  onClick={handleTestPrint.bind(null, 'checker')}
+                  disabled={saving || !selectedCheckerTemplate}
+                  className="px-4 py-2 bg-green-600 text-white rounded-md hover:bg-green-700 disabled:bg-gray-400 disabled:cursor-not-allowed flex items-center gap-2"
+                >
+                  <Printer className="w-4 h-4" />
+                  Test Print
+                </button>
+              </div>
+            </div>
+            <p className="text-sm text-gray-600 mb-4">
+              Template ini dipakai untuk label/checker yang dicetak saat transaksi atau saat menambah item di Active Order (Lihat). Placeholder: <code className="bg-gray-100 px-1 rounded">{'{{counter}}'}</code>, <code className="bg-gray-100 px-1 rounded">{'{{itemNumber}}'}</code>, <code className="bg-gray-100 px-1 rounded">{'{{totalItems}}'}</code>, <code className="bg-gray-100 px-1 rounded">{'{{pickupMethod}}'}</code>, <code className="bg-gray-100 px-1 rounded">{'{{productName}}'}</code>, <code className="bg-gray-100 px-1 rounded">{'{{customizations}}'}</code>, <code className="bg-gray-100 px-1 rounded">{'{{orderTime}}'}</code>, <code className="bg-gray-100 px-1 rounded">{'{{labelContinuation}}'}</code>.
+            </p>
+            {loading ? (
+              <div className="text-center py-8 text-gray-500">Memuat template...</div>
+            ) : (
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                {availableTemplates.checker.map((template) => (
+                  <div
+                    key={template.id}
+                    className={`p-4 border-2 rounded-lg transition-all ${
+                      selectedCheckerTemplateId === template.id
+                        ? 'border-blue-500 bg-blue-50'
+                        : 'border-gray-200 hover:border-gray-300 hover:bg-gray-50'
+                    }`}
+                  >
+                    <button
+                      onClick={() => handleSelectTemplate('checker', template.name, template.id)}
+                      disabled={saving}
+                      className="w-full text-left cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                      <div className="flex items-center justify-between mb-2">
+                        <span className="font-semibold text-gray-900">{template.name}</span>
+                        {template.is_default && (
+                          <span className="text-xs bg-green-100 text-green-800 px-2 py-1 rounded">Default</span>
+                        )}
+                      </div>
+                      {selectedCheckerTemplateId === template.id && (
+                        <div className="text-sm text-blue-600 mt-2">✓ Dipilih</div>
+                      )}
+                    </button>
+                    <div className="mt-3 flex gap-2">
+                      <button
+                        type="button"
+                        onClick={() => handleEditTemplate('checker', template)}
+                        disabled={saving || editModalLoading}
+                        className="flex-1 px-3 py-1.5 text-sm border border-gray-300 rounded-md hover:bg-gray-100 text-gray-700 flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
+                      >
+                        <Pencil className="w-4 h-4" />
+                        Edit
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleDuplikatEdit('checker', template)}
+                        disabled={saving || editModalLoading}
+                        className="flex-1 px-3 py-1.5 text-sm border border-gray-300 rounded-md hover:bg-gray-100 text-gray-700 flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
+                      >
+                        <Copy className="w-4 h-4" />
+                        Duplikat
+                      </button>
+                    </div>
+                  </div>
+                ))}
+                {availableTemplates.checker.length === 0 && (
+                  <div className="col-span-full text-center py-8 text-gray-500">
+                    Belum ada template label/checker. Klik &quot;Buat template baru&quot; untuk membuat template label.
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Edit / Duplicate Template Modal */}
+      {editModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50">
+          <div className="bg-white rounded-xl shadow-xl max-w-4xl w-full max-h-[90vh] flex flex-col">
+            <div className="flex items-center justify-between px-6 py-4 border-b border-gray-200">
+              <h3 className="text-lg font-semibold text-gray-900">
+                {editModal.mode === 'create'
+                  ? `Buat template baru — ${editModal.type === 'receipt' ? 'Template Struk' : editModal.type === 'bill' ? 'Template Bill' : 'Template Label/Checker'}`
+                  : editModal.mode === 'edit'
+                    ? `Edit — ${editModal.templateName}`
+                    : `Duplikat & Edit — ${editModal.type === 'receipt' ? 'Template Struk' : editModal.type === 'bill' ? 'Template Bill' : 'Template Label/Checker'}`}
+              </h3>
+              <button
+                type="button"
+                onClick={handleCloseEditModal}
+                className="p-2 text-gray-500 hover:text-gray-700 rounded-lg hover:bg-gray-100"
+                aria-label="Tutup"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+            <div className="px-6 py-4 space-y-4 overflow-y-auto flex-1">
+              {editModal.mode === 'duplicate' && (
+                <p className="text-sm text-gray-600">
+                  Salinan dari <strong>{editModal.templateName}</strong>. Edit kode HTML di bawah, beri nama baru, lalu simpan.
+                </p>
+              )}
+              {editModal.mode === 'create' && (
+                <p className="text-sm text-gray-600">
+                  Buat template baru. Isi nama, edit kode HTML di bawah, lalu simpan.
+                </p>
+              )}
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">
+                  {editModal.mode === 'edit' ? 'Nama template' : 'Nama template baru'}
+                </label>
+                <input
+                  type="text"
+                  value={editModal.newName}
+                  onChange={(e) => setEditModal(prev => prev ? { ...prev, newName: e.target.value } : null)}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 text-gray-900"
+                  placeholder={editModal.mode === 'edit' ? 'Nama template' : 'Contoh: Struk Custom Toko A'}
+                />
+              </div>
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Kode HTML template</label>
+                  <textarea
+                    value={editModal.code}
+                    onChange={(e) => setEditModal(prev => prev ? { ...prev, code: e.target.value } : null)}
+                    rows={18}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 font-mono text-sm text-gray-900"
+                    placeholder="HTML dengan placeholder {{...}}"
+                    spellCheck={false}
+                  />
+                  <p className="text-xs text-gray-500 mt-1">
+                    Placeholder: {'{{businessName}}'}, {'{{address}}'}, {'{{contactPhone}}'}, {'{{logo}}'}, {'{{footerText}}'}, {'{{items}}'}, {'{{total}}'}, dll.
+                  </p>
+                </div>
+                <div className="flex flex-col">
+                  <label className="block text-sm font-medium text-gray-700 mb-1 flex items-center gap-2">
+                    <Eye className="w-4 h-4" />
+                    Preview
+                  </label>
+                  <div className="flex-1 min-h-[280px] max-h-[480px] border border-gray-300 rounded-md bg-gray-50 overflow-auto p-2">
+                    <iframe
+                      title="Receipt preview"
+                      srcDoc={(() => {
+                        try {
+                          const raw = renderReceiptPreview(editModal.code || '');
+                          if (!raw || !raw.trim()) return '<!DOCTYPE html><html><body><p class="text-gray-500 text-sm">Edit template untuk melihat preview.</p></body></html>';
+                          return raw;
+                        } catch {
+                          return '<!DOCTYPE html><html><body><p class="text-red-600 text-sm">Error rendering preview.</p></body></html>';
+                        }
+                      })()}
+                      className="w-full min-h-[260px] border-0 bg-white max-w-[320px]"
+                      style={{ minHeight: '360px' }}
+                      sandbox="allow-same-origin"
+                    />
+                  </div>
+                </div>
+              </div>
+              <label className="flex items-center gap-2 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={editModal.showNotes}
+                  onChange={(e) => setEditModal(prev => prev ? { ...prev, showNotes: e.target.checked } : null)}
+                  className="rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                />
+                <span className="text-sm text-gray-700">Tampilkan catatan/kustomisasi di struk/bill</span>
+              </label>
+              {editModal.mode === 'edit' && !editModal.isDefault && (
+                <p className="text-sm text-amber-700 bg-amber-50 border border-amber-200 rounded-md px-3 py-2">
+                  Template ini <strong>bukan default</strong>. Cetak struk/bill menggunakan template default. Agar pengaturan &quot;Tampilkan catatan&quot; berlaku di cetakan, jadikan template ini sebagai default (pilih di daftar) atau edit template default.
+                </p>
+              )}
+              {(editModal.mode === 'duplicate' || editModal.mode === 'create') && (
+                <label className="flex items-center gap-2 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={editModal.setAsDefault}
+                    onChange={(e) => setEditModal(prev => prev ? { ...prev, setAsDefault: e.target.checked } : null)}
+                    className="rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                  />
+                  <span className="text-sm text-gray-700">Jadikan default setelah disimpan</span>
+                </label>
+              )}
+            </div>
+            <div className="flex items-center justify-end gap-3 px-6 py-4 border-t border-gray-200 bg-gray-50 rounded-b-xl">
+              <button
+                type="button"
+                onClick={handleCloseEditModal}
+                className="px-4 py-2 text-gray-700 border border-gray-300 rounded-md hover:bg-gray-100"
+              >
+                Batal
+              </button>
+              <button
+                type="button"
+                onClick={handleSaveTemplate}
+                disabled={saving || !editModal.newName.trim()}
+                className="px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 disabled:bg-gray-400 disabled:cursor-not-allowed flex items-center gap-2"
+              >
+                <Save className="w-4 h-4" />
+                {saving ? 'Menyimpan...' : editModal.mode === 'edit' ? 'Simpan' : editModal.mode === 'create' ? 'Buat template' : 'Simpan sebagai template baru'}
+              </button>
+            </div>
           </div>
         </div>
       )}

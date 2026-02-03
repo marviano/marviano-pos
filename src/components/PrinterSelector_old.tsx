@@ -573,13 +573,13 @@ Please check:
           </div>
         </div>
 
-        {/* Printer 3: Label Printer */}
+        {/* Printer 3: Label/Checker Printer */}
         <div className="bg-white rounded-lg border border-gray-200 p-6 shadow-sm">
           <div className="flex items-center justify-between mb-4">
             <div className="flex items-center space-x-3">
               <Printer className="w-6 h-6 text-green-600" />
               <div>
-                <h3 className="font-semibold text-gray-800">Printer 3: Label Printer</h3>
+                <h3 className="font-semibold text-gray-800">Printer 3: Label/Checker Printer</h3>
                 <p className="text-sm text-gray-500">Order labels</p>
               </div>
             </div>

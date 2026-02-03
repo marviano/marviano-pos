@@ -3,6 +3,11 @@
 :root {
   --background: #ffffff;
   --foreground: #171717;
+  /* Low-profile scrollbar: subtle, thin, works on small screens */
+  --scrollbar-track: #f1f1f1;
+  --scrollbar-thumb: #c1c1c1;
+  --scrollbar-thumb-hover: #a8a8a8;
+  --scrollbar-width: 6px;
 }
 
 @theme inline {
@@ -16,6 +21,9 @@
   :root {
     --background: #0a0a0a;
     --foreground: #ededed;
+    --scrollbar-track: #2a2a2a;
+    --scrollbar-thumb: #555555;
+    --scrollbar-thumb-hover: #6b6b6b;
   }
 }
 
@@ -30,6 +38,36 @@ body {
   background: var(--background);
   color: var(--foreground);
   font-family: Arial, Helvetica, sans-serif;
+}
+
+/* Low-profile scrollbars: thin, rounded, subtle (good on small screens) */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--scrollbar-thumb) var(--scrollbar-track);
+}
+
+*::-webkit-scrollbar {
+  width: var(--scrollbar-width);
+  height: var(--scrollbar-width);
+}
+
+*::-webkit-scrollbar-track {
+  background: var(--scrollbar-track);
+  border-radius: 999px;
+}
+
+*::-webkit-scrollbar-thumb {
+  background: var(--scrollbar-thumb);
+  border-radius: 999px;
+  min-height: 40px; /* Keeps thumb usable on touch/small viewports */
+}
+
+*::-webkit-scrollbar-thumb:hover {
+  background: var(--scrollbar-thumb-hover);
+}
+
+*::-webkit-scrollbar-corner {
+  background: transparent;
 }
 
 /* Copy notification animation */

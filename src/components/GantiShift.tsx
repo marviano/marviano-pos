@@ -30,6 +30,28 @@ const PLATFORM_LABELS: Record<string, string> = {
   tiktok: 'TikTok',
 };
 
+/** Order for displaying platform breakdown under Total Omset. */
+const PLATFORM_ORDER = ['offline', 'gofood', 'grabfood', 'shopeefood', 'qpon', 'tiktok'] as const;
+
+/** Derive transaction count and amount by platform from payment breakdown (for ringkasan). */
+function orderCountByPlatform(paymentBreakdown: PaymentBreakdown[]): Array<{ label: string; count: number; amount: number }> {
+  const countMap = new Map<string, number>();
+  const amountMap = new Map<string, number>();
+  paymentBreakdown.forEach((p) => {
+    const code = (p.payment_method_code || 'offline').toLowerCase();
+    const platform = PLATFORM_LABELS[code] ? code : 'offline';
+    const count = Number(p.transaction_count || 0);
+    const amount = Number(p.total_amount || 0);
+    countMap.set(platform, (countMap.get(platform) ?? 0) + count);
+    amountMap.set(platform, (amountMap.get(platform) ?? 0) + amount);
+  });
+  return PLATFORM_ORDER.filter((key) => (countMap.get(key) ?? 0) > 0).map((key) => ({
+    label: PLATFORM_LABELS[key],
+    count: countMap.get(key) ?? 0,
+    amount: amountMap.get(key) ?? 0,
+  }));
+}
+
 const formatPlatformLabel = (platform: string): string => {
   const key = (platform || 'offline').toLowerCase();
   if (PLATFORM_LABELS[key]) return PLATFORM_LABELS[key];
@@ -61,12 +83,20 @@ interface ShiftStatistics {
   total_amount: number;
   total_discount: number;
   voucher_count: number;
+  total_cu: number;
 }
 
 interface PaymentBreakdown {
   payment_method_name: string;
   payment_method_code: string;
   transaction_count: number;
+  total_amount: number;
+}
+
+interface Category1Breakdown {
+  category1_name: string;
+  category1_id: number;
+  total_quantity: number;
   total_amount: number;
 }
 
@@ -130,13 +160,17 @@ interface ShiftPrintSelection {
 
 type TabView = 'all-day' | number; // 'all-day' or shift ID
 
+type VoucherBreakdown = Record<string, { count: number; total: number }>;
+
 interface ReportDataPayload {
   statistics: ShiftStatistics;
   paymentBreakdown: PaymentBreakdown[];
+  category1Breakdown: Category1Breakdown[];
   category2Breakdown: Category2Breakdown[];
   cashSummary: CashSummary;
   productSales: ProductSale[];
   customizationSales: CustomizationSale[];
+  voucherBreakdown: VoucherBreakdown;
 }
 
 interface RefundDetail {
@@ -176,8 +210,6 @@ const getGmt7DayBounds = (dateString?: string | null): { dayStartUtc: string; da
   };
 };
 
-const AUTO_REFRESH_INTERVAL = 30000; // 30 seconds
-
 const getElectronAPI = () => (typeof window !== 'undefined' ? window.electronAPI : undefined);
 
 // Format Rupiah with Indonesian locale (dot separator)
@@ -192,6 +224,18 @@ const formatRupiah = (amount: number): string => {
     maximumFractionDigits: 0,
   }).format(amount);
 };
+
+const VOUCHER_BREAKDOWN_ORDER: { key: string; label: string }[] = [
+  { key: 'percent_10', label: '10%' },
+  { key: 'percent_15', label: '15%' },
+  { key: 'percent_20', label: '20%' },
+  { key: 'percent_25', label: '25%' },
+  { key: 'percent_30', label: '30%' },
+  { key: 'percent_35', label: '35%' },
+  { key: 'percent_50', label: '50%' },
+  { key: 'custom', label: 'Custom Nominal' },
+  { key: 'free', label: 'Free' }
+];
 
 // Format number for input (remove dots, allow only digits)
 const formatNumberInput = (value: string): string => {
@@ -211,44 +255,39 @@ const formatNumberDisplay = (value: string): string => {
   }
 };
 
-// Format time for display (GMT+7)
+const WIB = 'Asia/Jakarta';
+
+// Format time for display (UTC+7 / WIB)
 const formatTime = (dateString: string): string => {
   const date = new Date(dateString);
-  // Adjust for GMT+7
-  const gmt7Date = new Date(date.getTime() + (7 * 60 * 60 * 1000));
-  return gmt7Date.toLocaleTimeString('id-ID', {
+  return date.toLocaleTimeString('id-ID', {
     hour: '2-digit',
     minute: '2-digit',
     second: '2-digit',
-    hour12: false
+    hour12: false,
+    timeZone: WIB
   });
 };
 
-// Format full date and time in Indonesian (e.g., "Senin, 27 Desember 2025 14.53 PM")
+// Format full date and time in Indonesian in UTC+7 (e.g., "Senin, 27 Desember 2025 14.53 PM")
 const formatDateTime = (dateString: string): string => {
   const date = new Date(dateString);
-  // Adjust for GMT+7
-  const gmt7Date = new Date(date.getTime() + (7 * 60 * 60 * 1000));
-  
-  // Get day name
-  const dayNames = ['Minggu', 'Senin', 'Selasa', 'Rabu', 'Kamis', 'Jumat', 'Sabtu'];
-  const dayName = dayNames[gmt7Date.getUTCDay()];
-  
-  // Format date
-  const datePart = gmt7Date.toLocaleDateString('id-ID', {
+  const parts = new Intl.DateTimeFormat('id-ID', {
+    timeZone: WIB,
+    weekday: 'long',
     day: 'numeric',
     month: 'long',
     year: 'numeric',
-    timeZone: 'UTC'
-  });
-  
-  // Format time in 24-hour format with dot separator and AM/PM
-  const hours = gmt7Date.getUTCHours();
-  const minutes = gmt7Date.getUTCMinutes();
-  const ampm = hours >= 12 ? 'PM' : 'AM';
-  const timePart = `${hours.toString().padStart(2, '0')}.${minutes.toString().padStart(2, '0')} ${ampm}`;
-  
-  return `${dayName}, ${datePart} ${timePart}`;
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false
+  }).formatToParts(date);
+  const get = (type: string) => parts.find((p) => p.type === type)?.value ?? '';
+  const hour = get('hour').padStart(2, '0');
+  const minute = get('minute').padStart(2, '0');
+  const h = parseInt(hour, 10);
+  const ampm = h >= 12 ? 'PM' : 'AM';
+  return `${get('weekday')}, ${get('day')} ${get('month')} ${get('year')} ${hour}.${minute} ${ampm}`;
 };
 
 export default function GantiShift() {
@@ -264,7 +303,11 @@ export default function GantiShift() {
   
   // Get business ID from logged-in user
   const businessId = user?.selectedBusinessId;
-  
+
+
+  useEffect(() => {
+  }, [user?.id, user?.selectedBusinessId]);
+
   if (!businessId) {
     return (
       <div className="p-4 bg-red-50 border border-red-200 rounded-lg">
@@ -292,10 +335,12 @@ export default function GantiShift() {
     order_count: 0,
     total_amount: 0,
     total_discount: 0,
-    voucher_count: 0
+    voucher_count: 0,
+    total_cu: 0
   });
 
   const [paymentBreakdown, setPaymentBreakdown] = useState<PaymentBreakdown[]>([]);
+  const [category1Breakdown, setCategory1Breakdown] = useState<Category1Breakdown[]>([]);
   const [category2Breakdown, setCategory2Breakdown] = useState<Category2Breakdown[]>([]);
   const [cashSummary, setCashSummary] = useState<CashSummary>({
     cash_shift: 0,
@@ -307,7 +352,9 @@ export default function GantiShift() {
   });
   const [productSales, setProductSales] = useState<ProductSale[]>([]);
   const [customizationSales, setCustomizationSales] = useState<CustomizationSale[]>([]);
+  const [voucherBreakdown, setVoucherBreakdown] = useState<VoucherBreakdown>({});
   const [refunds, setRefunds] = useState<RefundDetail[]>([]);
+  const [recalculatedCategory1Breakdown, setRecalculatedCategory1Breakdown] = useState<Category1Breakdown[]>([]);
   const [recalculatedCategory2Breakdown, setRecalculatedCategory2Breakdown] = useState<Category2Breakdown[]>([]);
   const [groupProducts, setGroupProducts] = useState(false); // Default: ungrouped
 
@@ -386,6 +433,26 @@ export default function GantiShift() {
   };
   
   const displayProductSales: (ProductSale | GroupedProductType)[] = groupProducts ? groupedProductSales : productSales;
+
+  /** Barang Terjual: total qty and amount by platform (from raw productSales, excludes bundle). */
+  const barangTerjualByPlatform = useMemo(() => {
+    const countMap = new Map<string, number>();
+    const amountMap = new Map<string, number>();
+    productSales.forEach((p) => {
+      if (p.is_bundle_item) return;
+      const code = (p.platform || 'offline').toLowerCase();
+      const platform = PLATFORM_LABELS[code] ? code : 'offline';
+      const qty = Number(p.total_quantity || 0);
+      const amount = Number(p.base_subtotal ?? p.total_subtotal ?? 0);
+      countMap.set(platform, (countMap.get(platform) ?? 0) + qty);
+      amountMap.set(platform, (amountMap.get(platform) ?? 0) + amount);
+    });
+    return PLATFORM_ORDER.filter((key) => (countMap.get(key) ?? 0) > 0).map((key) => ({
+      label: PLATFORM_LABELS[key],
+      qty: countMap.get(key) ?? 0,
+      amount: amountMap.get(key) ?? 0,
+    }));
+  }, [productSales]);
 
   // Helper function to group productSales for printing (same logic as groupedProductSales)
   const groupProductSalesForPrint = (products: ProductSale[]): ProductSale[] => {
@@ -466,6 +533,63 @@ export default function GantiShift() {
         is_bundle_item: group.is_bundle_item
       } as ProductSale;
     }).sort((a, b) => a.product_name.localeCompare(b.product_name));
+  };
+
+  // Helper function to recalculate Category I for printing
+  const recalculateCategory1ForPrint = async (
+    products: ProductSale[],
+    originalCategory1: Category1Breakdown[],
+    electronAPI: ReturnType<typeof getElectronAPI>
+  ): Promise<Category1Breakdown[]> => {
+    if (!electronAPI?.localDbGetAllProducts || products.length === 0) {
+      return originalCategory1.length > 0 ? originalCategory1 : [];
+    }
+    try {
+      const allProducts = await electronAPI.localDbGetAllProducts();
+      const productsArray = Array.isArray(allProducts) ? allProducts as Record<string, unknown>[] : [];
+      const productToCategory1NameMap = new Map<number, string>();
+      productsArray.forEach((p) => {
+        const productId = typeof p.id === 'number' ? p.id : (typeof p.id === 'string' ? parseInt(p.id, 10) : null);
+        const category1Name = typeof p.category1_name === 'string' ? p.category1_name : (typeof (p as { kategori?: string }).kategori === 'string' ? (p as { kategori: string }).kategori : null);
+        if (productId && category1Name) {
+          productToCategory1NameMap.set(productId, category1Name);
+        }
+      });
+      const category1NameToIdMap = new Map<string, number>();
+      originalCategory1.forEach((cat) => {
+        category1NameToIdMap.set(cat.category1_name, cat.category1_id);
+      });
+      const category1Map = new Map<string, { category1_id: number; category1_name: string; total_quantity: number; total_amount: number }>();
+      products.forEach((product) => {
+        if (product.is_bundle_item) return;
+        const category1Name = productToCategory1NameMap.get(product.product_id);
+        if (!category1Name) return;
+        const category1Id = category1NameToIdMap.get(category1Name) || 0;
+        const existing = category1Map.get(category1Name);
+        if (existing) {
+          existing.total_quantity += product.total_quantity;
+          existing.total_amount += product.base_subtotal;
+        } else {
+          category1Map.set(category1Name, {
+            category1_id: category1Id,
+            category1_name: category1Name,
+            total_quantity: product.total_quantity,
+            total_amount: product.base_subtotal
+          });
+        }
+      });
+      return Array.from(category1Map.values())
+        .map((data) => ({
+          category1_id: data.category1_id,
+          category1_name: data.category1_name,
+          total_quantity: data.total_quantity,
+          total_amount: data.total_amount
+        }))
+        .sort((a, b) => a.category1_name.localeCompare(b.category1_name));
+    } catch (error) {
+      console.error('[Print Category I Recalc] Error:', error);
+      return originalCategory1;
+    }
   };
 
   // Helper function to recalculate Category II for printing (same logic as recalculateCategory2Breakdown)
@@ -587,7 +711,8 @@ export default function GantiShift() {
   // const [historicalShifts, setHistoricalShifts] = useState<Shift[]>([]);
 
   const modalInputRef = useRef<HTMLInputElement>(null);
-  const autoRefreshIntervalRef = useRef<NodeJS.Timeout | null>(null);
+  const lastLoadedTabRef = useRef<TabView | null>(null);
+  const loadingTabRef = useRef<TabView | null>(null);
   const permissions = user?.permissions ?? [];
   const isAdmin = isSuperAdmin(user);
   const canForceCloseShift = isAdmin || permissions.includes('marviano-pos_gantishift.closeunattendedshift');
@@ -682,8 +807,9 @@ export default function GantiShift() {
       checkTodayTransactions();
     } else {
       // Reset stats when no active shift
-      setStatistics({ order_count: 0, total_amount: 0, total_discount: 0, voucher_count: 0 });
+      setStatistics({ order_count: 0, total_amount: 0, total_discount: 0, voucher_count: 0, total_cu: 0 });
       setPaymentBreakdown([]);
+      setCategory1Breakdown([]);
       setCategory2Breakdown([]);
       setCashSummary({
         cash_shift: 0,
@@ -695,11 +821,69 @@ export default function GantiShift() {
       });
       setProductSales([]);
       setCustomizationSales([]);
+      setVoucherBreakdown({});
+      setRecalculatedCategory1Breakdown([]);
       setRecalculatedCategory2Breakdown([]);
       setTodayTransactionsInfo(null);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeShift?.id, checkTodayTransactions]);
+
+  // Function to recalculate Category I breakdown using base_subtotal
+  const recalculateCategory1Breakdown = useCallback(async (products: ProductSale[], originalCategory1: Category1Breakdown[]) => {
+    const electronAPI = getElectronAPI();
+    if (!electronAPI?.localDbGetAllProducts || products.length === 0) {
+      setRecalculatedCategory1Breakdown([]);
+      return;
+    }
+    try {
+      const allProducts = await electronAPI.localDbGetAllProducts();
+      const productsArray = Array.isArray(allProducts) ? allProducts as Record<string, unknown>[] : [];
+      const productToCategory1NameMap = new Map<number, string>();
+      productsArray.forEach((p) => {
+        const productId = typeof p.id === 'number' ? p.id : (typeof p.id === 'string' ? parseInt(p.id, 10) : null);
+        const category1Name = typeof p.category1_name === 'string' ? p.category1_name : (typeof (p as { kategori?: string }).kategori === 'string' ? (p as { kategori: string }).kategori : null);
+        if (productId && category1Name) {
+          productToCategory1NameMap.set(productId, category1Name);
+        }
+      });
+      const category1NameToIdMap = new Map<string, number>();
+      originalCategory1.forEach((cat) => {
+        category1NameToIdMap.set(cat.category1_name, cat.category1_id);
+      });
+      const category1Map = new Map<string, { category1_id: number; category1_name: string; total_quantity: number; total_amount: number }>();
+      products.forEach((product) => {
+        if (product.is_bundle_item) return;
+        const category1Name = productToCategory1NameMap.get(product.product_id);
+        if (!category1Name) return;
+        const category1Id = category1NameToIdMap.get(category1Name) || 0;
+        const existing = category1Map.get(category1Name);
+        if (existing) {
+          existing.total_quantity += product.total_quantity;
+          existing.total_amount += product.base_subtotal;
+        } else {
+          category1Map.set(category1Name, {
+            category1_id: category1Id,
+            category1_name: category1Name,
+            total_quantity: product.total_quantity,
+            total_amount: product.base_subtotal
+          });
+        }
+      });
+      const recalculated = Array.from(category1Map.values())
+        .map((data) => ({
+          category1_id: data.category1_id,
+          category1_name: data.category1_name,
+          total_quantity: data.total_quantity,
+          total_amount: data.total_amount
+        }))
+        .sort((a, b) => a.category1_name.localeCompare(b.category1_name));
+      setRecalculatedCategory1Breakdown(recalculated);
+    } catch (error) {
+      console.error('[Category I Recalc] Error:', error);
+      setRecalculatedCategory1Breakdown([]);
+    }
+  }, []);
 
   // Function to recalculate Category II breakdown using base_subtotal
   const recalculateCategory2Breakdown = useCallback(async (products: ProductSale[], originalCategory2: Category2Breakdown[]) => {
@@ -780,6 +964,17 @@ export default function GantiShift() {
     }
   }, []);
 
+  // Recalculate Category I breakdown when productSales or category1Breakdown changes
+  useEffect(() => {
+    if (productSales.length > 0 && category1Breakdown.length > 0) {
+      recalculateCategory1Breakdown(productSales, category1Breakdown);
+    } else if (category1Breakdown.length > 0 && productSales.length === 0) {
+      setRecalculatedCategory1Breakdown(category1Breakdown);
+    } else {
+      setRecalculatedCategory1Breakdown([]);
+    }
+  }, [productSales, category1Breakdown, recalculateCategory1Breakdown]);
+
   // Recalculate Category II breakdown when productSales or category2Breakdown changes
   useEffect(() => {
     if (productSales.length > 0 && category2Breakdown.length > 0) {
@@ -795,30 +990,6 @@ export default function GantiShift() {
     }
   }, [productSales, category2Breakdown, recalculateCategory2Breakdown]);
 
-  // Auto-refresh statistics when shift is active
-  useEffect(() => {
-    if (activeShift) {
-      // Clear any existing interval
-      if (autoRefreshIntervalRef.current) {
-        clearInterval(autoRefreshIntervalRef.current);
-      }
-
-      // Set up auto-refresh
-      autoRefreshIntervalRef.current = setInterval(() => {
-        loadStatistics();
-      }, AUTO_REFRESH_INTERVAL);
-    }
-
-    // Cleanup on unmount or when shift/user changes
-    return () => {
-      if (autoRefreshIntervalRef.current) {
-        clearInterval(autoRefreshIntervalRef.current);
-        autoRefreshIntervalRef.current = null;
-      }
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeShift?.id]);
-
   // Auto-dismiss success messages
   useEffect(() => {
     if (successMessage) {
@@ -832,12 +1003,14 @@ export default function GantiShift() {
   useEffect(() => {
     if (!activeShift) {
       setShiftSequenceInfo(null);
+      lastLoadedTabRef.current = null;
       return;
     }
 
     const bounds = getGmt7DayBounds(activeShift.shift_start);
     if (!bounds) {
       setShiftSequenceInfo(null);
+      lastLoadedTabRef.current = null;
       return;
     }
 
@@ -953,25 +1126,28 @@ export default function GantiShift() {
         return;
       }
 
-      const defaultStats: ShiftStatistics = { order_count: 0, total_amount: 0, total_discount: 0, voucher_count: 0 };
+      const defaultStats: ShiftStatistics = { order_count: 0, total_amount: 0, total_discount: 0, voucher_count: 0, total_cu: 0 };
       const defaultCash: CashSummary = { cash_shift: 0, cash_whole_day: 0 };
 
       // Load all statistics in parallel with error handling
-      const [statsResult, breakdownResult, category2BreakdownResult, cashResult, productSalesResult, refundsResult] = await Promise.allSettled([
+      const [statsResult, breakdownResult, category1BreakdownResult, category2BreakdownResult, cashResult, productSalesResult, refundsResult, voucherBreakdownResult] = await Promise.allSettled([
         electronAPI.localDbGetShiftStatistics
-          ? electronAPI.localDbGetShiftStatistics(shiftOwnerId, activeShift.shift_start, activeShift.shift_end, businessId, activeShift.uuid_id)
+          ? electronAPI.localDbGetShiftStatistics(null, activeShift.shift_start, activeShift.shift_end, businessId, activeShift.uuid_id)
           : Promise.resolve(defaultStats),
         electronAPI.localDbGetPaymentBreakdown
-          ? electronAPI.localDbGetPaymentBreakdown(shiftOwnerId, activeShift.shift_start, activeShift.shift_end, businessId)
+          ? electronAPI.localDbGetPaymentBreakdown(null, activeShift.shift_start, activeShift.shift_end, businessId, activeShift.uuid_id)
           : Promise.resolve<PaymentBreakdown[]>([]),
+        electronAPI.localDbGetCategory1Breakdown
+          ? electronAPI.localDbGetCategory1Breakdown(null, activeShift.shift_start, activeShift.shift_end, businessId, activeShift.uuid_id)
+          : Promise.resolve<Category1Breakdown[]>([]),
         electronAPI.localDbGetCategory2Breakdown
-          ? electronAPI.localDbGetCategory2Breakdown(shiftOwnerId, activeShift.shift_start, activeShift.shift_end, businessId)
+          ? electronAPI.localDbGetCategory2Breakdown(null, activeShift.shift_start, activeShift.shift_end, businessId, activeShift.uuid_id)
           : Promise.resolve<Category2Breakdown[]>([]),
         electronAPI.localDbGetCashSummary
-          ? electronAPI.localDbGetCashSummary(shiftOwnerId, activeShift.shift_start, activeShift.shift_end, businessId, activeShift.uuid_id)
+          ? electronAPI.localDbGetCashSummary(null, activeShift.shift_start, activeShift.shift_end, businessId, activeShift.uuid_id)
           : Promise.resolve(defaultCash),
         electronAPI.localDbGetProductSales
-          ? electronAPI.localDbGetProductSales(shiftOwnerId, activeShift.shift_start, activeShift.shift_end, businessId)
+          ? electronAPI.localDbGetProductSales(null, activeShift.shift_start, activeShift.shift_end, businessId, activeShift.uuid_id)
           : Promise.resolve<ProductSalesPayload>({ products: [], customizations: [] }),
         electronAPI.localDbGetShiftRefunds
           ? electronAPI.localDbGetShiftRefunds({
@@ -981,7 +1157,10 @@ export default function GantiShift() {
               shiftStart: activeShift.shift_start,
               shiftEnd: activeShift.shift_end
             })
-          : Promise.resolve<RefundDetail[]>([])
+          : Promise.resolve<RefundDetail[]>([]),
+        electronAPI.localDbGetVoucherBreakdown
+          ? electronAPI.localDbGetVoucherBreakdown(null, activeShift.shift_start, activeShift.shift_end, businessId, activeShift.uuid_id)
+          : Promise.resolve<VoucherBreakdown>({})
       ]);
 
       const stats =
@@ -989,6 +1168,10 @@ export default function GantiShift() {
       const breakdown =
         breakdownResult.status === 'fulfilled'
           ? (breakdownResult.value as PaymentBreakdown[])
+          : [];
+      const category1BreakdownData =
+        category1BreakdownResult.status === 'fulfilled'
+          ? (category1BreakdownResult.value as Category1Breakdown[])
           : [];
       const category2BreakdownData =
         category2BreakdownResult.status === 'fulfilled'
@@ -1005,18 +1188,25 @@ export default function GantiShift() {
         order_count: stats.order_count ?? 0,
         total_amount: stats.total_amount ?? 0,
         total_discount: stats.total_discount ?? 0,
-        voucher_count: stats.voucher_count ?? 0
+        voucher_count: stats.voucher_count ?? 0,
+        total_cu: stats.total_cu ?? 0
       });
       setPaymentBreakdown(breakdown);
+      setCategory1Breakdown(category1BreakdownData);
       setCategory2Breakdown(category2BreakdownData);
-      setCashSummary(cash);
+      // Do not overwrite cashSummary: RINGKASAN uses loadTabData as source of truth.
+      // loadStatistics overwriting it caused Cash (Hari) to flip (e.g. 92k -> 0) after a few seconds.
       setProductSales(productSalesData.products || []);
       setCustomizationSales(productSalesData.customizations || []);
+      const vb = voucherBreakdownResult.status === 'fulfilled' ? (voucherBreakdownResult.value as VoucherBreakdown) : {};
+      setVoucherBreakdown(vb ?? {});
       
-      // Recalculate Category II totals using base_subtotal (without customizations)
+      // Recalculate Category I and Category II totals using base_subtotal (without customizations)
       if (productSalesData.products && productSalesData.products.length > 0) {
+        recalculateCategory1Breakdown(productSalesData.products, category1BreakdownData);
         recalculateCategory2Breakdown(productSalesData.products, category2BreakdownData);
       } else {
+        setRecalculatedCategory1Breakdown(category1BreakdownData);
         setRecalculatedCategory2Breakdown(category2BreakdownData);
       }
       
@@ -1037,7 +1227,7 @@ export default function GantiShift() {
     } finally {
       setIsRefreshing(false);
     }
-  }, [activeShift, businessId, recalculateCategory2Breakdown]);
+  }, [activeShift, businessId, recalculateCategory1Breakdown, recalculateCategory2Breakdown]);
 
   const handleRefundClick = useCallback(async (refund: RefundDetail) => {
     const electronAPI = getElectronAPI();
@@ -1102,17 +1292,16 @@ export default function GantiShift() {
   }, [businessId]);
 
   const fetchReportPayload = useCallback(
-    async ({ start, end, userId, businessId: reportBusinessId = businessId, shiftUuid, list_of_shifts }: { start: string; end: string | null; userId: number | null; businessId?: number; shiftUuid?: string | null; list_of_shifts?: Shift[]; }): Promise<ReportDataPayload> => {
+    async ({ start, end, userId, businessId: reportBusinessId = businessId, shiftUuid, shiftUuids, list_of_shifts }: { start: string; end: string | null; userId: number | null; businessId?: number; shiftUuid?: string | null; shiftUuids?: string[]; list_of_shifts?: Shift[]; }): Promise<ReportDataPayload> => {
       const electronAPI = getElectronAPI();
       if (!electronAPI) {
         throw new Error('Aplikasi Electron tidak terdeteksi.');
       }
-      // Allow userId to be null for "all users" queries (All Day view)
       if (userId === undefined) {
         throw new Error('User ID tidak valid untuk laporan.');
       }
 
-      const defaultStats: ShiftStatistics = { order_count: 0, total_amount: 0, total_discount: 0, voucher_count: 0 };
+      const defaultStats: ShiftStatistics = { order_count: 0, total_amount: 0, total_discount: 0, voucher_count: 0, total_cu: 0 };
       const defaultCash: CashSummary = {
         cash_shift: 0,
         cash_shift_sales: 0,
@@ -1122,30 +1311,41 @@ export default function GantiShift() {
         cash_whole_day_refunds: 0
       };
 
+      const dayShiftUuids = shiftUuids ?? (list_of_shifts?.map((s) => s.uuid_id) ?? []);
+
       try {
-        const [statsResult, breakdownResult, category2BreakdownResult, cashResult, productSalesResult] = await Promise.allSettled([
+        const [statsResult, breakdownResult, category1BreakdownResult, category2BreakdownResult, cashResult, productSalesResult, voucherBreakdownResult] = await Promise.allSettled([
           electronAPI.localDbGetShiftStatistics
-            ? electronAPI.localDbGetShiftStatistics(userId, start, end, reportBusinessId)
+            ? electronAPI.localDbGetShiftStatistics(userId, start, end, reportBusinessId, shiftUuid ?? undefined, dayShiftUuids.length > 0 ? dayShiftUuids : undefined)
             : Promise.resolve(defaultStats),
           electronAPI.localDbGetPaymentBreakdown
-            ? electronAPI.localDbGetPaymentBreakdown(userId, start, end, reportBusinessId)
+            ? electronAPI.localDbGetPaymentBreakdown(userId, start, end, reportBusinessId, shiftUuid ?? undefined, dayShiftUuids.length > 0 ? dayShiftUuids : undefined)
             : Promise.resolve<PaymentBreakdown[]>([]),
+          electronAPI.localDbGetCategory1Breakdown
+            ? electronAPI.localDbGetCategory1Breakdown(userId, start, end, reportBusinessId, shiftUuid ?? undefined, dayShiftUuids.length > 0 ? dayShiftUuids : undefined)
+            : Promise.resolve<Category1Breakdown[]>([]),
           electronAPI.localDbGetCategory2Breakdown
-            ? electronAPI.localDbGetCategory2Breakdown(userId, start, end, reportBusinessId)
+            ? electronAPI.localDbGetCategory2Breakdown(userId, start, end, reportBusinessId, shiftUuid ?? undefined, dayShiftUuids.length > 0 ? dayShiftUuids : undefined)
             : Promise.resolve<Category2Breakdown[]>([]),
           electronAPI.localDbGetCashSummary
-            ? electronAPI.localDbGetCashSummary(userId, start, end, reportBusinessId, shiftUuid)
+            ? electronAPI.localDbGetCashSummary(userId, start, end, reportBusinessId, shiftUuid ?? undefined, dayShiftUuids.length > 0 ? dayShiftUuids : undefined)
             : Promise.resolve(defaultCash),
           electronAPI.localDbGetProductSales
-            ? electronAPI.localDbGetProductSales(userId, start, end, reportBusinessId)
-            : Promise.resolve<ProductSalesPayload>({ products: [], customizations: [] })
+            ? electronAPI.localDbGetProductSales(userId, start, end, reportBusinessId, shiftUuid ?? undefined, dayShiftUuids.length > 0 ? dayShiftUuids : undefined)
+            : Promise.resolve<ProductSalesPayload>({ products: [], customizations: [] }),
+          electronAPI.localDbGetVoucherBreakdown
+            ? electronAPI.localDbGetVoucherBreakdown(userId, start, end, reportBusinessId, shiftUuid ?? undefined, dayShiftUuids.length > 0 ? dayShiftUuids : undefined)
+            : Promise.resolve<VoucherBreakdown>({})
         ]);
 
         const statsPayload = statsResult.status === 'fulfilled' ? (statsResult.value as ShiftStatistics) : defaultStats;
         const breakdownPayload =
           breakdownResult.status === 'fulfilled' ? (breakdownResult.value as PaymentBreakdown[]) : [];
+        const category1BreakdownPayload =
+          category1BreakdownResult.status === 'fulfilled' ? (category1BreakdownResult.value as Category1Breakdown[]) : [];
         const category2BreakdownPayload =
-          category2BreakdownResult.status === 'fulfilled' ? (category2BreakdownResult.value as Category2Breakdown[]) : [];const rawCash = cashResult.status === 'fulfilled' ? (cashResult.value as CashSummary) : defaultCash;
+          category2BreakdownResult.status === 'fulfilled' ? (category2BreakdownResult.value as Category2Breakdown[]) : [];
+        const rawCash = cashResult.status === 'fulfilled' ? (cashResult.value as CashSummary) : defaultCash;
         const productSalesPayload =
           productSalesResult.status === 'fulfilled'
             ? (productSalesResult.value as ProductSalesPayload)
@@ -1189,18 +1389,22 @@ export default function GantiShift() {
           cash_whole_day_refunds: rawCash.cash_whole_day_refunds ?? 0
         };
 
+        const voucherBreakdownPayload = voucherBreakdownResult.status === 'fulfilled' ? (voucherBreakdownResult.value as VoucherBreakdown) : {};
         return {
           statistics: {
             order_count: statsPayload.order_count ?? 0,
             total_amount: statsPayload.total_amount ?? 0,
             total_discount: finalTotalDiscount,
-            voucher_count: statsPayload.voucher_count ?? 0
+            voucher_count: statsPayload.voucher_count ?? 0,
+            total_cu: statsPayload.total_cu ?? 0
           },
           paymentBreakdown: breakdownPayload,
+          category1Breakdown: category1BreakdownPayload,
           category2Breakdown: category2BreakdownPayload,
           cashSummary: resolvedCash,
           productSales: productSalesPayload.products || [],
-          customizationSales: productSalesPayload.customizations || []
+          customizationSales: productSalesPayload.customizations || [],
+          voucherBreakdown: voucherBreakdownPayload ?? {}
         };
       } catch (error) {
         console.error('Error fetching report payload:', error);
@@ -1402,9 +1606,11 @@ export default function GantiShift() {
         setKasAkhirError(null);
         setActiveShift(null);
         setModalAwal('');
-        setStatistics({ order_count: 0, total_amount: 0, total_discount: 0, voucher_count: 0 });
+        setStatistics({ order_count: 0, total_amount: 0, total_discount: 0, voucher_count: 0, total_cu: 0 });
         setPaymentBreakdown([]);
+        setCategory1Breakdown([]);
         setCategory2Breakdown([]);
+        setVoucherBreakdown({});
         setCashSummary({
           cash_shift: 0,
           cash_shift_sales: 0,
@@ -1430,6 +1636,9 @@ export default function GantiShift() {
   const handleRefresh = () => {
     if (viewMode === 'historical' && selectedDate) {
       loadHistoricalShifts(selectedDate);
+    } else if (activeShift && shiftSequenceInfo) {
+      loadTabData(activeTab);
+      checkTodayTransactions();
     } else if (activeShift) {
       loadStatistics();
       checkTodayTransactions();
@@ -1537,6 +1746,12 @@ export default function GantiShift() {
       return;
     }
 
+    // When a specific shift tab is selected, pre-select only that shift (no whole day)
+    if (activeTab !== 'all-day' && typeof activeTab === 'number') {
+      setPrintWholeDaySelected(false);
+      setPrintSelections(prev => prev.map(s => ({ ...s, selected: s.shiftId === activeTab })));
+    }
+
     // Show print selection modal
     setShowPrintSelectionModal(true);
   };
@@ -1633,10 +1848,15 @@ export default function GantiShift() {
             modalAwalWholeDay = todayShiftsForReport[0].modal_awal || 0;
           }
 
-          // Group products and recalculate Category II for print (only if setting is enabled)
+          // Group products and recalculate Category I & II for print
           const productsForPrint = groupProducts 
             ? groupProductSalesForPrint(dayReportData.productSales)
             : dayReportData.productSales;
+          const recalculatedCategory1 = await recalculateCategory1ForPrint(
+            dayReportData.productSales,
+            dayReportData.category1Breakdown || [],
+            electronAPI
+          );
           const recalculatedCategory2 = await recalculateCategory2ForPrint(
             dayReportData.productSales,
             dayReportData.category2Breakdown || [],
@@ -1660,7 +1880,9 @@ export default function GantiShift() {
               transaction_count: p.transaction_count,
               total_amount: p.total_amount || 0
             })),
+            category1Breakdown: recalculatedCategory1,
             category2Breakdown: recalculatedCategory2,
+            voucherBreakdown: dayReportData.voucherBreakdown ?? {},
             cashSummary: {
               cash_shift: dayCash.cash_shift ?? 0,
               cash_shift_sales: dayCashSales,
@@ -1724,10 +1946,15 @@ export default function GantiShift() {
           const shiftCashRefunds = shiftCash.cash_shift_refunds ?? 0;
           const shiftKasExpected = shift.modal_awal + shiftCashSales - shiftCashRefunds;
 
-          // Group products and recalculate Category II for print (only if setting is enabled)
+          // Group products and recalculate Category I & II for print
           const productsForPrint = groupProducts 
             ? groupProductSalesForPrint(shiftReportData.productSales)
             : shiftReportData.productSales;
+          const recalculatedCategory1 = await recalculateCategory1ForPrint(
+            shiftReportData.productSales,
+            shiftReportData.category1Breakdown || [],
+            electronAPI
+          );
           const recalculatedCategory2 = await recalculateCategory2ForPrint(
             shiftReportData.productSales,
             shiftReportData.category2Breakdown || [],
@@ -1749,7 +1976,9 @@ export default function GantiShift() {
               transaction_count: p.transaction_count,
               total_amount: p.total_amount || 0
             })),
+            category1Breakdown: recalculatedCategory1,
             category2Breakdown: recalculatedCategory2,
+            voucherBreakdown: shiftReportData.voucherBreakdown ?? {},
             cashSummary: {
               cash_shift: shiftCash.cash_shift ?? 0,
               cash_shift_sales: shiftCashSales,
@@ -1841,10 +2070,15 @@ export default function GantiShift() {
       const customKasExpected = modalAwalForCustom + customCashSales - customCashRefunds;
       const totalCashInCashierCustom = customKasExpected;
 
-      // Group products and recalculate Category II for print (only if setting is enabled)
+      // Group products and recalculate Category I & II for print
       const productsForPrint = groupProducts 
         ? groupProductSalesForPrint(reportData.productSales)
         : reportData.productSales;
+      const recalculatedCategory1 = await recalculateCategory1ForPrint(
+        reportData.productSales,
+        reportData.category1Breakdown || [],
+        electronAPI
+      );
       const recalculatedCategory2 = await recalculateCategory2ForPrint(
         reportData.productSales,
         reportData.category2Breakdown || [],
@@ -1864,7 +2098,9 @@ export default function GantiShift() {
           transaction_count: p.transaction_count,
           total_amount: p.total_amount || 0
         })),
+        category1Breakdown: recalculatedCategory1,
         category2Breakdown: recalculatedCategory2,
+        voucherBreakdown: reportData.voucherBreakdown ?? {},
         cashSummary: {
           cash_shift: reportData.cashSummary.cash_shift,
           cash_shift_sales: customCashSales,
@@ -1907,13 +2143,17 @@ export default function GantiShift() {
 
     const electronAPI = getElectronAPI();
     if (!electronAPI) return;
-    setIsLoadingTabData(true);
+    if (loadingTabRef.current === tabView) return;
+    loadingTabRef.current = tabView;
+    const isNewTab = lastLoadedTabRef.current !== tabView;
+    if (isNewTab) setIsLoadingTabData(true);
+    let didLoad = false;
     try {
       if (tabView === 'all-day') {
         // Load whole day data
         const shiftOwnerId = Number(activeShift?.user_id ?? 0);
         if (!shiftOwnerId) {
-          setIsLoadingTabData(false);
+          if (isNewTab) setIsLoadingTabData(false);
           return;
         }
 
@@ -1925,7 +2165,7 @@ export default function GantiShift() {
         
         if (!todayBounds) {
           console.error('[All Day Tab] Failed to calculate today bounds');
-          setIsLoadingTabData(false);
+          if (isNewTab) setIsLoadingTabData(false);
           return;
         }
 
@@ -1953,21 +2193,24 @@ export default function GantiShift() {
         // setTabData(prev => ({ ...prev, 'all-day': dayData }));
         setStatistics(dayData.statistics);
         setPaymentBreakdown(dayData.paymentBreakdown);
+        setCategory1Breakdown(dayData.category1Breakdown ?? []);
         setCategory2Breakdown(dayData.category2Breakdown);
         setCashSummary(dayData.cashSummary);
         setProductSales(dayData.productSales);
         setCustomizationSales(dayData.customizationSales);
+        setVoucherBreakdown(dayData.voucherBreakdown ?? {});
+        didLoad = true;
       } else {
         // Load specific shift data
         const shift = shiftSequenceInfo.shifts.find(s => s.id === tabView);
         if (!shift) {
-          setIsLoadingTabData(false);
+          if (isNewTab) setIsLoadingTabData(false);
           return;
         }
 
         const shiftUserId = Number(shift.user_id ?? 0);
         if (!shiftUserId) {
-          setIsLoadingTabData(false);
+          if (isNewTab) setIsLoadingTabData(false);
           return;
         }
 
@@ -1981,15 +2224,20 @@ export default function GantiShift() {
         // setTabData(prev => ({ ...prev, [tabView]: shiftData }));
         setStatistics(shiftData.statistics);
         setPaymentBreakdown(shiftData.paymentBreakdown);
+        setCategory1Breakdown(shiftData.category1Breakdown ?? []);
         setCategory2Breakdown(shiftData.category2Breakdown);
         setCashSummary(shiftData.cashSummary);
         setProductSales(shiftData.productSales);
         setCustomizationSales(shiftData.customizationSales);
+        setVoucherBreakdown(shiftData.voucherBreakdown ?? {});
+        didLoad = true;
       }
     } catch (error) {
       console.error(`Error loading tab data for ${tabView}:`, error);
     } finally {
-      setIsLoadingTabData(false);
+      loadingTabRef.current = null;
+      if (didLoad) lastLoadedTabRef.current = tabView;
+      if (isNewTab) setIsLoadingTabData(false);
     }
   }, [shiftSequenceInfo, activeShift, fetchReportPayload]);
 
@@ -2056,10 +2304,8 @@ export default function GantiShift() {
   // Convert string values to numbers (MySQL returns decimal as strings)
   const cashShiftSales = Number(cashSummary.cash_shift_sales ?? cashSummary.cash_shift ?? 0) || 0;
   const cashShiftRefunds = Number(cashSummary.cash_shift_refunds ?? 0) || 0;
-  const cashWholeDaySales = Number(cashSummary.cash_whole_day_sales ?? cashSummary.cash_whole_day ?? 0) || 0;
   const cashWholeDayRefunds = Number(cashSummary.cash_whole_day_refunds ?? 0) || 0;
-  const cashNetShift = cashShiftSales - cashShiftRefunds;
-  const cashNetWholeDay = cashWholeDaySales - cashWholeDayRefunds;
+  const totalRefundsActive = activeTab === 'all-day' ? cashWholeDayRefunds : cashShiftRefunds;
 
   // Get the correct modal awal based on active tab
   let kasMulaiActive = 0;
@@ -2096,11 +2342,14 @@ export default function GantiShift() {
   const kasMulaiActiveNum = Number(kasMulaiActive) || 0;
   const kasExpectedActive = kasMulaiActiveNum + cashShiftSales - cashShiftRefunds;
   const kasExpectedDisplay = activeShift ? kasExpectedActive : 0;
-  const totalCashInCashier = activeShift ? kasExpectedActive : 0;
 
-  // Calculate total payment method count
+  // Calculate total payment method count and total amount (use Number() – API may return strings)
   const totalPaymentCount = paymentBreakdown.reduce(
-    (sum, item) => sum + item.transaction_count,
+    (sum, item) => sum + Number(item.transaction_count || 0),
+    0
+  );
+  const totalPaymentAmount = paymentBreakdown.reduce(
+    (sum, item) => sum + Number(item.total_amount || 0),
     0
   );
 
@@ -2331,7 +2580,7 @@ export default function GantiShift() {
                   </div>
                   <div className="flex items-center space-x-3">
                     <DollarSign className="w-5 h-5 text-gray-400" />
-                    <span className="text-gray-600">Total Transaksi: <strong>Rp 0</strong></span>
+                    <span className="text-gray-600">Total Omset: <strong>Rp 0</strong></span>
                   </div>
                   <div className="flex items-center space-x-3">
                     <Ticket className="w-5 h-5 text-gray-400" />
@@ -2503,33 +2752,63 @@ export default function GantiShift() {
                   {/* Left Column - Transaction Summary */}
                   <div className="space-y-0">
                     <h3 className="text-xs font-semibold text-gray-700 mb-2 pb-1 border-b border-gray-300">Transaksi</h3>
-                    <div className="flex items-center py-0.5">
-                      <span className="text-xs text-gray-700">Total Pesanan:</span>
-                      <span className="flex-grow border-b border-dotted border-gray-300 mx-2"></span>
-                      <span className="text-xs font-semibold text-gray-900">{statistics.order_count} transaksi</span>
+                    {/* Total Omset block - breakdown indented inside */}
+                    <div className="rounded-lg bg-amber-50 border border-amber-200/60 mb-2 px-3 py-2">
+                      <div className="flex items-center py-1">
+                        <span className="text-sm font-semibold text-amber-900">Total Omset:</span>
+                        <span className="flex-grow border-b border-dotted border-amber-300 mx-2"></span>
+                        <span className="text-sm font-bold text-amber-900">{formatRupiah(statistics.total_amount)}</span>
+                      </div>
+                      <div className="flex items-center py-0.5 pl-4">
+                        <span className="text-xs text-gray-700">Jumlah Pesanan:</span>
+                        <span className="flex-grow border-b border-dotted border-gray-300 mx-2"></span>
+                        <span className="text-xs font-semibold text-gray-900">{statistics.order_count} transaksi</span>
+                      </div>
+                      <div className="flex items-center py-0.5 pl-4">
+                        <span className="text-xs text-gray-700">Jumlah CU:</span>
+                        <span className="flex-grow border-b border-dotted border-gray-300 mx-2"></span>
+                        <span className="text-xs font-semibold text-gray-900">{statistics.total_cu ?? 0}</span>
+                      </div>
+                      {orderCountByPlatform(paymentBreakdown).map(({ label, count, amount }) => (
+                        <div key={label} className="flex items-center py-0.5 pl-4">
+                          <span className="text-xs text-gray-600">{label}:</span>
+                          <span className="flex-grow border-b border-dotted border-gray-200 mx-2"></span>
+                          <span className="text-xs font-medium text-gray-800">{count} transaksi / {formatRupiah(amount)}</span>
+                        </div>
+                      ))}
                     </div>
-                    <div className="flex items-center py-0.5">
-                      <span className="text-xs text-gray-700">Total Transaksi:</span>
-                      <span className="flex-grow border-b border-dotted border-gray-300 mx-2"></span>
-                      <span className="text-xs font-semibold text-gray-900">{formatRupiah(statistics.total_amount)}</span>
+                    {/* Total Diskon Voucher block - breakdown indented inside */}
+                    <div className="rounded-lg bg-green-50 border border-green-200/60 mb-2 px-3 py-2">
+                      <div className="flex items-center py-1">
+                        <span className="text-sm font-semibold text-green-800">Total Diskon Voucher:</span>
+                        <span className="flex-grow border-b border-dotted border-green-300 mx-2"></span>
+                        <span className="text-sm font-bold text-green-700">
+                          {statistics.total_discount > 0 ? formatRupiah(-statistics.total_discount) : formatRupiah(0)}
+                        </span>
+                      </div>
+                      <div className="flex items-center py-0.5 pl-4">
+                        <span className="text-xs text-gray-700">Voucher Dipakai:</span>
+                        <span className="flex-grow border-b border-dotted border-gray-200 mx-2"></span>
+                        <span className="text-xs font-semibold text-gray-900">{statistics.voucher_count} transaksi</span>
+                      </div>
+                      {VOUCHER_BREAKDOWN_ORDER.map(({ key, label }) => {
+                        const e = voucherBreakdown[key];
+                        if (!e || e.count <= 0) return null;
+                        return (
+                          <div key={key} className="flex items-center py-0.5 pl-4">
+                            <span className="text-xs text-gray-600">{label} ({e.count}):</span>
+                            <span className="flex-grow border-b border-dotted border-gray-200 mx-2"></span>
+                            <span className="text-xs font-semibold text-green-600">-{formatRupiah(e.total)}</span>
+                          </div>
+                        );
+                      })}
                     </div>
-                    <div className="flex items-center py-0.5">
-                      <span className="text-xs text-gray-700">Total Topping:</span>
-                      <span className="flex-grow border-b border-dotted border-gray-300 mx-2"></span>
-                      <span className="text-xs font-semibold text-gray-900">
+                    {/* Total Topping - highlighted, bottommost */}
+                    <div className="flex items-center py-2 px-2 -mx-2 rounded-lg bg-blue-50 border border-blue-200/60 mb-2">
+                      <span className="text-sm font-semibold text-blue-800">Total Topping:</span>
+                      <span className="flex-grow border-b border-dotted border-blue-300 mx-2"></span>
+                      <span className="text-sm font-bold text-blue-900">
                         {formatRupiah(customizationSales.reduce((sum, c) => sum + c.total_revenue, 0))}
-                      </span>
-                    </div>
-                    <div className="flex items-center py-0.5">
-                      <span className="text-xs text-gray-700">Voucher Dipakai:</span>
-                      <span className="flex-grow border-b border-dotted border-gray-300 mx-2"></span>
-                      <span className="text-xs font-semibold text-gray-900">{statistics.voucher_count} transaksi</span>
-                    </div>
-                    <div className="flex items-center py-0.5">
-                      <span className="text-xs text-gray-700">Total Diskon Voucher:</span>
-                      <span className="flex-grow border-b border-dotted border-gray-300 mx-2"></span>
-                      <span className="text-xs font-semibold text-green-600">
-                        {statistics.total_discount > 0 ? formatRupiah(-statistics.total_discount) : formatRupiah(0)}
                       </span>
                     </div>
                   </div>
@@ -2543,24 +2822,14 @@ export default function GantiShift() {
                       <span className="text-xs font-semibold text-gray-900">{formatRupiah(kasMulaiActive)}</span>
                     </div>
                     <div className="flex items-center py-0.5">
-                      <span className="text-xs text-gray-700">Cash Sales (Shift):</span>
+                      <span className="text-xs text-gray-700">Cash Sales:</span>
                       <span className="flex-grow border-b border-dotted border-gray-300 mx-2"></span>
                       <span className="text-xs font-semibold text-gray-900">{formatRupiah(cashShiftSales)}</span>
                     </div>
                     <div className="flex items-center py-0.5">
-                      <span className="text-xs text-gray-700">Cash Refunds (Shift):</span>
+                      <span className="text-xs text-gray-700">Total Refunds:</span>
                       <span className="flex-grow border-b border-dotted border-gray-300 mx-2"></span>
-                      <span className="text-xs font-semibold text-red-600">-{formatRupiah(cashShiftRefunds)}</span>
-                    </div>
-                    <div className="flex items-center py-0.5">
-                      <span className="text-xs text-gray-700">Net Cash (Shift):</span>
-                      <span className="flex-grow border-b border-dotted border-gray-300 mx-2"></span>
-                      <span className="text-xs font-semibold text-gray-900">{formatRupiah(cashNetShift)}</span>
-                    </div>
-                    <div className="flex items-center py-0.5">
-                      <span className="text-xs text-gray-700">Cash (Hari):</span>
-                      <span className="flex-grow border-b border-dotted border-gray-300 mx-2"></span>
-                      <span className="text-xs font-semibold text-gray-900">{formatRupiah(cashSummary.cash_whole_day)}</span>
+                      <span className="text-xs font-semibold text-red-600">-{formatRupiah(totalRefundsActive)}</span>
                     </div>
                     <div className="flex items-center py-0.5">
                       <span className="text-xs font-semibold text-gray-800">Kas Diharapkan:</span>
@@ -2590,28 +2859,6 @@ export default function GantiShift() {
                         </div>
                       </>
                     )}
-                    <div className="flex items-center py-0.5">
-                      <span className="text-xs font-medium text-gray-800">Cash in Cashier:</span>
-                      <span className="flex-grow border-b border-dotted border-gray-300 mx-2"></span>
-                      <span className="text-xs font-bold text-purple-600">{formatRupiah(totalCashInCashier)}</span>
-                    </div>
-                    <div>
-                      <div className="flex items-center py-0.5">
-                        <span className="text-xs text-gray-700">Cash Sales (Whole Day):</span>
-                        <span className="flex-grow border-b border-dotted border-gray-300 mx-2"></span>
-                        <span className="text-xs font-semibold text-gray-900">{formatRupiah(cashWholeDaySales)}</span>
-                      </div>
-                      <div className="flex items-center py-0.5">
-                        <span className="text-xs text-gray-700">Cash Refunds (Whole Day):</span>
-                        <span className="flex-grow border-b border-dotted border-gray-300 mx-2"></span>
-                        <span className="text-xs font-semibold text-red-600">-{formatRupiah(cashWholeDayRefunds)}</span>
-                      </div>
-                      <div className="flex items-center py-0.5">
-                        <span className="text-xs text-gray-700">Net Cash (Whole Day):</span>
-                        <span className="flex-grow border-b border-dotted border-gray-300 mx-2"></span>
-                        <span className="text-xs font-semibold text-gray-900">{formatRupiah(cashNetWholeDay)}</span>
-                      </div>
-                    </div>
                   </div>
                 </div>
               </div>
@@ -2645,10 +2892,11 @@ export default function GantiShift() {
                               hour: '2-digit',
                               minute: '2-digit',
                               second: '2-digit',
-                              hour12: false
+                              hour12: false,
+                              timeZone: 'Asia/Jakarta'
                             });
                           };
-                          
+
                           return (
                             <tr 
                               key={refund.refund_uuid || idx} 
@@ -2740,7 +2988,8 @@ export default function GantiShift() {
                             hour: '2-digit',
                             minute: '2-digit',
                             second: '2-digit',
-                            hour12: false
+                            hour12: false,
+                            timeZone: 'Asia/Jakarta'
                           })}</span>
                         </div>
                         <div className="flex justify-between">
@@ -2752,7 +3001,8 @@ export default function GantiShift() {
                             hour: '2-digit',
                             minute: '2-digit',
                             second: '2-digit',
-                            hour12: false
+                            hour12: false,
+                            timeZone: 'Asia/Jakarta'
                           })}</span>
                         </div>
                       </div>
@@ -2885,44 +3135,7 @@ export default function GantiShift() {
                             <td className="py-1 px-2 text-right font-bold text-gray-900">
                               {displayProductSales.reduce((sum, p) => sum + p.total_quantity, 0)}
                             </td>
-                            <td className="py-1 px-2 text-right font-bold">
-                              {(() => {
-                                const regularProducts = displayProductSales.filter(p => !p.is_bundle_item);
-                                const totalsByKey = regularProducts.reduce((acc, p) => {
-                                  const isPGrouped = isGroupedProduct(p);
-                                  const platforms = isPGrouped 
-                                    ? p.platforms 
-                                    : [p.platform || 'offline'];
-                                  platforms.forEach((platform: string) => {
-                                    const key = `${p.transaction_type}-${platform}`;
-                                    if (!acc.has(key)) {
-                                      acc.set(key, { quantity: 0, base: 0 });
-                                    }
-                                    const current = acc.get(key)!;
-                                    // Distribute quantity and base proportionally (simplified: divide by platform count)
-                                    const platformCount = platforms.length;
-                                    const totalQty = isPGrouped ? p.total_quantity : p.total_quantity;
-                                    const baseSubtotal = isPGrouped ? p.total_base_subtotal : p.base_subtotal;
-                                    current.quantity += Math.round(totalQty / platformCount);
-                                    current.base += baseSubtotal / platformCount;
-                                  });
-                                  return acc;
-                                }, new Map<string, { quantity: number; base: number }>());
-
-                                const rows = Array.from(totalsByKey.entries()).map(([key, value]) => {
-                                  const [transactionType, platform] = key.split('-');
-                                  const label = `${transactionType === 'drinks' ? 'Drinks' : 'Bakery'} · ${formatPlatformLabel(platform)}`;
-                                  const unitPrice = value.quantity > 0 ? value.base / value.quantity : 0;
-                                  return (
-                                    <div key={key} className="flex justify-between text-sm text-gray-800">
-                                      <span>{label}</span>
-                                      <span>{formatRupiah(unitPrice)}</span>
-                                    </div>
-                                  );
-                                });
-                                return rows;
-                              })()}
-                            </td>
+                            <td className="py-1 px-2 text-right font-bold text-gray-900">-</td>
                             <td className="py-1 px-2 text-right font-bold text-gray-900">
                               {formatRupiah(displayProductSales.filter(p => !p.is_bundle_item).reduce((sum, p) => {
                                 const baseSubtotal = isGroupedProduct(p) ? p.total_base_subtotal : p.base_subtotal;
@@ -2930,6 +3143,14 @@ export default function GantiShift() {
                               }, 0))}
                             </td>
                           </tr>
+                          {barangTerjualByPlatform.map(({ label, qty, amount }) => (
+                            <tr key={label} className="border-b border-gray-100">
+                              <td className="py-0.5 px-2 pl-4 text-gray-600 text-xs">{label}</td>
+                              <td className="py-0.5 px-2 text-right text-gray-600 text-xs">{qty}</td>
+                              <td className="py-0.5 px-2 text-right text-gray-400">-</td>
+                              <td className="py-0.5 px-2 text-right font-medium text-gray-800 text-xs">{formatRupiah(amount)}</td>
+                            </tr>
+                          ))}
                         </>
                       ) : (
                         <tr>
@@ -2961,15 +3182,15 @@ export default function GantiShift() {
                           {paymentBreakdown.map((item, idx) => (
                             <tr key={idx} className="border-b border-gray-100 hover:bg-gray-50">
                               <td className="py-1 px-2 text-gray-900 font-medium">{item.payment_method_name || item.payment_method_code}</td>
-                              <td className="py-1 px-2 text-right font-medium text-gray-900">{item.transaction_count}</td>
-                              <td className="py-1 px-2 text-right font-semibold text-gray-900">{formatRupiah(item.total_amount)}</td>
+                              <td className="py-1 px-2 text-right font-medium text-gray-900">{Number(item.transaction_count || 0)}</td>
+                              <td className="py-1 px-2 text-right font-semibold text-gray-900">{formatRupiah(Number(item.total_amount || 0))}</td>
                             </tr>
                           ))}
                           <tr className="border-t-2 border-gray-300 bg-gray-100">
                             <td className="py-1 px-2 font-bold text-gray-900">TOTAL</td>
                             <td className="py-1 px-2 text-right font-bold text-gray-900">{totalPaymentCount}</td>
                             <td className="py-1 px-2 text-right font-bold text-gray-900">
-                              {formatRupiah(paymentBreakdown.reduce((sum, item) => sum + item.total_amount, 0))}
+                              {formatRupiah(totalPaymentAmount)}
                             </td>
                           </tr>
                         </>
@@ -2980,6 +3201,55 @@ export default function GantiShift() {
                           </td>
                         </tr>
                       )}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+
+              {/* CATEGORY I */}
+              <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-4">
+                <h2 className="text-base font-semibold text-gray-800 mb-2 text-center">CATEGORY I</h2>
+                <div className="overflow-x-auto">
+                  <table className="w-full text-xs">
+                    <thead>
+                      <tr className="border-b-2 border-gray-300">
+                        <th className="text-left py-1 px-2 font-semibold text-gray-700">Category I</th>
+                        <th className="text-right py-1 px-2 font-semibold text-gray-700">Quantity</th>
+                        <th className="text-right py-1 px-2 font-semibold text-gray-700">Total</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {(() => {
+                        const displayData = recalculatedCategory1Breakdown.length > 0
+                          ? recalculatedCategory1Breakdown
+                          : (productSales.length > 0 ? [] : category1Breakdown);
+                        return displayData.length > 0 ? (
+                          <>
+                            {displayData.map((item, idx) => (
+                              <tr key={idx} className="border-b border-gray-100 hover:bg-gray-50">
+                                <td className="py-1 px-2 text-gray-900 font-medium">{item.category1_name}</td>
+                                <td className="py-1 px-2 text-right font-medium text-gray-900">{item.total_quantity}</td>
+                                <td className="py-1 px-2 text-right font-semibold text-gray-900">{formatRupiah(item.total_amount)}</td>
+                              </tr>
+                            ))}
+                            <tr className="border-t-2 border-gray-300 bg-gray-100">
+                              <td className="py-1 px-2 font-bold text-gray-900">TOTAL</td>
+                              <td className="py-1 px-2 text-right font-bold text-gray-900">
+                                {displayData.reduce((sum, item) => sum + item.total_quantity, 0)}
+                              </td>
+                              <td className="py-1 px-2 text-right font-bold text-gray-900">
+                                {formatRupiah(displayData.reduce((sum, item) => sum + item.total_amount, 0))}
+                              </td>
+                            </tr>
+                          </>
+                        ) : (
+                          <tr>
+                            <td colSpan={3} className="py-4 text-center text-gray-500">
+                              {productSales.length > 0 ? 'Menghitung...' : 'Tidak ada Category I'}
+                            </td>
+                          </tr>
+                        );
+                      })()}
                     </tbody>
                   </table>
                 </div>
@@ -3079,27 +3349,6 @@ export default function GantiShift() {
                           </td>
                         </tr>
                       )}
-                    </tbody>
-                  </table>
-                </div>
-              </div>
-
-              {/* DISKON & VOUCHER */}
-              <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-4">
-                <h2 className="text-base font-semibold text-gray-800 mb-2 text-center">DISKON & VOUCHER</h2>
-                <div className="overflow-x-auto">
-                  <table className="w-full text-xs">
-                    <tbody>
-                      <tr className="border-b border-gray-200 hover:bg-gray-50">
-                        <td className="py-1 px-2 text-gray-900 font-medium">Voucher Digunakan</td>
-                        <td className="py-1 px-2 text-right font-semibold text-gray-900">{statistics.voucher_count} transaksi</td>
-                      </tr>
-                      <tr className="border-b border-gray-200 hover:bg-gray-50">
-                        <td className="py-1 px-2 text-gray-900 font-medium">Total Diskon Voucher</td>
-                        <td className="py-1 px-2 text-right font-semibold text-green-600">
-                          {statistics.total_discount > 0 ? formatRupiah(-statistics.total_discount) : formatRupiah(0)}
-                        </td>
-                      </tr>
                     </tbody>
                   </table>
                 </div>
@@ -3249,8 +3498,8 @@ export default function GantiShift() {
                           barangTerjual: newValue
                         }));
                         // Auto-update ringkasanOnly based on all sections
-                        const allUnchecked = !newValue && !printSectionOptions.paymentMethod && !printSectionOptions.categoryII && !printSectionOptions.toppingSales && !printSectionOptions.diskonVoucher;
-                        const allChecked = newValue && printSectionOptions.paymentMethod && printSectionOptions.categoryII && printSectionOptions.toppingSales && printSectionOptions.diskonVoucher;
+                        const allUnchecked = !newValue && !printSectionOptions.paymentMethod && !printSectionOptions.categoryII && !printSectionOptions.toppingSales;
+                        const allChecked = newValue && printSectionOptions.paymentMethod && printSectionOptions.categoryII && printSectionOptions.toppingSales;
                         if (allUnchecked) setRingkasanOnly(true);
                         else if (allChecked) setRingkasanOnly(false);
                       }}
@@ -3271,8 +3520,8 @@ export default function GantiShift() {
                           paymentMethod: newValue
                         }));
                         // Auto-update ringkasanOnly based on all sections
-                        const allUnchecked = !printSectionOptions.barangTerjual && !newValue && !printSectionOptions.categoryII && !printSectionOptions.toppingSales && !printSectionOptions.diskonVoucher;
-                        const allChecked = printSectionOptions.barangTerjual && newValue && printSectionOptions.categoryII && printSectionOptions.toppingSales && printSectionOptions.diskonVoucher;
+                        const allUnchecked = !printSectionOptions.barangTerjual && !newValue && !printSectionOptions.categoryII && !printSectionOptions.toppingSales;
+                        const allChecked = printSectionOptions.barangTerjual && newValue && printSectionOptions.categoryII && printSectionOptions.toppingSales;
                         if (allUnchecked) setRingkasanOnly(true);
                         else if (allChecked) setRingkasanOnly(false);
                       }}
@@ -3293,8 +3542,8 @@ export default function GantiShift() {
                           categoryII: newValue
                         }));
                         // Auto-update ringkasanOnly based on all sections
-                        const allUnchecked = !printSectionOptions.barangTerjual && !printSectionOptions.paymentMethod && !newValue && !printSectionOptions.toppingSales && !printSectionOptions.diskonVoucher;
-                        const allChecked = printSectionOptions.barangTerjual && printSectionOptions.paymentMethod && newValue && printSectionOptions.toppingSales && printSectionOptions.diskonVoucher;
+                        const allUnchecked = !printSectionOptions.barangTerjual && !printSectionOptions.paymentMethod && !newValue && !printSectionOptions.toppingSales;
+                        const allChecked = printSectionOptions.barangTerjual && printSectionOptions.paymentMethod && newValue && printSectionOptions.toppingSales;
                         if (allUnchecked) setRingkasanOnly(true);
                         else if (allChecked) setRingkasanOnly(false);
                       }}
@@ -3315,30 +3564,8 @@ export default function GantiShift() {
                           toppingSales: newValue
                         }));
                         // Auto-update ringkasanOnly based on all sections
-                        const allUnchecked = !printSectionOptions.barangTerjual && !printSectionOptions.paymentMethod && !printSectionOptions.categoryII && !newValue && !printSectionOptions.diskonVoucher;
-                        const allChecked = printSectionOptions.barangTerjual && printSectionOptions.paymentMethod && printSectionOptions.categoryII && newValue && printSectionOptions.diskonVoucher;
-                        if (allUnchecked) setRingkasanOnly(true);
-                        else if (allChecked) setRingkasanOnly(false);
-                      }}
-                      disabled={ringkasanOnly}
-                      className="w-5 h-5 text-blue-600 rounded focus:ring-2 focus:ring-blue-500 disabled:opacity-50 disabled:cursor-not-allowed"
-                    />
-                  </label>
-
-                  <label className={`flex items-center justify-between cursor-pointer p-2 rounded hover:bg-gray-50 ${ringkasanOnly ? 'opacity-50' : ''}`}>
-                    <span className="text-sm font-medium text-gray-700">DISKON & VOUCHER</span>
-                    <input
-                      type="checkbox"
-                      checked={printSectionOptions.diskonVoucher}
-                      onChange={(e) => {
-                        const newValue = e.target.checked;
-                        setPrintSectionOptions((prev) => ({
-                          ...prev,
-                          diskonVoucher: newValue
-                        }));
-                        // Auto-update ringkasanOnly based on all sections
-                        const allUnchecked = !printSectionOptions.barangTerjual && !printSectionOptions.paymentMethod && !printSectionOptions.categoryII && !printSectionOptions.toppingSales && !newValue;
-                        const allChecked = printSectionOptions.barangTerjual && printSectionOptions.paymentMethod && printSectionOptions.categoryII && printSectionOptions.toppingSales && newValue;
+                        const allUnchecked = !printSectionOptions.barangTerjual && !printSectionOptions.paymentMethod && !printSectionOptions.categoryII && !newValue && !printSectionOptions.toppingSales;
+                        const allChecked = printSectionOptions.barangTerjual && printSectionOptions.paymentMethod && printSectionOptions.categoryII && newValue && printSectionOptions.toppingSales;
                         if (allUnchecked) setRingkasanOnly(true);
                         else if (allChecked) setRingkasanOnly(false);
                       }}
@@ -3464,8 +3691,8 @@ export default function GantiShift() {
                           barangTerjual: newValue
                         }));
                         // Auto-update ringkasanOnly based on all sections
-                        const allUnchecked = !newValue && !printSectionOptions.paymentMethod && !printSectionOptions.categoryII && !printSectionOptions.toppingSales && !printSectionOptions.diskonVoucher;
-                        const allChecked = newValue && printSectionOptions.paymentMethod && printSectionOptions.categoryII && printSectionOptions.toppingSales && printSectionOptions.diskonVoucher;
+                        const allUnchecked = !newValue && !printSectionOptions.paymentMethod && !printSectionOptions.categoryII && !printSectionOptions.toppingSales;
+                        const allChecked = newValue && printSectionOptions.paymentMethod && printSectionOptions.categoryII && printSectionOptions.toppingSales;
                         if (allUnchecked) setRingkasanOnly(true);
                         else if (allChecked) setRingkasanOnly(false);
                       }}
@@ -3486,8 +3713,8 @@ export default function GantiShift() {
                           paymentMethod: newValue
                         }));
                         // Auto-update ringkasanOnly based on all sections
-                        const allUnchecked = !printSectionOptions.barangTerjual && !newValue && !printSectionOptions.categoryII && !printSectionOptions.toppingSales && !printSectionOptions.diskonVoucher;
-                        const allChecked = printSectionOptions.barangTerjual && newValue && printSectionOptions.categoryII && printSectionOptions.toppingSales && printSectionOptions.diskonVoucher;
+                        const allUnchecked = !printSectionOptions.barangTerjual && !newValue && !printSectionOptions.categoryII && !printSectionOptions.toppingSales;
+                        const allChecked = printSectionOptions.barangTerjual && newValue && printSectionOptions.categoryII && printSectionOptions.toppingSales;
                         if (allUnchecked) setRingkasanOnly(true);
                         else if (allChecked) setRingkasanOnly(false);
                       }}
@@ -3508,8 +3735,8 @@ export default function GantiShift() {
                           categoryII: newValue
                         }));
                         // Auto-update ringkasanOnly based on all sections
-                        const allUnchecked = !printSectionOptions.barangTerjual && !printSectionOptions.paymentMethod && !newValue && !printSectionOptions.toppingSales && !printSectionOptions.diskonVoucher;
-                        const allChecked = printSectionOptions.barangTerjual && printSectionOptions.paymentMethod && newValue && printSectionOptions.toppingSales && printSectionOptions.diskonVoucher;
+                        const allUnchecked = !printSectionOptions.barangTerjual && !printSectionOptions.paymentMethod && !newValue && !printSectionOptions.toppingSales;
+                        const allChecked = printSectionOptions.barangTerjual && printSectionOptions.paymentMethod && newValue && printSectionOptions.toppingSales;
                         if (allUnchecked) setRingkasanOnly(true);
                         else if (allChecked) setRingkasanOnly(false);
                       }}
@@ -3530,30 +3757,8 @@ export default function GantiShift() {
                           toppingSales: newValue
                         }));
                         // Auto-update ringkasanOnly based on all sections
-                        const allUnchecked = !printSectionOptions.barangTerjual && !printSectionOptions.paymentMethod && !printSectionOptions.categoryII && !newValue && !printSectionOptions.diskonVoucher;
-                        const allChecked = printSectionOptions.barangTerjual && printSectionOptions.paymentMethod && printSectionOptions.categoryII && newValue && printSectionOptions.diskonVoucher;
-                        if (allUnchecked) setRingkasanOnly(true);
-                        else if (allChecked) setRingkasanOnly(false);
-                      }}
-                      disabled={ringkasanOnly}
-                      className="w-5 h-5 text-blue-600 rounded focus:ring-2 focus:ring-blue-500 disabled:opacity-50 disabled:cursor-not-allowed"
-                    />
-                  </label>
-
-                  <label className={`flex items-center justify-between cursor-pointer p-2 rounded hover:bg-gray-50 ${ringkasanOnly ? 'opacity-50' : ''}`}>
-                    <span className="text-sm font-medium text-gray-700">DISKON & VOUCHER</span>
-                    <input
-                      type="checkbox"
-                      checked={printSectionOptions.diskonVoucher}
-                      onChange={(e) => {
-                        const newValue = e.target.checked;
-                        setPrintSectionOptions((prev) => ({
-                          ...prev,
-                          diskonVoucher: newValue
-                        }));
-                        // Auto-update ringkasanOnly based on all sections
-                        const allUnchecked = !printSectionOptions.barangTerjual && !printSectionOptions.paymentMethod && !printSectionOptions.categoryII && !printSectionOptions.toppingSales && !newValue;
-                        const allChecked = printSectionOptions.barangTerjual && printSectionOptions.paymentMethod && printSectionOptions.categoryII && printSectionOptions.toppingSales && newValue;
+                        const allUnchecked = !printSectionOptions.barangTerjual && !printSectionOptions.paymentMethod && !printSectionOptions.categoryII && !newValue && !printSectionOptions.toppingSales;
+                        const allChecked = printSectionOptions.barangTerjual && printSectionOptions.paymentMethod && printSectionOptions.categoryII && newValue && printSectionOptions.toppingSales;
                         if (allUnchecked) setRingkasanOnly(true);
                         else if (allChecked) setRingkasanOnly(false);
                       }}
@@ -3634,11 +3839,15 @@ export default function GantiShift() {
             <h3 className="text-xl font-bold text-gray-800 mb-4">Konfirmasi Akhiri Shift</h3>
             <div className="space-y-3 mb-6">
               <div className="flex justify-between">
-                <span className="text-gray-800 font-medium">Total Pesanan:</span>
+                <span className="text-gray-800 font-medium">Jumlah Pesanan:</span>
                 <span className="font-semibold text-gray-900">{statistics.order_count} transaksi</span>
               </div>
               <div className="flex justify-between">
-                <span className="text-gray-800 font-medium">Total Transaksi:</span>
+                <span className="text-gray-800 font-medium">Jumlah CU:</span>
+                <span className="font-semibold text-gray-900">{statistics.total_cu ?? 0}</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-gray-800 font-medium">Total Omset:</span>
                 <span className="font-semibold text-gray-900">{formatRupiah(statistics.total_amount)}</span>
               </div>
               <div className="flex justify-between">
@@ -3725,15 +3934,19 @@ export default function GantiShift() {
             </p>
             <div className="space-y-3 mb-6">
               <div className="flex justify-between">
-                <span className="text-gray-800 font-medium">Total Pesanan:</span>
+                <span className="text-gray-800 font-medium">Jumlah Pesanan:</span>
                 <span className="font-semibold text-gray-900">{statistics.order_count} transaksi</span>
               </div>
               <div className="flex justify-between">
-                <span className="text-gray-800 font-medium">Total Transaksi:</span>
+                <span className="text-gray-800 font-medium">Jumlah CU:</span>
+                <span className="font-semibold text-gray-900">{statistics.total_cu ?? 0}</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-gray-800 font-medium">Total Omset:</span>
                 <span className="font-semibold text-gray-900">{formatRupiah(statistics.total_amount)}</span>
               </div>
               <div className="flex justify-between">
-                <span className="text-gray-800 font-medium">Cash (Shift):</span>
+                <span className="text-gray-800 font-medium">Cash:</span>
                 <span className="font-semibold text-gray-900">{formatRupiah(cashSummary.cash_shift)}</span>
               </div>
               <div className="flex justify-between">

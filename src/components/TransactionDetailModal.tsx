@@ -80,6 +80,7 @@ export interface TransactionDetail {
   cl_account_id?: number | null;
   cl_account_name?: string | null;
   created_at: string;
+  paid_at?: string | null;
   items: TransactionItem[];
   voucher_type?: 'none' | 'percent' | 'nominal' | 'free';
   voucher_value?: number | null;
@@ -253,8 +254,8 @@ const TransactionDetailModal: React.FC<TransactionDetailModalProps> = ({
     try {
       const electronAPI = (window as {
         electronAPI?: {
-          getPrinter1AuditLog?: (fromDate: string, toDate: string, limit: number) => Promise<{ entries?: unknown[] }>;
-          getPrinter2AuditLog?: (fromDate: string, toDate: string, limit: number) => Promise<{ entries?: unknown[] }>;
+          getPrinter1AuditLog?: (fromDate?: string, toDate?: string, limit?: number, transactionId?: string) => Promise<{ entries?: unknown[] }>;
+          getPrinter2AuditLog?: (fromDate?: string, toDate?: string, limit?: number, transactionId?: string) => Promise<{ entries?: unknown[] }>;
           printReceipt?: (data: unknown) => Promise<{ success?: boolean; error?: string }>;
           logPrinter1Print?: (transactionId: string, counter: number, globalCounter: number, isReprint?: boolean) => Promise<{ success?: boolean }>;
           logPrinter2Print?: (transactionId: string, counter: number, mode: string, cycleNumber?: number, globalCounter?: number, isReprint?: boolean) => Promise<{ success?: boolean }>;
@@ -266,23 +267,27 @@ const TransactionDetailModal: React.FC<TransactionDetailModalProps> = ({
       }
 
       // Check which printer this transaction was originally printed on
-      // Fetch ALL entries (no date filter) to ensure we catch all reprints regardless of when they happened
-      // Use a very wide date range to catch everything
-      const startDate = '2020-01-01'; // Very old date to catch all entries
-      const endDate = new Date();
-      endDate.setFullYear(endDate.getFullYear() + 1); // Very future date to catch all entries
-
+      // Fetch only entries for this transaction (by transactionId) so we always find the record
+      // regardless of total audit log size (avoids 10k limit when fetching by date range)
       const printer1Result = await electronAPI.getPrinter1AuditLog?.(
-        startDate,
-        endDate.toISOString().split('T')[0],
-        50000 // Very high limit to catch all entries
+        undefined,
+        undefined,
+        undefined,
+        transaction.id
       );
 
       const printer2Result = await electronAPI.getPrinter2AuditLog?.(
-        startDate,
-        endDate.toISOString().split('T')[0],
-        50000 // Very high limit to catch all entries
+        undefined,
+        undefined,
+        undefined,
+        transaction.id
       );
+
+      const p1Response = printer1Result as { success?: boolean; entries?: unknown[] } | undefined;
+      const p2Response = printer2Result as { success?: boolean; entries?: unknown[] } | undefined;
+      if (p1Response?.success === false || p2Response?.success === false) {
+        throw new Error('Layanan audit printer tidak tersedia. Pastikan aplikasi desktop terhubung ke database.');
+      }
 
       // Find original print record (must be is_reprint = 0 or undefined/null)
       let originalPrinterType: 'receiptPrinter' | 'receiptizePrinter' | null = null;
@@ -318,7 +323,7 @@ const TransactionDetailModal: React.FC<TransactionDetailModalProps> = ({
       }
 
       if (!originalPrinterType) {
-        throw new Error('No original print record found for this transaction');
+        throw new Error('Tidak ada data cetak untuk transaksi ini. Pastikan struk pernah dicetak sebelumnya.');
       }
 
       // Calculate reprint count for this transaction
@@ -428,26 +433,36 @@ const TransactionDetailModal: React.FC<TransactionDetailModalProps> = ({
       // Get cashier name with fallback
       const cashierName = transaction.user_name || user?.name || 'Kasir';
 
-      // Prepare reprint data using original counter
+      // Always send reprint to Printer 1 (receipt) so the receipt comes out of the main receipt printer.
+      // We still use the original printer's counter for display and log to the correct audit (P1 or P2).
+      const reprintPrinterType: 'receiptPrinter' | 'receiptizePrinter' = 'receiptPrinter';
+
+      const vd = typeof transaction.voucher_discount === 'number' ? transaction.voucher_discount : (typeof transaction.voucher_discount === 'string' ? parseFloat(transaction.voucher_discount) : 0);
+      const hasVoucher = vd > 0;
+      // Prepare reprint data: physical print goes to Printer 1; counter/display from original print
       const reprintData = {
         type: 'transaction',
-        printerType: originalPrinterType,
+        printerType: reprintPrinterType,
         business_id: transaction.business_id,
         items: receiptItems,
-        total: transaction.final_amount,
+        total: hasVoucher ? (transaction.total_amount ?? transaction.final_amount) : transaction.final_amount,
+        final_amount: transaction.final_amount,
+        voucherDiscount: hasVoucher ? vd : undefined,
+        voucherLabel: hasVoucher ? (transaction.voucher_label ?? 'Voucher') : undefined,
         paymentMethod: getPaymentMethodLabel(transaction),
         amountReceived: transaction.amount_received,
         change: transaction.change_amount,
         date: transaction.created_at,
         receiptNumber: transaction.id,
         cashier: cashierName,
+        customerName: transaction.customer_name ?? '',
         transactionType: transaction.transaction_type || 'drinks',
         pickupMethod: transaction.pickup_method,
-        // Use original counters for reprint
-        [originalPrinterType === 'receiptPrinter' ? 'printer1Counter' : 'printer2Counter']: originalCounter,
+        // Receipt display: main uses printer1Counter when printerType is receiptPrinter
+        printer1Counter: originalCounter,
         globalCounter: originalGlobalCounter,
-        isReprint: true, // Flag to indicate this is a reprint
-        reprintCount: reprintCount // Reprint counter for display
+        isReprint: true,
+        reprintCount: reprintCount
       };
 
       // Print the receipt
@@ -1190,7 +1205,7 @@ const TransactionDetailModal: React.FC<TransactionDetailModalProps> = ({
             <div className="flex items-center space-x-3">
               <button
                 onClick={handleReprint}
-                disabled={isReprinting || !transaction}
+                disabled={isReprinting || !transaction || (typeof window !== 'undefined' && !(window as { electronAPI?: { printReceipt?: unknown } }).electronAPI?.printReceipt)}
                 className={`px-4 py-2 rounded-lg font-medium transition-colors flex items-center space-x-2 ${isReprinting
                   ? 'bg-gray-300 text-gray-500 cursor-not-allowed'
                   : reprintStatus === 'success'

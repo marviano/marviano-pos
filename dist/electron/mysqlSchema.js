@@ -290,6 +290,7 @@ async function initializeMySQLSchema() {
       last_refunded_at DATETIME DEFAULT NULL,
       created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
       updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      paid_at DATETIME DEFAULT NULL COMMENT 'When the transaction was paid (status completed/paid)',
       contact_id INT DEFAULT NULL,
       customer_name VARCHAR(255) DEFAULT NULL,
       customer_unit INT DEFAULT NULL,
@@ -305,6 +306,7 @@ async function initializeMySQLSchema() {
       sync_status ENUM('pending','synced','failed') DEFAULT 'pending',
       sync_attempts INT DEFAULT 0,
       synced_at DATETIME DEFAULT NULL,
+      checker_printed TINYINT(1) NOT NULL DEFAULT 0 COMMENT '1 = kitchen labels/checker already printed for this order',
       PRIMARY KEY (id),
       UNIQUE KEY uuid_id (uuid_id),
       KEY idx_transactions_business (business_id),
@@ -339,6 +341,7 @@ async function initializeMySQLSchema() {
       total_price DECIMAL(15,2) NOT NULL,
       custom_note TEXT,
       created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      waiter_id INT DEFAULT NULL COMMENT 'Employee who added this line item (for per-waiter achievement)',
       bundle_selections_json JSON DEFAULT NULL,
       production_started_at TIMESTAMP NULL DEFAULT NULL,
       production_status ENUM('preparing','finished','cancelled') DEFAULT NULL,
@@ -348,10 +351,12 @@ async function initializeMySQLSchema() {
       KEY idx_transaction_items_transaction (transaction_id),
       KEY idx_transaction_items_product (product_id),
       KEY idx_transaction_items_created (created_at),
+      KEY idx_transaction_items_waiter (waiter_id),
       KEY fk_transaction_items_transaction_uuid (uuid_transaction_id),
       KEY idx_transaction_items_production_status (production_status),
       CONSTRAINT fk_transaction_items_product FOREIGN KEY (product_id) REFERENCES products(id) ON DELETE CASCADE,
-      CONSTRAINT fk_transaction_items_transaction_uuid FOREIGN KEY (uuid_transaction_id) REFERENCES transactions(uuid_id) ON DELETE CASCADE
+      CONSTRAINT fk_transaction_items_transaction_uuid FOREIGN KEY (uuid_transaction_id) REFERENCES transactions(uuid_id) ON DELETE CASCADE,
+      CONSTRAINT fk_transaction_items_waiter FOREIGN KEY (waiter_id) REFERENCES employees(id) ON DELETE SET NULL
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci`,
         // Transaction_item_customizations table
         `CREATE TABLE IF NOT EXISTS transaction_item_customizations (
@@ -615,12 +620,13 @@ async function initializeMySQLSchema() {
         // Receipt_templates table (stores HTML template code)
         `CREATE TABLE IF NOT EXISTS receipt_templates (
       id INT NOT NULL AUTO_INCREMENT,
-      template_type ENUM('receipt', 'bill', 'refund') NOT NULL COMMENT 'Type of template: receipt (paid transaction), bill (unpaid order), or refund',
+      template_type ENUM('receipt', 'bill', 'refund', 'checker') NOT NULL COMMENT 'Type of template: receipt (paid transaction), bill (unpaid order), refund, or checker (label)',
       template_name VARCHAR(255) DEFAULT NULL COMMENT 'Template name (e.g., "MOMOYO Receipt", "MOMOYO Bill")',
       business_id INT DEFAULT NULL COMMENT 'NULL = global template, INT = business-specific template',
       template_code LONGTEXT NOT NULL COMMENT 'HTML template code with placeholders',
       is_active TINYINT(1) DEFAULT 1 COMMENT 'Whether this template is active',
       is_default TINYINT(1) DEFAULT 0 COMMENT 'Whether this template is the default/active template for its type',
+      show_notes TINYINT(1) DEFAULT 0 COMMENT '1 = show item note/customization on print, 0 = hide',
       version INT DEFAULT 1 COMMENT 'Template version number',
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
       updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
@@ -661,6 +667,20 @@ async function initializeMySQLSchema() {
       UNIQUE KEY unique_nama_jabatan (nama_jabatan),
       KEY idx_nama_jabatan (nama_jabatan)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='Employee job titles/positions'`,
+        // Activity logs table (split bill, pindah meja, etc.)
+        `CREATE TABLE IF NOT EXISTS activity_logs (
+      id INT NOT NULL AUTO_INCREMENT,
+      user_id INT NOT NULL,
+      action VARCHAR(100) NOT NULL,
+      business_id INT DEFAULT NULL,
+      details TEXT,
+      created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (id),
+      KEY idx_activity_logs_user (user_id),
+      KEY idx_activity_logs_business (business_id),
+      KEY idx_activity_logs_action (action),
+      KEY idx_activity_logs_created (created_at)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
         // Employees table
         `CREATE TABLE IF NOT EXISTS employees (
       id INT NOT NULL AUTO_INCREMENT,
@@ -693,6 +713,64 @@ async function initializeMySQLSchema() {
     try {
         for (const tableSql of tables) {
             await (0, mysqlDb_1.executeUpdate)(tableSql);
+        }
+        const pool = (0, mysqlDb_1.getMySQLPool)();
+        // One-time migration: add show_notes to receipt_templates if missing (existing DBs created before this column)
+        // Use pool directly so duplicate-column is handled without going through executeUpdate (which logs all errors)
+        try {
+            await pool.execute(`ALTER TABLE receipt_templates ADD COLUMN show_notes TINYINT(1) DEFAULT 0 COMMENT '1 = show item note/customization on print, 0 = hide'`, []);
+            console.log('✅ receipt_templates: added show_notes column');
+        }
+        catch (alterErr) {
+            const err = alterErr;
+            if (err.code === 'ER_DUP_FIELDNAME' || err.errno === 1060) {
+                // Column already exists — expected after first run; no log
+            }
+            else {
+                console.warn('⚠️ receipt_templates show_notes migration:', err);
+            }
+        }
+        // One-time migration: add 'checker' to receipt_templates template_type ENUM (label/checker template)
+        try {
+            await pool.execute(`ALTER TABLE receipt_templates MODIFY COLUMN template_type ENUM('receipt', 'bill', 'refund', 'checker') NOT NULL COMMENT 'Type of template: receipt (paid transaction), bill (unpaid order), refund, or checker (kitchen label)'`);
+            console.log('✅ receipt_templates: added checker to template_type ENUM');
+        }
+        catch (alterErr) {
+            const err = alterErr;
+            if (err.code === 'ER_INVALID_USE_OF_NULL' || err.errno === 1048) {
+                // ENUM already has checker or other non-null issue
+            }
+            else {
+                console.warn('⚠️ receipt_templates checker ENUM migration:', err);
+            }
+        }
+        // One-time migration: add checker_printed to transactions (skip label print at payment if already printed)
+        try {
+            await pool.execute(`ALTER TABLE transactions ADD COLUMN checker_printed TINYINT(1) NOT NULL DEFAULT 0 COMMENT '1 = kitchen labels/checker already printed for this order'`);
+            console.log('✅ transactions: added checker_printed column');
+        }
+        catch (alterErr) {
+            const err = alterErr;
+            if (err.code === 'ER_DUP_FIELDNAME' || err.errno === 1060) {
+                // Column already exists
+            }
+            else {
+                console.warn('⚠️ transactions checker_printed migration:', err);
+            }
+        }
+        // One-time migration: add paid_at to transactions (when the transaction was paid)
+        try {
+            await pool.execute(`ALTER TABLE transactions ADD COLUMN paid_at DATETIME DEFAULT NULL COMMENT 'When the transaction was paid (status completed/paid)' AFTER updated_at`);
+            console.log('✅ transactions: added paid_at column');
+        }
+        catch (alterErr) {
+            const err = alterErr;
+            if (err.code === 'ER_DUP_FIELDNAME' || err.errno === 1060) {
+                // Column already exists
+            }
+            else {
+                console.warn('⚠️ transactions paid_at migration:', err);
+            }
         }
         console.log('✅ MySQL schema initialized successfully');
     }

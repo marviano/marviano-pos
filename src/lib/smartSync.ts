@@ -190,9 +190,7 @@ class SmartSyncService {
    * Returns sync result with count of synced transactions
    */
   private async syncPendingTransactions(): Promise<{ success: boolean; syncedCount: number; message: string }> {
-    // #region agent log
-    fetch('http://127.0.0.1:7242/ingest/7b565785-72b5-49f7-b2c0-57606ea0d0b5',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'smartSync.ts:192',message:'Starting sync attempt',data:{isElectron:!!isElectron,isSyncing:this.isSyncing,isOnline:this.isOnline,autoSyncEnabled:this.autoSyncEnabled},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
-    // #endregion
+
     console.log('🚀 [SMART SYNC] ===== STARTING SYNC =====', {
       isElectron,
       isSyncing: this.isSyncing,
@@ -201,9 +199,6 @@ class SmartSyncService {
     });
 
     if (!isElectron || this.isSyncing || !this.isOnline) {
-      // #region agent log
-      fetch('http://127.0.0.1:7242/ingest/7b565785-72b5-49f7-b2c0-57606ea0d0b5',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'smartSync.ts:199',message:'Sync skipped',data:{reason:!isElectron?'Not Electron':this.isSyncing?'Already syncing':'Offline',isElectron:!!isElectron,isSyncing:this.isSyncing,isOnline:this.isOnline},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
-      // #endregion
       console.log('⏸️ [SMART SYNC] Sync skipped:', {
         reason: !isElectron ? 'Not Electron' : this.isSyncing ? 'Already syncing' : 'Offline',
         isElectron,
@@ -228,9 +223,6 @@ class SmartSyncService {
       console.log('🔍 [SMART SYNC] Fetching pending transactions...');
       // Get pending transactions (sync_status = 'pending')
       const pendingTransactions = await (electronAPI.localDbGetUnsyncedTransactions as (businessId?: number) => Promise<PendingTransaction[]>)();
-      // #region agent log
-      fetch('http://127.0.0.1:7242/ingest/7b565785-72b5-49f7-b2c0-57606ea0d0b5',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'smartSync.ts:222',message:'Found pending transactions',data:{count:pendingTransactions.length,transactionIds:pendingTransactions.slice(0,10).map((t:any)=>t.id),firstTx:pendingTransactions.length>0?{id:pendingTransactions[0].id,business_id:pendingTransactions[0].business_id,sync_status:pendingTransactions[0].sync_status}:null},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
-      // #endregion
       console.log(`📦 [SMART SYNC] Found ${pendingTransactions.length} pending transactions`, {
         count: pendingTransactions.length,
         transactionIds: pendingTransactions.slice(0, 10).map(t => t.id) // Show first 10 IDs
@@ -243,21 +235,12 @@ class SmartSyncService {
 
         // Process in batches to prevent server overload
         const batches = this.createBatches(pendingTransactions, this.config.maxBatchSize);
-        // #region agent log
-        fetch('http://127.0.0.1:7242/ingest/7b565785-72b5-49f7-b2c0-57606ea0d0b5',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'smartSync.ts:233',message:'Created batches',data:{batchCount:batches.length,maxBatchSize:this.config.maxBatchSize,firstBatchSize:batches.length>0?batches[0].length:0},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'E'})}).catch(()=>{});
-        // #endregion
         console.log(`📊 [SMART SYNC] Created ${batches.length} batch(es) of max ${this.config.maxBatchSize} transactions each`);
 
         for (let batchIndex = 0; batchIndex < batches.length; batchIndex++) {
           const batch = batches[batchIndex];
-          // #region agent log
-          fetch('http://127.0.0.1:7242/ingest/7b565785-72b5-49f7-b2c0-57606ea0d0b5',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'smartSync.ts:238',message:'Starting batch processing',data:{batchIndex:batchIndex+1,totalBatches:batches.length,batchSize:batch.length,transactionIds:batch.map((t:any)=>t.id)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'E'})}).catch(()=>{});
-          // #endregion
           console.log(`🔄 [SMART SYNC] Processing batch ${batchIndex + 1}/${batches.length} (${batch.length} transactions)`);
           const batchResult = await this.processBatch(batch, false);
-          // #region agent log
-          fetch('http://127.0.0.1:7242/ingest/7b565785-72b5-49f7-b2c0-57606ea0d0b5',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'smartSync.ts:241',message:'Batch processing completed',data:{batchIndex:batchIndex+1,syncedCount:batchResult.syncedCount},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'E'})}).catch(()=>{});
-          // #endregion
           syncedTransactionCount += batchResult.syncedCount;
 
           // Add delay between batches to prevent server overload
@@ -365,9 +348,7 @@ class SmartSyncService {
     forceSync: boolean = false,
     onProgress?: (transaction: PendingTransaction, status: string) => void
   ): Promise<{ syncedCount: number; skippedCount: number; failedCount: number }> {
-    // #region agent log
-    fetch('http://127.0.0.1:7242/ingest/7b565785-72b5-49f7-b2c0-57606ea0d0b5',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'smartSync.ts:342',message:'processBatch started',data:{batchSize:batch.length,forceSync,transactionIds:batch.map((t:any)=>t.id)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'E'})}).catch(()=>{});
-    // #endregion
+
     console.log(`🔄 [SMART SYNC] Processing batch of ${batch.length} transactions${forceSync ? ' (FORCE SYNC)' : ''}`);
     let syncedCount = 0;
     let skippedCount = 0;
@@ -376,17 +357,11 @@ class SmartSyncService {
     for (let i = 0; i < batch.length; i++) {
       const transaction = batch[i];
       const transactionIndex = i + 1;
-      // #region agent log
-      fetch('http://127.0.0.1:7242/ingest/7b565785-72b5-49f7-b2c0-57606ea0d0b5',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'smartSync.ts:349',message:'Processing transaction in batch',data:{transactionIndex:transactionIndex+1,batchLength:batch.length,transactionId:transaction.id||'unknown'},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'E'})}).catch(()=>{});
-      // #endregion
       console.log(`📤 [SMART SYNC] Processing transaction ${transactionIndex}/${batch.length}: ${transaction.id || 'unknown'}`);
       
       try {
         // Check server load before processing
         const serverLoad = await this.checkServerLoad();
-        // #region agent log
-        fetch('http://127.0.0.1:7242/ingest/7b565785-72b5-49f7-b2c0-57606ea0d0b5',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'smartSync.ts:353',message:'Server load check',data:{transactionId:transaction.id,serverLoad,threshold:this.config.serverLoadThreshold,isHigh:serverLoad>this.config.serverLoadThreshold},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'E'})}).catch(()=>{});
-        // #endregion
         if (serverLoad > this.config.serverLoadThreshold) {
           console.log(`⚠️ [SMART SYNC] Server load high (${serverLoad}ms) - delaying sync`);
           await this.delay(5000);
@@ -395,9 +370,6 @@ class SmartSyncService {
           continue;
         }
 
-        // #region agent log
-        fetch('http://127.0.0.1:7242/ingest/7b565785-72b5-49f7-b2c0-57606ea0d0b5',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'smartSync.ts:390',message:'After server load check, starting transaction processing',data:{transactionId:transaction.id,hasId:!!transaction.id,hasBusinessId:!!(transaction as any).business_id,hasUserId:!!(transaction as any).user_id,hasPaymentMethod:!!(transaction as any).payment_method,hasPickupMethod:!!(transaction as any).pickup_method,hasTotalAmount:!!(transaction as any).total_amount,hasFinalAmount:!!(transaction as any).final_amount,hasAmountReceived:!!(transaction as any).amount_received,hasPaymentMethodId:!!(transaction as any).payment_method_id,hasCreatedAt:!!(transaction as any).created_at},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'F'})}).catch(()=>{});
-        // #endregion
 
         // Use transaction data directly from transactions table
         let transactionData = transaction as UnknownRecord;
@@ -417,6 +389,7 @@ class SmartSyncService {
         if (transactionData.contact_id === undefined) transactionData.contact_id = null;
         if (transactionData.receipt_number === undefined) transactionData.receipt_number = null;
         if (transactionData.table_id === undefined) transactionData.table_id = null;
+        if (transactionData.waiter_id === undefined) transactionData.waiter_id = null;
 
         // Ensure items array exists (even if empty)
         if (!Array.isArray(transactionData.items)) {
@@ -425,9 +398,6 @@ class SmartSyncService {
 
         // Validate required fields
         if (!transactionData.id) {
-          // #region agent log
-          fetch('http://127.0.0.1:7242/ingest/7b565785-72b5-49f7-b2c0-57606ea0d0b5',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'smartSync.ts:385',message:'Transaction missing id field',data:{transactionId:transaction.id},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})}).catch(()=>{});
-          // #endregion
           console.warn(`⚠️ [SMART SYNC] Transaction missing required field: id`);
           const electronAPI = typeof window !== 'undefined' ? (window as { electronAPI?: UnknownRecord }).electronAPI : undefined;
           if (electronAPI?.localDbMarkTransactionFailed && transaction.id) {
@@ -440,9 +410,6 @@ class SmartSyncService {
 
         // Validate business_id (required by API)
         if (!transactionData.business_id) {
-          // #region agent log
-          fetch('http://127.0.0.1:7242/ingest/7b565785-72b5-49f7-b2c0-57606ea0d0b5',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'smartSync.ts:395',message:'Transaction missing business_id',data:{transactionId:transaction.id},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})}).catch(()=>{});
-          // #endregion
           console.warn(`⚠️ [SMART SYNC] Transaction ${transaction.id} missing required field: business_id`);
           const electronAPI = typeof window !== 'undefined' ? (window as { electronAPI?: UnknownRecord }).electronAPI : undefined;
           if (electronAPI?.localDbMarkTransactionFailed) {
@@ -456,17 +423,8 @@ class SmartSyncService {
         // Phase 2: Validate NOT NULL constraints for transactions
         const transactionRequiredFields = ['id', 'business_id', 'user_id', 'payment_method', 'pickup_method', 
           'total_amount', 'final_amount', 'amount_received', 'payment_method_id', 'created_at'];
-        // #region agent log
-        fetch('http://127.0.0.1:7242/ingest/7b565785-72b5-49f7-b2c0-57606ea0d0b5',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'smartSync.ts:447',message:'Before validateNotNullFields check',data:{transactionId:transaction.id,transactionDataFields:Object.keys(transactionData),requiredFields:transactionRequiredFields,fieldValues:{id:transactionData.id,business_id:transactionData.business_id,user_id:transactionData.user_id,payment_method:transactionData.payment_method,pickup_method:transactionData.pickup_method,total_amount:transactionData.total_amount,final_amount:transactionData.final_amount,amount_received:transactionData.amount_received,payment_method_id:transactionData.payment_method_id,created_at:transactionData.created_at}},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})}).catch(()=>{});
-        // #endregion
         const missingFields = validateNotNullFields(transactionData, transactionRequiredFields);
-        // #region agent log
-        fetch('http://127.0.0.1:7242/ingest/7b565785-72b5-49f7-b2c0-57606ea0d0b5',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'smartSync.ts:449',message:'After validateNotNullFields check',data:{transactionId:transaction.id,missingFieldsCount:missingFields.length,missingFields},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})}).catch(()=>{});
-        // #endregion
         if (missingFields.length > 0) {
-          // #region agent log
-          fetch('http://127.0.0.1:7242/ingest/7b565785-72b5-49f7-b2c0-57606ea0d0b5',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'smartSync.ts:451',message:'Transaction missing required fields - SKIPPING',data:{transactionId:transaction.id,missingFields,transactionData:{id:transactionData.id,business_id:transactionData.business_id,user_id:transactionData.user_id,payment_method:transactionData.payment_method,pickup_method:transactionData.pickup_method,total_amount:transactionData.total_amount,final_amount:transactionData.final_amount,amount_received:transactionData.amount_received,payment_method_id:transactionData.payment_method_id,created_at:transactionData.created_at}},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})}).catch(()=>{});
-          // #endregion
           console.warn(`⚠️ [SMART SYNC] Transaction ${transaction.id} missing required fields: ${missingFields.join(', ')}`);
           const electronAPI = typeof window !== 'undefined' ? (window as { electronAPI?: UnknownRecord }).electronAPI : undefined;
           if (electronAPI?.localDbMarkTransactionFailed) {
@@ -543,9 +501,6 @@ class SmartSyncService {
         // Only validate required fields, not age
         const fieldValidation = validateNotNullFields(transactionData, transactionRequiredFields);
         if (fieldValidation.length > 0) {
-          // #region agent log
-          fetch('http://127.0.0.1:7242/ingest/7b565785-72b5-49f7-b2c0-57606ea0d0b5',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'smartSync.ts:528',message:'Transaction missing required fields',data:{transactionId:transaction.id,missingFields:fieldValidation,transactionData:{id:transactionData.id,business_id:transactionData.business_id,user_id:transactionData.user_id,payment_method:transactionData.payment_method,pickup_method:transactionData.pickup_method,total_amount:transactionData.total_amount,final_amount:transactionData.final_amount,amount_received:transactionData.amount_received,payment_method_id:transactionData.payment_method_id,created_at:transactionData.created_at}},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})}).catch(()=>{});
-          // #endregion
           console.warn(`⚠️ [SMART SYNC] Transaction ${transaction.id} missing required fields: ${fieldValidation.join(', ')}`);
           const electronAPI = typeof window !== 'undefined' ? (window as { electronAPI?: UnknownRecord }).electronAPI : undefined;
           if (electronAPI?.localDbMarkTransactionFailed) {
@@ -557,9 +512,6 @@ class SmartSyncService {
         }
         // Skip conflictResolutionService.validateData() for pending transactions - it checks age which blocks old pending transactions
         // Pending transactions should be synced regardless of age
-        // #region agent log
-        fetch('http://127.0.0.1:7242/ingest/7b565785-72b5-49f7-b2c0-57606ea0d0b5',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'smartSync.ts:488',message:'Validation passed, proceeding to API call',data:{transactionId:transaction.id},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'D'})}).catch(()=>{});
-        // #endregion
 
         // Log transaction data being sent (for debugging)
         console.log(`📤 [SMART SYNC] Sending transaction ${transaction.id}:`, {
@@ -653,6 +605,7 @@ class SmartSyncService {
                   total_price: item.total_price as number,
                   custom_note: item.custom_note as string | undefined,
                   bundle_selections_json: item.bundle_selections_json as unknown | undefined,
+                  waiter_id: item.waiter_id as number | null | undefined, // Who added this line item (per-waiter achievement)
                   // Production status columns (CRITICAL - updated by Kitchen/Barista)
                   production_status: item.production_status as string | null | undefined,
                   production_started_at: item.production_started_at ? (
@@ -832,9 +785,6 @@ class SmartSyncService {
         const startTime = Date.now();
         const apiUrl = getApiUrl('/api/transactions');
         
-        // #region agent log
-        fetch('http://127.0.0.1:7242/ingest/7b565785-72b5-49f7-b2c0-57606ea0d0b5',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'smartSync.ts:789',message:'About to send transaction to API',data:{transactionId:transaction.id,businessId:transactionData.business_id,itemsCount:Array.isArray(transactionData.items)?transactionData.items.length:0,hasRequiredFields:{id:!!transactionData.id,business_id:!!transactionData.business_id,user_id:!!transactionData.user_id,payment_method:!!transactionData.payment_method,pickup_method:!!transactionData.pickup_method,total_amount:!!transactionData.total_amount,final_amount:!!transactionData.final_amount,amount_received:!!transactionData.amount_received,payment_method_id:!!transactionData.payment_method_id,created_at:!!transactionData.created_at}},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'D'})}).catch(()=>{});
-        // #endregion
         console.log(`🌐 [SMART SYNC] Sending transaction ${transaction.id} to server:`, {
           url: apiUrl,
           transactionId: transaction.id,
@@ -860,9 +810,6 @@ class SmartSyncService {
 
         if (response.ok) {
           const result = await response.json();
-          // #region agent log
-          fetch('http://127.0.0.1:7242/ingest/7b565785-72b5-49f7-b2c0-57606ea0d0b5',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'smartSync.ts:805',message:'Transaction synced successfully',data:{transactionId:transaction.id,responseTime,resultSuccess:result.success},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'D'})}).catch(()=>{});
-          // #endregion
           console.log(`✅ [SMART SYNC] Transaction ${transaction.id} synced successfully`, {
             responseTime: `${responseTime}ms`,
             resultKeys: Object.keys(result),
@@ -923,9 +870,6 @@ class SmartSyncService {
           let errorBody: UnknownRecord | null = null;
           try {
             errorBody = await response.json();
-            // #region agent log
-            fetch('http://127.0.0.1:7242/ingest/7b565785-72b5-49f7-b2c0-57606ea0d0b5',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'smartSync.ts:861',message:'API error response',data:{transactionId:transaction.id,status:response.status,statusText:response.statusText,errorBody:errorBody?{error:errorBody.error,message:errorBody.message,errorType:typeof errorBody.error}:null},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'D'})}).catch(()=>{});
-            // #endregion
             console.error(`❌ [SMART SYNC] Server error response for transaction ${transaction.id}:`, {
               status: response.status,
               statusText: response.statusText,
@@ -952,14 +896,8 @@ class SmartSyncService {
                 errorMessageStr.includes('duplicate') ||
                 (errorStr.includes('duplicate entry') && errorStr.includes('for key'));
 
-              // #region agent log
-              fetch('http://127.0.0.1:7242/ingest/7b565785-72b5-49f7-b2c0-57606ea0d0b5',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'smartSync.ts:929',message:'Checking for duplicate',data:{transactionId:transaction.id,status:response.status,errorStr,messageStr,isDuplicate,errorBodyError:errorBody.error,errorBodyMessage:errorBody.message},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'G'})}).catch(()=>{});
-              // #endregion
 
               if (isDuplicate) {
-                // #region agent log
-                fetch('http://127.0.0.1:7242/ingest/7b565785-72b5-49f7-b2c0-57606ea0d0b5',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'smartSync.ts:936',message:'Detected duplicate transaction, marking as synced',data:{transactionId:transaction.id,status:response.status,errorMessage:errorBody.error,transactionUuid:transactionData.uuid_id||transactionData.id||transaction.id},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'G'})}).catch(()=>{});
-                // #endregion
                 console.log(`⚠️ [SMART SYNC] Transaction ${transaction.id} already exists on server (duplicate), marking as synced`);
                 const electronAPI = typeof window !== 'undefined' ? (window as { electronAPI?: UnknownRecord }).electronAPI : undefined;
                 // Use uuid_id if available, otherwise use id
@@ -1006,9 +944,6 @@ class SmartSyncService {
         await this.delay(100);
 
       } catch (error) {
-        // #region agent log
-        fetch('http://127.0.0.1:7242/ingest/7b565785-72b5-49f7-b2c0-57606ea0d0b5',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'smartSync.ts:925',message:'Transaction sync exception',data:{transactionId:transaction.id,errorMessage:error instanceof Error?error.message:String(error),errorType:error instanceof Error?error.constructor.name:typeof error},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'D'})}).catch(()=>{});
-        // #endregion
         console.error(`❌ [SMART SYNC] Failed to sync transaction ${transaction.id}:`, {
           error: error instanceof Error ? error.message : String(error),
           stack: error instanceof Error ? error.stack : undefined,
@@ -1042,9 +977,7 @@ class SmartSyncService {
         }
       }
     }
-    // #region agent log
-    fetch('http://127.0.0.1:7242/ingest/7b565785-72b5-49f7-b2c0-57606ea0d0b5',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'smartSync.ts:1028',message:'processBatch completed',data:{syncedCount,skippedCount,failedCount,batchSize:batch.length},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'E'})}).catch(()=>{});
-    // #endregion
+
     return { syncedCount, skippedCount, failedCount };
   }
 
@@ -1174,34 +1107,23 @@ class SmartSyncService {
    * This forces a re-upload of all transactions to the server
    */
   async resyncAllTransactions(businessId?: number, onProgress?: (progress: { current: number; total: number; transactionId: string | number; status: string }) => void): Promise<{ success: boolean; syncedCount: number; skippedCount: number; failedCount: number; message: string }> {
-    // #region agent log
-    fetch('http://127.0.0.1:7242/ingest/7b565785-72b5-49f7-b2c0-57606ea0d0b5',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'smartSync.ts:1150',message:'Starting re-sync all transactions',data:{businessId,isElectron:!!isElectron,isOnline:this.isOnline},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'H'})}).catch(()=>{});
-    // #endregion
+
     console.log('🔄 [RE-SYNC] Starting re-sync of ALL transactions', { businessId, isElectron, isOnline: this.isOnline });
 
     if (!isElectron || !this.isOnline) {
       const message = !isElectron ? 'Not Electron' : 'Offline';
-      // #region agent log
-      fetch('http://127.0.0.1:7242/ingest/7b565785-72b5-49f7-b2c0-57606ea0d0b5',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'smartSync.ts:1155',message:'Re-sync skipped',data:{reason:message},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'H'})}).catch(()=>{});
-      // #endregion
       return { success: false, syncedCount: 0, skippedCount: 0, failedCount: 0, message };
     }
 
     const electronAPI = typeof window !== 'undefined' ? (window as { electronAPI?: UnknownRecord }).electronAPI : undefined;
     if (!electronAPI?.localDbGetAllTransactions) {
       const message = 'localDbGetAllTransactions not available';
-      // #region agent log
-      fetch('http://127.0.0.1:7242/ingest/7b565785-72b5-49f7-b2c0-57606ea0d0b5',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'smartSync.ts:1160',message:'Re-sync failed - API not available',data:{hasElectronAPI:!!electronAPI,hasGetAllTransactions:!!electronAPI?.localDbGetAllTransactions},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'H'})}).catch(()=>{});
-      // #endregion
       return { success: false, syncedCount: 0, skippedCount: 0, failedCount: 0, message };
     }
 
     try {
       // Get ALL transactions (not just unsynced)
       const allTransactions = await (electronAPI.localDbGetAllTransactions as (businessId?: number) => Promise<PendingTransaction[]>)(businessId);
-      // #region agent log
-      fetch('http://127.0.0.1:7242/ingest/7b565785-72b5-49f7-b2c0-57606ea0d0b5',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'smartSync.ts:1167',message:'Found all transactions for re-sync',data:{count:allTransactions.length,businessId,transactionIds:allTransactions.slice(0,10).map((t:any)=>t.id)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'H'})}).catch(()=>{});
-      // #endregion
       console.log(`📦 [RE-SYNC] Found ${allTransactions.length} transactions to re-sync`);
 
       let syncedCount = 0;
@@ -1239,16 +1161,10 @@ class SmartSyncService {
       }
 
       const message = `Re-synced ${syncedCount} transactions (${skippedCount} skipped, ${failedCount} failed)`;
-      // #region agent log
-      fetch('http://127.0.0.1:7242/ingest/7b565785-72b5-49f7-b2c0-57606ea0d0b5',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'smartSync.ts:1195',message:'Re-sync completed',data:{syncedCount,skippedCount,failedCount,total:allTransactions.length},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'H'})}).catch(()=>{});
-      // #endregion
       console.log(`✅ [RE-SYNC] ${message}`);
       return { success: true, syncedCount, skippedCount, failedCount, message };
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error);
-      // #region agent log
-      fetch('http://127.0.0.1:7242/ingest/7b565785-72b5-49f7-b2c0-57606ea0d0b5',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'smartSync.ts:1200',message:'Re-sync error',data:{error:errorMessage},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'H'})}).catch(()=>{});
-      // #endregion
       console.error('❌ [RE-SYNC] Error during re-sync:', error);
       return { success: false, syncedCount: 0, skippedCount: 0, failedCount: 0, message: errorMessage };
     }

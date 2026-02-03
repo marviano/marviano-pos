@@ -1,11 +1,41 @@
-import { executeQuery, executeQueryOne, executeUpdate, executeUpsert } from './mysqlDb';
+import { executeQuery, executeQueryOne, executeUpdate, executeUpsert, executeOnMirror } from './mysqlDb';
+
+const ALTER_CHECKER_ENUM_SQL = `ALTER TABLE receipt_templates MODIFY COLUMN template_type ENUM('receipt', 'bill', 'refund', 'checker') NOT NULL COMMENT 'Type of template: receipt (paid transaction), bill (unpaid order), refund, or checker (kitchen label)'`;
+
+/** Ensure receipt_templates.template_type accepts 'checker' (for DBs created before checker was added). */
+async function ensureCheckerTemplateType(): Promise<void> {
+  try {
+    await executeUpdate(ALTER_CHECKER_ENUM_SQL, []);
+    console.log('✅ receipt_templates: ensured template_type ENUM includes checker');
+  } catch (alterErr: unknown) {
+    const err = alterErr as { code?: string; errno?: number };
+    if (err.errno === 1265 || err.code === 'WARN_DATA_TRUNCATED') {
+      /* Column might already allow checker; retry is safe */
+    } else {
+      console.warn('⚠️ ensureCheckerTemplateType (main):', (alterErr as Error)?.message);
+    }
+  }
+  try {
+    await executeOnMirror(ALTER_CHECKER_ENUM_SQL, []);
+  } catch {
+    /* mirror optional */
+  }
+}
+import { getDbConfig } from './configManager';
+
+function logDbOperation(operation: 'read' | 'save', table: string, detail?: string): void {
+  try {
+    const db = getDbConfig();
+    fetch('http://127.0.0.1:7242/ingest/7b565785-72b5-49f7-b2c0-57606ea0d0b5', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ location: 'receiptManagement.ts', message: `${operation} ${table}`, data: { operation, table, dbHost: db.host, dbName: db.database, detail }, timestamp: Date.now(), sessionId: 'debug-session', runId: 'run1', hypothesisId: 'H1' }) }).catch(() => {});
+  } catch (_) {}
+}
 
 /**
  * Receipt Management Service
  * Handles loading and saving receipt templates and settings from database
  */
 
-type ReceiptTemplateType = 'receipt' | 'bill';
+type ReceiptTemplateType = 'receipt' | 'bill' | 'checker';
 
 interface ReceiptTemplate {
   id: number;
@@ -16,7 +46,10 @@ interface ReceiptTemplate {
   version: number;
   created_at: string;
   updated_at: string;
+  show_notes?: number;
 }
+
+export type GetReceiptTemplateResult = { templateCode: string | null; showNotes: boolean };
 
 interface ReceiptSettings {
   id: number;
@@ -47,6 +80,7 @@ export interface ReceiptTemplateData {
   displayCounter: string;
   receiptNumber: string;
   cashier: string;
+  customerName?: string;
   isBill: boolean;
   isReprint: boolean;
   reprintCount?: number;
@@ -57,65 +91,96 @@ export interface ReceiptTemplateData {
   logo?: string; // HTML string for logo (img tag or empty)
   address?: string;
   footerText?: string;
+  // Bill discount (optional)
+  voucherDiscount?: number;
+  voucherLabel?: string;
+  finalAmount?: number;
+  hasVoucher?: boolean;
 }
 
 export class ReceiptManagementService {
   /**
-   * Get receipt template from database
+   * Get receipt template from database (code + show_notes for default template).
    * Priority: business-specific default > global default
    */
-  async getReceiptTemplate(templateType: ReceiptTemplateType, businessId?: number): Promise<string | null> {
+  async getReceiptTemplate(templateType: ReceiptTemplateType, businessId?: number): Promise<GetReceiptTemplateResult> {
+    // #region agent log
+    logDbOperation('read', 'receipt_templates', `templateType=${templateType} businessId=${businessId ?? 'null'}`);
+    // #endregion
     try {
-      // Try to get business-specific default template first
+      const selectCols = 'template_code, COALESCE(show_notes, 0) as show_notes';
       if (businessId) {
-        const businessTemplate = await executeQueryOne<ReceiptTemplate>(
-          `SELECT template_code FROM receipt_templates 
+        const businessTemplate = await executeQueryOne<{ template_code: string; show_notes: number }>(
+          `SELECT ${selectCols} FROM receipt_templates 
            WHERE template_type = ? AND business_id = ? AND is_active = 1 AND is_default = 1 
            ORDER BY version DESC LIMIT 1`,
           [templateType, businessId]
         );
         if (businessTemplate?.template_code) {
           console.log(`✅ Found business-specific default ${templateType} template for business ${businessId}`);
-          return businessTemplate.template_code;
+          return { templateCode: businessTemplate.template_code, showNotes: businessTemplate.show_notes === 1 };
         }
       }
 
-      // Fall back to global default template
-      const globalTemplate = await executeQueryOne<ReceiptTemplate>(
-        `SELECT template_code FROM receipt_templates 
+      const globalTemplate = await executeQueryOne<{ template_code: string; show_notes: number }>(
+        `SELECT ${selectCols} FROM receipt_templates 
          WHERE template_type = ? AND business_id IS NULL AND is_active = 1 AND is_default = 1 
          ORDER BY version DESC LIMIT 1`,
         [templateType]
       );
       if (globalTemplate?.template_code) {
         console.log(`✅ Found global default ${templateType} template`);
-        return globalTemplate.template_code;
+        return { templateCode: globalTemplate.template_code, showNotes: globalTemplate.show_notes === 1 };
       }
 
       console.warn(`⚠️ No default ${templateType} template found in database`);
-      return null;
+      return { templateCode: null, showNotes: false };
     } catch (error) {
       console.error(`❌ Error loading ${templateType} template:`, error);
-      return null;
+      return { templateCode: null, showNotes: false };
+    }
+  }
+
+  /**
+   * Get template code and show_notes by template id (for copy/edit).
+   */
+  async getReceiptTemplateById(id: number): Promise<{ templateCode: string | null; showNotes: boolean }> {
+    // #region agent log
+    logDbOperation('read', 'receipt_templates', `byId=${id}`);
+    // #endregion
+    try {
+      const row = await executeQueryOne<{ template_code: string; show_notes: number }>(
+        `SELECT template_code, COALESCE(show_notes, 0) as show_notes FROM receipt_templates WHERE id = ? AND is_active = 1 LIMIT 1`,
+        [id]
+      );
+      if (!row) return { templateCode: null, showNotes: false };
+      return { templateCode: row.template_code ?? null, showNotes: row.show_notes === 1 };
+    } catch (error) {
+      console.error('Error loading receipt template by id:', error);
+      return { templateCode: null, showNotes: false };
     }
   }
 
   /**
    * Get list of available templates for a type
    */
-  async getReceiptTemplates(templateType: ReceiptTemplateType, businessId?: number): Promise<Array<{ id: number; name: string; is_default: boolean }>> {
+  async getReceiptTemplates(templateType: ReceiptTemplateType, businessId?: number): Promise<Array<{ id: number; name: string; is_default: boolean; show_notes?: boolean }>> {
+    // #region agent log
+    logDbOperation('read', 'receipt_templates', `list templateType=${templateType} businessId=${businessId ?? 'null'}`);
+    // #endregion
     try {
-      const templates = await executeQuery<{ id: number; template_name: string; is_default: number }>(
-        `SELECT id, template_name, is_default FROM receipt_templates 
+      const templates = await executeQuery<{ id: number; template_name: string; is_default: number; show_notes: number }>(
+        `SELECT id, template_name, is_default, COALESCE(show_notes, 0) as show_notes FROM receipt_templates 
          WHERE template_type = ? AND (business_id = ? OR business_id IS NULL) AND is_active = 1 
-         ORDER BY is_default DESC, template_name ASC`,
-        [templateType, businessId || null]
+         ORDER BY is_default DESC, (business_id <=> ?) DESC, template_name ASC`,
+        [templateType, businessId || null, businessId ?? null]
       );
       
       return templates.map(t => ({
         id: t.id,
         name: t.template_name || 'Unnamed Template',
-        is_default: t.is_default === 1
+        is_default: t.is_default === 1,
+        show_notes: t.show_notes === 1
       }));
     } catch (error) {
       console.error(`❌ Error loading ${templateType} templates list:`, error);
@@ -127,22 +192,28 @@ export class ReceiptManagementService {
    * Set default template for a type
    */
   async setDefaultTemplate(templateType: ReceiptTemplateType, templateName: string, businessId?: number): Promise<boolean> {
-    try {
-      // First, unset all defaults for this type and business
-      await executeUpdate(
-        `UPDATE receipt_templates 
+    const sqlUnset = `UPDATE receipt_templates 
          SET is_default = 0 
-         WHERE template_type = ? AND (business_id = ? OR business_id IS NULL)`,
-        [templateType, businessId || null]
-      );
-
-      // Then set the selected template as default
-      const result = await executeUpdate(
-        `UPDATE receipt_templates 
+         WHERE template_type = ? AND (business_id = ? OR business_id IS NULL)`;
+    const paramsUnset: (string | number | null)[] = [templateType, businessId || null];
+    const sqlSet = `UPDATE receipt_templates 
          SET is_default = 1 
-         WHERE template_type = ? AND template_name = ? AND (business_id = ? OR business_id IS NULL) AND is_active = 1`,
-        [templateType, templateName, businessId || null]
-      );
+         WHERE template_type = ? AND template_name = ? AND (business_id <=> ?) AND is_active = 1`;
+    const paramsSet: (string | number | null)[] = [templateType, templateName, businessId ?? null];
+    const sqlSetGlobal = `UPDATE receipt_templates 
+           SET is_default = 1 
+           WHERE template_type = ? AND template_name = ? AND business_id IS NULL AND is_active = 1`;
+    const paramsSetGlobal: (string | number | null)[] = [templateType, templateName];
+    try {
+      await executeUpdate(sqlUnset, paramsUnset);
+      await executeOnMirror(sqlUnset, paramsUnset);
+
+      let result = await executeUpdate(sqlSet, paramsSet);
+      await executeOnMirror(sqlSet, paramsSet);
+      if (result === 0 && businessId != null) {
+        result = await executeUpdate(sqlSetGlobal, paramsSetGlobal);
+        await executeOnMirror(sqlSetGlobal, paramsSetGlobal);
+      }
 
       if (result > 0) {
         console.log(`✅ Set ${templateName} as default ${templateType} template${businessId ? ` for business ${businessId}` : ' (global)'}`);
@@ -158,16 +229,92 @@ export class ReceiptManagementService {
   }
 
   /**
+   * Update existing template by id (overwrite template_code, optionally template_name and show_notes).
+   */
+  async updateReceiptTemplate(id: number, templateCode: string, templateName?: string | null, showNotes?: boolean): Promise<boolean> {
+    // #region agent log
+    logDbOperation('save', 'receipt_templates', `update id=${id}`);
+    // #endregion
+    const nameToSet =
+      templateName != null && String(templateName).trim() !== ''
+        ? String(templateName).trim()
+        : null;
+    const showNotesVal = showNotes === true ? 1 : 0;
+    const sql = `UPDATE receipt_templates SET template_code = ?, template_name = COALESCE(?, template_name), show_notes = ?, updated_at = NOW() WHERE id = ? AND is_active = 1`;
+    const params: (string | number | null)[] = [templateCode, nameToSet, showNotesVal, id];
+    try {
+      const result = await executeUpdate(sql, params);
+      if (result > 0) {
+        // Mirror: use upsert so row is created on VPS if missing (UPDATE alone affects 0 rows when id doesn't exist there)
+        const row = await executeQueryOne<{
+          id: number;
+          template_type: string;
+          template_name: string | null;
+          business_id: number | null;
+          template_code: string;
+          is_active: number;
+          is_default: number;
+          show_notes: number;
+          version: number;
+          created_at: string;
+          updated_at: string;
+        }>(
+          `SELECT id, template_type, template_name, business_id, template_code, is_active, is_default, COALESCE(show_notes, 0) AS show_notes, version, created_at, updated_at FROM receipt_templates WHERE id = ? AND is_active = 1 LIMIT 1`,
+          [id]
+        );
+        if (row) {
+          const upsertSql = `INSERT INTO receipt_templates (id, template_type, template_name, business_id, template_code, is_active, is_default, show_notes, version, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON DUPLICATE KEY UPDATE
+              template_code = VALUES(template_code),
+              template_name = VALUES(template_name),
+              show_notes = VALUES(show_notes),
+              version = VALUES(version),
+              updated_at = VALUES(updated_at)`;
+          const upsertParams: (string | number | null)[] = [
+            row.id,
+            row.template_type,
+            row.template_name ?? null,
+            row.business_id,
+            row.template_code,
+            row.is_active,
+            row.is_default,
+            row.show_notes,
+            row.version,
+            row.created_at,
+            row.updated_at,
+          ];
+          await executeOnMirror(upsertSql, upsertParams);
+        } else {
+          await executeOnMirror(sql, params);
+        }
+        console.log(`✅ Updated receipt template id ${id}${nameToSet != null ? ` (name: ${nameToSet})` : ''}`);
+        return true;
+      }
+      return false;
+    } catch (error) {
+      console.error('Error updating receipt template:', error);
+      return false;
+    }
+  }
+
+  /**
    * Save receipt template to database
    */
   async saveReceiptTemplate(
     templateType: ReceiptTemplateType,
     templateCode: string,
     templateName?: string,
-    businessId?: number
+    businessId?: number,
+    showNotes?: boolean
   ): Promise<boolean> {
+    // #region agent log
+    logDbOperation('save', 'receipt_templates', `save templateType=${templateType} businessId=${businessId ?? 'null'}`);
+    // #endregion
     try {
-      // Get current version if exists (for same name)
+      if (templateType === 'checker') {
+        await ensureCheckerTemplateType();
+      }
       const existing = await executeQueryOne<{ version: number }>(
         `SELECT version FROM receipt_templates 
          WHERE template_type = ? AND template_name = ? AND business_id ${businessId ? '= ?' : 'IS NULL'} 
@@ -176,17 +323,20 @@ export class ReceiptManagementService {
       );
 
       const newVersion = existing?.version ? existing.version + 1 : 1;
+      const showNotesVal = showNotes === true ? 1 : 0;
 
-      await executeUpsert(
-        `INSERT INTO receipt_templates (template_type, template_name, business_id, template_code, is_active, version, updated_at)
-         VALUES (?, ?, ?, ?, 1, ?, NOW())
+      const templateUpsertSql = `INSERT INTO receipt_templates (template_type, template_name, business_id, template_code, is_active, show_notes, version, updated_at)
+         VALUES (?, ?, ?, ?, 1, ?, ?, NOW())
          ON DUPLICATE KEY UPDATE 
            template_code = VALUES(template_code),
+           show_notes = VALUES(show_notes),
            version = VALUES(version),
            is_active = 1,
-           updated_at = NOW()`,
-        [templateType, templateName || 'Default', businessId || null, templateCode, newVersion]
-      );
+           updated_at = NOW()`;
+      const templateUpsertParams: (string | number | null)[] = [templateType, templateName || 'Default', businessId || null, templateCode, showNotesVal, newVersion];
+
+      await executeUpsert(templateUpsertSql, templateUpsertParams);
+      await executeOnMirror(templateUpsertSql, templateUpsertParams);
 
       console.log(`✅ Saved ${templateType} template "${templateName || 'Default'}" (version ${newVersion})${businessId ? ` for business ${businessId}` : ' (global)'}`);
       return true;
@@ -201,6 +351,9 @@ export class ReceiptManagementService {
    * Priority: business-specific > global
    */
   async getReceiptSettings(businessId?: number): Promise<ReceiptSettings | null> {
+    // #region agent log
+    logDbOperation('read', 'receipt_settings', `pengaturan konten businessId=${businessId ?? 'null'}`);
+    // #endregion
     try {
       // Try to get business-specific settings first
       if (businessId) {
@@ -264,9 +417,10 @@ export class ReceiptManagementService {
     settings: Partial<Omit<ReceiptSettings, 'id' | 'created_at' | 'updated_at' | 'is_active'>>,
     businessId?: number
   ): Promise<boolean> {
-    try {
-      await executeUpsert(
-        `INSERT INTO receipt_settings (
+    // #region agent log
+    logDbOperation('save', 'receipt_settings', `pengaturan konten businessId=${businessId ?? 'null'}`);
+    // #endregion
+    const receiptSettingsSql = `INSERT INTO receipt_settings (
           business_id, store_name, address, phone_number, 
           contact_phone, logo_base64, footer_text, partnership_contact, 
           is_active, updated_at
@@ -280,18 +434,20 @@ export class ReceiptManagementService {
           footer_text = VALUES(footer_text),
           partnership_contact = VALUES(partnership_contact),
           is_active = 1,
-          updated_at = NOW()`,
-        [
-          businessId || null,
-          settings.store_name || null,
-          settings.address || null,
-          settings.phone_number || null,
-          settings.contact_phone || null,
-          settings.logo_base64 || null,
-          settings.footer_text || null,
-          settings.partnership_contact || null,
-        ]
-      );
+          updated_at = NOW()`;
+    const receiptSettingsParams: (string | number | null)[] = [
+      businessId || null,
+      settings.store_name || null,
+      settings.address || null,
+      settings.phone_number || null,
+      settings.contact_phone || null,
+      settings.logo_base64 || null,
+      settings.footer_text || null,
+      settings.partnership_contact || null,
+    ];
+    try {
+      await executeUpsert(receiptSettingsSql, receiptSettingsParams);
+      await executeOnMirror(receiptSettingsSql, receiptSettingsParams);
 
       console.log(`✅ Saved receipt settings${businessId ? ` for business ${businessId}` : ' (global)'}`);
       return true;
@@ -323,6 +479,7 @@ export class ReceiptManagementService {
       '{{displayCounter}}': data.displayCounter || '',
       '{{receiptNumber}}': data.receiptNumber || '',
       '{{cashier}}': data.cashier || 'N/A',
+      '{{customerName}}': data.customerName || '',
       '{{leftPadding}}': data.leftPadding || '7.00',
       '{{rightPadding}}': data.rightPadding || '7.00',
       '{{reprintCount}}': data.reprintCount ? String(data.reprintCount) : '',
@@ -331,6 +488,10 @@ export class ReceiptManagementService {
       '{{logo}}': data.logo || '',
       '{{address}}': data.address || '',
       '{{footerText}}': data.footerText || '',
+      // Bill discount (optional)
+      '{{voucherDiscount}}': (data.voucherDiscount ?? 0).toLocaleString('id-ID'),
+      '{{voucherLabel}}': data.voucherLabel || '',
+      '{{finalAmount}}': (data.finalAmount ?? data.total).toLocaleString('id-ID'),
     };
 
     // Handle conditional sections
@@ -356,6 +517,16 @@ export class ReceiptManagementService {
       rendered = rendered.replace(/\{\{#ifReprint\}\}([\s\S]*?)\{\{\/ifReprint\}\}/g, '$1');
     } else {
       rendered = rendered.replace(/\{\{#ifReprint\}\}[\s\S]*?\{\{\/ifReprint\}\}/g, '');
+    }
+
+    // Handle bill voucher conditional (show discount + total bayar only if hasVoucher)
+    if (data.hasVoucher) {
+      const ifVoucherMatch = rendered.match(/\{\{#ifVoucher\}\}([\s\S]*?)\{\{\/ifVoucher\}\}/);
+      if (ifVoucherMatch) {
+        rendered = rendered.replace(/\{\{#ifVoucher\}\}[\s\S]*?\{\{\/ifVoucher\}\}/g, ifVoucherMatch[1]);
+      }
+    } else {
+      rendered = rendered.replace(/\{\{#ifVoucher\}\}[\s\S]*?\{\{\/ifVoucher\}\}/g, '');
     }
 
     // Handle amount received conditional (show payment details only if amountReceived > 0)

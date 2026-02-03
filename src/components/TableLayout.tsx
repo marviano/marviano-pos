@@ -168,43 +168,22 @@ export default function TableLayout({ onLoadTransaction }: TableLayoutProps = {}
   }, [selectedRoom]);
 
   const fetchLayoutElements = useCallback(async () => {
-    // #region agent log
-    fetch('http://127.0.0.1:7242/ingest/7b565785-72b5-49f7-b2c0-57606ea0d0b5',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'TableLayout.tsx:170',message:'fetchLayoutElements called',data:{selectedRoom,hasElectronAPI:!!window.electronAPI,hasMethod:!!window.electronAPI?.getRestaurantLayoutElements},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
-    // #endregion
     if (!selectedRoom) {
-      // #region agent log
-      fetch('http://127.0.0.1:7242/ingest/7b565785-72b5-49f7-b2c0-57606ea0d0b5',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'TableLayout.tsx:174',message:'fetchLayoutElements early return - no selectedRoom',data:{selectedRoom},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
-      // #endregion
       return;
     }
     
     try {
       const electronAPI = window.electronAPI;
       if (!electronAPI?.getRestaurantLayoutElements) {
-        // #region agent log
-        fetch('http://127.0.0.1:7242/ingest/7b565785-72b5-49f7-b2c0-57606ea0d0b5',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'TableLayout.tsx:178',message:'getRestaurantLayoutElements not available',data:{hasElectronAPI:!!electronAPI},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
-        // #endregion
         console.error('getRestaurantLayoutElements not available');
         return;
       }
 
-      // #region agent log
-      fetch('http://127.0.0.1:7242/ingest/7b565785-72b5-49f7-b2c0-57606ea0d0b5',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'TableLayout.tsx:183',message:'Calling getRestaurantLayoutElements',data:{selectedRoom},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
-      // #endregion
       const elementsData = await electronAPI.getRestaurantLayoutElements(selectedRoom);
       const elementsArray = Array.isArray(elementsData) ? elementsData : [];
-      // #region agent log
-      fetch('http://127.0.0.1:7242/ingest/7b565785-72b5-49f7-b2c0-57606ea0d0b5',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'TableLayout.tsx:186',message:'getRestaurantLayoutElements result',data:{elementCount:elementsArray.length,isArray:Array.isArray(elementsData),rawData:elementsData,firstElement:elementsArray[0]},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
-      // #endregion
       console.log('[TableLayout] Layout elements fetched:', elementsArray.length, elementsArray);
       setLayoutElements(elementsArray);
-      // #region agent log
-      fetch('http://127.0.0.1:7242/ingest/7b565785-72b5-49f7-b2c0-57606ea0d0b5',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'TableLayout.tsx:189',message:'setLayoutElements called',data:{elementCount:elementsArray.length},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
-      // #endregion
     } catch (error) {
-      // #region agent log
-      fetch('http://127.0.0.1:7242/ingest/7b565785-72b5-49f7-b2c0-57606ea0d0b5',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'TableLayout.tsx:191',message:'Error fetching layout elements',data:{error:error instanceof Error?error.message:String(error),selectedRoom},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
-      // #endregion
       console.error('Error fetching layout elements:', error);
     }
   }, [selectedRoom]);
@@ -404,9 +383,6 @@ export default function TableLayout({ onLoadTransaction }: TableLayoutProps = {}
           >
             {/* Layout Elements */}
             {(() => {
-              // #region agent log
-              fetch('http://127.0.0.1:7242/ingest/7b565785-72b5-49f7-b2c0-57606ea0d0b5',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'TableLayout.tsx:384',message:'Rendering layout elements section',data:{layoutElementsCount:layoutElements.length,selectedRoom,canvasSize,roomsCount:rooms.length},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})}).catch(()=>{});
-              // #endregion
               const selectedRoomData = rooms.find(r => r.id === selectedRoom);
               const fontSizeMultiplier = selectedRoomData?.font_size_multiplier ?? 1.0;
               const effectiveCanvasWidth = canvasSize.width || 800; // Fallback to 800 if not set
@@ -421,14 +397,8 @@ export default function TableLayout({ onLoadTransaction }: TableLayoutProps = {}
                 elements: layoutElements
               });
               
-              // #region agent log
-              fetch('http://127.0.0.1:7242/ingest/7b565785-72b5-49f7-b2c0-57606ea0d0b5',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'TableLayout.tsx:397',message:'Before rendering elements check',data:{layoutElementsCount:layoutElements.length,canvasSize,effectiveCanvasWidth,effectiveCanvasHeight},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})}).catch(()=>{});
-              // #endregion
               
               if (layoutElements.length === 0) {
-                // #region agent log
-                fetch('http://127.0.0.1:7242/ingest/7b565785-72b5-49f7-b2c0-57606ea0d0b5',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'TableLayout.tsx:400',message:'No layout elements to render',data:{layoutElementsCount:layoutElements.length},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})}).catch(()=>{});
-                // #endregion
                 console.log('[TableLayout] No layout elements to render');
                 return null;
               }
@@ -454,9 +424,6 @@ export default function TableLayout({ onLoadTransaction }: TableLayoutProps = {}
                   (MIN_SIZE_PERCENT / 100) * effectiveCanvasHeight
                 );
 
-                // #region agent log
-                fetch('http://127.0.0.1:7242/ingest/7b565785-72b5-49f7-b2c0-57606ea0d0b5',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'TableLayout.tsx:415',message:'Calculating element position and size',data:{elementId:element.id,label:element.label,posX,posY,widthPercent,heightPercent,pixelX,pixelY,pixelWidth,pixelHeight,effectiveCanvasWidth,effectiveCanvasHeight,isNaN:isNaN(pixelX)||isNaN(pixelY)||isNaN(pixelWidth)||isNaN(pixelHeight),isZero:pixelWidth===0||pixelHeight===0},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'E'})}).catch(()=>{});
-                // #endregion
 
                 console.log('[TableLayout] Rendering element:', {
                   id: element.id,
@@ -613,9 +580,16 @@ function TableDisplay({
     const created = new Date(createdAt);
     const diffMs = currentTime.getTime() - created.getTime();
     const totalSeconds = Math.floor(diffMs / 1000);
-    const minutes = Math.floor(totalSeconds / 60);
+    const totalMinutes = Math.floor(totalSeconds / 60);
     const seconds = totalSeconds % 60;
-    return `${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
+    if (totalMinutes >= 60) {
+      const hours = Math.floor(totalMinutes / 60);
+      const mins = totalMinutes % 60;
+      const hr = hours === 1 ? 'hr' : 'hrs';
+      const min = mins === 1 ? 'min' : 'mins';
+      return `${hours} ${hr} ${mins} ${min}`;
+    }
+    return `${totalMinutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
   };
 
   const timer = transaction ? formatTimer(transaction.created_at) : '--:--';

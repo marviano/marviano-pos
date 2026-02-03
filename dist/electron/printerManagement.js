@@ -12,7 +12,7 @@ class PrinterManagementService {
         // MySQL schema is initialized separately, no need for column checks
     }
     /**
-     * Generate 19-digit numeric UUID: [Business(3)][YYMMDD(6)][HHMMSS(6)][Seq(4)]
+     * Generate 19-digit numeric UUID: [Business(3)][Seq(4)][YYMMDD(6)][HH(2)][MMSS(4)]
      */
     async generateNumericUUID(businessId) {
         const now = new Date();
@@ -23,9 +23,11 @@ class PrinterManagementService {
         const minutes = now.getMinutes().toString().padStart(2, '0');
         const seconds = now.getSeconds().toString().padStart(2, '0');
         const date = `${year}${month}${day}`;
-        const time = `${hours}${minutes}${seconds}`;
+        const hour = hours;
+        const minutesSeconds = `${minutes}${seconds}`;
+        const fullTime = `${hours}${minutes}${seconds}`;
         // Get sequence number for this second
-        const thisSecond = `${date}${time}`;
+        const thisSecond = `${date}${fullTime}`;
         const counterKey = `uuid_seq_${businessId}_${thisSecond}`;
         let sequence = 1;
         try {
@@ -43,7 +45,8 @@ class PrinterManagementService {
         }
         const businessStr = businessId.toString().padStart(3, '0');
         const seqStr = sequence.toString().padStart(4, '0');
-        const uuid = `${businessStr}${date}${time}${seqStr}`;
+        // Format: [Business(3)][Seq(4)][YYMMDD(6)][HH(2)][MMSS(4)]
+        const uuid = `${businessStr}${seqStr}${date}${hour}${minutesSeconds}`;
         // Clean up old entries (keep only last 24 hours)
         try {
             const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1000).getTime();
@@ -228,39 +231,41 @@ class PrinterManagementService {
         }
     }
     /**
-     * Get Printer 1 audit log entries
+     * Get Printer 1 audit log entries.
+     * When transactionId is provided, only entries for that transaction are returned (no limit cap).
      */
-    async getPrinter1AuditLog(fromDate, toDate, limit = 100) {
+    async getPrinter1AuditLog(fromDate, toDate, limit = 100, transactionId) {
         try {
             let query = 'SELECT * FROM printer1_audit_log';
             const params = [];
-            let fromEpoch;
-            let toEpoch;
+            const conditions = [];
+            if (transactionId != null && String(transactionId).trim() !== '') {
+                conditions.push('transaction_id = ?');
+                params.push(String(transactionId).trim());
+            }
             if (fromDate || toDate) {
-                const conditions = [];
                 if (fromDate) {
-                    // Parse date as local time (start of day in local timezone)
                     const [year, month, day] = fromDate.split('-').map(Number);
-                    fromEpoch = new Date(year, month - 1, day, 0, 0, 0, 0).getTime();
+                    const fromEpoch = new Date(year, month - 1, day, 0, 0, 0, 0).getTime();
                     conditions.push('printed_at_epoch >= ?');
                     params.push(fromEpoch);
                 }
                 if (toDate) {
-                    // Parse date as local time (end of day in local timezone)
                     const [year, month, day] = toDate.split('-').map(Number);
-                    toEpoch = new Date(year, month - 1, day, 23, 59, 59, 999).getTime();
+                    const toEpoch = new Date(year, month - 1, day, 23, 59, 59, 999).getTime();
                     conditions.push('printed_at_epoch <= ?');
                     params.push(toEpoch);
                 }
-                if (conditions.length > 0) {
-                    query += ' WHERE ' + conditions.join(' AND ');
-                }
             }
-            // LIMIT cannot be parameterized in prepared statements reliably
-            // Use string interpolation (safe since we validate it's a number)
-            const safeLimit = typeof limit === 'number' && limit > 0 ? Math.min(Math.max(limit, 1), 10000) : 100;
-            query += ` ORDER BY printed_at_epoch DESC LIMIT ${safeLimit}`;
-            console.log(`🔍 [Printer1AuditLog] Query params: fromDate=${fromDate}, toDate=${toDate}, fromEpoch=${fromEpoch}, toEpoch=${toEpoch}, limit=${safeLimit}`);
+            if (conditions.length > 0) {
+                query += ' WHERE ' + conditions.join(' AND ');
+            }
+            query += ' ORDER BY printed_at_epoch DESC';
+            // When filtering by transactionId, no limit (we need all entries for reprint count). Otherwise cap at 10000.
+            if (transactionId == null || String(transactionId).trim() === '') {
+                const safeLimit = typeof limit === 'number' && limit > 0 ? Math.min(Math.max(limit, 1), 10000) : 100;
+                query += ` LIMIT ${safeLimit}`;
+            }
             const results = await (0, mysqlDb_1.executeQuery)(query, params);
             console.log(`✅ Retrieved ${results.length} printer1 audit log entries`);
             // Debug: show sample entries if any
@@ -286,39 +291,89 @@ class PrinterManagementService {
         }
     }
     /**
-     * Get Printer 2 audit log entries
+     * Move transaction from Printer 1 audit log to Printer 2 audit log
+     * This will:
+     * 1. Get the Printer 1 audit entry
+     * 2. Delete it from printer1_audit_log
+     * 3. Get/increment Printer 2 daily counter
+     * 4. Insert into printer2_audit_log with manual mode
+     * 5. Return success status
      */
-    async getPrinter2AuditLog(fromDate, toDate, limit = 100) {
+    async moveTransactionToPrinter2(transactionId, businessId) {
+        try {
+            // Step 1: Get the Printer 1 audit entry
+            const p1Entry = await (0, mysqlDb_1.executeQueryOne)('SELECT * FROM printer1_audit_log WHERE transaction_id = ? LIMIT 1', [transactionId]);
+            if (!p1Entry) {
+                console.error(`❌ Transaction ${transactionId} not found in printer1_audit_log`);
+                return false;
+            }
+            // Step 2: Get and increment Printer 2 daily counter
+            const printer2Counter = await this.getPrinterCounter('receiptizePrinter', businessId, true);
+            if (printer2Counter <= 0) {
+                console.error(`❌ Failed to get Printer 2 counter for transaction ${transactionId}`);
+                return false;
+            }
+            // Step 3: Insert into printer2_audit_log
+            const now = (0, mysqlDb_1.toMySQLDateTime)(new Date());
+            const printedAtEpoch = Date.now();
+            await (0, mysqlDb_1.executeUpdate)(`INSERT INTO printer2_audit_log 
+         (transaction_id, printer2_receipt_number, print_mode, cycle_number, global_counter, printed_at, printed_at_epoch, is_reprint, reprint_count) 
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`, [
+                transactionId,
+                printer2Counter,
+                'manual',
+                null,
+                p1Entry.global_counter,
+                now,
+                printedAtEpoch,
+                p1Entry.is_reprint || 0,
+                p1Entry.reprint_count || 0
+            ]);
+            // Step 4: Delete from printer1_audit_log
+            await (0, mysqlDb_1.executeUpdate)('DELETE FROM printer1_audit_log WHERE transaction_id = ?', [transactionId]);
+            console.log(`✅ Moved transaction ${transactionId} from Printer 1 to Printer 2 audit log (Printer 2 counter: ${printer2Counter})`);
+            return true;
+        }
+        catch (error) {
+            console.error(`❌ Error moving transaction ${transactionId} to Printer 2:`, error);
+            return false;
+        }
+    }
+    /**
+     * Get Printer 2 audit log entries.
+     * When transactionId is provided, only entries for that transaction are returned (no limit cap).
+     */
+    async getPrinter2AuditLog(fromDate, toDate, limit = 100, transactionId) {
         try {
             let query = 'SELECT * FROM printer2_audit_log';
             const params = [];
-            let fromEpoch;
-            let toEpoch;
+            const conditions = [];
+            if (transactionId != null && String(transactionId).trim() !== '') {
+                conditions.push('transaction_id = ?');
+                params.push(String(transactionId).trim());
+            }
             if (fromDate || toDate) {
-                const conditions = [];
                 if (fromDate) {
-                    // Parse date as local time (start of day in local timezone)
                     const [year, month, day] = fromDate.split('-').map(Number);
-                    fromEpoch = new Date(year, month - 1, day, 0, 0, 0, 0).getTime();
+                    const fromEpoch = new Date(year, month - 1, day, 0, 0, 0, 0).getTime();
                     conditions.push('printed_at_epoch >= ?');
                     params.push(fromEpoch);
                 }
                 if (toDate) {
-                    // Parse date as local time (end of day in local timezone)
                     const [year, month, day] = toDate.split('-').map(Number);
-                    toEpoch = new Date(year, month - 1, day, 23, 59, 59, 999).getTime();
+                    const toEpoch = new Date(year, month - 1, day, 23, 59, 59, 999).getTime();
                     conditions.push('printed_at_epoch <= ?');
                     params.push(toEpoch);
                 }
-                if (conditions.length > 0) {
-                    query += ' WHERE ' + conditions.join(' AND ');
-                }
             }
-            // LIMIT cannot be parameterized in prepared statements reliably
-            // Use string interpolation (safe since we validate it's a number)
-            const safeLimit = typeof limit === 'number' && limit > 0 ? Math.min(Math.max(limit, 1), 10000) : 100;
-            query += ` ORDER BY printed_at_epoch DESC LIMIT ${safeLimit}`;
-            console.log(`🔍 [Printer2AuditLog] Query params: fromDate=${fromDate}, toDate=${toDate}, fromEpoch=${fromEpoch}, toEpoch=${toEpoch}, limit=${safeLimit}`);
+            if (conditions.length > 0) {
+                query += ' WHERE ' + conditions.join(' AND ');
+            }
+            query += ' ORDER BY printed_at_epoch DESC';
+            if (transactionId == null || String(transactionId).trim() === '') {
+                const safeLimit = typeof limit === 'number' && limit > 0 ? Math.min(Math.max(limit, 1), 10000) : 100;
+                query += ` LIMIT ${safeLimit}`;
+            }
             const results = await (0, mysqlDb_1.executeQuery)(query, params);
             console.log(`✅ Retrieved ${results.length} printer2 audit log entries`);
             // Debug: show sample entries if any
