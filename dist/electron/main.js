@@ -3349,22 +3349,19 @@ function createWindows() {
         try {
             const queries = [];
             for (const r of rows) {
-                // Auto-link to active shift if shift_uuid is missing
+                // Auto-link to active shift if shift_uuid is missing (use business_id only, not user_id)
                 let finalShiftUuid = r.shift_uuid;
-                if (!finalShiftUuid && r.user_id && r.business_id) {
+                if (!finalShiftUuid && r.business_id) {
                     try {
                         const businessId = typeof r.business_id === 'number' ? r.business_id : (r.business_id ? parseInt(String(r.business_id), 10) : null);
                         if (businessId) {
                             const activeShift = await (0, mysqlDb_1.executeQueryOne)(`
                 SELECT uuid_id 
                 FROM shifts 
-                WHERE user_id = ? AND status = 'active' AND business_id = ?
-                ORDER BY shift_start DESC 
+                WHERE business_id = ? AND status = 'active'
+                ORDER BY shift_start ASC 
                 LIMIT 1
-              `, [
-                                typeof r.user_id === 'number' ? r.user_id : (typeof r.user_id === 'string' ? parseInt(String(r.user_id), 10) : 0),
-                                businessId
-                            ]);
+              `, [businessId]);
                             if (activeShift) {
                                 finalShiftUuid = activeShift.uuid_id;
                                 console.log(`🔗 [UPSERT] Linked transaction ${r.id} to active shift ${finalShiftUuid}`);
@@ -3488,7 +3485,7 @@ function createWindows() {
             transaction_type, payment_method_id, table_id, paid_at
           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
           ON DUPLICATE KEY UPDATE
-            business_id=VALUES(business_id), user_id=VALUES(user_id), waiter_id=VALUES(waiter_id), payment_method=VALUES(payment_method),
+            business_id=VALUES(business_id), user_id=VALUES(user_id), waiter_id=VALUES(waiter_id), shift_uuid=VALUES(shift_uuid), payment_method=VALUES(payment_method),
             pickup_method=VALUES(pickup_method), total_amount=VALUES(total_amount), voucher_discount=VALUES(voucher_discount),
             voucher_type=VALUES(voucher_type), voucher_value=VALUES(voucher_value), voucher_label=VALUES(voucher_label),
             final_amount=VALUES(final_amount), amount_received=VALUES(amount_received), change_amount=VALUES(change_amount),
@@ -5216,22 +5213,19 @@ function createWindows() {
             if (!refund.business_id) {
                 return { success: false, error: 'Business ID is required for refund' };
             }
-            // Auto-link to active shift if shift_uuid is missing
+            // Auto-link to active shift if shift_uuid is missing (use business_id only)
             let finalShiftUuid = refund.shift_uuid;
-            if (!finalShiftUuid && refund.refunded_by && refund.business_id) {
+            if (!finalShiftUuid && refund.business_id) {
                 try {
                     const businessId = typeof refund.business_id === 'number' ? refund.business_id : (refund.business_id ? parseInt(String(refund.business_id), 10) : null);
                     if (businessId) {
                         const activeShift = await (0, mysqlDb_1.executeQueryOne)(`
               SELECT uuid_id 
               FROM shifts 
-              WHERE user_id = ? AND status = 'active' AND business_id = ?
-              ORDER BY shift_start DESC 
+              WHERE business_id = ? AND status = 'active'
+              ORDER BY shift_start ASC 
               LIMIT 1
-            `, [
-                            typeof refund.refunded_by === 'number' ? refund.refunded_by : (typeof refund.refunded_by === 'string' ? parseInt(String(refund.refunded_by), 10) : 0),
-                            businessId
-                        ]);
+            `, [businessId]);
                         if (activeShift) {
                             finalShiftUuid = activeShift.uuid_id;
                             console.log(`🔗 [REFUND] Linked refund ${refund.uuid_id} to active shift ${finalShiftUuid}`);
@@ -5828,9 +5822,41 @@ function createWindows() {
                 }
             }
             const statsResult = await (0, mysqlDb_1.executeQueryOne)(statsQuery, statsParams);
+            // Get total refunds for transactions in this shift (to subtract from Total Omset)
+            let refundQuery = `
+        SELECT COALESCE(SUM(tr.refund_amount), 0) as refund_total
+        FROM transaction_refunds tr
+        INNER JOIN transactions t ON tr.transaction_uuid = t.uuid_id
+        WHERE t.business_id = ? AND t.status = 'completed'
+        AND (tr.status IS NULL OR tr.status != 'failed')
+      `;
+            const refundParams = [businessId];
+            if (shiftUuids && shiftUuids.length > 0) {
+                refundQuery += ' AND t.shift_uuid IN (' + shiftUuids.map(() => '?').join(',') + ')';
+                refundParams.push(...shiftUuids);
+            }
+            else if (shiftUuid) {
+                refundQuery += ' AND t.shift_uuid = ?';
+                refundParams.push(shiftUuid);
+            }
+            else {
+                if (userId !== null) {
+                    refundQuery += ' AND t.user_id = ?';
+                    refundParams.push(userId);
+                }
+                refundQuery += ' AND t.created_at >= ?';
+                refundParams.push(shiftStartMySQL);
+                if (shiftEnd) {
+                    refundQuery += ' AND t.created_at <= ?';
+                    refundParams.push(shiftEndMySQL);
+                }
+            }
+            const refundResult = await (0, mysqlDb_1.executeQueryOne)(refundQuery, refundParams);
+            const refundTotal = refundResult?.refund_total ?? 0;
+            const netTotalAmount = Math.max(0, (statsResult?.total_amount ?? 0) - refundTotal);
             return {
                 order_count: statsResult?.order_count || 0,
-                total_amount: statsResult?.total_amount || 0,
+                total_amount: netTotalAmount,
                 total_discount: statsResult?.total_discount || 0,
                 voucher_count: statsResult?.voucher_count || 0,
                 total_cu: statsResult?.total_cu ?? 0
@@ -10051,17 +10077,19 @@ function generateShiftBreakdownHTML(shiftData) {
         console.log('🔍 [RENDER SECTION] Options sectionOptions:', JSON.stringify(options.sectionOptions));
         console.log('🔍 [RENDER SECTION] Using provided options directly:', providedSectionOptions !== undefined && providedSectionOptions !== null);
         const sectionOptions = providedSectionOptions ? {
+            ringkasan: providedSectionOptions.ringkasan !== undefined ? providedSectionOptions.ringkasan : true,
             barangTerjual: providedSectionOptions.barangTerjual !== undefined ? providedSectionOptions.barangTerjual : true,
             paymentMethod: providedSectionOptions.paymentMethod !== undefined ? providedSectionOptions.paymentMethod : true,
+            categoryI: providedSectionOptions.categoryI !== undefined ? providedSectionOptions.categoryI : true,
             categoryII: providedSectionOptions.categoryII !== undefined ? providedSectionOptions.categoryII : true,
-            toppingSales: providedSectionOptions.toppingSales !== undefined ? providedSectionOptions.toppingSales : true,
-            diskonVoucher: providedSectionOptions.diskonVoucher !== undefined ? providedSectionOptions.diskonVoucher : true
+            toppingSales: providedSectionOptions.toppingSales !== undefined ? providedSectionOptions.toppingSales : true
         } : {
+            ringkasan: true,
             barangTerjual: true,
             paymentMethod: true,
+            categoryI: true,
             categoryII: true,
-            toppingSales: true,
-            diskonVoucher: true
+            toppingSales: true
         };
         // Debug logging
         writeDebugLog(JSON.stringify({
@@ -10299,6 +10327,7 @@ function generateShiftBreakdownHTML(shiftData) {
 
       <div class="divider"></div>
 
+      ${sectionOptions.ringkasan === true ? `
       <div class="section-title">RINGKASAN</div>
       <div class="summary">
         <div class="summary-block-omset">
@@ -10409,6 +10438,7 @@ function generateShiftBreakdownHTML(shiftData) {
       </div>
 
       <div class="divider"></div>
+      ` : ''}
 
       ${sectionOptions.barangTerjual === true ? `
       <div class="section-title">BARANG TERJUAL</div>
@@ -10459,7 +10489,7 @@ function generateShiftBreakdownHTML(shiftData) {
       <div class="divider"></div>
       ` : ''}
 
-      ${sectionOptions.categoryII === true ? `
+      ${sectionOptions.categoryI === true ? `
       <div class="section-title">CATEGORY I</div>
       <table>
         <thead>
@@ -10480,7 +10510,9 @@ function generateShiftBreakdownHTML(shiftData) {
       </table>
 
       <div class="divider"></div>
+      ` : ''}
 
+      ${sectionOptions.categoryII === true ? `
       <div class="section-title">CATEGORY II</div>
       <table>
         <thead>
@@ -10530,19 +10562,21 @@ function generateShiftBreakdownHTML(shiftData) {
     };
     const sections = [];
     const defaultSectionOptions = {
+        ringkasan: true,
         barangTerjual: true,
         paymentMethod: true,
+        categoryI: true,
         categoryII: true,
-        toppingSales: true,
-        diskonVoucher: true
+        toppingSales: true
     };
     // Respect false values - only use defaults if sectionOptions is not provided at all
     const sectionOptions = shiftData.sectionOptions ? {
+        ringkasan: shiftData.sectionOptions.ringkasan !== undefined ? shiftData.sectionOptions.ringkasan : defaultSectionOptions.ringkasan,
         barangTerjual: shiftData.sectionOptions.barangTerjual !== undefined ? shiftData.sectionOptions.barangTerjual : defaultSectionOptions.barangTerjual,
         paymentMethod: shiftData.sectionOptions.paymentMethod !== undefined ? shiftData.sectionOptions.paymentMethod : defaultSectionOptions.paymentMethod,
+        categoryI: shiftData.sectionOptions.categoryI !== undefined ? shiftData.sectionOptions.categoryI : defaultSectionOptions.categoryI,
         categoryII: shiftData.sectionOptions.categoryII !== undefined ? shiftData.sectionOptions.categoryII : defaultSectionOptions.categoryII,
-        toppingSales: shiftData.sectionOptions.toppingSales !== undefined ? shiftData.sectionOptions.toppingSales : defaultSectionOptions.toppingSales,
-        diskonVoucher: shiftData.sectionOptions.diskonVoucher !== undefined ? shiftData.sectionOptions.diskonVoucher : defaultSectionOptions.diskonVoucher
+        toppingSales: shiftData.sectionOptions.toppingSales !== undefined ? shiftData.sectionOptions.toppingSales : defaultSectionOptions.toppingSales
     } : defaultSectionOptions;
     // Debug logging
     writeDebugLog(JSON.stringify({

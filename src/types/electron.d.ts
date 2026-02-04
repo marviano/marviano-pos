@@ -50,11 +50,12 @@ declare global {
     printerType?: string;
     wholeDayReport?: ShiftPrintBreakdownSection;
     sectionOptions?: {
+      ringkasan?: boolean;
       barangTerjual?: boolean;
       paymentMethod?: boolean;
+      categoryI?: boolean;
       categoryII?: boolean;
       toppingSales?: boolean;
-      diskonVoucher?: boolean;
     };
   };
 
@@ -159,7 +160,7 @@ declare global {
       localDbCleanupOrphanedEmployees?: (businessId: number, syncedEmployeeIds: number[]) => Promise<{ success: boolean; deletedCount?: number; deletedEmployeeIds?: number[]; error?: string }>;
       localDbGetProductsByJenis?: (jenis: string) => Promise<unknown[]>;
       localDbGetProductsByCategory2?: (category2Name: string) => Promise<unknown[]>;
-      localDbGetAllProducts?: () => Promise<unknown[]>;
+      localDbGetAllProducts?: (businessId?: number) => Promise<unknown[]>;
       localDbGetBundleItems?: (productId: number) => Promise<unknown[]>;
       localDbUpsertBundleItems?: (rows: unknown[]) => Promise<{ success: boolean }>;
       localDbUpdateSyncStatus?: (key: string, status: string) => Promise<{ success: boolean }>;

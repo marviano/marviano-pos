@@ -7,7 +7,8 @@
  * This ensures consistent reporting regardless of the user's local timezone.
  */
 
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect, useCallback, useRef, useLayoutEffect } from 'react';
+import { createPortal } from 'react-dom';
 import {
   Calendar,
   User,
@@ -211,11 +212,30 @@ export default function TransactionsReport() {
   const [employeesMap, setEmployeesMap] = useState<Map<number, { name: string; color: string | null }>>(new Map());
   const [itemWaiterIdsByTx, setItemWaiterIdsByTx] = useState<Record<string, number[]>>({});
   const [openWaiterPopoverFor, setOpenWaiterPopoverFor] = useState<string | null>(null);
+  const waiterTriggerRef = useRef<HTMLButtonElement | null>(null);
   const waiterPopoverRef = useRef<HTMLDivElement>(null);
+  const [waiterPopoverPos, setWaiterPopoverPos] = useState<{ top: number; left: number } | null>(null);
+  useLayoutEffect(() => {
+    if (openWaiterPopoverFor === null) {
+      setWaiterPopoverPos(null);
+      return;
+    }
+    const el = waiterTriggerRef.current;
+    if (!el) return;
+    const rect = el.getBoundingClientRect();
+    const popoverH = 120;
+    const showAbove = rect.bottom + popoverH > window.innerHeight;
+    setWaiterPopoverPos({
+      top: showAbove ? rect.top - popoverH - 4 : rect.bottom + 4,
+      left: rect.left,
+    });
+  }, [openWaiterPopoverFor]);
   useEffect(() => {
     if (openWaiterPopoverFor === null) return;
     const close = (e: MouseEvent) => {
-      if (waiterPopoverRef.current && !waiterPopoverRef.current.contains(e.target as Node)) setOpenWaiterPopoverFor(null);
+      const target = e.target as Node;
+      if (waiterTriggerRef.current?.contains(target) || waiterPopoverRef.current?.contains(target)) return;
+      setOpenWaiterPopoverFor(null);
     };
     document.addEventListener('mousedown', close);
     return () => document.removeEventListener('mousedown', close);
@@ -894,11 +914,9 @@ export default function TransactionsReport() {
                       </td>
                       <td className="px-2 py-3 truncate max-w-[120px] text-xs text-gray-900" title={transaction.customer_name || 'Guest'}>{transaction.customer_name || 'Guest'}</td>
                       <td className="px-2 py-3 whitespace-nowrap text-xs text-gray-900">
-                        <div
-                          className="relative inline-block"
-                          ref={openWaiterPopoverFor === String(transaction.id) ? waiterPopoverRef : undefined}
-                        >
+                        <div className="relative inline-block">
                           <button
+                            ref={openWaiterPopoverFor === String(transaction.id) ? waiterTriggerRef : undefined}
                             type="button"
                             onClick={(e) => { e.stopPropagation(); setOpenWaiterPopoverFor((id) => (id === String(transaction.id) ? null : String(transaction.id))); }}
                             className="cursor-pointer rounded focus:outline-none focus:ring-2 focus:ring-blue-400 hover:underline"
@@ -909,14 +927,19 @@ export default function TransactionsReport() {
                           </button>
                           {openWaiterPopoverFor === String(transaction.id) && (() => {
                             const names = allWaiterIds.map((id) => employeesMap.get(id)?.name).filter(Boolean) as string[];
-                            return names.length > 0 ? (
-                              <div className="absolute left-0 top-full mt-1 z-50 min-w-[120px] rounded-lg border border-gray-200 bg-white py-2 shadow-lg">
+                            return names.length > 0 && waiterPopoverPos && typeof document !== 'undefined' && createPortal(
+                              <div
+                                ref={waiterPopoverRef}
+                                className="fixed z-[9999] min-w-[120px] rounded-lg border border-gray-200 bg-white py-2 shadow-lg"
+                                style={{ top: waiterPopoverPos.top, left: waiterPopoverPos.left }}
+                              >
                                 <div className="px-3 py-1 text-xs font-semibold text-gray-500 uppercase">Waiters</div>
                                 {names.map((name, i) => (
                                   <div key={i} className="px-3 py-1.5 text-sm text-gray-900">{name}</div>
                                 ))}
-                              </div>
-                            ) : null;
+                              </div>,
+                              document.body
+                            );
                           })()}
                         </div>
                       </td>

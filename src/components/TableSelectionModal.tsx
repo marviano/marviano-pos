@@ -502,6 +502,23 @@ export default function TableSelectionModal({
         console.error('Failed to get payment methods from local DB:', error);
       }
 
+      // Bind new transaction to current active shift
+      try {
+        if (electronAPI.localDbGetActiveShift && businessId) {
+          const userId = user?.id ? parseInt(String(user.id)) : 0;
+          const effectiveBizId = typeof businessId === 'number' ? businessId : (businessId ? parseInt(String(businessId), 10) : null);
+          if (effectiveBizId != null && !isNaN(effectiveBizId)) {
+            const activeShiftRes = await electronAPI.localDbGetActiveShift(userId, effectiveBizId);
+            const shiftUuid = (activeShiftRes as { shift?: { uuid_id?: string } })?.shift?.uuid_id;
+            if (shiftUuid) {
+              (transactionData as Record<string, unknown>).shift_uuid = shiftUuid;
+            }
+          }
+        }
+      } catch (error) {
+        console.warn('Failed to get active shift for transaction:', error);
+      }
+
       // Prepare transaction items (store UUIDs for matching later)
       const transactionItemUuids: string[] = [];
       const transactionItems = cartItems.map(item => {
@@ -980,11 +997,6 @@ export default function TableSelectionModal({
         : (typeof existingTransaction.final_amount === 'string' ? parseFloat(existingTransaction.final_amount) : 0);
 
       const originalTxWaiterId = existingTransaction.waiter_id != null ? existingTransaction.waiter_id : null;
-      // #region agent log
-      if (typeof fetch === 'function') {
-        fetch('http://127.0.0.1:7242/ingest/7b565785-72b5-49f7-b2c0-57606ea0d0b5', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ location: 'TableSelectionModal:saveNewItemsToExistingTransaction', message: 'Building updatedTransactionData', data: { waiterIdProp: waiterId, originalTxWaiterId, overwriting: waiterId != null ? waiterId : originalTxWaiterId }, timestamp: Date.now(), sessionId: 'debug-session', runId: 'run1', hypothesisId: 'H2' }) }).catch(() => {});
-      }
-      // #endregion
       const updatedTransactionData = {
         ...existingTransaction,
         total_amount: existingTotal + newItemsTotal,

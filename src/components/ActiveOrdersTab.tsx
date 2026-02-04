@@ -1,6 +1,7 @@
 'use client';
 
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect, useCallback, useRef, useLayoutEffect } from 'react';
+import { createPortal } from 'react-dom';
 import { Edit, List, LayoutGrid, Printer, Scissors } from 'lucide-react';
 import TableLayout from './TableLayout';
 import SplitBillModal from './SplitBillModal';
@@ -25,6 +26,7 @@ interface PendingTransaction {
   /** All distinct waiter names (transaction + item-level) for tooltip */
   waiter_names_all?: string[];
   pickup_method: 'dine-in' | 'take-away';
+  shift_uuid?: string | null;
 }
 
 
@@ -47,11 +49,31 @@ export default function ActiveOrdersTab({ businessId, isOpen, onLoadTransaction 
   const [showPrintBillModal, setShowPrintBillModal] = useState(false);
   const [printBillModalData, setPrintBillModalData] = useState<PrintBillModalData | null>(null);
   const [openWaiterPopoverFor, setOpenWaiterPopoverFor] = useState<string | null>(null);
+  const waiterTriggerRef = useRef<HTMLButtonElement | null>(null);
   const waiterPopoverRef = useRef<HTMLDivElement>(null);
+  const [waiterPopoverPos, setWaiterPopoverPos] = useState<{ top: number; left: number } | null>(null);
+  const [shiftLabelByUuid, setShiftLabelByUuid] = useState<Record<string, string>>({});
+  useLayoutEffect(() => {
+    if (openWaiterPopoverFor === null) {
+      setWaiterPopoverPos(null);
+      return;
+    }
+    const el = waiterTriggerRef.current;
+    if (!el) return;
+    const rect = el.getBoundingClientRect();
+    const popoverH = 120;
+    const showAbove = rect.bottom + popoverH > window.innerHeight;
+    setWaiterPopoverPos({
+      top: showAbove ? rect.top - popoverH - 4 : rect.bottom + 4,
+      left: rect.left,
+    });
+  }, [openWaiterPopoverFor]);
   useEffect(() => {
     if (openWaiterPopoverFor === null) return;
     const close = (e: MouseEvent) => {
-      if (waiterPopoverRef.current && !waiterPopoverRef.current.contains(e.target as Node)) setOpenWaiterPopoverFor(null);
+      const target = e.target as Node;
+      if (waiterTriggerRef.current?.contains(target) || waiterPopoverRef.current?.contains(target)) return;
+      setOpenWaiterPopoverFor(null);
     };
     document.addEventListener('mousedown', close);
     return () => document.removeEventListener('mousedown', close);
@@ -146,6 +168,7 @@ export default function ActiveOrdersTab({ businessId, isOpen, onLoadTransaction 
             created_at?: string;
             pickup_method?: string;
             payment_method?: string;
+            shift_uuid?: string | null;
           };
           
           // Only process pending transactions
@@ -224,6 +247,7 @@ export default function ActiveOrdersTab({ businessId, isOpen, onLoadTransaction 
             waiter_color: waiterColor,
             waiter_id: waiterId ?? null,
             pickup_method: pickupMethod,
+            shift_uuid: typeof transaction.shift_uuid === 'string' ? transaction.shift_uuid : null,
           });
         }
       }
@@ -268,6 +292,67 @@ export default function ActiveOrdersTab({ businessId, isOpen, onLoadTransaction 
       const pending = pendingTransactionsWithItems.sort((a, b) => {
         return new Date(b.created_at).getTime() - new Date(a.created_at).getTime();
       });
+
+      // Fetch shift labels for display (Shift 1, Shift 2, ...)
+      if (electronAPI.localDbGetShifts && pending.length > 0) {
+        try {
+          const now = new Date();
+          const yesterday = new Date(now);
+          yesterday.setDate(yesterday.getDate() - 1);
+          const tomorrow = new Date(now);
+          tomorrow.setDate(tomorrow.getDate() + 1);
+          const fmt = (d: Date) => d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+          const startDate = `${fmt(yesterday)}T00:00:00.000Z`;
+          const endDate = `${fmt(tomorrow)}T23:59:59.999Z`;
+          const { shifts } = await electronAPI.localDbGetShifts({
+            businessId,
+            startDate,
+            endDate,
+            limit: 50
+          });
+          type ShiftItem = { uuid_id?: string; shift_start?: string };
+          let allShifts: ShiftItem[] = [...((shifts || []) as ShiftItem[])];
+          // Merge active shift if not in list
+          if (electronAPI.localDbGetActiveShift && user?.id) {
+            try {
+              const activeRes = await electronAPI.localDbGetActiveShift(parseInt(String(user.id)), businessId);
+              const activeShift = (activeRes as { shift?: ShiftItem })?.shift;
+              if (activeShift?.uuid_id && !allShifts.some((s) => s.uuid_id === activeShift.uuid_id)) {
+                allShifts.push(activeShift);
+              }
+            } catch {
+              // ignore
+            }
+          }
+          const sorted = allShifts.sort(
+            (a, b) => new Date(a.shift_start || 0).getTime() - new Date(b.shift_start || 0).getTime()
+          );
+          const map: Record<string, string> = {};
+          // Group by date (GMT+7) so each day resets to Shift 1, Shift 2, ...
+          const getGmt7DateKey = (iso: string) => {
+            const d = new Date(iso);
+            const gmt7 = new Date(d.getTime() + 7 * 60 * 60 * 1000);
+            return gmt7.toISOString().slice(0, 10);
+          };
+          const byDate = new Map<string, ShiftItem[]>();
+          for (const s of sorted) {
+            const key = getGmt7DateKey(s.shift_start || '');
+            if (!byDate.has(key)) byDate.set(key, []);
+            byDate.get(key)!.push(s);
+          }
+          for (const [, dayShifts] of byDate) {
+            dayShifts.forEach((s, i) => {
+              const uuid = s.uuid_id;
+              if (uuid) map[uuid] = `Shift ${i + 1}`;
+            });
+          }
+          setShiftLabelByUuid(map);
+        } catch {
+          setShiftLabelByUuid({});
+        }
+      } else {
+        setShiftLabelByUuid({});
+      }
 
       setPendingTransactions(pending);
     } catch (error) {
@@ -708,6 +793,9 @@ export default function ActiveOrdersTab({ businessId, isOpen, onLoadTransaction 
                         Total
                       </th>
                       <th className="px-2 py-3 text-[10px] font-medium text-gray-500 uppercase tracking-wider">
+                        Shift
+                      </th>
+                      <th className="px-2 py-3 text-[10px] font-medium text-gray-500 uppercase tracking-wider">
                         Waktu Mulai
                       </th>
                       <th className="px-2 py-3 text-[10px] font-medium text-gray-500 uppercase tracking-wider">
@@ -741,11 +829,9 @@ export default function ActiveOrdersTab({ businessId, isOpen, onLoadTransaction 
                           </span>
                         </td>
                         <td className="px-2 py-3 whitespace-nowrap">
-                          <div
-                            className="relative inline-block"
-                            ref={openWaiterPopoverFor === transaction.uuid_id ? waiterPopoverRef : undefined}
-                          >
+                          <div className="relative inline-block">
                             <button
+                              ref={openWaiterPopoverFor === transaction.uuid_id ? waiterTriggerRef : undefined}
                               type="button"
                               onClick={(e) => { e.stopPropagation(); setOpenWaiterPopoverFor((id) => (id === transaction.uuid_id ? null : transaction.uuid_id)); }}
                               className="text-left text-xs text-gray-900 hover:underline cursor-pointer rounded focus:outline-none focus:ring-2 focus:ring-blue-400"
@@ -756,13 +842,18 @@ export default function ActiveOrdersTab({ businessId, isOpen, onLoadTransaction 
                                 <span className="text-gray-500 ml-0.5">(+{transaction.waiter_names_all.length - 1})</span>
                               )}
                             </button>
-                            {openWaiterPopoverFor === transaction.uuid_id && transaction.waiter_names_all && transaction.waiter_names_all.length > 0 && (
-                              <div className="absolute left-0 top-full mt-1 z-50 min-w-[120px] rounded-lg border border-gray-200 bg-white py-2 shadow-lg">
+                            {openWaiterPopoverFor === transaction.uuid_id && transaction.waiter_names_all && transaction.waiter_names_all.length > 0 && waiterPopoverPos && typeof document !== 'undefined' && createPortal(
+                              <div
+                                ref={waiterPopoverRef}
+                                className="fixed z-[9999] min-w-[120px] rounded-lg border border-gray-200 bg-white py-2 shadow-lg"
+                                style={{ top: waiterPopoverPos.top, left: waiterPopoverPos.left }}
+                              >
                                 <div className="px-3 py-1 text-xs font-semibold text-gray-500 uppercase">Waiters</div>
                                 {transaction.waiter_names_all.map((name, i) => (
                                   <div key={i} className="px-3 py-1.5 text-sm text-gray-900">{name}</div>
                                 ))}
-                              </div>
+                              </div>,
+                              document.body
                             )}
                           </div>
                         </td>
@@ -774,6 +865,11 @@ export default function ActiveOrdersTab({ businessId, isOpen, onLoadTransaction 
                         <td className="px-2 py-3 whitespace-nowrap">
                           <span className="text-xs font-medium text-gray-900">
                             {formatPrice(transaction.final_amount)}
+                          </span>
+                        </td>
+                        <td className="px-2 py-3 whitespace-nowrap">
+                          <span className="text-xs text-gray-700" title={transaction.shift_uuid ?? undefined}>
+                            {transaction.shift_uuid ? (shiftLabelByUuid[transaction.shift_uuid] ?? 'Shift') : '-'}
                           </span>
                         </td>
                         <td className="px-2 py-3 whitespace-nowrap">

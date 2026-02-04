@@ -171,6 +171,7 @@ interface ReportDataPayload {
   productSales: ProductSale[];
   customizationSales: CustomizationSale[];
   voucherBreakdown: VoucherBreakdown;
+  refunds: RefundDetail[];
 }
 
 interface RefundDetail {
@@ -535,23 +536,25 @@ export default function GantiShift() {
     }).sort((a, b) => a.product_name.localeCompare(b.product_name));
   };
 
-  // Helper function to recalculate Category I for printing
+  // Helper function to recalculate Category I for printing (only products with BOTH categories)
   const recalculateCategory1ForPrint = async (
     products: ProductSale[],
     originalCategory1: Category1Breakdown[],
-    electronAPI: ReturnType<typeof getElectronAPI>
+    electronAPI: ReturnType<typeof getElectronAPI>,
+    businessId?: number
   ): Promise<Category1Breakdown[]> => {
     if (!electronAPI?.localDbGetAllProducts || products.length === 0) {
       return originalCategory1.length > 0 ? originalCategory1 : [];
     }
     try {
-      const allProducts = await electronAPI.localDbGetAllProducts();
+      const allProducts = await electronAPI.localDbGetAllProducts(businessId);
       const productsArray = Array.isArray(allProducts) ? allProducts as Record<string, unknown>[] : [];
       const productToCategory1NameMap = new Map<number, string>();
       productsArray.forEach((p) => {
         const productId = typeof p.id === 'number' ? p.id : (typeof p.id === 'string' ? parseInt(p.id, 10) : null);
         const category1Name = typeof p.category1_name === 'string' ? p.category1_name : (typeof (p as { kategori?: string }).kategori === 'string' ? (p as { kategori: string }).kategori : null);
-        if (productId && category1Name) {
+        const category2Name = typeof p.category2_name === 'string' ? p.category2_name : null;
+        if (productId && category1Name && category2Name) {
           productToCategory1NameMap.set(productId, category1Name);
         }
       });
@@ -592,25 +595,27 @@ export default function GantiShift() {
     }
   };
 
-  // Helper function to recalculate Category II for printing (same logic as recalculateCategory2Breakdown)
+  // Helper function to recalculate Category II for printing (only products with BOTH categories)
   const recalculateCategory2ForPrint = async (
     products: ProductSale[],
     originalCategory2: Category2Breakdown[],
-    electronAPI: ReturnType<typeof getElectronAPI>
+    electronAPI: ReturnType<typeof getElectronAPI>,
+    businessId?: number
   ): Promise<Category2Breakdown[]> => {
     if (!electronAPI?.localDbGetAllProducts || products.length === 0) {
       return [];
     }
 
     try {
-      const allProducts = await electronAPI.localDbGetAllProducts();
+      const allProducts = await electronAPI.localDbGetAllProducts(businessId);
       const productsArray = Array.isArray(allProducts) ? allProducts as Record<string, unknown>[] : [];
       
       const productToCategory2NameMap = new Map<number, string>();
       productsArray.forEach((p) => {
         const productId = typeof p.id === 'number' ? p.id : (typeof p.id === 'string' ? parseInt(p.id, 10) : null);
+        const category1Name = typeof p.category1_name === 'string' ? p.category1_name : (typeof (p as { kategori?: string }).kategori === 'string' ? (p as { kategori: string }).kategori : null);
         const category2Name = typeof p.category2_name === 'string' ? p.category2_name : null;
-        if (productId && category2Name) {
+        if (productId && category1Name && category2Name) {
           productToCategory2NameMap.set(productId, category2Name);
         }
       });
@@ -692,11 +697,12 @@ export default function GantiShift() {
   const [isPrintingSelected, setIsPrintingSelected] = useState(false);
   const [showPrintOptions, setShowPrintOptions] = useState(false);
   const [printSectionOptions, setPrintSectionOptions] = useState({
+    ringkasan: true,
     barangTerjual: true,
     paymentMethod: true,
+    categoryI: true,
     categoryII: true,
-    toppingSales: true,
-    diskonVoucher: true
+    toppingSales: true
   });
   const [ringkasanOnly, setRingkasanOnly] = useState(false);
   const [showSettingsModal, setShowSettingsModal] = useState(false);
@@ -830,20 +836,23 @@ export default function GantiShift() {
   }, [activeShift?.id, checkTodayTransactions]);
 
   // Function to recalculate Category I breakdown using base_subtotal
-  const recalculateCategory1Breakdown = useCallback(async (products: ProductSale[], originalCategory1: Category1Breakdown[]) => {
+  // Only includes products that have BOTH category1 and category2 so totals match Category II
+  const recalculateCategory1Breakdown = useCallback(async (products: ProductSale[], originalCategory1: Category1Breakdown[], businessId?: number) => {
     const electronAPI = getElectronAPI();
     if (!electronAPI?.localDbGetAllProducts || products.length === 0) {
       setRecalculatedCategory1Breakdown([]);
       return;
     }
     try {
-      const allProducts = await electronAPI.localDbGetAllProducts();
+      const allProducts = await electronAPI.localDbGetAllProducts(businessId);
       const productsArray = Array.isArray(allProducts) ? allProducts as Record<string, unknown>[] : [];
       const productToCategory1NameMap = new Map<number, string>();
       productsArray.forEach((p) => {
         const productId = typeof p.id === 'number' ? p.id : (typeof p.id === 'string' ? parseInt(p.id, 10) : null);
         const category1Name = typeof p.category1_name === 'string' ? p.category1_name : (typeof (p as { kategori?: string }).kategori === 'string' ? (p as { kategori: string }).kategori : null);
-        if (productId && category1Name) {
+        const category2Name = typeof p.category2_name === 'string' ? p.category2_name : null;
+        // Only include products that have BOTH categories so Category I and II totals match
+        if (productId && category1Name && category2Name) {
           productToCategory1NameMap.set(productId, category1Name);
         }
       });
@@ -886,30 +895,27 @@ export default function GantiShift() {
   }, []);
 
   // Function to recalculate Category II breakdown using base_subtotal
-  const recalculateCategory2Breakdown = useCallback(async (products: ProductSale[], originalCategory2: Category2Breakdown[]) => {
-    console.log('[Category II Recalc] Starting recalculation with', products.length, 'products');
+  // Only includes products that have BOTH category1 and category2 so totals match Category I
+  const recalculateCategory2Breakdown = useCallback(async (products: ProductSale[], originalCategory2: Category2Breakdown[], businessId?: number) => {
     const electronAPI = getElectronAPI();
     if (!electronAPI?.localDbGetAllProducts || products.length === 0) {
-      console.warn('[Category II Recalc] Cannot recalculate - no products or API unavailable');
-      // Set empty array instead of using original data with wrong totals
       setRecalculatedCategory2Breakdown([]);
       return;
     }
 
     try {
-      // Fetch all products to get category2_id mapping
-      const allProducts = await electronAPI.localDbGetAllProducts();
+      const allProducts = await electronAPI.localDbGetAllProducts(businessId);
       const productsArray = Array.isArray(allProducts) ? allProducts as Record<string, unknown>[] : [];
-      console.log('[Category II Recalc] Fetched', productsArray.length, 'products from database');
       
-      // Build map: product_id -> category2_name (localDbGetAllProducts returns category2_name but not category2_id)
+      // Build map: product_id -> category2_name (only products with BOTH category1 and category2)
       const productToCategory2NameMap = new Map<number, string>();
 
       productsArray.forEach((p) => {
         const productId = typeof p.id === 'number' ? p.id : (typeof p.id === 'string' ? parseInt(p.id, 10) : null);
+        const category1Name = typeof p.category1_name === 'string' ? p.category1_name : (typeof (p as { kategori?: string }).kategori === 'string' ? (p as { kategori: string }).kategori : null);
         const category2Name = typeof p.category2_name === 'string' ? p.category2_name : null;
-
-        if (productId && category2Name) {
+        // Only include products that have BOTH categories so Category I and II totals match
+        if (productId && category1Name && category2Name) {
           productToCategory2NameMap.set(productId, category2Name);
         }
       });
@@ -967,28 +973,24 @@ export default function GantiShift() {
   // Recalculate Category I breakdown when productSales or category1Breakdown changes
   useEffect(() => {
     if (productSales.length > 0 && category1Breakdown.length > 0) {
-      recalculateCategory1Breakdown(productSales, category1Breakdown);
+      recalculateCategory1Breakdown(productSales, category1Breakdown, businessId);
     } else if (category1Breakdown.length > 0 && productSales.length === 0) {
       setRecalculatedCategory1Breakdown(category1Breakdown);
     } else {
       setRecalculatedCategory1Breakdown([]);
     }
-  }, [productSales, category1Breakdown, recalculateCategory1Breakdown]);
+  }, [productSales, category1Breakdown, recalculateCategory1Breakdown, businessId]);
 
   // Recalculate Category II breakdown when productSales or category2Breakdown changes
   useEffect(() => {
     if (productSales.length > 0 && category2Breakdown.length > 0) {
-      console.log('[Category II Recalc] useEffect triggered - recalculating with', productSales.length, 'products');
-      recalculateCategory2Breakdown(productSales, category2Breakdown);
+      recalculateCategory2Breakdown(productSales, category2Breakdown, businessId);
     } else if (category2Breakdown.length > 0 && productSales.length === 0) {
-      // Only use original data if we truly have no productSales data
-      console.log('[Category II Recalc] No productSales data, using original category2Breakdown');
       setRecalculatedCategory2Breakdown(category2Breakdown);
     } else {
-      // Clear if no data at all
       setRecalculatedCategory2Breakdown([]);
     }
-  }, [productSales, category2Breakdown, recalculateCategory2Breakdown]);
+  }, [productSales, category2Breakdown, recalculateCategory2Breakdown, businessId]);
 
   // Auto-dismiss success messages
   useEffect(() => {
@@ -1203,8 +1205,8 @@ export default function GantiShift() {
       
       // Recalculate Category I and Category II totals using base_subtotal (without customizations)
       if (productSalesData.products && productSalesData.products.length > 0) {
-        recalculateCategory1Breakdown(productSalesData.products, category1BreakdownData);
-        recalculateCategory2Breakdown(productSalesData.products, category2BreakdownData);
+        recalculateCategory1Breakdown(productSalesData.products, category1BreakdownData, businessId);
+        recalculateCategory2Breakdown(productSalesData.products, category2BreakdownData, businessId);
       } else {
         setRecalculatedCategory1Breakdown(category1BreakdownData);
         setRecalculatedCategory2Breakdown(category2BreakdownData);
@@ -1314,7 +1316,18 @@ export default function GantiShift() {
       const dayShiftUuids = shiftUuids ?? (list_of_shifts?.map((s) => s.uuid_id) ?? []);
 
       try {
-        const [statsResult, breakdownResult, category1BreakdownResult, category2BreakdownResult, cashResult, productSalesResult, voucherBreakdownResult] = await Promise.allSettled([
+        const refundsRequestPayload = electronAPI.localDbGetShiftRefunds
+        ? {
+            userId: userId ?? 0,
+            businessId: reportBusinessId ?? 0,
+            shiftUuid: shiftUuid ?? undefined,
+            shiftUuids: dayShiftUuids.length > 0 ? dayShiftUuids : undefined,
+            shiftStart: start,
+            shiftEnd: end ?? undefined
+          }
+        : null;
+
+      const [statsResult, breakdownResult, category1BreakdownResult, category2BreakdownResult, cashResult, productSalesResult, voucherBreakdownResult, refundsResult] = await Promise.allSettled([
           electronAPI.localDbGetShiftStatistics
             ? electronAPI.localDbGetShiftStatistics(userId, start, end, reportBusinessId, shiftUuid ?? undefined, dayShiftUuids.length > 0 ? dayShiftUuids : undefined)
             : Promise.resolve(defaultStats),
@@ -1335,7 +1348,10 @@ export default function GantiShift() {
             : Promise.resolve<ProductSalesPayload>({ products: [], customizations: [] }),
           electronAPI.localDbGetVoucherBreakdown
             ? electronAPI.localDbGetVoucherBreakdown(userId, start, end, reportBusinessId, shiftUuid ?? undefined, dayShiftUuids.length > 0 ? dayShiftUuids : undefined)
-            : Promise.resolve<VoucherBreakdown>({})
+            : Promise.resolve<VoucherBreakdown>({}),
+          refundsRequestPayload && electronAPI.localDbGetShiftRefunds
+            ? electronAPI.localDbGetShiftRefunds(refundsRequestPayload)
+            : Promise.resolve<RefundDetail[]>([])
         ]);
 
         const statsPayload = statsResult.status === 'fulfilled' ? (statsResult.value as ShiftStatistics) : defaultStats;
@@ -1390,6 +1406,7 @@ export default function GantiShift() {
         };
 
         const voucherBreakdownPayload = voucherBreakdownResult.status === 'fulfilled' ? (voucherBreakdownResult.value as VoucherBreakdown) : {};
+        const refundsPayload = refundsResult.status === 'fulfilled' ? (refundsResult.value as RefundDetail[]) : [];
         return {
           statistics: {
             order_count: statsPayload.order_count ?? 0,
@@ -1404,7 +1421,8 @@ export default function GantiShift() {
           cashSummary: resolvedCash,
           productSales: productSalesPayload.products || [],
           customizationSales: productSalesPayload.customizations || [],
-          voucherBreakdown: voucherBreakdownPayload ?? {}
+          voucherBreakdown: voucherBreakdownPayload ?? {},
+          refunds: refundsPayload
         };
       } catch (error) {
         console.error('Error fetching report payload:', error);
@@ -1647,6 +1665,15 @@ export default function GantiShift() {
     }
   };
 
+  // Refresh Ringkasan when a refund is completed (e.g. from RefundModal)
+  const handleRefreshRef = useRef(handleRefresh);
+  handleRefreshRef.current = handleRefresh;
+  useEffect(() => {
+    const handler = () => handleRefreshRef.current();
+    window.addEventListener('refund-completed', handler);
+    return () => window.removeEventListener('refund-completed', handler);
+  }, []);
+
   // Get today's date in GMT+7 format (YYYY-MM-DD)
   const getTodayGmt7 = (): string => {
     const now = new Date();
@@ -1746,8 +1773,11 @@ export default function GantiShift() {
       return;
     }
 
-    // When a specific shift tab is selected, pre-select only that shift (no whole day)
-    if (activeTab !== 'all-day' && typeof activeTab === 'number') {
+    // Pre-select based on active tab: Whole Day or the currently viewed shift
+    if (activeTab === 'all-day') {
+      setPrintWholeDaySelected(true);
+      setPrintSelections(prev => prev.map(s => ({ ...s, selected: false })));
+    } else if (typeof activeTab === 'number') {
       setPrintWholeDaySelected(false);
       setPrintSelections(prev => prev.map(s => ({ ...s, selected: s.shiftId === activeTab })));
     }
@@ -1763,10 +1793,12 @@ export default function GantiShift() {
       return;
     }
 
-    // Validate that at least one item is selected
+    // Validate exactly one selection: Whole Day OR one shift (not both, not multiple shifts)
     const selectedShifts = printSelections.filter(s => s.selected);
-    if (!printWholeDaySelected && selectedShifts.length === 0) {
-      setError('Silakan pilih setidaknya satu laporan untuk dicetak.');
+    const hasValidSelection = (printWholeDaySelected && selectedShifts.length === 0) ||
+      (!printWholeDaySelected && selectedShifts.length === 1);
+    if (!hasValidSelection) {
+      setError('Silakan pilih satu laporan untuk dicetak (Whole Day atau satu shift).');
       return;
     }
 
@@ -1799,38 +1831,38 @@ export default function GantiShift() {
         try {
           console.log('📊 [PRINT WHOLE DAY] Starting...');
           
-          // Use TODAY's date bounds (same as "All Day" tab), not the active shift's date
-          const today = new Date();
-          const todayStr = today.toISOString().split('T')[0]; // YYYY-MM-DD format
-          const todayBounds = getGmt7DayBounds(todayStr);
+          // Use selectedDate in historical view, otherwise today (same as "All Day" tab)
+          const dateStr = (viewMode === 'historical' && selectedDate)
+            ? selectedDate
+            : new Date().toISOString().split('T')[0];
+          const dayBounds = getGmt7DayBounds(dateStr);
           
-          if (!todayBounds) {
-            throw new Error('Failed to calculate today bounds for print');
+          if (!dayBounds) {
+            throw new Error('Failed to calculate day bounds for print');
           }
           
-          console.log('   Day range (TODAY):', todayBounds.dayStartUtc, 'to', todayBounds.dayEndUtc);
+          console.log('   Day range:', dayBounds.dayStartUtc, 'to', dayBounds.dayEndUtc, viewMode === 'historical' ? '(historical)' : '(today)');
 
-          // Get shifts for today first (before fetching report data)
+          // Get shifts for the day (same as display)
           const electronAPIForShifts = getElectronAPI();
-          let todayShiftsForReport: Shift[] = [];
+          let dayShiftsForReport: Shift[] = [];
           
           if (electronAPIForShifts?.localDbGetShifts) {
             const shiftsResult = await electronAPIForShifts.localDbGetShifts({
               businessId: businessId,
-              startDate: todayBounds.dayStartUtc,
-              endDate: todayBounds.dayEndUtc
+              startDate: dayBounds.dayStartUtc,
+              endDate: dayBounds.dayEndUtc
             });
-            todayShiftsForReport = (shiftsResult?.shifts || []) as Shift[];
+            dayShiftsForReport = (shiftsResult?.shifts || []) as Shift[];
           } else {
-            // Fallback to shiftSequenceInfo if API not available
-            todayShiftsForReport = shiftSequenceInfo.shifts;
+            dayShiftsForReport = shiftSequenceInfo.shifts;
           }
 
           const dayReportData = await fetchReportPayload({
-            start: todayBounds.dayStartUtc, // Use TODAY's date bounds
-            end: todayBounds.dayEndUtc,
+            start: dayBounds.dayStartUtc,
+            end: dayBounds.dayEndUtc,
             userId: null, // null = all users for whole day report
-            list_of_shifts: todayShiftsForReport // Pass TODAY's shifts to sum up discounts correctly
+            list_of_shifts: dayShiftsForReport
           });
 
           console.log('📊 [PRINT WHOLE DAY] Data fetched:', {
@@ -1842,10 +1874,10 @@ export default function GantiShift() {
           const dayCashRefunds = dayCash.cash_shift_refunds ?? 0;
           // const dailyKasExpected = (dayCash.cash_whole_day ?? dayCash.cash_shift ?? 0) || dayCashSales - dayCashRefunds;
 
-          // Get modal awal from today's shifts
+          // Get modal awal from day's shifts
           let modalAwalWholeDay = 0;
-          if (todayShiftsForReport.length > 0) {
-            modalAwalWholeDay = todayShiftsForReport[0].modal_awal || 0;
+          if (dayShiftsForReport.length > 0) {
+            modalAwalWholeDay = dayShiftsForReport[0].modal_awal || 0;
           }
 
           // Group products and recalculate Category I & II for print
@@ -1855,12 +1887,14 @@ export default function GantiShift() {
           const recalculatedCategory1 = await recalculateCategory1ForPrint(
             dayReportData.productSales,
             dayReportData.category1Breakdown || [],
-            electronAPI
+            electronAPI,
+            businessId
           );
           const recalculatedCategory2 = await recalculateCategory2ForPrint(
             dayReportData.productSales,
             dayReportData.category2Breakdown || [],
-            electronAPI
+            electronAPI,
+            businessId
           );
 
           console.log('🖨️ [PRINT WHOLE DAY] Sending to printer...');
@@ -1869,8 +1903,8 @@ export default function GantiShift() {
           
           const result = await electronAPI.printShiftBreakdown({
             user_name: 'Semua Shift',
-            shift_start: todayBounds.dayStartUtc,
-            shift_end: todayBounds.dayEndUtc,
+            shift_start: dayBounds.dayStartUtc,
+            shift_end: dayBounds.dayEndUtc,
             modal_awal: modalAwalWholeDay,
             statistics: dayReportData.statistics,
             productSales: productsForPrint,
@@ -1933,7 +1967,8 @@ export default function GantiShift() {
           const shiftReportData = await fetchReportPayload({
             start: shift.shift_start,
             end: shift.shift_end,
-            userId: shiftUserId
+            userId: shiftUserId,
+            shiftUuid: shift.uuid_id
           });
 
           console.log(`📊 [PRINT SHIFT ${selection.shiftIndex}] Data:`, {
@@ -1953,12 +1988,14 @@ export default function GantiShift() {
           const recalculatedCategory1 = await recalculateCategory1ForPrint(
             shiftReportData.productSales,
             shiftReportData.category1Breakdown || [],
-            electronAPI
+            electronAPI,
+            businessId
           );
           const recalculatedCategory2 = await recalculateCategory2ForPrint(
             shiftReportData.productSales,
             shiftReportData.category2Breakdown || [],
-            electronAPI
+            electronAPI,
+            businessId
           );
 
           console.log(`🖨️ [PRINT SHIFT ${selection.shiftIndex}] Sending to printer...`);
@@ -2077,12 +2114,14 @@ export default function GantiShift() {
       const recalculatedCategory1 = await recalculateCategory1ForPrint(
         reportData.productSales,
         reportData.category1Breakdown || [],
-        electronAPI
+        electronAPI,
+        businessId
       );
       const recalculatedCategory2 = await recalculateCategory2ForPrint(
         reportData.productSales,
         reportData.category2Breakdown || [],
-        electronAPI
+        electronAPI,
+        businessId
       );
 
       const result = await electronAPI.printShiftBreakdown({
@@ -2157,29 +2196,29 @@ export default function GantiShift() {
           return;
         }
 
-        // For "All Day" tab, use TODAY's date, not the active shift's date
-        // The active shift might be from a previous day, but "All Day" should show current day
-        const today = new Date();
-        const todayStr = today.toISOString().split('T')[0]; // YYYY-MM-DD format
-        const todayBounds = getGmt7DayBounds(todayStr);
+        // For "All Day" tab: use selectedDate in historical view, otherwise today
+        const dateStr = (viewMode === 'historical' && selectedDate)
+          ? selectedDate
+          : new Date().toISOString().split('T')[0];
+        const dayBounds = getGmt7DayBounds(dateStr);
         
-        if (!todayBounds) {
-          console.error('[All Day Tab] Failed to calculate today bounds');
+        if (!dayBounds) {
+          console.error('[All Day Tab] Failed to calculate day bounds');
           if (isNewTab) setIsLoadingTabData(false);
           return;
         }
 
         console.log('[All Day Tab] Loading data for all shifts:', {
-          dayStart: todayBounds.dayStartUtc,
-          dayEnd: todayBounds.dayEndUtc,
+          dayStart: dayBounds.dayStartUtc,
+          dayEnd: dayBounds.dayEndUtc,
           shiftsCount: shiftSequenceInfo.shifts.length,
-          usingToday: true,
-          todayDate: todayStr
+          dateStr,
+          isHistorical: viewMode === 'historical'
         });
 
         const dayData = await fetchReportPayload({
-          start: todayBounds.dayStartUtc,
-          end: todayBounds.dayEndUtc,
+          start: dayBounds.dayStartUtc,
+          end: dayBounds.dayEndUtc,
           userId: null, // null = all users for whole day report
           list_of_shifts: shiftSequenceInfo.shifts // Pass shifts to sum up discounts correctly
         });
@@ -2199,6 +2238,7 @@ export default function GantiShift() {
         setProductSales(dayData.productSales);
         setCustomizationSales(dayData.customizationSales);
         setVoucherBreakdown(dayData.voucherBreakdown ?? {});
+        setRefunds(dayData.refunds ?? []);
         didLoad = true;
       } else {
         // Load specific shift data
@@ -2230,6 +2270,7 @@ export default function GantiShift() {
         setProductSales(shiftData.productSales);
         setCustomizationSales(shiftData.customizationSales);
         setVoucherBreakdown(shiftData.voucherBreakdown ?? {});
+        setRefunds(shiftData.refunds ?? []);
         didLoad = true;
       }
     } catch (error) {
@@ -2239,7 +2280,7 @@ export default function GantiShift() {
       if (didLoad) lastLoadedTabRef.current = tabView;
       if (isNewTab) setIsLoadingTabData(false);
     }
-  }, [shiftSequenceInfo, activeShift, fetchReportPayload]);
+  }, [shiftSequenceInfo, activeShift, fetchReportPayload, viewMode, selectedDate]);
 
   // Load tab data when active tab changes
   useEffect(() => {
@@ -2580,7 +2621,7 @@ export default function GantiShift() {
                   </div>
                   <div className="flex items-center space-x-3">
                     <DollarSign className="w-5 h-5 text-gray-400" />
-                    <span className="text-gray-600">Total Omset: <strong>Rp 0</strong></span>
+                    <span className="text-gray-600">Total Omset (sudah dibayar): <strong>Rp 0</strong></span>
                   </div>
                   <div className="flex items-center space-x-3">
                     <Ticket className="w-5 h-5 text-gray-400" />
@@ -2755,7 +2796,7 @@ export default function GantiShift() {
                     {/* Total Omset block - breakdown indented inside */}
                     <div className="rounded-lg bg-amber-50 border border-amber-200/60 mb-2 px-3 py-2">
                       <div className="flex items-center py-1">
-                        <span className="text-sm font-semibold text-amber-900">Total Omset:</span>
+                        <span className="text-sm font-semibold text-amber-900">Total Omset <span className="text-xs font-normal text-amber-700/80">(sudah dibayar)</span>:</span>
                         <span className="flex-grow border-b border-dotted border-amber-300 mx-2"></span>
                         <span className="text-sm font-bold text-amber-900">{formatRupiah(statistics.total_amount)}</span>
                       </div>
@@ -3367,12 +3408,15 @@ export default function GantiShift() {
             <h3 className="text-xl font-bold text-gray-800 mb-4">Pilih Laporan untuk Print</h3>
 
             <div className="space-y-3 mb-6 max-h-96 overflow-y-auto">
-              {/* Whole Day Option */}
+              {/* Whole Day Option - radio-style: selecting deselects all shifts */}
               <label className="flex items-center space-x-3 cursor-pointer p-3 rounded-lg hover:bg-gray-50 border border-gray-200">
                 <input
                   type="checkbox"
                   checked={printWholeDaySelected}
-                  onChange={(e) => setPrintWholeDaySelected(e.target.checked)}
+                  onChange={() => {
+                    setPrintWholeDaySelected(true);
+                    setPrintSelections(prev => prev.map(s => ({ ...s, selected: false })));
+                  }}
                   className="w-5 h-5 text-blue-600 rounded focus:ring-2 focus:ring-blue-500"
                 />
                 <div className="flex-1">
@@ -3399,13 +3443,12 @@ export default function GantiShift() {
                       type="checkbox"
                       checked={selection.selected}
                       onChange={(e) => {
-                        setPrintSelections(prev =>
-                          prev.map(s =>
-                            s.shiftId === selection.shiftId
-                              ? { ...s, selected: e.target.checked }
-                              : s
-                          )
-                        );
+                        if (e.target.checked) {
+                          setPrintWholeDaySelected(false);
+                          setPrintSelections(prev =>
+                            prev.map(s => ({ ...s, selected: s.shiftId === selection.shiftId }))
+                          );
+                        }
                       }}
                       className="w-5 h-5 text-green-600 rounded focus:ring-2 focus:ring-green-500"
                     />
@@ -3460,11 +3503,12 @@ export default function GantiShift() {
                             const isEnabled = e.target.checked;
                             setRingkasanOnly(isEnabled);
                             setPrintSectionOptions({
+                              ringkasan: true,
                               barangTerjual: !isEnabled,
                               paymentMethod: !isEnabled,
+                              categoryI: !isEnabled,
                               categoryII: !isEnabled,
-                              toppingSales: !isEnabled,
-                              diskonVoucher: !isEnabled
+                              toppingSales: !isEnabled
                             });
                           }}
                           className="sr-only"
@@ -3487,19 +3531,30 @@ export default function GantiShift() {
                   <p className="text-sm text-gray-600 mb-3">Pilih bagian yang ingin dicetak:</p>
                   
                   <label className={`flex items-center justify-between cursor-pointer p-2 rounded hover:bg-gray-50 ${ringkasanOnly ? 'opacity-50' : ''}`}>
+                    <span className="text-sm font-medium text-gray-700">RINGKASAN</span>
+                    <input
+                      type="checkbox"
+                      checked={printSectionOptions.ringkasan}
+                      onChange={(e) => {
+                        const newValue = e.target.checked;
+                        setPrintSectionOptions((prev) => ({ ...prev, ringkasan: newValue }));
+                        if (!newValue) setRingkasanOnly(false);
+                      }}
+                      disabled={ringkasanOnly}
+                      className="w-5 h-5 text-blue-600 rounded focus:ring-2 focus:ring-blue-500 disabled:opacity-50 disabled:cursor-not-allowed"
+                    />
+                  </label>
+
+                  <label className={`flex items-center justify-between cursor-pointer p-2 rounded hover:bg-gray-50 ${ringkasanOnly ? 'opacity-50' : ''}`}>
                     <span className="text-sm font-medium text-gray-700">BARANG TERJUAL</span>
                     <input
                       type="checkbox"
                       checked={printSectionOptions.barangTerjual}
                       onChange={(e) => {
                         const newValue = e.target.checked;
-                        setPrintSectionOptions((prev) => ({
-                          ...prev,
-                          barangTerjual: newValue
-                        }));
-                        // Auto-update ringkasanOnly based on all sections
-                        const allUnchecked = !newValue && !printSectionOptions.paymentMethod && !printSectionOptions.categoryII && !printSectionOptions.toppingSales;
-                        const allChecked = newValue && printSectionOptions.paymentMethod && printSectionOptions.categoryII && printSectionOptions.toppingSales;
+                        setPrintSectionOptions((prev) => ({ ...prev, barangTerjual: newValue }));
+                        const allUnchecked = !newValue && !printSectionOptions.paymentMethod && !printSectionOptions.categoryI && !printSectionOptions.categoryII && !printSectionOptions.toppingSales;
+                        const allChecked = newValue && printSectionOptions.paymentMethod && printSectionOptions.categoryI && printSectionOptions.categoryII && printSectionOptions.toppingSales;
                         if (allUnchecked) setRingkasanOnly(true);
                         else if (allChecked) setRingkasanOnly(false);
                       }}
@@ -3515,13 +3570,27 @@ export default function GantiShift() {
                       checked={printSectionOptions.paymentMethod}
                       onChange={(e) => {
                         const newValue = e.target.checked;
-                        setPrintSectionOptions((prev) => ({
-                          ...prev,
-                          paymentMethod: newValue
-                        }));
-                        // Auto-update ringkasanOnly based on all sections
-                        const allUnchecked = !printSectionOptions.barangTerjual && !newValue && !printSectionOptions.categoryII && !printSectionOptions.toppingSales;
-                        const allChecked = printSectionOptions.barangTerjual && newValue && printSectionOptions.categoryII && printSectionOptions.toppingSales;
+                        setPrintSectionOptions((prev) => ({ ...prev, paymentMethod: newValue }));
+                        const allUnchecked = !printSectionOptions.barangTerjual && !newValue && !printSectionOptions.categoryI && !printSectionOptions.categoryII && !printSectionOptions.toppingSales;
+                        const allChecked = printSectionOptions.barangTerjual && newValue && printSectionOptions.categoryI && printSectionOptions.categoryII && printSectionOptions.toppingSales;
+                        if (allUnchecked) setRingkasanOnly(true);
+                        else if (allChecked) setRingkasanOnly(false);
+                      }}
+                      disabled={ringkasanOnly}
+                      className="w-5 h-5 text-blue-600 rounded focus:ring-2 focus:ring-blue-500 disabled:opacity-50 disabled:cursor-not-allowed"
+                    />
+                  </label>
+
+                  <label className={`flex items-center justify-between cursor-pointer p-2 rounded hover:bg-gray-50 ${ringkasanOnly ? 'opacity-50' : ''}`}>
+                    <span className="text-sm font-medium text-gray-700">CATEGORY I</span>
+                    <input
+                      type="checkbox"
+                      checked={printSectionOptions.categoryI}
+                      onChange={(e) => {
+                        const newValue = e.target.checked;
+                        setPrintSectionOptions((prev) => ({ ...prev, categoryI: newValue }));
+                        const allUnchecked = !printSectionOptions.barangTerjual && !printSectionOptions.paymentMethod && !newValue && !printSectionOptions.categoryII && !printSectionOptions.toppingSales;
+                        const allChecked = printSectionOptions.barangTerjual && printSectionOptions.paymentMethod && newValue && printSectionOptions.categoryII && printSectionOptions.toppingSales;
                         if (allUnchecked) setRingkasanOnly(true);
                         else if (allChecked) setRingkasanOnly(false);
                       }}
@@ -3537,13 +3606,9 @@ export default function GantiShift() {
                       checked={printSectionOptions.categoryII}
                       onChange={(e) => {
                         const newValue = e.target.checked;
-                        setPrintSectionOptions((prev) => ({
-                          ...prev,
-                          categoryII: newValue
-                        }));
-                        // Auto-update ringkasanOnly based on all sections
-                        const allUnchecked = !printSectionOptions.barangTerjual && !printSectionOptions.paymentMethod && !newValue && !printSectionOptions.toppingSales;
-                        const allChecked = printSectionOptions.barangTerjual && printSectionOptions.paymentMethod && newValue && printSectionOptions.toppingSales;
+                        setPrintSectionOptions((prev) => ({ ...prev, categoryII: newValue }));
+                        const allUnchecked = !printSectionOptions.barangTerjual && !printSectionOptions.paymentMethod && !printSectionOptions.categoryI && !newValue && !printSectionOptions.toppingSales;
+                        const allChecked = printSectionOptions.barangTerjual && printSectionOptions.paymentMethod && printSectionOptions.categoryI && newValue && printSectionOptions.toppingSales;
                         if (allUnchecked) setRingkasanOnly(true);
                         else if (allChecked) setRingkasanOnly(false);
                       }}
@@ -3553,19 +3618,15 @@ export default function GantiShift() {
                   </label>
 
                   <label className={`flex items-center justify-between cursor-pointer p-2 rounded hover:bg-gray-50 ${ringkasanOnly ? 'opacity-50' : ''}`}>
-                    <span className="text-sm font-medium text-gray-700">TOPPING SALES BREAKDOWN</span>
+                    <span className="text-sm font-medium text-gray-700">TOPPING SALES</span>
                     <input
                       type="checkbox"
                       checked={printSectionOptions.toppingSales}
                       onChange={(e) => {
                         const newValue = e.target.checked;
-                        setPrintSectionOptions((prev) => ({
-                          ...prev,
-                          toppingSales: newValue
-                        }));
-                        // Auto-update ringkasanOnly based on all sections
-                        const allUnchecked = !printSectionOptions.barangTerjual && !printSectionOptions.paymentMethod && !printSectionOptions.categoryII && !newValue && !printSectionOptions.toppingSales;
-                        const allChecked = printSectionOptions.barangTerjual && printSectionOptions.paymentMethod && printSectionOptions.categoryII && newValue && printSectionOptions.toppingSales;
+                        setPrintSectionOptions((prev) => ({ ...prev, toppingSales: newValue }));
+                        const allUnchecked = !printSectionOptions.barangTerjual && !printSectionOptions.paymentMethod && !printSectionOptions.categoryI && !printSectionOptions.categoryII && !newValue;
+                        const allChecked = printSectionOptions.barangTerjual && printSectionOptions.paymentMethod && printSectionOptions.categoryI && printSectionOptions.categoryII && newValue;
                         if (allUnchecked) setRingkasanOnly(true);
                         else if (allChecked) setRingkasanOnly(false);
                       }}
@@ -3653,11 +3714,12 @@ export default function GantiShift() {
                             const isEnabled = e.target.checked;
                             setRingkasanOnly(isEnabled);
                             setPrintSectionOptions({
+                              ringkasan: true,
                               barangTerjual: !isEnabled,
                               paymentMethod: !isEnabled,
+                              categoryI: !isEnabled,
                               categoryII: !isEnabled,
-                              toppingSales: !isEnabled,
-                              diskonVoucher: !isEnabled
+                              toppingSales: !isEnabled
                             });
                           }}
                           className="sr-only"
@@ -3680,19 +3742,29 @@ export default function GantiShift() {
                   <p className="text-sm text-gray-600 mb-3">Pilih bagian yang ingin dicetak:</p>
                   
                   <label className={`flex items-center justify-between cursor-pointer p-2 rounded hover:bg-gray-50 ${ringkasanOnly ? 'opacity-50' : ''}`}>
+                    <span className="text-sm font-medium text-gray-700">RINGKASAN</span>
+                    <input
+                      type="checkbox"
+                      checked={printSectionOptions.ringkasan}
+                      onChange={(e) => {
+                        setPrintSectionOptions((prev) => ({ ...prev, ringkasan: e.target.checked }));
+                        if (!e.target.checked) setRingkasanOnly(false);
+                      }}
+                      disabled={ringkasanOnly}
+                      className="w-5 h-5 text-blue-600 rounded focus:ring-2 focus:ring-blue-500 disabled:opacity-50 disabled:cursor-not-allowed"
+                    />
+                  </label>
+
+                  <label className={`flex items-center justify-between cursor-pointer p-2 rounded hover:bg-gray-50 ${ringkasanOnly ? 'opacity-50' : ''}`}>
                     <span className="text-sm font-medium text-gray-700">BARANG TERJUAL</span>
                     <input
                       type="checkbox"
                       checked={printSectionOptions.barangTerjual}
                       onChange={(e) => {
                         const newValue = e.target.checked;
-                        setPrintSectionOptions((prev) => ({
-                          ...prev,
-                          barangTerjual: newValue
-                        }));
-                        // Auto-update ringkasanOnly based on all sections
-                        const allUnchecked = !newValue && !printSectionOptions.paymentMethod && !printSectionOptions.categoryII && !printSectionOptions.toppingSales;
-                        const allChecked = newValue && printSectionOptions.paymentMethod && printSectionOptions.categoryII && printSectionOptions.toppingSales;
+                        setPrintSectionOptions((prev) => ({ ...prev, barangTerjual: newValue }));
+                        const allUnchecked = !newValue && !printSectionOptions.paymentMethod && !printSectionOptions.categoryI && !printSectionOptions.categoryII && !printSectionOptions.toppingSales;
+                        const allChecked = newValue && printSectionOptions.paymentMethod && printSectionOptions.categoryI && printSectionOptions.categoryII && printSectionOptions.toppingSales;
                         if (allUnchecked) setRingkasanOnly(true);
                         else if (allChecked) setRingkasanOnly(false);
                       }}
@@ -3708,13 +3780,27 @@ export default function GantiShift() {
                       checked={printSectionOptions.paymentMethod}
                       onChange={(e) => {
                         const newValue = e.target.checked;
-                        setPrintSectionOptions((prev) => ({
-                          ...prev,
-                          paymentMethod: newValue
-                        }));
-                        // Auto-update ringkasanOnly based on all sections
-                        const allUnchecked = !printSectionOptions.barangTerjual && !newValue && !printSectionOptions.categoryII && !printSectionOptions.toppingSales;
-                        const allChecked = printSectionOptions.barangTerjual && newValue && printSectionOptions.categoryII && printSectionOptions.toppingSales;
+                        setPrintSectionOptions((prev) => ({ ...prev, paymentMethod: newValue }));
+                        const allUnchecked = !printSectionOptions.barangTerjual && !newValue && !printSectionOptions.categoryI && !printSectionOptions.categoryII && !printSectionOptions.toppingSales;
+                        const allChecked = printSectionOptions.barangTerjual && newValue && printSectionOptions.categoryI && printSectionOptions.categoryII && printSectionOptions.toppingSales;
+                        if (allUnchecked) setRingkasanOnly(true);
+                        else if (allChecked) setRingkasanOnly(false);
+                      }}
+                      disabled={ringkasanOnly}
+                      className="w-5 h-5 text-blue-600 rounded focus:ring-2 focus:ring-blue-500 disabled:opacity-50 disabled:cursor-not-allowed"
+                    />
+                  </label>
+
+                  <label className={`flex items-center justify-between cursor-pointer p-2 rounded hover:bg-gray-50 ${ringkasanOnly ? 'opacity-50' : ''}`}>
+                    <span className="text-sm font-medium text-gray-700">CATEGORY I</span>
+                    <input
+                      type="checkbox"
+                      checked={printSectionOptions.categoryI}
+                      onChange={(e) => {
+                        const newValue = e.target.checked;
+                        setPrintSectionOptions((prev) => ({ ...prev, categoryI: newValue }));
+                        const allUnchecked = !printSectionOptions.barangTerjual && !printSectionOptions.paymentMethod && !newValue && !printSectionOptions.categoryII && !printSectionOptions.toppingSales;
+                        const allChecked = printSectionOptions.barangTerjual && printSectionOptions.paymentMethod && newValue && printSectionOptions.categoryII && printSectionOptions.toppingSales;
                         if (allUnchecked) setRingkasanOnly(true);
                         else if (allChecked) setRingkasanOnly(false);
                       }}
@@ -3730,13 +3816,9 @@ export default function GantiShift() {
                       checked={printSectionOptions.categoryII}
                       onChange={(e) => {
                         const newValue = e.target.checked;
-                        setPrintSectionOptions((prev) => ({
-                          ...prev,
-                          categoryII: newValue
-                        }));
-                        // Auto-update ringkasanOnly based on all sections
-                        const allUnchecked = !printSectionOptions.barangTerjual && !printSectionOptions.paymentMethod && !newValue && !printSectionOptions.toppingSales;
-                        const allChecked = printSectionOptions.barangTerjual && printSectionOptions.paymentMethod && newValue && printSectionOptions.toppingSales;
+                        setPrintSectionOptions((prev) => ({ ...prev, categoryII: newValue }));
+                        const allUnchecked = !printSectionOptions.barangTerjual && !printSectionOptions.paymentMethod && !printSectionOptions.categoryI && !newValue && !printSectionOptions.toppingSales;
+                        const allChecked = printSectionOptions.barangTerjual && printSectionOptions.paymentMethod && printSectionOptions.categoryI && newValue && printSectionOptions.toppingSales;
                         if (allUnchecked) setRingkasanOnly(true);
                         else if (allChecked) setRingkasanOnly(false);
                       }}
@@ -3746,19 +3828,15 @@ export default function GantiShift() {
                   </label>
 
                   <label className={`flex items-center justify-between cursor-pointer p-2 rounded hover:bg-gray-50 ${ringkasanOnly ? 'opacity-50' : ''}`}>
-                    <span className="text-sm font-medium text-gray-700">TOPPING SALES BREAKDOWN</span>
+                    <span className="text-sm font-medium text-gray-700">TOPPING SALES</span>
                     <input
                       type="checkbox"
                       checked={printSectionOptions.toppingSales}
                       onChange={(e) => {
                         const newValue = e.target.checked;
-                        setPrintSectionOptions((prev) => ({
-                          ...prev,
-                          toppingSales: newValue
-                        }));
-                        // Auto-update ringkasanOnly based on all sections
-                        const allUnchecked = !printSectionOptions.barangTerjual && !printSectionOptions.paymentMethod && !printSectionOptions.categoryII && !newValue && !printSectionOptions.toppingSales;
-                        const allChecked = printSectionOptions.barangTerjual && printSectionOptions.paymentMethod && printSectionOptions.categoryII && newValue && printSectionOptions.toppingSales;
+                        setPrintSectionOptions((prev) => ({ ...prev, toppingSales: newValue }));
+                        const allUnchecked = !printSectionOptions.barangTerjual && !printSectionOptions.paymentMethod && !printSectionOptions.categoryI && !printSectionOptions.categoryII && !newValue;
+                        const allChecked = printSectionOptions.barangTerjual && printSectionOptions.paymentMethod && printSectionOptions.categoryI && printSectionOptions.categoryII && newValue;
                         if (allUnchecked) setRingkasanOnly(true);
                         else if (allChecked) setRingkasanOnly(false);
                       }}
@@ -3847,7 +3925,7 @@ export default function GantiShift() {
                 <span className="font-semibold text-gray-900">{statistics.total_cu ?? 0}</span>
               </div>
               <div className="flex justify-between">
-                <span className="text-gray-800 font-medium">Total Omset:</span>
+                <span className="text-gray-800 font-medium">Total Omset <span className="text-gray-500 font-normal">(sudah dibayar)</span>:</span>
                 <span className="font-semibold text-gray-900">{formatRupiah(statistics.total_amount)}</span>
               </div>
               <div className="flex justify-between">
@@ -3942,7 +4020,7 @@ export default function GantiShift() {
                 <span className="font-semibold text-gray-900">{statistics.total_cu ?? 0}</span>
               </div>
               <div className="flex justify-between">
-                <span className="text-gray-800 font-medium">Total Omset:</span>
+                <span className="text-gray-800 font-medium">Total Omset <span className="text-gray-500 font-normal">(sudah dibayar)</span>:</span>
                 <span className="font-semibold text-gray-900">{formatRupiah(statistics.total_amount)}</span>
               </div>
               <div className="flex justify-between">

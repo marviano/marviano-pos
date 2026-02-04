@@ -322,6 +322,10 @@ const RefundModal: React.FC<RefundModalProps> = ({
 
       if (updatedTransaction) {
         onSuccess(updatedTransaction);
+        // Notify Ganti Shift to refresh Ringkasan when refund is completed
+        if (typeof window !== 'undefined') {
+          window.dispatchEvent(new CustomEvent('refund-completed'));
+        }
       }
 
       handleClose();

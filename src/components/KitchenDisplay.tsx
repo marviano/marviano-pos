@@ -4,6 +4,7 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import { Volume2 } from 'lucide-react';
 import { useAuth } from '@/hooks/useAuth';
 import { isSuperAdmin } from '@/lib/auth';
+import { OrderTimer } from '@/contexts/DisplayTimerContext';
 
 interface OrderItem {
   id: number;
@@ -59,10 +60,10 @@ export default function KitchenDisplay({ viewOnly = false, legacyCardLayout = fa
   const [activeOrders, setActiveOrders] = useState<GroupedOrderItem[]>([]);
   const [finishedOrders, setFinishedOrders] = useState<GroupedOrderItem[]>([]);
   const [loading, setLoading] = useState(true);
-  const [currentTime, setCurrentTime] = useState(new Date());
   const previousOrderIdsRef = useRef<Set<string>>(new Set());
   const hasCompletedInitialFetchRef = useRef(false);
   const soundRef = useRef<HTMLAudioElement | null>(null);
+  const optimisticFinishedRef = useRef<Map<string, GroupedOrderItem>>(new Map());
   
   const businessId = user?.selectedBusinessId;
   
@@ -93,41 +94,6 @@ export default function KitchenDisplay({ viewOnly = false, legacyCardLayout = fa
     );
   }
 
-  // Update timer every second
-  useEffect(() => {
-    const interval = setInterval(() => {
-      const newTime = new Date();
-      setCurrentTime(newTime);
-    }, 1000);
-    return () => clearInterval(interval);
-  }, []);
-
-  const formatTimer = useCallback((createdAt: string | null | undefined): string => {
-    if (!createdAt) {
-      return '00:00';
-    }
-    const created = new Date(createdAt);
-    
-    // Check if date is valid
-    if (isNaN(created.getTime())) {
-      console.warn('Invalid date for timer:', createdAt);
-      return '00:00';
-    }
-    const diffMs = currentTime.getTime() - created.getTime();
-    
-    // Handle negative time (if date is in future due to timezone issues)
-    if (diffMs < 0) {
-      console.warn('Negative time difference detected:', { createdAt, currentTime: currentTime.toISOString(), diffMs });
-      return '00:00';
-    }
-    const totalSeconds = Math.floor(diffMs / 1000);
-    const minutes = Math.floor(totalSeconds / 60);
-    const seconds = totalSeconds % 60;
-    const result = `${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
-    
-    return result;
-  }, [currentTime]);
-
   // Fetch orders from database
   const fetchOrders = useCallback(async () => {
     try {
@@ -139,7 +105,7 @@ export default function KitchenDisplay({ viewOnly = false, legacyCardLayout = fa
 
       // Fetch all transactions (pending, paid, and completed)
       // We include paid/completed transactions because items might still be in production
-      const transactions = await electronAPI.localDbGetTransactions?.(businessId, 10000);
+      const transactions = await electronAPI.localDbGetTransactions?.(businessId, 1000);
       const transactionsArray = Array.isArray(transactions) ? transactions as Record<string, unknown>[] : [];
       
       // Filter for transactions that might have items in production
@@ -385,7 +351,7 @@ export default function KitchenDisplay({ viewOnly = false, legacyCardLayout = fa
           ...item,
           total_quantity: item.quantity,
           display_text: displayText,
-          timer: formatTimer(item.created_at),
+          timer: '00:00', // Rendered by OrderTimer component
         });
       });
 
@@ -396,20 +362,12 @@ export default function KitchenDisplay({ viewOnly = false, legacyCardLayout = fa
       groupedMap.forEach((item, signature) => {
         const groupedItem = {
           ...item,
-          timer: formatTimer(item.created_at),
+          timer: '00:00', // Rendered by OrderTimer component
         };
 
         // Check if ALL items in this group are finished
         const itemsInGroup = groupItemsMap.get(signature) || [];
         const allFinished = itemsInGroup.length > 0 && itemsInGroup.every(i => i.production_status === 'finished');
-        
-        console.log('📋 Group status check:', {
-          signature,
-          product_name: item.product_name,
-          itemsInGroup: itemsInGroup.length,
-          allFinished,
-          statuses: itemsInGroup.map(i => i.production_status)
-        });
 
         if (allFinished) {
           // Update the grouped item's production_status to finished
@@ -430,13 +388,26 @@ export default function KitchenDisplay({ viewOnly = false, legacyCardLayout = fa
         return bTime - aTime;
       });
 
-      setActiveOrders(active);
-      setFinishedOrders(finished);
+      // Merge with optimistically finished items (moved before DB confirmed)
+      const optMap = optimisticFinishedRef.current;
+      for (const f of finished) {
+        optMap.delete(f.uuid_id); // DB confirmed - remove from optimistic
+      }
+      const activeFiltered = active.filter((x) => !optMap.has(x.uuid_id));
+      const finishedMerged = [...finished, ...optMap.values()];
+      finishedMerged.sort((a, b) => {
+        const aTime = a.production_finished_at ? new Date(a.production_finished_at).getTime() : 0;
+        const bTime = b.production_finished_at ? new Date(b.production_finished_at).getTime() : 0;
+        return bTime - aTime;
+      });
+
+      setActiveOrders(activeFiltered);
+      setFinishedOrders(finishedMerged);
       
       // Check for new orders and play sound (only on standalone Kitchen display, not in Barista & Kitchen combined view)
       // Use hasCompletedInitialFetchRef so we also play when first order arrives after empty list (no sound on very first page load)
       if (!viewOnly && !loading && hasCompletedInitialFetchRef.current) {
-        const currentOrderIds = new Set(active.map(order => order.uuid_id));
+        const currentOrderIds = new Set(activeFiltered.map(order => order.uuid_id));
         const newOrderIds = [...currentOrderIds].filter(id => !previousOrderIdsRef.current.has(id));
         
         if (newOrderIds.length > 0) {
@@ -458,14 +429,14 @@ export default function KitchenDisplay({ viewOnly = false, legacyCardLayout = fa
       
       hasCompletedInitialFetchRef.current = true;
       // Update previous order IDs
-      previousOrderIdsRef.current = new Set(active.map(order => order.uuid_id));
+      previousOrderIdsRef.current = new Set(activeFiltered.map(order => order.uuid_id));
       
       setLoading(false);
     } catch (error) {
       console.error('Error fetching orders:', error);
       setLoading(false);
     }
-  }, [businessId, formatTimer]);
+  }, [businessId]);
 
   const formatTimeHHmm = (dateTime: string | null | undefined): string => {
     if (!dateTime) return '-';
@@ -502,29 +473,36 @@ export default function KitchenDisplay({ viewOnly = false, legacyCardLayout = fa
     };
   }, []);
 
-  const handleMarkFinished = async (item: GroupedOrderItem) => {
-    console.log('🔵 handleMarkFinished called for item:', item);
-    try {
-      const electronAPI = getElectronAPI();
-      if (!electronAPI?.localDbGetTransactionItems || !electronAPI?.localDbUpsertTransactionItems) {
-        console.error('❌ Electron API functions not available');
-        alert('Function not available');
-        return;
-      }
+  const handleMarkFinished = (item: GroupedOrderItem) => {
+    const electronAPI = getElectronAPI();
+    if (!electronAPI?.localDbGetTransactionItems || !electronAPI?.localDbUpsertTransactionItems) {
+      alert('Function not available');
+      return;
+    }
 
-      console.log('📦 Fetching transaction items for:', item.transaction_id);
-      // Fetch all transaction items for this transaction
-      const items = await electronAPI.localDbGetTransactionItems?.(item.transaction_id);
-      const itemsArray = Array.isArray(items) ? items as Record<string, unknown>[] : [];
-      console.log('📦 Found', itemsArray.length, 'transaction items');
+    // 1. Optimistic update: move to right immediately
+    const finishedItem: GroupedOrderItem = {
+      ...item,
+      production_status: 'finished',
+      production_finished_at: new Date().toISOString(),
+    };
+    optimisticFinishedRef.current.set(item.uuid_id, finishedItem);
+    setActiveOrders((prev) => prev.filter((x) => x.uuid_id !== item.uuid_id));
+    setFinishedOrders((prev) => [...prev, finishedItem].sort((a, b) => {
+      const aTime = a.production_finished_at ? new Date(a.production_finished_at).getTime() : 0;
+      const bTime = b.production_finished_at ? new Date(b.production_finished_at).getTime() : 0;
+      return bTime - aTime;
+    }));
 
-      // Fetch customizations to match items by signature
-      const customizationsData = await electronAPI.localDbGetTransactionItemCustomizationsNormalized?.(item.transaction_id);
-      const customizations = Array.isArray(customizationsData?.customizations) ? customizationsData.customizations as Record<string, unknown>[] : [];
-      const customizationOptions = Array.isArray(customizationsData?.options) ? customizationsData.options as Record<string, unknown>[] : [];
-
-      // Create customizations map
-      const customizationsMap = new Map<number, Array<{
+    // 2. Persist in background with retry until success
+    const persistWithRetry = async (delayMs = 2000) => {
+      try {
+        const items = await electronAPI.localDbGetTransactionItems?.(item.transaction_id);
+        const itemsArray = Array.isArray(items) ? items as Record<string, unknown>[] : [];
+        const customizationsData = await electronAPI.localDbGetTransactionItemCustomizationsNormalized?.(item.transaction_id);
+        const customizations = Array.isArray(customizationsData?.customizations) ? customizationsData.customizations as Record<string, unknown>[] : [];
+        const customizationOptions = Array.isArray(customizationsData?.options) ? customizationsData.options as Record<string, unknown>[] : [];
+        const customizationsMap = new Map<number, Array<{
         customization_name: string;
         options: Array<{ option_name: string; price_adjustment: number }>;
       }>>();
@@ -612,10 +590,7 @@ export default function KitchenDisplay({ viewOnly = false, legacyCardLayout = fa
 
         // If signatures match, add to update list (only if not already finished)
         if (itemSignature === groupedSignature) {
-          if (transactionItem.production_status === 'finished') {
-            console.log('⏭️ Item already finished, skipping:', transactionItem.id);
-            return;
-          }
+          if (transactionItem.production_status === 'finished') return;
           // Ensure we have all required fields for the update
           const itemToUpdate: Record<string, unknown> = {
             id: transactionItem.id,
@@ -638,44 +613,33 @@ export default function KitchenDisplay({ viewOnly = false, legacyCardLayout = fa
         }
       });
 
-      console.log('🔍 Found', itemsToUpdate.length, 'items to update');
-      if (itemsToUpdate.length === 0) {
-        console.warn('⚠️ No items found matching signature, trying fallback (product_id + note only)');
-        // Fallback: try matching by product_id and note only (for items without customizations)
-        const fallbackItems = itemsArray.filter((transactionItem) => {
-          return transactionItem.product_id === item.product_id &&
-                 (transactionItem.custom_note || '') === (item.custom_note || '') &&
-                 (transactionItem.production_status !== 'finished');
-        });
-        
-        if (fallbackItems.length > 0) {
-          console.log('✅ Found', fallbackItems.length, 'items using fallback method');
-          const finishedAt = new Date().toISOString();
-          const fallbackUpdates = fallbackItems.map((transactionItem) => ({
-            ...transactionItem,
-            production_status: 'finished',
-            production_finished_at: finishedAt,
-          }));
-          itemsToUpdate.push(...fallbackUpdates);
-        } else {
-          console.error('❌ No items found even with fallback method');
-          console.log('Looking for product_id:', item.product_id, 'note:', item.custom_note);
-          alert('Item tidak ditemukan. Check console for details.');
+        if (itemsToUpdate.length === 0) {
+          const fallbackItems = itemsArray.filter((ti) =>
+            ti.product_id === item.product_id && (ti.custom_note || '') === (item.custom_note || '') && ti.production_status !== 'finished'
+          );
+          if (fallbackItems.length > 0) {
+            fallbackItems.forEach((ti) => itemsToUpdate.push({ ...ti, production_status: 'finished', production_finished_at: finishedAt }));
+          }
+        }
+
+        if (itemsToUpdate.length === 0) {
+          optimisticFinishedRef.current.delete(item.uuid_id);
+          setFinishedOrders((prev) => prev.filter((x) => x.uuid_id !== item.uuid_id));
+          setActiveOrders((prev) => [...prev, item].sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime()));
+          alert('Item tidak ditemukan.');
           return;
         }
+
+        await electronAPI.localDbUpsertTransactionItems?.(itemsToUpdate);
+        optimisticFinishedRef.current.delete(item.uuid_id);
+        fetchOrders();
+      } catch (error) {
+        console.warn('Retrying mark finished:', error);
+        setTimeout(() => persistWithRetry(Math.min(delayMs * 1.5, 30000)), delayMs);
       }
+    };
 
-      console.log('💾 Updating items:', itemsToUpdate.map(i => ({ id: i.id, uuid_id: i.uuid_id, product_id: i.product_id })));
-      // Update all matching items
-      await electronAPI.localDbUpsertTransactionItems?.(itemsToUpdate);
-      console.log('✅ Items updated successfully');
-
-      // Refresh orders immediately
-      await fetchOrders();
-    } catch (error) {
-      console.error('❌ Error marking item as finished:', error);
-      alert(`Gagal menandai item sebagai selesai: ${error instanceof Error ? error.message : String(error)}`);
-    }
+    persistWithRetry(500);
   };
 
   if (loading) {
@@ -756,7 +720,7 @@ export default function KitchenDisplay({ viewOnly = false, legacyCardLayout = fa
                         )}
                       </div>
                       <div className="flex-shrink-0 w-[100px] flex flex-col items-center justify-center p-1.5 bg-orange-200" style={{ minHeight: '100%' }}>
-                        <div className="text-2xl font-mono font-bold text-blue-600">{item.timer}</div>
+                        <div className="text-2xl font-mono font-bold text-blue-600"><OrderTimer createdAt={item.created_at} /></div>
                         {item.customer_name && (
                           <div className="text-base text-gray-600 font-semibold text-center mt-1 truncate max-w-full" title={item.customer_name}>{item.customer_name}</div>
                         )}
@@ -777,7 +741,7 @@ export default function KitchenDisplay({ viewOnly = false, legacyCardLayout = fa
                         <span className="min-w-0 break-words">{item.total_quantity}x {item.product_name}</span>
                         <span className="text-black font-semibold truncate" title={item.pickup_method === 'take-away' ? 'Take Away' : (item.table_number || '-')}>{item.pickup_method === 'take-away' ? 'Take Away' : (item.table_number || '-')}</span>
                         <span className="text-black font-semibold truncate" title={item.customer_name || '-'}>{item.customer_name || '-'}</span>
-                        <span className="text-xl font-mono font-bold text-blue-700 shrink-0">{item.timer}</span>
+                        <span className="text-xl font-mono font-bold text-blue-700 shrink-0"><OrderTimer createdAt={item.created_at} /></span>
                       </div>
                       {(item.custom_note || (item.customizations && item.customizations.length > 0)) && (
                         <div className="text-sm text-black break-words flex flex-wrap gap-x-1 font-medium">

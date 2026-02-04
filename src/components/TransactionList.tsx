@@ -1,6 +1,7 @@
 'use client';
 
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect, useCallback, useRef, useLayoutEffect } from 'react';
+import { createPortal } from 'react-dom';
 import { useRouter } from 'next/navigation';
 import { Clock, CreditCard, RefreshCw, Search, Filter, ChevronUp, ChevronDown, ChevronRight, Wifi, WifiOff, Calendar, X, Trash2, Columns } from 'lucide-react';
 import TransactionDetailModal, { TransactionDetail, TransactionRefund } from './TransactionDetailModal';
@@ -208,6 +209,7 @@ interface ElectronAPI {
   localDbGetSystemPosAllProducts?: (businessId?: number) => Promise<ElectronProduct[]>;
   localDbGetSystemPosEmployees?: () => Promise<Array<{ id: number | string; nama_karyawan?: string; color?: string | null }>>;
   localDbGetShifts?: (filters?: { businessId?: number; startDate?: string; endDate?: string; limit?: number }) => Promise<{ shifts: Array<{ uuid_id?: string; shift_start?: string; user_name?: string }> }>;
+  localDbGetActiveShift?: (userId: number, businessId?: number) => Promise<{ shift?: { uuid_id?: string; shift_start?: string } | null }>;
   localDbUpdateTransactionShift?: (transactionUuid: string, shiftUuid: string | null) => Promise<{ success: boolean; error?: string }>;
   localDbDeleteSingleTransactionPreview?: (transactionUuid: string) => Promise<{
     success: boolean;
@@ -244,7 +246,8 @@ export default function TransactionList({ businessId, onLoadTransaction }: Trans
   const [receiptizePrintedIds, setReceiptizePrintedIds] = useState<Set<string>>(() => new Set());
   const [receiptizeCounters, setReceiptizeCounters] = useState<Record<string, number>>({});
   const [receiptCounters, setReceiptCounters] = useState<Record<string, number>>({});
-  const [shiftLabelByUuid, setShiftLabelByUuid] = useState<Record<string, string>>({});
+  /** Maps shift uuid -> { filterLabel, cellLabel }. filterLabel for dropdown (e.g. "Hari ini | Shift 1"); cellLabel for table cells (e.g. "03/08/26 Shift 1"). */
+  const [shiftLabelByUuid, setShiftLabelByUuid] = useState<Record<string, { filterLabel: string; cellLabel: string }>>({});
   const [showAllTransactions, setShowAllTransactions] = useState(false);
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
   const [voucherClickCount, setVoucherClickCount] = useState(0);
@@ -252,11 +255,30 @@ export default function TransactionList({ businessId, onLoadTransaction }: Trans
   const [employeesMap, setEmployeesMap] = useState<Map<number, { name: string; color: string | null }>>(new Map());
   const [itemWaiterIdsByTx, setItemWaiterIdsByTx] = useState<Record<string, number[]>>({});
   const [openWaiterPopoverFor, setOpenWaiterPopoverFor] = useState<string | null>(null);
+  const waiterTriggerRef = useRef<HTMLButtonElement | null>(null);
   const waiterPopoverRef = useRef<HTMLDivElement>(null);
+  const [waiterPopoverPos, setWaiterPopoverPos] = useState<{ top: number; left: number } | null>(null);
+  useLayoutEffect(() => {
+    if (openWaiterPopoverFor === null) {
+      setWaiterPopoverPos(null);
+      return;
+    }
+    const el = waiterTriggerRef.current;
+    if (!el) return;
+    const rect = el.getBoundingClientRect();
+    const popoverH = 120;
+    const showAbove = rect.bottom + popoverH > window.innerHeight;
+    setWaiterPopoverPos({
+      top: showAbove ? rect.top - popoverH - 4 : rect.bottom + 4,
+      left: rect.left + rect.width / 2,
+    });
+  }, [openWaiterPopoverFor]);
   useEffect(() => {
     if (openWaiterPopoverFor === null) return;
     const close = (e: MouseEvent) => {
-      if (waiterPopoverRef.current && !waiterPopoverRef.current.contains(e.target as Node)) setOpenWaiterPopoverFor(null);
+      const target = e.target as Node;
+      if (waiterTriggerRef.current?.contains(target) || waiterPopoverRef.current?.contains(target)) return;
+      setOpenWaiterPopoverFor(null);
     };
     document.addEventListener('mousedown', close);
     return () => document.removeEventListener('mousedown', close);
@@ -820,24 +842,74 @@ export default function TransactionList({ businessId, onLoadTransaction }: Trans
       setTransactions(filteredTransactions);
 
       // Fetch shifts for date range to build shift labels (Shift 1, Shift 2, ...)
+      // Only show shifts that fall within the selected date range
       if (!useSystemPos && electronAPI.localDbGetShifts) {
         try {
-          const startDate = `${fromDate}T00:00:00.000Z`;
-          const endDate = `${toDate}T23:59:59.999Z`;
+          const startDate = fromDate + 'T00:00:00.000Z';
+          const endDate = toDate + 'T23:59:59.999Z';
           const { shifts } = await electronAPI.localDbGetShifts({
             businessId: effectiveBusinessId,
             startDate,
             endDate,
             limit: 200
           });
-          const sorted = [...(shifts || [])].sort(
+          let allShifts = [...(shifts || [])];
+          // Include active shift only if it started within the selected date range
+          if (electronAPI.localDbGetActiveShift && user?.id) {
+            try {
+              const activeRes = await electronAPI.localDbGetActiveShift(parseInt(String(user.id)), effectiveBusinessId);
+              const activeShift = (activeRes as { shift?: { uuid_id?: string; shift_start?: string } })?.shift;
+              if (activeShift?.uuid_id && !allShifts.some((s) => s.uuid_id === activeShift.uuid_id)) {
+                const activeStart = activeShift.shift_start ? new Date(activeShift.shift_start) : null;
+                const rangeStart = new Date(fromDate + 'T00:00:00');
+                const rangeEnd = new Date(toDate + 'T23:59:59');
+                if (activeStart && activeStart >= rangeStart && activeStart <= rangeEnd) {
+                  allShifts.push(activeShift as (typeof allShifts)[0]);
+                }
+              }
+            } catch {
+              // ignore
+            }
+          }
+          const sorted = allShifts.sort(
             (a, b) => new Date(a.shift_start || 0).getTime() - new Date(b.shift_start || 0).getTime()
           );
-          const map: Record<string, string> = {};
-          sorted.forEach((s, i) => {
-            const uuid = s.uuid_id;
-            if (uuid) map[uuid] = `Shift ${i + 1}`;
-          });
+          const map: Record<string, { filterLabel: string; cellLabel: string }> = {};
+          const getGmt7DateKey = (iso: string) => {
+            const d = new Date(iso);
+            const gmt7 = new Date(d.getTime() + 7 * 60 * 60 * 1000);
+            return gmt7.toISOString().slice(0, 10);
+          };
+          const todayGmt7 = getTodayUTC7();
+          const byDate = new Map<string, typeof sorted>();
+          for (const s of sorted) {
+            const key = getGmt7DateKey(s.shift_start || '');
+            if (!byDate.has(key)) byDate.set(key, []);
+            byDate.get(key)!.push(s);
+          }
+          for (const [dateKey, dayShifts] of byDate) {
+            // Only include shifts whose date falls within the selected date range
+            if (dateKey < fromDate || dateKey > toDate) continue;
+            const isToday = dateKey === todayGmt7;
+            const dateObj = new Date(dateKey + 'T12:00:00');
+            const filterDateLabel = isToday
+              ? 'Hari ini'
+              : dateObj.toLocaleDateString('id-ID', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' });
+            const d = dateObj.getDate();
+            const m = dateObj.getMonth() + 1;
+            const y = String(dateObj.getFullYear()).slice(-2);
+            const cellDateLabel = `${String(d).padStart(2, '0')}/${String(m).padStart(2, '0')}/${y}`;
+            dayShifts.forEach((s, i) => {
+              const uuid = s.uuid_id;
+              if (uuid) {
+                const shiftNum = i + 1;
+                map[uuid] = {
+                  filterLabel: `${filterDateLabel} | Shift ${shiftNum}`,
+                  cellLabel: `${cellDateLabel} Shift ${shiftNum}`
+                };
+              }
+            });
+          }
           setShiftLabelByUuid(map);
         } catch {
           setShiftLabelByUuid({});
@@ -1078,6 +1150,7 @@ export default function TransactionList({ businessId, onLoadTransaction }: Trans
     setReceiptizeCounters({});
     setReceiptizePrintedIds(new Set<string>());
     setReceiptCounters({});
+    setShiftFilterUuid(''); // Reset shift filter when date range changes so dropdown only shows shifts in new range
   }, [effectiveBusinessId, fromDate, toDate, isSystemPosMode]);
 
   // #region agent log
@@ -1739,10 +1812,10 @@ export default function TransactionList({ businessId, onLoadTransaction }: Trans
                     <option value="">Shift: All</option>
                     <option value="none">Shift: No shift</option>
                     {Object.entries(shiftLabelByUuid)
-                      .sort((a, b) => a[1].localeCompare(b[1]))
-                      .map(([uuid, label]) => (
+                      .sort((a, b) => a[1].filterLabel.localeCompare(b[1].filterLabel))
+                      .map(([uuid, info]) => (
                         <option key={uuid} value={uuid}>
-                          Shift: {label}
+                          Shift: {info.filterLabel}
                         </option>
                       ))}
                   </select>
@@ -1814,6 +1887,7 @@ export default function TransactionList({ businessId, onLoadTransaction }: Trans
                   setSearchTerm('');
                   setFilterMethod('all');
                   setShiftFilterUuid('');
+                  setShiftLabelByUuid({}); // Clear to avoid stale shift labels before refetch
                   const gmt7Offset = 7 * 60 * 60 * 1000;
                   const now = new Date();
                   const nowGmt7 = new Date(now.getTime() + gmt7Offset);
@@ -1994,8 +2068,14 @@ export default function TransactionList({ businessId, onLoadTransaction }: Trans
                               const primaryId = transaction.waiter_id ?? allIds[0];
                               const names = allIds.map((id) => employeesMap.get(id)?.name).filter((n): n is string => Boolean(n));
                               return (
-                                <div className="relative inline-block" ref={openWaiterPopoverFor === transaction.id ? waiterPopoverRef : undefined}>
-                                  <button type="button" onClick={(e) => { e.stopPropagation(); setOpenWaiterPopoverFor((id) => (id === transaction.id ? null : transaction.id)); }} className="cursor-pointer rounded focus:outline-none focus:ring-2 focus:ring-blue-400" title={names.length > 1 ? names.join(', ') : undefined}>
+                                <div className="relative inline-block">
+                                  <button
+                                    ref={openWaiterPopoverFor === transaction.id ? waiterTriggerRef : undefined}
+                                    type="button"
+                                    onClick={(e) => { e.stopPropagation(); setOpenWaiterPopoverFor((id) => (id === transaction.id ? null : transaction.id)); }}
+                                    className="cursor-pointer rounded focus:outline-none focus:ring-2 focus:ring-blue-400"
+                                    title={names.length > 1 ? names.join(', ') : undefined}
+                                  >
                                     {!primaryId || !employeesMap.has(primaryId) ? <span className="text-xs text-gray-900">-</span> : (() => {
                                       const waiter = employeesMap.get(primaryId)!;
                                       const hasMultiple = allIds.length > 1;
@@ -2003,11 +2083,16 @@ export default function TransactionList({ businessId, onLoadTransaction }: Trans
                                       return <span className="text-xs text-gray-900">{waiter.name}{hasMultiple && <span className="text-gray-500 ml-0.5">(+{allIds.length - 1})</span>}</span>;
                                     })()}
                                   </button>
-                                  {openWaiterPopoverFor === transaction.id && names.length > 0 && (
-                                    <div className="absolute left-1/2 -translate-x-1/2 top-full mt-1 z-50 min-w-[120px] rounded-lg border border-gray-200 bg-white py-2 shadow-lg">
+                                  {openWaiterPopoverFor === transaction.id && names.length > 0 && waiterPopoverPos && typeof document !== 'undefined' && createPortal(
+                                    <div
+                                      ref={waiterPopoverRef}
+                                      className="fixed z-[9999] min-w-[120px] rounded-lg border border-gray-200 bg-white py-2 shadow-lg"
+                                      style={{ top: waiterPopoverPos.top, left: waiterPopoverPos.left, transform: 'translateX(-50%)' }}
+                                    >
                                       <div className="px-3 py-1 text-xs font-semibold text-gray-500 uppercase">Waiters</div>
                                       {names.map((name, i) => <div key={i} className="px-3 py-1.5 text-sm text-gray-900">{name}</div>)}
-                                    </div>
+                                    </div>,
+                                    document.body
                                   )}
                                 </div>
                               );
@@ -2015,7 +2100,7 @@ export default function TransactionList({ businessId, onLoadTransaction }: Trans
                             {col.key === 'user_name' && <span className="text-xs text-gray-900 truncate block" title={transaction.user_name || 'Unknown'}>{transaction.user_name || 'Unknown'}</span>}
                             {col.key === 'shift' && (
                               <div className="flex flex-col items-center gap-0.5">
-                                <span className="text-xs text-gray-700" title={transaction.shift_uuid ?? undefined}>{transaction.shift_uuid ? (shiftLabelByUuid[transaction.shift_uuid] ?? '-') : '-'}</span>
+                                <span className="text-xs text-gray-700" title={transaction.shift_uuid ?? undefined}>{transaction.shift_uuid ? (shiftLabelByUuid[transaction.shift_uuid]?.cellLabel ?? 'Shift') : '-'}</span>
                                 {canBindToShift && <button type="button" onClick={(e) => { e.stopPropagation(); handleOpenBindShift(transaction); }} className="text-[10px] text-blue-600 hover:text-blue-800 hover:underline">{transaction.shift_uuid ? 'Ubah' : 'Bind'}</button>}
                                 {canDeleteTransaction && <button type="button" onClick={(e) => { e.stopPropagation(); handleOpenDeleteTransaction(transaction); }} className="text-[10px] text-red-600 hover:text-red-800 hover:underline flex items-center gap-0.5 justify-center" title="Hapus transaksi (Super Admin)"><Trash2 className="w-3 h-3" /> Hapus</button>}
                               </div>

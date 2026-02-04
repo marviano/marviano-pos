@@ -779,24 +779,49 @@ export default function PaymentModal({
               updated_at: new Date().toISOString(),
               waiter_id: (waiterId != null && waiterId !== undefined) ? waiterId : (existingTransaction.waiter_id ?? null),
               sync_status: 'pending',
+              shift_uuid: existingTransaction.shift_uuid ?? null, // Preserve original shift (e.g. shift 1 stays when paying in shift 2)
             };
             console.log('📝 [PAYMENT] Updating existing transaction:', loadedTransactionInfo.transactionId);
           } else {
-            // Fallback: create new transaction if existing not found
+            // Fallback: create new transaction if existing not found - bind to current active shift
             localTransactionData = {
               ...transactionData,
               receipt_number: null,
               sync_status: 'pending',
             };
+            try {
+              if (electronAPI.localDbGetActiveShift && businessId) {
+                const userId = user?.id ? parseInt(String(user.id)) : 0;
+                const activeShiftRes = await electronAPI.localDbGetActiveShift(userId, businessId);
+                const shiftUuid = (activeShiftRes as { shift?: { uuid_id?: string } })?.shift?.uuid_id;
+                if (shiftUuid) {
+                  localTransactionData.shift_uuid = shiftUuid;
+                }
+              }
+            } catch (err) {
+              console.warn('Failed to get active shift for payment fallback:', err);
+            }
             console.warn('⚠️ [PAYMENT] Existing transaction not found, creating new one');
           }
         } else {
-          // New transaction
+          // New transaction (direct Bayar) - bind to current active shift
           localTransactionData = {
             ...transactionData,
             receipt_number: null, // Initial local save has no receipt number yet
             sync_status: 'pending',
           };
+          try {
+            if (electronAPI.localDbGetActiveShift && businessId) {
+              const userId = user?.id ? parseInt(String(user.id)) : 0;
+              const activeShiftRes = await electronAPI.localDbGetActiveShift(userId, businessId);
+              const shiftUuid = (activeShiftRes as { shift?: { uuid_id?: string } })?.shift?.uuid_id;
+              if (shiftUuid) {
+                localTransactionData.shift_uuid = shiftUuid;
+              }
+            }
+          } catch (error) {
+            console.warn('Failed to get active shift for payment:', error);
+          }
         }
 
         // For existing transactions (lihat mode), fetch existing items to get their uuid_id, production_status, and waiter_id
