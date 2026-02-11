@@ -15,25 +15,27 @@ const originalConsoleError = console.error.bind(console);
 const originalConsoleInfo = console.info.bind(console);
 const originalConsoleDebug = console.debug.bind(console);
 
-// Helper function to safely write to debug.log (ensures directory exists)
-function writeDebugLog(data: string): void {
+// Debug log disabled to prevent unbounded file growth (was writing to .cursor/debug.log).
+// Re-enable temporarily by uncommenting the body and using a bounded/rotating log if needed.
+function writeDebugLog(_data: string): void {
+  // no-op
+}
+
+/** Write system_pos save failure to .cursor/system_pos_debug.log for debugging intermittent sync failures. */
+function writeSystemPosDebugLog(entry: { source: string; transactionId: string; reason: string; stack?: string }): void {
   try {
-    const debugLogPath = path.join(__dirname, '..', '.cursor', 'debug.log');
-    const debugLogDir = path.dirname(debugLogPath);
-    
-    // Ensure directory exists
-    if (!fs.existsSync(debugLogDir)) {
-      fs.mkdirSync(debugLogDir, { recursive: true });
+    const logPath = path.join(__dirname, '..', '.cursor', 'system_pos_debug.log');
+    const logDir = path.dirname(logPath);
+    if (!fs.existsSync(logDir)) {
+      fs.mkdirSync(logDir, { recursive: true });
     }
-    
-    // Append to log file
-    fs.appendFileSync(debugLogPath, data + '\n');
-  } catch (error) {
-    // Silently fail - debug logging should not break the application
-    // Only log to console if it's a critical error
-    if (error instanceof Error && !error.message.includes('ENOENT')) {
-      console.warn('Failed to write to debug.log:', error.message);
-    }
+    const line = JSON.stringify({
+      ts: new Date().toISOString(),
+      ...entry
+    }) + '\n';
+    fs.appendFileSync(logPath, line);
+  } catch {
+    // do not break app if log write fails
   }
 }
 
@@ -381,7 +383,7 @@ const saveCustomizationsToNormalizedTables = async (
       const converted = toMySQLTimestamp(createdAt || new Date());
       mysqlCreatedAt = converted || toMySQLTimestamp(new Date()) || '';
     }
-    
+
     if (!mysqlCreatedAt) {
       console.warn('⚠️ Failed to convert createdAt to MySQL format, using current timestamp');
       mysqlCreatedAt = toMySQLTimestamp(new Date()) || new Date().toISOString().replace('T', ' ').slice(0, 19);
@@ -400,7 +402,7 @@ const saveCustomizationsToNormalizedTables = async (
             AND (bundle_product_id IS NULL AND ? IS NULL OR bundle_product_id = ?)
         )
       `, [transactionItemId, bundleProductId || null, bundleProductId || null]);
-      
+
       await connection.query(`
         DELETE FROM transaction_item_customizations 
         WHERE transaction_item_id = ? 
@@ -475,6 +477,10 @@ type TransactionItemRow = {
   harga_shopeefood?: number;
   harga_qpon?: number;
   harga_tiktok?: number;
+  refund_total?: number;
+  final_amount?: number | null;
+  total_amount?: number | null;
+  tx_items_total?: number;
 };
 
 type TransactionRefundRow = {
@@ -581,6 +587,33 @@ async function ensureTransactionItemsWaiterIdColumn(): Promise<void> {
   }
 }
 
+/** Lazy migration: ensure transaction_items.package_line_finished_at_json exists (legacy; prefer transaction_item_package_lines.finished_at). */
+let transactionItemsPackageLineFinishedAtEnsured = false;
+async function ensureTransactionItemsPackageLineFinishedAtColumn(): Promise<void> {
+  if (transactionItemsPackageLineFinishedAtEnsured) return;
+  try {
+    await executeDdlIgnoreDup('ALTER TABLE transaction_items ADD COLUMN package_line_finished_at_json TEXT DEFAULT NULL COMMENT \'Per-line finished-at times for package breakdown (JSON: {"0":"iso",...})\' AFTER production_finished_at');
+    transactionItemsPackageLineFinishedAtEnsured = true;
+    console.log('✅ transaction_items.package_line_finished_at_json column ensured (lazy migration)');
+  } catch (e) {
+    console.warn('⚠️ Lazy migration transaction_items.package_line_finished_at_json failed (will retry on next use):', (e as Error)?.message);
+  }
+}
+
+/** Lazy migration: ensure transaction_item_package_lines.finished_at exists (normalized per-line completion). */
+let transactionItemPackageLinesFinishedAtEnsured = false;
+async function ensureTransactionItemPackageLinesFinishedAtColumn(): Promise<void> {
+  if (transactionItemPackageLinesFinishedAtEnsured) return;
+  try {
+    await executeDdlIgnoreDup('ALTER TABLE transaction_item_package_lines ADD COLUMN finished_at TIMESTAMP NULL DEFAULT NULL AFTER quantity');
+    await executeDdlIgnoreDup('ALTER TABLE transaction_item_package_lines ADD INDEX idx_tipl_finished_at (finished_at)');
+    transactionItemPackageLinesFinishedAtEnsured = true;
+    console.log('✅ transaction_item_package_lines.finished_at column ensured (lazy migration)');
+  } catch (e) {
+    console.warn('⚠️ Lazy migration transaction_item_package_lines.finished_at failed (will retry on next use):', (e as Error)?.message);
+  }
+}
+
 async function ensureSystemPosQueueTable(): Promise<void> {
   const sql = `CREATE TABLE IF NOT EXISTS system_pos_queue (
     id INT NOT NULL AUTO_INCREMENT,
@@ -663,6 +696,7 @@ async function ensureSystemPosSchema(): Promise<void> {
       total_price DECIMAL(15,2) NOT NULL,
       custom_note TEXT DEFAULT NULL,
       bundle_selections_json TEXT DEFAULT NULL,
+      package_selections_json TEXT DEFAULT NULL,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
       waiter_id INT DEFAULT NULL,
       PRIMARY KEY (id),
@@ -741,6 +775,7 @@ async function ensureSystemPosSchema(): Promise<void> {
     'ALTER TABLE transactions ADD COLUMN waiter_id INT DEFAULT NULL AFTER user_id',
     'ALTER TABLE transaction_items ADD COLUMN waiter_id INT DEFAULT NULL AFTER created_at',
     "ALTER TABLE transactions ADD COLUMN sync_status ENUM('pending','synced','failed') DEFAULT 'pending' AFTER payment_method_id",
+    "ALTER TABLE products ADD COLUMN is_package TINYINT(1) NOT NULL DEFAULT 0 COMMENT '1 = package product' AFTER is_bundle",
     'ALTER TABLE transactions ADD COLUMN sync_attempts INT DEFAULT 0 AFTER sync_status',
     'ALTER TABLE transactions ADD COLUMN synced_at DATETIME DEFAULT NULL AFTER synced_at',
     'ALTER TABLE transactions ADD COLUMN last_sync_attempt TIMESTAMP NULL DEFAULT NULL AFTER synced_at',
@@ -753,7 +788,7 @@ async function ensureSystemPosSchema(): Promise<void> {
     await executeSystemPosDdlIgnoreDup(sql);
   }
 
-  const masterTables = ['organizations', 'roles', 'businesses', 'category1', 'category2', 'category2_businesses', 'products', 'product_customization_types', 'product_customization_options', 'users', 'employees_position', 'employees', 'payment_methods'] as const;
+  const masterTables = ['organizations', 'roles', 'businesses', 'category1', 'category2', 'category2_businesses', 'products', 'product_customization_types', 'product_customization_options', 'bundle_items', 'package_items', 'package_item_products', 'users', 'employees_position', 'employees', 'payment_methods'] as const;
   for (const t of masterTables) {
     try {
       await executeSystemPosDdl(`CREATE TABLE IF NOT EXISTS \`${t}\` LIKE \`${mainDb}\`.\`${t}\``);
@@ -792,7 +827,7 @@ function createWindows(): void {
 
     // Initialize MySQL connection pool
     const mysqlPool = initializeMySQLPool();
-    
+
     // Initialize MySQL schema
     initializeMySQLSchema().catch(err => {
       console.error('❌ Failed to initialize MySQL schema:', err);
@@ -802,13 +837,13 @@ function createWindows(): void {
     // #region agent log
     void (async () => {
       try {
-        fetch('http://127.0.0.1:7242/ingest/7b565785-72b5-49f7-b2c0-57606ea0d0b5', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ location: 'main.ts:before-waiter-migration', message: 'Before main DB waiter_id migration', data: {}, timestamp: Date.now(), sessionId: 'debug-session', runId: 'run1', hypothesisId: 'H1' }) }).catch(() => {});
+        fetch('http://127.0.0.1:7242/ingest/7b565785-72b5-49f7-b2c0-57606ea0d0b5', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ location: 'main.ts:before-waiter-migration', message: 'Before main DB waiter_id migration', data: {}, timestamp: Date.now(), sessionId: 'debug-session', runId: 'run1', hypothesisId: 'H1' }) }).catch(() => { });
         await executeDdlIgnoreDup('ALTER TABLE transaction_items ADD COLUMN waiter_id INT DEFAULT NULL COMMENT \'Employee who added this line item\' AFTER created_at');
         await executeDdlIgnoreDup('ALTER TABLE transaction_items ADD INDEX idx_transaction_items_waiter (waiter_id)');
         await executeDdlIgnoreDup('ALTER TABLE transactions ADD COLUMN paid_at DATETIME DEFAULT NULL COMMENT \'When the transaction was paid\' AFTER updated_at');
-        fetch('http://127.0.0.1:7242/ingest/7b565785-72b5-49f7-b2c0-57606ea0d0b5', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ location: 'main.ts:after-waiter-migration', message: 'Main DB waiter_id migration completed', data: { success: true }, timestamp: Date.now(), sessionId: 'debug-session', runId: 'run1', hypothesisId: 'H1' }) }).catch(() => {});
+        fetch('http://127.0.0.1:7242/ingest/7b565785-72b5-49f7-b2c0-57606ea0d0b5', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ location: 'main.ts:after-waiter-migration', message: 'Main DB waiter_id migration completed', data: { success: true }, timestamp: Date.now(), sessionId: 'debug-session', runId: 'run1', hypothesisId: 'H1' }) }).catch(() => { });
       } catch (migErr) {
-        fetch('http://127.0.0.1:7242/ingest/7b565785-72b5-49f7-b2c0-57606ea0d0b5', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ location: 'main.ts:waiter-migration-error', message: 'Main DB waiter_id migration failed', data: { error: (migErr as Error)?.message }, timestamp: Date.now(), sessionId: 'debug-session', runId: 'run1', hypothesisId: 'H1' }) }).catch(() => {});
+        fetch('http://127.0.0.1:7242/ingest/7b565785-72b5-49f7-b2c0-57606ea0d0b5', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ location: 'main.ts:waiter-migration-error', message: 'Main DB waiter_id migration failed', data: { error: (migErr as Error)?.message }, timestamp: Date.now(), sessionId: 'debug-session', runId: 'run1', hypothesisId: 'H1' }) }).catch(() => { });
         console.warn('⚠️ Main DB migration (transaction_items.waiter_id) failed (non-fatal):', (migErr as Error)?.message);
       }
     })();
@@ -816,7 +851,7 @@ function createWindows(): void {
 
     // MySQL pool is already initialized above
     console.log('✅ MySQL database connection initialized (salespulse)');
-    
+
     // Initialize System POS MySQL connection pool (for printer 2 transactions)
     initializeSystemPosPool();
     console.log('✅ System POS MySQL database connection initialized (system_pos)');
@@ -1183,23 +1218,23 @@ function createWindows(): void {
       let query = `SELECT DISTINCT c2.name AS category2_name, c2.updated_at, c2.display_order
         FROM category2 c2
         INNER JOIN products p ON p.category2_id = c2.id`;
-      
+
       const params: number[] = [];
-      
+
       // Add business filter if businessId is provided
       if (businessId) {
         query += ` INNER JOIN product_businesses pb ON p.id = pb.product_id`;
       }
-      
+
       query += ` WHERE p.status = 'active' AND c2.is_active = 1`;
-      
+
       if (businessId) {
         query += ` AND pb.business_id = ?`;
         params.push(businessId);
       }
-      
+
       query += ` ORDER BY c2.display_order ASC, c2.name ASC`;
-      
+
       return await executeQuery<{ category2_name: string; updated_at: number }>(query, params);
     } catch (error) {
       console.error('Error getting categories:', error);
@@ -1207,11 +1242,12 @@ function createWindows(): void {
     }
   });
   ipcMain.handle('localdb-upsert-product-businesses', async (event, rows: Array<{ product_id: number; business_id: number }>) => {
-    try {const queries: Array<{ sql: string; params?: (string | number | null | boolean)[] }> = [];
-      
+    try {
+      const queries: Array<{ sql: string; params?: (string | number | null | boolean)[] }> = [];
+
       // Verify business_id and product_id exist before inserting (foreign key constraints)
       const validJunctionData: Array<{ product_id: number; business_id: number }> = [];
-      
+
       for (const rel of rows) {
         try {
           const [businessExists, productExists] = await Promise.all([
@@ -1232,7 +1268,7 @@ function createWindows(): void {
           continue;
         }
       }
-      
+
       if (validJunctionData.length > 0) {
         const junctionQueries = validJunctionData.map(rel => ({
           sql: `
@@ -1242,72 +1278,72 @@ function createWindows(): void {
           `,
           params: [rel.product_id, rel.business_id]
         }));
-        queries.push(...junctionQueries);console.log(`✅ [PRODUCT BUSINESSES UPSERT] Stored ${validJunctionData.length} product-business relationships (${rows.length - validJunctionData.length} skipped)`);
+        queries.push(...junctionQueries); console.log(`✅ [PRODUCT BUSINESSES UPSERT] Stored ${validJunctionData.length} product-business relationships (${rows.length - validJunctionData.length} skipped)`);
       } else {
         console.warn(`⚠️ [PRODUCT BUSINESSES UPSERT] No valid junction table data (all ${rows.length} skipped)`);
       }
-      
+
       if (queries.length > 0) {
         await executeTransaction(queries);
       }
       return { success: true };
     } catch (error) {
-      console.error('Error upserting product_businesses:', error);return { success: false };
+      console.error('Error upserting product_businesses:', error); return { success: false };
     }
   });
 
   // Download product/business images from server and rewrite image_url to pos-image:// for offline use
   ipcMain.handle('download-and-rewrite-sync-images', async (_event, payload: { baseUrl: string; products: UnknownRecord[]; businesses: UnknownRecord[] }) => {
     try {
-    const { baseUrl, products, businesses } = payload;
-    const base = baseUrl.replace(/\/$/, '');
-    const userData = app.getPath('userData');
-    const dirs = [path.join(userData, 'images', 'products'), path.join(userData, 'images', 'businesses')];
-    for (const d of dirs) {
-      try { fs.mkdirSync(d, { recursive: true }); } catch { /* ignore */ }
-    }
-    const imagePathRe = /^\/images\/(products|businesses)\/([^/]+\.(webp|png|jpg|jpeg|gif))$/i;
-    let downloadCount = 0;
-    let rewriteCount = 0;
-    let failCount = 0;
-    const tryDownload = async (imageUrl: string): Promise<string> => {
-      if (!imageUrl || typeof imageUrl !== 'string') return imageUrl;
-      const m = imageUrl.match(imagePathRe);
-      if (!m) {
-        return imageUrl;
+      const { baseUrl, products, businesses } = payload;
+      const base = baseUrl.replace(/\/$/, '');
+      const userData = app.getPath('userData');
+      const dirs = [path.join(userData, 'images', 'products'), path.join(userData, 'images', 'businesses')];
+      for (const d of dirs) {
+        try { fs.mkdirSync(d, { recursive: true }); } catch { /* ignore */ }
       }
-      const [, sub, filename] = m;
-      const fullUrl = `${base}${imageUrl}`;
-      const localPath = path.join(userData, 'images', sub, filename);
-      try {
-        const res = await fetch(fullUrl);
-        if (!res.ok) {
+      const imagePathRe = /^\/images\/(products|businesses)\/([^/]+\.(webp|png|jpg|jpeg|gif))$/i;
+      let downloadCount = 0;
+      let rewriteCount = 0;
+      let failCount = 0;
+      const tryDownload = async (imageUrl: string): Promise<string> => {
+        if (!imageUrl || typeof imageUrl !== 'string') return imageUrl;
+        const m = imageUrl.match(imagePathRe);
+        if (!m) {
+          return imageUrl;
+        }
+        const [, sub, filename] = m;
+        const fullUrl = `${base}${imageUrl}`;
+        const localPath = path.join(userData, 'images', sub, filename);
+        try {
+          const res = await fetch(fullUrl);
+          if (!res.ok) {
+            failCount++;
+            return `${base}${imageUrl}`;
+          }
+          const buf = await res.arrayBuffer();
+          fs.writeFileSync(localPath, Buffer.from(buf));
+          // Remove leading slash from imageUrl to avoid triple slash: pos-image:///images/... -> pos-image://images/...
+          const rewritten = `pos-image://${imageUrl.startsWith('/') ? imageUrl.slice(1) : imageUrl}`;
+          downloadCount++;
+          rewriteCount++;
+          return rewritten;
+        } catch (err) {
           failCount++;
           return `${base}${imageUrl}`;
         }
-        const buf = await res.arrayBuffer();
-        fs.writeFileSync(localPath, Buffer.from(buf));
-        // Remove leading slash from imageUrl to avoid triple slash: pos-image:///images/... -> pos-image://images/...
-        const rewritten = `pos-image://${imageUrl.startsWith('/') ? imageUrl.slice(1) : imageUrl}`;
-        downloadCount++;
-        rewriteCount++;
-        return rewritten;
-      } catch (err) {
-        failCount++;
-        return `${base}${imageUrl}`;
+      };
+      for (const p of products || []) {
+        if (p && typeof p.image_url === 'string') {
+          (p as Record<string, unknown>).image_url = await tryDownload(p.image_url);
+        }
       }
-    };
-    for (const p of products || []) {
-      if (p && typeof p.image_url === 'string') {
-        (p as Record<string, unknown>).image_url = await tryDownload(p.image_url);
+      for (const b of businesses || []) {
+        if (b && typeof b.image_url === 'string') {
+          (b as Record<string, unknown>).image_url = await tryDownload(b.image_url);
+        }
       }
-    }
-    for (const b of businesses || []) {
-      if (b && typeof b.image_url === 'string') {
-        (b as Record<string, unknown>).image_url = await tryDownload(b.image_url);
-      }
-    }
-    return { products: products || [], businesses: businesses || [] };
+      return { products: products || [], businesses: businesses || [] };
     } catch (handlerError) {
       console.error('❌ [IMAGE DOWNLOAD] Handler error:', handlerError);
       return { products: payload.products || [], businesses: payload.businesses || [] };
@@ -1425,6 +1461,7 @@ function createWindows(): void {
         }
 
         const isBundle = (r.is_bundle === 1 || r.is_bundle === true) ? 1 : 0;
+        const isPackage = (r.is_package === 1 || r.is_package === true) ? 1 : 0;
         const hasCustomization = (r.has_customization === 1 || r.has_customization === true) ? 1 : 0;
 
         const productId = getId();
@@ -1450,8 +1487,8 @@ function createWindows(): void {
         queries.push({
           sql: `INSERT INTO products (
             id, menu_code, nama, satuan, category1_id, category2_id, keterangan,
-            harga_beli, ppn, harga_jual, harga_khusus, harga_online, harga_qpon, harga_gofood, harga_grabfood, harga_shopeefood, harga_tiktok, fee_kerja, image_url, status, has_customization, is_bundle, created_at, updated_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            harga_beli, ppn, harga_jual, harga_khusus, harga_online, harga_qpon, harga_gofood, harga_grabfood, harga_shopeefood, harga_tiktok, fee_kerja, image_url, status, has_customization, is_bundle, is_package, created_at, updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
           ON DUPLICATE KEY UPDATE
             menu_code=VALUES(menu_code),
             nama=VALUES(nama),
@@ -1474,11 +1511,12 @@ function createWindows(): void {
             status=VALUES(status),
             has_customization=VALUES(has_customization),
             is_bundle=VALUES(is_bundle),
+            is_package=VALUES(is_package),
             updated_at=VALUES(updated_at)`,
           params: [
             productId, menuCode, nama, satuan, category1Id, category2Id, keterangan,
             hargaBeli, ppn, hargaJual, hargaKhusus, hargaOnline, hargaQpon, hargaGofood, hargaGrabfood, hargaShopeefood, hargaTiktok,
-            feeKerja, imageUrl, status, hasCustomization, isBundle,
+            feeKerja, imageUrl, status, hasCustomization, isBundle, isPackage,
             createdTimestamp, toMySQLTimestamp(Date.now())
           ]
         });
@@ -1558,6 +1596,12 @@ function createWindows(): void {
         params: [...orphanedProductIds]
       });
 
+      // 3. Delete package_item_products -> package_items where package_product_id is in orphaned products
+      queries.push({
+        sql: `DELETE FROM package_items WHERE package_product_id IN (${deletePlaceholders})`,
+        params: [...orphanedProductIds]
+      });
+
       // 3. Delete product_businesses relationships for orphaned products
       queries.push({
         sql: `DELETE FROM product_businesses WHERE product_id IN (${deletePlaceholders}) AND business_id = ?`,
@@ -1572,13 +1616,74 @@ function createWindows(): void {
 
       await executeTransaction(queries);
       console.log(`✅ [PRODUCTS CLEANUP] Successfully deleted ${orphanedProductIds.length} orphaned products and their related data`);
-      
+
       return { success: true, deletedCount: orphanedProductIds.length, deletedProductIds: orphanedProductIds };
     } catch (error) {
       console.error('❌ [PRODUCTS CLEANUP] Failed to cleanup orphaned products:', error);
       return { success: false, error: error instanceof Error ? error.message : 'Unknown error' };
     }
   });
+
+  // Mark bundle_items as inactive if not in synced list (soft-delete sync)
+  ipcMain.handle('localdb-mark-inactive-bundle-items', async (_event, businessId: number, syncedBundleItemIds: number[]) => {
+    try {
+      const params: (string | number)[] = [businessId];
+      let sql: string;
+      if (Array.isArray(syncedBundleItemIds) && syncedBundleItemIds.length > 0) {
+        const placeholders = syncedBundleItemIds.map(() => '?').join(',');
+        sql = `UPDATE bundle_items SET is_active = 0 WHERE bundle_product_id IN (SELECT product_id FROM product_businesses WHERE business_id = ?) AND id NOT IN (${placeholders})`;
+        params.push(...syncedBundleItemIds);
+      } else {
+        sql = `UPDATE bundle_items SET is_active = 0 WHERE bundle_product_id IN (SELECT product_id FROM product_businesses WHERE business_id = ?)`;
+      }
+      await executeUpdate(sql, params);
+      return { success: true };
+    } catch (error) {
+      console.error('❌ [MARK INACTIVE] bundle_items:', error);
+      return { success: false, error: error instanceof Error ? error.message : 'Unknown error' };
+    }
+  });
+
+  // Mark package_items as inactive if not in synced list (soft-delete sync)
+  ipcMain.handle('localdb-mark-inactive-package-items', async (_event, businessId: number, syncedPackageItemIds: number[]) => {
+    try {
+      const params: (string | number)[] = [businessId];
+      let sql: string;
+      if (Array.isArray(syncedPackageItemIds) && syncedPackageItemIds.length > 0) {
+        const placeholders = syncedPackageItemIds.map(() => '?').join(',');
+        sql = `UPDATE package_items SET is_active = 0 WHERE package_product_id IN (SELECT product_id FROM product_businesses WHERE business_id = ?) AND id NOT IN (${placeholders})`;
+        params.push(...syncedPackageItemIds);
+      } else {
+        sql = `UPDATE package_items SET is_active = 0 WHERE package_product_id IN (SELECT product_id FROM product_businesses WHERE business_id = ?)`;
+      }
+      await executeUpdate(sql, params);
+      return { success: true };
+    } catch (error) {
+      console.error('❌ [MARK INACTIVE] package_items:', error);
+      return { success: false, error: error instanceof Error ? error.message : 'Unknown error' };
+    }
+  });
+
+  // Mark package_item_products as inactive if not in synced list (soft-delete sync)
+  ipcMain.handle('localdb-mark-inactive-package-item-products', async (_event, businessId: number, syncedPackageItemProductIds: number[]) => {
+    try {
+      const params: (string | number)[] = [businessId];
+      let sql: string;
+      if (Array.isArray(syncedPackageItemProductIds) && syncedPackageItemProductIds.length > 0) {
+        const placeholders = syncedPackageItemProductIds.map(() => '?').join(',');
+        sql = `UPDATE package_item_products SET is_active = 0 WHERE package_item_id IN (SELECT id FROM package_items WHERE package_product_id IN (SELECT product_id FROM product_businesses WHERE business_id = ?)) AND id NOT IN (${placeholders})`;
+        params.push(...syncedPackageItemProductIds);
+      } else {
+        sql = `UPDATE package_item_products SET is_active = 0 WHERE package_item_id IN (SELECT id FROM package_items WHERE package_product_id IN (SELECT product_id FROM product_businesses WHERE business_id = ?))`;
+      }
+      await executeUpdate(sql, params);
+      return { success: true };
+    } catch (error) {
+      console.error('❌ [MARK INACTIVE] package_item_products:', error);
+      return { success: false, error: error instanceof Error ? error.message : 'Unknown error' };
+    }
+  });
+
   ipcMain.handle('localdb-get-products-by-jenis', async (event, jenis: string, businessId?: number) => {
     try {
       let query = `SELECT 
@@ -1590,24 +1695,24 @@ function createWindows(): void {
         FROM products p
         LEFT JOIN category2 c2 ON p.category2_id = c2.id
         LEFT JOIN category1 c1 ON p.category1_id = c1.id`;
-      
+
       const params: (string | number)[] = [];
-      
+
       // Add business filter if businessId is provided
       if (businessId) {
         query += ` INNER JOIN product_businesses pb ON p.id = pb.product_id`;
       }
-      
+
       query += ` WHERE c2.name = ? AND p.status = 'active'`;
       params.push(jenis);
-      
+
       if (businessId) {
         query += ` AND pb.business_id = ?`;
         params.push(businessId);
       }
-      
+
       query += ` ORDER BY p.nama ASC`;
-      
+
       return await executeQuery(query, params);
     } catch (error) {
       console.error('Error getting products by jenis:', error);
@@ -1617,35 +1722,36 @@ function createWindows(): void {
 
   // Add the missing method for category2 filtering
   ipcMain.handle('localdb-get-products-by-category2', async (event, category2Name: string, businessId?: number) => {
-    try {let query = `SELECT 
+    try {
+      let query = `SELECT 
         p.id, p.menu_code, p.nama, p.satuan, 
         c2.name AS category2_name, c1.name AS category1_name,
         p.keterangan, p.harga_beli, p.ppn, p.harga_jual, p.harga_khusus, 
         p.harga_online, p.harga_qpon, p.harga_gofood, p.harga_grabfood, 
-        p.harga_shopeefood, p.harga_tiktok, p.fee_kerja, p.image_url, p.status, p.has_customization, p.is_bundle
+        p.harga_shopeefood, p.harga_tiktok, p.fee_kerja, p.image_url, p.status, p.has_customization, p.is_bundle, p.is_package
         FROM products p
         LEFT JOIN category2 c2 ON p.category2_id = c2.id
         LEFT JOIN category1 c1 ON p.category1_id = c1.id`;
-      
+
       const params: (string | number)[] = [];
-      
+
       // Filter by businessId using junction table (product_businesses)
       // Note: Only using junction table because p.business_id column doesn't exist in this MySQL schema
       // ALWAYS apply business filter when businessId is provided (don't fallback to all products)
       if (businessId) {
         query += ` INNER JOIN product_businesses pb ON p.id = pb.product_id`;
       }
-      
+
       query += ` WHERE c2.name = ? AND p.status = 'active' AND p.harga_jual IS NOT NULL`;
       params.push(category2Name);
-      
+
       if (businessId) {
         // Use junction table only (p.business_id column doesn't exist in this schema)
         query += ` AND pb.business_id = ?`;
         params.push(businessId);
       }
-      
-      query += ` ORDER BY p.nama ASC`;const result = await executeQuery(query, params);return result;
+
+      query += ` ORDER BY p.nama ASC`; const result = await executeQuery(query, params); return result;
     } catch (error) {
       console.error('Error getting products by category2:', error);
       return [];
@@ -1658,28 +1764,28 @@ function createWindows(): void {
         c2.name AS category2_name, c1.name AS category1_name,
         p.keterangan, p.harga_beli, p.ppn, p.harga_jual, p.harga_khusus, 
         p.harga_online, p.harga_qpon, p.harga_gofood, p.harga_grabfood, 
-        p.harga_shopeefood, p.harga_tiktok, p.fee_kerja, p.image_url, p.status, p.has_customization, p.is_bundle
+        p.harga_shopeefood, p.harga_tiktok, p.fee_kerja, p.image_url, p.status, p.has_customization, p.is_bundle, p.is_package
         FROM products p
         LEFT JOIN category2 c2 ON p.category2_id = c2.id
         LEFT JOIN category1 c1 ON p.category1_id = c1.id`;
-      
+
       const params: number[] = [];
-      
+
       // Filter by businessId using junction table (product_businesses)
       // Note: Only using junction table because p.business_id column doesn't exist in this MySQL schema
       // ALWAYS apply business filter when businessId is provided (don't fallback to all products)
       if (businessId) {
         query += ` INNER JOIN product_businesses pb ON p.id = pb.product_id`;
       }
-      
+
       query += ` WHERE p.status = 'active' AND p.harga_jual IS NOT NULL`;
-      
+
       if (businessId) {
         // Use junction table only (p.business_id column doesn't exist in this schema)
         query += ` AND pb.business_id = ?`;
         params.push(businessId);
       }
-      
+
       query += ` ORDER BY p.nama ASC`;
       const result = await executeQuery(query, params);
       return result;
@@ -1860,7 +1966,7 @@ function createWindows(): void {
           c2.name AS category2_name
         FROM bundle_items bi
         LEFT JOIN category2 c2 ON bi.category2_id = c2.id
-        WHERE bi.bundle_product_id = ?
+        WHERE bi.bundle_product_id = ? AND (COALESCE(bi.is_active, 1) = 1)
         ORDER BY bi.display_order ASC
       `, [productIdNum]);
 
@@ -1984,17 +2090,19 @@ function createWindows(): void {
           const updatedAtRaw = getDate('updated_at');
           const createdAt = createdAtRaw ? toMySQLTimestamp(createdAtRaw as string | number | Date) : toMySQLTimestamp(new Date());
           const updatedAt = updatedAtRaw ? toMySQLTimestamp(updatedAtRaw as string | number | Date) : toMySQLTimestamp(Date.now());
-          
+
+          const isActive = r.is_active !== undefined ? (r.is_active ? 1 : 0) : 1;
           queries.push({
             sql: `
               INSERT INTO bundle_items (
-                id, bundle_product_id, category2_id, required_quantity, display_order, created_at, updated_at
-              ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                id, bundle_product_id, category2_id, required_quantity, display_order, is_active, created_at, updated_at
+              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
               ON DUPLICATE KEY UPDATE
                 bundle_product_id = VALUES(bundle_product_id),
                 category2_id = VALUES(category2_id),
                 required_quantity = VALUES(required_quantity),
                 display_order = VALUES(display_order),
+                is_active = VALUES(is_active),
                 updated_at = VALUES(updated_at)
             `,
             params: [
@@ -2003,6 +2111,7 @@ function createWindows(): void {
               category2Id,
               getNumber('required_quantity'),
               getNumber('display_order'),
+              isActive,
               createdAt,
               updatedAt
             ]
@@ -2034,6 +2143,180 @@ function createWindows(): void {
         ? String((error as { message: unknown }).message)
         : String(error);
       console.error(`❌ [BUNDLE ITEMS UPSERT] Error:`, errorMessage);
+      return { success: false };
+    }
+  });
+
+  // Package items for POS: items + choice products for flexible
+  ipcMain.handle('localdb-get-package-items', async (_event, packageProductId: number | string) => {
+    try {
+      const id = typeof packageProductId === 'string' ? parseInt(packageProductId, 10) : packageProductId;
+      if (isNaN(id)) return [];
+      const items = await executeQuery<{
+        id: number;
+        package_product_id: number;
+        selection_type: string;
+        product_id: number | null;
+        required_quantity: number;
+        display_order: number;
+        product_name: string | null;
+      }>(`
+        SELECT
+          pi.id,
+          pi.package_product_id,
+          pi.selection_type,
+          pi.product_id,
+          pi.required_quantity,
+          pi.display_order,
+          p.nama AS product_name
+        FROM package_items pi
+        LEFT JOIN products p ON pi.product_id = p.id
+        WHERE pi.package_product_id = ? AND (COALESCE(pi.is_active, 1) = 1)
+        ORDER BY pi.display_order ASC
+      `, [id]);
+      const itemIds = items.map(i => i.id);
+      if (itemIds.length === 0) return items.map(pi => ({ ...pi, choice_products: [] }));
+      const placeholders = itemIds.map(() => '?').join(',');
+      const choices = await executeQuery<{ package_item_id: number; product_id: number; product_name: string; display_order: number }>(`
+        SELECT pip.package_item_id, pip.product_id, p.nama AS product_name, pip.display_order
+        FROM package_item_products pip
+        INNER JOIN products p ON pip.product_id = p.id
+        WHERE pip.package_item_id IN (${placeholders}) AND (COALESCE(pip.is_active, 1) = 1)
+        ORDER BY pip.package_item_id, pip.display_order ASC
+      `, itemIds);
+      const choiceByItem: Record<number, { id: number; nama: string }[]> = {};
+      for (const c of choices) {
+        if (!choiceByItem[c.package_item_id]) choiceByItem[c.package_item_id] = [];
+        choiceByItem[c.package_item_id].push({ id: c.product_id, nama: c.product_name });
+      }
+      return items.map(pi => ({
+        id: pi.id,
+        package_product_id: pi.package_product_id,
+        selection_type: pi.selection_type,
+        product_id: pi.product_id,
+        required_quantity: pi.required_quantity,
+        display_order: pi.display_order,
+        product_name: pi.product_name || null,
+        choice_products: choiceByItem[pi.id] || []
+      }));
+    } catch (err) {
+      console.error('localdb-get-package-items error:', err);
+      return [];
+    }
+  });
+
+  // Package items (for packages - product with is_package=1)
+  ipcMain.handle('localdb-upsert-package-items', async (event, rows: RowArray) => {
+    try {
+      if (!Array.isArray(rows)) return { success: false };
+      const queries: Array<{ sql: string; params?: (string | number | null | boolean)[] }> = [];
+      for (const r of rows) {
+        const getId = () => {
+          const val = r.id;
+          if (typeof val === 'number') return val;
+          if (typeof val === 'string') { const n = Number(val); return isNaN(n) ? null : n; }
+          return null;
+        };
+        const getNumber = (k: string) => {
+          const val = r[k];
+          if (typeof val === 'number') return val;
+          if (typeof val === 'string') { const n = Number(val); return isNaN(n) ? null : n; }
+          return null;
+        };
+        const getString = (k: string) => (typeof r[k] === 'string' ? r[k] as string : null);
+        const getDate = (k: string) => {
+          const val = r[k];
+          if (val instanceof Date) return val;
+          if (typeof val === 'string' || typeof val === 'number') return val;
+          return null;
+        };
+        const packageProductId = getNumber('package_product_id');
+        if (!packageProductId) continue;
+        const rowId = getId();
+        const selectionType = getString('selection_type') || 'default';
+        const productId = getNumber('product_id');
+        const requiredQty = getNumber('required_quantity') ?? 1;
+        const displayOrder = getNumber('display_order') ?? 0;
+        const createdAtRaw = getDate('created_at');
+        const updatedAtRaw = getDate('updated_at');
+        const createdAt = createdAtRaw ? toMySQLTimestamp(createdAtRaw as string | number | Date) : toMySQLTimestamp(new Date());
+        const updatedAt = updatedAtRaw ? toMySQLTimestamp(updatedAtRaw as string | number | Date) : toMySQLTimestamp(Date.now());
+        const isActive = r.is_active !== undefined ? (r.is_active ? 1 : 0) : 1;
+        queries.push({
+          sql: `INSERT INTO package_items (
+            id, package_product_id, selection_type, product_id, required_quantity, display_order, is_active, created_at, updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+          ON DUPLICATE KEY UPDATE
+            package_product_id=VALUES(package_product_id),
+            selection_type=VALUES(selection_type),
+            product_id=VALUES(product_id),
+            required_quantity=VALUES(required_quantity),
+            display_order=VALUES(display_order),
+            is_active=VALUES(is_active),
+            updated_at=VALUES(updated_at)`,
+          params: [rowId, packageProductId, selectionType, productId, requiredQty, displayOrder, isActive, createdAt, updatedAt]
+        });
+      }
+      if (queries.length > 0) {
+        await executeTransaction(queries);
+        await upsertMasterDataToSystemPos(queries);
+      }
+      return { success: true };
+    } catch (error) {
+      console.error('Error upserting package items:', error);
+      return { success: false };
+    }
+  });
+
+  // Package item products (for flexible package items - which products can be chosen)
+  ipcMain.handle('localdb-upsert-package-item-products', async (event, rows: RowArray) => {
+    try {
+      if (!Array.isArray(rows)) return { success: false };
+      const queries: Array<{ sql: string; params?: (string | number | null | boolean)[] }> = [];
+      for (const r of rows) {
+        const getId = () => {
+          const val = r.id;
+          if (typeof val === 'number') return val;
+          if (typeof val === 'string') { const n = Number(val); return isNaN(n) ? null : n; }
+          return null;
+        };
+        const getNumber = (k: string) => {
+          const val = r[k];
+          if (typeof val === 'number') return val;
+          if (typeof val === 'string') { const n = Number(val); return isNaN(n) ? null : n; }
+          return null;
+        };
+        const getDate = (k: string) => {
+          const val = r[k];
+          if (val instanceof Date) return val;
+          if (typeof val === 'string' || typeof val === 'number') return val;
+          return null;
+        };
+        const packageItemId = getNumber('package_item_id');
+        const productId = getNumber('product_id');
+        if (!packageItemId || !productId) continue;
+        const rowId = getId();
+        const displayOrder = getNumber('display_order') ?? 0;
+        const createdAtRaw = getDate('created_at');
+        const createdAt = createdAtRaw ? toMySQLTimestamp(createdAtRaw as string | number | Date) : toMySQLTimestamp(new Date());
+        const isActive = r.is_active !== undefined ? (r.is_active ? 1 : 0) : 1;
+        queries.push({
+          sql: `INSERT INTO package_item_products (
+            id, package_item_id, product_id, display_order, is_active, created_at
+          ) VALUES (?, ?, ?, ?, ?, ?)
+          ON DUPLICATE KEY UPDATE
+            display_order=VALUES(display_order),
+            is_active=VALUES(is_active)`,
+          params: [rowId, packageItemId, productId, displayOrder, isActive, createdAt]
+        });
+      }
+      if (queries.length > 0) {
+        await executeTransaction(queries);
+        await upsertMasterDataToSystemPos(queries);
+      }
+      return { success: true };
+    } catch (error) {
+      console.error('Error upserting package item products:', error);
       return { success: false };
     }
   });
@@ -2151,9 +2434,10 @@ function createWindows(): void {
   // Comprehensive IPC handlers for all POS tables
   // Users
   ipcMain.handle('localdb-upsert-users', async (event, rows: RowArray, skipRoleValidation: boolean = false) => {
-    try {const queries: Array<{ sql: string; params?: (string | number | null | boolean)[] }> = [];
+    try {
+      const queries: Array<{ sql: string; params?: (string | number | null | boolean)[] }> = [];
       let skippedCount = 0;
-      
+
       for (const r of rows) {
         const getId = () => {
           const val = r.id;
@@ -2181,23 +2465,25 @@ function createWindows(): void {
           return null;
         };
 
-        const userId = getId();let roleId = getNumber('role_id');
+        const userId = getId(); let roleId = getNumber('role_id');
         let orgId = getNumber('organization_id');
-        
+
         // Verify role_id exists before inserting (foreign key constraint) - SKIP on first pass to break circular dependency
         if (roleId && !skipRoleValidation) {
           try {
-            const roleExists = await executeQueryOne<{ id: number }>('SELECT id FROM roles WHERE id = ? LIMIT 1', [roleId]);if (!roleExists) {
-              console.warn(`⚠️ [USERS] Skipping user ${userId}: role_id ${roleId} does not exist`);skippedCount++;
+            const roleExists = await executeQueryOne<{ id: number }>('SELECT id FROM roles WHERE id = ? LIMIT 1', [roleId]); if (!roleExists) {
+              console.warn(`⚠️ [USERS] Skipping user ${userId}: role_id ${roleId} does not exist`); skippedCount++;
               continue;
             }
-          } catch (checkError) {console.warn(`⚠️ [USERS] Failed to verify role_id ${roleId}:`, checkError);
+          } catch (checkError) {
+            console.warn(`⚠️ [USERS] Failed to verify role_id ${roleId}:`, checkError);
             skippedCount++;
             continue;
           }
-        } else if (roleId && skipRoleValidation) {console.log(`ℹ️ [USERS] Skipping role validation for user ${userId} (first pass - breaking circular dependency)`);
+        } else if (roleId && skipRoleValidation) {
+          console.log(`ℹ️ [USERS] Skipping role validation for user ${userId} (first pass - breaking circular dependency)`);
         }
-        
+
         // Verify organization_id exists before inserting (foreign key constraint) - SKIP on first pass
         if (orgId && !skipRoleValidation) {
           try {
@@ -2212,12 +2498,13 @@ function createWindows(): void {
             skippedCount++;
             continue;
           }
-        } else if (orgId && skipRoleValidation) {console.log(`ℹ️ [USERS] Skipping organization validation for user ${userId} (first pass - breaking circular dependency)`);
+        } else if (orgId && skipRoleValidation) {
+          console.log(`ℹ️ [USERS] Skipping organization validation for user ${userId} (first pass - breaking circular dependency)`);
         }
-        
+
         const createdAtRaw = getDate('createdAt');
         const createdAt = createdAtRaw ? toMySQLTimestamp(createdAtRaw as string | number | Date) : toMySQLTimestamp(new Date());
-        
+
         queries.push({
           sql: `INSERT INTO users (
             id, email, password, name, googleId, createdAt, role_id, organization_id
@@ -2236,27 +2523,30 @@ function createWindows(): void {
             roleId,
             orgId
           ]
-        });}
-      
-      if (queries.length > 0) {if (skipRoleValidation) {
+        });
+      }
+
+      if (queries.length > 0) {
+        if (skipRoleValidation) {
           // On first pass: Insert users one by one to handle foreign key errors individually
           let successCount = 0;
           let failCount = 0;
           for (const query of queries) {
             try {
               await executeUpdate(query.sql, query.params || []);
-              successCount++;} catch (insertError: unknown) {
+              successCount++;
+            } catch (insertError: unknown) {
               const err = insertError as { code?: string; errno?: number; message?: string };
               if (err.code === 'ER_NO_REFERENCED_ROW_2' || err.errno === 1452) {
                 // Foreign key constraint - expected on first pass, will retry later
-                failCount++;console.log(`ℹ️ [USERS] User ${query.params?.[0]} insert failed (foreign key - will retry later): ${err.message}`);
+                failCount++; console.log(`ℹ️ [USERS] User ${query.params?.[0]} insert failed (foreign key - will retry later): ${err.message}`);
               } else {
                 // Unexpected error - log and continue
                 failCount++;
                 console.warn(`⚠️ [USERS] User ${query.params?.[0]} insert failed: ${err.message}`);
               }
             }
-          }console.log(`ℹ️ [USERS] First pass: ${successCount} inserted, ${failCount} failed (will retry later)`);
+          } console.log(`ℹ️ [USERS] First pass: ${successCount} inserted, ${failCount} failed (will retry later)`);
         } else {
           // On retry pass: Use transaction for better performance
           try {
@@ -2266,11 +2556,12 @@ function createWindows(): void {
               console.log(`⚠️ [USERS] Skipped ${skippedCount} users due to missing roles/organizations`);
             }
           } catch (transactionError: unknown) {
-            const err = transactionError as { code?: string; errno?: number; message?: string };console.error(`❌ [USERS] Transaction error:`, transactionError);
+            const err = transactionError as { code?: string; errno?: number; message?: string }; console.error(`❌ [USERS] Transaction error:`, transactionError);
             throw transactionError;
           }
         }
-      } else {console.warn(`⚠️ [USERS] No valid users to insert (all ${rows.length} skipped)`);
+      } else {
+        console.warn(`⚠️ [USERS] No valid users to insert (all ${rows.length} skipped)`);
       }
       return { success: true };
     } catch (error) {
@@ -2293,7 +2584,7 @@ function createWindows(): void {
     try {
       const queries: Array<{ sql: string; params?: (string | number | null | boolean)[] }> = [];
       let skippedCount = 0;
-      
+
       for (const r of rows) {
         const getId = () => {
           const val = r.id;
@@ -2324,7 +2615,7 @@ function createWindows(): void {
         const businessId = getId();
         let orgId = getNumber('organization_id');
         let mgmtGroupId = getNumber('management_group_id');
-        
+
         // Verify organization_id exists before inserting (foreign key constraint)
         if (orgId) {
           try {
@@ -2340,17 +2631,17 @@ function createWindows(): void {
             continue;
           }
         }
-        
+
         // Skip management_group_id validation - not needed in POS app (CRM-only)
         // Just set to NULL if provided since we're not syncing management_groups table
         if (mgmtGroupId) {
           mgmtGroupId = null;
         }
-        
+
         const status = getString('status') || 'active';
         const createdAtRaw = getDate('created_at');
         const createdAt = createdAtRaw ? toMySQLTimestamp(createdAtRaw as string | number | Date) : toMySQLTimestamp(new Date());
-        
+
         queries.push({
           sql: `INSERT INTO businesses (
             id, name, permission_name, organization_id, status, management_group_id, image_url, created_at
@@ -2371,7 +2662,7 @@ function createWindows(): void {
           ]
         });
       }
-      
+
       if (queries.length > 0) {
         await executeTransaction(queries);
         await upsertMasterDataToSystemPos(queries);
@@ -2471,12 +2762,12 @@ function createWindows(): void {
   // Employees Position
   ipcMain.handle('localdb-upsert-employees-position', async (event, rows: RowArray) => {
     // #region agent log
-    const logData = {location:'main.ts:2067',message:'localdb-upsert-employees-position called',data:{rowCount:Array.isArray(rows)?rows.length:0,firstRow:Array.isArray(rows)&&rows.length>0?rows[0]:null},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'};
+    const logData = { location: 'main.ts:2067', message: 'localdb-upsert-employees-position called', data: { rowCount: Array.isArray(rows) ? rows.length : 0, firstRow: Array.isArray(rows) && rows.length > 0 ? rows[0] : null }, timestamp: Date.now(), sessionId: 'debug-session', runId: 'run1', hypothesisId: 'C' };
     writeDebugLog(JSON.stringify(logData));
     // #endregion
     try {
       const queries: Array<{ sql: string; params?: (string | number | null | boolean)[] }> = [];
-      
+
       for (const r of rows) {
         const getId = () => {
           const val = r.id;
@@ -2501,7 +2792,7 @@ function createWindows(): void {
         const updatedAtRaw = getDate('updated_at');
         const createdAt = createdAtRaw ? toMySQLTimestamp(createdAtRaw as string | number | Date) : toMySQLTimestamp(new Date());
         const updatedAt = updatedAtRaw ? toMySQLTimestamp(updatedAtRaw as string | number | Date) : toMySQLTimestamp(new Date());
-        
+
         queries.push({
           sql: `INSERT INTO employees_position (
             id, nama_jabatan, created_at, updated_at
@@ -2511,15 +2802,15 @@ function createWindows(): void {
           params: [positionId, namaJabatan, createdAt, updatedAt]
         });
       }
-      
+
       // #region agent log
-      const logBeforeExec = {location:'main.ts:2107',message:'Before executing employees_position queries',data:{queryCount:queries.length,firstQuery:queries.length>0?{sql:queries[0].sql,paramCount:queries[0].params?.length||0}:null},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'E'};
+      const logBeforeExec = { location: 'main.ts:2107', message: 'Before executing employees_position queries', data: { queryCount: queries.length, firstQuery: queries.length > 0 ? { sql: queries[0].sql, paramCount: queries[0].params?.length || 0 } : null }, timestamp: Date.now(), sessionId: 'debug-session', runId: 'run1', hypothesisId: 'E' };
       writeDebugLog(JSON.stringify(logBeforeExec));
       // #endregion
       if (queries.length > 0) {
         await executeTransaction(queries);
         // #region agent log
-        const logAfterExec = {location:'main.ts:2110',message:'After executing employees_position queries',data:{success:true},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'E'};
+        const logAfterExec = { location: 'main.ts:2110', message: 'After executing employees_position queries', data: { success: true }, timestamp: Date.now(), sessionId: 'debug-session', runId: 'run1', hypothesisId: 'E' };
         writeDebugLog(JSON.stringify(logAfterExec));
         // #endregion
         await upsertMasterDataToSystemPos(queries);
@@ -2527,7 +2818,7 @@ function createWindows(): void {
       return { success: true };
     } catch (error) {
       // #region agent log
-      const logError = {location:'main.ts:2113',message:'employees_position upsert error',data:{error:error instanceof Error?error.message:String(error),stack:error instanceof Error?error.stack:undefined},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'D'};
+      const logError = { location: 'main.ts:2113', message: 'employees_position upsert error', data: { error: error instanceof Error ? error.message : String(error), stack: error instanceof Error ? error.stack : undefined }, timestamp: Date.now(), sessionId: 'debug-session', runId: 'run1', hypothesisId: 'D' };
       writeDebugLog(JSON.stringify(logError));
       // #endregion
       console.error('Error upserting employees_position:', error);
@@ -2547,13 +2838,13 @@ function createWindows(): void {
   // Employees
   ipcMain.handle('localdb-upsert-employees', async (event, rows: RowArray, skipValidation: boolean = false) => {
     // #region agent log
-    const logEntry = {location:'main.ts:2127',message:'localdb-upsert-employees called',data:{rowCount:Array.isArray(rows)?rows.length:0,skipValidation:skipValidation,firstRow:Array.isArray(rows)&&rows.length>0?rows[0]:null},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'};
+    const logEntry = { location: 'main.ts:2127', message: 'localdb-upsert-employees called', data: { rowCount: Array.isArray(rows) ? rows.length : 0, skipValidation: skipValidation, firstRow: Array.isArray(rows) && rows.length > 0 ? rows[0] : null }, timestamp: Date.now(), sessionId: 'debug-session', runId: 'run1', hypothesisId: 'C' };
     writeDebugLog(JSON.stringify(logEntry));
     // #endregion
     try {
       const queries: Array<{ sql: string; params?: (string | number | null | boolean)[] }> = [];
       let skippedCount = 0;
-      
+
       for (const r of rows) {
         const getId = () => {
           const val = r.id;
@@ -2601,12 +2892,12 @@ function createWindows(): void {
         // Robust date conversion that handles various input formats
         const convertToMySQLDate = (date: Date | string | number | null | undefined): string | null => {
           if (!date) return null;
-          
+
           // If already in YYYY-MM-DD format, return as-is
           if (typeof date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(date)) {
             return date;
           }
-          
+
           // Try to parse as date
           let dateObj: Date;
           if (typeof date === 'number') {
@@ -2617,48 +2908,48 @@ function createWindows(): void {
           } else {
             dateObj = date;
           }
-          
+
           // Check if date is valid
           if (isNaN(dateObj.getTime())) {
             console.warn(`⚠️ [EMPLOYEES] Invalid date value: ${date}`);
             return null;
           }
-          
+
           // Convert to UTC+7 (WIB) and extract date part
           const utc7Timestamp = dateObj.getTime() + (7 * 60 * 60 * 1000);
           const utc7Date = new Date(utc7Timestamp);
-          
+
           const year = utc7Date.getUTCFullYear();
           const month = String(utc7Date.getUTCMonth() + 1).padStart(2, '0');
           const day = String(utc7Date.getUTCDate()).padStart(2, '0');
-          
+
           return `${year}-${month}-${day}`;
         };
         const tanggalLahir = convertToMySQLDate(tanggalLahirRaw);
         const tanggalBekerja = convertToMySQLDate(tanggalBekerjaRaw);
-        
+
         // Validate required fields
         if (!namaKaryawan) {
           // #region agent log
-          writeDebugLog(JSON.stringify({location:'main.ts:2214',message:'Skipping employee - missing nama_karyawan',data:{employeeId:employeeId},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'F'}));
+          writeDebugLog(JSON.stringify({ location: 'main.ts:2214', message: 'Skipping employee - missing nama_karyawan', data: { employeeId: employeeId }, timestamp: Date.now(), sessionId: 'debug-session', runId: 'run1', hypothesisId: 'F' }));
           // #endregion
           console.warn(`⚠️ [EMPLOYEES] Skipping employee ${employeeId}: nama_karyawan is required`);
           skippedCount++;
           continue;
         }
-        
+
         if (!jenisKelamin || !['pria', 'wanita'].includes(jenisKelamin)) {
           // #region agent log
-          writeDebugLog(JSON.stringify({location:'main.ts:2220',message:'Skipping employee - invalid jenis_kelamin',data:{employeeId:employeeId,jenisKelamin:jenisKelamin},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'F'}));
+          writeDebugLog(JSON.stringify({ location: 'main.ts:2220', message: 'Skipping employee - invalid jenis_kelamin', data: { employeeId: employeeId, jenisKelamin: jenisKelamin }, timestamp: Date.now(), sessionId: 'debug-session', runId: 'run1', hypothesisId: 'F' }));
           // #endregion
           console.warn(`⚠️ [EMPLOYEES] Skipping employee ${employeeId}: invalid jenis_kelamin`);
           skippedCount++;
           continue;
         }
-        
+
         if (!tanggalBekerja) {
           // #region agent log
-          writeDebugLog(JSON.stringify({location:'main.ts:2226',message:'Skipping employee - missing tanggal_bekerja',data:{employeeId:employeeId,tanggalBekerjaRaw:tanggalBekerjaRaw},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'F'}));
+          writeDebugLog(JSON.stringify({ location: 'main.ts:2226', message: 'Skipping employee - missing tanggal_bekerja', data: { employeeId: employeeId, tanggalBekerjaRaw: tanggalBekerjaRaw }, timestamp: Date.now(), sessionId: 'debug-session', runId: 'run1', hypothesisId: 'F' }));
           // #endregion
           console.warn(`⚠️ [EMPLOYEES] Skipping employee ${employeeId}: tanggal_bekerja is required`);
           skippedCount++;
@@ -2717,10 +3008,10 @@ function createWindows(): void {
             }
           }
         }
-        
+
         try {
           // #region agent log
-          const logBuild = {location:'main.ts:2314',message:'Building employee query',data:{employeeId:employeeId,business_id:businessId,user_id:userId,namaKaryawan:namaKaryawan,tanggalLahir:tanggalLahir,tanggalBekerja:tanggalBekerja,jenisKelamin:jenisKelamin},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'};
+          const logBuild = { location: 'main.ts:2314', message: 'Building employee query', data: { employeeId: employeeId, business_id: businessId, user_id: userId, namaKaryawan: namaKaryawan, tanggalLahir: tanggalLahir, tanggalBekerja: tanggalBekerja, jenisKelamin: jenisKelamin }, timestamp: Date.now(), sessionId: 'debug-session', runId: 'run1', hypothesisId: 'B' };
           writeDebugLog(JSON.stringify(logBuild));
           // #endregion
           queries.push({
@@ -2741,7 +3032,7 @@ function createWindows(): void {
           });
         } catch (queryError) {
           // #region agent log
-          const logError = {location:'main.ts:2332',message:'Error building employee query',data:{employeeId:employeeId,error:queryError instanceof Error?queryError.message:String(queryError)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'G'};
+          const logError = { location: 'main.ts:2332', message: 'Error building employee query', data: { employeeId: employeeId, error: queryError instanceof Error ? queryError.message : String(queryError) }, timestamp: Date.now(), sessionId: 'debug-session', runId: 'run1', hypothesisId: 'G' };
           writeDebugLog(JSON.stringify(logError));
           // #endregion
           console.error(`❌ [EMPLOYEES] Error building query for employee ${employeeId}:`, queryError);
@@ -2749,9 +3040,9 @@ function createWindows(): void {
           continue;
         }
       }
-      
+
       // #region agent log
-      writeDebugLog(JSON.stringify({location:'main.ts:2343',message:'Before executing employee queries',data:{queryCount:queries.length,skipValidation:skipValidation,skippedCount:skippedCount},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'E'}));
+      writeDebugLog(JSON.stringify({ location: 'main.ts:2343', message: 'Before executing employee queries', data: { queryCount: queries.length, skipValidation: skipValidation, skippedCount: skippedCount }, timestamp: Date.now(), sessionId: 'debug-session', runId: 'run1', hypothesisId: 'E' }));
       // #endregion
       if (queries.length > 0) {
         if (skipValidation) {
@@ -2763,12 +3054,12 @@ function createWindows(): void {
               await executeUpdate(query.sql, query.params || []);
               successCount++;
               // #region agent log
-              writeDebugLog(JSON.stringify({location:'main.ts:2351',message:'Employee upsert success',data:{employeeId:query.params?.[0],business_id:query.params?.[2],user_id:query.params?.[1],nama_karyawan:query.params?.[6]},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'}));
+              writeDebugLog(JSON.stringify({ location: 'main.ts:2351', message: 'Employee upsert success', data: { employeeId: query.params?.[0], business_id: query.params?.[2], user_id: query.params?.[1], nama_karyawan: query.params?.[6] }, timestamp: Date.now(), sessionId: 'debug-session', runId: 'run1', hypothesisId: 'C' }));
               // #endregion
             } catch (insertError: unknown) {
               const err = insertError as { code?: string; errno?: number; message?: string };
               // #region agent log
-              writeDebugLog(JSON.stringify({location:'main.ts:2353',message:'Employee insert failed',data:{employeeId:query.params?.[0],error:err.message,code:err.code,errno:err.errno,isForeignKey:err.code==='ER_NO_REFERENCED_ROW_2'||err.errno===1452},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'E'}));
+              writeDebugLog(JSON.stringify({ location: 'main.ts:2353', message: 'Employee insert failed', data: { employeeId: query.params?.[0], error: err.message, code: err.code, errno: err.errno, isForeignKey: err.code === 'ER_NO_REFERENCED_ROW_2' || err.errno === 1452 }, timestamp: Date.now(), sessionId: 'debug-session', runId: 'run1', hypothesisId: 'E' }));
               // #endregion
               if (err.code === 'ER_NO_REFERENCED_ROW_2' || err.errno === 1452) {
                 // Foreign key constraint - expected on first pass, will retry later
@@ -2783,7 +3074,7 @@ function createWindows(): void {
             }
           }
           // #region agent log
-          writeDebugLog(JSON.stringify({location:'main.ts:2366',message:'First pass summary',data:{successCount:successCount,failCount:failCount,skippedCount:skippedCount},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'E'}));
+          writeDebugLog(JSON.stringify({ location: 'main.ts:2366', message: 'First pass summary', data: { successCount: successCount, failCount: failCount, skippedCount: skippedCount }, timestamp: Date.now(), sessionId: 'debug-session', runId: 'run1', hypothesisId: 'E' }));
           // #endregion
           console.log(`ℹ️ [EMPLOYEES] First pass: ${successCount} inserted, ${failCount} failed (will retry later)`);
           if (skippedCount > 0) {
@@ -2793,13 +3084,13 @@ function createWindows(): void {
           // On retry pass: Use transaction for better performance
           try {
             // #region agent log
-            const employeesBeingUpserted = queries.map(q => ({id:q.params?.[0],business_id:q.params?.[2],user_id:q.params?.[1],nama_karyawan:q.params?.[6]}));
-            writeDebugLog(JSON.stringify({location:'main.ts:2633',message:'About to upsert employees in transaction',data:{queryCount:queries.length,employees:employeesBeingUpserted},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'D'}));
+            const employeesBeingUpserted = queries.map(q => ({ id: q.params?.[0], business_id: q.params?.[2], user_id: q.params?.[1], nama_karyawan: q.params?.[6] }));
+            writeDebugLog(JSON.stringify({ location: 'main.ts:2633', message: 'About to upsert employees in transaction', data: { queryCount: queries.length, employees: employeesBeingUpserted }, timestamp: Date.now(), sessionId: 'debug-session', runId: 'run1', hypothesisId: 'D' }));
             // #endregion
             await executeTransaction(queries);
             await upsertMasterDataToSystemPos(queries);
             // #region agent log
-            writeDebugLog(JSON.stringify({location:'main.ts:2374',message:'Employee transaction success',data:{queryCount:queries.length,employees:employeesBeingUpserted},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'D'}));
+            writeDebugLog(JSON.stringify({ location: 'main.ts:2374', message: 'Employee transaction success', data: { queryCount: queries.length, employees: employeesBeingUpserted }, timestamp: Date.now(), sessionId: 'debug-session', runId: 'run1', hypothesisId: 'D' }));
             // #endregion
             if (skippedCount > 0) {
               console.log(`⚠️ [EMPLOYEES] Skipped ${skippedCount} employees due to missing foreign keys`);
@@ -2807,7 +3098,7 @@ function createWindows(): void {
           } catch (transactionError: unknown) {
             const err = transactionError as { code?: string; errno?: number; message?: string };
             // #region agent log
-            writeDebugLog(JSON.stringify({location:'main.ts:2378',message:'Employee transaction error',data:{error:err.message,code:err.code,errno:err.errno},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'E'}));
+            writeDebugLog(JSON.stringify({ location: 'main.ts:2378', message: 'Employee transaction error', data: { error: err.message, code: err.code, errno: err.errno }, timestamp: Date.now(), sessionId: 'debug-session', runId: 'run1', hypothesisId: 'E' }));
             // #endregion
             console.error(`❌ [EMPLOYEES] Transaction error:`, transactionError);
             throw transactionError;
@@ -2815,15 +3106,15 @@ function createWindows(): void {
         }
       } else {
         // #region agent log
-        writeDebugLog(JSON.stringify({location:'main.ts:2383',message:'No employee queries to execute',data:{rowCount:rows.length,skippedCount:skippedCount},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'F'}));
+        writeDebugLog(JSON.stringify({ location: 'main.ts:2383', message: 'No employee queries to execute', data: { rowCount: rows.length, skippedCount: skippedCount }, timestamp: Date.now(), sessionId: 'debug-session', runId: 'run1', hypothesisId: 'F' }));
         // #endregion
         console.warn(`⚠️ [EMPLOYEES] No valid employees to insert (all ${rows.length} skipped)`);
       }
-      
+
       if (skippedCount > 0 && !skipValidation) {
         console.warn(`⚠️ [EMPLOYEES] Total skipped: ${skippedCount} employees`);
       }
-      
+
       return { success: true, skipped: skippedCount };
     } catch (error) {
       console.error('❌ [EMPLOYEES] Error upserting employees:', error);
@@ -2838,18 +3129,18 @@ function createWindows(): void {
   ipcMain.handle('localdb-get-employees', async () => {
     try {
       // #region agent log
-      const logBefore = {location:'main.ts:2425',message:'localdb-get-employees called',data:{},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'};
+      const logBefore = { location: 'main.ts:2425', message: 'localdb-get-employees called', data: {}, timestamp: Date.now(), sessionId: 'debug-session', runId: 'run1', hypothesisId: 'B' };
       writeDebugLog(JSON.stringify(logBefore));
       // #endregion
       const result = await executeQuery('SELECT * FROM employees ORDER BY nama_karyawan ASC');
       // #region agent log
-      const logAfter = {location:'main.ts:2427',message:'localdb-get-employees result',data:{resultCount:Array.isArray(result)?result.length:0,result:Array.isArray(result)?result.map((e:any)=>({id:e.id,business_id:e.business_id,jabatan_id:e.jabatan_id,nama:e.nama_karyawan})):null},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'};
+      const logAfter = { location: 'main.ts:2427', message: 'localdb-get-employees result', data: { resultCount: Array.isArray(result) ? result.length : 0, result: Array.isArray(result) ? result.map((e: any) => ({ id: e.id, business_id: e.business_id, jabatan_id: e.jabatan_id, nama: e.nama_karyawan })) : null }, timestamp: Date.now(), sessionId: 'debug-session', runId: 'run1', hypothesisId: 'B' };
       writeDebugLog(JSON.stringify(logAfter));
       // #endregion
       return result;
     } catch (error) {
       // #region agent log
-      const logError = {location:'main.ts:2430',message:'localdb-get-employees error',data:{error:error instanceof Error?error.message:String(error)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'};
+      const logError = { location: 'main.ts:2430', message: 'localdb-get-employees error', data: { error: error instanceof Error ? error.message : String(error) }, timestamp: Date.now(), sessionId: 'debug-session', runId: 'run1', hypothesisId: 'B' };
       writeDebugLog(JSON.stringify(logError));
       // #endregion
       console.error('Error getting employees:', error);
@@ -3019,7 +3310,7 @@ function createWindows(): void {
   ipcMain.handle('localdb-upsert-contacts', async (event, rows: RowArray) => {
     try {
       const queries: Array<{ sql: string; params?: (string | number | null | boolean)[] }> = [];
-      
+
       for (const r of rows) {
         const getId = () => {
           const val = r.id;
@@ -3055,7 +3346,7 @@ function createWindows(): void {
         };
 
         let sourceId = getNumber('source_id');
-        
+
         // Verify source_id exists before inserting (foreign key constraint)
         if (sourceId) {
           try {
@@ -3069,10 +3360,10 @@ function createWindows(): void {
             sourceId = null;
           }
         }
-        
+
         const createdAtRaw = getDate('created_at');
         const createdAt = createdAtRaw ? toMySQLTimestamp(createdAtRaw as string | number | Date) : toMySQLTimestamp(new Date());
-        
+
         queries.push({
           sql: `INSERT INTO contacts (
             id, no_ktp, nama, phone_number, tgl_lahir, no_kk, created_at, updated_at,
@@ -3095,7 +3386,7 @@ function createWindows(): void {
           ]
         });
       }
-      
+
       if (queries.length > 0) {
         await executeTransaction(queries);
       }
@@ -3127,7 +3418,7 @@ function createWindows(): void {
     try {
       const queries: Array<{ sql: string; params?: (string | number | null | boolean)[] }> = [];
       let skippedCount = 0;
-      
+
       for (const r of rows) {
         const getId = () => {
           const val = r.id;
@@ -3157,7 +3448,7 @@ function createWindows(): void {
 
         const roleId = getId();
         let orgId = getNumber('organization_id');
-        
+
         // Verify organization_id exists before inserting (foreign key constraint)
         if (orgId) {
           try {
@@ -3173,10 +3464,10 @@ function createWindows(): void {
             continue;
           }
         }
-        
+
         const createdAtRaw = getDate('created_at');
         const createdAt = createdAtRaw ? toMySQLTimestamp(createdAtRaw as string | number | Date) : toMySQLTimestamp(new Date());
-        
+
         queries.push({
           sql: `INSERT INTO roles (
             id, name, description, organization_id, created_at
@@ -3195,7 +3486,7 @@ function createWindows(): void {
           ]
         });
       }
-      
+
       if (queries.length > 0) {
         await executeTransaction(queries);
         await upsertMasterDataToSystemPos(queries);
@@ -3226,7 +3517,7 @@ function createWindows(): void {
     try {
       const queries: Array<{ sql: string; params?: (string | number | null | boolean)[] }> = [];
       let skippedCount = 0;
-      
+
       for (const r of rows) {
         const getId = () => {
           const val = r.id;
@@ -3255,7 +3546,7 @@ function createWindows(): void {
         };
 
         let orgId = getNumber('organization_id');
-        
+
         // Verify organization_id exists if provided
         if (orgId) {
           try {
@@ -3269,10 +3560,10 @@ function createWindows(): void {
             orgId = null;
           }
         }
-        
+
         const createdAtRaw = getDate('created_at');
         const createdAt = createdAtRaw ? toMySQLTimestamp(createdAtRaw as string | number | Date) : toMySQLTimestamp(new Date());
-        
+
         queries.push({
           sql: `INSERT INTO permission_categories (
             id, name, description, organization_id, created_at
@@ -3291,7 +3582,7 @@ function createWindows(): void {
           ]
         });
       }
-      
+
       if (queries.length > 0) {
         await executeTransaction(queries);
         if (skippedCount > 0) {
@@ -3310,12 +3601,12 @@ function createWindows(): void {
     try {
       const queries: Array<{ sql: string; params?: (string | number | null | boolean)[] }> = [];
       let skippedCount = 0;
-      
+
       for (const r of rows) {
         let categoryId = typeof r.category_id === 'number' ? r.category_id : null;
         let orgId = typeof r.organization_id === 'number' ? r.organization_id : null;
         let businessId = typeof r.business_id === 'number' ? r.business_id : null;
-        
+
         // Verify category_id exists if provided (foreign key constraint)
         // Only check if permission_categories table exists
         if (categoryId) {
@@ -3325,7 +3616,7 @@ function createWindows(): void {
               `SELECT COUNT(*) as count FROM information_schema.tables 
                WHERE table_schema = DATABASE() AND table_name = 'permission_categories'`
             );
-            
+
             if (tableExists && tableExists.count > 0) {
               const catExists = await executeQueryOne<{ id: number }>('SELECT id FROM permission_categories WHERE id = ? LIMIT 1', [categoryId]);
               if (!catExists) {
@@ -3346,7 +3637,7 @@ function createWindows(): void {
             // Don't set categoryId to null if table doesn't exist - keep the original value
           }
         }
-        
+
         // Verify organization_id exists if provided
         if (orgId) {
           try {
@@ -3360,7 +3651,7 @@ function createWindows(): void {
             orgId = null;
           }
         }
-        
+
         // Verify business_id exists if provided
         if (businessId) {
           try {
@@ -3374,13 +3665,13 @@ function createWindows(): void {
             businessId = null;
           }
         }
-        
+
         const id = typeof r.id === 'number' ? r.id : (typeof r.id === 'string' ? parseInt(String(r.id), 10) : 0);
         const name = typeof r.name === 'string' ? r.name : String(r.name ?? '');
         const description = typeof r.description === 'string' ? r.description : String(r.description ?? '');
         const status = typeof r.status === 'string' ? r.status : 'active';
         const createdAt = r.created_at ? (typeof r.created_at === 'number' || typeof r.created_at === 'string' ? r.created_at : new Date()) : new Date();
-        
+
         queries.push({
           sql: `INSERT INTO permissions (
             id, name, description, category_id, organization_id, business_id, status, created_at
@@ -3394,18 +3685,18 @@ function createWindows(): void {
             status=VALUES(status),
             created_at=VALUES(created_at)`,
           params: [
-            id, 
-            name, 
-            description, 
-            categoryId ?? null, 
-            orgId ?? null, 
-            businessId ?? null, 
+            id,
+            name,
+            description,
+            categoryId ?? null,
+            orgId ?? null,
+            businessId ?? null,
             status,
             toMySQLTimestamp(createdAt)
           ]
         });
       }
-      
+
       if (queries.length > 0) {
         await executeTransaction(queries);
         if (skippedCount > 0) {
@@ -3427,36 +3718,36 @@ function createWindows(): void {
     try {
       const queries: Array<{ sql: string; params?: (string | number | null | boolean)[] }> = [];
       let skippedCount = 0;
-      
+
       // Delete all existing role permissions first
       queries.push({
         sql: 'DELETE FROM role_permissions',
         params: []
       });
-      
+
       // Then insert new ones (only if both role_id and permission_id exist)
       for (const r of rows ?? []) {
         const roleId = typeof r.role_id === 'number' ? r.role_id : (typeof r.role_id === 'string' ? parseInt(String(r.role_id), 10) : null);
         const permissionId = typeof r.permission_id === 'number' ? r.permission_id : (typeof r.permission_id === 'string' ? parseInt(String(r.permission_id), 10) : null);
-        
+
         // Verify both role_id and permission_id exist
         if (roleId && permissionId) {
           try {
             const roleExists = await executeQueryOne<{ id: number }>('SELECT id FROM roles WHERE id = ? LIMIT 1', [roleId]);
             const permissionExists = await executeQueryOne<{ id: number }>('SELECT id FROM permissions WHERE id = ? LIMIT 1', [permissionId]);
-            
+
             if (!roleExists) {
               console.warn(`⚠️ [ROLE PERMISSIONS] Skipping: role_id ${roleId} does not exist`);
               skippedCount++;
               continue;
             }
-            
+
             if (!permissionExists) {
               console.warn(`⚠️ [ROLE PERMISSIONS] Skipping: permission_id ${permissionId} does not exist`);
               skippedCount++;
               continue;
             }
-            
+
             queries.push({
               sql: `INSERT INTO role_permissions (
                 role_id, permission_id
@@ -3474,7 +3765,7 @@ function createWindows(): void {
           skippedCount++;
         }
       }
-      
+
       if (queries.length > 1) { // More than just DELETE
         await executeTransaction(queries);
         if (skippedCount > 0) {
@@ -3923,14 +4214,14 @@ function createWindows(): void {
     try {
       // Diagnostic logging
       const diagLogPathTx = path.join(app.getPath('userData'), 'path-diagnostic.log');
-      try { 
+      try {
         const txCountResult = await executeQueryOne<{ cnt: number }>('SELECT COUNT(*) as cnt FROM transactions');
         const txCount = txCountResult?.cnt || 0;
-        fs.appendFileSync(diagLogPathTx, `${new Date().toISOString()} [GET-TX] businessId=${businessId}, limit=${limit}, totalTxInDb=${txCount}\n`); 
-      } catch(e) { 
-        try { fs.appendFileSync(diagLogPathTx, `${new Date().toISOString()} [GET-TX] ERROR: ${e}\n`); } catch(e2) {} 
+        fs.appendFileSync(diagLogPathTx, `${new Date().toISOString()} [GET-TX] businessId=${businessId}, limit=${limit}, totalTxInDb=${txCount}\n`);
+      } catch (e) {
+        try { fs.appendFileSync(diagLogPathTx, `${new Date().toISOString()} [GET-TX] ERROR: ${e}\n`); } catch (e2) { }
       }
-      
+
       let query = `
         SELECT 
           t.*,
@@ -3994,10 +4285,10 @@ function createWindows(): void {
       }
 
       const results = await executeQuery(query, params);
-      
+
       // Diagnostic logging
-      try { fs.appendFileSync(diagLogPathTx, `${new Date().toISOString()} [GET-TX] Returned ${results.length} transactions\n`); } catch(e) {}
-      
+      try { fs.appendFileSync(diagLogPathTx, `${new Date().toISOString()} [GET-TX] Returned ${results.length} transactions\n`); } catch (e) { }
+
       // Debug: Check for specific transaction UUID and verify refunds exist in database
       const specificTx = (results as unknown[]).find((tx: unknown): tx is Record<string, unknown> => {
         if (typeof tx === 'object' && tx !== null) {
@@ -4023,7 +4314,7 @@ function createWindows(): void {
             WHERE transaction_uuid = ?
             GROUP BY transaction_uuid
           `, [txUuidId]);
-          
+
           console.log(`🔍 [GET-TX] Debug for transaction 0142512271637510001:`, {
             id: specificTx.id,
             uuid_id: specificTx.uuid_id,
@@ -4038,7 +4329,7 @@ function createWindows(): void {
           console.error('❌ [GET-TX] Error checking refunds:', refundError);
         }
       }
-      
+
       // Debug: Log transactions with refunds to verify refund_total is being calculated
       if (results.length > 0) {
         const transactionsWithRefunds = results.filter((tx: any) => {
@@ -4046,7 +4337,7 @@ function createWindows(): void {
           return refundTotal && refundTotal > 0;
         });
         if (transactionsWithRefunds.length > 0) {
-          console.log(`💰 [GET-TX] Found ${transactionsWithRefunds.length} transaction(s) with refunds:`, 
+          console.log(`💰 [GET-TX] Found ${transactionsWithRefunds.length} transaction(s) with refunds:`,
             transactionsWithRefunds.slice(0, 3).map((tx: any) => ({
               id: tx.id || tx.uuid_id,
               refund_total: tx.refund_total,
@@ -4056,7 +4347,7 @@ function createWindows(): void {
           );
         }
       }
-      
+
       return results;
     } catch (error) {
       console.error('Error getting transactions:', error);
@@ -4104,9 +4395,9 @@ function createWindows(): void {
     try {
       const { clause: baseClause, params } = buildTransactionFilter(businessId, startIso, endIso);
       const timestamp = Date.now();
-      
+
       const queries: Array<{ sql: string; params?: (string | number | null | boolean)[] }> = [];
-      
+
       // Update transactions to archived
       queries.push({
         sql: `
@@ -4184,6 +4475,11 @@ function createWindows(): void {
         sql: `DELETE FROM printer2_audit_log WHERE transaction_id IN (${uuidPlaceholders})`,
         params: [...transactionUuids]
       });
+      // offline_refunds: delete orphan refunds for deleted transactions
+      queries.push({
+        sql: `DELETE FROM offline_refunds WHERE JSON_UNQUOTE(JSON_EXTRACT(refund_data, '$.transaction_uuid')) IN (${uuidPlaceholders})`,
+        params: [...transactionUuids]
+      });
       queries.push({
         sql: `DELETE FROM transactions WHERE ${baseClause}`,
         params: [...params]
@@ -4236,10 +4532,12 @@ function createWindows(): void {
         { sql: 'DELETE FROM printer2_audit_log WHERE transaction_id = ?', params: [transactionUuid], description: 'Printer 2 audit log' },
         { sql: 'DELETE FROM transactions WHERE uuid_id = ?', params: [transactionUuid], description: 'transactions (CASCADE: transaction_items, transaction_item_customizations, transaction_item_customization_options, transaction_refunds)' },
       ];
-      return { success: true, transactionUuid, queries, systemPosQueries: [
-        { sql: 'DELETE FROM system_pos_queue WHERE transaction_id = ?', params: [transactionUuid], description: 'system_pos: queue' },
-        { sql: 'DELETE FROM transactions WHERE uuid_id = ?', params: [transactionUuid], description: 'system_pos: transactions' },
-      ] as SingleDeletePreviewQuery[] };
+      return {
+        success: true, transactionUuid, queries, systemPosQueries: [
+          { sql: 'DELETE FROM system_pos_queue WHERE transaction_id = ?', params: [transactionUuid], description: 'system_pos: queue' },
+          { sql: 'DELETE FROM transactions WHERE uuid_id = ?', params: [transactionUuid], description: 'system_pos: transactions' },
+        ] as SingleDeletePreviewQuery[]
+      };
     } catch (err) {
       console.error('localdb-delete-single-transaction-preview error:', err);
       return { success: false, error: (err as Error).message, queries: [] as SingleDeletePreviewQuery[] };
@@ -4286,7 +4584,7 @@ function createWindows(): void {
 
     try {
       const { clause: baseClause, params } = buildTransactionFilter(businessId, startIso, endIso);
-      
+
       // Get count before deletion
       const countResult = await executeQueryOne<{ count: number }>(`
         SELECT COUNT(*) as count FROM transaction_items 
@@ -4295,7 +4593,7 @@ function createWindows(): void {
         )
       `, params);
       const deletedCount = countResult?.count || 0;
-      
+
       await executeUpdate(`
         DELETE FROM transaction_items 
         WHERE transaction_id IN (
@@ -4498,10 +4796,14 @@ function createWindows(): void {
   ipcMain.handle('localdb-upsert-transaction-items', async (event, rows: RowArray) => {
     try {
       await ensureTransactionItemsWaiterIdColumn();
-      console.log('🔍 [MYSQL] Inserting transaction items:', rows.length);const queries: Array<{ sql: string; params?: (string | number | null | boolean)[] }> = [];
+      await ensureTransactionItemsPackageLineFinishedAtColumn();
+      await ensureTransactionItemPackageLinesFinishedAtColumn();
+      console.log('🔍 [MYSQL] Inserting transaction items:', rows.length); const queries: Array<{ sql: string; params?: (string | number | null | boolean)[] }> = [];
 
       // Map to store transaction UUID -> INT id lookups
       const transactionIdMap = new Map<string, number>();
+      /** Package payloads to write to transaction_item_package_lines after transaction_items are inserted */
+      const packageLinesToSave: { itemUuidId: string; itemQuantity: number; rawJson: string }[] = [];
 
       for (const r of rows) {
         console.log('📦 [MYSQL] Item data:', {
@@ -4527,12 +4829,25 @@ function createWindows(): void {
           }
         }
 
+        // Package selections: will be saved to transaction_item_package_lines table below; store null in transaction_items
+        const rawPackageJson = (r as Record<string, unknown>).package_selections_json;
+        const packageSelectionsJson = null; // Stored in transaction_item_package_lines, not JSON column
+        if (rawPackageJson) {
+          const itemUuidIdForPackage = typeof (r as any).uuid_id === 'string' && (r as any).uuid_id ? (r as any).uuid_id : (typeof r.id === 'string' ? r.id : String(r.id ?? ''));
+          const itemQty = typeof r.quantity === 'number' ? r.quantity : (typeof r.quantity === 'string' ? parseInt(String(r.quantity), 10) : 1);
+          packageLinesToSave.push({
+            itemUuidId: itemUuidIdForPackage,
+            itemQuantity: itemQty,
+            rawJson: typeof rawPackageJson === 'string' ? rawPackageJson : JSON.stringify(rawPackageJson),
+          });
+        }
+
         console.log('📝 [MYSQL] Custom note:', r.custom_note);
 
         // Use UUID columns: uuid_id (item UUID) and uuid_transaction_id (transaction UUID reference)
         // IMPORTANT: Use r.uuid_id if available, otherwise fall back to r.id as string
-        const itemUuidId = typeof (r as any).uuid_id === 'string' && (r as any).uuid_id 
-          ? (r as any).uuid_id 
+        const itemUuidId = typeof (r as any).uuid_id === 'string' && (r as any).uuid_id
+          ? (r as any).uuid_id
           : (typeof r.id === 'string' ? r.id : String(r.id ?? ''));
         // IMPORTANT: Use uuid_transaction_id field, not transaction_id (which is 0 placeholder)
         const transactionUuidId = typeof r.uuid_transaction_id === 'string' ? r.uuid_transaction_id : (typeof r.transaction_id === 'string' ? r.transaction_id : String(r.transaction_id ?? ''));// Look up transaction INT id from UUID (cache results)
@@ -4540,10 +4855,11 @@ function createWindows(): void {
         if (transactionIdMap.has(transactionUuidId)) {
           transactionIntId = transactionIdMap.get(transactionUuidId)!;
         } else {
-          try {const tx = await executeQueryOne<{ id: number }>(
+          try {
+            const tx = await executeQueryOne<{ id: number }>(
               'SELECT id FROM transactions WHERE uuid_id = ? LIMIT 1',
               [transactionUuidId]
-            );if (tx && typeof tx.id === 'number') {
+            ); if (tx && typeof tx.id === 'number') {
               transactionIntId = tx.id;
               transactionIdMap.set(transactionUuidId, transactionIntId);
             } else {
@@ -4555,13 +4871,13 @@ function createWindows(): void {
             transactionIntId = 0;
           }
         }
-        
+
         const productId = typeof r.product_id === 'number' ? r.product_id : (typeof r.product_id === 'string' ? parseInt(String(r.product_id), 10) : 0);
         const quantity = typeof r.quantity === 'number' ? r.quantity : (typeof r.quantity === 'string' ? parseInt(String(r.quantity), 10) : 1);
         const unitPrice = typeof r.unit_price === 'number' ? r.unit_price : (typeof r.unit_price === 'string' ? parseFloat(String(r.unit_price)) : 0);
         const totalPrice = typeof r.total_price === 'number' ? r.total_price : (typeof r.total_price === 'string' ? parseFloat(String(r.total_price)) : 0);
         const customNote = typeof r.custom_note === 'string' ? r.custom_note : (r.custom_note ? String(r.custom_note) : null);
-        
+
         const getDate = (key: string) => {
           const val = r[key];
           if (val instanceof Date) return val;
@@ -4570,7 +4886,7 @@ function createWindows(): void {
         };
         const createdDate = getDate('created_at');
         const createdAt = createdDate ? toMySQLDateTime(createdDate as string | number | Date) : toMySQLDateTime(new Date());
-        
+
         // Handle production status fields
         const productionStatus = typeof r.production_status === 'string' ? r.production_status : (r.production_status ? String(r.production_status) : null);
         const productionStartedDate = getDate('production_started_at');
@@ -4578,7 +4894,13 @@ function createWindows(): void {
         const productionFinishedDate = getDate('production_finished_at');
         const productionFinishedAt = productionFinishedDate ? toMySQLDateTime(productionFinishedDate as string | number | Date) : null;
         const waiterIdItem = typeof (r as any).waiter_id === 'number' ? (r as any).waiter_id : (typeof (r as any).waiter_id === 'string' ? parseInt(String((r as any).waiter_id), 10) : null);
-        
+        const packageLineFinishedAtJson = (() => {
+          const raw = (r as Record<string, unknown>).package_line_finished_at_json;
+          if (raw == null) return null;
+          if (typeof raw === 'string') return raw;
+          try { return JSON.stringify(raw); } catch { return null; }
+        })();
+
         console.log('🔧 [MYSQL] Production status update:', {
           itemId: r.id,
           itemUuidId,
@@ -4586,29 +4908,66 @@ function createWindows(): void {
           productionStartedAt,
           productionFinishedAt
         });
-        
+
         queries.push({
           sql: `INSERT INTO transaction_items (
             uuid_id, transaction_id, uuid_transaction_id, product_id, quantity, unit_price, total_price,
-            bundle_selections_json, custom_note, created_at, waiter_id,
-            production_status, production_started_at, production_finished_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            bundle_selections_json, package_selections_json, custom_note, created_at, waiter_id,
+            production_status, production_started_at, production_finished_at, package_line_finished_at_json
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
           ON DUPLICATE KEY UPDATE
             transaction_id=VALUES(transaction_id), uuid_transaction_id=VALUES(uuid_transaction_id), product_id=VALUES(product_id), quantity=VALUES(quantity),
             unit_price=VALUES(unit_price), total_price=VALUES(total_price),
-            bundle_selections_json=VALUES(bundle_selections_json),
+            bundle_selections_json=VALUES(bundle_selections_json), package_selections_json=VALUES(package_selections_json),
             custom_note=VALUES(custom_note), created_at=VALUES(created_at), waiter_id=VALUES(waiter_id),
-            production_status=VALUES(production_status), production_started_at=VALUES(production_started_at), production_finished_at=VALUES(production_finished_at)`,
+            production_status=VALUES(production_status), production_started_at=VALUES(production_started_at), production_finished_at=VALUES(production_finished_at),
+            package_line_finished_at_json=VALUES(package_line_finished_at_json)`,
           params: [
             itemUuidId, transactionIntId, transactionUuidId, productId, quantity, unitPrice, totalPrice,
-            bundleSelectionsJson, customNote, createdAt, waiterIdItem,
-            productionStatus, productionStartedAt, productionFinishedAt
+            bundleSelectionsJson, packageSelectionsJson, customNote, createdAt, waiterIdItem,
+            productionStatus, productionStartedAt, productionFinishedAt, packageLineFinishedAtJson
           ]
         });
       }
 
       // Insert all transaction items first
-      if (queries.length > 0) {await executeTransaction(queries);}
+      if (queries.length > 0) { await executeTransaction(queries); }
+
+      // Save package line items to transaction_item_package_lines (normalized table)
+      const packageLineQueries: Array<{ sql: string; params?: (string | number)[] }> = [];
+      for (const { itemUuidId, itemQuantity, rawJson } of packageLinesToSave) {
+        try {
+          const selections = parseJsonArray<{ selection_type: string; product_id?: number; quantity?: number; chosen?: Array<{ product_id: number; quantity?: number }> }>(rawJson, 'package_selections_json');
+          // Store per-package quantity only; display will multiply by itemQuantity
+          const byProduct = new Map<number, number>();
+          for (const sel of selections || []) {
+            if (sel.selection_type === 'default' && sel.product_id != null) {
+              const q = typeof sel.quantity === 'number' ? sel.quantity : 1;
+              byProduct.set(sel.product_id, (byProduct.get(sel.product_id) || 0) + q);
+            } else if (sel.selection_type === 'flexible' && Array.isArray(sel.chosen)) {
+              for (const c of sel.chosen) {
+                if (c.product_id == null) continue;
+                const q = typeof c.quantity === 'number' ? c.quantity : 1;
+                byProduct.set(c.product_id, (byProduct.get(c.product_id) || 0) + q);
+              }
+            }
+          }
+          packageLineQueries.push({ sql: 'DELETE FROM transaction_item_package_lines WHERE uuid_transaction_item_id = ?', params: [itemUuidId] });
+          for (const [pid, qty] of byProduct.entries()) {
+            if (qty > 0) {
+              packageLineQueries.push({
+                sql: 'INSERT INTO transaction_item_package_lines (uuid_transaction_item_id, product_id, quantity, finished_at) VALUES (?, ?, ?, NULL)',
+                params: [itemUuidId, pid, qty],
+              });
+            }
+          }
+        } catch (err) {
+          console.warn('⚠️ Failed to parse package lines for item', itemUuidId, err);
+        }
+      }
+      if (packageLineQueries.length > 0) {
+        await executeTransaction(packageLineQueries.map((q) => ({ sql: q.sql, params: q.params ?? [] })));
+      }
 
       // Then save customizations for each item (after items are inserted)
       for (const r of rows) {
@@ -4689,7 +5048,8 @@ function createWindows(): void {
       return { success: true };
     } catch (error) {
       console.error('❌ Error upserting transaction items:', error);
-      return { success: false };
+      // Rethrow so renderer can show "Gagal" and retry; otherwise UI shows "Tersimpan" despite no save
+      throw error;
     }
   });
 
@@ -4704,8 +5064,8 @@ function createWindows(): void {
         const isReceiptNumberFormat = typeof transactionId === 'string' && /^0\d{15,}$/.test(String(transactionId).trim());
         const isNumeric = typeof transactionId === 'number' || (typeof transactionId === 'string' && /^\d+$/.test(String(transactionId).trim()));
         const isSimpleNumeric = isNumeric && !isReceiptNumberFormat; // Numeric but NOT receipt number format
-        
-        console.log(`[localdb-get-transaction-items] Looking for items with transactionId: ${transactionId} (isNumeric: ${isNumeric}, isReceiptNumberFormat: ${isReceiptNumberFormat}, isSimpleNumeric: ${isSimpleNumeric})`);if (isSimpleNumeric) {
+
+        console.log(`[localdb-get-transaction-items] Looking for items with transactionId: ${transactionId} (isNumeric: ${isNumeric}, isReceiptNumberFormat: ${isReceiptNumberFormat}, isSimpleNumeric: ${isSimpleNumeric})`); if (isSimpleNumeric) {
           // Simple numeric ID (not receipt number format) - match by transaction_id
           items = await executeQuery<Record<string, unknown>>(`
             SELECT ti.*, p.nama as product_name 
@@ -4739,7 +5099,7 @@ function createWindows(): void {
               ORDER BY ti.id ASC
             `, [transactionId, String(transactionId), transactionId]);
           }
-          
+
           // Strategy 3: If still no items, find transaction's numeric ID and match by transaction_id
           if (items.length === 0) {
             console.log(`[localdb-get-transaction-items] No items found via join, trying to find by transaction numeric ID`);
@@ -4751,7 +5111,7 @@ function createWindows(): void {
                  OR id = ?
               LIMIT 1
             `, [transactionId, String(transactionId), transactionId, transactionId]);
-            
+
             if (transaction && Array.isArray(transaction) && transaction.length > 0) {
               const tx = transaction[0] as Record<string, unknown>;
               const txId = typeof tx.id === 'number' ? tx.id : (typeof tx.id === 'string' ? Number(tx.id) : null);
@@ -4761,7 +5121,7 @@ function createWindows(): void {
                 uuid_id: tx.uuid_id,
                 receipt_number: tx.receipt_number
               });
-              
+
               // Try with numeric ID
               if (txId !== null && !isNaN(txId)) {
                 const numericId: number = txId;
@@ -4774,7 +5134,7 @@ function createWindows(): void {
                   ORDER BY ti.id ASC
                 `, [numericId]);
               }
-              
+
               // If still no items, try with UUID
               if (items.length === 0 && txUuidId) {
                 console.log(`[localdb-get-transaction-items] Querying items by uuid_transaction_id: ${txUuidId}`);
@@ -4791,7 +5151,7 @@ function createWindows(): void {
             }
           }
         }
-        
+
         console.log(`[localdb-get-transaction-items] Found ${items.length} items for transactionId: ${transactionId}`);
         if (items.length > 0) {
           console.log(`[localdb-get-transaction-items] Sample item:`, {
@@ -4809,6 +5169,45 @@ function createWindows(): void {
           LEFT JOIN products p ON ti.product_id = p.id
           ORDER BY ti.created_at DESC
         `);
+      }
+
+      // Load package lines from transaction_item_package_lines for all items (normalized table; id + finished_at for completion)
+      const itemUuids = items.map((i) => (i.uuid_id || i.id) as string).filter(Boolean);
+      const packageLinesByItem = new Map<string, Array<{ id: number; product_id: number; product_name: string; quantity: number; finished_at: string | null; category1_id?: number; category1_name?: string }>>();
+      if (itemUuids.length > 0) {
+        await ensureTransactionItemPackageLinesFinishedAtColumn();
+        const placeholders = itemUuids.map(() => '?').join(',');
+        const packageRows = await executeQuery<Record<string, unknown>>(
+          `SELECT tipl.id, tipl.uuid_transaction_item_id, ti.id as ti_id, tipl.product_id, tipl.quantity, tipl.finished_at,
+                  p.nama as product_name, p.category1_id as category1_id, c1.name as category1_name
+           FROM transaction_item_package_lines tipl
+           LEFT JOIN transaction_items ti ON ti.uuid_id = tipl.uuid_transaction_item_id
+           LEFT JOIN products p ON p.id = tipl.product_id
+           LEFT JOIN category1 c1 ON p.category1_id = c1.id
+           WHERE tipl.uuid_transaction_item_id IN (${placeholders})
+           ORDER BY tipl.id ASC`,
+          itemUuids
+        );
+        for (const row of packageRows || []) {
+          const uuid = row.uuid_transaction_item_id as string;
+          if (!uuid) continue;
+          const lineEntry = {
+            id: typeof row.id === 'number' ? row.id : parseInt(String(row.id || 0), 10),
+            product_id: row.product_id as number,
+            product_name: (row.product_name as string) || '',
+            quantity: (row.quantity as number) || 1,
+            finished_at: row.finished_at != null ? (typeof row.finished_at === 'string' ? row.finished_at : String(row.finished_at)) : null,
+            category1_id: row.category1_id != null ? (typeof row.category1_id === 'number' ? row.category1_id : parseInt(String(row.category1_id), 10)) : undefined,
+            category1_name: row.category1_name != null ? String(row.category1_name) : undefined,
+          };
+          if (!packageLinesByItem.has(uuid)) packageLinesByItem.set(uuid, []);
+          packageLinesByItem.get(uuid)!.push(lineEntry);
+          const tiId = row.ti_id != null ? String(row.ti_id) : null;
+          if (tiId && tiId !== uuid) {
+            if (!packageLinesByItem.has(tiId)) packageLinesByItem.set(tiId, []);
+            packageLinesByItem.get(tiId)!.push({ ...lineEntry });
+          }
+        }
       }
 
       // For each item, load customizations from normalized tables
@@ -4859,10 +5258,26 @@ function createWindows(): void {
           }
         }
 
+        // Attach package lines from transaction_item_package_lines (id + finished_at for Kitchen/Barista completion)
+        let package_selections_json = item.package_selections_json;
+        const lines = packageLinesByItem.get(itemUuid) ?? (item.id != null ? packageLinesByItem.get(String(item.id)) : undefined);
+        if (lines && lines.length > 0) {
+          const reconstructed = lines.map((l) => ({
+            selection_type: 'default' as const,
+            package_item_id: 0,
+            product_id: l.product_id,
+            product_name: l.product_name,
+            quantity: l.quantity,
+          }));
+          package_selections_json = JSON.stringify(reconstructed);
+        }
+
         return {
           ...item,
           customizations: customizations || [],  // Main product customizations
-          bundleSelections: bundleSelections || null  // Bundle selections with customizations from normalized tables
+          bundleSelections: bundleSelections || null,  // Bundle selections with customizations from normalized tables
+          package_selections_json: package_selections_json ?? item.package_selections_json,
+          packageBreakdownLines: lines && lines.length > 0 ? lines : undefined,  // Normalized lines with id, finished_at for display
         };
       }));
 
@@ -4870,6 +5285,45 @@ function createWindows(): void {
     } catch (error) {
       console.error('Error getting transaction items:', error);
       return [];
+    }
+  });
+
+  /** Get all package lines for given transaction item UUID(s) (for completion check across kitchen + barista). */
+  ipcMain.handle('localdb-get-package-lines', async (_event, uuidTransactionItemIds: string[]) => {
+    try {
+      if (!Array.isArray(uuidTransactionItemIds) || uuidTransactionItemIds.length === 0) return [];
+      const placeholders = uuidTransactionItemIds.map(() => '?').join(',');
+      const rows = await executeQuery<Record<string, unknown>>(
+        `SELECT id, uuid_transaction_item_id, product_id, quantity, finished_at, created_at
+         FROM transaction_item_package_lines
+         WHERE uuid_transaction_item_id IN (${placeholders})
+         ORDER BY id ASC`,
+        uuidTransactionItemIds
+      );
+      return rows ?? [];
+    } catch (error) {
+      console.error('Error getting package lines:', error);
+      return [];
+    }
+  });
+
+  /** Update a single package line's finished_at (normalized completion, same as normal items). */
+  ipcMain.handle('localdb-update-package-line', async (_event, payload: { id: number; finished_at: string | null }) => {
+    try {
+      const { id, finished_at } = payload;
+      if (typeof id !== 'number' || isNaN(id)) {
+        return { success: false, error: 'Invalid package line id' };
+      }
+      // MySQL TIMESTAMP expects 'YYYY-MM-DD HH:MM:SS', not ISO 8601 with T/Z
+      const ts = finished_at == null ? null : toMySQLDateTime(finished_at);
+      await executeUpdate(
+        'UPDATE transaction_item_package_lines SET finished_at = ? WHERE id = ?',
+        [ts, id]
+      );
+      return { success: true };
+    } catch (error) {
+      console.error('Error updating package line:', error);
+      return { success: false, error: error instanceof Error ? error.message : 'Unknown error' };
     }
   });
 
@@ -4902,23 +5356,23 @@ function createWindows(): void {
   ipcMain.handle('localdb-get-transaction-item-customizations-normalized', async (event, transactionId: string) => {
     // #region agent log
     console.log('🔍 [DEBUG] Electron function called with transactionId:', transactionId);
-    writeDebugLog(JSON.stringify({location:'main.ts:3762',message:'Electron function called',data:{transactionId,type:typeof transactionId},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'D'}));
+    writeDebugLog(JSON.stringify({ location: 'main.ts:3762', message: 'Electron function called', data: { transactionId, type: typeof transactionId }, timestamp: Date.now(), sessionId: 'debug-session', runId: 'run1', hypothesisId: 'D' }));
     // #endregion
-    
+
     try {
       // Get all transaction items for this transaction
       // Support both UUID and numeric ID lookups (similar to localDbGetTransactionItems)
       const isReceiptNumberFormat = typeof transactionId === 'string' && /^0\d{15,}$/.test(String(transactionId).trim());
       const isNumeric = typeof transactionId === 'number' || (typeof transactionId === 'string' && /^\d+$/.test(String(transactionId).trim()));
       const isSimpleNumeric = isNumeric && !isReceiptNumberFormat;
-      
+
       // #region agent log
       console.log('🔍 [DEBUG] Transaction ID analysis:', { transactionId, isReceiptNumberFormat, isNumeric, isSimpleNumeric });
-      writeDebugLog(JSON.stringify({location:'main.ts:3768',message:'Transaction ID analysis',data:{transactionId,isReceiptNumberFormat,isNumeric,isSimpleNumeric},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'D'}));
+      writeDebugLog(JSON.stringify({ location: 'main.ts:3768', message: 'Transaction ID analysis', data: { transactionId, isReceiptNumberFormat, isNumeric, isSimpleNumeric }, timestamp: Date.now(), sessionId: 'debug-session', runId: 'run1', hypothesisId: 'D' }));
       // #endregion
-      
+
       let items: Array<{ id: number }> = [];
-      
+
       if (isSimpleNumeric) {
         // Simple numeric ID - match by transaction_id
         // Convert transactionId to number if it's a string
@@ -4926,25 +5380,25 @@ function createWindows(): void {
         items = await executeQuery<{ id: number }>('SELECT id FROM transaction_items WHERE transaction_id = ?', [numericId]);
         // #region agent log
         console.log('🔍 [DEBUG] Items found (numeric):', items.length, 'items for transaction_id', numericId, items.map(i => i.id));
-        writeDebugLog(JSON.stringify({location:'main.ts:3786',message:'Items found (numeric)',data:{transactionId,numericId,itemsCount:items.length,itemIds:items.map(i=>i.id)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'D'}));
+        writeDebugLog(JSON.stringify({ location: 'main.ts:3786', message: 'Items found (numeric)', data: { transactionId, numericId, itemsCount: items.length, itemIds: items.map(i => i.id) }, timestamp: Date.now(), sessionId: 'debug-session', runId: 'run1', hypothesisId: 'D' }));
         // #endregion
-        
+
         // Debug: Check if customizations exist for these items
         if (items.length > 0) {
           const itemIdsForCheck = items.map(i => i.id);
           const placeholders = itemIdsForCheck.map(() => '?').join(',');
           const existingCustomizations = await executeQuery<{ count: number }>(`SELECT COUNT(*) as count FROM transaction_item_customizations WHERE transaction_item_id IN (${placeholders})`, itemIdsForCheck);
           console.log('🔍 [DEBUG] Existing customizations in DB for these items:', existingCustomizations[0]?.count || 0);
-          writeDebugLog(JSON.stringify({location:'main.ts:3790',message:'Existing customizations check',data:{itemIds:itemIdsForCheck,existingCount:existingCustomizations[0]?.count || 0},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'D'}));
+          writeDebugLog(JSON.stringify({ location: 'main.ts:3790', message: 'Existing customizations check', data: { itemIds: itemIdsForCheck, existingCount: existingCustomizations[0]?.count || 0 }, timestamp: Date.now(), sessionId: 'debug-session', runId: 'run1', hypothesisId: 'D' }));
         }
       } else {
         // UUID or receipt number format - match by uuid_transaction_id
         items = await executeQuery<{ id: number }>('SELECT id FROM transaction_items WHERE uuid_transaction_id = ?', [transactionId]);
-        
+
         // #region agent log
-        writeDebugLog(JSON.stringify({location:'main.ts:3790',message:'Items found (UUID)',data:{transactionId,itemsCount:items.length,itemIds:items.map(i=>i.id)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'D'}));
+        writeDebugLog(JSON.stringify({ location: 'main.ts:3790', message: 'Items found (UUID)', data: { transactionId, itemsCount: items.length, itemIds: items.map(i => i.id) }, timestamp: Date.now(), sessionId: 'debug-session', runId: 'run1', hypothesisId: 'D' }));
         // #endregion
-        
+
         // If no items found, try joining with transactions table
         if (items.length === 0) {
           const tx = await executeQueryOne<{ id: number }>(
@@ -4954,7 +5408,7 @@ function createWindows(): void {
           if (tx && tx.id) {
             items = await executeQuery<{ id: number }>('SELECT id FROM transaction_items WHERE transaction_id = ?', [tx.id]);
             // #region agent log
-            writeDebugLog(JSON.stringify({location:'main.ts:3798',message:'Items found (fallback)',data:{transactionId,txId:tx.id,itemsCount:items.length},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'D'}));
+            writeDebugLog(JSON.stringify({ location: 'main.ts:3798', message: 'Items found (fallback)', data: { transactionId, txId: tx.id, itemsCount: items.length }, timestamp: Date.now(), sessionId: 'debug-session', runId: 'run1', hypothesisId: 'D' }));
             // #endregion
           }
         }
@@ -4965,7 +5419,7 @@ function createWindows(): void {
 
       // #region agent log
       console.log('🔍 [DEBUG] Starting to fetch customizations for', items.length, 'items');
-      writeDebugLog(JSON.stringify({location:'main.ts:3791',message:'Starting to fetch customizations',data:{transactionId,itemsCount:items.length,itemIds:items.map(i=>i.id)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'D'}));
+      writeDebugLog(JSON.stringify({ location: 'main.ts:3791', message: 'Starting to fetch customizations', data: { transactionId, itemsCount: items.length, itemIds: items.map(i => i.id) }, timestamp: Date.now(), sessionId: 'debug-session', runId: 'run1', hypothesisId: 'D' }));
       // #endregion
 
       for (const item of items) {
@@ -4973,7 +5427,7 @@ function createWindows(): void {
 
         // #region agent log
         console.log('🔍 [DEBUG] Fetching customizations for item:', itemId);
-        writeDebugLog(JSON.stringify({location:'main.ts:3796',message:'Fetching customizations for item',data:{itemId,transactionId},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'D'}));
+        writeDebugLog(JSON.stringify({ location: 'main.ts:3796', message: 'Fetching customizations for item', data: { itemId, transactionId }, timestamp: Date.now(), sessionId: 'debug-session', runId: 'run1', hypothesisId: 'D' }));
         // #endregion
 
         // Get customizations for this item with customization type name from product_customization_types
@@ -4993,16 +5447,16 @@ function createWindows(): void {
             LEFT JOIN product_customization_types pct ON tic.customization_type_id = pct.id
             WHERE tic.transaction_item_id = ?
           `, [itemId]);
-          
+
           // #region agent log
           console.log('🔍 [DEBUG] Customizations found for item', itemId, ':', customizations.length);
-          writeDebugLog(JSON.stringify({location:'main.ts:3812',message:'Customizations query result',data:{itemId,customizationsCount:customizations.length,customizations:customizations.map((c:any)=>({id:c.id,transaction_item_id:c.transaction_item_id,uuid_transaction_item_id:c.uuid_transaction_item_id}))},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'D'}));
+          writeDebugLog(JSON.stringify({ location: 'main.ts:3812', message: 'Customizations query result', data: { itemId, customizationsCount: customizations.length, customizations: customizations.map((c: any) => ({ id: c.id, transaction_item_id: c.transaction_item_id, uuid_transaction_item_id: c.uuid_transaction_item_id })) }, timestamp: Date.now(), sessionId: 'debug-session', runId: 'run1', hypothesisId: 'D' }));
           // #endregion
         } catch (error) {
           // #region agent log
-          writeDebugLog(JSON.stringify({location:'main.ts:3814',message:'Customizations query error',data:{itemId,error:String(error)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'D'}));
+          writeDebugLog(JSON.stringify({ location: 'main.ts:3814', message: 'Customizations query error', data: { itemId, error: String(error) }, timestamp: Date.now(), sessionId: 'debug-session', runId: 'run1', hypothesisId: 'D' }));
           // #endregion
-          
+
           // If product_customization_types table doesn't exist, query without JOIN
           console.warn('⚠️ product_customization_types table not found, using fallback names');
           customizations = await executeQuery<Record<string, unknown>>(`
@@ -5017,9 +5471,9 @@ function createWindows(): void {
             FROM transaction_item_customizations tic
             WHERE tic.transaction_item_id = ?
           `, [itemId]);
-          
+
           // #region agent log
-          writeDebugLog(JSON.stringify({location:'main.ts:3826',message:'Customizations query result (fallback)',data:{itemId,customizationsCount:customizations.length},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'D'}));
+          writeDebugLog(JSON.stringify({ location: 'main.ts:3826', message: 'Customizations query result (fallback)', data: { itemId, customizationsCount: customizations.length }, timestamp: Date.now(), sessionId: 'debug-session', runId: 'run1', hypothesisId: 'D' }));
           // #endregion
         }
 
@@ -5027,7 +5481,7 @@ function createWindows(): void {
           allCustomizations.push(customization);
 
           // Get options for this customization
-          const customizationId = typeof customization.id === 'number' ? customization.id : (typeof customization.id === 'string' ? parseInt(String(customization.id), 10) : 0);const options = await executeQuery<Record<string, unknown>>(`
+          const customizationId = typeof customization.id === 'number' ? customization.id : (typeof customization.id === 'string' ? parseInt(String(customization.id), 10) : 0); const options = await executeQuery<Record<string, unknown>>(`
             SELECT 
               id,
               transaction_item_customization_id,
@@ -5037,13 +5491,13 @@ function createWindows(): void {
               created_at
             FROM transaction_item_customization_options
             WHERE transaction_item_customization_id = ?
-          `, [customizationId]);allOptions.push(...options);
+          `, [customizationId]); allOptions.push(...options);
         }
       }
 
       // #region agent log
       console.log('🔍 [DEBUG] Returning customizations:', allCustomizations.length, 'customizations,', allOptions.length, 'options');
-      writeDebugLog(JSON.stringify({location:'main.ts:3849',message:'Returning customizations',data:{transactionId,totalCustomizations:allCustomizations.length,totalOptions:allOptions.length},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'D'}));
+      writeDebugLog(JSON.stringify({ location: 'main.ts:3849', message: 'Returning customizations', data: { transactionId, totalCustomizations: allCustomizations.length, totalOptions: allOptions.length }, timestamp: Date.now(), sessionId: 'debug-session', runId: 'run1', hypothesisId: 'D' }));
       // #endregion
 
       return {
@@ -5052,7 +5506,7 @@ function createWindows(): void {
       };
     } catch (error) {
       // #region agent log
-      writeDebugLog(JSON.stringify({location:'main.ts:3890',message:'Error in electron function',data:{transactionId,error:String(error),errorStack:error instanceof Error ? error.stack : undefined},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'D'}));
+      writeDebugLog(JSON.stringify({ location: 'main.ts:3890', message: 'Error in electron function', data: { transactionId, error: String(error), errorStack: error instanceof Error ? error.stack : undefined }, timestamp: Date.now(), sessionId: 'debug-session', runId: 'run1', hypothesisId: 'D' }));
       // #endregion
       console.error('Error getting normalized customizations:', error);
       return { customizations: [], options: [] };
@@ -5095,13 +5549,13 @@ function createWindows(): void {
           // If id is null/undefined/0, let database auto-generate it
           const rowId = getId();
           const hasId = rowId !== null && rowId !== 0;
-          
+
           const transactionItemId = getNumber('transaction_item_id'); // transaction_item_id is a numeric foreign key, not a string
           const customizationTypeId = getNumber('customization_type_id');
           const bundleProductId = getNumber('bundle_product_id');
           const createdDate = getDate('created_at');
           const createdAt = createdDate ? toMySQLDateTime(createdDate as string | number | Date) : toMySQLDateTime(new Date());
-          
+
           // Validate required fields - transaction_item_id cannot be null
           if (transactionItemId === null || transactionItemId === 0) {
             console.warn('⚠️ [TRANSACTION ITEM CUSTOMIZATIONS UPSERT] Skipping row with null/zero transaction_item_id:', {
@@ -5111,7 +5565,7 @@ function createWindows(): void {
             });
             return null; // Skip this row
           }
-          
+
           if (customizationTypeId === null || customizationTypeId === 0) {
             console.warn('⚠️ [TRANSACTION ITEM CUSTOMIZATIONS UPSERT] Skipping row with null/zero customization_type_id:', {
               rowId,
@@ -5120,10 +5574,10 @@ function createWindows(): void {
             });
             return null; // Skip this row
           }
-        
-        if (hasId) {
-          return {
-            sql: `
+
+          if (hasId) {
+            return {
+              sql: `
               INSERT INTO transaction_item_customizations (
                 id, transaction_item_id, customization_type_id, bundle_product_id, created_at
               ) VALUES (?, ?, ?, ?, ?)
@@ -5133,32 +5587,32 @@ function createWindows(): void {
                 bundle_product_id = VALUES(bundle_product_id),
                 created_at = VALUES(created_at)
             `,
-            params: [
-              rowId,
-              transactionItemId,
-              customizationTypeId,
-              bundleProductId,
-              createdAt
-            ] as (string | number | null | boolean)[]
-          };
-        } else {
-          // Auto-generate ID
-          return {
-            sql: `
+              params: [
+                rowId,
+                transactionItemId,
+                customizationTypeId,
+                bundleProductId,
+                createdAt
+              ] as (string | number | null | boolean)[]
+            };
+          } else {
+            // Auto-generate ID
+            return {
+              sql: `
               INSERT INTO transaction_item_customizations (
                 transaction_item_id, customization_type_id, bundle_product_id, created_at
               ) VALUES (?, ?, ?, ?)
             `,
-            params: [
-              transactionItemId,
-              customizationTypeId,
-              bundleProductId,
-              createdAt
-            ] as (string | number | null | boolean)[]
-          };
-        }
-      })
-      .filter((query): query is { sql: string; params: (string | number | null | boolean)[] } => query !== null); // Remove null entries (invalid rows)
+              params: [
+                transactionItemId,
+                customizationTypeId,
+                bundleProductId,
+                createdAt
+              ] as (string | number | null | boolean)[]
+            };
+          }
+        })
+        .filter((query): query is { sql: string; params: (string | number | null | boolean)[] } => query !== null); // Remove null entries (invalid rows)
 
       if (queries.length === 0) {
         console.warn('⚠️ [TRANSACTION ITEM CUSTOMIZATIONS UPSERT] No valid rows to insert after filtering');
@@ -5208,14 +5662,14 @@ function createWindows(): void {
         // If id is null/undefined/0, let database auto-generate it
         const rowId = getId();
         const hasId = rowId !== null && rowId !== 0;
-        
+
         const transactionItemCustomizationId = getNumber('transaction_item_customization_id');
         const customizationOptionId = getNumber('customization_option_id');
         const optionName = getString('option_name');
         const priceAdjustment = getNumber('price_adjustment') ?? 0;
         const createdDate = getDate('created_at');
         const createdAt = createdDate ? toMySQLDateTime(createdDate as string | number | Date) : toMySQLDateTime(new Date());
-        
+
         if (hasId) {
           return {
             sql: `
@@ -5495,9 +5949,20 @@ function createWindows(): void {
           t.uuid_id as transaction_uuid_id,
           t.payment_method,
           t.final_amount,
-          t.created_at as transaction_created_at
+          t.created_at as transaction_created_at,
+          t.customer_name,
+          u.email as issuer_email,
+          COALESCE(e.nama_karyawan, (
+            SELECT e2.nama_karyawan
+            FROM transaction_items ti2
+            LEFT JOIN employees e2 ON ti2.waiter_id = e2.id
+            WHERE ti2.transaction_id = t.id AND ti2.waiter_id IS NOT NULL
+            LIMIT 1
+          )) as waiter_name
         FROM transaction_refunds tr
         INNER JOIN transactions t ON tr.transaction_uuid = t.uuid_id
+        LEFT JOIN users u ON t.user_id = u.id
+        LEFT JOIN employees e ON t.waiter_id = e.id
         WHERE tr.business_id = ?
         AND tr.status != 'failed'
       `;
@@ -5535,7 +6000,7 @@ function createWindows(): void {
   ipcMain.handle('localdb-upsert-transaction-refunds', async (event, rows: RowArray) => {
     try {
       const queries: Array<{ sql: string; params?: (string | number | null | boolean)[] }> = [];
-      
+
       for (const r of rows) {
         const uuidId = typeof r.uuid_id === 'string' ? r.uuid_id : String(r.uuid_id ?? '');
         const transactionUuid = typeof r.transaction_uuid === 'string' ? r.transaction_uuid : String(r.transaction_uuid ?? '');
@@ -5557,7 +6022,7 @@ function createWindows(): void {
         const createdAt = r.created_at ? (typeof r.created_at === 'number' || typeof r.created_at === 'string' ? r.created_at : new Date()) : new Date();
         const updatedAt = r.updated_at ? (typeof r.updated_at === 'number' ? new Date(r.updated_at) : (typeof r.updated_at === 'string' ? r.updated_at : new Date())) : new Date();
         const syncedAt = r.synced_at ? (typeof r.synced_at === 'number' ? new Date(r.synced_at) : (typeof r.synced_at === 'string' ? r.synced_at : null)) : null;
-        
+
         queries.push({
           sql: `
             INSERT INTO transaction_refunds (
@@ -5820,7 +6285,7 @@ function createWindows(): void {
   }) => {
     try {
       const { sourceTransactionUuid, destinationTransactionUuid, itemIds } = payload || {};
-      
+
       if (!sourceTransactionUuid || !destinationTransactionUuid || !itemIds || itemIds.length === 0) {
         return { success: false, error: 'Missing required parameters' };
       }
@@ -5864,7 +6329,7 @@ function createWindows(): void {
       // Validate items exist and belong to source transaction
       const itemIdPlaceholders = itemIds.map(() => '?').join(',');
       const itemIdParams = itemIds.map(id => typeof id === 'number' ? id : parseInt(String(id), 10));
-      
+
       const itemsToMove = await executeQuery<{
         id: number;
         uuid_id: string;
@@ -6049,7 +6514,7 @@ function createWindows(): void {
         ORDER BY shift_start ASC
         LIMIT 1
       `, [businessId]);
-      
+
       if (!shift) {
         return { shift: null, isCurrentUserShift: false };
       }
@@ -6342,7 +6807,7 @@ function createWindows(): void {
           statsParams.push(shiftEndMySQL);
         }
       }
-      
+
       const statsResult = await executeQueryOne<{
         order_count: number;
         total_amount: number;
@@ -6487,16 +6952,19 @@ function createWindows(): void {
         return [];
       }
 
+      // Payment breakdown: total_amount only (gross, before discount). Exclude fully refunded transactions.
+      // Exclude transactions with no line items (or zero sum of item totals) so payment total matches Category/Barang basis.
+      const onlyTxWithItems = ' AND t.id IN (SELECT transaction_id FROM transaction_items GROUP BY transaction_id HAVING COALESCE(SUM(total_price), 0) > 0)';
       if (shiftUuids && shiftUuids.length > 0) {
         const query = `
           SELECT 
             COALESCE(pm.name, 'Unknown') as payment_method_name,
             COALESCE(pm.code, 'unknown') as payment_method_code,
             COUNT(t.id) as transaction_count,
-            COALESCE(SUM(t.final_amount), 0) as total_amount
+            COALESCE(SUM(t.total_amount), 0) as total_amount
           FROM transactions t
           LEFT JOIN payment_methods pm ON t.payment_method_id = pm.id
-          WHERE t.business_id = ? AND t.shift_uuid IN (${shiftUuids.map(() => '?').join(',')}) AND t.status = 'completed'
+          WHERE t.business_id = ? AND t.shift_uuid IN (${shiftUuids.map(() => '?').join(',')}) AND t.status = 'completed' AND t.refund_status != 'full'${onlyTxWithItems}
           GROUP BY t.payment_method_id, pm.name, pm.code ORDER BY transaction_count DESC
         `;
         const results = await executeQuery(query, [businessId, ...shiftUuids]);
@@ -6509,10 +6977,10 @@ function createWindows(): void {
             COALESCE(pm.name, 'Unknown') as payment_method_name,
             COALESCE(pm.code, 'unknown') as payment_method_code,
             COUNT(t.id) as transaction_count,
-            COALESCE(SUM(t.final_amount), 0) as total_amount
+            COALESCE(SUM(t.total_amount), 0) as total_amount
           FROM transactions t
           LEFT JOIN payment_methods pm ON t.payment_method_id = pm.id
-          WHERE t.business_id = ? AND t.shift_uuid = ? AND t.status = 'completed'
+          WHERE t.business_id = ? AND t.shift_uuid = ? AND t.status = 'completed' AND t.refund_status != 'full'${onlyTxWithItems}
           GROUP BY t.payment_method_id, pm.name, pm.code ORDER BY transaction_count DESC
         `;
         const results = await executeQuery(query, [businessId, shiftUuid]);
@@ -6522,21 +6990,23 @@ function createWindows(): void {
       // No shift filter: filter by userId (optional) + time range
       const shiftStartMySQL = toMySQLDateTime(shiftStart);
       const shiftEndMySQL = shiftEnd ? toMySQLDateTime(shiftEnd) : null;
-      
+
       let query = `
         SELECT 
           COALESCE(pm.name, 'Unknown') as payment_method_name,
           COALESCE(pm.code, 'unknown') as payment_method_code,
           COUNT(t.id) as transaction_count,
-          COALESCE(SUM(t.final_amount), 0) as total_amount
+          COALESCE(SUM(t.total_amount), 0) as total_amount
         FROM transactions t
         LEFT JOIN payment_methods pm ON t.payment_method_id = pm.id
         WHERE t.business_id = ?
         AND t.created_at >= ?
         AND t.status = 'completed'
+        AND t.refund_status != 'full'
+        ${onlyTxWithItems}
       `;
       const params: (string | number | null | boolean)[] = [businessId, shiftStartMySQL];
-      
+
       if (userId !== null) {
         query = query.replace('WHERE t.business_id = ?', 'WHERE t.user_id = ? AND t.business_id = ?');
         params.unshift(userId);
@@ -6548,7 +7018,7 @@ function createWindows(): void {
       }
 
       query += ' GROUP BY t.payment_method_id, pm.name, pm.code ORDER BY transaction_count DESC';
-      
+
       const results = await executeQuery(query, params);
       return results;
     } catch (error) {
@@ -6557,7 +7027,7 @@ function createWindows(): void {
     }
   });
 
-  // Get Category I breakdown
+  // Get Category I breakdown: only product's category1 (no category2). Refunds excluded (full-refund tx excluded; partial prorated).
   // When shiftUuids (non-empty): filter by t.shift_uuid IN (...). When shiftUuid: filter by t.shift_uuid = ?. Else: userId + time.
   ipcMain.handle('localdb-get-category1-breakdown', async (event, userId: number | null, shiftStart: string, shiftEnd: string | null, businessId: number | null = null, shiftUuid?: string | null, shiftUuids?: string[]) => {
     try {
@@ -6571,13 +7041,17 @@ function createWindows(): void {
           COALESCE(c1.name, 'Unknown') as category1_name,
           COALESCE(c1.id, 0) as category1_id,
           COALESCE(SUM(ti.quantity), 0) as total_quantity,
-          COALESCE(SUM(ti.total_price), 0) as total_amount
+          COALESCE(SUM(
+            ti.total_price / NULLIF((SELECT COALESCE(SUM(ti2.total_price), 0) FROM transaction_items ti2 WHERE ti2.transaction_id = ti.transaction_id), 0)
+            * COALESCE(t.total_amount, 0)
+          ), 0) as total_amount
         FROM transaction_items ti
         INNER JOIN transactions t ON ti.transaction_id = t.id
         INNER JOIN products p ON ti.product_id = p.id
         LEFT JOIN category1 c1 ON p.category1_id = c1.id
         WHERE t.business_id = ?
         AND t.status = 'completed'
+        AND t.refund_status != 'full'
         AND p.category1_id IS NOT NULL
         AND c1.id IS NOT NULL
       `;
@@ -6609,7 +7083,7 @@ function createWindows(): void {
     }
   });
 
-  // Get Category II breakdown
+  // Get Category II breakdown: only product's category2 that belongs to this business (category2_businesses). Refunds excluded.
   // When shiftUuids (non-empty): filter by t.shift_uuid IN (...). When shiftUuid: filter by t.shift_uuid = ?. Else: userId + time.
   ipcMain.handle('localdb-get-category2-breakdown', async (event, userId: number | null, shiftStart: string, shiftEnd: string | null, businessId: number | null = null, shiftUuid?: string | null, shiftUuids?: string[]) => {
     try {
@@ -6624,13 +7098,18 @@ function createWindows(): void {
           COALESCE(c2.name, 'Unknown') as category2_name,
           COALESCE(c2.id, 0) as category2_id,
           COALESCE(SUM(ti.quantity), 0) as total_quantity,
-          COALESCE(SUM(ti.total_price), 0) as total_amount
+          COALESCE(SUM(
+            ti.total_price / NULLIF((SELECT COALESCE(SUM(ti2.total_price), 0) FROM transaction_items ti2 WHERE ti2.transaction_id = ti.transaction_id), 0)
+            * COALESCE(t.total_amount, 0)
+          ), 0) as total_amount
         FROM transaction_items ti
         INNER JOIN transactions t ON ti.transaction_id = t.id
         INNER JOIN products p ON ti.product_id = p.id
+        INNER JOIN category2_businesses cb ON cb.category2_id = p.category2_id AND cb.business_id = t.business_id
         LEFT JOIN category2 c2 ON p.category2_id = c2.id
         WHERE t.business_id = ?
         AND t.status = 'completed'
+        AND t.refund_status != 'full'
         AND p.category2_id IS NOT NULL
         AND c2.id IS NOT NULL
       `;
@@ -6939,7 +7418,7 @@ function createWindows(): void {
         // updated_at and synced_at are BIGINT (timestamp in milliseconds), not DATETIME
         const updatedAt = row.updated_at ? (typeof row.updated_at === 'number' ? row.updated_at : (typeof row.updated_at === 'string' ? parseInt(row.updated_at, 10) : Date.now())) : null;
         const syncedAt = row.synced_at ? (typeof row.synced_at === 'number' ? row.synced_at : (typeof row.synced_at === 'string' ? parseInt(row.synced_at, 10) : Date.now())) : null;
-        
+
         return {
           sql: `
             INSERT INTO shifts (
@@ -7109,7 +7588,7 @@ function createWindows(): void {
     }
   });
 
-  // Get product sales breakdown for shift
+  // Get product sales breakdown for shift. Allocate total_amount (gross, before discount) to items proportionally. Full refund tx excluded.
   // When shiftUuids (non-empty): filter by t.shift_uuid IN (...). When shiftUuid: filter by t.shift_uuid = ?. Else: userId + time.
   ipcMain.handle('localdb-get-product-sales', async (event, userId: number | null, shiftStart: string, shiftEnd: string | null, businessId: number | null = null, shiftUuid?: string | null, shiftUuids?: string[]) => {
     try {
@@ -7137,13 +7616,18 @@ function createWindows(): void {
           p.harga_grabfood,
           p.harga_shopeefood,
           p.harga_qpon,
-          p.harga_tiktok
+          p.harga_tiktok,
+          COALESCE(t.refund_total, 0) as refund_total,
+          t.final_amount as final_amount,
+          t.total_amount as total_amount,
+          (SELECT COALESCE(SUM(ti2.total_price), 0) FROM transaction_items ti2 WHERE ti2.transaction_id = ti.transaction_id) as tx_items_total
         FROM transaction_items ti
         INNER JOIN transactions t ON ti.transaction_id = t.id
         LEFT JOIN payment_methods pm ON t.payment_method_id = pm.id
         INNER JOIN products p ON ti.product_id = p.id
         WHERE t.business_id = ?
         AND t.status = 'completed'
+        AND t.refund_status != 'full'
       `;
       const params: (string | number | null | boolean)[] = [businessId];
 
@@ -7351,6 +7835,14 @@ function createWindows(): void {
           baseSubtotal = 0;
         }
 
+        // Allocate transaction total_amount (gross, before discount) to items proportionally
+        const totalAmountTx = Number(row.total_amount ?? 0);
+        const txItemsTotal = Number(row.tx_items_total ?? 0);
+        const allocatedRatio = txItemsTotal > 0 ? totalAmountTx / txItemsTotal : 0;
+        const netBaseSubtotal = baseSubtotal * allocatedRatio;
+        const netTotalPrice = totalPrice * allocatedRatio;
+        const netCustomizationSubtotal = customizationSubtotal * allocatedRatio;
+
         // Determine platform based on product price, not payment method
         const platformCode = determinePlatform(row);
         const transactionType = row.transaction_type || 'drinks';
@@ -7361,9 +7853,9 @@ function createWindows(): void {
 
         if (existing) {
           existing.total_quantity += quantity;
-          existing.total_subtotal += totalPrice;
-          existing.customization_subtotal += customizationSubtotal;
-          existing.base_subtotal += baseSubtotal;
+          existing.total_subtotal += netTotalPrice;
+          existing.customization_subtotal += netCustomizationSubtotal;
+          existing.base_subtotal += netBaseSubtotal;
         } else {
           aggregate.set(key, {
             product_id: Number(row.product_id),
@@ -7372,9 +7864,9 @@ function createWindows(): void {
             platform: platformCode,
             transaction_type: transactionType,
             total_quantity: quantity,
-            total_subtotal: totalPrice,
-            customization_subtotal: customizationSubtotal,
-            base_subtotal: baseSubtotal,
+            total_subtotal: netTotalPrice,
+            customization_subtotal: netCustomizationSubtotal,
+            base_subtotal: netBaseSubtotal,
             unit_price: unitPrice,
           });
         }
@@ -7445,7 +7937,7 @@ function createWindows(): void {
         const isActive = typeof r.is_active === 'number' ? r.is_active : (r.is_active ? 1 : 0);
         const requiresAdditionalInfo = typeof r.requires_additional_info === 'number' ? r.requires_additional_info : (r.requires_additional_info ? 1 : 0);
         const createdAt = r.created_at ? (typeof r.created_at === 'number' || typeof r.created_at === 'string' ? r.created_at : new Date()) : new Date();
-        
+
         return {
           sql: `INSERT INTO payment_methods (
             id, name, code, description, is_active, requires_additional_info, created_at, updated_at
@@ -7592,7 +8084,7 @@ function createWindows(): void {
         const createdDate = getDate('created_at');
         const createdAt = createdDate ? toMySQLTimestamp(createdDate as string | number | Date) : toMySQLTimestamp(new Date());
         const updatedAt = toMySQLTimestamp(Date.now());
-        
+
         return {
           sql: `INSERT INTO receipt_settings (
             id, business_id, store_name, address, phone_number, contact_phone,
@@ -7702,7 +8194,8 @@ function createWindows(): void {
 
   // Organizations
   ipcMain.handle('localdb-upsert-organizations', async (event, rows: RowArray, skipOwnerValidation: boolean = false) => {
-    try {const queries: Array<{ sql: string; params?: (string | number | null | boolean)[] }> = [];
+    try {
+      const queries: Array<{ sql: string; params?: (string | number | null | boolean)[] }> = [];
       let skippedCount = 0;
 
       for (const r of rows) {
@@ -7734,15 +8227,17 @@ function createWindows(): void {
         // Verify user exists before inserting organization - SKIP on first pass to break circular dependency
         if (!skipOwnerValidation) {
           try {
-            const userExists = await executeQueryOne<{ id: number }>('SELECT id FROM users WHERE id = ? LIMIT 1', [ownerUserId]);if (!userExists) {
-              console.warn(`⚠️ [ORGANIZATIONS] Skipping organization ${orgId}: owner_user_id ${ownerUserId} does not exist`);skippedCount++;
+            const userExists = await executeQueryOne<{ id: number }>('SELECT id FROM users WHERE id = ? LIMIT 1', [ownerUserId]); if (!userExists) {
+              console.warn(`⚠️ [ORGANIZATIONS] Skipping organization ${orgId}: owner_user_id ${ownerUserId} does not exist`); skippedCount++;
               continue;
             }
-          } catch (checkError) {console.warn(`⚠️ [ORGANIZATIONS] Error checking user ${ownerUserId} for organization ${orgId}:`, checkError);
+          } catch (checkError) {
+            console.warn(`⚠️ [ORGANIZATIONS] Error checking user ${ownerUserId} for organization ${orgId}:`, checkError);
             skippedCount++;
             continue;
           }
-        } else {console.log(`ℹ️ [ORGANIZATIONS] Skipping owner validation for organization ${orgId} (first pass - breaking circular dependency)`);
+        } else {
+          console.log(`ℹ️ [ORGANIZATIONS] Skipping owner validation for organization ${orgId} (first pass - breaking circular dependency)`);
         }
 
         const getString = (key: string) => (typeof r[key] === 'string' ? r[key] as string : null);
@@ -7762,7 +8257,7 @@ function createWindows(): void {
         const updatedDate = getDate('updated_at');
         const createdAt = createdDate ? toMySQLTimestamp(createdDate as string | number | Date) : toMySQLTimestamp(new Date());
         const updatedAt = updatedDate ? toMySQLTimestamp(updatedDate as string | number | Date) : toMySQLTimestamp(Date.now());
-        
+
         queries.push({
           sql: `INSERT INTO organizations (
             id, name, slug, owner_user_id, subscription_status, subscription_plan,
@@ -7829,7 +8324,7 @@ function createWindows(): void {
         const displayOrder = typeof r.display_order === 'number' ? r.display_order : 0;
         const isActive = typeof r.is_active === 'number' ? r.is_active : (r.is_active ? 1 : 0);
         const createdAt = r.created_at ? (typeof r.created_at === 'number' || typeof r.created_at === 'string' ? r.created_at : new Date()) : new Date();
-        
+
         return {
           sql: `INSERT INTO category1 (
             id, name, description, display_order, is_active, created_at, updated_at
@@ -7866,7 +8361,7 @@ function createWindows(): void {
   ipcMain.handle('localdb-upsert-category2', async (event, rows: RowArray, junctionTableData?: Array<{ category2_id: number; business_id: number }>) => {
     try {
       const queries: Array<{ sql: string; params?: (string | number | null | boolean)[] }> = [];
-      
+
       // Upsert category2 records
       const category2Queries = rows.map(r => ({
         sql: `INSERT INTO category2 (
@@ -7891,7 +8386,7 @@ function createWindows(): void {
       // Upsert junction table relationships (REQUIRED - no fallback)
       if (junctionTableData && junctionTableData.length > 0) {
         const validJunctionData: Array<{ category2_id: number; business_id: number; created_at?: string | null }> = [];
-        
+
         // Verify business_id exists before inserting (foreign key constraint)
         for (const rel of junctionTableData) {
           try {
@@ -7906,7 +8401,7 @@ function createWindows(): void {
             continue;
           }
         }
-        
+
         if (validJunctionData.length > 0) {
           const junctionQueries = validJunctionData.map(rel => ({
             sql: `
@@ -7928,7 +8423,7 @@ function createWindows(): void {
       } else {
         console.warn(`⚠️ [CATEGORY2 UPSERT] No junction table data provided - category2 records will not be associated with any business`);
       }
-      
+
       await executeTransaction(queries);
       await upsertMasterDataToSystemPos(queries);
       return { success: true };
@@ -8009,14 +8504,14 @@ function createWindows(): void {
             credit_limit=VALUES(credit_limit), current_balance=VALUES(current_balance),
             is_active=VALUES(is_active), created_at=VALUES(created_at), updated_at=VALUES(updated_at)`,
           params: [
-            getId(), 
-            getString('account_code'), 
-            getString('account_name'), 
-            getString('contact_info'), 
+            getId(),
+            getString('account_code'),
+            getString('account_name'),
+            getString('contact_info'),
             getNumber('credit_limit') ?? 0.0,
-            getNumber('current_balance') ?? 0.0, 
-            getBoolean('is_active') ? 1 : 0, 
-            createdAt, 
+            getNumber('current_balance') ?? 0.0,
+            getBoolean('is_active') ? 1 : 0,
+            createdAt,
             updatedAt
           ] as (string | number | null | boolean)[]
         };
@@ -8225,6 +8720,11 @@ function createWindows(): void {
           [(insertResult.error ?? 'Unknown error').substring(0, 500), transactionId]
         );
         console.error(`❌ [SYSTEM POS] Failed to insert transaction ${transactionId} into system_pos:`, insertResult.error);
+        writeSystemPosDebugLog({
+          source: 'bayar_konfirmasi',
+          transactionId,
+          reason: insertResult.error ?? 'Unknown error'
+        });
         return { success: false, error: insertResult.error };
       }
 
@@ -8232,8 +8732,16 @@ function createWindows(): void {
       console.log(`✅ [SYSTEM POS] Queued and inserted transaction ${transactionId} into system_pos${insertResult.skipped ? ' (already existed)' : ''}`);
       return { success: true };
     } catch (error) {
+      const errMsg = error instanceof Error ? error.message : String(error);
+      const errStack = error instanceof Error ? error.stack : undefined;
       console.error('❌ [SYSTEM POS] Error queueing transaction:', error);
-      return { success: false, error: String(error) };
+      writeSystemPosDebugLog({
+        source: 'bayar_konfirmasi',
+        transactionId,
+        reason: errMsg,
+        stack: errStack
+      });
+      return { success: false, error: errMsg };
     }
   });
 
@@ -8403,6 +8911,11 @@ function createWindows(): void {
             'UPDATE system_pos_queue SET retry_count = retry_count + 1, last_error = ? WHERE transaction_id = ?',
             [(insertResult.error ?? 'Unknown').substring(0, 500), transactionId]
           );
+          writeSystemPosDebugLog({
+            source: 'repopulate',
+            transactionId,
+            reason: insertResult.error ?? 'Unknown error'
+          });
           failed++;
         }
       }
@@ -8448,7 +8961,7 @@ function createWindows(): void {
       }
 
       const result = await printerService.moveTransactionToPrinter2(transactionId, transaction.business_id);
-      
+
       if (result) {
         // Queue transaction for System POS sync
         try {
@@ -8459,9 +8972,22 @@ function createWindows(): void {
             console.log(`✅ [SYSTEM POS] Transaction ${transactionId} already exists in system_pos`);
           } else {
             console.warn(`⚠️ [SYSTEM POS] Failed to queue transaction ${transactionId}:`, queueResult.error);
+            writeSystemPosDebugLog({
+              source: 'move_to_printer2',
+              transactionId,
+              reason: queueResult.error ?? 'Unknown error'
+            });
           }
         } catch (queueError) {
+          const errMsg = queueError instanceof Error ? queueError.message : String(queueError);
+          const errStack = queueError instanceof Error ? queueError.stack : undefined;
           console.error('❌ [SYSTEM POS] Error queueing transaction for System POS:', queueError);
+          writeSystemPosDebugLog({
+            source: 'move_to_printer2',
+            transactionId,
+            reason: errMsg,
+            stack: errStack
+          });
           // Don't fail the move operation if System POS queue fails
         }
       }
@@ -8507,7 +9033,7 @@ function createWindows(): void {
     try {
       const now = Date.now();
       const queries: Array<{ sql: string; params?: (string | number | null | boolean)[] }> = [];
-      
+
       if (ids?.p1Ids?.length) {
         const placeholders = ids.p1Ids.map(() => '?').join(',');
         queries.push({
@@ -8522,7 +9048,7 @@ function createWindows(): void {
           params: [toMySQLDateTime(now), ...ids.p2Ids]
         });
       }
-      
+
       if (queries.length > 0) {
         await executeTransaction(queries);
       }
@@ -8542,7 +9068,7 @@ function createWindows(): void {
 
     try {
       const queries: Array<{ sql: string; params?: (string | number | null | boolean)[] }> = [];
-      
+
       const parsePrintedAt = (value: unknown): number => {
         if (typeof value === 'string' || typeof value === 'number') {
           const date = new Date(value);
@@ -8561,13 +9087,13 @@ function createWindows(): void {
           if (!transactionId || Number.isNaN(receiptNumber) || Number.isNaN(printedAtEpoch)) {
             continue;
           }
-          
+
           // Delete existing record
           queries.push({
             sql: 'DELETE FROM printer1_audit_log WHERE transaction_id = ? AND printer1_receipt_number = ? AND printed_at_epoch = ?',
             params: [transactionId, receiptNumber, printedAtEpoch]
           });
-          
+
           // Insert new record
           queries.push({
             sql: `
@@ -8592,13 +9118,13 @@ function createWindows(): void {
           if (!transactionId || Number.isNaN(receiptNumber) || Number.isNaN(printedAtEpoch)) {
             continue;
           }
-          
+
           // Delete existing record
           queries.push({
             sql: 'DELETE FROM printer2_audit_log WHERE transaction_id = ? AND printer2_receipt_number = ? AND printed_at_epoch = ?',
             params: [transactionId, receiptNumber, printedAtEpoch]
           });
-          
+
           // Insert new record
           queries.push({
             sql: `
@@ -8777,6 +9303,36 @@ function createWindows(): void {
       return { success: true };
     } catch (error) {
       console.error('Error marking refund as failed:', error);
+      return { success: false, error: String(error) };
+    }
+  });
+
+  ipcMain.handle('localdb-check-transaction-exists', async (_event, transactionUuid: string) => {
+    try {
+      if (!transactionUuid || typeof transactionUuid !== 'string') {
+        return { exists: false, error: 'transactionUuid required' };
+      }
+      const rows = await executeQuery<{ n: number }>(
+        'SELECT 1 as n FROM transactions WHERE uuid_id = ? LIMIT 1',
+        [transactionUuid]
+      );
+      const exists = Array.isArray(rows) && rows.length > 0;
+      return { exists };
+    } catch (error) {
+      console.error('Error checking transaction exists:', error);
+      return { exists: false, error: String(error) };
+    }
+  });
+
+  ipcMain.handle('localdb-delete-refund', async (_event, offlineRefundId: number) => {
+    try {
+      if (!offlineRefundId || typeof offlineRefundId !== 'number') {
+        return { success: false, error: 'offlineRefundId required' };
+      }
+      await executeUpdate('DELETE FROM offline_refunds WHERE id = ?', [offlineRefundId]);
+      return { success: true };
+    } catch (error) {
+      console.error('Error deleting refund:', error);
       return { success: false, error: String(error) };
     }
   });
@@ -9196,11 +9752,11 @@ ipcMain.handle('print-receipt', async (event, data: ReceiptPrintData) => {
 
         if (templateCode) {
           console.log(`✅ Using ${templateType} template from database for printing`);
-          
+
           // Fetch receipt settings (pengaturan konten) so test and real prints use saved content
           const receiptSettings = await receiptManagementService.getReceiptSettings(data.business_id);
           const displayBusinessName = (receiptSettings?.store_name?.trim() || businessName).trim() || businessName;
-          
+
           // Generate items HTML string (note/customization only when showNotes is true)
           const items = data.items || [];
           const itemsHTML = items.map((item: any) => {
@@ -9232,10 +9788,10 @@ ipcMain.handle('print-receipt', async (event, data: ReceiptPrintData) => {
               ${noteRow}
             `;
           }).join('');
-          
+
           // Calculate total items
           const totalItems = items.reduce((sum: number, item: any) => sum + (item.quantity || 1), 0);
-          
+
           // Format date/time
           const formatDateTime = (date: Date): string => {
             const year = date.getFullYear();
@@ -9246,16 +9802,16 @@ ipcMain.handle('print-receipt', async (event, data: ReceiptPrintData) => {
             const seconds = String(date.getSeconds()).padStart(2, '0');
             return `${year}-${month}-${day} ${hours}:${minutes}:${seconds}`;
           };
-          
+
           const currentDate = new Date(data.date || Date.now());
           const orderTime = formatDateTime(currentDate);
           const printTime = formatDateTime(new Date());
-          
+
           // Determine transaction type display (DINE IN / TAKE AWAY)
           const pickupMethod = data.pickupMethod || 'dine-in';
           const isDineIn = pickupMethod === 'dine-in';
           const transactionDisplay = isDineIn ? 'DINE IN' : 'TAKE AWAY';
-          
+
           // Calculate display counter (same logic as generateReceiptHTML)
           // For bills, use table number if available, otherwise fallback to counter
           let displayCounter: string | number;
@@ -9276,13 +9832,13 @@ ipcMain.handle('print-receipt', async (event, data: ReceiptPrintData) => {
             }
           }
           const displayCounterStr = String(displayCounter).padStart(2, '0');
-          
+
           // Prepare logo HTML from receipt_settings
           let logoHTML = '';
           if (receiptSettings?.logo_base64) {
             logoHTML = `<div class="logo-container"><img src="${receiptSettings.logo_base64}" class="logo" alt="Logo"></div>`;
           }
-          
+
           const hasVoucher = typeof data.voucherDiscount === 'number' && data.voucherDiscount > 0;
           const subTotal = data.total ?? 0;
           const finalAmount = (typeof data.final_amount === 'number' ? data.final_amount : subTotal) as number;
@@ -9321,7 +9877,7 @@ ipcMain.handle('print-receipt', async (event, data: ReceiptPrintData) => {
             finalAmount: hasVoucher ? finalAmount : subTotal,
             hasVoucher,
           };
-          
+
           // Render template
           htmlContent = receiptManagementService.renderTemplate(templateCode, templateData);
           console.log(`✅ ${templateType} template rendered successfully`);
@@ -9665,6 +10221,8 @@ async function executeLabelsBatchPrint(data: {
   printerType?: string;
   business_id?: number;
   orderContext?: OrderContextForChecker;
+  /** When true, use nonOfflineCopies for labelPrinter (GoFood, Grab, Shopee, Qpon, TikTok) */
+  isOnlineOrder?: boolean;
 }): Promise<{ success: boolean; error?: string }> {
   try {
     const businessId = data.business_id ?? data.labels?.[0]?.business_id;
@@ -9714,7 +10272,10 @@ async function executeLabelsBatchPrint(data: {
             if (config.extra_settings) {
               try {
                 const extra = typeof config.extra_settings === 'string' ? JSON.parse(config.extra_settings) : config.extra_settings;
-                if (extra && typeof extra.copies === 'number' && extra.copies > 0) {
+                // Label printer (Printer 3): use copies for offline, nonOfflineCopies for GoFood/Grab/Shopee/Qpon/TikTok
+                if (data.printerType === 'labelPrinter' && data.isOnlineOrder === true && extra && typeof extra.nonOfflineCopies === 'number' && extra.nonOfflineCopies > 0) {
+                  copies = Math.min(10, Math.floor(extra.nonOfflineCopies));
+                } else if (extra && typeof extra.copies === 'number' && extra.copies > 0) {
                   copies = Math.min(10, Math.floor(extra.copies));
                 }
                 if (batchMarginAdjustMm === undefined && typeof extra.marginAdjustMm === 'number' && !Number.isNaN(extra.marginAdjustMm)) {
@@ -9881,6 +10442,7 @@ ipcMain.handle('print-labels-batch', async (event, data: {
   printerType?: string;
   business_id?: number;
   orderContext?: OrderContextForChecker;
+  isOnlineOrder?: boolean;
 }) => {
   // When orderContext is provided and checker template uses {{items}} or {{itemsCategory1}}/{{itemsCategory2}}, we print one order-summary slip (labels can be empty)
   const hasOrderContext = data.orderContext && (
@@ -10675,12 +11237,12 @@ function generateReceiptHTML(data: ReceiptPrintData, businessName: string, optio
       const isReceiptize = data.printerType === 'receiptizePrinter';
       // Prioritize per-printer counter over globalCounter to ensure each printer has its own counter
       const perPrinterCounter = isReceiptize ? data.printer2Counter : data.printer1Counter;
-      
+
       // Debug: Log all available counter values
       console.log(`📄 [RECEIPT] Counter selection - printerType: ${data.printerType}, isReceiptize: ${isReceiptize}`);
       console.log(`📄 [RECEIPT] Available counters - printer1Counter: ${data.printer1Counter} (type: ${typeof data.printer1Counter}), printer2Counter: ${data.printer2Counter} (type: ${typeof data.printer2Counter}), globalCounter: ${data.globalCounter}, tableNumber: ${data.tableNumber}`);
       console.log(`📄 [RECEIPT] Selected perPrinterCounter: ${perPrinterCounter} (type: ${typeof perPrinterCounter})`);
-      
+
       // Use per-printer counter if it's a valid number > 0, otherwise fall back
       let displayCounter: string | number;
       if (typeof perPrinterCounter === 'number' && perPrinterCounter > 0) {
@@ -10696,11 +11258,11 @@ function generateReceiptHTML(data: ReceiptPrintData, businessName: string, optio
         displayCounter = '01';
         console.log(`❌ [RECEIPT] All counters invalid, using default '01'`);
       }
-      
+
       const numStr = String(displayCounter).padStart(2, '0');
-      
+
       console.log(`📄 [RECEIPT] Final counter display - displayCounter: ${displayCounter}, numStr: ${numStr}, will show: ${transactionDisplay} ${numStr}`);
-      
+
       return `<div class="transaction-type">${transactionDisplay} ${numStr}</div>`;
     })()}
   
@@ -10809,6 +11371,12 @@ function generateShiftBreakdownHTML(
     }).format(value);
   };
 
+  // Round to integer and format as id-ID to avoid decimals (e.g. ",002") from floating point
+  const formatIntegerId = (value: number): string => {
+    const n = Number.isFinite(value) ? Math.round(value) : 0;
+    return n.toLocaleString('id-ID', { minimumFractionDigits: 0, maximumFractionDigits: 0 });
+  };
+
   const formatPlatformLabel = (platform: string): string => {
     const key = (platform || 'offline').toLowerCase();
     switch (key) {
@@ -10844,7 +11412,7 @@ function generateShiftBreakdownHTML(
     // Use sectionOptions from options directly if provided, otherwise use defaults
     // This ensures we respect false values from the caller
     const providedSectionOptions = options.sectionOptions;
-    
+
     // Debug logging
     writeDebugLog(JSON.stringify({
       location: 'electron/main.ts:8453',
@@ -10855,10 +11423,10 @@ function generateShiftBreakdownHTML(
       runId: 'post-fix',
       hypothesisId: 'C'
     }));
-    
+
     console.log('🔍 [RENDER SECTION] Options sectionOptions:', JSON.stringify(options.sectionOptions));
     console.log('🔍 [RENDER SECTION] Using provided options directly:', providedSectionOptions !== undefined && providedSectionOptions !== null);
-    
+
     const sectionOptions = providedSectionOptions ? {
       ringkasan: providedSectionOptions.ringkasan !== undefined ? providedSectionOptions.ringkasan : true,
       barangTerjual: providedSectionOptions.barangTerjual !== undefined ? providedSectionOptions.barangTerjual : true,
@@ -10874,7 +11442,7 @@ function generateShiftBreakdownHTML(
       categoryII: true,
       toppingSales: true
     };
-    
+
     // Debug logging
     writeDebugLog(JSON.stringify({
       location: 'electron/main.ts:8475',
@@ -10898,7 +11466,7 @@ function generateShiftBreakdownHTML(
       runId: 'post-fix',
       hypothesisId: 'C'
     }));
-    
+
     console.log('🔍 [RENDER SECTION] Final resolved sectionOptions:', JSON.stringify(sectionOptions));
     console.log('🔍 [RENDER SECTION] barangTerjual value:', sectionOptions.barangTerjual, 'type:', typeof sectionOptions.barangTerjual, '=== true:', sectionOptions.barangTerjual === true);
     const shiftStartTime = formatDateTime(report.shift_start);
@@ -10941,9 +11509,9 @@ function generateShiftBreakdownHTML(
           <div>${productNameDisplay}</div>
           <div style="font-size: 7pt; color: #555;">${transactionLabel} · ${platformLabel}</div>
         </td>
-        <td style="text-align: right; padding: 0.3mm 0;">${quantity}</td>
-        <td style="text-align: right; padding: 0.3mm 0;">${isBundleItem ? '-' : (isNaN(unitPrice) ? '0' : Number(unitPrice).toLocaleString('id-ID'))}</td>
-        <td style="text-align: right; padding: 0.3mm 0;">${isBundleItem ? '-' : (isNaN(baseSubtotal) ? '0' : Number(baseSubtotal).toLocaleString('id-ID'))}</td>
+        <td style="text-align: left; padding: 0.3mm 0;">${quantity}</td>
+        <td style="text-align: right; padding: 0.3mm 0;">${isBundleItem ? '-' : (isNaN(unitPrice) ? '0' : formatIntegerId(unitPrice))}</td>
+        <td style="text-align: right; padding: 0.3mm 0;">${isBundleItem ? '-' : (isNaN(baseSubtotal) ? '0' : formatIntegerId(baseSubtotal))}</td>
       </tr>
       `;
       } catch (productError) {
@@ -10980,8 +11548,8 @@ function generateShiftBreakdownHTML(
       const qty = productPlatformCount.get(key) ?? 0;
       const amount = productPlatformAmount.get(key) ?? 0;
       const label = PLATFORM_LABELS_BT[key];
-      const amountStr = Number.isFinite(amount) ? amount.toLocaleString('id-ID') : '0';
-      return `<tr><td style="padding-left: 2mm; font-size: 7pt;">${label}</td><td class="right" style="font-size: 7pt;">${qty}</td><td class="right">-</td><td class="right" style="font-size: 7pt;">${amountStr}</td></tr>`;
+      const amountStr = Number.isFinite(amount) ? formatIntegerId(Math.round(amount)) : '0';
+      return `<tr><td style="padding-left: 2mm; font-size: 7pt;">${label}</td><td style="text-align: left; font-size: 7pt;">${qty}</td><td class="right">-</td><td class="right" style="font-size: 7pt;">${amountStr}</td></tr>`;
     }).join('');
 
     const customizationRows = report.customizationSales.map(item => {
@@ -11001,8 +11569,8 @@ function generateShiftBreakdownHTML(
           <div>${item.option_name || 'Unknown'}</div>
           <div style="font-size: 7pt; color: #555;">${item.customization_name || 'N/A'}</div>
         </td>
-        <td style="text-align: right; padding: 0.3mm 0;">${isNaN(quantity) ? '0' : quantity}</td>
-        <td style="text-align: right; padding: 0.3mm 0;">${isNaN(revenue) ? '0' : Number(revenue).toLocaleString('id-ID')}</td>
+        <td style="text-align: left; padding: 0.3mm 0;">${isNaN(quantity) ? '0' : quantity}</td>
+        <td style="text-align: right; padding: 0.3mm 0;">${isNaN(revenue) ? '0' : formatIntegerId(Math.round(revenue))}</td>
       </tr>
     `;
       } catch (customizationError) {
@@ -11021,7 +11589,7 @@ function generateShiftBreakdownHTML(
       <tr>
         <td style="text-align: left; padding: 0.3mm 0;">${payment.payment_method_name || 'N/A'}</td>
         <td style="text-align: right; padding: 0.3mm 0;">${count}</td>
-        <td style="text-align: right; padding: 0.3mm 0;">${amount.toLocaleString('id-ID')}</td>
+        <td style="text-align: right; padding: 0.3mm 0;">${formatIntegerId(Math.round(amount))}</td>
       </tr>
     `;
     }).join('');
@@ -11032,8 +11600,8 @@ function generateShiftBreakdownHTML(
     const category1Data = report.category1Breakdown || [];
     const category1Rows = category1Data.map((c1: { category1_name: string; total_quantity: number; total_amount: number }) => {
       const q = Number(c1.total_quantity || 0);
-      const a = Number(c1.total_amount || 0);
-      return `<tr><td style="text-align: left; padding: 0.3mm 0;">${c1.category1_name || 'N/A'}</td><td style="text-align: right; padding: 0.3mm 0;">${q}</td><td style="text-align: right; padding: 0.3mm 0;">${a.toLocaleString('id-ID')}</td></tr>`;
+      const a = Math.round(Number(c1.total_amount || 0));
+      return `<tr><td style="text-align: left; padding: 0.3mm 0;">${c1.category1_name || 'N/A'}</td><td style="text-align: left; padding: 0.3mm 0;">${q}</td><td style="text-align: right; padding: 0.3mm 0;">${formatIntegerId(a)}</td></tr>`;
     }).join('');
     const totalCategory1Quantity = (report.category1Breakdown || []).reduce((sum: number, c: { total_quantity: number }) => sum + Number(c.total_quantity || 0), 0);
     const totalCategory1Amount = (report.category1Breakdown || []).reduce((sum: number, c: { total_amount: number }) => sum + Number(c.total_amount || 0), 0);
@@ -11041,12 +11609,12 @@ function generateShiftBreakdownHTML(
     const category2Data = report.category2Breakdown || [];
     const category2Rows = category2Data.map((category2: { category2_name: string; total_quantity: number; total_amount: number }) => {
       const quantity = Number(category2.total_quantity || 0);
-      const amount = Number(category2.total_amount || 0);
+      const amount = Math.round(Number(category2.total_amount || 0));
       return `
       <tr>
         <td style="text-align: left; padding: 0.3mm 0;">${category2.category2_name || 'N/A'}</td>
-        <td style="text-align: right; padding: 0.3mm 0;">${quantity}</td>
-        <td style="text-align: right; padding: 0.3mm 0;">${amount.toLocaleString('id-ID')}</td>
+        <td style="text-align: left; padding: 0.3mm 0;">${quantity}</td>
+        <td style="text-align: right; padding: 0.3mm 0;">${formatIntegerId(amount)}</td>
       </tr>
     `;
     }).join('');
@@ -11054,9 +11622,12 @@ function generateShiftBreakdownHTML(
     const totalCategory2Amount = (report.category2Breakdown || []).reduce((sum: number, c: { total_amount: number }) => sum + Number(c.total_amount || 0), 0);
 
     const formattedTotalDiscount = report.statistics.total_discount > 0
-      ? formatCurrency(-Math.abs(report.statistics.total_discount))
-      : formatCurrency(0);
+      ? `-${formatIntegerId(Math.abs(report.statistics.total_discount))}`
+      : formatIntegerId(0);
     const cashSummaryData = report.cashSummary;
+    // Coerce to number: IPC can send gross_total_omset as string (e.g. "55771000.00244" from number+string concat on frontend)
+    const grossTotalOmsetRaw = report.gross_total_omset ?? (Number(report.statistics.total_amount || 0) + Number(cashSummaryData.cash_shift_refunds ?? 0) + Number(report.statistics.total_discount || 0));
+    const grossTotalOmset = Math.round(Number(grossTotalOmsetRaw));
     const cashShiftSales = Number(cashSummaryData.cash_shift_sales ?? cashSummaryData.cash_shift ?? 0) || 0;
     const cashShiftRefunds = Number(cashSummaryData.cash_shift_refunds ?? 0) || 0;
     const cashWholeDaySales = Number(cashSummaryData.cash_whole_day_sales ?? cashSummaryData.cash_whole_day ?? 0) || 0;
@@ -11066,38 +11637,56 @@ function generateShiftBreakdownHTML(
     // Ensure all values are numbers and handle NaN
     const kasMulaiSummary = Number(cashSummaryData.kas_mulai ?? report.modal_awal ?? 0) || 0;
     const kasExpectedSummary = Number(cashSummaryData.kas_expected) || (kasMulaiSummary + cashShiftSales - cashShiftRefunds);
-    const kasAkhirSummary = typeof cashSummaryData.kas_akhir === 'number' && !isNaN(cashSummaryData.kas_akhir) ? cashSummaryData.kas_akhir : null;
-    let kasSelisihSummary =
-      typeof cashSummaryData.kas_selisih === 'number' && !isNaN(cashSummaryData.kas_selisih)
-        ? cashSummaryData.kas_selisih
-        : kasAkhirSummary !== null && !isNaN(kasExpectedSummary)
-          ? Number((kasAkhirSummary - kasExpectedSummary).toFixed(2))
-          : null;
+    // Coerce to number: IPC/JSON can send kas_akhir/kas_selisih as string from DB
+    const kasAkhirNum = cashSummaryData.kas_akhir != null && String(cashSummaryData.kas_akhir) !== '' ? Number(cashSummaryData.kas_akhir) : NaN;
+    const kasAkhirSummary = Number.isFinite(kasAkhirNum) ? kasAkhirNum : null;
+    const kasSelisihRaw = cashSummaryData.kas_selisih != null && String(cashSummaryData.kas_selisih) !== '' ? Number(cashSummaryData.kas_selisih) : NaN;
+    const SELISIH_MAX = 1e8; // Reject garbage values
+    let kasSelisihSummary: number | null =
+      Number.isFinite(kasSelisihRaw) && Math.abs(kasSelisihRaw) <= SELISIH_MAX
+        ? Math.round(kasSelisihRaw)
+        : null;
     let kasSelisihLabelSummary: 'balanced' | 'plus' | 'minus' | null =
       cashSummaryData.kas_selisih_label ?? null;
-    if (kasSelisihSummary !== null && !isNaN(kasSelisihSummary)) {
-      if (Math.abs(kasSelisihSummary) < 0.01) {
+    // If payload has no selisih but has kas_akhir and kas_expected, compute so print matches app
+    if (kasSelisihSummary === null && kasAkhirSummary !== null && Number.isFinite(kasExpectedSummary)) {
+      const computed = Math.round(Number((kasAkhirSummary - kasExpectedSummary).toFixed(2)));
+      if (Math.abs(computed) <= SELISIH_MAX) {
+        kasSelisihSummary = computed;
+        if (Math.abs(kasSelisihSummary) < 1) kasSelisihLabelSummary = 'balanced';
+        else if (!kasSelisihLabelSummary) kasSelisihLabelSummary = kasSelisihSummary > 0 ? 'plus' : 'minus';
+      }
+    }
+    if (kasSelisihSummary !== null) {
+      if (Math.abs(kasSelisihSummary) < 1) {
         kasSelisihSummary = 0;
         kasSelisihLabelSummary = 'balanced';
       } else if (!kasSelisihLabelSummary) {
         kasSelisihLabelSummary = kasSelisihSummary > 0 ? 'plus' : 'minus';
       }
     }
-    const varianceLabelDisplay =
-      kasSelisihLabelSummary === 'plus'
-        ? 'Plus'
-        : kasSelisihLabelSummary === 'minus'
-          ? 'Minus'
-          : kasSelisihLabelSummary === 'balanced'
-            ? 'Balanced'
-            : 'Pending';
+    // Selisih Kas: no "Rp" on print; + / - before number is enough (no "(Plus)" / "(Minus)" label)
     const varianceValueDisplay =
       kasSelisihSummary === null || isNaN(kasSelisihSummary)
         ? '-'
-        : `${kasSelisihSummary > 0 ? '+' : ''}${kasSelisihSummary.toLocaleString('id-ID')}`;
-    const kasAkhirDisplay = kasAkhirSummary !== null && !isNaN(kasAkhirSummary) ? kasAkhirSummary.toLocaleString('id-ID') : '-';
+        : `${kasSelisihSummary > 0 ? '+' : ''}${formatIntegerId(Math.abs(kasSelisihSummary))}`;
+    const kasAkhirDisplay = kasAkhirSummary !== null && !isNaN(kasAkhirSummary) ? formatIntegerId(kasAkhirSummary) : '-';
     const totalCashInCashierValue = Number(cashSummaryData.total_cash_in_cashier) || kasExpectedSummary;
     const totalCashInCashierDisplay = !isNaN(totalCashInCashierValue) ? totalCashInCashierValue.toLocaleString('id-ID') : '-';
+
+    const refundList = report.refunds || [];
+    const refundRows = refundList.map((r: PrintableShiftRefundRow) => {
+      const txId = r.transaction_uuid_id || r.transaction_uuid || '-';
+      const method = formatPlatformLabel(r.payment_method || 'offline');
+      const total = formatIntegerId(Math.round(Number(r.final_amount || 0)));
+      const refundAmt = formatIntegerId(Math.round(Number(r.refund_amount || 0)));
+      const reason = (r.reason || '-').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+      const refundTime = r.refunded_at ? formatDateTime(r.refunded_at) : '-';
+      const issuer = (r.issuer_email || '-').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+      const waiter = (r.waiter_name || '-').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+      const customer = (r.customer_name || '-').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+      return `<tr><td style="font-size: 7pt;">${txId}</td><td style="font-size: 7pt;">${method}</td><td class="right" style="font-size: 7pt;">${total}</td><td class="right" style="font-size: 7pt; color: #991b1b;">-${refundAmt}</td><td style="font-size: 7pt;">${reason}</td><td style="font-size: 7pt;">${refundTime}</td><td style="font-size: 7pt;">${issuer}</td><td style="font-size: 7pt;">${waiter}</td><td style="font-size: 7pt;">${customer}</td></tr>`;
+    }).join('');
 
     return `
     <div class="report-block">
@@ -11122,7 +11711,7 @@ function generateShiftBreakdownHTML(
       </div>
       <div class="info-line">
         <span class="info-label">Modal Awal:</span>
-        <span class="info-value">${report.modal_awal.toLocaleString('id-ID')}</span>
+        <span class="info-value">${formatIntegerId(Number(report.modal_awal))}</span>
       </div>
 
       <div class="divider"></div>
@@ -11130,137 +11719,79 @@ function generateShiftBreakdownHTML(
       ${sectionOptions.ringkasan === true ? `
       <div class="section-title">RINGKASAN</div>
       <div class="summary">
+        <div class="summary-subtitle">Transaksi</div>
         <div class="summary-block-omset">
           <div class="summary-line summary-line-highlight">
-            <span class="summary-label">Total Omset:</span>
-            <span class="summary-value">Rp ${Number(report.statistics.total_amount || 0).toLocaleString('id-ID')}</span>
+            <span class="summary-label">Total Omset (sebelum refund & diskon):</span>
+            <span class="summary-value">${formatIntegerId(grossTotalOmset || 0)}</span>
           </div>
-          <div class="summary-line summary-line-indent">
-            <span class="summary-label">Jumlah Pesanan:</span>
-            <span class="summary-value">${report.statistics.order_count} transaksi</span>
+          <div class="summary-line summary-line-indent" style="color: #991b1b;">
+            <span class="summary-label">Refund:</span>
+            <span class="summary-value">-${formatIntegerId(cashShiftRefunds)}</span>
           </div>
-          <div class="summary-line summary-line-indent">
-            <span class="summary-label">Jumlah CU:</span>
-            <span class="summary-value">${report.statistics.total_cu ?? 0}</span>
+          <div class="summary-block-voucher">
+            <div class="summary-line summary-line-highlight-voucher">
+              <span class="summary-label">Diskon Voucher:</span>
+              <span class="summary-value">${formattedTotalDiscount}</span>
+            </div>
+            ${((): string => {
+          const vb = report.voucherBreakdown || {};
+          return VOUCHER_BREAKDOWN_ORDER.map(({ key, label }) => {
+            const e = vb[key];
+            if (!e || e.count <= 0) return '';
+            return `<div class="summary-line summary-line-indent">
+                  <span class="summary-label">${label} (${e.count}):</span>
+                  <span class="summary-value">-${formatIntegerId(e.total || 0)}</span>
+                </div>`;
+          }).join('');
+        })()}
           </div>
-          ${((): string => {
-            const PLATFORM_LABELS: Record<string, string> = { offline: 'Offline', gofood: 'GoFood', grabfood: 'GrabFood', shopeefood: 'ShopeeFood', qpon: 'Qpon', tiktok: 'TikTok' };
-            const PLATFORM_ORDER = ['offline', 'gofood', 'grabfood', 'shopeefood', 'qpon', 'tiktok'];
-            const countMap = new Map<string, number>();
-            const amountMap = new Map<string, number>();
-            (report.paymentBreakdown || []).forEach((p: { payment_method_code?: string; transaction_count?: number; total_amount?: number }) => {
-              const code = (p.payment_method_code || 'offline').toLowerCase();
-              const platform = PLATFORM_LABELS[code] ? code : 'offline';
-              const count = Number(p.transaction_count || 0);
-              const amount = Number(p.total_amount || 0);
-              countMap.set(platform, (countMap.get(platform) ?? 0) + count);
-              amountMap.set(platform, (amountMap.get(platform) ?? 0) + amount);
-            });
-            return PLATFORM_ORDER.filter((key) => (countMap.get(key) ?? 0) > 0).map((key) => {
-              const count = countMap.get(key) ?? 0;
-              const amount = amountMap.get(key) ?? 0;
-              const label = PLATFORM_LABELS[key];
-              const amountStr = amount.toLocaleString('id-ID');
-              return `<div class="summary-line summary-line-indent"><span class="summary-label">${label}:</span><span class="summary-value">${count} transaksi / Rp ${amountStr}</span></div>`;
-            }).join('');
-          })()}
+          <div class="summary-line summary-line-highlight">
+            <span class="summary-label">Grand Total:</span>
+            <span class="summary-value">${formatIntegerId(Math.max(0, (grossTotalOmset || 0) - cashShiftRefunds - (report.statistics.total_discount || 0)))}</span>
+          </div>
         </div>
-        <div class="summary-block-voucher">
-          <div class="summary-line summary-line-highlight-voucher">
-            <span class="summary-label">Total Diskon Voucher:</span>
-            <span class="summary-value">${formattedTotalDiscount}</span>
-          </div>
-          <div class="summary-line summary-line-indent">
-            <span class="summary-label">Voucher Dipakai:</span>
-            <span class="summary-value">${report.statistics.voucher_count} transaksi</span>
-          </div>
-          ${((): string => {
-            const vb = report.voucherBreakdown || {};
-            return VOUCHER_BREAKDOWN_ORDER.map(({ key, label }) => {
-              const e = vb[key];
-              if (!e || e.count <= 0) return '';
-              return `<div class="summary-line summary-line-indent">
-                <span class="summary-label">${label} (${e.count}):</span>
-                <span class="summary-value">-${(e.total || 0).toLocaleString('id-ID')}</span>
-              </div>`;
-            }).join('');
-          })()}
-        </div>
+        ${totalCustomizationRevenue > 0 ? `
         <div class="summary-line summary-line-highlight-topping">
           <span class="summary-label">Total Topping:</span>
-          <span class="summary-value">${totalCustomizationRevenue.toLocaleString('id-ID')}</span>
+          <span class="summary-value">${formatIntegerId(totalCustomizationRevenue)}</span>
         </div>
+        ` : ''}
+        <div class="summary-subtitle">Kas</div>
         <div class="summary-line">
           <span class="summary-label">Kas Mulai:</span>
-          <span class="summary-value">${kasMulaiSummary.toLocaleString('id-ID')}</span>
+          <span class="summary-value">${formatIntegerId(kasMulaiSummary)}</span>
         </div>
         <div class="summary-line">
-          <span class="summary-label">Cash Sales (Shift):</span>
-          <span class="summary-value">${cashShiftSales.toLocaleString('id-ID')}</span>
+          <span class="summary-label">Cash Sales:</span>
+          <span class="summary-value">${formatIntegerId(cashShiftSales)}</span>
         </div>
         <div class="summary-line">
-          <span class="summary-label">Cash Refunds (Shift):</span>
-          <span class="summary-value">-${cashShiftRefunds.toLocaleString('id-ID')}</span>
-        </div>
-        <div class="summary-line">
-          <span class="summary-label">Net Cash (Shift):</span>
-          <span class="summary-value">${cashNetShift.toLocaleString('id-ID')}</span>
+          <span class="summary-label">Total Refunds:</span>
+          <span class="summary-value">-${formatIntegerId(cashShiftRefunds)}</span>
         </div>
         <div class="summary-line">
           <span class="summary-label">Kas Diharapkan:</span>
-          <span class="summary-value">${!isNaN(kasExpectedSummary) ? kasExpectedSummary.toLocaleString('id-ID') : '-'}</span>
+          <span class="summary-value">${!isNaN(kasExpectedSummary) ? formatIntegerId(kasExpectedSummary) : '-'}</span>
+        </div>
+        <div class="divider"></div>
+        <div class="summary-line">
+          <span class="summary-label">Jumlah Pesanan:</span>
+          <span class="summary-value">${report.statistics.order_count} transaksi</span>
+        </div>
+        <div class="summary-line">
+          <span class="summary-label">Jumlah CU:</span>
+          <span class="summary-value">${report.statistics.total_cu ?? 0}</span>
         </div>
         <div class="summary-line">
           <span class="summary-label">Kas Akhir:</span>
           <span class="summary-value">${kasAkhirDisplay}</span>
         </div>
         <div class="summary-line">
-          <span class="summary-label">Selisih (${varianceLabelDisplay}):</span>
+          <span class="summary-label">Selisih Kas:</span>
           <span class="summary-value">${varianceValueDisplay}</span>
         </div>
-        <div class="summary-line">
-          <span class="summary-label">Cash Sales (Hari):</span>
-          <span class="summary-value">${cashWholeDaySales.toLocaleString('id-ID')}</span>
-        </div>
-        <div class="summary-line">
-          <span class="summary-label">Cash Refunds (Hari):</span>
-          <span class="summary-value">-${cashWholeDayRefunds.toLocaleString('id-ID')}</span>
-        </div>
-        <div class="summary-line">
-          <span class="summary-label">Net Cash (Hari):</span>
-          <span class="summary-value">${cashNetWholeDay.toLocaleString('id-ID')}</span>
-        </div>
-        <div class="summary-line">
-          <span class="summary-label">Cash in Cashier:</span>
-          <span class="summary-value">${totalCashInCashierDisplay}</span>
-        </div>
       </div>
-
-      <div class="divider"></div>
-      ` : ''}
-
-      ${sectionOptions.barangTerjual === true ? `
-      <div class="section-title">BARANG TERJUAL</div>
-      <table>
-        <thead>
-          <tr>
-            <th>Product</th>
-            <th class="right">Qty</th>
-            <th class="right">Unit Price</th>
-            <th class="right">Subtotal</th>
-          </tr>
-        </thead>
-        <tbody>
-          ${productRows || '<tr><td colSpan="4" style="text-align: center;">Tidak ada produk</td></tr>'}
-          <tr class="total-row">
-            <td>TOTAL</td>
-            <td class="right">${totalProductQty}</td>
-            <td class="right">-</td>
-            <td class="right">${Number(totalProductBaseSubtotal).toLocaleString('id-ID')}</td>
-          </tr>
-          ${productPlatformBreakdownRows}
-        </tbody>
-      </table>
 
       <div class="divider"></div>
       ` : ''}
@@ -11280,7 +11811,7 @@ function generateShiftBreakdownHTML(
           <tr class="total-row">
             <td>TOTAL</td>
             <td class="right">${totalPaymentCount}</td>
-            <td class="right">${Number(totalPaymentAmount).toLocaleString('id-ID')}</td>
+            <td class="right">${formatIntegerId(Math.round(totalPaymentAmount))}</td>
           </tr>
         </tbody>
       </table>
@@ -11294,7 +11825,7 @@ function generateShiftBreakdownHTML(
         <thead>
           <tr>
             <th>Category I</th>
-            <th class="right">Quantity</th>
+            <th style="text-align: left;">Quantity</th>
             <th class="right">Total</th>
           </tr>
         </thead>
@@ -11302,8 +11833,8 @@ function generateShiftBreakdownHTML(
           ${category1Rows || '<tr><td colSpan="3" style="text-align: center;">Tidak ada Category I</td></tr>'}
           <tr class="total-row">
             <td>TOTAL</td>
-            <td class="right">${totalCategory1Quantity}</td>
-            <td class="right">${Number(totalCategory1Amount).toLocaleString('id-ID')}</td>
+            <td style="text-align: left;">${totalCategory1Quantity}</td>
+            <td class="right">${formatIntegerId(Math.round(totalCategory1Amount))}</td>
           </tr>
         </tbody>
       </table>
@@ -11317,7 +11848,7 @@ function generateShiftBreakdownHTML(
         <thead>
           <tr>
             <th>Category II</th>
-            <th class="right">Quantity</th>
+            <th style="text-align: left;">Quantity</th>
             <th class="right">Total</th>
           </tr>
         </thead>
@@ -11325,8 +11856,8 @@ function generateShiftBreakdownHTML(
           ${category2Rows || '<tr><td colSpan="3" style="text-align: center;">Tidak ada Category II</td></tr>'}
           <tr class="total-row">
             <td>TOTAL</td>
-            <td class="right">${totalCategory2Quantity}</td>
-            <td class="right">${Number(totalCategory2Amount).toLocaleString('id-ID')}</td>
+            <td style="text-align: left;">${totalCategory2Quantity}</td>
+            <td class="right">${formatIntegerId(Math.round(totalCategory2Amount))}</td>
           </tr>
         </tbody>
       </table>
@@ -11334,13 +11865,40 @@ function generateShiftBreakdownHTML(
       <div class="divider"></div>
       ` : ''}
 
-      ${sectionOptions.toppingSales === true ? `
+      ${sectionOptions.barangTerjual === true ? `
+      <div class="section-title">BARANG TERJUAL</div>
+      <div class="barang-terjual-note">Nilai per platform sebelum potongan/diskon/voucher. Refund tidak disertakan dalam perhitungan.</div>
+      <table>
+        <thead>
+          <tr>
+            <th>Product</th>
+            <th style="text-align: left;">Qty</th>
+            <th class="right">Unit Price</th>
+            <th class="right">Subtotal</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${productRows || '<tr><td colSpan="4" style="text-align: center;">Tidak ada produk</td></tr>'}
+          <tr class="total-row">
+            <td>TOTAL</td>
+            <td style="text-align: left;">${totalProductQty}</td>
+            <td class="right">-</td>
+            <td class="right">${formatIntegerId(Math.round(totalProductBaseSubtotal))}</td>
+          </tr>
+          ${productPlatformBreakdownRows}
+        </tbody>
+      </table>
+
+      <div class="divider"></div>
+      ` : ''}
+
+      ${sectionOptions.toppingSales === true && totalCustomizationRevenue > 0 ? `
       <div class="section-title">TOPPING SALES BREAKDOWN</div>
       <table>
         <thead>
           <tr>
             <th>Customization</th>
-            <th class="right">Qty</th>
+            <th style="text-align: left;">Qty</th>
             <th class="right">Revenue</th>
           </tr>
         </thead>
@@ -11348,9 +11906,33 @@ function generateShiftBreakdownHTML(
           ${customizationRows || '<tr><td colSpan="3" style="text-align: center;">Tidak ada kustomisasi</td></tr>'}
           <tr class="total-row">
             <td>TOTAL</td>
-            <td class="right">${totalCustomizationUnits}</td>
-            <td class="right">${Number(totalCustomizationRevenue).toLocaleString('id-ID')}</td>
+            <td style="text-align: left;">${totalCustomizationUnits}</td>
+            <td class="right">${formatIntegerId(Math.round(totalCustomizationRevenue))}</td>
           </tr>
+        </tbody>
+      </table>
+
+      <div class="divider"></div>
+      ` : ''}
+
+      ${refundList.length > 0 ? `
+      <div class="section-title">REFUND</div>
+      <table>
+        <thead>
+          <tr>
+            <th style="font-size: 7pt;">Transaction ID</th>
+            <th style="font-size: 7pt;">Method</th>
+            <th class="right" style="font-size: 7pt;">Total</th>
+            <th class="right" style="font-size: 7pt;">Refund Amount</th>
+            <th style="font-size: 7pt;">Alasan</th>
+            <th style="font-size: 7pt;">Refund Time</th>
+            <th style="font-size: 7pt;">Issuer</th>
+            <th style="font-size: 7pt;">Waiter</th>
+            <th style="font-size: 7pt;">Nama Pelanggan</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${refundRows}
         </tbody>
       </table>
 
@@ -11378,7 +11960,7 @@ function generateShiftBreakdownHTML(
     categoryII: shiftData.sectionOptions.categoryII !== undefined ? shiftData.sectionOptions.categoryII : defaultSectionOptions.categoryII,
     toppingSales: shiftData.sectionOptions.toppingSales !== undefined ? shiftData.sectionOptions.toppingSales : defaultSectionOptions.toppingSales
   } : defaultSectionOptions;
-  
+
   // Debug logging
   writeDebugLog(JSON.stringify({
     location: 'electron/main.ts:8839',
@@ -11390,7 +11972,7 @@ function generateShiftBreakdownHTML(
     hypothesisId: 'B'
   }));
   console.log('🔍 [GENERATE HTML] Section options:', JSON.stringify(sectionOptions));
-  
+
   sections.push(
     renderReportSection(shiftData, {
       titleOverride: shiftData.title || 'LAPORAN SHIFT',
@@ -11468,6 +12050,20 @@ function generateShiftBreakdownHTML(
       margin: 1.5mm 0 1mm 0;
       text-align: center;
       text-decoration: underline;
+    }
+    .summary-subtitle {
+      font-size: 8pt;
+      font-weight: 700;
+      color: #374151;
+      margin: 1mm 0 0.5mm 0;
+      padding-bottom: 0.5mm;
+      border-bottom: 1px solid #9ca3af;
+    }
+    .barang-terjual-note {
+      font-size: 7pt;
+      color: #6b7280;
+      margin-bottom: 1mm;
+      font-style: italic;
     }
     table {
       width: 100%;
@@ -11596,6 +12192,20 @@ type PrintableCashSummary = {
 
 type VoucherBreakdown = Record<string, { count: number; total: number }>;
 
+type PrintableShiftRefundRow = {
+  refund_uuid?: string;
+  transaction_uuid?: string;
+  transaction_uuid_id?: string;
+  refund_amount?: number;
+  refunded_at?: string;
+  payment_method?: string;
+  final_amount?: number;
+  reason?: string | null;
+  issuer_email?: string | null;
+  waiter_name?: string | null;
+  customer_name?: string | null;
+};
+
 type PrintableShiftReportSection = {
   title?: string;
   user_name: string;
@@ -11603,6 +12213,8 @@ type PrintableShiftReportSection = {
   shift_end: string | null;
   modal_awal: number;
   statistics: { order_count: number; total_amount: number; total_discount: number; voucher_count: number; total_cu?: number };
+  gross_total_omset?: number;
+  refunds?: PrintableShiftRefundRow[];
   productSales: Array<{
     product_name: string;
     total_quantity: number;
@@ -11644,6 +12256,9 @@ const VOUCHER_BREAKDOWN_ORDER: { key: string; label: string }[] = [
 // Print shift breakdown report
 ipcMain.handle('print-shift-breakdown', async (event, data: PrintableShiftReportSection & { business_id?: number; printerType?: string; wholeDayReport?: PrintableShiftReportSection | null; sectionOptions?: { ringkasan?: boolean; barangTerjual?: boolean; paymentMethod?: boolean; categoryI?: boolean; categoryII?: boolean; toppingSales?: boolean } }) => {
   try {
+    // #region agent log
+    writeDebugLog(JSON.stringify({ location: 'electron/main.ts:print-shift-breakdown', message: 'Received print payload', data: { gross_total_omset: data.gross_total_omset, statistics_total_amount: data.statistics?.total_amount, user_name: data.user_name }, timestamp: Date.now(), sessionId: 'debug-session', hypothesisId: 'B' }));
+    // #endregion
     console.log('🖨️ [SHIFT PRINT] Starting shift breakdown print...');
     console.log('   - Shift:', data.user_name);
     console.log('   - Products:', data.productSales?.length || 0);
@@ -11815,7 +12430,7 @@ ipcMain.handle('print-shift-breakdown', async (event, data: PrintableShiftReport
         hypothesisId: 'A'
       }));
       console.log('🔍 [PRINT HANDLER] Received sectionOptions:', JSON.stringify(data.sectionOptions));
-      
+
       htmlContent = generateShiftBreakdownHTML({
         ...data,
         productSales: data.productSales || [],
@@ -12237,7 +12852,7 @@ ipcMain.handle('create-customer-display', async () => {
 // Create Barista & Kitchen display window
 ipcMain.handle('create-barista-kitchen-window', async () => {
   console.log('🔍 [BARISTA-KITCHEN] Creating window...');
-  
+
   // If window already exists and is not destroyed, show it
   if (baristaKitchenWindow && !baristaKitchenWindow.isDestroyed()) {
     console.log('🔍 [BARISTA-KITCHEN] Window already exists, showing it...');
@@ -12527,6 +13142,7 @@ ipcMain.handle('localdb-delete-transactions-by-role', async () => {
     printer2_audit_log: 0,
     transaction_items: 0,
     transactions: 0,
+    shifts: 0,
     system_pos_queue: 0,
     system_pos_transactions: 0,
     counters_reset_businesses: [] as number[],
@@ -12565,6 +13181,21 @@ ipcMain.handle('localdb-delete-transactions-by-role', async () => {
     console.log(`[CLEANUP] [MySQL] Found ${transactionIds.length} transactions to delete`);
 
     if (transactionIds.length === 0) {
+      // Still delete shifts for target user (marviano.austin@gmail.com)
+      if (targetUserIds.length > 0) {
+        try {
+          const shiftsDeleted = await executeUpdate(
+            `DELETE FROM shifts WHERE user_id IN (${targetUserIds.map(() => '?').join(',')})`,
+            targetUserIds
+          );
+          details.shifts = shiftsDeleted;
+          if (details.shifts > 0) {
+            console.log(`[CLEANUP] [MySQL] Deleted ${details.shifts} shifts for target user(s)`);
+          }
+        } catch (e) {
+          console.warn('[CLEANUP] Failed to delete shifts:', e);
+        }
+      }
       details.success = true;
       console.log(`✅ [CLEANUP] [MySQL] No transactions to delete`);
       return {
@@ -12626,6 +13257,12 @@ ipcMain.handle('localdb-delete-transactions-by-role', async () => {
       params: [...transactionUuids]
     });
 
+    // 6b. offline_refunds: delete orphan refunds for deleted transactions
+    queries.push({
+      sql: `DELETE FROM offline_refunds WHERE JSON_UNQUOTE(JSON_EXTRACT(refund_data, '$.transaction_uuid')) IN (${uuidPlaceholders})`,
+      params: [...transactionUuids]
+    });
+
     // 7. transactions
     queries.push({
       sql: `DELETE FROM transactions ${whereClause}`,
@@ -12633,6 +13270,22 @@ ipcMain.handle('localdb-delete-transactions-by-role', async () => {
     });
 
     await executeTransaction(queries);
+
+    // ----- shifts: delete shifts owned by target user (marviano.austin@gmail.com) -----
+    if (targetUserIds.length > 0) {
+      try {
+        const shiftsDeleted = await executeUpdate(
+          `DELETE FROM shifts WHERE user_id IN (${targetUserIds.map(() => '?').join(',')})`,
+          targetUserIds
+        );
+        details.shifts = shiftsDeleted;
+        if (details.shifts > 0) {
+          console.log(`[CLEANUP] [MySQL] Deleted ${details.shifts} shifts for target user(s)`);
+        }
+      } catch (e) {
+        console.warn('[CLEANUP] Failed to delete shifts:', e);
+      }
+    }
 
     // ----- system_pos -----
     const sysPosQueries: Array<{ sql: string; params?: (string | number | null | boolean)[] }> = [];
@@ -13192,6 +13845,60 @@ ipcMain.handle('restore-from-server', async (event, options: {
       console.log(`✅ [RESTORE] ${data.bundleItems.length} bundle items restored`);
     }
 
+    // 2.8a Package Items
+    if (Array.isArray(data.packageItems) && data.packageItems.length > 0) {
+      for (const pi of data.packageItems) {
+        allQueries.push({
+          sql: `
+            INSERT INTO package_items (id, package_product_id, selection_type, product_id, required_quantity, display_order, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON DUPLICATE KEY UPDATE
+              package_product_id=VALUES(package_product_id),
+              selection_type=VALUES(selection_type),
+              product_id=VALUES(product_id),
+              required_quantity=VALUES(required_quantity),
+              display_order=VALUES(display_order),
+              updated_at=VALUES(updated_at)
+          `,
+          params: [
+            pi.id,
+            pi.package_product_id,
+            pi.selection_type || 'default',
+            pi.product_id ?? null,
+            pi.required_quantity || 1,
+            pi.display_order ?? 0,
+            toMySQLTimestamp(pi.created_at || new Date()),
+            toMySQLTimestamp(pi.updated_at || Date.now())
+          ]
+        });
+      }
+      stats.packageItems = data.packageItems.length;
+      console.log(`✅ [RESTORE] ${data.packageItems.length} package items restored`);
+    }
+
+    // 2.8b Package Item Products
+    if (Array.isArray(data.packageItemProducts) && data.packageItemProducts.length > 0) {
+      for (const pip of data.packageItemProducts) {
+        allQueries.push({
+          sql: `
+            INSERT INTO package_item_products (id, package_item_id, product_id, display_order, created_at)
+            VALUES (?, ?, ?, ?, ?)
+            ON DUPLICATE KEY UPDATE
+              display_order=VALUES(display_order)
+          `,
+          params: [
+            pip.id,
+            pip.package_item_id,
+            pip.product_id,
+            pip.display_order ?? 0,
+            toMySQLTimestamp(pip.created_at || new Date())
+          ]
+        });
+      }
+      stats.packageItemProducts = data.packageItemProducts.length;
+      console.log(`✅ [RESTORE] ${data.packageItemProducts.length} package item products restored`);
+    }
+
     // 2.9 Payment Methods
     if (Array.isArray(data.paymentMethods) && data.paymentMethods.length > 0) {
       for (const pm of data.paymentMethods) {
@@ -13286,10 +13993,11 @@ ipcMain.handle('restore-from-server', async (event, options: {
       console.log(`✅ [RESTORE] ${data.clAccounts.length} CL accounts restored`);
     }
 
-    // Execute all master data queries in a transaction
+    // Execute all master data queries in a transaction (db_host)
     if (allQueries.length > 0) {
       await executeTransaction(allQueries);
       console.log(`✅ [RESTORE] Executed ${allQueries.length} master data queries`);
+      await upsertMasterDataToSystemPos(allQueries);
     }
 
     // Step 3: Download and Restore Transactions (if requested)
@@ -13308,7 +14016,7 @@ ipcMain.handle('restore-from-server', async (event, options: {
           console.log(`💾 [RESTORE] Restoring ${transactions.length} transactions...`);
           const txQueries: Array<{ sql: string; params?: (string | number | null)[] }> = [];
           const now = Date.now();
-          
+
           for (const tx of transactions) {
             const txId = tx.uuid_id || tx.id;
             txQueries.push({
@@ -13409,7 +14117,7 @@ ipcMain.handle('restore-from-server', async (event, options: {
               }
 
               const itemWaiterId = typeof item.waiter_id === 'number' ? item.waiter_id : (typeof item.waiter_id === 'string' ? parseInt(String(item.waiter_id), 10) : null);
-            itemQueries.push({
+              itemQueries.push({
                 sql: `
                   INSERT INTO transaction_items (
                     id, transaction_id, product_id, quantity, unit_price, total_price,
@@ -13731,7 +14439,8 @@ ipcMain.handle('restore-from-server', async (event, options: {
 
 // IPC handlers for Restaurant Table Layout
 ipcMain.handle('get-restaurant-rooms', async (event, businessId: number) => {
-  try {const query = `
+  try {
+    const query = `
       SELECT 
         rr.id,
         rr.business_id,
@@ -13748,9 +14457,9 @@ ipcMain.handle('get-restaurant-rooms', async (event, businessId: number) => {
       GROUP BY rr.id, rr.business_id, rr.name, rr.canvas_width, rr.canvas_height, rr.font_size_multiplier, rr.created_at, rr.updated_at
       ORDER BY rr.name ASC
     `;
-    const result = await executeQuery<RowArray>(query, [businessId]);return result;
+    const result = await executeQuery<RowArray>(query, [businessId]); return result;
   } catch (error) {
-    console.error('Error getting restaurant rooms:', error);return [];
+    console.error('Error getting restaurant rooms:', error); return [];
   }
 });
 
@@ -13784,9 +14493,10 @@ ipcMain.handle('get-restaurant-layout-elements', async (event, roomId: number) =
 
 // IPC handlers for syncing restaurant table layout data
 ipcMain.handle('localdb-upsert-restaurant-rooms', async (event, rows: RowArray) => {
-  try {const queries: Array<{ sql: string; params?: (string | number | null | boolean)[] }> = [];
+  try {
+    const queries: Array<{ sql: string; params?: (string | number | null | boolean)[] }> = [];
     let skippedCount = 0;
-    
+
     for (const r of rows) {
       const getId = () => {
         const val = r.id;
@@ -13816,7 +14526,7 @@ ipcMain.handle('localdb-upsert-restaurant-rooms', async (event, rows: RowArray) 
 
       const roomId = getId();
       const businessId = getNumber('business_id');
-      
+
       // Verify business_id exists before inserting (foreign key constraint)
       if (businessId) {
         try {
@@ -13832,12 +14542,12 @@ ipcMain.handle('localdb-upsert-restaurant-rooms', async (event, rows: RowArray) 
           continue;
         }
       }
-      
+
       const createdDate = getDate('created_at');
       const updatedDate = getDate('updated_at');
       const createdAt = createdDate ? toMySQLDateTime(createdDate as string | number | Date) : toMySQLDateTime(new Date());
       const updatedAt = updatedDate ? toMySQLDateTime(updatedDate as string | number | Date) : toMySQLDateTime(new Date());
-      
+
       queries.push({
         sql: `INSERT INTO restaurant_rooms (
           id, business_id, name, canvas_width, canvas_height, font_size_multiplier, created_at, updated_at
@@ -13862,7 +14572,7 @@ ipcMain.handle('localdb-upsert-restaurant-rooms', async (event, rows: RowArray) 
         ]
       });
     }
-    
+
     if (queries.length > 0) {
       await executeTransaction(queries);
       await upsertMasterDataToSystemPos(queries);
@@ -13874,7 +14584,7 @@ ipcMain.handle('localdb-upsert-restaurant-rooms', async (event, rows: RowArray) 
     }
     return { success: true };
   } catch (error) {
-    console.error('Error upserting restaurant rooms:', error);return { success: false };
+    console.error('Error upserting restaurant rooms:', error); return { success: false };
   }
 });
 
@@ -13882,7 +14592,7 @@ ipcMain.handle('localdb-upsert-restaurant-tables', async (event, rows: RowArray)
   try {
     const queries: Array<{ sql: string; params?: (string | number | null | boolean)[] }> = [];
     let skippedCount = 0;
-    
+
     for (const r of rows) {
       const getId = () => {
         const val = r.id;
@@ -13912,7 +14622,7 @@ ipcMain.handle('localdb-upsert-restaurant-tables', async (event, rows: RowArray)
 
       const tableId = getId();
       const roomId = getNumber('room_id');
-      
+
       // Verify room_id exists before inserting (foreign key constraint)
       if (roomId) {
         try {
@@ -13928,12 +14638,12 @@ ipcMain.handle('localdb-upsert-restaurant-tables', async (event, rows: RowArray)
           continue;
         }
       }
-      
+
       const createdDate = getDate('created_at');
       const updatedDate = getDate('updated_at');
       const createdAt = createdDate ? toMySQLDateTime(createdDate as string | number | Date) : toMySQLDateTime(new Date());
       const updatedAt = updatedDate ? toMySQLDateTime(updatedDate as string | number | Date) : toMySQLDateTime(new Date());
-      
+
       queries.push({
         sql: `INSERT INTO restaurant_tables (
           id, room_id, table_number, position_x, position_y, width, height, capacity, shape, created_at, updated_at
@@ -13964,7 +14674,7 @@ ipcMain.handle('localdb-upsert-restaurant-tables', async (event, rows: RowArray)
         ]
       });
     }
-    
+
     if (queries.length > 0) {
       await executeTransaction(queries);
       await upsertMasterDataToSystemPos(queries);
@@ -13985,7 +14695,7 @@ ipcMain.handle('localdb-upsert-restaurant-layout-elements', async (event, rows: 
   try {
     const queries: Array<{ sql: string; params?: (string | number | null | boolean)[] }> = [];
     let skippedCount = 0;
-    
+
     for (const r of rows) {
       const getId = () => {
         const val = r.id;
@@ -14015,7 +14725,7 @@ ipcMain.handle('localdb-upsert-restaurant-layout-elements', async (event, rows: 
 
       const elementId = getId();
       const roomId = getNumber('room_id');
-      
+
       // Verify room_id exists before inserting (foreign key constraint)
       if (roomId) {
         try {
@@ -14031,12 +14741,12 @@ ipcMain.handle('localdb-upsert-restaurant-layout-elements', async (event, rows: 
           continue;
         }
       }
-      
+
       const createdDate = getDate('created_at');
       const updatedDate = getDate('updated_at');
       const createdAt = createdDate ? toMySQLDateTime(createdDate as string | number | Date) : toMySQLDateTime(new Date());
       const updatedAt = updatedDate ? toMySQLDateTime(updatedDate as string | number | Date) : toMySQLDateTime(new Date());
-      
+
       queries.push({
         sql: `INSERT INTO restaurant_layout_elements (
           id, room_id, label, position_x, position_y, width, height, element_type, color, text_color, created_at, updated_at

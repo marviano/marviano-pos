@@ -1,7 +1,5 @@
 import { NextResponse, NextRequest } from 'next/server';
 import { queryVps } from '@/lib/db';
-import fs from 'fs';
-import path from 'path';
 
 export async function GET(request: NextRequest) {
   try {
@@ -115,12 +113,6 @@ export async function GET(request: NextRequest) {
       syncResults.employeesPosition = employeesPosition;
       counts.employeesPosition = employeesPosition.length;
       console.log(`✅ Synced ${employeesPosition.length} employees position records`);
-      try {
-        const logPath1 = path.join(process.cwd(), '.cursor', 'debug.log');
-        fs.appendFileSync(logPath1, JSON.stringify({location:'sync/route.ts:112',message:'Fetched employees_position from VPS',data:{count:employeesPosition.length,firstFew:Array.isArray(employeesPosition)?(employeesPosition as Array<Record<string,unknown>>).slice(0,3).map((ep)=>({id:ep.id,nama_jabatan:ep.nama_jabatan})):[]},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})+'\n');
-      } catch {
-        // Silently ignore logging errors
-      }
     } catch (error: unknown) {
       console.warn('⚠️ Failed to sync employees_position:', error);
       syncResults.employeesPosition = [];
@@ -139,13 +131,6 @@ export async function GET(request: NextRequest) {
       `, [BUSINESS_ID] as (string | number)[]);
       
       const organizationId = businessInfo && businessInfo.length > 0 ? businessInfo[0].organization_id : null;
-      
-      try {
-        const logPathCheck = path.join(process.cwd(), '.cursor', 'debug.log');
-        fs.appendFileSync(logPathCheck, JSON.stringify({location:'sync/route.ts:136',message:'Checking business organization',data:{businessId:BUSINESS_ID,organizationId:organizationId,businessInfoFound:!!businessInfo&&businessInfo.length>0},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})+'\n');
-      } catch {
-        // Silently ignore logging errors
-      }
       
       let employees: unknown[] = [];
       if (organizationId) {
@@ -175,22 +160,9 @@ export async function GET(request: NextRequest) {
       
       syncResults.employees = employees;
       counts.employees = employees.length;
-      
-      try {
-        const logPath2 = path.join(process.cwd(), '.cursor', 'debug.log');
-        fs.appendFileSync(logPath2, JSON.stringify({location:'sync/route.ts:165',message:'Fetched employees from VPS',data:{businessId:BUSINESS_ID,organizationId:organizationId,count:employees.length,employees:Array.isArray(employees)?(employees as Array<Record<string,unknown>>).map((e)=>({id:e.id,business_id:e.business_id,nama_karyawan:e.nama_karyawan,jabatan_id:e.jabatan_id})):[]},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})+'\n');
-      } catch {
-        // Silently ignore logging errors
-      }
     } catch (error: unknown) {
       const errorMessage = error instanceof Error ? error.message : String(error);
       console.error('❌ Failed to sync employees:', errorMessage);
-      try {
-        const logPathError = path.join(process.cwd(), '.cursor', 'debug.log');
-        fs.appendFileSync(logPathError, JSON.stringify({location:'sync/route.ts:175',message:'Error fetching employees',data:{businessId:BUSINESS_ID,error:errorMessage},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})+'\n');
-      } catch {
-        // Silently ignore logging errors
-      }
       syncResults.employees = [];
       counts.employees = 0;
     }
@@ -504,13 +476,6 @@ export async function GET(request: NextRequest) {
 
     const totalRecords = Object.values(counts).reduce((sum, count) => sum + count, 0);
     console.log(`🎉 Comprehensive sync completed: ${totalRecords} total records synced`);
-
-    try {
-      const logPath3 = path.join(process.cwd(), '.cursor', 'debug.log');
-      fs.appendFileSync(logPath3, JSON.stringify({location:'sync/route.ts:683',message:'Returning sync response',data:{allKeys:Object.keys(syncResults)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})+'\n');
-    } catch {
-      // Silently ignore logging errors
-    }
 
     return NextResponse.json({
       success: true,

@@ -139,7 +139,15 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // Bundle handlers
   localDbGetBundleItems: (productId: number) => ipcRenderer.invoke('localdb-get-bundle-items', productId),
   localDbUpsertBundleItems: (rows: UnknownRecord[]) => ipcRenderer.invoke('localdb-upsert-bundle-items', rows),
+  localDbGetPackageItems: (packageProductId: number | string) => ipcRenderer.invoke('localdb-get-package-items', packageProductId),
   localDbDebugBundleItems: () => ipcRenderer.invoke('localdb-debug-bundle-items'),
+
+  // Package handlers
+  localDbUpsertPackageItems: (rows: UnknownRecord[]) => ipcRenderer.invoke('localdb-upsert-package-items', rows),
+  localDbUpsertPackageItemProducts: (rows: UnknownRecord[]) => ipcRenderer.invoke('localdb-upsert-package-item-products', rows),
+  localDbMarkInactiveBundleItems: (businessId: number, syncedBundleItemIds: number[]) => ipcRenderer.invoke('localdb-mark-inactive-bundle-items', businessId, syncedBundleItemIds),
+  localDbMarkInactivePackageItems: (businessId: number, syncedPackageItemIds: number[]) => ipcRenderer.invoke('localdb-mark-inactive-package-items', businessId, syncedPackageItemIds),
+  localDbMarkInactivePackageItemProducts: (businessId: number, syncedPackageItemProductIds: number[]) => ipcRenderer.invoke('localdb-mark-inactive-package-item-products', businessId, syncedPackageItemProductIds),
 
   // New enhanced offline support tables
   // Transactions
@@ -169,6 +177,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // Transaction Items
   localDbUpsertTransactionItems: (rows: UnknownRecord[]) => ipcRenderer.invoke('localdb-upsert-transaction-items', rows),
   localDbGetTransactionItems: (transactionId?: number | string) => ipcRenderer.invoke('localdb-get-transaction-items', transactionId),
+  localDbGetPackageLines: (uuidTransactionItemIds: string[]) => ipcRenderer.invoke('localdb-get-package-lines', uuidTransactionItemIds),
+  localDbUpdatePackageLine: (payload: { id: number; finished_at: string | null }) => ipcRenderer.invoke('localdb-update-package-line', payload),
   localDbGetDistinctItemWaiterIdsByTransaction: (transactionIds: string[]) => ipcRenderer.invoke('localdb-get-distinct-item-waiter-ids-by-transaction', transactionIds),
   localDbGetTransactionItemCustomizationsNormalized: (transactionId: string) => ipcRenderer.invoke('localdb-get-transaction-item-customizations-normalized', transactionId),
   localDbUpsertTransactionItemCustomizations: (rows: UnknownRecord[]) => ipcRenderer.invoke('localdb-upsert-transaction-item-customizations', rows),

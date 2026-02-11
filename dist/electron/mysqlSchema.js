@@ -107,6 +107,7 @@ async function initializeMySQLSchema() {
       updated_at TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
       has_customization TINYINT(1) DEFAULT '0',
       is_bundle TINYINT(1) DEFAULT '0',
+      is_package TINYINT(1) DEFAULT '0',
       PRIMARY KEY (id),
       UNIQUE KEY unique_menu_code_business (menu_code),
       KEY idx_status (status),
@@ -168,13 +169,50 @@ async function initializeMySQLSchema() {
       category2_id INT NOT NULL,
       required_quantity INT NOT NULL DEFAULT '1',
       display_order INT DEFAULT '0',
+      is_active TINYINT(1) NOT NULL DEFAULT 1,
       created_at TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP,
       updated_at TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
       PRIMARY KEY (id),
       KEY idx_bundle_product (bundle_product_id),
       KEY idx_category2 (category2_id),
+      KEY idx_bundle_items_active (is_active),
       CONSTRAINT fk_bundle_items_category2 FOREIGN KEY (category2_id) REFERENCES category2(id) ON DELETE CASCADE,
       CONSTRAINT fk_bundle_items_product FOREIGN KEY (bundle_product_id) REFERENCES products(id) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+        // Package_items table (package = product with is_package=1)
+        `CREATE TABLE IF NOT EXISTS package_items (
+      id INT NOT NULL AUTO_INCREMENT,
+      package_product_id INT NOT NULL,
+      selection_type ENUM('default', 'flexible') NOT NULL DEFAULT 'default',
+      product_id INT DEFAULT NULL,
+      required_quantity INT NOT NULL DEFAULT 1,
+      display_order INT NOT NULL DEFAULT 0,
+      is_active TINYINT(1) NOT NULL DEFAULT 1,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME DEFAULT NULL ON UPDATE CURRENT_TIMESTAMP,
+      PRIMARY KEY (id),
+      KEY idx_package_items_package_product (package_product_id),
+      KEY idx_package_items_product (product_id),
+      KEY idx_package_items_display_order (package_product_id, display_order),
+      KEY idx_package_items_active (is_active),
+      CONSTRAINT fk_package_items_package_product FOREIGN KEY (package_product_id) REFERENCES products(id) ON DELETE CASCADE,
+      CONSTRAINT fk_package_items_product FOREIGN KEY (product_id) REFERENCES products(id) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+        // Package_item_products table (for flexible package items)
+        `CREATE TABLE IF NOT EXISTS package_item_products (
+      id INT NOT NULL AUTO_INCREMENT,
+      package_item_id INT NOT NULL,
+      product_id INT NOT NULL,
+      display_order INT NOT NULL DEFAULT 0,
+      is_active TINYINT(1) NOT NULL DEFAULT 1,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (id),
+      UNIQUE KEY uk_package_item_product (package_item_id, product_id),
+      KEY idx_package_item_products_item (package_item_id),
+      KEY idx_package_item_products_product (product_id),
+      KEY idx_package_item_products_active (is_active),
+      CONSTRAINT fk_pip_package_item FOREIGN KEY (package_item_id) REFERENCES package_items(id) ON DELETE CASCADE,
+      CONSTRAINT fk_pip_product FOREIGN KEY (product_id) REFERENCES products(id) ON DELETE CASCADE
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
         // Payment_methods table
         `CREATE TABLE IF NOT EXISTS payment_methods (
@@ -343,6 +381,7 @@ async function initializeMySQLSchema() {
       created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
       waiter_id INT DEFAULT NULL COMMENT 'Employee who added this line item (for per-waiter achievement)',
       bundle_selections_json JSON DEFAULT NULL,
+      package_selections_json JSON DEFAULT NULL,
       production_started_at TIMESTAMP NULL DEFAULT NULL,
       production_status ENUM('preparing','finished','cancelled') DEFAULT NULL,
       production_finished_at TIMESTAMP NULL DEFAULT NULL,
@@ -357,6 +396,21 @@ async function initializeMySQLSchema() {
       CONSTRAINT fk_transaction_items_product FOREIGN KEY (product_id) REFERENCES products(id) ON DELETE CASCADE,
       CONSTRAINT fk_transaction_items_transaction_uuid FOREIGN KEY (uuid_transaction_id) REFERENCES transactions(uuid_id) ON DELETE CASCADE,
       CONSTRAINT fk_transaction_items_waiter FOREIGN KEY (waiter_id) REFERENCES employees(id) ON DELETE SET NULL
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci`,
+        // Package line items (normalized: which products were chosen inside each package sale; finished_at = per-line completion)
+        `CREATE TABLE IF NOT EXISTS transaction_item_package_lines (
+      id INT NOT NULL AUTO_INCREMENT,
+      uuid_transaction_item_id VARCHAR(36) NOT NULL,
+      product_id INT NOT NULL,
+      quantity INT NOT NULL DEFAULT 1,
+      finished_at TIMESTAMP NULL DEFAULT NULL,
+      created_at TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (id),
+      KEY idx_tipl_item (uuid_transaction_item_id),
+      KEY idx_tipl_product (product_id),
+      KEY idx_tipl_finished_at (finished_at),
+      CONSTRAINT fk_tipl_transaction_item FOREIGN KEY (uuid_transaction_item_id) REFERENCES transaction_items(uuid_id) ON DELETE CASCADE,
+      CONSTRAINT fk_tipl_product FOREIGN KEY (product_id) REFERENCES products(id) ON DELETE CASCADE
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci`,
         // Transaction_item_customizations table
         `CREATE TABLE IF NOT EXISTS transaction_item_customizations (
@@ -770,6 +824,48 @@ async function initializeMySQLSchema() {
             }
             else {
                 console.warn('⚠️ transactions paid_at migration:', err);
+            }
+        }
+        // One-time migration: add customer_unit to transactions (number of customers / pax)
+        try {
+            await pool.execute(`ALTER TABLE transactions ADD COLUMN customer_unit INT DEFAULT NULL COMMENT 'Number of customers / pax' AFTER customer_name`);
+            console.log('✅ transactions: added customer_unit column');
+        }
+        catch (alterErr) {
+            const err = alterErr;
+            if (err.code === 'ER_DUP_FIELDNAME' || err.errno === 1060) {
+                // Column already exists
+            }
+            else {
+                console.warn('⚠️ transactions customer_unit migration:', err);
+            }
+        }
+        // One-time migration: add is_package to products (1 = package product, 0 = regular/bundle)
+        try {
+            await pool.execute(`ALTER TABLE products ADD COLUMN is_package TINYINT(1) NOT NULL DEFAULT 0 COMMENT '1 = package product (combo/meal deal), 0 = regular or bundle' AFTER is_bundle`);
+            console.log('✅ products: added is_package column');
+        }
+        catch (alterErr) {
+            const err = alterErr;
+            if (err.code === 'ER_DUP_FIELDNAME' || err.errno === 1060) {
+                // Column already exists
+            }
+            else {
+                console.warn('⚠️ products is_package migration:', err);
+            }
+        }
+        // One-time migration: add package_selections_json to transaction_items (package product chosen items)
+        try {
+            await pool.execute(`ALTER TABLE transaction_items ADD COLUMN package_selections_json JSON DEFAULT NULL COMMENT 'Package chosen/default items for package products' AFTER bundle_selections_json`);
+            console.log('✅ transaction_items: added package_selections_json column');
+        }
+        catch (alterErr) {
+            const err = alterErr;
+            if (err.code === 'ER_DUP_FIELDNAME' || err.errno === 1060) {
+                // Column already exists
+            }
+            else {
+                console.warn('⚠️ transaction_items package_selections_json migration:', err);
             }
         }
         console.log('✅ MySQL schema initialized successfully');

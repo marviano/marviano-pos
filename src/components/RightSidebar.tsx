@@ -5,7 +5,7 @@ import { ChevronRight } from 'lucide-react';
 interface Category {
   jenis: string;
   active: boolean;
-  productType?: 'drinks' | 'bakery' | 'foods';
+  productType?: 'drinks' | 'bakery' | 'foods' | 'packages';
 }
 
 interface RightSidebarProps {
@@ -18,12 +18,13 @@ interface RightSidebarProps {
 export default function RightSidebar({ categories, selectedCategory, onCategorySelect, isLoadingCategories = false }: RightSidebarProps) {
   // Filter out blank/null categories
   const validCategories = categories.filter(cat => cat.jenis && cat.jenis.trim() !== '');
-  
+
   // Group categories by product type
   const drinksCategories = validCategories.filter(cat => cat.productType === 'drinks');
   const bakeryCategories = validCategories.filter(cat => cat.productType === 'bakery');
   const foodsCategories = validCategories.filter(cat => cat.productType === 'foods');
-  
+  const packagesCategories = validCategories.filter(cat => cat.productType === 'packages');
+
   return (
     <div className="w-48 bg-blue-100 flex flex-col h-full">
       {/* Category List */}
@@ -37,7 +38,7 @@ export default function RightSidebar({ categories, selectedCategory, onCategoryS
             </div>
           </div>
         )}
-        
+
         {/* Show loading message only when no categories are loaded yet */}
         {validCategories.length === 0 && isLoadingCategories ? (
           <div className="flex items-center justify-center h-32">
@@ -63,11 +64,10 @@ export default function RightSidebar({ categories, selectedCategory, onCategoryS
                     key={`drinks-${index}`}
                     onClick={() => onCategorySelect(category.jenis)}
                     disabled={isLoadingCategories}
-                    className={`w-full flex items-center justify-between px-4 py-2.5 text-left transition-colors ${
-                      selectedCategory === category.jenis
+                    className={`w-full flex items-center justify-between px-4 py-2.5 text-left transition-colors ${selectedCategory === category.jenis
                         ? 'bg-green-200 text-green-900 font-medium'
                         : 'text-gray-700 hover:bg-blue-50'
-                    } ${isLoadingCategories ? 'opacity-50 cursor-not-allowed' : ''}`}
+                      } ${isLoadingCategories ? 'opacity-50 cursor-not-allowed' : ''}`}
                   >
                     <span className="text-xs">{category.jenis}</span>
                     {selectedCategory === category.jenis && (
@@ -77,7 +77,7 @@ export default function RightSidebar({ categories, selectedCategory, onCategoryS
                 ))}
               </>
             )}
-            
+
             {/* Bakery Section */}
             {bakeryCategories.length > 0 && (
               <>
@@ -89,11 +89,10 @@ export default function RightSidebar({ categories, selectedCategory, onCategoryS
                     key={`bakery-${index}`}
                     onClick={() => onCategorySelect(category.jenis)}
                     disabled={isLoadingCategories}
-                    className={`w-full flex items-center justify-between px-4 py-2.5 text-left transition-colors ${
-                      selectedCategory === category.jenis
+                    className={`w-full flex items-center justify-between px-4 py-2.5 text-left transition-colors ${selectedCategory === category.jenis
                         ? 'bg-green-200 text-green-900 font-medium'
                         : 'text-gray-700 hover:bg-blue-50'
-                    } ${isLoadingCategories ? 'opacity-50 cursor-not-allowed' : ''}`}
+                      } ${isLoadingCategories ? 'opacity-50 cursor-not-allowed' : ''}`}
                   >
                     <span className="text-xs">{category.jenis}</span>
                     {selectedCategory === category.jenis && (
@@ -103,7 +102,7 @@ export default function RightSidebar({ categories, selectedCategory, onCategoryS
                 ))}
               </>
             )}
-            
+
             {/* Foods Section */}
             {foodsCategories.length > 0 && (
               <>
@@ -115,11 +114,35 @@ export default function RightSidebar({ categories, selectedCategory, onCategoryS
                     key={`foods-${index}`}
                     onClick={() => onCategorySelect(category.jenis)}
                     disabled={isLoadingCategories}
-                    className={`w-full flex items-center justify-between px-4 py-2.5 text-left transition-colors ${
-                      selectedCategory === category.jenis
+                    className={`w-full flex items-center justify-between px-4 py-2.5 text-left transition-colors ${selectedCategory === category.jenis
                         ? 'bg-green-200 text-green-900 font-medium'
                         : 'text-gray-700 hover:bg-blue-50'
-                    } ${isLoadingCategories ? 'opacity-50 cursor-not-allowed' : ''}`}
+                      } ${isLoadingCategories ? 'opacity-50 cursor-not-allowed' : ''}`}
+                  >
+                    <span className="text-xs">{category.jenis}</span>
+                    {selectedCategory === category.jenis && (
+                      <ChevronRight className="w-4 h-4 text-green-700" />
+                    )}
+                  </button>
+                ))}
+              </>
+            )}
+
+            {/* Packages Section */}
+            {packagesCategories.length > 0 && (
+              <>
+                <div className="px-4 py-2 bg-blue-200 border-b border-blue-300 mt-2">
+                  <h4 className="text-xs font-semibold text-blue-900">📦 PACKAGES</h4>
+                </div>
+                {packagesCategories.map((category, index) => (
+                  <button
+                    key={`packages-${index}`}
+                    onClick={() => onCategorySelect(category.jenis)}
+                    disabled={isLoadingCategories}
+                    className={`w-full flex items-center justify-between px-4 py-2.5 text-left transition-colors ${selectedCategory === category.jenis
+                        ? 'bg-green-200 text-green-900 font-medium'
+                        : 'text-gray-700 hover:bg-blue-50'
+                      } ${isLoadingCategories ? 'opacity-50 cursor-not-allowed' : ''}`}
                   >
                     <span className="text-xs">{category.jenis}</span>
                     {selectedCategory === category.jenis && (

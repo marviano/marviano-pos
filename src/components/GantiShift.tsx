@@ -185,9 +185,12 @@ interface RefundDetail {
   payment_method_id: number;
   payment_method: string;
   final_amount: number;
-  transaction_created_at: string;
+  transaction_created_at?: string;
   reason?: string | null;
   note?: string | null;
+  customer_name?: string | null;
+  issuer_email?: string | null;
+  waiter_name?: string | null;
 }
 
 const getGmt7DayBounds = (dateString?: string | null): { dayStartUtc: string; dayEndUtc: string } | null => {
@@ -435,7 +438,9 @@ export default function GantiShift() {
   
   const displayProductSales: (ProductSale | GroupedProductType)[] = groupProducts ? groupedProductSales : productSales;
 
-  /** Barang Terjual: total qty and amount by platform (from raw productSales, excludes bundle). */
+  /** Barang Terjual: total qty and amount by platform (from productSales, excludes bundle).
+   * Amounts are gross (from line item total_price), not reduced by transaction-level discount/voucher.
+   * Fully refunded transactions are excluded by the backend; partial refunds are still included in full. */
   const barangTerjualByPlatform = useMemo(() => {
     const countMap = new Map<string, number>();
     const amountMap = new Map<string, number>();
@@ -536,7 +541,7 @@ export default function GantiShift() {
     }).sort((a, b) => a.product_name.localeCompare(b.product_name));
   };
 
-  // Helper function to recalculate Category I for printing (only products with BOTH categories)
+  // Helper function to recalculate Category I for printing (only product's category1)
   const recalculateCategory1ForPrint = async (
     products: ProductSale[],
     originalCategory1: Category1Breakdown[],
@@ -553,8 +558,7 @@ export default function GantiShift() {
       productsArray.forEach((p) => {
         const productId = typeof p.id === 'number' ? p.id : (typeof p.id === 'string' ? parseInt(p.id, 10) : null);
         const category1Name = typeof p.category1_name === 'string' ? p.category1_name : (typeof (p as { kategori?: string }).kategori === 'string' ? (p as { kategori: string }).kategori : null);
-        const category2Name = typeof p.category2_name === 'string' ? p.category2_name : null;
-        if (productId && category1Name && category2Name) {
+        if (productId && category1Name) {
           productToCategory1NameMap.set(productId, category1Name);
         }
       });
@@ -595,7 +599,7 @@ export default function GantiShift() {
     }
   };
 
-  // Helper function to recalculate Category II for printing (only products with BOTH categories)
+  // Helper function to recalculate Category II for printing (only product's category2)
   const recalculateCategory2ForPrint = async (
     products: ProductSale[],
     originalCategory2: Category2Breakdown[],
@@ -609,13 +613,11 @@ export default function GantiShift() {
     try {
       const allProducts = await electronAPI.localDbGetAllProducts(businessId);
       const productsArray = Array.isArray(allProducts) ? allProducts as Record<string, unknown>[] : [];
-      
       const productToCategory2NameMap = new Map<number, string>();
       productsArray.forEach((p) => {
         const productId = typeof p.id === 'number' ? p.id : (typeof p.id === 'string' ? parseInt(p.id, 10) : null);
-        const category1Name = typeof p.category1_name === 'string' ? p.category1_name : (typeof (p as { kategori?: string }).kategori === 'string' ? (p as { kategori: string }).kategori : null);
         const category2Name = typeof p.category2_name === 'string' ? p.category2_name : null;
-        if (productId && category1Name && category2Name) {
+        if (productId && category2Name) {
           productToCategory2NameMap.set(productId, category2Name);
         }
       });
@@ -835,8 +837,7 @@ export default function GantiShift() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeShift?.id, checkTodayTransactions]);
 
-  // Function to recalculate Category I breakdown using base_subtotal
-  // Only includes products that have BOTH category1 and category2 so totals match Category II
+  // Function to recalculate Category I breakdown using base_subtotal. Only uses product's category1 (no category2 requirement).
   const recalculateCategory1Breakdown = useCallback(async (products: ProductSale[], originalCategory1: Category1Breakdown[], businessId?: number) => {
     const electronAPI = getElectronAPI();
     if (!electronAPI?.localDbGetAllProducts || products.length === 0) {
@@ -850,9 +851,7 @@ export default function GantiShift() {
       productsArray.forEach((p) => {
         const productId = typeof p.id === 'number' ? p.id : (typeof p.id === 'string' ? parseInt(p.id, 10) : null);
         const category1Name = typeof p.category1_name === 'string' ? p.category1_name : (typeof (p as { kategori?: string }).kategori === 'string' ? (p as { kategori: string }).kategori : null);
-        const category2Name = typeof p.category2_name === 'string' ? p.category2_name : null;
-        // Only include products that have BOTH categories so Category I and II totals match
-        if (productId && category1Name && category2Name) {
+        if (productId && category1Name) {
           productToCategory1NameMap.set(productId, category1Name);
         }
       });
@@ -894,8 +893,7 @@ export default function GantiShift() {
     }
   }, []);
 
-  // Function to recalculate Category II breakdown using base_subtotal
-  // Only includes products that have BOTH category1 and category2 so totals match Category I
+  // Function to recalculate Category II breakdown using base_subtotal. Only uses product's category2.
   const recalculateCategory2Breakdown = useCallback(async (products: ProductSale[], originalCategory2: Category2Breakdown[], businessId?: number) => {
     const electronAPI = getElectronAPI();
     if (!electronAPI?.localDbGetAllProducts || products.length === 0) {
@@ -906,16 +904,12 @@ export default function GantiShift() {
     try {
       const allProducts = await electronAPI.localDbGetAllProducts(businessId);
       const productsArray = Array.isArray(allProducts) ? allProducts as Record<string, unknown>[] : [];
-      
-      // Build map: product_id -> category2_name (only products with BOTH category1 and category2)
       const productToCategory2NameMap = new Map<number, string>();
 
       productsArray.forEach((p) => {
         const productId = typeof p.id === 'number' ? p.id : (typeof p.id === 'string' ? parseInt(p.id, 10) : null);
-        const category1Name = typeof p.category1_name === 'string' ? p.category1_name : (typeof (p as { kategori?: string }).kategori === 'string' ? (p as { kategori: string }).kategori : null);
         const category2Name = typeof p.category2_name === 'string' ? p.category2_name : null;
-        // Only include products that have BOTH categories so Category I and II totals match
-        if (productId && category1Name && category2Name) {
+        if (productId && category2Name) {
           productToCategory2NameMap.set(productId, category2Name);
         }
       });
@@ -1880,6 +1874,19 @@ export default function GantiShift() {
             modalAwalWholeDay = dayShiftsForReport[0].modal_awal || 0;
           }
 
+          // For whole-day print: use last shift that has kas_akhir so print matches app (app shows one shift's Kas Akhir/Selisih on all-day tab)
+          const lastShiftWithKas = dayShiftsForReport.length > 0
+            ? [...dayShiftsForReport].reverse().find((s) => s.kas_akhir != null && s.kas_akhir !== undefined) ?? null
+            : null;
+          const wholeDayKasAkhir = lastShiftWithKas != null ? Number(lastShiftWithKas.kas_akhir) : null;
+          let wholeDayKasSelisih: number | null = lastShiftWithKas != null && lastShiftWithKas.kas_selisih != null ? Number(lastShiftWithKas.kas_selisih) : null;
+          let wholeDayKasSelisihLabel = lastShiftWithKas?.kas_selisih_label ?? null;
+          if (wholeDayKasSelisih == null && lastShiftWithKas != null && lastShiftWithKas.kas_akhir != null && lastShiftWithKas.kas_expected != null) {
+            const computed = Math.round(Number((Number(lastShiftWithKas.kas_akhir) - Number(lastShiftWithKas.kas_expected)).toFixed(2)));
+            wholeDayKasSelisih = computed;
+            wholeDayKasSelisihLabel = Math.abs(computed) < 1 ? 'balanced' : (computed > 0 ? 'plus' : 'minus');
+          }
+
           // Group products and recalculate Category I & II for print
           const productsForPrint = groupProducts 
             ? groupProductSalesForPrint(dayReportData.productSales)
@@ -1899,14 +1906,15 @@ export default function GantiShift() {
 
           console.log('🖨️ [PRINT WHOLE DAY] Sending to printer...');
 
-          // Debug logging
-          
+          const dayGrossOmset = Math.round((Number(dayReportData.statistics.total_amount) || 0) + (Number(dayCashRefunds) || 0) + (Number(dayReportData.statistics.total_discount) || 0));
           const result = await electronAPI.printShiftBreakdown({
             user_name: 'Semua Shift',
             shift_start: dayBounds.dayStartUtc,
             shift_end: dayBounds.dayEndUtc,
             modal_awal: modalAwalWholeDay,
             statistics: dayReportData.statistics,
+            gross_total_omset: dayGrossOmset,
+            refunds: dayReportData.refunds ?? [],
             productSales: productsForPrint,
             customizationSales: dayReportData.customizationSales,
             paymentBreakdown: dayReportData.paymentBreakdown.map(p => ({
@@ -1927,9 +1935,9 @@ export default function GantiShift() {
               total_cash_in_cashier: modalAwalWholeDay + dayCashSales - dayCashRefunds,
               kas_mulai: modalAwalWholeDay,
               kas_expected: modalAwalWholeDay + dayCashSales - dayCashRefunds,
-              kas_akhir: null,
-              kas_selisih: null,
-              kas_selisih_label: null
+              kas_akhir: wholeDayKasAkhir,
+              kas_selisih: wholeDayKasSelisih,
+              kas_selisih_label: wholeDayKasSelisihLabel
             },
             business_id: businessId,
             printerType: 'receiptPrinter',
@@ -1980,6 +1988,14 @@ export default function GantiShift() {
           const shiftCashSales = shiftCash.cash_shift_sales ?? shiftCash.cash_shift ?? 0;
           const shiftCashRefunds = shiftCash.cash_shift_refunds ?? 0;
           const shiftKasExpected = shift.modal_awal + shiftCashSales - shiftCashRefunds;
+          // If shift has kas_akhir but kas_selisih not set, compute so print shows same as app
+          let printKasSelisih = shift.kas_selisih ?? null;
+          let printKasSelisihLabel = shift.kas_selisih_label ?? null;
+          if (printKasSelisih == null && shift.kas_akhir != null && shift.kas_akhir !== undefined) {
+            const computed = Math.round(Number((Number(shift.kas_akhir) - shiftKasExpected).toFixed(2)));
+            printKasSelisih = computed;
+            printKasSelisihLabel = Math.abs(computed) < 1 ? 'balanced' : (computed > 0 ? 'plus' : 'minus');
+          }
 
           // Group products and recalculate Category I & II for print
           const productsForPrint = groupProducts 
@@ -2000,12 +2016,15 @@ export default function GantiShift() {
 
           console.log(`🖨️ [PRINT SHIFT ${selection.shiftIndex}] Sending to printer...`);
 
+          const shiftGrossOmset = Math.round((Number(shiftReportData.statistics.total_amount) || 0) + (Number(shiftCashRefunds) || 0) + (Number(shiftReportData.statistics.total_discount) || 0));
           const result = await electronAPI.printShiftBreakdown({
             user_name: shift.user_name,
             shift_start: shift.shift_start,
             shift_end: shift.shift_end,
             modal_awal: shift.modal_awal,
             statistics: shiftReportData.statistics,
+            gross_total_omset: shiftGrossOmset,
+            refunds: shiftReportData.refunds ?? [],
             productSales: productsForPrint,
             customizationSales: shiftReportData.customizationSales,
             paymentBreakdown: shiftReportData.paymentBreakdown.map(p => ({
@@ -2027,8 +2046,8 @@ export default function GantiShift() {
               kas_mulai: shift.modal_awal,
               kas_expected: shiftKasExpected,
               kas_akhir: shift.kas_akhir ?? null,
-              kas_selisih: shift.kas_selisih ?? null,
-              kas_selisih_label: shift.kas_selisih_label ?? null
+              kas_selisih: printKasSelisih,
+              kas_selisih_label: printKasSelisihLabel
             },
             business_id: businessId,
             printerType: 'receiptPrinter',
@@ -2124,12 +2143,15 @@ export default function GantiShift() {
         businessId
       );
 
+      const customGrossOmset = Math.round((Number(reportData.statistics.total_amount) || 0) + (Number(customCashRefunds) || 0) + (Number(reportData.statistics.total_discount) || 0));
       const result = await electronAPI.printShiftBreakdown({
         user_name: user?.name || activeShift?.user_name || 'Cashier',
         shift_start: startDateTime,
         shift_end: endDateTime,
         modal_awal: modalAwalForCustom,
         statistics: reportData.statistics,
+        gross_total_omset: customGrossOmset,
+        refunds: reportData.refunds ?? [],
         productSales: productsForPrint,
         customizationSales: reportData.customizationSales,
         paymentBreakdown: reportData.paymentBreakdown.map((p) => ({
@@ -2393,6 +2415,10 @@ export default function GantiShift() {
     (sum, item) => sum + Number(item.total_amount || 0),
     0
   );
+
+  // Gross total omset (before refund and before discount) for Ringkasan display
+  const grossTotalOmset = (Number(statistics.total_amount) || 0) + (Number(totalRefundsActive) || 0) + (Number(statistics.total_discount) || 0);
+  const totalToppingRevenue = customizationSales.reduce((sum, c) => sum + (c.total_revenue || 0), 0);
 
   return (
     <div className="flex-1 flex flex-col h-full bg-gray-50 overflow-y-auto">
@@ -2793,65 +2819,57 @@ export default function GantiShift() {
                   {/* Left Column - Transaction Summary */}
                   <div className="space-y-0">
                     <h3 className="text-xs font-semibold text-gray-700 mb-2 pb-1 border-b border-gray-300">Transaksi</h3>
-                    {/* Total Omset block - breakdown indented inside */}
+                    {/* Total Omset (gross: before refund & discount) */}
                     <div className="rounded-lg bg-amber-50 border border-amber-200/60 mb-2 px-3 py-2">
                       <div className="flex items-center py-1">
-                        <span className="text-sm font-semibold text-amber-900">Total Omset <span className="text-xs font-normal text-amber-700/80">(sudah dibayar)</span>:</span>
+                        <span className="text-sm font-semibold text-amber-900">Total Omset <span className="text-xs font-normal text-amber-700/80">(sebelum refund & diskon)</span>:</span>
                         <span className="flex-grow border-b border-dotted border-amber-300 mx-2"></span>
-                        <span className="text-sm font-bold text-amber-900">{formatRupiah(statistics.total_amount)}</span>
+                        <span className="text-sm font-bold text-amber-900">{formatRupiah(grossTotalOmset)}</span>
                       </div>
-                      <div className="flex items-center py-0.5 pl-4">
-                        <span className="text-xs text-gray-700">Jumlah Pesanan:</span>
-                        <span className="flex-grow border-b border-dotted border-gray-300 mx-2"></span>
-                        <span className="text-xs font-semibold text-gray-900">{statistics.order_count} transaksi</span>
+                      {/* Refund - own row with distinct color */}
+                      <div className="flex items-center py-1 mt-1 rounded px-2 bg-red-50 border border-red-200/60">
+                        <span className="text-xs font-semibold text-red-800">Refund:</span>
+                        <span className="flex-grow border-b border-dotted border-red-200 mx-2"></span>
+                        <span className="text-xs font-bold text-red-700">-{formatRupiah(totalRefundsActive)}</span>
                       </div>
-                      <div className="flex items-center py-0.5 pl-4">
-                        <span className="text-xs text-gray-700">Jumlah CU:</span>
-                        <span className="flex-grow border-b border-dotted border-gray-300 mx-2"></span>
-                        <span className="text-xs font-semibold text-gray-900">{statistics.total_cu ?? 0}</span>
-                      </div>
-                      {orderCountByPlatform(paymentBreakdown).map(({ label, count, amount }) => (
-                        <div key={label} className="flex items-center py-0.5 pl-4">
-                          <span className="text-xs text-gray-600">{label}:</span>
-                          <span className="flex-grow border-b border-dotted border-gray-200 mx-2"></span>
-                          <span className="text-xs font-medium text-gray-800">{count} transaksi / {formatRupiah(amount)}</span>
+                      {/* Diskon Voucher - own row with distinct color; breakdown indented below */}
+                      <div className="rounded px-2 py-1 mt-0.5 bg-green-50 border border-green-200/60">
+                        <div className="flex items-center py-0.5">
+                          <span className="text-xs font-semibold text-green-800">Diskon Voucher:</span>
+                          <span className="flex-grow border-b border-dotted border-green-200 mx-2"></span>
+                          <span className="text-xs font-bold text-green-700">
+                            {statistics.total_discount > 0 ? `-${formatRupiah(statistics.total_discount)}` : formatRupiah(0)}
+                          </span>
                         </div>
-                      ))}
-                    </div>
-                    {/* Total Diskon Voucher block - breakdown indented inside */}
-                    <div className="rounded-lg bg-green-50 border border-green-200/60 mb-2 px-3 py-2">
-                      <div className="flex items-center py-1">
-                        <span className="text-sm font-semibold text-green-800">Total Diskon Voucher:</span>
-                        <span className="flex-grow border-b border-dotted border-green-300 mx-2"></span>
-                        <span className="text-sm font-bold text-green-700">
-                          {statistics.total_discount > 0 ? formatRupiah(-statistics.total_discount) : formatRupiah(0)}
+                        {VOUCHER_BREAKDOWN_ORDER.map(({ key, label }) => {
+                          const e = voucherBreakdown[key];
+                          if (!e || e.count <= 0) return null;
+                          return (
+                            <div key={key} className="flex items-center py-0.5 pl-4">
+                              <span className="text-xs text-gray-600">{label} ({e.count}):</span>
+                              <span className="flex-grow border-b border-dotted border-gray-200 mx-2"></span>
+                              <span className="text-xs font-semibold text-green-600">-{formatRupiah(e.total)}</span>
+                            </div>
+                          );
+                        })}
+                      </div>
+                      {/* Grand total = Total Omset - Refund - Diskon Voucher */}
+                      <div className="flex items-center py-1.5 mt-1 rounded px-2 bg-gray-100 border border-gray-200">
+                        <span className="text-xs font-bold text-gray-800">Grand Total:</span>
+                        <span className="flex-grow border-b border-dotted border-gray-300 mx-2"></span>
+                        <span className="text-sm font-bold text-gray-900">
+                          {formatRupiah(Math.max(0, grossTotalOmset - (Number(totalRefundsActive) || 0) - (Number(statistics.total_discount) || 0)))}
                         </span>
                       </div>
-                      <div className="flex items-center py-0.5 pl-4">
-                        <span className="text-xs text-gray-700">Voucher Dipakai:</span>
-                        <span className="flex-grow border-b border-dotted border-gray-200 mx-2"></span>
-                        <span className="text-xs font-semibold text-gray-900">{statistics.voucher_count} transaksi</span>
+                    </div>
+                    {/* Total Topping - only show when > 0 */}
+                    {totalToppingRevenue > 0 && (
+                      <div className="flex items-center py-2 px-2 -mx-2 rounded-lg bg-blue-50 border border-blue-200/60 mb-2">
+                        <span className="text-sm font-semibold text-blue-800">Total Topping:</span>
+                        <span className="flex-grow border-b border-dotted border-blue-300 mx-2"></span>
+                        <span className="text-sm font-bold text-blue-900">{formatRupiah(totalToppingRevenue)}</span>
                       </div>
-                      {VOUCHER_BREAKDOWN_ORDER.map(({ key, label }) => {
-                        const e = voucherBreakdown[key];
-                        if (!e || e.count <= 0) return null;
-                        return (
-                          <div key={key} className="flex items-center py-0.5 pl-4">
-                            <span className="text-xs text-gray-600">{label} ({e.count}):</span>
-                            <span className="flex-grow border-b border-dotted border-gray-200 mx-2"></span>
-                            <span className="text-xs font-semibold text-green-600">-{formatRupiah(e.total)}</span>
-                          </div>
-                        );
-                      })}
-                    </div>
-                    {/* Total Topping - highlighted, bottommost */}
-                    <div className="flex items-center py-2 px-2 -mx-2 rounded-lg bg-blue-50 border border-blue-200/60 mb-2">
-                      <span className="text-sm font-semibold text-blue-800">Total Topping:</span>
-                      <span className="flex-grow border-b border-dotted border-blue-300 mx-2"></span>
-                      <span className="text-sm font-bold text-blue-900">
-                        {formatRupiah(customizationSales.reduce((sum, c) => sum + c.total_revenue, 0))}
-                      </span>
-                    </div>
+                    )}
                   </div>
 
                   {/* Right Column - Cash Summary */}
@@ -2876,6 +2894,17 @@ export default function GantiShift() {
                       <span className="text-xs font-semibold text-gray-800">Kas Diharapkan:</span>
                       <span className="flex-grow border-b border-dotted border-gray-300 mx-2"></span>
                       <span className="text-xs font-bold text-purple-700">{formatRupiah(kasExpectedActive)}</span>
+                    </div>
+                    <div className="border-t border-gray-300 my-1.5" />
+                    <div className="flex items-center py-0.5">
+                      <span className="text-xs text-gray-700">Jumlah Pesanan:</span>
+                      <span className="flex-grow border-b border-dotted border-gray-300 mx-2"></span>
+                      <span className="text-xs font-semibold text-gray-900">{statistics.order_count} transaksi</span>
+                    </div>
+                    <div className="flex items-center py-0.5">
+                      <span className="text-xs text-gray-700">Jumlah CU:</span>
+                      <span className="flex-grow border-b border-dotted border-gray-300 mx-2"></span>
+                      <span className="text-xs font-semibold text-gray-900">{statistics.total_cu ?? 0}</span>
                     </div>
                     {kasAkhirActive !== null && (
                       <>
@@ -2918,13 +2947,14 @@ export default function GantiShift() {
                           <th className="px-2 py-2 text-right font-semibold text-gray-700">Refund Amount</th>
                           <th className="px-2 py-2 text-left font-semibold text-gray-700">Alasan</th>
                           <th className="px-2 py-2 text-left font-semibold text-gray-700">Refund Time</th>
-                          <th className="px-2 py-2 text-left font-semibold text-gray-700">Transaction Created</th>
+                          <th className="px-2 py-2 text-left font-semibold text-gray-700">Issuer</th>
+                          <th className="px-2 py-2 text-left font-semibold text-gray-700">Waiter</th>
+                          <th className="px-2 py-2 text-left font-semibold text-gray-700">Nama Pelanggan</th>
                         </tr>
                       </thead>
                       <tbody>
                         {refunds.map((refund, idx) => {
                           const refundDate = new Date(refund.refunded_at);
-                          const transactionDate = new Date(refund.transaction_created_at);
                           const formatDateTime = (date: Date) => {
                             return date.toLocaleString('id-ID', {
                               year: 'numeric',
@@ -2963,7 +2993,13 @@ export default function GantiShift() {
                                 {formatDateTime(refundDate)}
                               </td>
                               <td className="px-2 py-2 text-gray-600">
-                                {formatDateTime(transactionDate)}
+                                {refund.issuer_email || '-'}
+                              </td>
+                              <td className="px-2 py-2 text-gray-600">
+                                {refund.waiter_name || '-'}
+                              </td>
+                              <td className="px-2 py-2 text-gray-600">
+                                {refund.customer_name || '-'}
                               </td>
                             </tr>
                           );
@@ -3034,17 +3070,16 @@ export default function GantiShift() {
                           })}</span>
                         </div>
                         <div className="flex justify-between">
-                          <span className="text-black font-medium">Transaction Created:</span>
-                          <span className="text-black">{new Date(selectedRefundTransaction.refund.transaction_created_at).toLocaleString('id-ID', {
-                            year: 'numeric',
-                            month: '2-digit',
-                            day: '2-digit',
-                            hour: '2-digit',
-                            minute: '2-digit',
-                            second: '2-digit',
-                            hour12: false,
-                            timeZone: 'Asia/Jakarta'
-                          })}</span>
+                          <span className="text-black font-medium">Issuer:</span>
+                          <span className="text-black">{selectedRefundTransaction.refund.issuer_email || '-'}</span>
+                        </div>
+                        <div className="flex justify-between">
+                          <span className="text-black font-medium">Waiter:</span>
+                          <span className="text-black">{selectedRefundTransaction.refund.waiter_name || '-'}</span>
+                        </div>
+                        <div className="flex justify-between">
+                          <span className="text-black font-medium">Nama Pelanggan:</span>
+                          <span className="text-black">{selectedRefundTransaction.refund.customer_name || '-'}</span>
                         </div>
                       </div>
 
@@ -3100,110 +3135,6 @@ export default function GantiShift() {
                   </div>
                 </div>
               )}
-
-              {/* BARANG TERJUAL */}
-              <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-4">
-                <h2 className="text-base font-semibold text-gray-800 mb-2 text-center">BARANG TERJUAL</h2>
-                <div className="overflow-x-auto">
-                  <table className="w-full text-xs">
-                    <thead>
-                      <tr className="border-b-2 border-gray-300">
-                        <th className="text-left py-1 px-2 font-semibold text-gray-700">Product</th>
-                        <th className="text-right py-1 px-2 font-semibold text-gray-700">Qty</th>
-                        <th className="text-right py-1 px-2 font-semibold text-gray-700">Unit Price</th>
-                        <th className="text-right py-1 px-2 font-semibold text-gray-700">Subtotal</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {displayProductSales.length > 0 ? (
-                        <>
-                          {displayProductSales.map((product, idx) => {
-                            // Handle both grouped (has platforms array) and ungrouped (has platform string) formats
-                            const isGrouped = isGroupedProduct(product);
-                            
-                            const platformsStr = isGrouped
-                              ? product.platforms
-                                  .map((p: string) => formatPlatformLabel(p))
-                                  .sort()
-                                  .join(', ')
-                              : formatPlatformLabel(product.platform || 'offline');
-                            
-                            // Format unit prices (for grouped) or single unit price (for ungrouped)
-                            const unitPricesStr = isGrouped
-                              ? product.unitPrices
-                                  .sort((a: number, b: number) => a - b)
-                                  .map((price: number) => formatRupiah(price))
-                                  .join(', ')
-                              : formatRupiah(product.base_unit_price || (product.total_quantity > 0 ? product.base_subtotal / product.total_quantity : 0));
-
-                            return (
-                              <tr key={`${product.product_id}-${product.transaction_type}-${idx}`} className="border-b border-gray-200 hover:bg-gray-50">
-                                <td className="py-1 px-2 font-medium">
-                                  <div className="text-gray-900">
-                                    {product.is_bundle_item && <span className="text-[10px] font-semibold text-purple-600">[Bundle] </span>}
-                                    {product.product_name}
-                                  </div>
-                                  <div className="text-[10px] text-gray-600">
-                                    {product.transaction_type === 'drinks' ? 'Drinks' : 'Bakery'}
-                                    {' · '}
-                                    {platformsStr}
-                                  </div>
-                                </td>
-                                <td className="py-1 px-2 text-right font-medium text-gray-900">{product.total_quantity}</td>
-                                <td className="py-1 px-2 text-right font-medium">
-                                  {product.is_bundle_item ? (
-                                    <span className="text-gray-700">-</span>
-                                  ) : (
-                                    <span className="text-gray-900">
-                                      {unitPricesStr || '-'}
-                                    </span>
-                                  )}
-                                </td>
-                                <td className="py-1 px-2 text-right font-semibold">
-                                  {product.is_bundle_item ? (
-                                    <span className="text-gray-700">-</span>
-                                  ) : (
-                                    <span className="text-gray-900">
-                                      {formatRupiah(isGrouped ? product.total_base_subtotal : product.base_subtotal)}
-                                    </span>
-                                  )}
-                                </td>
-                              </tr>
-                            );
-                          })}
-                          <tr className="border-t-2 border-gray-300 bg-gray-100">
-                            <td className="py-1 px-2 font-bold text-gray-900">TOTAL</td>
-                            <td className="py-1 px-2 text-right font-bold text-gray-900">
-                              {displayProductSales.reduce((sum, p) => sum + p.total_quantity, 0)}
-                            </td>
-                            <td className="py-1 px-2 text-right font-bold text-gray-900">-</td>
-                            <td className="py-1 px-2 text-right font-bold text-gray-900">
-                              {formatRupiah(displayProductSales.filter(p => !p.is_bundle_item).reduce((sum, p) => {
-                                const baseSubtotal = isGroupedProduct(p) ? p.total_base_subtotal : p.base_subtotal;
-                                return sum + baseSubtotal;
-                              }, 0))}
-                            </td>
-                          </tr>
-                          {barangTerjualByPlatform.map(({ label, qty, amount }) => (
-                            <tr key={label} className="border-b border-gray-100">
-                              <td className="py-0.5 px-2 pl-4 text-gray-600 text-xs">{label}</td>
-                              <td className="py-0.5 px-2 text-right text-gray-600 text-xs">{qty}</td>
-                              <td className="py-0.5 px-2 text-right text-gray-400">-</td>
-                              <td className="py-0.5 px-2 text-right font-medium text-gray-800 text-xs">{formatRupiah(amount)}</td>
-                            </tr>
-                          ))}
-                        </>
-                      ) : (
-                        <tr>
-                          <td colSpan={4} className="py-4 text-center text-gray-500 text-xs">
-                            Belum ada produk yang terjual
-                          </td>
-                        </tr>
-                      )}
-                    </tbody>
-                  </table>
-                </div>
-              </div>
 
               {/* Payment Method Breakdown */}
               <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-4">
@@ -3348,7 +3279,96 @@ export default function GantiShift() {
                 </div>
               </div>
 
-              {/* TOPPING SALES BREAKDOWN */}
+              {/* BARANG TERJUAL - below Category II */}
+              <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-4">
+                <h2 className="text-base font-semibold text-gray-800 mb-1 text-center">BARANG TERJUAL</h2>
+                <p className="text-[10px] text-gray-500 text-center mb-2">Nilai per platform sebelum potongan/diskon/voucher. Refund tidak disertakan dalam perhitungan.</p>
+                <div className="overflow-x-auto">
+                  <table className="w-full text-xs">
+                    <thead>
+                      <tr className="border-b-2 border-gray-300">
+                        <th className="text-left py-1 px-2 font-semibold text-gray-700">Product</th>
+                        <th className="text-right py-1 px-2 font-semibold text-gray-700">Qty</th>
+                        <th className="text-right py-1 px-2 font-semibold text-gray-700">Unit Price</th>
+                        <th className="text-right py-1 px-2 font-semibold text-gray-700">Subtotal</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {displayProductSales.length > 0 ? (
+                        <>
+                          {displayProductSales.map((product, idx) => {
+                            const isGrouped = isGroupedProduct(product);
+                            const platformsStr = isGrouped
+                              ? product.platforms
+                                  .map((p: string) => formatPlatformLabel(p))
+                                  .sort()
+                                  .join(', ')
+                              : formatPlatformLabel(product.platform || 'offline');
+                            const unitPricesStr = isGrouped
+                              ? product.unitPrices
+                                  .sort((a: number, b: number) => a - b)
+                                  .map((price: number) => formatRupiah(price))
+                                  .join(', ')
+                              : formatRupiah(product.base_unit_price || (product.total_quantity > 0 ? product.base_subtotal / product.total_quantity : 0));
+                            return (
+                              <tr key={`${product.product_id}-${product.transaction_type}-${idx}`} className="border-b border-gray-200 hover:bg-gray-50">
+                                <td className="py-1 px-2 font-medium">
+                                  <div className="text-gray-900">
+                                    {product.is_bundle_item && <span className="text-[10px] font-semibold text-purple-600">[Bundle] </span>}
+                                    {product.product_name}
+                                  </div>
+                                  <div className="text-[10px] text-gray-600">
+                                    {product.transaction_type === 'drinks' ? 'Drinks' : 'Bakery'}
+                                    {' · '}
+                                    {platformsStr}
+                                  </div>
+                                </td>
+                                <td className="py-1 px-2 text-right font-medium text-gray-900">{product.total_quantity}</td>
+                                <td className="py-1 px-2 text-right font-medium">
+                                  {product.is_bundle_item ? <span className="text-gray-700">-</span> : <span className="text-gray-900">{unitPricesStr || '-'}</span>}
+                                </td>
+                                <td className="py-1 px-2 text-right font-semibold">
+                                  {product.is_bundle_item ? <span className="text-gray-700">-</span> : <span className="text-gray-900">{formatRupiah(isGrouped ? product.total_base_subtotal : product.base_subtotal)}</span>}
+                                </td>
+                              </tr>
+                            );
+                          })}
+                          <tr className="border-t-2 border-gray-300 bg-gray-100">
+                            <td className="py-1 px-2 font-bold text-gray-900">TOTAL</td>
+                            <td className="py-1 px-2 text-right font-bold text-gray-900">
+                              {displayProductSales.reduce((sum, p) => sum + p.total_quantity, 0)}
+                            </td>
+                            <td className="py-1 px-2 text-right font-bold text-gray-900">-</td>
+                            <td className="py-1 px-2 text-right font-bold text-gray-900">
+                              {formatRupiah(displayProductSales.reduce((sum, p) => {
+                                const baseSubtotal = isGroupedProduct(p) ? p.total_base_subtotal : p.base_subtotal;
+                                return sum + baseSubtotal;
+                              }, 0))}
+                            </td>
+                          </tr>
+                          {barangTerjualByPlatform.map(({ label, qty, amount }) => (
+                            <tr key={label} className="border-b border-gray-100">
+                              <td className="py-0.5 px-2 pl-4 text-gray-600 text-xs">{label}</td>
+                              <td className="py-0.5 px-2 text-right text-gray-600 text-xs">{qty}</td>
+                              <td className="py-0.5 px-2 text-right text-gray-400">-</td>
+                              <td className="py-0.5 px-2 text-right font-medium text-gray-800 text-xs">{formatRupiah(amount)}</td>
+                            </tr>
+                          ))}
+                        </>
+                      ) : (
+                        <tr>
+                          <td colSpan={4} className="py-4 text-center text-gray-500 text-xs">
+                            Belum ada produk yang terjual
+                          </td>
+                        </tr>
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+
+              {/* TOPPING SALES BREAKDOWN - only when total > 0 */}
+              {totalToppingRevenue > 0 && (
               <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-4">
                 <h2 className="text-base font-semibold text-gray-800 mb-2 text-center">TOPPING SALES BREAKDOWN</h2>
                 <div className="overflow-x-auto">
@@ -3394,6 +3414,7 @@ export default function GantiShift() {
                   </table>
                 </div>
               </div>
+              )}
             </>
           )}
                 </>

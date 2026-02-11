@@ -8,6 +8,7 @@ import CustomNoteModal from './CustomNoteModal';
 import EditItemModal from './EditItemModal';
 import PaymentModal from './PaymentModal';
 import BundleSelectionModal from './BundleSelectionModal';
+import PackageSelectionModal, { type PackageSelection, type PackageItemForPos, getPackageBreakdownLines } from './PackageSelectionModal';
 import TableSelectionModal from './TableSelectionModal';
 import WaiterSelectionModal from './WaiterSelectionModal';
 import { offlineSyncService } from '@/lib/offlineSync';
@@ -44,6 +45,7 @@ interface Product {
   image_url: string | null;
   status: string;
   is_bundle?: number | boolean;
+  is_package?: number | boolean;
 }
 
 interface SelectedCustomization {
@@ -81,6 +83,7 @@ interface CartItem {
   customizations?: SelectedCustomization[];
   customNote?: string;
   bundleSelections?: BundleSelection[];
+  packageSelections?: PackageSelection[];
   isLocked?: boolean; // Item from pending transaction - requires password to remove
   transactionItemId?: number; // ID of the transaction_item in database (for logging)
   transactionId?: string; // UUID of the transaction (for logging)
@@ -88,6 +91,9 @@ interface CartItem {
   /** Waiter who added this line item (for multi-waiter display in cart) */
   waiterId?: number | null;
   waiterName?: string | null;
+  waiterColor?: string | null;
+  /** True for newly added items - displayed as [NEW] in lihat mode, inserted below same product */
+  isNewlyAdded?: boolean;
 }
 
 interface Employee {
@@ -178,7 +184,7 @@ interface CenterContentProps {
   products: Product[];
   cartItems: CartItem[];
   setCartItems: (items: CartItem[]) => void;
-  transactionType: 'drinks' | 'bakery' | 'foods';
+  transactionType: 'drinks' | 'bakery' | 'foods' | 'packages';
   isLoadingProducts?: boolean;
   isOnline?: boolean;
   selectedOnlinePlatform?: 'qpon' | 'gofood' | 'grabfood' | 'shopeefood' | 'tiktok' | null;
@@ -199,6 +205,7 @@ interface CenterContentProps {
     voucher_type?: string;
     voucher_value?: number | null;
     voucher_label?: string | null;
+    customer_unit?: number | null;
   } | null;
   onReloadTransaction?: (transactionId: string) => void;
   onClearLoadedTransaction?: () => void;
@@ -214,9 +221,11 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
   const [showCustomNoteModal, setShowCustomNoteModal] = useState(false);
   const [showEditModal, setShowEditModal] = useState(false);
   const [showBundleModal, setShowBundleModal] = useState(false);
-  
+  const [showPackageModal, setShowPackageModal] = useState(false);
+  const [packageItemsForModal, setPackageItemsForModal] = useState<PackageItemForPos[]>([]);
+
   const businessId = user?.selectedBusinessId;
-  
+
   if (!businessId) {
     return (
       <div className="p-4 bg-red-50 border border-red-200 rounded-lg">
@@ -232,10 +241,11 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
   const [showTableSelectionModal, setShowTableSelectionModal] = useState(false);
   const [bundleItems, setBundleItems] = useState<BundleItem[]>([]);
   const [customerName, setCustomerName] = useState<string>('');
+  const [cuValue, setCuValue] = useState<string>('1');
   const [showPasswordModal, setShowPasswordModal] = useState(false);
   const [passwordInput, setPasswordInput] = useState('');
   const [pendingLockedItemAction, setPendingLockedItemAction] = useState<{ item: CartItem; action: 'reduce' | 'delete' } | null>(null);
-  
+
   // Waiter selection state
   const [currentUserEmployee, setCurrentUserEmployee] = useState<Employee | null>(null);
   const [selectedWaiterId, setSelectedWaiterId] = useState<number | null>(null);
@@ -291,16 +301,19 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
     }
   }, [hasUnsavedChanges, onUnsavedChangesChange]);
 
-  // Populate customer name, waiter, and pickup method when transaction is loaded
+  // Populate customer name, waiter, CU, and pickup method when transaction is loaded
   useEffect(() => {
     if (loadedTransactionInfo) {
       setCustomerName(loadedTransactionInfo.customerName ?? '');
+      const cu = loadedTransactionInfo.customer_unit;
+      setCuValue(cu != null && cu >= 1 ? String(Math.min(999, cu)) : '1');
       setSelectedWaiterId(loadedTransactionInfo.waiterId ?? null);
       setSelectedWaiterName(loadedTransactionInfo.waiterName ?? null);
       setSelectedWaiterColor(loadedTransactionInfo.waiterColor ?? null);
       setOrderPickupMethod(loadedTransactionInfo.pickupMethod ?? 'dine-in');
     } else {
       setCustomerName('');
+      setCuValue('1');
       setSelectedWaiterId(null);
       setSelectedWaiterName(null);
       setSelectedWaiterColor(null);
@@ -316,10 +329,11 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
     }
   }, [isOnline, selectedOnlinePlatform]);
 
-  // When parent triggers "New" (resetCustomerAndWaiterSignal increments), reset nama pelanggan and pilih waiter
+  // When parent triggers "New" (resetCustomerAndWaiterSignal increments), reset nama pelanggan, CU, and pilih waiter
   useEffect(() => {
     if (resetCustomerAndWaiterSignal !== undefined && resetCustomerAndWaiterSignal > 0) {
       setCustomerName('');
+      setCuValue('1');
       setSelectedWaiterId(null);
       setSelectedWaiterName(null);
       setSelectedWaiterColor(null);
@@ -335,8 +349,8 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
           if (electronAPI?.localDbGetEmployees) {
             const allEmployees = await electronAPI.localDbGetEmployees();
             const employee = (allEmployees as unknown as Employee[]).find(
-              (emp: Employee) => 
-                emp.user_id === parseInt(String(user.id)) && 
+              (emp: Employee) =>
+                emp.user_id === parseInt(String(user.id)) &&
                 (emp.business_id === businessId || emp.business_id === null)
             );
             setCurrentUserEmployee(employee || null);
@@ -353,9 +367,9 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
   }, [user?.id, businessId]);
 
   // Check if user can select waiter (SPV, Cashier, or Waiter)
-  const canSelectWaiter = currentUserEmployee?.jabatan_id === 1 || 
-                          currentUserEmployee?.jabatan_id === 2 || 
-                          currentUserEmployee?.jabatan_id === 6;
+  const canSelectWaiter = currentUserEmployee?.jabatan_id === 1 ||
+    currentUserEmployee?.jabatan_id === 2 ||
+    currentUserEmployee?.jabatan_id === 6;
 
   // Calculate responsive sizes based on column count
   const gridStyles = useMemo(() => {
@@ -423,7 +437,7 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
     if (!customizations || customizations.length === 0) return 0;
     return customizations.reduce((sum, customization) => {
       const optionTotal = customization.selected_options.reduce((optionSum, option) => {
-        const priceAdj = typeof option.price_adjustment === 'number' ? option.price_adjustment : (typeof option.price_adjustment === 'string' ? parseFloat(option.price_adjustment) || 0 : 0);return optionSum + priceAdj;
+        const priceAdj = typeof option.price_adjustment === 'number' ? option.price_adjustment : (typeof option.price_adjustment === 'string' ? parseFloat(option.price_adjustment) || 0 : 0); return optionSum + priceAdj;
       }, 0);
       return sum + optionTotal;
     }, 0);
@@ -579,6 +593,26 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
           console.error('❌ [BUNDLE] Error fetching bundle items:', error);
           alert('Gagal memuat detail bundle. Silakan coba lagi.');
         }
+      } else if (product.is_package === 1 || product.is_package === true) {
+        // Package product: open package selection modal
+        const electronAPI = typeof window !== 'undefined' ? window.electronAPI : undefined;
+        if (electronAPI?.localDbGetPackageItems) {
+          try {
+            const items = await electronAPI.localDbGetPackageItems(product.id) as PackageItemForPos[];
+            if (items && items.length > 0) {
+              setPackageItemsForModal(items);
+              setSelectedProduct(product);
+              setShowPackageModal(true);
+            } else {
+              alert('Paket ini belum memiliki item. Silakan atur di manage products.');
+            }
+          } catch (e) {
+            console.error('Error fetching package items:', e);
+            alert('Gagal memuat detail paket. Silakan coba lagi.');
+          }
+        } else {
+          alert('Fitur paket tidak tersedia.');
+        }
       } else {
         // Regular product flow
         const hasCustomizations = await checkProductCustomizations(product);
@@ -597,73 +631,36 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
     }
   };
 
-  const addToCart = (product: Product, customizations?: SelectedCustomization[], quantity: number = 1, customNote?: string, bundleSelections?: BundleSelection[]) => {
-    // If in "lihat" mode (loadedTransactionInfo exists), always create separate entries
-    // This prevents merging with locked items that are already sent to production
-    if (loadedTransactionInfo) {
-      const newCartItems = [...cartItems, {
-        id: Date.now(),
-        product,
-        quantity,
-        customizations: customizations || [],
-        customNote: customNote || undefined,
-        bundleSelections: bundleSelections || undefined,
-        isLocked: false, // New items start as unlocked
-      }];
-      setCartItems(newCartItems);
-      sendCartUpdate(newCartItems);
-      return;
+  /** Insert new item right after the last occurrence of the same product (product.id) */
+  const insertAfterSameProduct = (items: CartItem[], newItem: CartItem): CartItem[] => {
+    let insertIndex = -1;
+    for (let i = items.length - 1; i >= 0; i--) {
+      if (items[i].product.id === newItem.product.id) {
+        insertIndex = i + 1;
+        break;
+      }
     }
-
-    // Normal mode: merge items if they match
-    // Check if this is a basic product (no customizations, no custom note, no bundle)
-    const hasCustomizations = customizations && customizations.length > 0;
-    const hasCustomNote = customNote && customNote.trim() !== '';
-    const isBundle = bundleSelections && bundleSelections.length > 0;
-
-    let existingItem: CartItem | undefined;
-
-    // For bundles, always create new cart item (each bundle selection is unique)
-    if (isBundle) {
-      existingItem = undefined;
-    } else if (!hasCustomizations && !hasCustomNote) {
-      // For basic products (no customizations, no notes), find any existing item of the same product
-      // regardless of customizations or notes, as long as it's also a basic product
-      existingItem = cartItems.find(item =>
-        item.product.id === product.id &&
-        (!item.customizations || item.customizations.length === 0) &&
-        (!item.customNote || item.customNote.trim() === '') &&
-        (!item.bundleSelections || item.bundleSelections.length === 0)
-      );
-    } else {
-      // For products with customizations or notes, match exactly
-      existingItem = cartItems.find(item =>
-        item.product.id === product.id &&
-        JSON.stringify(item.customizations) === JSON.stringify(customizations) &&
-        item.customNote === customNote &&
-        (!item.bundleSelections || item.bundleSelections.length === 0)
-      );
+    if (insertIndex < 0) {
+      return [...items, newItem];
     }
+    return [...items.slice(0, insertIndex), newItem, ...items.slice(insertIndex)];
+  };
 
-    let newCartItems: CartItem[];
+  const addToCart = (product: Product, customizations?: SelectedCustomization[], quantity: number = 1, customNote?: string, bundleSelections?: BundleSelection[], packageSelections?: PackageSelection[]) => {
+    const newItem: CartItem = {
+      id: Date.now(),
+      product,
+      quantity,
+      customizations: customizations || [],
+      customNote: customNote || undefined,
+      bundleSelections: bundleSelections || undefined,
+      packageSelections: packageSelections || undefined,
+      isNewlyAdded: true,
+      ...(loadedTransactionInfo ? { isLocked: false } : {}),
+    };
 
-    if (existingItem && !isBundle) {
-      newCartItems = cartItems.map(item =>
-        item.id === existingItem!.id
-          ? { ...item, quantity: item.quantity + quantity }
-          : item
-      );
-    } else {
-      newCartItems = [...cartItems, {
-        id: Date.now(),
-        product,
-        quantity,
-        customizations: customizations || [],
-        customNote: customNote || undefined,
-        bundleSelections: bundleSelections || undefined
-      }];
-    }
-
+    // Both lihat mode and normal mode: insert new item below the last occurrence of same product
+    const newCartItems = insertAfterSameProduct(cartItems, newItem);
     setCartItems(newCartItems);
 
     // Send cart update to customer display
@@ -690,6 +687,15 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
     }
   };
 
+  const handlePackageConfirm = (selections: PackageSelection[], quantity: number) => {
+    if (selectedProduct) {
+      addToCart(selectedProduct, undefined, quantity, undefined, undefined, selections);
+      setShowPackageModal(false);
+      setSelectedProduct(null);
+      setPackageItemsForModal([]);
+    }
+  };
+
   const handleEditItem = (cartItem: CartItem) => {
     setSelectedCartItem(cartItem);
     setShowEditModal(true);
@@ -697,7 +703,7 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
 
   const handleUpdateItem = (updatedItem: CartItem) => {
     const newCartItems = cartItems.map(item =>
-      item.id === updatedItem.id ? updatedItem : item
+      item.id === updatedItem.id ? { ...updatedItem, isNewlyAdded: false } : item
     );
     setCartItems(newCartItems);
     sendCartUpdate(newCartItems);
@@ -772,11 +778,11 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
   const handlePasswordSubmit = async () => {
     if (passwordInput === 'KONFIRMASI') {
       setShowPasswordModal(false);
-      
+
       if (pendingLockedItemAction) {
         const { item, action } = pendingLockedItemAction;
         const electronAPI = typeof window !== 'undefined' ? window.electronAPI : undefined;
-        
+
         try {
           // Perform the action
           if (action === 'delete') {
@@ -802,10 +808,10 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
                 const customNote = typeof transactionItem.custom_note === 'string' ? transactionItem.custom_note : null;
                 const bundleSelectionsJson = typeof transactionItem.bundle_selections_json === 'string' ? transactionItem.bundle_selections_json : (transactionItem.bundle_selections_json ? JSON.stringify(transactionItem.bundle_selections_json) : null);
                 const waiterIdItem = typeof transactionItem.waiter_id === 'number' ? transactionItem.waiter_id : (typeof transactionItem.waiter_id === 'string' ? parseInt(String(transactionItem.waiter_id), 10) : null);
-                
+
                 // Get created_at - preserve original timestamp
                 const createdAt = transactionItem.created_at ? String(transactionItem.created_at) : new Date().toISOString();
-                
+
                 // Set production_status to 'cancelled'
                 const productionStatus = 'cancelled';
                 const productionStartedAt = transactionItem.production_started_at ? String(transactionItem.production_started_at) : null;
@@ -833,7 +839,7 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
                 console.warn('Transaction item not found in database');
               }
             }
-            
+
             // Check if transaction has any active (non-cancelled) items left
             // If all items are cancelled, update transaction status to 'cancelled'
             if (item.transactionId && electronAPI?.localDbGetTransactionItems && electronAPI?.localDbGetTransactions && electronAPI?.localDbUpsertTransactions) {
@@ -841,13 +847,13 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
                 // Fetch all items for this transaction
                 const allTransactionItems = await electronAPI.localDbGetTransactionItems(item.transactionId);
                 const allItemsArray = Array.isArray(allTransactionItems) ? allTransactionItems as Record<string, unknown>[] : [];
-                
+
                 // Check if there are any active (non-cancelled) items
                 const hasActiveItems = allItemsArray.some((ti) => {
                   const status = typeof ti.production_status === 'string' ? ti.production_status : null;
                   return status !== 'cancelled';
                 });
-                
+
                 // If no active items, update transaction status to 'cancelled'
                 if (!hasActiveItems) {
                   // Fetch the transaction to get all its data
@@ -860,7 +866,7 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
                     }
                     return false;
                   }) as Record<string, unknown> | undefined;
-                  
+
                   if (transaction) {
                     // Update transaction status to 'cancelled'
                     const updatedTransaction = {
@@ -868,7 +874,7 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
                       status: 'cancelled',
                       updated_at: new Date().toISOString(),
                     };
-                    
+
                     await electronAPI.localDbUpsertTransactions([updatedTransaction]);
                     console.log(`✅ Transaction ${item.transactionId} status updated to 'cancelled' (all items cancelled)`);
                   }
@@ -878,12 +884,12 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
                 // Don't block the item removal if this check fails
               }
             }
-            
+
             // Remove from cart UI
             const newCartItems = cartItems.filter(cartItem => cartItem.id !== item.id);
             setCartItems(newCartItems);
             sendCartUpdate(newCartItems);
-            
+
             // Log activity
             await logActivity(
               'delete_locked_cart_item',
@@ -909,7 +915,7 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
               if (transactionItem) {
                 const cancelledQuantity = 1; // Always cancel 1 item when reducing
                 const remainingQuantity = item.quantity - cancelledQuantity;
-                
+
                 // Extract common fields
                 const transactionIntId = typeof transactionItem.transaction_id === 'number' ? transactionItem.transaction_id : (typeof transactionItem.transaction_id === 'string' ? parseInt(transactionItem.transaction_id, 10) : 0);
                 const transactionUuidId = typeof transactionItem.uuid_transaction_id === 'string' ? transactionItem.uuid_transaction_id : String(transactionItem.uuid_transaction_id || '');
@@ -919,7 +925,7 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
                 const bundleSelectionsJson = typeof transactionItem.bundle_selections_json === 'string' ? transactionItem.bundle_selections_json : (transactionItem.bundle_selections_json ? JSON.stringify(transactionItem.bundle_selections_json) : null);
                 const waiterIdItem = typeof transactionItem.waiter_id === 'number' ? transactionItem.waiter_id : (typeof transactionItem.waiter_id === 'string' ? parseInt(String(transactionItem.waiter_id), 10) : null);
                 const createdAt = transactionItem.created_at ? String(transactionItem.created_at) : new Date().toISOString();
-                
+
                 // Preserve production_status for original record
                 const productionStatus = typeof transactionItem.production_status === 'string' ? transactionItem.production_status : null;
                 const productionStartedAt = transactionItem.production_started_at ? String(transactionItem.production_started_at) : null;
@@ -928,7 +934,7 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
                 // 1. Update original record: reduce quantity to remaining items, keep production_status
                 const itemUuidId = typeof transactionItem.uuid_id === 'string' ? transactionItem.uuid_id : String(transactionItem.uuid_id || '');
                 const remainingTotalPrice = unitPrice * remainingQuantity;
-                
+
                 await electronAPI.localDbUpsertTransactionItems([{
                   id: item.transactionItemId,
                   uuid_id: itemUuidId,
@@ -950,7 +956,7 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
                 // 2. Create new cancelled record: quantity 1, production_status 'cancelled'
                 const cancelledUuidId = generateUUID();
                 const cancelledTotalPrice = unitPrice * cancelledQuantity;
-                
+
                 await electronAPI.localDbUpsertTransactionItems([{
                   uuid_id: cancelledUuidId,
                   transaction_id: transactionIntId,
@@ -971,7 +977,7 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
                 console.warn('Transaction item not found in database');
               }
             }
-            
+
             // Check if transaction has any active (non-cancelled) items left
             // If all items are cancelled, update transaction status to 'cancelled'
             if (item.transactionId && electronAPI?.localDbGetTransactionItems && electronAPI?.localDbGetTransactions && electronAPI?.localDbUpsertTransactions) {
@@ -979,13 +985,13 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
                 // Fetch all items for this transaction
                 const allTransactionItems = await electronAPI.localDbGetTransactionItems(item.transactionId);
                 const allItemsArray = Array.isArray(allTransactionItems) ? allTransactionItems as Record<string, unknown>[] : [];
-                
+
                 // Check if there are any active (non-cancelled) items
                 const hasActiveItems = allItemsArray.some((ti) => {
                   const status = typeof ti.production_status === 'string' ? ti.production_status : null;
                   return status !== 'cancelled';
                 });
-                
+
                 // If no active items, update transaction status to 'cancelled'
                 if (!hasActiveItems) {
                   // Fetch the transaction to get all its data
@@ -998,7 +1004,7 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
                     }
                     return false;
                   }) as Record<string, unknown> | undefined;
-                  
+
                   if (transaction) {
                     // Update transaction status to 'cancelled'
                     const updatedTransaction = {
@@ -1006,7 +1012,7 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
                       status: 'cancelled',
                       updated_at: new Date().toISOString(),
                     };
-                    
+
                     await electronAPI.localDbUpsertTransactions([updatedTransaction]);
                     console.log(`✅ Transaction ${item.transactionId} status updated to 'cancelled' (all items cancelled)`);
                   }
@@ -1016,7 +1022,7 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
                 // Don't block the item removal if this check fails
               }
             }
-            
+
             // Update cart UI
             const newCartItems = cartItems.map(cartItem =>
               cartItem.id === item.id
@@ -1025,7 +1031,7 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
             );
             setCartItems(newCartItems);
             sendCartUpdate(newCartItems);
-            
+
             // Log activity
             await logActivity(
               'reduce_locked_cart_item',
@@ -1043,7 +1049,7 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
           console.error('Error updating transaction item:', error);
           alert('Gagal memperbarui item. Silakan coba lagi.');
         }
-        
+
         setPendingLockedItemAction(null);
         setPasswordInput('');
       }
@@ -1060,7 +1066,7 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
   const totalItems = cartItems.reduce((sum, item) => sum + item.quantity, 0);
   const totalPrice = cartItems.reduce((sum, item) => {
     let itemPrice = effectiveProductPrice(item.product);
-    
+
     // If price is null, skip this item (shouldn't happen if items are already in cart, but safety check)
     if (itemPrice === null) return sum;
 
@@ -1105,7 +1111,7 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
                       textArea.focus();
                       textArea.select();
                       textArea.setSelectionRange(0, loadedTransactionInfo.transactionId.length);
-                      
+
                       try {
                         if (window.isSecureContext && navigator.clipboard && navigator.clipboard.writeText) {
                           await navigator.clipboard.writeText(loadedTransactionInfo.transactionId);
@@ -1121,7 +1127,7 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
                           throw new Error('All copy methods failed');
                         }
                       }
-                      
+
                       document.body.removeChild(textArea);
                       setCopiedUuid(loadedTransactionInfo.transactionId);
                       setTimeout(() => {
@@ -1145,27 +1151,16 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
                       <button
                         type="button"
                         onClick={() => setShowWaiterListPopover((v) => !v)}
-                        className="inline-flex items-center gap-0.5 cursor-pointer rounded focus:outline-none focus:ring-2 focus:ring-yellow-500"
+                        className={`min-h-8 px-2 py-1 transition-all hover:shadow-md cursor-pointer flex items-center justify-center rounded-lg border border-gray-300 bg-white focus:outline-none focus:ring-2 focus:ring-yellow-500`}
+                        style={loadedTransactionInfo.waiterColor ? { borderLeftColor: loadedTransactionInfo.waiterColor, borderLeftWidth: '4px' } : undefined}
                         title={loadedTransactionInfo.waiterNamesAll && loadedTransactionInfo.waiterNamesAll.length > 1 ? loadedTransactionInfo.waiterNamesAll.join(', ') : undefined}
                       >
-                        {loadedTransactionInfo.waiterColor ? (
-                          <span
-                            className="text-xs font-medium text-white px-2 py-1"
-                            style={{ backgroundColor: loadedTransactionInfo.waiterColor }}
-                          >
-                            {loadedTransactionInfo.waiterName ?? loadedTransactionInfo.waiterNamesAll?.[0]}
-                            {loadedTransactionInfo.waiterNamesAll && loadedTransactionInfo.waiterNamesAll.length > 1 && (
-                              <span className="text-white/90 ml-0.5">(+{loadedTransactionInfo.waiterNamesAll.length - 1})</span>
-                            )}
-                          </span>
-                        ) : (
-                          <span className="font-medium">
-                            {loadedTransactionInfo.waiterName ?? loadedTransactionInfo.waiterNamesAll?.[0]}
-                            {loadedTransactionInfo.waiterNamesAll && loadedTransactionInfo.waiterNamesAll.length > 1 && (
-                              <span className="text-gray-500 ml-0.5">(+{loadedTransactionInfo.waiterNamesAll.length - 1})</span>
-                            )}
-                          </span>
-                        )}
+                        <span className="font-medium text-gray-800 text-xs">
+                          {loadedTransactionInfo.waiterName ?? loadedTransactionInfo.waiterNamesAll?.[0]}
+                          {loadedTransactionInfo.waiterNamesAll && loadedTransactionInfo.waiterNamesAll.length > 1 && (
+                            <span className="text-gray-500 ml-0.5">(+{loadedTransactionInfo.waiterNamesAll.length - 1})</span>
+                          )}
+                        </span>
                       </button>
                       {showWaiterListPopover && loadedTransactionInfo.waiterNamesAll && loadedTransactionInfo.waiterNamesAll.length > 0 && (
                         <div className="absolute left-0 top-full mt-1 z-50 min-w-[120px] rounded-lg border border-gray-200 bg-white py-2 shadow-lg">
@@ -1208,352 +1203,395 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
         )}
         <div className="flex-1 p-4 flex flex-col overflow-hidden">
 
-        {/* When viewing existing order: show "Adding items as" waiter so user can set who gets credit for new items */}
-        {loadedTransactionInfo && (
-          <div className="mb-3 flex-shrink-0">
-            <div className="flex items-center gap-2 flex-wrap">
-              <span className="text-sm text-gray-600">Menambah item sebagai:</span>
-              <button
-                type="button"
-                onClick={() => setShowWaiterModal(true)}
-                className={`min-h-8 px-3 py-1.5 transition-all hover:shadow-md cursor-pointer flex items-center justify-center rounded-lg border ${selectedWaiterName ? 'border-gray-300 bg-white' : 'border-amber-400 bg-amber-100'}`}
-                style={selectedWaiterColor ? { borderLeftColor: selectedWaiterColor, borderLeftWidth: '4px' } : undefined}
-                title="Klik untuk memilih waiter yang menambah item"
-              >
-                {selectedWaiterName ? (
-                  <span className="font-medium text-gray-800 text-sm">{selectedWaiterName}</span>
-                ) : (
-                  <span className="text-amber-800 text-sm font-medium">Pilih Waiter</span>
-                )}
-              </button>
-            </div>
-          </div>
-        )}
-
-        {/* Customer Name and Waiter Selection - hidden when viewing active order; header already shows waiter and customer */}
-        {!loadedTransactionInfo && (
-          <div className="mb-3 flex-shrink-0">
-            <div className="grid grid-cols-2 gap-2 items-stretch">
-              <input
-                type="text"
-                value={customerName}
-                onChange={(e) => setCustomerName(e.target.value)}
-                placeholder="Nama pelanggan"
-                className="h-8 rounded-lg px-3 border-2 border-blue-500 text-sm text-black placeholder:text-gray-400 focus:outline-none animate-pulse box-border"
-                style={{ 
-                  animation: 'pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite',
-                  fontSize: 'clamp(0.8125rem, 2.2vw, 1rem)'
-                }}
-              />
-              <button
-                type="button"
-                onClick={() => setShowWaiterModal(true)}
-                className={`h-8 w-full min-h-8 transition-all hover:shadow-lg cursor-pointer flex items-center justify-center overflow-hidden box-border ${selectedWaiterName ? 'rounded-none' : 'rounded-lg'}`}
-                style={{ 
-                  backgroundColor: selectedWaiterColor || '#3B82F6',
-                  padding: '0 0.5rem'
-                }}
-              >
-                {selectedWaiterName ? (
-                  <span className="font-medium text-gray-800 text-sm truncate block bg-white rounded-none px-2 pt-1 border border-black max-w-full" style={{ fontSize: 'clamp(0.8125rem, 2.2vw, 1rem)' }}>
-                    {selectedWaiterName}
-                  </span>
-                ) : (
-                  <span className="text-white text-sm" style={{ fontSize: 'clamp(0.8125rem, 2.2vw, 1rem)' }}>Pilih Waiter</span>
-                )}
-              </button>
-            </div>
-          </div>
-        )}
-
-        {/* Cart Items Area - Scrollable with Padding for Summary */}
-        <div className="flex-1 overflow-y-auto mb-4" style={{ minHeight: 0, paddingBottom: '220px' }}>
-          {/* Empty Cart Indicator */}
-          {cartItems.length === 0 && (
-            <div className="text-center py-12">
-              <div className="w-24 h-24 mx-auto mb-4 text-gray-300">
-                <ShoppingCart className="w-full h-full" />
+          {/* When viewing existing order: show "Adding items as" waiter so user can set who gets credit for new items */}
+          {loadedTransactionInfo && (
+            <div className="mb-3 flex-shrink-0">
+              <div className="flex items-center gap-2 flex-wrap">
+                <span className="text-sm text-gray-600">Menambah item sebagai:</span>
+                <button
+                  type="button"
+                  onClick={() => setShowWaiterModal(true)}
+                  className={`min-h-8 px-3 py-1.5 transition-all hover:shadow-md cursor-pointer flex items-center justify-center rounded-lg border ${selectedWaiterName ? 'border-gray-300 bg-white' : 'border-amber-400 bg-amber-100'}`}
+                  style={selectedWaiterColor ? { borderLeftColor: selectedWaiterColor, borderLeftWidth: '4px' } : undefined}
+                  title="Klik untuk memilih waiter yang menambah item"
+                >
+                  {selectedWaiterName ? (
+                    <span className="font-medium text-gray-800 text-sm">{selectedWaiterName}</span>
+                  ) : (
+                    <span className="text-amber-800 text-sm font-medium">Pilih Waiter</span>
+                  )}
+                </button>
               </div>
-              <p className="text-gray-400 text-base">Keranjang belanja kosong</p>
             </div>
           )}
 
-          {/* Cart Items List */}
-          {cartItems.length > 0 && (
-            <div className="space-y-2">
-              {cartItems.map((item) => {
-                const isLocked = item.isLocked === true;
-                return (
-                <div
-                  key={item.id}
-                  onClick={() => !isLocked && handleEditItem(item)}
-                  className={`rounded-lg border p-3 transition-all duration-200 ${
-                    isLocked 
-                      ? 'bg-gray-100 border-gray-300 cursor-not-allowed' 
-                      : 'bg-white border-gray-200 cursor-pointer hover:border-blue-300 hover:shadow-sm'
-                  }`}
-                  title={isLocked ? 'Item terkunci - sudah dikirim ke kitchen/barista' : 'Click to edit item'}
+          {/* Customer Name, CU, and Waiter Selection - hidden when viewing active order; header already shows waiter and customer */}
+          {!loadedTransactionInfo && (
+            <div className="mb-3 flex-shrink-0">
+              <div className="grid grid-cols-[1fr_auto_1fr] gap-2 items-center">
+                <input
+                  type="text"
+                  value={customerName}
+                  onChange={(e) => setCustomerName(e.target.value)}
+                  placeholder="Nama pelanggan"
+                  className="h-9 touch-manipulation w-full min-w-0 rounded-lg px-2.5 py-1.5 border-2 border-blue-500 text-sm text-black placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-400 animate-pulse box-border"
+                  style={{ animation: 'pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite', fontSize: 'clamp(0.8125rem, 2.2vw, 1rem)' }}
+                />
+                <input
+                  type="number"
+                  inputMode="numeric"
+                  min={1}
+                  max={999}
+                  value={cuValue}
+                  onChange={(e) => {
+                    const v = e.target.value.replace(/\D/g, '');
+                    if (v === '') setCuValue('');
+                    else {
+                      const n = parseInt(v, 10);
+                      if (!Number.isNaN(n) && n >= 1 && n <= 999) setCuValue(String(n));
+                    }
+                  }}
+                  onBlur={() => {
+                    const n = parseInt(cuValue, 10);
+                    if (Number.isNaN(n) || n < 1) setCuValue('1');
+                    else if (n > 999) setCuValue('999');
+                  }}
+                  placeholder="1"
+                  title="CU"
+                  className="h-9 w-14 touch-manipulation rounded-lg px-1 py-1.5 border-2 border-amber-500 text-sm text-black text-center placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-amber-400 box-border [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
+                  style={{ fontSize: 'clamp(0.8125rem, 2.2vw, 1rem)' }}
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowWaiterModal(true)}
+                  className="h-9 touch-manipulation w-full min-w-0 rounded-lg transition-all hover:shadow-md active:scale-[0.98] cursor-pointer flex items-center justify-center overflow-hidden box-border px-2"
+                  style={{ backgroundColor: selectedWaiterColor || '#3B82F6' }}
                 >
-                  <div className="flex justify-between items-start">
-                    <div className="flex-1">
-                      <h4 className={`font-medium text-sm ${isLocked ? 'text-gray-800' : 'text-gray-800'}`}>
-                        {item.product.nama}
-                      </h4>
-                      {effectiveProductPrice(item.product) !== null && (
-                        <p className="text-gray-600 text-xs">
-                          {formatPrice(effectiveProductPrice(item.product)!)} each
-                        </p>
-                      )}
+                  {selectedWaiterName ? (
+                    <span className="font-medium text-gray-800 text-sm truncate block bg-white rounded px-1.5 py-0.5 border border-black max-w-full" style={{ fontSize: 'clamp(0.8125rem, 2.2vw, 1rem)' }}>
+                      {selectedWaiterName}
+                    </span>
+                  ) : (
+                    <span className="text-white text-sm" style={{ fontSize: 'clamp(0.8125rem, 2.2vw, 1rem)' }}>Pilih Waiter</span>
+                  )}
+                </button>
+              </div>
+            </div>
+          )}
 
-                      {/* Customizations */}
-                      {item.customizations && item.customizations.length > 0 && (() => {return (
-                        <div className="mt-1 space-y-1">
-                          {item.customizations.map((customization) => (
-                            <div key={customization.customization_id} className="text-xs">
-                              <span className="text-gray-500">{customization.customization_name}:</span>
-                              <div className="ml-2 space-y-0.5">
-                                {customization.selected_options && customization.selected_options.length > 0 ? (
-                                  customization.selected_options.map((option) => (
-                                    <div key={option.option_id} className="flex items-center justify-between">
-                                      <span className="text-gray-600">• {option.option_name}</span>
-                                      {option.price_adjustment !== 0 && (
-                                        <span className={`text-xs ${option.price_adjustment > 0 ? 'text-green-600' : 'text-red-600'
-                                          }`}>
-                                          {option.price_adjustment > 0 ? '+' : ''}{formatPrice(option.price_adjustment)}
-                                        </span>
-                                      )}
+          {/* Cart Items Area - Scrollable with Padding for Summary */}
+          <div className="flex-1 overflow-y-auto mb-4" style={{ minHeight: 0, paddingBottom: '220px' }}>
+            {/* Empty Cart Indicator */}
+            {cartItems.length === 0 && (
+              <div className="text-center py-12">
+                <div className="w-24 h-24 mx-auto mb-4 text-gray-300">
+                  <ShoppingCart className="w-full h-full" />
+                </div>
+                <p className="text-gray-400 text-base">Keranjang belanja kosong</p>
+              </div>
+            )}
+
+            {/* Cart Items List */}
+            {cartItems.length > 0 && (
+              <div className="space-y-2">
+                {cartItems.map((item) => {
+                  const isLocked = item.isLocked === true;
+                  return (
+                    <div
+                      key={item.id}
+                      onClick={() => !isLocked && handleEditItem(item)}
+                      className={`rounded-lg border p-3 transition-all duration-200 ${isLocked
+                          ? 'bg-gray-100 border-gray-300 cursor-not-allowed'
+                          : 'bg-white border-gray-200 cursor-pointer hover:border-blue-300 hover:shadow-sm'
+                        }`}
+                      title={isLocked ? 'Item terkunci - sudah dikirim ke kitchen/barista' : 'Click to edit item'}
+                    >
+                      <div className="flex justify-between items-start">
+                        <div className="flex-1">
+                          <h4 className={`font-medium text-sm ${isLocked ? 'text-gray-800' : 'text-gray-800'}`}>
+                            {item.isNewlyAdded && loadedTransactionInfo && (
+                              <span className="mr-1 text-blue-600 font-normal">[NEW]</span>
+                            )}
+                            {item.product.nama}
+                          </h4>
+                          {effectiveProductPrice(item.product) !== null && (
+                            <p className="text-gray-600 text-xs flex items-center gap-1.5 flex-wrap">
+                              <span>{formatPrice(effectiveProductPrice(item.product)!)} each</span>
+                              {item.waiterName && (
+                                <>
+                                  <span className="text-gray-400">|</span>
+                                  <span className="text-gray-500">by</span>
+                                  <span
+                                    className={`inline-flex min-h-6 items-center px-2 py-0.5 rounded-lg border border-gray-300 bg-white text-xs font-medium text-gray-800`}
+                                    style={item.waiterColor ? { borderLeftColor: item.waiterColor, borderLeftWidth: '4px' } : undefined}
+                                  >
+                                    {item.waiterName}
+                                  </span>
+                                </>
+                              )}
+                            </p>
+                          )}
+
+                          {/* Customizations */}
+                          {item.customizations && item.customizations.length > 0 && (() => {
+                            return (
+                              <div className="mt-1 space-y-1">
+                                {item.customizations.map((customization) => (
+                                  <div key={customization.customization_id} className="text-xs">
+                                    <span className="text-gray-500">{customization.customization_name}:</span>
+                                    <div className="ml-2 space-y-0.5">
+                                      {customization.selected_options && customization.selected_options.length > 0 ? (
+                                        customization.selected_options.map((option) => (
+                                          <div key={option.option_id} className="flex items-center justify-between">
+                                            <span className="text-gray-600">• {option.option_name}</span>
+                                            {option.price_adjustment !== 0 && (
+                                              <span className={`text-xs ${option.price_adjustment > 0 ? 'text-green-600' : 'text-red-600'
+                                                }`}>
+                                                {option.price_adjustment > 0 ? '+' : ''}{formatPrice(option.price_adjustment)}
+                                              </span>
+                                            )}
+                                          </div>
+                                        ))
+                                      ) : null}
                                     </div>
-                                  ))
-                                ) : null}
+                                  </div>
+                                ))}
+                              </div>
+                            );
+                          })()}
+
+                          {/* Custom Note */}
+                          {item.customNote && (
+                            <div className="mt-1">
+                              <div className="text-xs">
+                                <span className="text-gray-500">Note:</span>
+                                <span className="text-gray-700 ml-1 italic">&ldquo;{item.customNote}&rdquo;</span>
                               </div>
                             </div>
-                          ))}
-                        </div>
-                        );
-                      })()}
+                          )}
 
-                      {/* Custom Note */}
-                      {item.customNote && (
-                        <div className="mt-1">
-                          <div className="text-xs">
-                            <span className="text-gray-500">Note:</span>
-                            <span className="text-gray-700 ml-1 italic">&ldquo;{item.customNote}&rdquo;</span>
-                          </div>
-                        </div>
-                      )}
-
-                      {/* Waiter who added this item */}
-                      {item.waiterName && (
-                        <div className="mt-1">
-                          <span className="text-xs text-gray-500">by {item.waiterName}</span>
-                        </div>
-                      )}
-
-                      {/* Bundle Selections */}
-                      {item.bundleSelections && item.bundleSelections.length > 0 && (
-                        <div className="mt-2 space-y-2">
-                          <div className="text-xs font-semibold text-purple-700">Bundle Items:</div>
-                          {item.bundleSelections.map((bundleSel, idx) => {
-                            const totalQuantity = bundleSel.selectedProducts.length;
-                            return (
-                              <div key={idx} className="ml-2 border-l-2 border-purple-300 pl-2">
-                                <div className="text-xs font-medium text-purple-600">
-                                  {bundleSel.category2_name} ({totalQuantity}/{bundleSel.requiredQuantity}):
-                                </div>
-                                <div className="ml-2 mt-1 space-y-1">
-                                  {bundleSel.selectedProducts.map((sp, spIdx) => (
-                                    <div key={spIdx} className="text-xs text-gray-600 border border-gray-200 rounded px-2 py-1 bg-white space-y-1">
-                                      <div className="font-medium text-gray-700">• {sp.product.nama}</div>
-                                      {sp.customizations && sp.customizations.length > 0 && (
-                                        <div className="ml-3 text-[11px] text-gray-500 space-y-0.5">
-                                          {sp.customizations.map((customization) => (
-                                            <div key={customization.customization_id}>
-                                              <div className="font-semibold text-gray-600">{customization.customization_name}</div>
-                                              <ul className="ml-3 list-disc">
-                                                {customization.selected_options.map(option => (
-                                                  <li key={option.option_id}>
-                                                    {option.option_name}
-                                                    {option.price_adjustment !== 0 && (
-                                                      <span className={`ml-1 ${option.price_adjustment > 0 ? 'text-green-600' : 'text-red-600'}`}>
-                                                        ({option.price_adjustment > 0 ? '+' : ''}{formatPrice(option.price_adjustment)})
-                                                      </span>
-                                                    )}
-                                                  </li>
-                                                ))}
-                                              </ul>
+                          {/* Bundle Selections */}
+                          {item.bundleSelections && item.bundleSelections.length > 0 && (
+                            <div className="mt-2 space-y-2">
+                              <div className="text-xs font-semibold text-purple-700">Bundle Items:</div>
+                              {item.bundleSelections.map((bundleSel, idx) => {
+                                const totalQuantity = bundleSel.selectedProducts.length;
+                                return (
+                                  <div key={idx} className="ml-2 border-l-2 border-purple-300 pl-2">
+                                    <div className="text-xs font-medium text-purple-600">
+                                      {bundleSel.category2_name} ({totalQuantity}/{bundleSel.requiredQuantity}):
+                                    </div>
+                                    <div className="ml-2 mt-1 space-y-1">
+                                      {bundleSel.selectedProducts.map((sp, spIdx) => (
+                                        <div key={spIdx} className="text-xs text-gray-600 border border-gray-200 rounded px-2 py-1 bg-white space-y-1">
+                                          <div className="font-medium text-gray-700">• {sp.product.nama}</div>
+                                          {sp.customizations && sp.customizations.length > 0 && (
+                                            <div className="ml-3 text-[11px] text-gray-500 space-y-0.5">
+                                              {sp.customizations.map((customization) => (
+                                                <div key={customization.customization_id}>
+                                                  <div className="font-semibold text-gray-600">{customization.customization_name}</div>
+                                                  <ul className="ml-3 list-disc">
+                                                    {customization.selected_options.map(option => (
+                                                      <li key={option.option_id}>
+                                                        {option.option_name}
+                                                        {option.price_adjustment !== 0 && (
+                                                          <span className={`ml-1 ${option.price_adjustment > 0 ? 'text-green-600' : 'text-red-600'}`}>
+                                                            ({option.price_adjustment > 0 ? '+' : ''}{formatPrice(option.price_adjustment)})
+                                                          </span>
+                                                        )}
+                                                      </li>
+                                                    ))}
+                                                  </ul>
+                                                </div>
+                                              ))}
                                             </div>
-                                          ))}
+                                          )}
+                                          {sp.customNote && (
+                                            <div className="text-[11px] text-gray-500 italic">
+                                              Note: &ldquo;{sp.customNote}&rdquo;
+                                            </div>
+                                          )}
                                         </div>
-                                      )}
-                                      {sp.customNote && (
-                                        <div className="text-[11px] text-gray-500 italic">
-                                          Note: &ldquo;{sp.customNote}&rdquo;
-                                        </div>
-                                      )}
+                                      ))}
+                                    </div>
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          )}
+
+                          {/* Package breakdown (expanded by default, compact) */}
+                          {item.packageSelections && item.packageSelections.length > 0 && (() => {
+                            const lines = getPackageBreakdownLines(item.packageSelections, item.quantity);
+                            if (lines.length === 0) return null;
+                            return (
+                              <div className="mt-1 py-0.5 space-y-0.5">
+                                <div className="text-xs font-semibold text-amber-700">Paket:</div>
+                                <div className="ml-2 border-l-2 border-amber-300 pl-1.5 space-y-0.5">
+                                  {lines.map((line, idx) => (
+                                    <div key={idx} className="text-xs text-gray-900 py-0">
+                                      • {line.product_name} ×{line.quantity}
                                     </div>
                                   ))}
                                 </div>
                               </div>
                             );
-                          })}
+                          })()}
                         </div>
-                      )}
-                    </div>
-                    <div className="flex items-center space-x-2">
-                      <button
-                        onClick={(e) => {
-                          e.stopPropagation(); // Prevent opening edit modal
-                          if (isLocked) {
-                            // For locked items, show password modal
-                            if (item.quantity > 1) {
-                              setPendingLockedItemAction({ item, action: 'reduce' });
-                            } else {
-                              setPendingLockedItemAction({ item, action: 'delete' });
+                        <div className="flex items-center space-x-2">
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation(); // Prevent opening edit modal
+                              if (isLocked) {
+                                // For locked items, show password modal
+                                if (item.quantity > 1) {
+                                  setPendingLockedItemAction({ item, action: 'reduce' });
+                                } else {
+                                  setPendingLockedItemAction({ item, action: 'delete' });
+                                }
+                                setShowPasswordModal(true);
+                                return;
+                              }
+
+                              // Normal flow for unlocked items
+                              if (item.quantity > 1) {
+                                const newCartItems = cartItems.map(cartItem =>
+                                  cartItem.id === item.id
+                                    ? { ...cartItem, quantity: cartItem.quantity - 1 }
+                                    : cartItem
+                                );
+                                setCartItems(newCartItems);
+                                sendCartUpdate(newCartItems);
+                              } else {
+                                const newCartItems = cartItems.filter(cartItem => cartItem.id !== item.id);
+                                setCartItems(newCartItems);
+                                sendCartUpdate(newCartItems);
+                              }
+                            }}
+                            className={`w-6 h-6 rounded-full flex items-center justify-center text-xs ${isLocked
+                                ? 'bg-red-500 hover:bg-red-600 text-white'
+                                : 'bg-red-500 hover:bg-red-600 text-white'
+                              }`}
+                            title={isLocked ? 'Kurangi jumlah (memerlukan password)' : 'Kurangi jumlah'}
+                          >
+                            -
+                          </button>
+                          <span className={`text-sm font-medium w-8 text-center ${isLocked ? 'text-gray-500' : 'text-black'}`}>
+                            {item.quantity}
+                          </span>
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation(); // Prevent opening edit modal
+                              if (isLocked) return; // Prevent action on locked items
+                              const newCartItems = cartItems.map(cartItem =>
+                                cartItem.id === item.id
+                                  ? { ...cartItem, quantity: cartItem.quantity + 1 }
+                                  : cartItem
+                              );
+                              setCartItems(newCartItems);
+                              sendCartUpdate(newCartItems);
+                            }}
+                            disabled={isLocked}
+                            className={`w-6 h-6 rounded-full flex items-center justify-center text-xs ${isLocked
+                                ? 'bg-gray-300 text-gray-500 cursor-not-allowed'
+                                : 'bg-green-500 hover:bg-green-600 text-white'
+                              }`}
+                            title={isLocked ? 'Item terkunci - tidak dapat diubah' : 'Tambah jumlah'}
+                          >
+                            +
+                          </button>
+                        </div>
+                      </div>
+                      <div className="mt-2 flex justify-between items-center">
+                        <span className="text-xs text-gray-500">Subtotal</span>
+                        <span className="font-semibold text-green-600">
+                          {(() => {
+                            let itemPrice = effectiveProductPrice(item.product); if (itemPrice === null) return 'N/A';
+                            if (item.customizations) {
+                              const customizationPrice = sumCustomizationPrice(item.customizations); itemPrice += customizationPrice;
                             }
-                            setShowPasswordModal(true);
-                            return;
-                          }
-                          
-                          // Normal flow for unlocked items
-                          if (item.quantity > 1) {
-                            const newCartItems = cartItems.map(cartItem =>
-                              cartItem.id === item.id
-                                ? { ...cartItem, quantity: cartItem.quantity - 1 }
-                                : cartItem
-                            );
-                            setCartItems(newCartItems);
-                            sendCartUpdate(newCartItems);
-                          } else {
-                            const newCartItems = cartItems.filter(cartItem => cartItem.id !== item.id);
-                            setCartItems(newCartItems);
-                            sendCartUpdate(newCartItems);
-                          }
-                        }}
-                        className={`w-6 h-6 rounded-full flex items-center justify-center text-xs ${
-                          isLocked
-                            ? 'bg-red-500 hover:bg-red-600 text-white'
-                            : 'bg-red-500 hover:bg-red-600 text-white'
-                        }`}
-                        title={isLocked ? 'Kurangi jumlah (memerlukan password)' : 'Kurangi jumlah'}
-                      >
-                        -
-                      </button>
-                      <span className={`text-sm font-medium w-8 text-center ${isLocked ? 'text-gray-500' : 'text-black'}`}>
-                        {item.quantity}
-                      </span>
-                      <button
-                        onClick={(e) => {
-                          e.stopPropagation(); // Prevent opening edit modal
-                          if (isLocked) return; // Prevent action on locked items
-                          const newCartItems = cartItems.map(cartItem =>
-                            cartItem.id === item.id
-                              ? { ...cartItem, quantity: cartItem.quantity + 1 }
-                              : cartItem
-                          );
-                          setCartItems(newCartItems);
-                          sendCartUpdate(newCartItems);
-                        }}
-                        disabled={isLocked}
-                        className={`w-6 h-6 rounded-full flex items-center justify-center text-xs ${
-                          isLocked
-                            ? 'bg-gray-300 text-gray-500 cursor-not-allowed'
-                            : 'bg-green-500 hover:bg-green-600 text-white'
-                        }`}
-                        title={isLocked ? 'Item terkunci - tidak dapat diubah' : 'Tambah jumlah'}
-                      >
-                        +
-                      </button>
+                            if (item.bundleSelections) {
+                              const bundleCharge = calculateBundleCustomizationCharge(item.bundleSelections); itemPrice += bundleCharge;
+                            }
+                            const finalPrice = itemPrice * item.quantity; return formatPrice(finalPrice);
+                          })()}
+                        </span>
+                      </div>
                     </div>
-                  </div>
-                  <div className="mt-2 flex justify-between items-center">
-                    <span className="text-xs text-gray-500">Subtotal</span>
-                    <span className="font-semibold text-green-600">
-                      {(() => {let itemPrice = effectiveProductPrice(item.product);if (itemPrice === null) return 'N/A';
-                        if (item.customizations) {
-                          const customizationPrice = sumCustomizationPrice(item.customizations);itemPrice += customizationPrice;
-                        }
-                        if (item.bundleSelections) {
-                          const bundleCharge = calculateBundleCustomizationCharge(item.bundleSelections);itemPrice += bundleCharge;
-                        }
-                        const finalPrice = itemPrice * item.quantity;return formatPrice(finalPrice);
-                      })()}
-                    </span>
-                  </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+
+          {/* Cart Summary - Sticky at Bottom of Viewport */}
+          <div className="bg-white rounded-lg border border-gray-200 p-4 flex-shrink-0" style={{ position: 'sticky', bottom: '16px', zIndex: 10 }}>
+            <div className="space-y-2 text-sm">
+              <div className="flex justify-between">
+                <span className="text-black">Harga produk asli</span>
+                <span className="font-medium text-black">{formatPrice(totalPrice)}</span>
+              </div>
+              <hr className="border-gray-200" />
+              <div className="flex justify-between items-center">
+                <span className="text-gray-600">{totalItems} Barang</span>
+                <div className="bg-blue-100 px-3 py-1 rounded">
+                  <span className="font-semibold text-blue-800">Yang Diterima: {formatPrice(totalPrice)}</span>
                 </div>
-              );
-              })}
-            </div>
-          )}
-        </div>
-
-        {/* Cart Summary - Sticky at Bottom of Viewport */}
-        <div className="bg-white rounded-lg border border-gray-200 p-4 flex-shrink-0" style={{ position: 'sticky', bottom: '16px', zIndex: 10 }}>
-          <div className="space-y-2 text-sm">
-            <div className="flex justify-between">
-              <span className="text-black">Harga produk asli</span>
-              <span className="font-medium text-black">{formatPrice(totalPrice)}</span>
-            </div>
-            <hr className="border-gray-200" />
-            <div className="flex justify-between items-center">
-              <span className="text-gray-600">{totalItems} Barang</span>
-              <div className="bg-blue-100 px-3 py-1 rounded">
-                <span className="font-semibold text-blue-800">Yang Diterima: {formatPrice(totalPrice)}</span>
               </div>
             </div>
-          </div>
 
-          {/* Take Away / Dine In selector - only when offline (Simpan Order flow) */}
-          {!isOnline && (
-            <div className="mt-2">
-              <p className="text-xs text-gray-500 mb-1.5">Untuk Simpan Order:</p>
-              <div className="relative flex rounded-lg border border-gray-200 bg-gray-50 p-0.5">
-                <div
-                  className={`absolute top-0.5 bottom-0.5 left-0.5 w-[calc(50%-0.125rem)] bg-white rounded-md shadow-sm transition-transform duration-200 ease-out ${orderPickupMethod === 'dine-in' ? 'translate-x-0' : 'translate-x-full'}`}
-                />
-                <button
-                  type="button"
-                  onClick={() => setOrderPickupMethod('dine-in')}
-                  className={`relative z-10 flex-1 py-1.5 px-2 rounded-md text-xs font-medium transition-colors ${orderPickupMethod === 'dine-in' ? 'text-blue-700' : 'text-gray-600'}`}
-                >
-                  Dine In
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setOrderPickupMethod('take-away')}
-                  className={`relative z-10 flex-1 py-1.5 px-2 rounded-md text-xs font-medium transition-colors ${orderPickupMethod === 'take-away' ? 'text-green-700' : 'text-gray-600'}`}
-                >
-                  Take Away
-                </button>
+            {/* Take Away / Dine In selector - only when offline (Simpan Order flow) */}
+            {!isOnline && (
+              <div className="mt-2">
+                <p className="text-xs text-gray-500 mb-1.5">Untuk Simpan Order:</p>
+                <div className="relative flex rounded-lg border border-gray-200 bg-gray-50 p-0.5">
+                  <div
+                    className={`absolute top-0.5 bottom-0.5 left-0.5 w-[calc(50%-0.125rem)] bg-white rounded-md shadow-sm transition-transform duration-200 ease-out ${orderPickupMethod === 'dine-in' ? 'translate-x-0' : 'translate-x-full'}`}
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setOrderPickupMethod('dine-in')}
+                    className={`relative z-10 flex-1 py-1.5 px-2 rounded-md text-xs font-medium transition-colors ${orderPickupMethod === 'dine-in' ? 'text-blue-700' : 'text-gray-600'}`}
+                  >
+                    Dine In
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setOrderPickupMethod('take-away')}
+                    className={`relative z-10 flex-1 py-1.5 px-2 rounded-md text-xs font-medium transition-colors ${orderPickupMethod === 'take-away' ? 'text-green-700' : 'text-gray-600'}`}
+                  >
+                    Take Away
+                  </button>
+                </div>
               </div>
-            </div>
-          )}
+            )}
 
-          {/* Action Buttons */}
-          <div className="flex space-x-2 mt-3">
-            <button
-              onClick={() => setShowTableSelectionModal(true)}
-              disabled={cartItems.length === 0 || isOnline}
-              className="flex-1 bg-blue-500 hover:bg-blue-600 disabled:bg-gray-400 disabled:cursor-not-allowed text-white py-1.5 px-3 rounded-lg transition-colors text-sm"
-              title={isOnline ? 'Simpan Order hanya tersedia di tab Offline' : undefined}
-            >
-              Simpan Order
-            </button>
-            <button
-              onClick={() => setShowPaymentModal(true)}
-              disabled={cartItems.length === 0 || hasUnsavedChanges || !canAccessBayarButton}
-              className="flex-1 bg-green-500 hover:bg-green-600 disabled:bg-gray-400 disabled:cursor-not-allowed text-white py-1.5 px-3 rounded-lg transition-colors text-sm"
-              title={
-                !canAccessBayarButton 
-                  ? 'Anda tidak memiliki izin untuk mengakses tombol Bayar' 
-                  : hasUnsavedChanges 
-                    ? 'Simpan perubahan terlebih dahulu sebelum melakukan pembayaran' 
-                    : 'Bayar'
-              }
-            >
-              Bayar
-            </button>
+            {/* Action Buttons */}
+            <div className="flex space-x-2 mt-3">
+              <button
+                onClick={() => setShowTableSelectionModal(true)}
+                disabled={cartItems.length === 0 || isOnline}
+                className="flex-1 bg-blue-500 hover:bg-blue-600 disabled:bg-gray-400 disabled:cursor-not-allowed text-white py-1.5 px-3 rounded-lg transition-colors text-sm"
+                title={isOnline ? 'Simpan Order hanya tersedia di tab Offline' : undefined}
+              >
+                Simpan Order
+              </button>
+              <button
+                onClick={() => setShowPaymentModal(true)}
+                disabled={cartItems.length === 0 || hasUnsavedChanges || !canAccessBayarButton}
+                className="flex-1 bg-green-500 hover:bg-green-600 disabled:bg-gray-400 disabled:cursor-not-allowed text-white py-1.5 px-3 rounded-lg transition-colors text-sm"
+                title={
+                  !canAccessBayarButton
+                    ? 'Anda tidak memiliki izin untuk mengakses tombol Bayar'
+                    : hasUnsavedChanges
+                      ? 'Simpan perubahan terlebih dahulu sebelum melakukan pembayaran'
+                      : 'Bayar'
+                }
+              >
+                Bayar
+              </button>
+            </div>
           </div>
-        </div>
         </div>
       </div>
 
@@ -1570,8 +1608,8 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
                   key={cols}
                   onClick={() => setColumnCount(cols)}
                   className={`px-2 py-1 text-xs rounded transition-colors ${columnCount === cols
-                      ? 'bg-blue-600 text-white'
-                      : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
+                    ? 'bg-blue-600 text-white'
+                    : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
                     }`}
                   title={`${cols} columns`}
                 >
@@ -1635,7 +1673,7 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
                   }
                   return true;
                 }
-                
+
                 // Online mode
                 if (!selectedOnlinePlatform) {
                   // Online mode but no platform selected - still check harga_jual
@@ -1644,7 +1682,7 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
                   }
                   return true;
                 }
-                
+
                 // Online mode with platform selected - check platform price
                 const p = getOnlinePriceForPlatform(product);
                 // Allow 0 prices, only filter out null prices
@@ -1694,8 +1732,9 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
               return filteredProducts.map((product) => {
                 const isDisabledOnline = false;
                 const isBundle = product.is_bundle === 1 || product.is_bundle === true;
+                const isPackage = product.is_package === 1 || product.is_package === true;
                 const productPrice = effectiveProductPrice(product);
-                
+
                 // Debug: Log if productPrice is null or 0 for products that shouldn't show
                 if (productPrice === null) {
                   console.log('⚠️ [CENTER CONTENT] Product with NULL effectivePrice still in filtered list:', {
@@ -1707,14 +1746,14 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
                     platform: selectedOnlinePlatform
                   });
                 }
-                
+
                 return (
                   <button
                     key={product.id}
                     onClick={() => handleProductClick(product)}
                     disabled={loadingProductId === product.id || isDisabledOnline}
-                    className={`bg-white rounded-xl border border-gray-200 shadow-md hover:shadow-lg hover:border-gray-300 ${gridStyles.cardPadding} transition-all duration-200 w-full text-left relative ${loadingProductId === product.id || isDisabledOnline ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'
-                      }`}
+                    className={`rounded-xl border shadow-md transition-all duration-200 w-full text-left relative ${gridStyles.cardPadding} ${isPackage ? 'bg-amber-50 border-amber-200 hover:border-amber-300 hover:shadow-lg' : 'bg-white border-gray-200 hover:shadow-lg hover:border-gray-300'
+                      } ${loadingProductId === product.id || isDisabledOnline ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'}`}
                   >
                     {/* Loading Overlay */}
                     {loadingProductId === product.id && (
@@ -1727,6 +1766,13 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
                     {isBundle && (
                       <div className={`absolute top-1 right-1 bg-purple-500 text-white ${gridStyles.bundleBadgePadding} rounded-full ${gridStyles.bundleBadgeSize} font-semibold z-10`}>
                         Bundle
+                      </div>
+                    )}
+
+                    {/* Package Badge */}
+                    {isPackage && !isBundle && (
+                      <div className={`absolute top-1 right-1 bg-amber-500 text-white ${gridStyles.bundleBadgePadding} rounded-full ${gridStyles.bundleBadgeSize} font-semibold z-10`}>
+                        Paket
                       </div>
                     )}
 
@@ -1815,6 +1861,7 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
         isOpen={showPaymentModal}
         onClose={() => setShowPaymentModal(false)}
         initialCustomerName={customerName}
+        initialCustomerUnit={cuValue}
         loadedTransactionInfo={loadedTransactionInfo}
         pickupMethod={orderPickupMethod}
         cartItems={cartItems as unknown as Array<{
@@ -1847,7 +1894,7 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
           bundleSelections?: BundleSelection[];
         }>}
         onPaymentComplete={handlePaymentComplete}
-        transactionType={transactionType === 'foods' ? 'drinks' : transactionType}
+        transactionType={(transactionType === 'foods' || transactionType === 'packages') ? 'drinks' : transactionType}
         isOnline={isOnline}
         selectedOnlinePlatform={selectedOnlinePlatform}
         waiterId={selectedWaiterId}
@@ -1858,6 +1905,7 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
         isOpen={showTableSelectionModal}
         onClose={() => setShowTableSelectionModal(false)}
         customerName={customerName}
+        customerUnit={cuValue}
         pickupMethod={orderPickupMethod}
         loadedTransactionInfo={loadedTransactionInfo}
         onItemsLocked={(itemIds) => {
@@ -1901,16 +1949,17 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
             }>;
           }>;
         }>}
-        transactionType={transactionType === 'foods' ? 'drinks' : transactionType}
+        transactionType={(transactionType === 'foods' || transactionType === 'packages') ? 'drinks' : transactionType}
         waiterId={selectedWaiterId}
         onSuccess={() => {
           console.log('🔍 [CENTER CONTENT] Transaction saved successfully with waiterId:', selectedWaiterId);
           // Only clear cart for new orders, not for "lihat" mode
           if (!loadedTransactionInfo) {
-            // New order: clear cart, customer name, and waiter after successful save
+            // New order: clear cart, customer name, CU, and waiter after successful save
             setCartItems([]);
             sendCartUpdate([]);
             setCustomerName('');
+            setCuValue('1');
             setSelectedWaiterId(null);
             setSelectedWaiterName(null);
             setSelectedWaiterColor(null);
@@ -1989,6 +2038,25 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
             harga_jual: selectedProduct.harga_jual ?? 0
           }}
           bundleItems={bundleItems}
+        />
+      )}
+
+      {/* Package Selection Modal */}
+      {selectedProduct && (selectedProduct.is_package === 1 || selectedProduct.is_package === true) && (
+        <PackageSelectionModal
+          isOpen={showPackageModal}
+          onClose={() => {
+            setShowPackageModal(false);
+            setSelectedProduct(null);
+            setPackageItemsForModal([]);
+          }}
+          onConfirm={handlePackageConfirm}
+          packageProduct={{
+            id: selectedProduct.id,
+            nama: selectedProduct.nama,
+            harga_jual: selectedProduct.harga_jual ?? 0
+          }}
+          packageItems={packageItemsForModal}
         />
       )}
 

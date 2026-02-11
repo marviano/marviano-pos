@@ -5,7 +5,7 @@ import ServiceWorkerErrorHandler from "@/components/ServiceWorkerErrorHandler";
 import DisableHMR from "@/components/DisableHMR";
 
 export const metadata: Metadata = {
-  title: "SalesPOS",
+  title: "POS",
   description: "Point of Sale System",
 };
 

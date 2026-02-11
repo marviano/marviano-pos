@@ -27,7 +27,7 @@ import { ClipboardList, FilePlus, ChevronRight, Store, Globe } from 'lucide-reac
 type LocalCategory = {
   jenis: string;
   active: boolean;
-  productType?: 'drinks' | 'bakery' | 'foods'; // NEW: Track whether this is a drinks, bakery, or foods category
+  productType?: 'drinks' | 'bakery' | 'foods' | 'packages';
 };
 
 interface Product {
@@ -106,6 +106,7 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
     voucher_type?: string;
     voucher_value?: number | null;
     voucher_label?: string | null;
+    customer_unit?: number | null;
   } | null>(null);
   const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false);
   
@@ -300,8 +301,8 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
 
     const loadCategories = async () => {
       try {
-        // Fetch drinks, bakery, and foods categories
-        const [drinksCategories, bakeryCategories, foodsCategories] = await Promise.all([
+        // Fetch drinks, bakery, foods, and packages categories
+        const [drinksCategories, bakeryCategories, foodsCategories, packagesCategories] = await Promise.all([
           fetchCategories('drinks', {
             isOnline: isOnlineTab,
             platform: isOnlineTab ? (selectedOnlinePlatform ?? undefined) : undefined,
@@ -313,6 +314,11 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
             businessId: businessId
           }) as Promise<Array<{ jenis: string; active?: boolean }>>,
           fetchCategories('foods', {
+            isOnline: isOnlineTab,
+            platform: isOnlineTab ? (selectedOnlinePlatform ?? undefined) : undefined,
+            businessId: businessId
+          }) as Promise<Array<{ jenis: string; active?: boolean }>>,
+          fetchCategories('packages', {
             isOnline: isOnlineTab,
             platform: isOnlineTab ? (selectedOnlinePlatform ?? undefined) : undefined,
             businessId: businessId
@@ -350,8 +356,17 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
             productType: 'foods' as const
           }));
 
-        // Combine: drinks first, then bakery, then foods
-        const validCategories: LocalCategory[] = [...taggedDrinks, ...taggedBakery, ...taggedFoods];
+        // Tag packages categories (category1 PAKET, id 14)
+        const taggedPackages = packagesCategories
+          .filter(cat => cat.jenis && cat.jenis.trim() !== '')
+          .map(cat => ({
+            jenis: cat.jenis,
+            active: cat.active ?? true,
+            productType: 'packages' as const
+          }));
+
+        // Combine: drinks first, then bakery, then foods, then packages
+        const validCategories: LocalCategory[] = [...taggedDrinks, ...taggedBakery, ...taggedFoods, ...taggedPackages];
 
         if (validCategories.length > 0) {
           setCategories(validCategories);
@@ -399,9 +414,9 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
 
       setIsLoadingProducts(true);
       try {
-        // Try drinks, bakery, and foods - the category will naturally filter to the right products
+        // Try drinks, bakery, foods, and packages - the category will naturally filter to the right products
         // We fetch all types and let the API/database filter by category2_name
-        const [drinksData, bakeryData, foodsData] = await Promise.all([
+        const [drinksData, bakeryData, foodsData, packagesData] = await Promise.all([
           fetchProducts(selectedCategory, 'drinks', {
             isOnline: isOnlineTab,
             platform: isOnlineTab ? (selectedOnlinePlatform ?? undefined) : undefined,
@@ -416,11 +431,16 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
             isOnline: isOnlineTab,
             platform: isOnlineTab ? (selectedOnlinePlatform ?? undefined) : undefined,
             businessId: businessId
+          }),
+          fetchProducts(selectedCategory, 'packages', {
+            isOnline: isOnlineTab,
+            platform: isOnlineTab ? (selectedOnlinePlatform ?? undefined) : undefined,
+            businessId: businessId
           })
         ]);
 
         // Combine results - only one will have data for this category
-        const productsData = [...drinksData, ...bakeryData, ...foodsData];
+        const productsData = [...drinksData, ...bakeryData, ...foodsData, ...packagesData];
 
         if (!isCancelled) {
           // FIX: Update both states together to minimize re-renders
@@ -468,12 +488,13 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
           platform: isOnlineTab ? (selectedOnlinePlatform ?? undefined) : undefined,
           businessId,
         };
-        const [drinksData, bakeryData, foodsData] = await Promise.all([
+        const [drinksData, bakeryData, foodsData, packagesData] = await Promise.all([
           fetchProducts(undefined, 'drinks', opts),
           fetchProducts(undefined, 'bakery', opts),
           fetchProducts(undefined, 'foods', opts),
+          fetchProducts(undefined, 'packages', opts),
         ]);
-        const merged = [...drinksData, ...bakeryData, ...foodsData];
+        const merged = [...drinksData, ...bakeryData, ...foodsData, ...packagesData];
         if (!isCancelled) setAllProductsForSearch(merged);
       } catch (error) {
         if (!isCancelled) {
@@ -542,8 +563,8 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
       setIsLoadingProducts(true);
 
       try {
-        // Fetch drinks, bakery, and foods categories
-        const [drinksCategories, bakeryCategories, foodsCategories] = await Promise.all([
+        // Fetch drinks, bakery, foods, and packages categories
+        const [drinksCategories, bakeryCategories, foodsCategories, packagesCategories] = await Promise.all([
           fetchCategories('drinks', {
             isOnline: isOnlineTab,
             platform: isOnlineTab ? (selectedOnlinePlatform ?? undefined) : undefined,
@@ -555,6 +576,11 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
             businessId: businessId
           }),
           fetchCategories('foods', {
+            isOnline: isOnlineTab,
+            platform: isOnlineTab ? (selectedOnlinePlatform ?? undefined) : undefined,
+            businessId: businessId
+          }),
+          fetchCategories('packages', {
             isOnline: isOnlineTab,
             platform: isOnlineTab ? (selectedOnlinePlatform ?? undefined) : undefined,
             businessId: businessId
@@ -588,13 +614,22 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
             productType: 'foods' as const
           }));
 
-        const validCategories: LocalCategory[] = [...taggedDrinks, ...taggedBakery, ...taggedFoods];
+        // Tag packages categories
+        const taggedPackages = (packagesCategories as Array<{ jenis: string; active?: boolean }>)
+          .filter(cat => cat.jenis && cat.jenis.trim() !== '')
+          .map(cat => ({
+            jenis: cat.jenis,
+            active: cat.active ?? true,
+            productType: 'packages' as const
+          }));
+
+        const validCategories: LocalCategory[] = [...taggedDrinks, ...taggedBakery, ...taggedFoods, ...taggedPackages];
         setCategories(validCategories);
 
         if (validCategories.length > 0 && validCategories[0].jenis) {
           setSelectedCategory(validCategories[0].jenis);
-          // Fetch products from drinks, bakery, and foods
-          const [drinksProducts, bakeryProducts, foodsProducts] = await Promise.all([
+          // Fetch products from drinks, bakery, foods, and packages
+          const [drinksProducts, bakeryProducts, foodsProducts, packagesProducts] = await Promise.all([
             fetchProducts(validCategories[0].jenis, 'drinks', {
               isOnline: isOnlineTab,
               platform: isOnlineTab ? (selectedOnlinePlatform ?? undefined) : undefined,
@@ -609,9 +644,14 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
               isOnline: isOnlineTab,
               platform: isOnlineTab ? (selectedOnlinePlatform ?? undefined) : undefined,
               businessId: businessId
+            }),
+            fetchProducts(validCategories[0].jenis, 'packages', {
+              isOnline: isOnlineTab,
+              platform: isOnlineTab ? (selectedOnlinePlatform ?? undefined) : undefined,
+              businessId: businessId
             })
           ]);
-          setProducts([...drinksProducts, ...bakeryProducts, ...foodsProducts]);
+          setProducts([...drinksProducts, ...bakeryProducts, ...foodsProducts, ...packagesProducts]);
         }
       } catch (error) {
         console.error('❌ Error refreshing after sync:', error);
@@ -874,6 +914,15 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
         });
         return emp && typeof (emp as { nama_karyawan?: string }).nama_karyawan === 'string' ? (emp as { nama_karyawan: string }).nama_karyawan : null;
       };
+      const resolveWaiterColor = (empId: number | null): string | null => {
+        if (empId == null) return null;
+        const emp = employeesArray.find((e: { id?: number | string }) => {
+          const eid = typeof e.id === 'number' ? e.id : (typeof e.id === 'string' ? parseInt(String(e.id), 10) : null);
+          return eid === empId;
+        });
+        const color = emp && typeof (emp as { color?: string | null }).color === 'string' && (emp as { color: string }).color ? (emp as { color: string }).color : null;
+        return color || null;
+      };
 
       // Convert transaction items to cart items
       // Filter out cancelled items - they should not be loaded into cart
@@ -906,6 +955,7 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
         const itemQuantity = typeof item.quantity === 'number' ? item.quantity : (typeof item.quantity === 'string' ? parseInt(item.quantity, 10) : 1);
         const itemCustomNote = typeof item.custom_note === 'string' ? item.custom_note : undefined;
         const itemBundleSelections = typeof item.bundle_selections_json === 'string' ? item.bundle_selections_json : undefined;
+        const itemPackageSelections = typeof item.package_selections_json === 'string' ? item.package_selections_json : undefined;
         const transactionTableId = typeof transaction.table_id === 'number' ? transaction.table_id : (typeof transaction.table_id === 'string' ? parseInt(transaction.table_id, 10) : null);
         
         // Check if item should be locked
@@ -919,6 +969,7 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
 
         const itemWaiterId = typeof item.waiter_id === 'number' ? item.waiter_id : (typeof item.waiter_id === 'string' ? parseInt(String(item.waiter_id), 10) : null);
         const itemWaiterName = resolveWaiterName(itemWaiterId ?? null);
+        const itemWaiterColor = resolveWaiterColor(itemWaiterId ?? null);
 
         return {
           id: Date.now() + Math.random(), // Generate unique ID for cart
@@ -946,12 +997,16 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
           bundleSelections: itemBundleSelections 
             ? JSON.parse(itemBundleSelections) 
             : undefined,
+          packageSelections: itemPackageSelections 
+            ? JSON.parse(itemPackageSelections) 
+            : undefined,
           isLocked: isItemLocked, // Lock items that are visible on kitchen/barista (production_status IS NULL or 'preparing')
           transactionItemId: itemId || 0, // Database transaction_item ID
           transactionId: transactionId, // Transaction UUID
           tableId: transactionTableId,
           waiterId: itemWaiterId ?? undefined,
           waiterName: itemWaiterName ?? undefined,
+          waiterColor: itemWaiterColor ?? undefined,
         };
       }).filter((item) => item !== null) as CartItem[];
 
@@ -981,6 +1036,9 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
       const vt = typeof transaction.voucher_type === 'string' ? transaction.voucher_type : undefined;
       const vv = typeof transaction.voucher_value === 'number' ? transaction.voucher_value : (typeof transaction.voucher_value === 'string' ? parseFloat(transaction.voucher_value as string) : null);
       const vl = typeof transaction.voucher_label === 'string' ? transaction.voucher_label : null;
+      const rawCu = (transaction as Record<string, unknown>).customer_unit ?? (transaction as Record<string, unknown>).Customer_Unit;
+      const cu = typeof rawCu === 'number' ? rawCu : (typeof rawCu === 'string' ? parseInt(String(rawCu), 10) : null);
+      const customerUnit = cu != null && !Number.isNaN(cu) && cu >= 1 ? cu : null;
       // Pickup method: use stored value, or default take-away for platform orders (gofood/grabfood/shopeefood/qpon/tiktok)
       const platformPaymentMethods = ['gofood', 'grabfood', 'shopeefood', 'qpon', 'tiktok'];
       const pm = typeof transaction.pickup_method === 'string' ? transaction.pickup_method : null;
@@ -1003,6 +1061,7 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
         voucher_type: vt,
         voucher_value: vv != null && !Number.isNaN(vv) ? vv : null,
         voucher_label: vl,
+        customer_unit: customerUnit,
       });
 
       // Switch to Kasir page if not already there
@@ -1239,7 +1298,7 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
                     products={searchQuery.trim() ? (allProductsForSearch ?? products) : products}
                     cartItems={getCurrentCart()}
                     setCartItems={setCurrentCart}
-                    transactionType={(categories.find(c => c.jenis === selectedCategory)?.productType || 'drinks') as 'drinks' | 'bakery' | 'foods'}
+                    transactionType={(categories.find(c => c.jenis === selectedCategory)?.productType || 'drinks') as 'drinks' | 'bakery' | 'foods' | 'packages'}
                     isLoadingProducts={isLoadingProducts || (!!searchQuery.trim() && allProductsForSearch === null && isLoadingAllProductsForSearch)}
                     isOnline={isOnlineTab}
                     selectedOnlinePlatform={selectedOnlinePlatform}

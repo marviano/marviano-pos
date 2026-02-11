@@ -71,6 +71,8 @@ export default function PrinterSelector() {
     receiptPrinter: 1,
     receiptizePrinter: 1
   });
+  // Printer 3 (labelPrinter) only: copies for offline vs non-offline (GoFood, Grab, Shopee, Qpon, TikTok)
+  const [labelPrinterNonOfflineCopies, setLabelPrinterNonOfflineCopies] = useState<number>(1);
   const [singlePrinterMode, setSinglePrinterMode] = useState<boolean>(false);
   const [printer2AuditLogChance, setPrinter2AuditLogChance] = useState<number | null>(null);
   const [isScanning, setIsScanning] = useState(false);
@@ -112,6 +114,7 @@ export default function PrinterSelector() {
           receiptPrinter: 1,
           receiptizePrinter: 1
         };
+        let labelPrinterNonOfflineValue = 1;
         let singlePrinterModeValue = false;
         let printer2AuditLogChanceValue: number | null = null;
         
@@ -202,6 +205,13 @@ export default function PrinterSelector() {
               } else if (config.printer_type === 'receiptizePrinter') {
                 nonCashCopiesSettings.receiptizePrinter = nonCashCopiesValue;
               }
+              // Printer 3 (labelPrinter): nonOfflineCopies for GoFood, Grab, Shopee, Qpon, TikTok
+              if (config.printer_type === 'labelPrinter' && extra && typeof extra === 'object' && 'nonOfflineCopies' in extra &&
+                typeof (extra as { nonOfflineCopies?: number }).nonOfflineCopies === 'number' &&
+                !Number.isNaN((extra as { nonOfflineCopies?: number }).nonOfflineCopies) &&
+                (extra as { nonOfflineCopies?: number }).nonOfflineCopies! > 0) {
+                labelPrinterNonOfflineValue = (extra as { nonOfflineCopies: number }).nonOfflineCopies;
+              }
             } catch (parseError) {
               console.error('Failed to parse extra_settings for printer config:', parseError);
             }
@@ -228,11 +238,12 @@ export default function PrinterSelector() {
         
         setSinglePrinterMode(singlePrinterModeValue);
         setPrinter2AuditLogChance(printer2AuditLogChanceValue);
-        
+
         setSelectedPrinters(selections);
         setMarginOffsets(margins);
         setCopies(copiesSettings);
         setNonCashCopies(nonCashCopiesSettings);
+        setLabelPrinterNonOfflineCopies(labelPrinterNonOfflineValue);
         return;
       }
       
@@ -282,15 +293,23 @@ export default function PrinterSelector() {
         const copiesValue = (printerType === 'receiptPrinter' || printerType === 'labelPrinter' || printerType === 'receiptizePrinter')
           ? (copies[printerType] || 1)
           : undefined;
-        const settings: { marginAdjustMm: number; copies?: number; nonCashCopies?: number } = {
+        const settings: { marginAdjustMm: number; copies?: number; nonCashCopies?: number; nonOfflineCopies?: number } = {
           marginAdjustMm: typeof marginAdjust === 'number' && !Number.isNaN(marginAdjust) ? marginAdjust : 0,
         };
         if (copiesValue !== undefined) {
           settings.copies = typeof copiesValue === 'number' && !Number.isNaN(copiesValue) && copiesValue > 0 ? copiesValue : 1;
         }
+        // Printer 1 & 2 (receiptPrinter, receiptizePrinter): nonCashCopies
         if (printerType === 'receiptPrinter' || printerType === 'receiptizePrinter') {
           const nonCashValue = nonCashCopies[printerType] ?? 1;
           settings.nonCashCopies = typeof nonCashValue === 'number' && !Number.isNaN(nonCashValue) && nonCashValue > 0 ? nonCashValue : 1;
+        }
+        // Printer 3 (labelPrinter): nonOfflineCopies for GoFood, Grab, Shopee, Qpon, TikTok
+        if (printerType === 'labelPrinter') {
+          const nonOffVal = typeof labelPrinterNonOfflineCopies === 'number' && !Number.isNaN(labelPrinterNonOfflineCopies) && labelPrinterNonOfflineCopies > 0
+            ? labelPrinterNonOfflineCopies
+            : 1;
+          settings.nonOfflineCopies = nonOffVal;
         }
         return settings;
       };
@@ -447,6 +466,10 @@ Please try:
       ...prev,
       [printerType]: numValue
     }));
+  };
+
+  const handleLabelPrinterNonOfflineCopiesChange = (value: number) => {
+    setLabelPrinterNonOfflineCopies(Math.max(1, Math.floor(value)));
   };
 
   const handleSave = () => {
@@ -837,7 +860,12 @@ const testPrinter = async (printerType: keyof PrinterSelection) => {
                 </div>
                 <div className="w-16">
                   <label className="block text-sm font-medium text-gray-700">
-                    Copies
+                    Copies (offline)
+                  </label>
+                </div>
+                <div className="w-20">
+                  <label className="block text-sm font-medium text-gray-700">
+                    Copies (non-offline)
                   </label>
                 </div>
               </div>
@@ -861,6 +889,16 @@ const testPrinter = async (printerType: keyof PrinterSelection) => {
                   value={copies.labelPrinter}
                   onChange={(e) => handleCopiesChange('labelPrinter', Number(e.target.value))}
                   className="w-16 border border-gray-300 rounded-lg px-2 py-2 focus:outline-none focus:ring-2 focus:ring-green-500 text-gray-900 bg-white text-center"
+                  title="Copies for offline orders"
+                />
+                <input
+                  type="number"
+                  min={1}
+                  max={10}
+                  value={labelPrinterNonOfflineCopies}
+                  onChange={(e) => handleLabelPrinterNonOfflineCopiesChange(Number(e.target.value))}
+                  className="w-20 border border-gray-300 rounded-lg px-2 py-2 focus:outline-none focus:ring-2 focus:ring-green-500 text-gray-900 bg-white text-center"
+                  title="Copies for GoFood, Grab, Shopee, Qpon, TikTok"
                 />
               </div>
             </div>

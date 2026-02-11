@@ -5,6 +5,7 @@ import { Volume2 } from 'lucide-react';
 import { useAuth } from '@/hooks/useAuth';
 import { isSuperAdmin } from '@/lib/auth';
 import { OrderTimer } from '@/contexts/DisplayTimerContext';
+import { getPackageBreakdownLines, getPackageBreakdownLinesWithProductId } from './PackageSelectionModal';
 
 interface OrderItem {
   id: number;
@@ -30,6 +31,12 @@ interface OrderItem {
       price_adjustment: number;
     }>;
   }>;
+  /** Package breakdown lines (from DB: id, finished_at; or from JSON fallback). Filtered lines include originalIdx. */
+  packageBreakdownLines?: { id?: number; product_id: number; product_name: string; quantity: number; category1_id?: number; category1_name?: string; originalIdx?: number; finished_at?: string | null }[];
+  /** Full unfiltered package breakdown (all lines) for completion tracking. */
+  originalPackageBreakdownLines?: { id?: number; product_id: number; product_name: string; quantity: number; category1_id?: number; category1_name?: string; finished_at?: string | null }[];
+  /** Legacy: per-line completion (JSON). Prefer line.finished_at from DB when available. */
+  package_line_finished_at?: Record<string, string>;
 }
 
 const OFFLINE_PAYMENT_CODES = new Set(['cash', 'debit', 'qr', 'ewallet', 'cl', 'voucher', 'offline', 'tunai', 'edc']);
@@ -64,12 +71,19 @@ export default function BaristaDisplay({ viewOnly = false, legacyCardLayout = fa
   const hasCompletedInitialFetchRef = useRef(false);
   const soundRef = useRef<HTMLAudioElement | null>(null);
   const optimisticFinishedRef = useRef<Map<string, GroupedOrderItem>>(new Map());
+  const persistingIdsRef = useRef<Set<string>>(new Set());
+  /** Last finished list we displayed; used so a stale fetch never moves an item back to active. */
+  const lastFinishedMapRef = useRef<Map<string, GroupedOrderItem>>(new Map());
   const firstTextWrapperRef = useRef<HTMLDivElement | null>(null);
   const firstProductNameRef = useRef<HTMLDivElement | null>(null);
   const firstCardRef = useRef<HTMLDivElement | null>(null);
 
   const businessId = user?.selectedBusinessId;
-  
+
+  const [packageCheckedSubItems, setPackageCheckedSubItems] = useState<Map<string, Set<number>>>(() => new Map());
+  const [optimisticPackageLineFinishedAt, setOptimisticPackageLineFinishedAt] = useState<Map<string, Map<number, string>>>(() => new Map());
+  const [persistStatusMap, setPersistStatusMap] = useState<Map<string, { status: 'processing' | 'success' | 'error'; message?: string }>>(() => new Map());
+
   if (!businessId) {
     return (
       <div className="h-screen flex items-center justify-center bg-gray-100">
@@ -216,9 +230,11 @@ export default function BaristaDisplay({ viewOnly = false, legacyCardLayout = fa
           const product = productId ? productsMap.get(productId) : undefined;
           if (!product) continue;
 
-          // Filter by category - minuman and dessert for barista
+          // Filter by category: minuman and dessert for barista; also include package products (category1_id 14) so we show their breakdown by line category
           const categoryName = typeof product.category1_name === 'string' ? product.category1_name.toLowerCase() : '';
-          if (categoryName !== 'minuman' && categoryName !== 'dessert') {
+          const category1Id = typeof product.category1_id === 'number' ? product.category1_id : (typeof product.category1_id === 'string' ? parseInt(String(product.category1_id), 10) : null);
+          const isPackageProduct = category1Id === 14 || (product as { is_package?: number }).is_package === 1;
+          if (!isPackageProduct && categoryName !== 'minuman' && categoryName !== 'dessert') {
             continue;
           }
 
@@ -238,13 +254,49 @@ export default function BaristaDisplay({ viewOnly = false, legacyCardLayout = fa
             continue;
           }
           
+          const itemQuantity = typeof item.quantity === 'number' ? item.quantity : (typeof item.quantity === 'string' ? parseInt(item.quantity, 10) : 1);
+          let packageBreakdownLines: { id?: number; product_id: number; product_name: string; quantity: number; category1_id?: number; category1_name?: string; finished_at?: string | null }[] | undefined;
+          const dbLines = (item as Record<string, unknown>).packageBreakdownLines;
+          if (Array.isArray(dbLines) && dbLines.length > 0) {
+            // DB stores per-package quantity; show as-is (header "Paket: 2x ..." indicates package count)
+            packageBreakdownLines = dbLines.map((l: Record<string, unknown>) => ({
+              id: typeof l.id === 'number' ? l.id : undefined,
+              product_id: l.product_id as number,
+              product_name: (l.product_name as string) || '',
+              quantity: (l.quantity as number) || 1,
+              category1_id: l.category1_id != null ? (typeof l.category1_id === 'number' ? l.category1_id : parseInt(String(l.category1_id), 10)) : undefined,
+              category1_name: l.category1_name != null ? String(l.category1_name) : undefined,
+              finished_at: l.finished_at != null ? String(l.finished_at) : null,
+            }));
+          } else {
+            try {
+              const raw = (item as Record<string, unknown>).package_selections_json;
+              if (raw) {
+                const sel = typeof raw === 'string' ? JSON.parse(raw) : raw;
+                const withId = getPackageBreakdownLinesWithProductId(Array.isArray(sel) ? sel : [], itemQuantity);
+                if (withId.length > 0) {
+                  packageBreakdownLines = withId.map((line) => {
+                    const p = productsMap.get(line.product_id) as Record<string, unknown> | undefined;
+                    const category1_id = p && (typeof p.category1_id === 'number' || typeof p.category1_id === 'string') ? (typeof p.category1_id === 'number' ? p.category1_id : parseInt(String(p.category1_id), 10)) : undefined;
+                    const category1_name = p && typeof p.category1_name === 'string' ? p.category1_name : undefined;
+                    return { ...line, category1_id, category1_name };
+                  });
+                }
+              }
+            } catch (e) {
+              if (isPackageProduct && process.env.NODE_ENV !== 'production') {
+                console.warn('[BaristaDisplay] Failed to parse package_selections_json:', typeof product.nama === 'string' ? product.nama : 'Unknown', e);
+              }
+            }
+          }
+
           const orderItem = {
             id: itemId,
             uuid_id: typeof item.uuid_id === 'string' ? item.uuid_id : (itemId ? String(itemId) : ''),
             transaction_id: transactionIdStr || (transactionId ? String(transactionId) : ''),
             product_id: productId,
             product_name: typeof product.nama === 'string' ? product.nama : 'Unknown',
-            quantity: typeof item.quantity === 'number' ? item.quantity : (typeof item.quantity === 'string' ? parseInt(item.quantity, 10) : 1),
+            quantity: itemQuantity,
             custom_note: typeof item.custom_note === 'string' ? item.custom_note : null,
             production_status: itemProductionStatus,
             production_started_at: typeof item.production_started_at === 'string' ? item.production_started_at : (item.production_started_at instanceof Date ? item.production_started_at.toISOString() : null),
@@ -288,6 +340,7 @@ export default function BaristaDisplay({ viewOnly = false, legacyCardLayout = fa
               return finalCreatedAt;
             })(),
             customizations: itemCustomizations,
+            packageBreakdownLines: packageBreakdownLines?.length ? packageBreakdownLines : undefined,
           };
           
           allOrderItems.push(orderItem);
@@ -299,37 +352,63 @@ export default function BaristaDisplay({ viewOnly = false, legacyCardLayout = fa
       const groupedMap = new Map<string, GroupedOrderItem>();
       const groupItemsMap = new Map<string, OrderItem[]>();
 
+      // Barista: Minuman (2), Dessert (3) - match by id or name
+      const BARISTA_CATEGORY_IDS = [2, 3];
+      const BARISTA_CATEGORY_NAMES = ['minuman', 'dessert'];
+      const lineBelongsToBarista = (line: { category1_id?: number; category1_name?: string }) => {
+        const id = line.category1_id;
+        const name = (line.category1_name || '').toString().trim().toLowerCase();
+        if (id != null && BARISTA_CATEGORY_IDS.includes(id)) return true;
+        if (name && BARISTA_CATEGORY_NAMES.includes(name)) return true;
+        return false;
+      };
+
       allOrderItems.forEach(item => {
+        // For package items: show only breakdown lines that belong to Barista (minuman/dessert); skip package on this display if none match
+        let itemForGroup = item;
+        if (item.packageBreakdownLines && item.packageBreakdownLines.length > 0) {
+          const originalLines = item.packageBreakdownLines;
+          const filteredWithIndices = originalLines
+            .map((line, originalIdx) => ({ ...line, originalIdx }))
+            .filter(line => lineBelongsToBarista(line));
+          if (filteredWithIndices.length === 0) return; // Do not show this package on Barista
+          itemForGroup = {
+            ...item,
+            packageBreakdownLines: filteredWithIndices,
+            originalPackageBreakdownLines: originalLines,
+          };
+        }
+
         // Create customization signature
         const allOptionIds: number[] = [];
-        item.customizations.forEach(customization => {
+        itemForGroup.customizations.forEach(customization => {
           customization.options.forEach(option => {
             // Use option name for signature (since we don't have option_id here)
             allOptionIds.push(option.option_name.charCodeAt(0)); // Simple hash
           });
         });
         const sortedOptionIds = allOptionIds.sort((a, b) => a - b).join(',');
-        const customNote = item.custom_note || '';
+        const customNote = itemForGroup.custom_note || '';
         // Include table_number in signature to prevent grouping items from different tables
-        const tableNumber = item.table_number || '';
+        const tableNumber = itemForGroup.table_number || '';
         // Include uuid_id to ensure each item is unique (one line per item, no grouping)
-        const itemUuid = item.uuid_id || item.id?.toString() || '';
-        const signature = `${item.product_id}_${sortedOptionIds}_${customNote}_${tableNumber}_${itemUuid}`;
+        const itemUuid = itemForGroup.uuid_id || itemForGroup.id?.toString() || '';
+        const signature = `${itemForGroup.product_id}_${sortedOptionIds}_${customNote}_${tableNumber}_${itemUuid}`;
 
         // Track all items in this group (each item has unique signature now, so groups will be size 1)
         if (!groupItemsMap.has(signature)) {
           groupItemsMap.set(signature, []);
         }
-        groupItemsMap.get(signature)!.push(item);
+        groupItemsMap.get(signature)!.push(itemForGroup);
 
         // Since each item has unique signature (includes uuid_id), this will always be a new entry
         // Build display text: 1x [platform name] [product name] for online; 1x [product name] for offline
-        const platformPrefix = item.platform_label === 'Offline' ? '' : `[${item.platform_label}] `;
-        let displayText = `${item.quantity}x ${platformPrefix}${item.product_name}`;
+        const platformPrefix = itemForGroup.platform_label === 'Offline' ? '' : `[${itemForGroup.platform_label}] `;
+        let displayText = `${itemForGroup.quantity}x ${platformPrefix}${itemForGroup.product_name}`;
         
         // Add customizations
         const customizationTexts: string[] = [];
-        item.customizations.forEach(customization => {
+        itemForGroup.customizations.forEach(customization => {
           customization.options.forEach(option => {
             customizationTexts.push(`+${option.option_name}`);
           });
@@ -339,16 +418,16 @@ export default function BaristaDisplay({ viewOnly = false, legacyCardLayout = fa
         }
 
         // Add custom note
-        if (item.custom_note) {
-          displayText += ` note: ${item.custom_note}`;
+        if (itemForGroup.custom_note) {
+          displayText += ` note: ${itemForGroup.custom_note}`;
         }
 
         // Use production_started_at if available, otherwise created_at
-        const startTime = item.production_started_at || item.created_at;
+        const startTime = itemForGroup.production_started_at || itemForGroup.created_at;
         
         groupedMap.set(signature, {
-          ...item,
-          total_quantity: item.quantity,
+          ...itemForGroup,
+          total_quantity: itemForGroup.quantity,
           display_text: displayText,
           timer: '00:00', // Rendered by OrderTimer component
           production_started_at: startTime,
@@ -358,59 +437,59 @@ export default function BaristaDisplay({ viewOnly = false, legacyCardLayout = fa
       // Separate active and finished orders
       const active: GroupedOrderItem[] = [];
       const finished: GroupedOrderItem[] = [];
+      const finishedUuids = new Set<string>();
 
       groupedMap.forEach((item, signature) => {
         const itemsInGroup = groupItemsMap.get(signature) || [];
-        
-        // For timer, use the earliest production_started_at from items in the group, or earliest created_at
         const startTimes = itemsInGroup
           .map(i => i.production_started_at || i.created_at)
           .filter((t): t is string => t !== null)
           .sort((a, b) => new Date(a).getTime() - new Date(b).getTime());
         const earliestStartTime = startTimes.length > 0 ? startTimes[0] : item.created_at;
-        
         const groupedItem = {
           ...item,
           production_started_at: earliestStartTime,
           timer: '00:00', // Rendered by OrderTimer component
         };
 
-        // Check if ALL items in this group are finished
-        const allFinished = itemsInGroup.length > 0 && itemsInGroup.every(i => i.production_status === 'finished');
-
-        if (allFinished) {
-          // Update the grouped item's production_status to finished
-          groupedItem.production_status = 'finished';
-          // Use the most recent finished_at time from the items
-          // Since each item has unique signature now, itemsInGroup should have 1 item
-          const finishedTimes = itemsInGroup
-            .map(i => i.production_finished_at)
-            .filter((t): t is string => t !== null)
-            .sort((a, b) => new Date(b).getTime() - new Date(a).getTime());
-          if (finishedTimes.length > 0) {
-            groupedItem.production_finished_at = finishedTimes[0];
-          } else {
-            // If production_finished_at is null, use the item's production_finished_at directly
-            // This handles the case where the item is marked finished but finished_at wasn't set
-            const itemFinishedAt = itemsInGroup[0]?.production_finished_at;
-            if (itemFinishedAt) {
-              groupedItem.production_finished_at = itemFinishedAt;
-            } else {
-              // Log warning if finished item has no finished_at time
-              console.warn('Finished item has no production_finished_at:', {
-                itemId: itemsInGroup[0]?.id,
-                uuid_id: itemsInGroup[0]?.uuid_id,
-                production_status: itemsInGroup[0]?.production_status
-              });
-            }
-          }
-          finished.push(groupedItem);
+        const isPackage = groupedItem.packageBreakdownLines && groupedItem.packageBreakdownLines.length > 0;
+        let shouldBeFinished: boolean;
+        if (isPackage) {
+          // Packages: finished when all visible (barista) lines have finished_at set
+          shouldBeFinished = groupedItem.packageBreakdownLines!.every((line) => line.finished_at != null);
         } else {
-          // Only add to active if there are unfinished items
-          const hasUnfinishedItems = itemsInGroup.some(i => i.production_status !== 'finished');
-          if (hasUnfinishedItems) {
-            active.push(groupedItem);
+          // Non-packages: finished when all items have production_status === 'finished'
+          shouldBeFinished = itemsInGroup.length > 0 && itemsInGroup.every(i => i.production_status === 'finished');
+        }
+        if (shouldBeFinished) {
+          if (!finishedUuids.has(groupedItem.uuid_id)) {
+            finishedUuids.add(groupedItem.uuid_id);
+            groupedItem.production_status = 'finished';
+            if (isPackage && groupedItem.packageBreakdownLines?.length) {
+              // Packages: production_finished_at from line times (display/filter only, not persisted)
+              const lineTimes = groupedItem.packageBreakdownLines
+                .map((l) => l.finished_at ? new Date(l.finished_at).getTime() : 0)
+                .filter((t) => t > 0);
+              groupedItem.production_finished_at = lineTimes.length > 0
+                ? new Date(Math.max(...lineTimes)).toISOString()
+                : new Date().toISOString();
+            } else {
+              // Non-packages: production_finished_at from transaction item
+              const finishedTimes = itemsInGroup
+                .map(i => i.production_finished_at)
+                .filter((t): t is string => t !== null)
+                .sort((a, b) => new Date(b).getTime() - new Date(a).getTime());
+              if (finishedTimes.length > 0) {
+                groupedItem.production_finished_at = finishedTimes[0];
+              } else {
+                const itemFinishedAt = itemsInGroup[0]?.production_finished_at;
+                if (itemFinishedAt) groupedItem.production_finished_at = itemFinishedAt;
+              }
+            }
+            finished.push(groupedItem);
           }
+        } else {
+          active.push(groupedItem);
         }
       });
 
@@ -424,20 +503,70 @@ export default function BaristaDisplay({ viewOnly = false, legacyCardLayout = fa
         return bTime - aTime;
       });
 
-      // Merge with optimistically finished items
+      // Merge with optimistically finished items; keep packages in finished until DB reflects them
       const optMap = optimisticFinishedRef.current;
-      for (const f of finished) optMap.delete(f.uuid_id);
-      const activeFiltered = active.filter((x) => !optMap.has(x.uuid_id));
-      const finishedMerged = [...finished, ...optMap.values()];
+      for (const f of finished) {
+        optMap.delete(f.uuid_id);
+      }
+      const lastFinished = lastFinishedMapRef.current;
+      const isPackageItem = (x: GroupedOrderItem) => (x.packageBreakdownLines?.length ?? 0) > 0;
+      const keptAsFinished = active
+        .filter((x) => !isPackageItem(x) && lastFinished.has(x.uuid_id))
+        .map((x) => lastFinished.get(x.uuid_id)!);
+      const activeFiltered = active.filter((x) => !optMap.has(x.uuid_id) && !lastFinished.has(x.uuid_id));
+      const finishedByUuid = new Map<string, GroupedOrderItem>();
+      for (const x of [...finished, ...optMap.values(), ...keptAsFinished]) {
+        if (!finishedByUuid.has(x.uuid_id)) finishedByUuid.set(x.uuid_id, x);
+      }
+      let finishedMerged = Array.from(finishedByUuid.values());
       finishedMerged.sort((a, b) => {
         const aTime = a.production_finished_at ? new Date(a.production_finished_at).getTime() : 0;
         const bTime = b.production_finished_at ? new Date(b.production_finished_at).getTime() : 0;
         return bTime - aTime;
       });
 
+      // Only show Pesanan Selesai from today to avoid unbounded list and keep relevance
+      const now = new Date();
+      const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0, 0).getTime();
+      const todayEnd = todayStart + 24 * 60 * 60 * 1000 - 1;
+      finishedMerged = finishedMerged.filter((item) => {
+        let finishedAt: number;
+        if (item.packageBreakdownLines && item.packageBreakdownLines.length > 0) {
+          // Packages: use line times (transaction item production_finished_at may be unset)
+          const lineTimes = item.packageBreakdownLines
+            .map((l) => l.finished_at ? new Date(l.finished_at).getTime() : 0)
+            .filter((t) => t > 0);
+          finishedAt = lineTimes.length > 0 ? Math.max(...lineTimes) : 0;
+        } else {
+          // Non-packages: use production_finished_at from transaction item
+          finishedAt = item.production_finished_at ? new Date(item.production_finished_at).getTime() : 0;
+        }
+        return finishedAt >= todayStart && finishedAt <= todayEnd;
+      });
+      // Cap finished list to avoid performance degradation with many items
+      const FINISHED_CAP = 150;
+      if (finishedMerged.length > FINISHED_CAP) {
+        finishedMerged = finishedMerged.slice(0, FINISHED_CAP);
+      }
+
+      lastFinishedMapRef.current = new Map(
+        finishedMerged
+          .filter((x) => !(x.packageBreakdownLines && x.packageBreakdownLines.length > 0))
+          .map((x) => [x.uuid_id, x])
+      );
+      setPackageCheckedSubItems((prev) => {
+        const next = new Map(prev);
+        finishedMerged.forEach((order) => next.delete(order.uuid_id));
+        return next;
+      });
+      setOptimisticPackageLineFinishedAt((prev) => {
+        const next = new Map(prev);
+        finishedMerged.forEach((order) => next.delete(order.uuid_id));
+        return next;
+      });
       setActiveOrders(activeFiltered);
       setFinishedOrders(finishedMerged);
-      
+
       // Check for new orders and play sound (only on standalone Barista display, not in Barista & Kitchen combined view)
       // Use hasCompletedInitialFetchRef so we also play when first order arrives after empty list (no sound on very first page load)
       if (!viewOnly && !loading && hasCompletedInitialFetchRef.current) {
@@ -512,20 +641,30 @@ export default function BaristaDisplay({ viewOnly = false, legacyCardLayout = fa
       alert('Function not available');
       return;
     }
+    // Avoid double-submit (e.g. double-click): skip if already persisting this item
+    if (persistingIdsRef.current.has(item.uuid_id)) return;
 
     // 1. Optimistic update: move to right immediately
+    persistingIdsRef.current.add(item.uuid_id);
+    setPersistStatusMap((prev) => new Map(prev).set(item.uuid_id, { status: 'processing' }));
     const finishedItem: GroupedOrderItem = {
       ...item,
       production_status: 'finished',
       production_finished_at: new Date().toISOString(),
     };
     optimisticFinishedRef.current.set(item.uuid_id, finishedItem);
+    lastFinishedMapRef.current.set(item.uuid_id, finishedItem);
     setActiveOrders((prev) => prev.filter((x) => x.uuid_id !== item.uuid_id));
-    setFinishedOrders((prev) => [...prev, finishedItem].sort((a, b) => {
-      const aTime = a.production_finished_at ? new Date(a.production_finished_at).getTime() : 0;
-      const bTime = b.production_finished_at ? new Date(b.production_finished_at).getTime() : 0;
-      return bTime - aTime;
-    }));
+    setFinishedOrders((prev) => {
+      const merged = [...prev, finishedItem];
+      const byUuid = new Map<string, GroupedOrderItem>();
+      merged.forEach((x) => { if (!byUuid.has(x.uuid_id)) byUuid.set(x.uuid_id, x); });
+      return Array.from(byUuid.values()).sort((a, b) => {
+        const aTime = a.production_finished_at ? new Date(a.production_finished_at).getTime() : 0;
+        const bTime = b.production_finished_at ? new Date(b.production_finished_at).getTime() : 0;
+        return bTime - aTime;
+      });
+    });
 
     // 2. Persist in background with retry until success
     const persistWithRetry = async (delayMs = 2000) => {
@@ -609,6 +748,36 @@ export default function BaristaDisplay({ viewOnly = false, legacyCardLayout = fa
       const itemsToUpdate: Array<Record<string, unknown>> = [];
       const finishedAt = new Date().toISOString();
 
+      // Prefer exact match by transaction item uuid_id so package items always persist (signature can fail when transaction_id is receipt_number etc.)
+      if (item.uuid_id) {
+        const tiByUuid = itemsArray.find((ti: Record<string, unknown>) => {
+          const tiId = ti.uuid_id ?? ti.id;
+          if (tiId == null) return false;
+          return String(tiId).trim() === String(item.uuid_id).trim();
+        });
+        if (tiByUuid && tiByUuid.production_status !== 'finished') {
+          const startedAt = tiByUuid.production_started_at || tiByUuid.created_at || finishedAt;
+          itemsToUpdate.push({
+            id: tiByUuid.id,
+            uuid_id: tiByUuid.uuid_id || tiByUuid.id?.toString(),
+            transaction_id: tiByUuid.transaction_id || 0,
+            uuid_transaction_id: tiByUuid.uuid_transaction_id || item.transaction_id,
+            product_id: tiByUuid.product_id,
+            quantity: tiByUuid.quantity,
+            unit_price: tiByUuid.unit_price,
+            total_price: tiByUuid.total_price,
+            custom_note: tiByUuid.custom_note,
+            bundle_selections_json: tiByUuid.bundle_selections_json,
+            package_selections_json: tiByUuid.package_selections_json ?? undefined,
+            created_at: tiByUuid.created_at,
+            production_status: 'finished',
+            production_started_at: startedAt,
+            production_finished_at: finishedAt,
+          });
+        }
+      }
+
+      if (itemsToUpdate.length === 0) {
       itemsArray.forEach((transactionItem: Record<string, unknown>) => {
         // Check if product_id matches
         if (transactionItem.product_id !== item.product_id) {
@@ -656,7 +825,6 @@ export default function BaristaDisplay({ viewOnly = false, legacyCardLayout = fa
           // Ensure we have all required fields for the update
           // Set production_started_at if not already set (use created_at as fallback)
           const startedAt = transactionItem.production_started_at || transactionItem.created_at || finishedAt;
-          
           const itemToUpdate: Record<string, unknown> = {
             id: transactionItem.id,
             uuid_id: transactionItem.uuid_id || transactionItem.id?.toString(),
@@ -668,6 +836,7 @@ export default function BaristaDisplay({ viewOnly = false, legacyCardLayout = fa
             total_price: transactionItem.total_price,
             custom_note: transactionItem.custom_note,
             bundle_selections_json: transactionItem.bundle_selections_json,
+            package_selections_json: transactionItem.package_selections_json ?? undefined,
             created_at: transactionItem.created_at,
             production_status: 'finished',
             production_started_at: startedAt,
@@ -676,6 +845,7 @@ export default function BaristaDisplay({ viewOnly = false, legacyCardLayout = fa
           itemsToUpdate.push(itemToUpdate);
         }
       });
+      }
 
         if (itemsToUpdate.length === 0) {
           const fallbackItems = itemsArray.filter((ti: Record<string, unknown>) =>
@@ -688,25 +858,160 @@ export default function BaristaDisplay({ viewOnly = false, legacyCardLayout = fa
             });
           }
         }
+        // Final fallback: match by uuid_id so we always persist when marking finished
+        if (itemsToUpdate.length === 0) {
+          const byUuid = itemsArray.find((ti: Record<string, unknown>) => (ti.uuid_id || ti.id?.toString()) === item.uuid_id);
+          if (byUuid && byUuid.production_status !== 'finished') {
+            const startedAt = byUuid.production_started_at || byUuid.created_at || finishedAt;
+            itemsToUpdate.push({
+              ...byUuid,
+              production_status: 'finished',
+              production_started_at: startedAt,
+              production_finished_at: finishedAt,
+            });
+          }
+        }
 
         if (itemsToUpdate.length === 0) {
-          optimisticFinishedRef.current.delete(item.uuid_id);
-          setFinishedOrders((prev) => prev.filter((x) => x.uuid_id !== item.uuid_id));
-          setActiveOrders((prev) => [...prev, item].sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime()));
-          alert('Item tidak ditemukan.');
+          setPersistStatusMap((prev) => new Map(prev).set(item.uuid_id, { 
+            status: 'error', 
+            message: 'Item tidak ditemukan' 
+          }));
+          
+          // For package items, completion is tracked via individual lines, not transaction item status
+          // Keep in optimisticFinishedRef so it stays in "Pesanan Selesai" on refresh
+          if (!(item.packageBreakdownLines && item.packageBreakdownLines.length > 0)) {
+            // Non-package items: remove from optimistic and re-fetch
+            optimisticFinishedRef.current.delete(item.uuid_id);
+            persistingIdsRef.current.delete(item.uuid_id);
+            fetchOrders();
+          } else {
+            // Package items: keep in optimistic finished, just clear persisting flag
+            persistingIdsRef.current.delete(item.uuid_id);
+            // Clear error status after 5 seconds (user feedback)
+            setTimeout(() => {
+              setPersistStatusMap((p) => { 
+                const next = new Map(p); 
+                next.delete(item.uuid_id); 
+                return next; 
+              });
+            }, 5000);
+          }
           return;
         }
 
-        await electronAPI.localDbUpsertTransactionItems?.(itemsToUpdate);
-        optimisticFinishedRef.current.delete(item.uuid_id);
-        fetchOrders();
+        const result = await electronAPI.localDbUpsertTransactionItems?.(itemsToUpdate);
+        if (result && typeof result === 'object' && (result as { success?: boolean }).success === false) {
+          throw new Error((result as { error?: string }).error || 'Gagal menyimpan');
+        }
+        persistingIdsRef.current.delete(item.uuid_id);
+        setPersistStatusMap((prev) => new Map(prev).set(item.uuid_id, { status: 'success' }));
+        setTimeout(() => setPersistStatusMap((p) => { const next = new Map(p); next.delete(item.uuid_id); return next; }), 3000);
+        // Do NOT clear optimisticFinishedRef here: a fetch (e.g. 5s poll) may complete before the
+        // write is visible and overwrite the UI with stale "item still active". Keeping the item
+        // in the ref ensures the next fetch keeps it on the right; fetchOrders clears the ref when
+        // it sees the item in finished from DB.
       } catch (error) {
+        const errMsg = error instanceof Error ? error.message : String(error);
+        setPersistStatusMap((prev) => new Map(prev).set(item.uuid_id, { status: 'error', message: errMsg }));
         console.warn('Retrying mark finished:', error);
         setTimeout(() => persistWithRetry(Math.min(delayMs * 1.5, 30000)), delayMs);
       }
     };
 
     persistWithRetry(500);
+  };
+
+  const handlePackageSubItemDoubleClick = async (item: GroupedOrderItem, idx: number) => {
+    if (viewOnly || !item.packageBreakdownLines?.length) return;
+    const line = item.packageBreakdownLines[idx];
+    const electronAPI = getElectronAPI();
+    if (typeof line.id !== 'number') {
+      console.warn('[BaristaDisplay] Package line has no DB id (legacy?), cannot update');
+      return;
+    }
+    if (!electronAPI?.localDbUpdatePackageLine) {
+      alert('Function not available');
+      return;
+    }
+    const newFinishedAt = line.finished_at ? null : new Date().toISOString();
+
+    line.finished_at = newFinishedAt;
+    setPackageCheckedSubItems((prev) => {
+      const next = new Map(prev);
+      const s = new Set(next.get(item.uuid_id) || []);
+      if (newFinishedAt === null) s.delete(idx);
+      else s.add(idx);
+      next.set(item.uuid_id, s);
+      return next;
+    });
+    setOptimisticPackageLineFinishedAt((prev) => {
+      const next = new Map(prev);
+      const inner = new Map(next.get(item.uuid_id) || []);
+      if (newFinishedAt) inner.set(idx, newFinishedAt);
+      else inner.delete(idx);
+      next.set(item.uuid_id, inner);
+      return next;
+    });
+
+    const visibleIndices = new Set((item.packageBreakdownLines ?? []).map((_, i) => i));
+    const checkedSet = new Set(packageCheckedSubItems.get(item.uuid_id) || []);
+    if (newFinishedAt) checkedSet.add(idx);
+    else checkedSet.delete(idx);
+    const allVisibleDone = visibleIndices.size > 0 && [...visibleIndices].every((i) => {
+      const lineDone = (item.packageBreakdownLines?.[i]?.finished_at != null) || checkedSet.has(i);
+      return lineDone;
+    });
+
+    if (allVisibleDone) {
+      const lineTimes = (item.packageBreakdownLines ?? []).map((l, i) => (i === idx ? newFinishedAt : l.finished_at)).filter(Boolean) as string[];
+      const production_finished_at = lineTimes.length > 0
+        ? new Date(Math.max(...lineTimes.map((t) => new Date(t).getTime()))).toISOString()
+        : new Date().toISOString();
+      const updatedLines = (item.packageBreakdownLines ?? []).map((l, i) => (i === idx ? { ...l, finished_at: newFinishedAt } : l));
+      const finishedItem: GroupedOrderItem = {
+        ...item,
+        production_status: 'finished',
+        production_finished_at,
+        packageBreakdownLines: updatedLines,
+      };
+      optimisticFinishedRef.current.set(item.uuid_id, finishedItem);
+      setActiveOrders((prev) => prev.filter((x) => x.uuid_id !== item.uuid_id));
+      setFinishedOrders((prev) => {
+        const merged = [...prev, finishedItem];
+        const byUuid = new Map<string, GroupedOrderItem>();
+        merged.forEach((x) => { if (!byUuid.has(x.uuid_id)) byUuid.set(x.uuid_id, x); });
+        return Array.from(byUuid.values()).sort((a, b) => {
+          const aTime = a.production_finished_at ? new Date(a.production_finished_at).getTime() : 0;
+          const bTime = b.production_finished_at ? new Date(b.production_finished_at).getTime() : 0;
+          return bTime - aTime;
+        });
+      });
+      setPersistStatusMap((prev) => new Map(prev).set(item.uuid_id, { status: 'processing' }));
+    }
+
+    try {
+      await electronAPI.localDbUpdatePackageLine({ id: line.id, finished_at: newFinishedAt });
+      if (allVisibleDone) {
+        setPersistStatusMap((prev) => new Map(prev).set(item.uuid_id, { status: 'success' }));
+        setTimeout(() => setPersistStatusMap((p) => { const next = new Map(p); next.delete(item.uuid_id); return next; }), 3000);
+        fetchOrders();
+      }
+    } catch (error) {
+      if (allVisibleDone) {
+        optimisticFinishedRef.current.delete(item.uuid_id);
+        setFinishedOrders((prev) => prev.filter((x) => x.uuid_id !== item.uuid_id));
+        setActiveOrders((prev) =>
+          [...prev, item].sort((a, b) =>
+            (a.created_at ? new Date(a.created_at).getTime() : 0) - (b.created_at ? new Date(b.created_at).getTime() : 0)
+          )
+        );
+      }
+      const errMsg = error instanceof Error ? error.message : String(error);
+      setPersistStatusMap((prev) => new Map(prev).set(item.uuid_id, { status: 'error', message: errMsg }));
+      console.error('Failed to update package line:', error);
+      alert('Failed to update package line');
+    }
   };
 
   if (loading) {
@@ -749,19 +1054,57 @@ export default function BaristaDisplay({ viewOnly = false, legacyCardLayout = fa
             </div>
           ) : (
             <div className={`space-y-2 ${legacyCardLayout ? 'bg-lime-50' : ''}`} title="LIST WRAPPER">
-              {activeOrders.map((item, index) => (
-                <div
-                  key={`${item.uuid_id}-${index}`}
-                  ref={index === 0 ? firstCardRef : undefined}
-                  onDoubleClick={viewOnly ? undefined : () => handleMarkFinished(item)}
-                  className={legacyCardLayout
-                    ? `w-full min-w-0 border-2 border-blue-300 rounded-lg p-2 transition-all flex relative bg-amber-100 ${viewOnly ? '' : 'cursor-pointer hover:border-blue-500 hover:shadow-md'}`
-                    : `w-full min-w-0 border-2 border-gray-800 rounded-lg p-2.5 transition-all flex flex-col relative bg-white shadow-sm ${viewOnly ? '' : 'cursor-pointer hover:border-blue-700 hover:shadow-md'}`
-                  }
-                  style={{ minHeight: legacyCardLayout ? '100px' : '60px' }}
-                  title="CARD"
-                >
-                  {legacyCardLayout ? (
+              {activeOrders.map((item, index) => {
+                const isPackage = item.packageBreakdownLines && item.packageBreakdownLines.length > 0;
+                return (
+                  <div
+                    key={item.uuid_id}
+                    ref={index === 0 ? firstCardRef : undefined}
+                    onDoubleClick={viewOnly || isPackage ? undefined : () => handleMarkFinished(item)}
+                    className={legacyCardLayout
+                      ? `w-full min-w-0 border-2 border-blue-300 rounded-lg p-2 transition-all flex relative bg-amber-100 ${viewOnly || isPackage ? '' : 'cursor-pointer hover:border-blue-500 hover:shadow-md'} ${isPackage ? 'border-amber-500' : ''}`
+                      : `w-full min-w-0 border-2 border-gray-800 rounded-lg p-2.5 transition-all flex flex-col relative bg-white shadow-sm ${viewOnly || isPackage ? '' : 'cursor-pointer hover:border-blue-700 hover:shadow-md'} ${isPackage ? 'border-amber-600' : ''}`
+                    }
+                    style={{ minHeight: legacyCardLayout ? '100px' : '60px' }}
+                    title="CARD"
+                  >
+                    {isPackage ? (
+                      <>
+                        <div className="flex-1 flex flex-col gap-0.5 min-w-0 overflow-visible">
+                          <div className="text-base font-bold text-amber-900">
+                            Paket: {item.total_quantity}x {item.product_name}
+                          </div>
+                          <div className="text-black font-semibold truncate" title={item.pickup_method === 'take-away' ? 'Take Away' : (item.table_number || '-')}>
+                            {item.pickup_method === 'take-away' ? 'Take Away' : (item.table_number || '-')}
+                          </div>
+                          <div className="border-l-2 border-amber-400 pl-2 mt-1 space-y-1">
+                            {item.packageBreakdownLines!.map((line, idx) => {
+                              const lineChecked = packageCheckedSubItems.get(item.uuid_id)?.has(idx) ?? (line.finished_at != null);
+                              const lineFinishedAt = line.finished_at ?? optimisticPackageLineFinishedAt.get(item.uuid_id)?.get(idx);
+                              const lineStart = item.production_started_at || item.created_at;
+                              const lineDurationMinutes = lineChecked && lineFinishedAt && lineStart
+                                ? Math.max(0, Math.round((new Date(lineFinishedAt).getTime() - new Date(lineStart).getTime()) / 60000))
+                                : null;
+                              return (
+                                <div
+                                  key={idx}
+                                  onDoubleClick={viewOnly ? undefined : () => handlePackageSubItemDoubleClick(item, idx)}
+                                  className={`py-0.5 px-1 rounded min-h-[44px] flex items-center justify-between gap-2 text-gray-900 font-medium ${viewOnly ? '' : 'cursor-pointer hover:bg-amber-100'} ${lineChecked ? 'line-through opacity-75 bg-amber-50' : ''}`}
+                                >
+                                  <span>{line.quantity}x {line.product_name}</span>
+                                  {lineChecked && lineDurationMinutes != null ? (
+                                    <span className="text-base font-mono font-bold text-blue-700 shrink-0">{lineDurationMinutes} Menit</span>
+                                  ) : (
+                                    <OrderTimer startedAt={item.production_started_at} createdAt={item.created_at} />
+                                  )}
+                                </div>
+                              );
+                            })}
+                          </div>
+                        </div>
+                        <span className="text-xl font-mono font-bold text-blue-700 shrink-0 self-end"><OrderTimer startedAt={item.production_started_at} createdAt={item.created_at} /></span>
+                      </>
+                    ) : legacyCardLayout ? (
                     <>
                       <div ref={index === 0 ? firstTextWrapperRef : undefined} className="flex-1 flex flex-col gap-0.5 min-w-0 basis-0 overflow-visible">
                         <div ref={index === 0 ? firstProductNameRef : undefined} className="text-lg font-semibold text-gray-900 break-all">
@@ -800,7 +1143,7 @@ export default function BaristaDisplay({ viewOnly = false, legacyCardLayout = fa
                         ) : null}
                       </div>
                     </>
-                  ) : (
+                    ) : (
                     <div ref={index === 0 ? firstTextWrapperRef : undefined} className="flex flex-col gap-0.5 min-w-0 overflow-visible" title="TEXT WRAPPER">
                       <div
                         ref={index === 0 ? firstProductNameRef : undefined}
@@ -839,9 +1182,10 @@ export default function BaristaDisplay({ viewOnly = false, legacyCardLayout = fa
                         </div>
                       )}
                     </div>
-                  )}
-                </div>
-              ))}
+                    )}
+                  </div>
+                );
+              })}
             </div>
           )}
         </div>
@@ -859,15 +1203,37 @@ export default function BaristaDisplay({ viewOnly = false, legacyCardLayout = fa
             </div>
           ) : (
             <div className={`space-y-2 ${legacyCardLayout ? 'bg-lime-50' : ''}`} title="LIST WRAPPER (finished)">
-              {finishedOrders.map((item, index) => {
-                const duration = formatDuration(item.production_started_at, item.production_finished_at);
+              {finishedOrders.map((item) => {
+                const durationMinutes = (() => {
+                  const start = item.production_started_at || item.created_at;
+                  const end = item.production_finished_at;
+                  if (!start || !end) return null;
+                  const diffMs = new Date(end).getTime() - new Date(start).getTime();
+                  return diffMs >= 0 ? Math.round(diffMs / 60000) : null;
+                })();
+                const isPackageFinished = item.packageBreakdownLines && item.packageBreakdownLines.length > 0;
+                const persistStatus = persistStatusMap.get(item.uuid_id);
                 if (legacyCardLayout) {
                   return (
-                    <div key={`${item.uuid_id}-${index}`} className="border-2 border-gray-300 rounded-lg p-2 opacity-75 bg-amber-100" title="FINISHED CARD">
+                    <div key={item.uuid_id} className="border-2 border-gray-300 rounded-lg p-2 opacity-75 bg-amber-100 relative" title="FINISHED CARD">
                       <div className="flex flex-col gap-1 min-w-0">
                         <div className="text-lg font-semibold text-gray-600 break-all">
-                          {item.total_quantity}x {item.platform_label === 'Offline' ? '' : `[${item.platform_label}] `}{item.product_name}
+                          {isPackageFinished ? `Paket: ${item.total_quantity}x ${item.product_name}` : `${item.total_quantity}x ${item.platform_label === 'Offline' ? '' : `[${item.platform_label}] `}${item.product_name}`}
                         </div>
+                        {isPackageFinished && (
+                          <div className="border-l-2 border-amber-400 pl-2 mt-0.5 space-y-0.5">
+                            {item.packageBreakdownLines!.map((line, idx) => {
+                              const lineFinishedAt = line.finished_at ?? undefined;
+                              const lineStart = item.production_started_at || item.created_at;
+                              const lineDurationMinutes = lineFinishedAt && lineStart
+                                ? Math.max(0, Math.round((new Date(lineFinishedAt).getTime() - new Date(lineStart).getTime()) / 60000))
+                                : durationMinutes;
+                              return (
+                                <div key={idx} className="text-gray-600 text-sm line-through">{line.quantity}x {line.product_name}{lineDurationMinutes != null ? ` · ${lineDurationMinutes} Menit` : ''}</div>
+                              );
+                            })}
+                          </div>
+                        )}
                         {item.customizations && item.customizations.length > 0 && (
                           <div className="text-blue-700 font-bold text-base flex flex-wrap break-words">
                             {item.customizations.map((customization, idx) => (
@@ -894,15 +1260,16 @@ export default function BaristaDisplay({ viewOnly = false, legacyCardLayout = fa
                             const startTimeSource = item.production_started_at || item.created_at;
                             const startTime = startTimeSource ? new Date(startTimeSource).toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit', hour12: false }) : null;
                             const endTime = item.production_finished_at ? new Date(item.production_finished_at).toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit', hour12: false }) : null;
-                            let durationText = '';
-                            if (startTimeSource && item.production_finished_at) {
-                              const start = new Date(startTimeSource);
-                              const end = new Date(item.production_finished_at);
-                              const diffMinutes = Math.floor((end.getTime() - start.getTime()) / (1000 * 60));
-                              durationText = ` | Waktu penyelesaian: ${diffMinutes} Menit`;
-                            }
+                            const durationText = durationMinutes != null ? ` | Selesai dalam ${durationMinutes} Menit` : '';
                             return `${tableText}${startTime ? `Mulai: ${startTime}` : ''}${startTime && endTime ? ' | ' : ''}${endTime ? `Selesai: ${endTime}` : ''}${durationText}`;
                           })()}
+                        </div>
+                      )}
+                      {persistStatus && (
+                        <div className="absolute bottom-1 right-1 text-[10px] text-right">
+                          {persistStatus.status === 'processing' && <span className="text-amber-700">Memproses...</span>}
+                          {persistStatus.status === 'success' && <span className="text-green-700">Tersimpan</span>}
+                          {persistStatus.status === 'error' && <span className="text-red-700 truncate max-w-[120px]" title={persistStatus.message}>Gagal: {persistStatus.message}</span>}
                         </div>
                       )}
                     </div>
@@ -910,11 +1277,37 @@ export default function BaristaDisplay({ viewOnly = false, legacyCardLayout = fa
                 }
                 return (
                   <div
-                    key={`${item.uuid_id}-${index}`}
-                    className="border-2 border-gray-700 rounded-lg p-2.5 bg-white"
+                    key={item.uuid_id}
+                    className="border-2 border-gray-700 rounded-lg p-2.5 bg-white relative"
                     title="FINISHED CARD"
                   >
                     <div className="flex flex-col gap-0.5 min-w-0">
+                      {isPackageFinished ? (
+                        <>
+                          <div className="text-base font-bold text-gray-900 grid gap-x-2 items-center line-through" style={{ gridTemplateColumns: '1fr 6rem 7rem 9rem' }}>
+                            <span className="min-w-0 break-words">Paket: {item.total_quantity}x {item.product_name}</span>
+                            <span className="text-gray-900 font-semibold truncate">{item.pickup_method === 'take-away' ? 'Take Away' : (item.table_number || '-')}</span>
+                            <span className="text-gray-900 font-semibold truncate">{item.customer_name || '-'}</span>
+                            <span className="font-mono text-gray-800 text-sm shrink-0">{durationMinutes != null ? `${durationMinutes} Menit` : '-'}</span>
+                          </div>
+                          <div className="border-l-2 border-amber-400 pl-2 mt-1 space-y-0.5">
+                            {item.packageBreakdownLines!.map((line, idx) => {
+                              const lineFinishedAt = line.finished_at ?? undefined;
+                              const lineStart = item.production_started_at || item.created_at;
+                              const lineDurationMinutes = lineFinishedAt && lineStart
+                                ? Math.max(0, Math.round((new Date(lineFinishedAt).getTime() - new Date(lineStart).getTime()) / 60000))
+                                : durationMinutes;
+                              return (
+                                <div key={idx} className="flex items-center justify-between gap-2 text-gray-700 text-sm line-through">
+                                  <span>{line.quantity}x {line.product_name}</span>
+                                  {lineDurationMinutes != null && <span className="font-mono text-gray-600 shrink-0">{lineDurationMinutes} Menit</span>}
+                                </div>
+                              );
+                            })}
+                          </div>
+                        </>
+                      ) : (
+                        <>
                       <div
                         className="text-base font-bold text-gray-900 grid gap-x-2 items-center line-through"
                         style={{ gridTemplateColumns: '1fr 6rem 7rem 9rem' }}
@@ -926,7 +1319,12 @@ export default function BaristaDisplay({ viewOnly = false, legacyCardLayout = fa
                           const startTimeSource = item.production_started_at || item.created_at;
                           const startTime = startTimeSource ? new Date(startTimeSource).toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit', hour12: false }) : null;
                           const endTime = item.production_finished_at ? new Date(item.production_finished_at).toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit', hour12: false }) : null;
-                          return <span className="font-mono text-gray-800 text-sm shrink-0">{startTime && endTime ? `${startTime} - ${endTime}` : (startTime || '-')}</span>;
+                          return (
+                            <span className="font-mono text-gray-800 text-sm shrink-0">
+                              {startTime && endTime ? `${startTime} - ${endTime}` : (startTime || '-')}
+                              {durationMinutes != null && ` · ${durationMinutes} Menit`}
+                            </span>
+                          );
                         })()}
                       </div>
                       {(item.custom_note || (item.customizations && item.customizations.length > 0)) && (
@@ -952,6 +1350,15 @@ export default function BaristaDisplay({ viewOnly = false, legacyCardLayout = fa
                               note: {item.custom_note}
                             </span>
                           )}
+                        </div>
+                      )}
+                        </>
+                      )}
+                      {persistStatus && (
+                        <div className="absolute bottom-1 right-1 text-[10px] text-right">
+                          {persistStatus.status === 'processing' && <span className="text-amber-700">Memproses...</span>}
+                          {persistStatus.status === 'success' && <span className="text-green-700">Tersimpan</span>}
+                          {persistStatus.status === 'error' && <span className="text-red-700 truncate max-w-[140px]" title={persistStatus.message}>Gagal: {persistStatus.message}</span>}
                         </div>
                       )}
                     </div>

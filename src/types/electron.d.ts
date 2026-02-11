@@ -1,11 +1,27 @@
 declare global {
+  type ShiftPrintRefundRow = {
+    refund_uuid?: string;
+    transaction_uuid?: string;
+    transaction_uuid_id?: string;
+    refund_amount?: number;
+    refunded_at?: string;
+    payment_method?: string;
+    final_amount?: number;
+    reason?: string | null;
+    issuer_email?: string | null;
+    waiter_name?: string | null;
+    customer_name?: string | null;
+  };
+
   type ShiftPrintBreakdownSection = {
     title?: string;
     user_name: string;
     shift_start: string;
     shift_end: string | null;
     modal_awal: number;
-    statistics: { order_count: number; total_amount: number; total_discount: number; voucher_count: number };
+    statistics: { order_count: number; total_amount: number; total_discount: number; voucher_count: number; total_cu?: number };
+    gross_total_omset?: number;
+    refunds?: ShiftPrintRefundRow[];
     productSales: Array<{
       product_name: string;
       total_quantity: number;
@@ -70,6 +86,7 @@ declare global {
         printerType?: string;
         business_id?: number;
         orderContext?: { waiterName?: string; customerName?: string; tableName?: string; orderTime?: string; itemsHtml?: string; itemsHtmlCategory1?: string; itemsHtmlCategory2?: string; category1Name?: string; category2Name?: string };
+        isOnlineOrder?: boolean;
       }) => Promise<{ success: boolean; error?: string }>;
       openCashDrawer: () => Promise<unknown>;
       playSound: (soundType: string) => Promise<unknown>;
@@ -163,6 +180,12 @@ declare global {
       localDbGetAllProducts?: (businessId?: number) => Promise<unknown[]>;
       localDbGetBundleItems?: (productId: number) => Promise<unknown[]>;
       localDbUpsertBundleItems?: (rows: unknown[]) => Promise<{ success: boolean }>;
+      localDbGetPackageItems?: (packageProductId: number | string) => Promise<unknown[]>;
+      localDbUpsertPackageItems?: (rows: unknown[]) => Promise<{ success: boolean }>;
+      localDbUpsertPackageItemProducts?: (rows: unknown[]) => Promise<{ success: boolean }>;
+      localDbMarkInactiveBundleItems?: (businessId: number, syncedBundleItemIds: number[]) => Promise<{ success: boolean; error?: string }>;
+      localDbMarkInactivePackageItems?: (businessId: number, syncedPackageItemIds: number[]) => Promise<{ success: boolean; error?: string }>;
+      localDbMarkInactivePackageItemProducts?: (businessId: number, syncedPackageItemProductIds: number[]) => Promise<{ success: boolean; error?: string }>;
       localDbUpdateSyncStatus?: (key: string, status: string) => Promise<{ success: boolean }>;
       localDbGetSyncStatus?: (key: string) => Promise<{ key: string; last_sync: number; status: string } | null>;
 
@@ -250,6 +273,8 @@ declare global {
         }>;
       }>;
       localDbUpsertTransactionItems?: (rows: unknown[]) => Promise<unknown>;
+      localDbGetPackageLines?: (uuidTransactionItemIds: string[]) => Promise<Array<{ id: number; uuid_transaction_item_id: string; product_id: number; quantity: number; finished_at: string | null }>>;
+      localDbUpdatePackageLine?: (payload: { id: number; finished_at: string | null }) => Promise<{ success: boolean; error?: string }>;
       localDbUpsertTransactionItemCustomizations?: (rows: unknown[]) => Promise<{ success: boolean; count: number; error?: string }>;
       localDbUpsertTransactionItemCustomizationOptions?: (rows: unknown[]) => Promise<{ success: boolean; count: number; error?: string }>;
       localDbGetTransactionRefunds?: (transactionUuid: string) => Promise<unknown[]>;

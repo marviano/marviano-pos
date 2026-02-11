@@ -30,6 +30,8 @@ export interface Product {
   fee_kerja: number | null;
   image_url: string | null;
   status: 'active' | 'inactive';
+  is_bundle?: number | boolean;
+  is_package?: number | boolean;
 }
 
 export interface Category {
@@ -42,7 +44,7 @@ export interface Category {
  */
 export async function fetchProducts(
   category2Name?: string,
-  transactionType?: 'drinks' | 'bakery' | 'foods',
+  transactionType?: 'drinks' | 'bakery' | 'foods' | 'packages',
   options?: { isOnline?: boolean, forceOnline?: boolean, platform?: 'qpon' | 'gofood' | 'grabfood' | 'shopeefood' | 'tiktok', businessId?: number }
 ): Promise<Product[]> {
   // Use Electron MySQL connection (direct MySQL queries via IPC)
@@ -77,9 +79,13 @@ export async function fetchProducts(
  */
 async function fetchProductsFromMySQL(
   category2Name?: string,
-  transactionType?: 'drinks' | 'bakery' | 'foods',
+  transactionType?: 'drinks' | 'bakery' | 'foods' | 'packages',
   options?: { isOnline?: boolean, platform?: 'qpon' | 'gofood' | 'grabfood' | 'shopeefood' | 'tiktok', businessId?: number }
-): Promise<Product[]> {try {
+): Promise<Product[]> {
+    // #region agent log
+    try { fetch('http://127.0.0.1:7244/ingest/c0917f49-320f-4b63-aac0-b89a407233e0',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'offlineDataFetcher.ts:fetchProductsFromMySQL',message:'fetchProducts entry',data:{category2Name,transactionType,businessId:options?.businessId},timestamp:Date.now(),sessionId:'debug-session',hypothesisId:'H3,H4'})}).catch(()=>{}); } catch (_) {}
+    // #endregion
+    try {
     const electronAPI = typeof window !== 'undefined' ? (window as { electronAPI?: UnknownRecord }).electronAPI : undefined;if (!electronAPI) {
       console.warn('⚠️ [FETCH PRODUCTS] Electron API not available');
       return [];
@@ -89,16 +95,27 @@ async function fetchProductsFromMySQL(
     const businessId = options?.businessId;// Fetch products by category2_name or all products
     if (category2Name && electronAPI.localDbGetProductsByCategory2) {
       const result = await (electronAPI.localDbGetProductsByCategory2 as (category2Name: string, businessId?: number) => Promise<unknown[]>)(category2Name, businessId);
-      products = Array.isArray(result) ? result as UnknownRecord[] : [];} else if (electronAPI.localDbGetAllProducts) {
+      products = Array.isArray(result) ? result as UnknownRecord[] : [];
+      // #region agent log
+      const isPaketBukber = (category2Name || '').includes('Paket Bukber');
+      if (isPaketBukber || (transactionType === 'foods' && products.some((p: UnknownRecord) => String(p.category2_name || '').includes('Paket Bukber')))) {
+        const paketAyam = products.find((p: UnknownRecord) => String(p.nama || '').toLowerCase().includes('paket ayam sedih') || String(p.menu_code || '') === 'PAKET-001');
+        const sampleArr = products.slice(0, 5).map((p: UnknownRecord) => ({ nama: p.nama, c1: p.category1_name, c2: p.category2_name }));
+        const payload = { location: 'offlineDataFetcher.ts:fetchProducts', message: 'raw products from DB', data: { category2Name, rawCount: products.length, paketAyamFound: !!paketAyam, paketAyamData: paketAyam ? { id: paketAyam.id, nama: paketAyam.nama, c1: paketAyam.category1_name, c2: paketAyam.category2_name } : null, sample: sampleArr }, timestamp: Date.now(), sessionId: 'debug-session', hypothesisId: 'H1,H3' };
+        fetch('http://127.0.0.1:7244/ingest/c0917f49-320f-4b63-aac0-b89a407233e0', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) }).catch(() => {});
+      }
+      // #endregion
+    } else if (electronAPI.localDbGetAllProducts) {
       const result = await (electronAPI.localDbGetAllProducts as (businessId?: number) => Promise<unknown[]>)(businessId);
       products = Array.isArray(result) ? result as UnknownRecord[] : [];} else {
       console.warn('⚠️ [FETCH PRODUCTS] MySQL query methods not available');
       return [];
     }
 
-    // Filter by transaction type using category1_name
+    // Filter by transaction type using category1_name or category1_id
     if (transactionType) {
       const beforeCount = products.length;
+      const paketAyamInRaw = products.find((p: UnknownRecord) => String(p.nama || '').toLowerCase().includes('paket ayam sedih') || String(p.menu_code || '') === 'PAKET-001');
       if (transactionType === 'drinks') {
         products = products.filter((p: UnknownRecord) => {
           const category1Name = p.category1_name;
@@ -108,7 +125,19 @@ async function fetchProductsFromMySQL(
         products = products.filter((p: UnknownRecord) => p.category1_name === 'Bakery');
       } else if (transactionType === 'foods') {
         products = products.filter((p: UnknownRecord) => p.category1_name === 'Makanan');
-      }}
+      } else if (transactionType === 'packages') {
+        products = products.filter((p: UnknownRecord) =>
+          String(p.category1_name || '').toUpperCase() === 'PAKET' || p.category1_id === 14
+        );
+      }
+      // #region agent log
+      const hadPaketBukber = (category2Name || '').includes('Paket Bukber') || (beforeCount > 0 && products.some((p: UnknownRecord) => String(p.category2_name || '').includes('Paket Bukber')));
+      if (hadPaketBukber || paketAyamInRaw) {
+        const paketAyamAfter = products.find((p: UnknownRecord) => String(p.nama || '').toLowerCase().includes('paket ayam sedih'));
+        fetch('http://127.0.0.1:7244/ingest/c0917f49-320f-4b63-aac0-b89a407233e0',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'offlineDataFetcher.ts:fetchProducts',message:'after transactionType filter',data:{category2Name,transactionType,beforeCount,afterCount:products.length,paketAyamInRaw:!!paketAyamInRaw,paketAyamC1:paketAyamInRaw?paketAyamInRaw.category1_name:null,paketAyamInResult:!!paketAyamAfter},timestamp:Date.now(),sessionId:'debug-session',hypothesisId:'H3,H5'})}).catch(()=>{});
+      }
+      // #endregion
+    }
 
     // Filter by platform if in online mode
     if (options?.isOnline && options?.platform) {
@@ -162,7 +191,7 @@ async function fetchProductsFromMySQL(
  * Fetch categories from MySQL database via Electron IPC (direct MySQL connection)
  */
 export async function fetchCategories(
-  transactionType?: 'drinks' | 'bakery' | 'foods',
+  transactionType?: 'drinks' | 'bakery' | 'foods' | 'packages',
   options?: { isOnline?: boolean, platform?: 'qpon' | 'gofood' | 'grabfood' | 'shopeefood' | 'tiktok', businessId?: number }
 ): Promise<Category[]> {
   // Use Electron MySQL connection (direct MySQL queries via IPC)
@@ -196,9 +225,13 @@ export async function fetchCategories(
  * Categories are derived from products (category2 names from active products)
  */
 async function fetchCategoriesFromMySQL(
-  transactionType?: 'drinks' | 'bakery' | 'foods',
+  transactionType?: 'drinks' | 'bakery' | 'foods' | 'packages',
   options?: { isOnline?: boolean, platform?: 'qpon' | 'gofood' | 'grabfood' | 'shopeefood' | 'tiktok', businessId?: number }
-): Promise<Category[]> {try {
+): Promise<Category[]> {
+    // #region agent log
+    try { fetch('http://127.0.0.1:7244/ingest/c0917f49-320f-4b63-aac0-b89a407233e0',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'offlineDataFetcher.ts:fetchCategoriesFromMySQL',message:'fetchCategories entry',data:{transactionType,businessId:options?.businessId},timestamp:Date.now(),sessionId:'debug-session',hypothesisId:'H2,H4'})}).catch(()=>{}); } catch (_) {}
+    // #endregion
+    try {
     const electronAPI = typeof window !== 'undefined' ? (window as { electronAPI?: UnknownRecord }).electronAPI : undefined;if (!electronAPI?.localDbGetAllProducts) {
       console.warn('⚠️ [FETCH CATEGORIES] MySQL query method not available');
       return [];
@@ -206,7 +239,15 @@ async function fetchCategoriesFromMySQL(
 
     const businessId = options?.businessId;
     const allProductsResult = await (electronAPI.localDbGetAllProducts as (businessId?: number) => Promise<unknown[]>)(businessId);
-    const allProducts: UnknownRecord[] = Array.isArray(allProductsResult) ? allProductsResult as UnknownRecord[] : [];    // Filter products by transaction type using category1_name
+    const allProducts: UnknownRecord[] = Array.isArray(allProductsResult) ? allProductsResult as UnknownRecord[] : [];
+    // #region agent log
+    const paketAyam = allProducts.find((p: UnknownRecord) => (String(p.nama || '').toLowerCase().includes('paket ayam sedih') || String(p.menu_code || '') === 'PAKET-001'));
+    const paketBukberProducts = allProducts.filter((p: UnknownRecord) => String(p.category2_name || '').includes('Paket Bukber'));
+    const sampleArr2 = paketBukberProducts.slice(0, 3).map((p: UnknownRecord) => ({ id: p.id, nama: p.nama, c1: p.category1_name, c2: p.category2_name, hj: p.harga_jual }));
+    const payload1 = { location: 'offlineDataFetcher.ts:fetchCategories', message: 'allProducts loaded', data: { allProductsCount: allProducts.length, transactionType, businessId, paketAyamSedihFound: !!paketAyam, paketAyamData: paketAyam ? { id: paketAyam.id, nama: paketAyam.nama, menu_code: paketAyam.menu_code, category1_name: paketAyam.category1_name, category2_name: paketAyam.category2_name, harga_jual: paketAyam.harga_jual } : null, paketBukberCount: paketBukberProducts.length, paketBukberSample: sampleArr2 }, timestamp: Date.now(), sessionId: 'debug-session', hypothesisId: 'H1,H2,H5' };
+    fetch('http://127.0.0.1:7244/ingest/c0917f49-320f-4b63-aac0-b89a407233e0', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload1) }).catch(() => {});
+    // #endregion
+    // Filter products by transaction type using category1_name or category1_id
     let filteredProducts = allProducts;
     if (transactionType) {
       if (transactionType === 'bakery') {
@@ -217,6 +258,10 @@ async function fetchCategoriesFromMySQL(
         );
       } else if (transactionType === 'foods') {
         filteredProducts = allProducts.filter((p: UnknownRecord) => p.category1_name === 'Makanan');
+      } else if (transactionType === 'packages') {
+        filteredProducts = allProducts.filter((p: UnknownRecord) =>
+          String(p.category1_name || '').toUpperCase() === 'PAKET' || p.category1_id === 14
+        );
       }
     }
 
@@ -224,6 +269,19 @@ async function fetchCategoriesFromMySQL(
     // This matches the filtering logic in CenterContent.tsx
     if (!options?.isOnline) {
       const beforeCount = filteredProducts.length;
+      const excludedByHarga = filteredProducts.filter((p: UnknownRecord) => {
+        const product = p as unknown as Product;
+        const hj = product.harga_jual;
+        return hj === null || hj === undefined || hj === 0;
+      });
+      const paketAyamExcluded = excludedByHarga.find((p: UnknownRecord) => String(p.nama || '').toLowerCase().includes('paket ayam sedih') || String(p.menu_code || '') === 'PAKET-001');
+      // #region agent log
+      if (transactionType === 'foods' && (paketAyamExcluded || excludedByHarga.some((p: UnknownRecord) => String(p.category2_name || '').includes('Paket Bukber')))) {
+        const excludedArr = excludedByHarga.filter((p: UnknownRecord) => String(p.category2_name || '').includes('Paket Bukber')).map((p: UnknownRecord) => ({ nama: p.nama, hj: p.harga_jual }));
+        const payload2 = { location: 'offlineDataFetcher.ts:fetchCategories', message: 'harga_jual filter excluded Paket Bukber', data: { beforeCount, excludedCount: excludedByHarga.length, paketAyamExcluded: !!paketAyamExcluded, paketAyamData: paketAyamExcluded ? { nama: paketAyamExcluded.nama, harga_jual: paketAyamExcluded.harga_jual, category2: paketAyamExcluded.category2_name } : null, paketBukberExcluded: excludedArr }, timestamp: Date.now(), sessionId: 'debug-session', hypothesisId: 'H2' };
+        fetch('http://127.0.0.1:7244/ingest/c0917f49-320f-4b63-aac0-b89a407233e0', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload2) }).catch(() => {});
+      }
+      // #endregion
       filteredProducts = filteredProducts.filter((p: UnknownRecord) => {
         const product = p as unknown as Product;
         const hargaJual = product.harga_jual;
@@ -242,7 +300,15 @@ async function fetchCategoriesFromMySQL(
       if (category2Name && category2Name.trim() !== '') {
         category2Set.add(category2Name);
       }
-    });// Apply platform filter if needed
+    });
+    // #region agent log
+    const categoriesList = Array.from(category2Set);
+    const hasPaketBukber = categoriesList.some(c => c.includes('Paket Bukber'));
+    if (transactionType === 'foods') {
+      fetch('http://127.0.0.1:7244/ingest/c0917f49-320f-4b63-aac0-b89a407233e0',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'offlineDataFetcher.ts:fetchCategories',message:'foods categories result',data:{categoriesCount:categoriesList.length,hasPaketBukber,categoriesList},timestamp:Date.now(),sessionId:'debug-session',hypothesisId:'H2,H3'})}).catch(()=>{});
+    }
+    // #endregion
+    // Apply platform filter if needed
     if (options?.isOnline && options?.platform) {
       // DEBUG: Check KOC products BEFORE platform filtering
       if (options.platform === 'tiktok') {

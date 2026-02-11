@@ -47,24 +47,27 @@ const originalConsoleLog = console.log.bind(console);
 const originalConsoleError = console.error.bind(console);
 const originalConsoleInfo = console.info.bind(console);
 const originalConsoleDebug = console.debug.bind(console);
-// Helper function to safely write to debug.log (ensures directory exists)
-function writeDebugLog(data) {
+// Debug log disabled to prevent unbounded file growth (was writing to .cursor/debug.log).
+// Re-enable temporarily by uncommenting the body and using a bounded/rotating log if needed.
+function writeDebugLog(_data) {
+    // no-op
+}
+/** Write system_pos save failure to .cursor/system_pos_debug.log for debugging intermittent sync failures. */
+function writeSystemPosDebugLog(entry) {
     try {
-        const debugLogPath = path.join(__dirname, '..', '.cursor', 'debug.log');
-        const debugLogDir = path.dirname(debugLogPath);
-        // Ensure directory exists
-        if (!fs.existsSync(debugLogDir)) {
-            fs.mkdirSync(debugLogDir, { recursive: true });
+        const logPath = path.join(__dirname, '..', '.cursor', 'system_pos_debug.log');
+        const logDir = path.dirname(logPath);
+        if (!fs.existsSync(logDir)) {
+            fs.mkdirSync(logDir, { recursive: true });
         }
-        // Append to log file
-        fs.appendFileSync(debugLogPath, data + '\n');
+        const line = JSON.stringify({
+            ts: new Date().toISOString(),
+            ...entry
+        }) + '\n';
+        fs.appendFileSync(logPath, line);
     }
-    catch (error) {
-        // Silently fail - debug logging should not break the application
-        // Only log to console if it's a critical error
-        if (error instanceof Error && !error.message.includes('ENOENT')) {
-            console.warn('Failed to write to debug.log:', error.message);
-        }
+    catch {
+        // do not break app if log write fails
     }
 }
 // MySQL pool will be initialized in createWindow
@@ -359,6 +362,35 @@ async function ensureTransactionItemsWaiterIdColumn() {
         console.warn('⚠️ Lazy migration transaction_items.waiter_id failed (will retry on next use):', e?.message);
     }
 }
+/** Lazy migration: ensure transaction_items.package_line_finished_at_json exists (legacy; prefer transaction_item_package_lines.finished_at). */
+let transactionItemsPackageLineFinishedAtEnsured = false;
+async function ensureTransactionItemsPackageLineFinishedAtColumn() {
+    if (transactionItemsPackageLineFinishedAtEnsured)
+        return;
+    try {
+        await (0, mysqlDb_1.executeDdlIgnoreDup)('ALTER TABLE transaction_items ADD COLUMN package_line_finished_at_json TEXT DEFAULT NULL COMMENT \'Per-line finished-at times for package breakdown (JSON: {"0":"iso",...})\' AFTER production_finished_at');
+        transactionItemsPackageLineFinishedAtEnsured = true;
+        console.log('✅ transaction_items.package_line_finished_at_json column ensured (lazy migration)');
+    }
+    catch (e) {
+        console.warn('⚠️ Lazy migration transaction_items.package_line_finished_at_json failed (will retry on next use):', e?.message);
+    }
+}
+/** Lazy migration: ensure transaction_item_package_lines.finished_at exists (normalized per-line completion). */
+let transactionItemPackageLinesFinishedAtEnsured = false;
+async function ensureTransactionItemPackageLinesFinishedAtColumn() {
+    if (transactionItemPackageLinesFinishedAtEnsured)
+        return;
+    try {
+        await (0, mysqlDb_1.executeDdlIgnoreDup)('ALTER TABLE transaction_item_package_lines ADD COLUMN finished_at TIMESTAMP NULL DEFAULT NULL AFTER quantity');
+        await (0, mysqlDb_1.executeDdlIgnoreDup)('ALTER TABLE transaction_item_package_lines ADD INDEX idx_tipl_finished_at (finished_at)');
+        transactionItemPackageLinesFinishedAtEnsured = true;
+        console.log('✅ transaction_item_package_lines.finished_at column ensured (lazy migration)');
+    }
+    catch (e) {
+        console.warn('⚠️ Lazy migration transaction_item_package_lines.finished_at failed (will retry on next use):', e?.message);
+    }
+}
 async function ensureSystemPosQueueTable() {
     const sql = `CREATE TABLE IF NOT EXISTS system_pos_queue (
     id INT NOT NULL AUTO_INCREMENT,
@@ -439,6 +471,7 @@ async function ensureSystemPosSchema() {
       total_price DECIMAL(15,2) NOT NULL,
       custom_note TEXT DEFAULT NULL,
       bundle_selections_json TEXT DEFAULT NULL,
+      package_selections_json TEXT DEFAULT NULL,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
       waiter_id INT DEFAULT NULL,
       PRIMARY KEY (id),
@@ -515,6 +548,7 @@ async function ensureSystemPosSchema() {
         'ALTER TABLE transactions ADD COLUMN waiter_id INT DEFAULT NULL AFTER user_id',
         'ALTER TABLE transaction_items ADD COLUMN waiter_id INT DEFAULT NULL AFTER created_at',
         "ALTER TABLE transactions ADD COLUMN sync_status ENUM('pending','synced','failed') DEFAULT 'pending' AFTER payment_method_id",
+        "ALTER TABLE products ADD COLUMN is_package TINYINT(1) NOT NULL DEFAULT 0 COMMENT '1 = package product' AFTER is_bundle",
         'ALTER TABLE transactions ADD COLUMN sync_attempts INT DEFAULT 0 AFTER sync_status',
         'ALTER TABLE transactions ADD COLUMN synced_at DATETIME DEFAULT NULL AFTER synced_at',
         'ALTER TABLE transactions ADD COLUMN last_sync_attempt TIMESTAMP NULL DEFAULT NULL AFTER synced_at',
@@ -526,7 +560,7 @@ async function ensureSystemPosSchema() {
     for (const sql of alterColumns) {
         await (0, mysqlDb_1.executeSystemPosDdlIgnoreDup)(sql);
     }
-    const masterTables = ['organizations', 'roles', 'businesses', 'category1', 'category2', 'category2_businesses', 'products', 'product_customization_types', 'product_customization_options', 'users', 'employees_position', 'employees', 'payment_methods'];
+    const masterTables = ['organizations', 'roles', 'businesses', 'category1', 'category2', 'category2_businesses', 'products', 'product_customization_types', 'product_customization_options', 'bundle_items', 'package_items', 'package_item_products', 'users', 'employees_position', 'employees', 'payment_methods'];
     for (const t of masterTables) {
         try {
             await (0, mysqlDb_1.executeSystemPosDdl)(`CREATE TABLE IF NOT EXISTS \`${t}\` LIKE \`${mainDb}\`.\`${t}\``);
@@ -1173,6 +1207,7 @@ function createWindows() {
                     }
                 }
                 const isBundle = (r.is_bundle === 1 || r.is_bundle === true) ? 1 : 0;
+                const isPackage = (r.is_package === 1 || r.is_package === true) ? 1 : 0;
                 const hasCustomization = (r.has_customization === 1 || r.has_customization === true) ? 1 : 0;
                 const productId = getId();
                 const menuCode = typeof r.menu_code === 'string' ? r.menu_code : (typeof r.menu_code === 'number' ? String(r.menu_code) : null);
@@ -1196,8 +1231,8 @@ function createWindows() {
                 queries.push({
                     sql: `INSERT INTO products (
             id, menu_code, nama, satuan, category1_id, category2_id, keterangan,
-            harga_beli, ppn, harga_jual, harga_khusus, harga_online, harga_qpon, harga_gofood, harga_grabfood, harga_shopeefood, harga_tiktok, fee_kerja, image_url, status, has_customization, is_bundle, created_at, updated_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            harga_beli, ppn, harga_jual, harga_khusus, harga_online, harga_qpon, harga_gofood, harga_grabfood, harga_shopeefood, harga_tiktok, fee_kerja, image_url, status, has_customization, is_bundle, is_package, created_at, updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
           ON DUPLICATE KEY UPDATE
             menu_code=VALUES(menu_code),
             nama=VALUES(nama),
@@ -1220,11 +1255,12 @@ function createWindows() {
             status=VALUES(status),
             has_customization=VALUES(has_customization),
             is_bundle=VALUES(is_bundle),
+            is_package=VALUES(is_package),
             updated_at=VALUES(updated_at)`,
                     params: [
                         productId, menuCode, nama, satuan, category1Id, category2Id, keterangan,
                         hargaBeli, ppn, hargaJual, hargaKhusus, hargaOnline, hargaQpon, hargaGofood, hargaGrabfood, hargaShopeefood, hargaTiktok,
-                        feeKerja, imageUrl, status, hasCustomization, isBundle,
+                        feeKerja, imageUrl, status, hasCustomization, isBundle, isPackage,
                         createdTimestamp, (0, mysqlDb_1.toMySQLTimestamp)(Date.now())
                     ]
                 });
@@ -1294,6 +1330,11 @@ function createWindows() {
                 sql: `DELETE FROM bundle_items WHERE bundle_product_id IN (${deletePlaceholders})`,
                 params: [...orphanedProductIds]
             });
+            // 3. Delete package_item_products -> package_items where package_product_id is in orphaned products
+            queries.push({
+                sql: `DELETE FROM package_items WHERE package_product_id IN (${deletePlaceholders})`,
+                params: [...orphanedProductIds]
+            });
             // 3. Delete product_businesses relationships for orphaned products
             queries.push({
                 sql: `DELETE FROM product_businesses WHERE product_id IN (${deletePlaceholders}) AND business_id = ?`,
@@ -1310,6 +1351,69 @@ function createWindows() {
         }
         catch (error) {
             console.error('❌ [PRODUCTS CLEANUP] Failed to cleanup orphaned products:', error);
+            return { success: false, error: error instanceof Error ? error.message : 'Unknown error' };
+        }
+    });
+    // Mark bundle_items as inactive if not in synced list (soft-delete sync)
+    electron_1.ipcMain.handle('localdb-mark-inactive-bundle-items', async (_event, businessId, syncedBundleItemIds) => {
+        try {
+            const params = [businessId];
+            let sql;
+            if (Array.isArray(syncedBundleItemIds) && syncedBundleItemIds.length > 0) {
+                const placeholders = syncedBundleItemIds.map(() => '?').join(',');
+                sql = `UPDATE bundle_items SET is_active = 0 WHERE bundle_product_id IN (SELECT product_id FROM product_businesses WHERE business_id = ?) AND id NOT IN (${placeholders})`;
+                params.push(...syncedBundleItemIds);
+            }
+            else {
+                sql = `UPDATE bundle_items SET is_active = 0 WHERE bundle_product_id IN (SELECT product_id FROM product_businesses WHERE business_id = ?)`;
+            }
+            await (0, mysqlDb_1.executeUpdate)(sql, params);
+            return { success: true };
+        }
+        catch (error) {
+            console.error('❌ [MARK INACTIVE] bundle_items:', error);
+            return { success: false, error: error instanceof Error ? error.message : 'Unknown error' };
+        }
+    });
+    // Mark package_items as inactive if not in synced list (soft-delete sync)
+    electron_1.ipcMain.handle('localdb-mark-inactive-package-items', async (_event, businessId, syncedPackageItemIds) => {
+        try {
+            const params = [businessId];
+            let sql;
+            if (Array.isArray(syncedPackageItemIds) && syncedPackageItemIds.length > 0) {
+                const placeholders = syncedPackageItemIds.map(() => '?').join(',');
+                sql = `UPDATE package_items SET is_active = 0 WHERE package_product_id IN (SELECT product_id FROM product_businesses WHERE business_id = ?) AND id NOT IN (${placeholders})`;
+                params.push(...syncedPackageItemIds);
+            }
+            else {
+                sql = `UPDATE package_items SET is_active = 0 WHERE package_product_id IN (SELECT product_id FROM product_businesses WHERE business_id = ?)`;
+            }
+            await (0, mysqlDb_1.executeUpdate)(sql, params);
+            return { success: true };
+        }
+        catch (error) {
+            console.error('❌ [MARK INACTIVE] package_items:', error);
+            return { success: false, error: error instanceof Error ? error.message : 'Unknown error' };
+        }
+    });
+    // Mark package_item_products as inactive if not in synced list (soft-delete sync)
+    electron_1.ipcMain.handle('localdb-mark-inactive-package-item-products', async (_event, businessId, syncedPackageItemProductIds) => {
+        try {
+            const params = [businessId];
+            let sql;
+            if (Array.isArray(syncedPackageItemProductIds) && syncedPackageItemProductIds.length > 0) {
+                const placeholders = syncedPackageItemProductIds.map(() => '?').join(',');
+                sql = `UPDATE package_item_products SET is_active = 0 WHERE package_item_id IN (SELECT id FROM package_items WHERE package_product_id IN (SELECT product_id FROM product_businesses WHERE business_id = ?)) AND id NOT IN (${placeholders})`;
+                params.push(...syncedPackageItemProductIds);
+            }
+            else {
+                sql = `UPDATE package_item_products SET is_active = 0 WHERE package_item_id IN (SELECT id FROM package_items WHERE package_product_id IN (SELECT product_id FROM product_businesses WHERE business_id = ?))`;
+            }
+            await (0, mysqlDb_1.executeUpdate)(sql, params);
+            return { success: true };
+        }
+        catch (error) {
+            console.error('❌ [MARK INACTIVE] package_item_products:', error);
             return { success: false, error: error instanceof Error ? error.message : 'Unknown error' };
         }
     });
@@ -1351,7 +1455,7 @@ function createWindows() {
         c2.name AS category2_name, c1.name AS category1_name,
         p.keterangan, p.harga_beli, p.ppn, p.harga_jual, p.harga_khusus, 
         p.harga_online, p.harga_qpon, p.harga_gofood, p.harga_grabfood, 
-        p.harga_shopeefood, p.harga_tiktok, p.fee_kerja, p.image_url, p.status, p.has_customization, p.is_bundle
+        p.harga_shopeefood, p.harga_tiktok, p.fee_kerja, p.image_url, p.status, p.has_customization, p.is_bundle, p.is_package
         FROM products p
         LEFT JOIN category2 c2 ON p.category2_id = c2.id
         LEFT JOIN category1 c1 ON p.category1_id = c1.id`;
@@ -1385,7 +1489,7 @@ function createWindows() {
         c2.name AS category2_name, c1.name AS category1_name,
         p.keterangan, p.harga_beli, p.ppn, p.harga_jual, p.harga_khusus, 
         p.harga_online, p.harga_qpon, p.harga_gofood, p.harga_grabfood, 
-        p.harga_shopeefood, p.harga_tiktok, p.fee_kerja, p.image_url, p.status, p.has_customization, p.is_bundle
+        p.harga_shopeefood, p.harga_tiktok, p.fee_kerja, p.image_url, p.status, p.has_customization, p.is_bundle, p.is_package
         FROM products p
         LEFT JOIN category2 c2 ON p.category2_id = c2.id
         LEFT JOIN category1 c1 ON p.category1_id = c1.id`;
@@ -1588,7 +1692,7 @@ function createWindows() {
           c2.name AS category2_name
         FROM bundle_items bi
         LEFT JOIN category2 c2 ON bi.category2_id = c2.id
-        WHERE bi.bundle_product_id = ?
+        WHERE bi.bundle_product_id = ? AND (COALESCE(bi.is_active, 1) = 1)
         ORDER BY bi.display_order ASC
       `, [productIdNum]);
             console.log(`✅ [BUNDLE ITEMS] Found ${bundleItems.length} bundle items for product ${productIdNum}`);
@@ -1710,16 +1814,18 @@ function createWindows() {
                     const updatedAtRaw = getDate('updated_at');
                     const createdAt = createdAtRaw ? (0, mysqlDb_1.toMySQLTimestamp)(createdAtRaw) : (0, mysqlDb_1.toMySQLTimestamp)(new Date());
                     const updatedAt = updatedAtRaw ? (0, mysqlDb_1.toMySQLTimestamp)(updatedAtRaw) : (0, mysqlDb_1.toMySQLTimestamp)(Date.now());
+                    const isActive = r.is_active !== undefined ? (r.is_active ? 1 : 0) : 1;
                     queries.push({
                         sql: `
               INSERT INTO bundle_items (
-                id, bundle_product_id, category2_id, required_quantity, display_order, created_at, updated_at
-              ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                id, bundle_product_id, category2_id, required_quantity, display_order, is_active, created_at, updated_at
+              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
               ON DUPLICATE KEY UPDATE
                 bundle_product_id = VALUES(bundle_product_id),
                 category2_id = VALUES(category2_id),
                 required_quantity = VALUES(required_quantity),
                 display_order = VALUES(display_order),
+                is_active = VALUES(is_active),
                 updated_at = VALUES(updated_at)
             `,
                         params: [
@@ -1728,6 +1834,7 @@ function createWindows() {
                             category2Id,
                             getNumber('required_quantity'),
                             getNumber('display_order'),
+                            isActive,
                             createdAt,
                             updatedAt
                         ]
@@ -1758,6 +1865,199 @@ function createWindows() {
                 ? String(error.message)
                 : String(error);
             console.error(`❌ [BUNDLE ITEMS UPSERT] Error:`, errorMessage);
+            return { success: false };
+        }
+    });
+    // Package items for POS: items + choice products for flexible
+    electron_1.ipcMain.handle('localdb-get-package-items', async (_event, packageProductId) => {
+        try {
+            const id = typeof packageProductId === 'string' ? parseInt(packageProductId, 10) : packageProductId;
+            if (isNaN(id))
+                return [];
+            const items = await (0, mysqlDb_1.executeQuery)(`
+        SELECT
+          pi.id,
+          pi.package_product_id,
+          pi.selection_type,
+          pi.product_id,
+          pi.required_quantity,
+          pi.display_order,
+          p.nama AS product_name
+        FROM package_items pi
+        LEFT JOIN products p ON pi.product_id = p.id
+        WHERE pi.package_product_id = ? AND (COALESCE(pi.is_active, 1) = 1)
+        ORDER BY pi.display_order ASC
+      `, [id]);
+            const itemIds = items.map(i => i.id);
+            if (itemIds.length === 0)
+                return items.map(pi => ({ ...pi, choice_products: [] }));
+            const placeholders = itemIds.map(() => '?').join(',');
+            const choices = await (0, mysqlDb_1.executeQuery)(`
+        SELECT pip.package_item_id, pip.product_id, p.nama AS product_name, pip.display_order
+        FROM package_item_products pip
+        INNER JOIN products p ON pip.product_id = p.id
+        WHERE pip.package_item_id IN (${placeholders}) AND (COALESCE(pip.is_active, 1) = 1)
+        ORDER BY pip.package_item_id, pip.display_order ASC
+      `, itemIds);
+            const choiceByItem = {};
+            for (const c of choices) {
+                if (!choiceByItem[c.package_item_id])
+                    choiceByItem[c.package_item_id] = [];
+                choiceByItem[c.package_item_id].push({ id: c.product_id, nama: c.product_name });
+            }
+            return items.map(pi => ({
+                id: pi.id,
+                package_product_id: pi.package_product_id,
+                selection_type: pi.selection_type,
+                product_id: pi.product_id,
+                required_quantity: pi.required_quantity,
+                display_order: pi.display_order,
+                product_name: pi.product_name || null,
+                choice_products: choiceByItem[pi.id] || []
+            }));
+        }
+        catch (err) {
+            console.error('localdb-get-package-items error:', err);
+            return [];
+        }
+    });
+    // Package items (for packages - product with is_package=1)
+    electron_1.ipcMain.handle('localdb-upsert-package-items', async (event, rows) => {
+        try {
+            if (!Array.isArray(rows))
+                return { success: false };
+            const queries = [];
+            for (const r of rows) {
+                const getId = () => {
+                    const val = r.id;
+                    if (typeof val === 'number')
+                        return val;
+                    if (typeof val === 'string') {
+                        const n = Number(val);
+                        return isNaN(n) ? null : n;
+                    }
+                    return null;
+                };
+                const getNumber = (k) => {
+                    const val = r[k];
+                    if (typeof val === 'number')
+                        return val;
+                    if (typeof val === 'string') {
+                        const n = Number(val);
+                        return isNaN(n) ? null : n;
+                    }
+                    return null;
+                };
+                const getString = (k) => (typeof r[k] === 'string' ? r[k] : null);
+                const getDate = (k) => {
+                    const val = r[k];
+                    if (val instanceof Date)
+                        return val;
+                    if (typeof val === 'string' || typeof val === 'number')
+                        return val;
+                    return null;
+                };
+                const packageProductId = getNumber('package_product_id');
+                if (!packageProductId)
+                    continue;
+                const rowId = getId();
+                const selectionType = getString('selection_type') || 'default';
+                const productId = getNumber('product_id');
+                const requiredQty = getNumber('required_quantity') ?? 1;
+                const displayOrder = getNumber('display_order') ?? 0;
+                const createdAtRaw = getDate('created_at');
+                const updatedAtRaw = getDate('updated_at');
+                const createdAt = createdAtRaw ? (0, mysqlDb_1.toMySQLTimestamp)(createdAtRaw) : (0, mysqlDb_1.toMySQLTimestamp)(new Date());
+                const updatedAt = updatedAtRaw ? (0, mysqlDb_1.toMySQLTimestamp)(updatedAtRaw) : (0, mysqlDb_1.toMySQLTimestamp)(Date.now());
+                const isActive = r.is_active !== undefined ? (r.is_active ? 1 : 0) : 1;
+                queries.push({
+                    sql: `INSERT INTO package_items (
+            id, package_product_id, selection_type, product_id, required_quantity, display_order, is_active, created_at, updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+          ON DUPLICATE KEY UPDATE
+            package_product_id=VALUES(package_product_id),
+            selection_type=VALUES(selection_type),
+            product_id=VALUES(product_id),
+            required_quantity=VALUES(required_quantity),
+            display_order=VALUES(display_order),
+            is_active=VALUES(is_active),
+            updated_at=VALUES(updated_at)`,
+                    params: [rowId, packageProductId, selectionType, productId, requiredQty, displayOrder, isActive, createdAt, updatedAt]
+                });
+            }
+            if (queries.length > 0) {
+                await (0, mysqlDb_1.executeTransaction)(queries);
+                await upsertMasterDataToSystemPos(queries);
+            }
+            return { success: true };
+        }
+        catch (error) {
+            console.error('Error upserting package items:', error);
+            return { success: false };
+        }
+    });
+    // Package item products (for flexible package items - which products can be chosen)
+    electron_1.ipcMain.handle('localdb-upsert-package-item-products', async (event, rows) => {
+        try {
+            if (!Array.isArray(rows))
+                return { success: false };
+            const queries = [];
+            for (const r of rows) {
+                const getId = () => {
+                    const val = r.id;
+                    if (typeof val === 'number')
+                        return val;
+                    if (typeof val === 'string') {
+                        const n = Number(val);
+                        return isNaN(n) ? null : n;
+                    }
+                    return null;
+                };
+                const getNumber = (k) => {
+                    const val = r[k];
+                    if (typeof val === 'number')
+                        return val;
+                    if (typeof val === 'string') {
+                        const n = Number(val);
+                        return isNaN(n) ? null : n;
+                    }
+                    return null;
+                };
+                const getDate = (k) => {
+                    const val = r[k];
+                    if (val instanceof Date)
+                        return val;
+                    if (typeof val === 'string' || typeof val === 'number')
+                        return val;
+                    return null;
+                };
+                const packageItemId = getNumber('package_item_id');
+                const productId = getNumber('product_id');
+                if (!packageItemId || !productId)
+                    continue;
+                const rowId = getId();
+                const displayOrder = getNumber('display_order') ?? 0;
+                const createdAtRaw = getDate('created_at');
+                const createdAt = createdAtRaw ? (0, mysqlDb_1.toMySQLTimestamp)(createdAtRaw) : (0, mysqlDb_1.toMySQLTimestamp)(new Date());
+                const isActive = r.is_active !== undefined ? (r.is_active ? 1 : 0) : 1;
+                queries.push({
+                    sql: `INSERT INTO package_item_products (
+            id, package_item_id, product_id, display_order, is_active, created_at
+          ) VALUES (?, ?, ?, ?, ?, ?)
+          ON DUPLICATE KEY UPDATE
+            display_order=VALUES(display_order),
+            is_active=VALUES(is_active)`,
+                    params: [rowId, packageItemId, productId, displayOrder, isActive, createdAt]
+                });
+            }
+            if (queries.length > 0) {
+                await (0, mysqlDb_1.executeTransaction)(queries);
+                await upsertMasterDataToSystemPos(queries);
+            }
+            return { success: true };
+        }
+        catch (error) {
+            console.error('Error upserting package item products:', error);
             return { success: false };
         }
     });
@@ -3847,6 +4147,11 @@ function createWindows() {
                 sql: `DELETE FROM printer2_audit_log WHERE transaction_id IN (${uuidPlaceholders})`,
                 params: [...transactionUuids]
             });
+            // offline_refunds: delete orphan refunds for deleted transactions
+            queries.push({
+                sql: `DELETE FROM offline_refunds WHERE JSON_UNQUOTE(JSON_EXTRACT(refund_data, '$.transaction_uuid')) IN (${uuidPlaceholders})`,
+                params: [...transactionUuids]
+            });
             queries.push({
                 sql: `DELETE FROM transactions WHERE ${baseClause}`,
                 params: [...params]
@@ -3894,10 +4199,12 @@ function createWindows() {
                 { sql: 'DELETE FROM printer2_audit_log WHERE transaction_id = ?', params: [transactionUuid], description: 'Printer 2 audit log' },
                 { sql: 'DELETE FROM transactions WHERE uuid_id = ?', params: [transactionUuid], description: 'transactions (CASCADE: transaction_items, transaction_item_customizations, transaction_item_customization_options, transaction_refunds)' },
             ];
-            return { success: true, transactionUuid, queries, systemPosQueries: [
+            return {
+                success: true, transactionUuid, queries, systemPosQueries: [
                     { sql: 'DELETE FROM system_pos_queue WHERE transaction_id = ?', params: [transactionUuid], description: 'system_pos: queue' },
                     { sql: 'DELETE FROM transactions WHERE uuid_id = ?', params: [transactionUuid], description: 'system_pos: transactions' },
-                ] };
+                ]
+            };
         }
         catch (err) {
             console.error('localdb-delete-single-transaction-preview error:', err);
@@ -4130,10 +4437,14 @@ function createWindows() {
     electron_1.ipcMain.handle('localdb-upsert-transaction-items', async (event, rows) => {
         try {
             await ensureTransactionItemsWaiterIdColumn();
+            await ensureTransactionItemsPackageLineFinishedAtColumn();
+            await ensureTransactionItemPackageLinesFinishedAtColumn();
             console.log('🔍 [MYSQL] Inserting transaction items:', rows.length);
             const queries = [];
             // Map to store transaction UUID -> INT id lookups
             const transactionIdMap = new Map();
+            /** Package payloads to write to transaction_item_package_lines after transaction_items are inserted */
+            const packageLinesToSave = [];
             for (const r of rows) {
                 console.log('📦 [MYSQL] Item data:', {
                     id: r.id,
@@ -4155,6 +4466,18 @@ function createWindows() {
                     catch (error) {
                         console.warn('⚠️ Failed to parse bundle_selections_json:', error);
                     }
+                }
+                // Package selections: will be saved to transaction_item_package_lines table below; store null in transaction_items
+                const rawPackageJson = r.package_selections_json;
+                const packageSelectionsJson = null; // Stored in transaction_item_package_lines, not JSON column
+                if (rawPackageJson) {
+                    const itemUuidIdForPackage = typeof r.uuid_id === 'string' && r.uuid_id ? r.uuid_id : (typeof r.id === 'string' ? r.id : String(r.id ?? ''));
+                    const itemQty = typeof r.quantity === 'number' ? r.quantity : (typeof r.quantity === 'string' ? parseInt(String(r.quantity), 10) : 1);
+                    packageLinesToSave.push({
+                        itemUuidId: itemUuidIdForPackage,
+                        itemQuantity: itemQty,
+                        rawJson: typeof rawPackageJson === 'string' ? rawPackageJson : JSON.stringify(rawPackageJson),
+                    });
                 }
                 console.log('📝 [MYSQL] Custom note:', r.custom_note);
                 // Use UUID columns: uuid_id (item UUID) and uuid_transaction_id (transaction UUID reference)
@@ -4207,6 +4530,19 @@ function createWindows() {
                 const productionFinishedDate = getDate('production_finished_at');
                 const productionFinishedAt = productionFinishedDate ? (0, mysqlDb_1.toMySQLDateTime)(productionFinishedDate) : null;
                 const waiterIdItem = typeof r.waiter_id === 'number' ? r.waiter_id : (typeof r.waiter_id === 'string' ? parseInt(String(r.waiter_id), 10) : null);
+                const packageLineFinishedAtJson = (() => {
+                    const raw = r.package_line_finished_at_json;
+                    if (raw == null)
+                        return null;
+                    if (typeof raw === 'string')
+                        return raw;
+                    try {
+                        return JSON.stringify(raw);
+                    }
+                    catch {
+                        return null;
+                    }
+                })();
                 console.log('🔧 [MYSQL] Production status update:', {
                     itemId: r.id,
                     itemUuidId,
@@ -4217,25 +4553,64 @@ function createWindows() {
                 queries.push({
                     sql: `INSERT INTO transaction_items (
             uuid_id, transaction_id, uuid_transaction_id, product_id, quantity, unit_price, total_price,
-            bundle_selections_json, custom_note, created_at, waiter_id,
-            production_status, production_started_at, production_finished_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            bundle_selections_json, package_selections_json, custom_note, created_at, waiter_id,
+            production_status, production_started_at, production_finished_at, package_line_finished_at_json
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
           ON DUPLICATE KEY UPDATE
             transaction_id=VALUES(transaction_id), uuid_transaction_id=VALUES(uuid_transaction_id), product_id=VALUES(product_id), quantity=VALUES(quantity),
             unit_price=VALUES(unit_price), total_price=VALUES(total_price),
-            bundle_selections_json=VALUES(bundle_selections_json),
+            bundle_selections_json=VALUES(bundle_selections_json), package_selections_json=VALUES(package_selections_json),
             custom_note=VALUES(custom_note), created_at=VALUES(created_at), waiter_id=VALUES(waiter_id),
-            production_status=VALUES(production_status), production_started_at=VALUES(production_started_at), production_finished_at=VALUES(production_finished_at)`,
+            production_status=VALUES(production_status), production_started_at=VALUES(production_started_at), production_finished_at=VALUES(production_finished_at),
+            package_line_finished_at_json=VALUES(package_line_finished_at_json)`,
                     params: [
                         itemUuidId, transactionIntId, transactionUuidId, productId, quantity, unitPrice, totalPrice,
-                        bundleSelectionsJson, customNote, createdAt, waiterIdItem,
-                        productionStatus, productionStartedAt, productionFinishedAt
+                        bundleSelectionsJson, packageSelectionsJson, customNote, createdAt, waiterIdItem,
+                        productionStatus, productionStartedAt, productionFinishedAt, packageLineFinishedAtJson
                     ]
                 });
             }
             // Insert all transaction items first
             if (queries.length > 0) {
                 await (0, mysqlDb_1.executeTransaction)(queries);
+            }
+            // Save package line items to transaction_item_package_lines (normalized table)
+            const packageLineQueries = [];
+            for (const { itemUuidId, itemQuantity, rawJson } of packageLinesToSave) {
+                try {
+                    const selections = parseJsonArray(rawJson, 'package_selections_json');
+                    // Store per-package quantity only; display will multiply by itemQuantity
+                    const byProduct = new Map();
+                    for (const sel of selections || []) {
+                        if (sel.selection_type === 'default' && sel.product_id != null) {
+                            const q = typeof sel.quantity === 'number' ? sel.quantity : 1;
+                            byProduct.set(sel.product_id, (byProduct.get(sel.product_id) || 0) + q);
+                        }
+                        else if (sel.selection_type === 'flexible' && Array.isArray(sel.chosen)) {
+                            for (const c of sel.chosen) {
+                                if (c.product_id == null)
+                                    continue;
+                                const q = typeof c.quantity === 'number' ? c.quantity : 1;
+                                byProduct.set(c.product_id, (byProduct.get(c.product_id) || 0) + q);
+                            }
+                        }
+                    }
+                    packageLineQueries.push({ sql: 'DELETE FROM transaction_item_package_lines WHERE uuid_transaction_item_id = ?', params: [itemUuidId] });
+                    for (const [pid, qty] of byProduct.entries()) {
+                        if (qty > 0) {
+                            packageLineQueries.push({
+                                sql: 'INSERT INTO transaction_item_package_lines (uuid_transaction_item_id, product_id, quantity, finished_at) VALUES (?, ?, ?, NULL)',
+                                params: [itemUuidId, pid, qty],
+                            });
+                        }
+                    }
+                }
+                catch (err) {
+                    console.warn('⚠️ Failed to parse package lines for item', itemUuidId, err);
+                }
+            }
+            if (packageLineQueries.length > 0) {
+                await (0, mysqlDb_1.executeTransaction)(packageLineQueries.map((q) => ({ sql: q.sql, params: q.params ?? [] })));
             }
             // Then save customizations for each item (after items are inserted)
             for (const r of rows) {
@@ -4307,7 +4682,8 @@ function createWindows() {
         }
         catch (error) {
             console.error('❌ Error upserting transaction items:', error);
-            return { success: false };
+            // Rethrow so renderer can show "Gagal" and retry; otherwise UI shows "Tersimpan" despite no save
+            throw error;
         }
     });
     electron_1.ipcMain.handle('localdb-get-transaction-items', async (event, transactionId) => {
@@ -4425,6 +4801,44 @@ function createWindows() {
           ORDER BY ti.created_at DESC
         `);
             }
+            // Load package lines from transaction_item_package_lines for all items (normalized table; id + finished_at for completion)
+            const itemUuids = items.map((i) => (i.uuid_id || i.id)).filter(Boolean);
+            const packageLinesByItem = new Map();
+            if (itemUuids.length > 0) {
+                await ensureTransactionItemPackageLinesFinishedAtColumn();
+                const placeholders = itemUuids.map(() => '?').join(',');
+                const packageRows = await (0, mysqlDb_1.executeQuery)(`SELECT tipl.id, tipl.uuid_transaction_item_id, ti.id as ti_id, tipl.product_id, tipl.quantity, tipl.finished_at,
+                  p.nama as product_name, p.category1_id as category1_id, c1.name as category1_name
+           FROM transaction_item_package_lines tipl
+           LEFT JOIN transaction_items ti ON ti.uuid_id = tipl.uuid_transaction_item_id
+           LEFT JOIN products p ON p.id = tipl.product_id
+           LEFT JOIN category1 c1 ON p.category1_id = c1.id
+           WHERE tipl.uuid_transaction_item_id IN (${placeholders})
+           ORDER BY tipl.id ASC`, itemUuids);
+                for (const row of packageRows || []) {
+                    const uuid = row.uuid_transaction_item_id;
+                    if (!uuid)
+                        continue;
+                    const lineEntry = {
+                        id: typeof row.id === 'number' ? row.id : parseInt(String(row.id || 0), 10),
+                        product_id: row.product_id,
+                        product_name: row.product_name || '',
+                        quantity: row.quantity || 1,
+                        finished_at: row.finished_at != null ? (typeof row.finished_at === 'string' ? row.finished_at : String(row.finished_at)) : null,
+                        category1_id: row.category1_id != null ? (typeof row.category1_id === 'number' ? row.category1_id : parseInt(String(row.category1_id), 10)) : undefined,
+                        category1_name: row.category1_name != null ? String(row.category1_name) : undefined,
+                    };
+                    if (!packageLinesByItem.has(uuid))
+                        packageLinesByItem.set(uuid, []);
+                    packageLinesByItem.get(uuid).push(lineEntry);
+                    const tiId = row.ti_id != null ? String(row.ti_id) : null;
+                    if (tiId && tiId !== uuid) {
+                        if (!packageLinesByItem.has(tiId))
+                            packageLinesByItem.set(tiId, []);
+                        packageLinesByItem.get(tiId).push({ ...lineEntry });
+                    }
+                }
+            }
             // For each item, load customizations from normalized tables
             const itemsWithCustomizations = await Promise.all(items.map(async (item) => {
                 // Use uuid_id for reading customizations (function expects UUID, not INT id)
@@ -4465,10 +4879,25 @@ function createWindows() {
                         console.warn('⚠️ Error reconstructing bundle selections:', error);
                     }
                 }
+                // Attach package lines from transaction_item_package_lines (id + finished_at for Kitchen/Barista completion)
+                let package_selections_json = item.package_selections_json;
+                const lines = packageLinesByItem.get(itemUuid) ?? (item.id != null ? packageLinesByItem.get(String(item.id)) : undefined);
+                if (lines && lines.length > 0) {
+                    const reconstructed = lines.map((l) => ({
+                        selection_type: 'default',
+                        package_item_id: 0,
+                        product_id: l.product_id,
+                        product_name: l.product_name,
+                        quantity: l.quantity,
+                    }));
+                    package_selections_json = JSON.stringify(reconstructed);
+                }
                 return {
                     ...item,
                     customizations: customizations || [], // Main product customizations
-                    bundleSelections: bundleSelections || null // Bundle selections with customizations from normalized tables
+                    bundleSelections: bundleSelections || null, // Bundle selections with customizations from normalized tables
+                    package_selections_json: package_selections_json ?? item.package_selections_json,
+                    packageBreakdownLines: lines && lines.length > 0 ? lines : undefined, // Normalized lines with id, finished_at for display
                 };
             }));
             return itemsWithCustomizations;
@@ -4476,6 +4905,40 @@ function createWindows() {
         catch (error) {
             console.error('Error getting transaction items:', error);
             return [];
+        }
+    });
+    /** Get all package lines for given transaction item UUID(s) (for completion check across kitchen + barista). */
+    electron_1.ipcMain.handle('localdb-get-package-lines', async (_event, uuidTransactionItemIds) => {
+        try {
+            if (!Array.isArray(uuidTransactionItemIds) || uuidTransactionItemIds.length === 0)
+                return [];
+            const placeholders = uuidTransactionItemIds.map(() => '?').join(',');
+            const rows = await (0, mysqlDb_1.executeQuery)(`SELECT id, uuid_transaction_item_id, product_id, quantity, finished_at, created_at
+         FROM transaction_item_package_lines
+         WHERE uuid_transaction_item_id IN (${placeholders})
+         ORDER BY id ASC`, uuidTransactionItemIds);
+            return rows ?? [];
+        }
+        catch (error) {
+            console.error('Error getting package lines:', error);
+            return [];
+        }
+    });
+    /** Update a single package line's finished_at (normalized completion, same as normal items). */
+    electron_1.ipcMain.handle('localdb-update-package-line', async (_event, payload) => {
+        try {
+            const { id, finished_at } = payload;
+            if (typeof id !== 'number' || isNaN(id)) {
+                return { success: false, error: 'Invalid package line id' };
+            }
+            // MySQL TIMESTAMP expects 'YYYY-MM-DD HH:MM:SS', not ISO 8601 with T/Z
+            const ts = finished_at == null ? null : (0, mysqlDb_1.toMySQLDateTime)(finished_at);
+            await (0, mysqlDb_1.executeUpdate)('UPDATE transaction_item_package_lines SET finished_at = ? WHERE id = ?', [ts, id]);
+            return { success: true };
+        }
+        catch (error) {
+            console.error('Error updating package line:', error);
+            return { success: false, error: error instanceof Error ? error.message : 'Unknown error' };
         }
     });
     /** Returns distinct waiter_id per transaction from transaction_items (for multi-waiter display). Keys are uuid_transaction_id. */
@@ -5077,9 +5540,20 @@ function createWindows() {
           t.uuid_id as transaction_uuid_id,
           t.payment_method,
           t.final_amount,
-          t.created_at as transaction_created_at
+          t.created_at as transaction_created_at,
+          t.customer_name,
+          u.email as issuer_email,
+          COALESCE(e.nama_karyawan, (
+            SELECT e2.nama_karyawan
+            FROM transaction_items ti2
+            LEFT JOIN employees e2 ON ti2.waiter_id = e2.id
+            WHERE ti2.transaction_id = t.id AND ti2.waiter_id IS NOT NULL
+            LIMIT 1
+          )) as waiter_name
         FROM transaction_refunds tr
         INNER JOIN transactions t ON tr.transaction_uuid = t.uuid_id
+        LEFT JOIN users u ON t.user_id = u.id
+        LEFT JOIN employees e ON t.waiter_id = e.id
         WHERE tr.business_id = ?
         AND tr.status != 'failed'
       `;
@@ -5957,16 +6431,19 @@ function createWindows() {
             if (businessId === null) {
                 return [];
             }
+            // Payment breakdown: total_amount only (gross, before discount). Exclude fully refunded transactions.
+            // Exclude transactions with no line items (or zero sum of item totals) so payment total matches Category/Barang basis.
+            const onlyTxWithItems = ' AND t.id IN (SELECT transaction_id FROM transaction_items GROUP BY transaction_id HAVING COALESCE(SUM(total_price), 0) > 0)';
             if (shiftUuids && shiftUuids.length > 0) {
                 const query = `
           SELECT 
             COALESCE(pm.name, 'Unknown') as payment_method_name,
             COALESCE(pm.code, 'unknown') as payment_method_code,
             COUNT(t.id) as transaction_count,
-            COALESCE(SUM(t.final_amount), 0) as total_amount
+            COALESCE(SUM(t.total_amount), 0) as total_amount
           FROM transactions t
           LEFT JOIN payment_methods pm ON t.payment_method_id = pm.id
-          WHERE t.business_id = ? AND t.shift_uuid IN (${shiftUuids.map(() => '?').join(',')}) AND t.status = 'completed'
+          WHERE t.business_id = ? AND t.shift_uuid IN (${shiftUuids.map(() => '?').join(',')}) AND t.status = 'completed' AND t.refund_status != 'full'${onlyTxWithItems}
           GROUP BY t.payment_method_id, pm.name, pm.code ORDER BY transaction_count DESC
         `;
                 const results = await (0, mysqlDb_1.executeQuery)(query, [businessId, ...shiftUuids]);
@@ -5978,10 +6455,10 @@ function createWindows() {
             COALESCE(pm.name, 'Unknown') as payment_method_name,
             COALESCE(pm.code, 'unknown') as payment_method_code,
             COUNT(t.id) as transaction_count,
-            COALESCE(SUM(t.final_amount), 0) as total_amount
+            COALESCE(SUM(t.total_amount), 0) as total_amount
           FROM transactions t
           LEFT JOIN payment_methods pm ON t.payment_method_id = pm.id
-          WHERE t.business_id = ? AND t.shift_uuid = ? AND t.status = 'completed'
+          WHERE t.business_id = ? AND t.shift_uuid = ? AND t.status = 'completed' AND t.refund_status != 'full'${onlyTxWithItems}
           GROUP BY t.payment_method_id, pm.name, pm.code ORDER BY transaction_count DESC
         `;
                 const results = await (0, mysqlDb_1.executeQuery)(query, [businessId, shiftUuid]);
@@ -5995,12 +6472,14 @@ function createWindows() {
           COALESCE(pm.name, 'Unknown') as payment_method_name,
           COALESCE(pm.code, 'unknown') as payment_method_code,
           COUNT(t.id) as transaction_count,
-          COALESCE(SUM(t.final_amount), 0) as total_amount
+          COALESCE(SUM(t.total_amount), 0) as total_amount
         FROM transactions t
         LEFT JOIN payment_methods pm ON t.payment_method_id = pm.id
         WHERE t.business_id = ?
         AND t.created_at >= ?
         AND t.status = 'completed'
+        AND t.refund_status != 'full'
+        ${onlyTxWithItems}
       `;
             const params = [businessId, shiftStartMySQL];
             if (userId !== null) {
@@ -6020,7 +6499,7 @@ function createWindows() {
             return [];
         }
     });
-    // Get Category I breakdown
+    // Get Category I breakdown: only product's category1 (no category2). Refunds excluded (full-refund tx excluded; partial prorated).
     // When shiftUuids (non-empty): filter by t.shift_uuid IN (...). When shiftUuid: filter by t.shift_uuid = ?. Else: userId + time.
     electron_1.ipcMain.handle('localdb-get-category1-breakdown', async (event, userId, shiftStart, shiftEnd, businessId = null, shiftUuid, shiftUuids) => {
         try {
@@ -6034,13 +6513,17 @@ function createWindows() {
           COALESCE(c1.name, 'Unknown') as category1_name,
           COALESCE(c1.id, 0) as category1_id,
           COALESCE(SUM(ti.quantity), 0) as total_quantity,
-          COALESCE(SUM(ti.total_price), 0) as total_amount
+          COALESCE(SUM(
+            ti.total_price / NULLIF((SELECT COALESCE(SUM(ti2.total_price), 0) FROM transaction_items ti2 WHERE ti2.transaction_id = ti.transaction_id), 0)
+            * COALESCE(t.total_amount, 0)
+          ), 0) as total_amount
         FROM transaction_items ti
         INNER JOIN transactions t ON ti.transaction_id = t.id
         INNER JOIN products p ON ti.product_id = p.id
         LEFT JOIN category1 c1 ON p.category1_id = c1.id
         WHERE t.business_id = ?
         AND t.status = 'completed'
+        AND t.refund_status != 'full'
         AND p.category1_id IS NOT NULL
         AND c1.id IS NOT NULL
       `;
@@ -6074,7 +6557,7 @@ function createWindows() {
             return [];
         }
     });
-    // Get Category II breakdown
+    // Get Category II breakdown: only product's category2 that belongs to this business (category2_businesses). Refunds excluded.
     // When shiftUuids (non-empty): filter by t.shift_uuid IN (...). When shiftUuid: filter by t.shift_uuid = ?. Else: userId + time.
     electron_1.ipcMain.handle('localdb-get-category2-breakdown', async (event, userId, shiftStart, shiftEnd, businessId = null, shiftUuid, shiftUuids) => {
         try {
@@ -6088,13 +6571,18 @@ function createWindows() {
           COALESCE(c2.name, 'Unknown') as category2_name,
           COALESCE(c2.id, 0) as category2_id,
           COALESCE(SUM(ti.quantity), 0) as total_quantity,
-          COALESCE(SUM(ti.total_price), 0) as total_amount
+          COALESCE(SUM(
+            ti.total_price / NULLIF((SELECT COALESCE(SUM(ti2.total_price), 0) FROM transaction_items ti2 WHERE ti2.transaction_id = ti.transaction_id), 0)
+            * COALESCE(t.total_amount, 0)
+          ), 0) as total_amount
         FROM transaction_items ti
         INNER JOIN transactions t ON ti.transaction_id = t.id
         INNER JOIN products p ON ti.product_id = p.id
+        INNER JOIN category2_businesses cb ON cb.category2_id = p.category2_id AND cb.business_id = t.business_id
         LEFT JOIN category2 c2 ON p.category2_id = c2.id
         WHERE t.business_id = ?
         AND t.status = 'completed'
+        AND t.refund_status != 'full'
         AND p.category2_id IS NOT NULL
         AND c2.id IS NOT NULL
       `;
@@ -6543,7 +7031,7 @@ function createWindows() {
             return { success: false, error: String(error) };
         }
     });
-    // Get product sales breakdown for shift
+    // Get product sales breakdown for shift. Allocate total_amount (gross, before discount) to items proportionally. Full refund tx excluded.
     // When shiftUuids (non-empty): filter by t.shift_uuid IN (...). When shiftUuid: filter by t.shift_uuid = ?. Else: userId + time.
     electron_1.ipcMain.handle('localdb-get-product-sales', async (event, userId, shiftStart, shiftEnd, businessId = null, shiftUuid, shiftUuids) => {
         try {
@@ -6570,13 +7058,18 @@ function createWindows() {
           p.harga_grabfood,
           p.harga_shopeefood,
           p.harga_qpon,
-          p.harga_tiktok
+          p.harga_tiktok,
+          COALESCE(t.refund_total, 0) as refund_total,
+          t.final_amount as final_amount,
+          t.total_amount as total_amount,
+          (SELECT COALESCE(SUM(ti2.total_price), 0) FROM transaction_items ti2 WHERE ti2.transaction_id = ti.transaction_id) as tx_items_total
         FROM transaction_items ti
         INNER JOIN transactions t ON ti.transaction_id = t.id
         LEFT JOIN payment_methods pm ON t.payment_method_id = pm.id
         INNER JOIN products p ON ti.product_id = p.id
         WHERE t.business_id = ?
         AND t.status = 'completed'
+        AND t.refund_status != 'full'
       `;
             const params = [businessId];
             if (shiftUuids && shiftUuids.length > 0) {
@@ -6747,6 +7240,13 @@ function createWindows() {
                 if (baseSubtotal < 0) {
                     baseSubtotal = 0;
                 }
+                // Allocate transaction total_amount (gross, before discount) to items proportionally
+                const totalAmountTx = Number(row.total_amount ?? 0);
+                const txItemsTotal = Number(row.tx_items_total ?? 0);
+                const allocatedRatio = txItemsTotal > 0 ? totalAmountTx / txItemsTotal : 0;
+                const netBaseSubtotal = baseSubtotal * allocatedRatio;
+                const netTotalPrice = totalPrice * allocatedRatio;
+                const netCustomizationSubtotal = customizationSubtotal * allocatedRatio;
                 // Determine platform based on product price, not payment method
                 const platformCode = determinePlatform(row);
                 const transactionType = row.transaction_type || 'drinks';
@@ -6755,9 +7255,9 @@ function createWindows() {
                 const existing = aggregate.get(key);
                 if (existing) {
                     existing.total_quantity += quantity;
-                    existing.total_subtotal += totalPrice;
-                    existing.customization_subtotal += customizationSubtotal;
-                    existing.base_subtotal += baseSubtotal;
+                    existing.total_subtotal += netTotalPrice;
+                    existing.customization_subtotal += netCustomizationSubtotal;
+                    existing.base_subtotal += netBaseSubtotal;
                 }
                 else {
                     aggregate.set(key, {
@@ -6767,9 +7267,9 @@ function createWindows() {
                         platform: platformCode,
                         transaction_type: transactionType,
                         total_quantity: quantity,
-                        total_subtotal: totalPrice,
-                        customization_subtotal: customizationSubtotal,
-                        base_subtotal: baseSubtotal,
+                        total_subtotal: netTotalPrice,
+                        customization_subtotal: netCustomizationSubtotal,
+                        base_subtotal: netBaseSubtotal,
                         unit_price: unitPrice,
                     });
                 }
@@ -7627,6 +8127,11 @@ function createWindows() {
             if (!insertResult.success) {
                 await (0, mysqlDb_1.executeSystemPosUpdate)('UPDATE system_pos_queue SET retry_count = retry_count + 1, last_error = ? WHERE transaction_id = ?', [(insertResult.error ?? 'Unknown error').substring(0, 500), transactionId]);
                 console.error(`❌ [SYSTEM POS] Failed to insert transaction ${transactionId} into system_pos:`, insertResult.error);
+                writeSystemPosDebugLog({
+                    source: 'bayar_konfirmasi',
+                    transactionId,
+                    reason: insertResult.error ?? 'Unknown error'
+                });
                 return { success: false, error: insertResult.error };
             }
             await (0, mysqlDb_1.executeSystemPosUpdate)('UPDATE system_pos_queue SET synced_at = ? WHERE transaction_id = ?', [now, transactionId]);
@@ -7634,8 +8139,16 @@ function createWindows() {
             return { success: true };
         }
         catch (error) {
+            const errMsg = error instanceof Error ? error.message : String(error);
+            const errStack = error instanceof Error ? error.stack : undefined;
             console.error('❌ [SYSTEM POS] Error queueing transaction:', error);
-            return { success: false, error: String(error) };
+            writeSystemPosDebugLog({
+                source: 'bayar_konfirmasi',
+                transactionId,
+                reason: errMsg,
+                stack: errStack
+            });
+            return { success: false, error: errMsg };
         }
     });
     // Get queued transactions for System POS sync
@@ -7771,6 +8284,11 @@ function createWindows() {
                 }
                 else {
                     await (0, mysqlDb_1.executeSystemPosUpdate)('UPDATE system_pos_queue SET retry_count = retry_count + 1, last_error = ? WHERE transaction_id = ?', [(insertResult.error ?? 'Unknown').substring(0, 500), transactionId]);
+                    writeSystemPosDebugLog({
+                        source: 'repopulate',
+                        transactionId,
+                        reason: insertResult.error ?? 'Unknown error'
+                    });
                     failed++;
                 }
             }
@@ -7820,10 +8338,23 @@ function createWindows() {
                     }
                     else {
                         console.warn(`⚠️ [SYSTEM POS] Failed to queue transaction ${transactionId}:`, queueResult.error);
+                        writeSystemPosDebugLog({
+                            source: 'move_to_printer2',
+                            transactionId,
+                            reason: queueResult.error ?? 'Unknown error'
+                        });
                     }
                 }
                 catch (queueError) {
+                    const errMsg = queueError instanceof Error ? queueError.message : String(queueError);
+                    const errStack = queueError instanceof Error ? queueError.stack : undefined;
                     console.error('❌ [SYSTEM POS] Error queueing transaction for System POS:', queueError);
+                    writeSystemPosDebugLog({
+                        source: 'move_to_printer2',
+                        transactionId,
+                        reason: errMsg,
+                        stack: errStack
+                    });
                     // Don't fail the move operation if System POS queue fails
                 }
             }
@@ -8123,6 +8654,33 @@ function createWindows() {
         }
         catch (error) {
             console.error('Error marking refund as failed:', error);
+            return { success: false, error: String(error) };
+        }
+    });
+    electron_1.ipcMain.handle('localdb-check-transaction-exists', async (_event, transactionUuid) => {
+        try {
+            if (!transactionUuid || typeof transactionUuid !== 'string') {
+                return { exists: false, error: 'transactionUuid required' };
+            }
+            const rows = await (0, mysqlDb_1.executeQuery)('SELECT 1 as n FROM transactions WHERE uuid_id = ? LIMIT 1', [transactionUuid]);
+            const exists = Array.isArray(rows) && rows.length > 0;
+            return { exists };
+        }
+        catch (error) {
+            console.error('Error checking transaction exists:', error);
+            return { exists: false, error: String(error) };
+        }
+    });
+    electron_1.ipcMain.handle('localdb-delete-refund', async (_event, offlineRefundId) => {
+        try {
+            if (!offlineRefundId || typeof offlineRefundId !== 'number') {
+                return { success: false, error: 'offlineRefundId required' };
+            }
+            await (0, mysqlDb_1.executeUpdate)('DELETE FROM offline_refunds WHERE id = ?', [offlineRefundId]);
+            return { success: true };
+        }
+        catch (error) {
+            console.error('Error deleting refund:', error);
             return { success: false, error: String(error) };
         }
     });
@@ -8987,7 +9545,11 @@ async function executeLabelsBatchPrint(data) {
                         if (config.extra_settings) {
                             try {
                                 const extra = typeof config.extra_settings === 'string' ? JSON.parse(config.extra_settings) : config.extra_settings;
-                                if (extra && typeof extra.copies === 'number' && extra.copies > 0) {
+                                // Label printer (Printer 3): use copies for offline, nonOfflineCopies for GoFood/Grab/Shopee/Qpon/TikTok
+                                if (data.printerType === 'labelPrinter' && data.isOnlineOrder === true && extra && typeof extra.nonOfflineCopies === 'number' && extra.nonOfflineCopies > 0) {
+                                    copies = Math.min(10, Math.floor(extra.nonOfflineCopies));
+                                }
+                                else if (extra && typeof extra.copies === 'number' && extra.copies > 0) {
                                     copies = Math.min(10, Math.floor(extra.copies));
                                 }
                                 if (batchMarginAdjustMm === undefined && typeof extra.marginAdjustMm === 'number' && !Number.isNaN(extra.marginAdjustMm)) {
@@ -10035,6 +10597,11 @@ function generateShiftBreakdownHTML(shiftData) {
             maximumFractionDigits: 0,
         }).format(value);
     };
+    // Round to integer and format as id-ID to avoid decimals (e.g. ",002") from floating point
+    const formatIntegerId = (value) => {
+        const n = Number.isFinite(value) ? Math.round(value) : 0;
+        return n.toLocaleString('id-ID', { minimumFractionDigits: 0, maximumFractionDigits: 0 });
+    };
     const formatPlatformLabel = (platform) => {
         const key = (platform || 'offline').toLowerCase();
         switch (key) {
@@ -10154,9 +10721,9 @@ function generateShiftBreakdownHTML(shiftData) {
           <div>${productNameDisplay}</div>
           <div style="font-size: 7pt; color: #555;">${transactionLabel} · ${platformLabel}</div>
         </td>
-        <td style="text-align: right; padding: 0.3mm 0;">${quantity}</td>
-        <td style="text-align: right; padding: 0.3mm 0;">${isBundleItem ? '-' : (isNaN(unitPrice) ? '0' : Number(unitPrice).toLocaleString('id-ID'))}</td>
-        <td style="text-align: right; padding: 0.3mm 0;">${isBundleItem ? '-' : (isNaN(baseSubtotal) ? '0' : Number(baseSubtotal).toLocaleString('id-ID'))}</td>
+        <td style="text-align: left; padding: 0.3mm 0;">${quantity}</td>
+        <td style="text-align: right; padding: 0.3mm 0;">${isBundleItem ? '-' : (isNaN(unitPrice) ? '0' : formatIntegerId(unitPrice))}</td>
+        <td style="text-align: right; padding: 0.3mm 0;">${isBundleItem ? '-' : (isNaN(baseSubtotal) ? '0' : formatIntegerId(baseSubtotal))}</td>
       </tr>
       `;
             }
@@ -10192,8 +10759,8 @@ function generateShiftBreakdownHTML(shiftData) {
             const qty = productPlatformCount.get(key) ?? 0;
             const amount = productPlatformAmount.get(key) ?? 0;
             const label = PLATFORM_LABELS_BT[key];
-            const amountStr = Number.isFinite(amount) ? amount.toLocaleString('id-ID') : '0';
-            return `<tr><td style="padding-left: 2mm; font-size: 7pt;">${label}</td><td class="right" style="font-size: 7pt;">${qty}</td><td class="right">-</td><td class="right" style="font-size: 7pt;">${amountStr}</td></tr>`;
+            const amountStr = Number.isFinite(amount) ? formatIntegerId(Math.round(amount)) : '0';
+            return `<tr><td style="padding-left: 2mm; font-size: 7pt;">${label}</td><td style="text-align: left; font-size: 7pt;">${qty}</td><td class="right">-</td><td class="right" style="font-size: 7pt;">${amountStr}</td></tr>`;
         }).join('');
         const customizationRows = report.customizationSales.map(item => {
             try {
@@ -10210,8 +10777,8 @@ function generateShiftBreakdownHTML(shiftData) {
           <div>${item.option_name || 'Unknown'}</div>
           <div style="font-size: 7pt; color: #555;">${item.customization_name || 'N/A'}</div>
         </td>
-        <td style="text-align: right; padding: 0.3mm 0;">${isNaN(quantity) ? '0' : quantity}</td>
-        <td style="text-align: right; padding: 0.3mm 0;">${isNaN(revenue) ? '0' : Number(revenue).toLocaleString('id-ID')}</td>
+        <td style="text-align: left; padding: 0.3mm 0;">${isNaN(quantity) ? '0' : quantity}</td>
+        <td style="text-align: right; padding: 0.3mm 0;">${isNaN(revenue) ? '0' : formatIntegerId(Math.round(revenue))}</td>
       </tr>
     `;
             }
@@ -10229,7 +10796,7 @@ function generateShiftBreakdownHTML(shiftData) {
       <tr>
         <td style="text-align: left; padding: 0.3mm 0;">${payment.payment_method_name || 'N/A'}</td>
         <td style="text-align: right; padding: 0.3mm 0;">${count}</td>
-        <td style="text-align: right; padding: 0.3mm 0;">${amount.toLocaleString('id-ID')}</td>
+        <td style="text-align: right; padding: 0.3mm 0;">${formatIntegerId(Math.round(amount))}</td>
       </tr>
     `;
         }).join('');
@@ -10238,29 +10805,32 @@ function generateShiftBreakdownHTML(shiftData) {
         const category1Data = report.category1Breakdown || [];
         const category1Rows = category1Data.map((c1) => {
             const q = Number(c1.total_quantity || 0);
-            const a = Number(c1.total_amount || 0);
-            return `<tr><td style="text-align: left; padding: 0.3mm 0;">${c1.category1_name || 'N/A'}</td><td style="text-align: right; padding: 0.3mm 0;">${q}</td><td style="text-align: right; padding: 0.3mm 0;">${a.toLocaleString('id-ID')}</td></tr>`;
+            const a = Math.round(Number(c1.total_amount || 0));
+            return `<tr><td style="text-align: left; padding: 0.3mm 0;">${c1.category1_name || 'N/A'}</td><td style="text-align: left; padding: 0.3mm 0;">${q}</td><td style="text-align: right; padding: 0.3mm 0;">${formatIntegerId(a)}</td></tr>`;
         }).join('');
         const totalCategory1Quantity = (report.category1Breakdown || []).reduce((sum, c) => sum + Number(c.total_quantity || 0), 0);
         const totalCategory1Amount = (report.category1Breakdown || []).reduce((sum, c) => sum + Number(c.total_amount || 0), 0);
         const category2Data = report.category2Breakdown || [];
         const category2Rows = category2Data.map((category2) => {
             const quantity = Number(category2.total_quantity || 0);
-            const amount = Number(category2.total_amount || 0);
+            const amount = Math.round(Number(category2.total_amount || 0));
             return `
       <tr>
         <td style="text-align: left; padding: 0.3mm 0;">${category2.category2_name || 'N/A'}</td>
-        <td style="text-align: right; padding: 0.3mm 0;">${quantity}</td>
-        <td style="text-align: right; padding: 0.3mm 0;">${amount.toLocaleString('id-ID')}</td>
+        <td style="text-align: left; padding: 0.3mm 0;">${quantity}</td>
+        <td style="text-align: right; padding: 0.3mm 0;">${formatIntegerId(amount)}</td>
       </tr>
     `;
         }).join('');
         const totalCategory2Quantity = (report.category2Breakdown || []).reduce((sum, c) => sum + Number(c.total_quantity || 0), 0);
         const totalCategory2Amount = (report.category2Breakdown || []).reduce((sum, c) => sum + Number(c.total_amount || 0), 0);
         const formattedTotalDiscount = report.statistics.total_discount > 0
-            ? formatCurrency(-Math.abs(report.statistics.total_discount))
-            : formatCurrency(0);
+            ? `-${formatIntegerId(Math.abs(report.statistics.total_discount))}`
+            : formatIntegerId(0);
         const cashSummaryData = report.cashSummary;
+        // Coerce to number: IPC can send gross_total_omset as string (e.g. "55771000.00244" from number+string concat on frontend)
+        const grossTotalOmsetRaw = report.gross_total_omset ?? (Number(report.statistics.total_amount || 0) + Number(cashSummaryData.cash_shift_refunds ?? 0) + Number(report.statistics.total_discount || 0));
+        const grossTotalOmset = Math.round(Number(grossTotalOmsetRaw));
         const cashShiftSales = Number(cashSummaryData.cash_shift_sales ?? cashSummaryData.cash_shift ?? 0) || 0;
         const cashShiftRefunds = Number(cashSummaryData.cash_shift_refunds ?? 0) || 0;
         const cashWholeDaySales = Number(cashSummaryData.cash_whole_day_sales ?? cashSummaryData.cash_whole_day ?? 0) || 0;
@@ -10270,15 +10840,28 @@ function generateShiftBreakdownHTML(shiftData) {
         // Ensure all values are numbers and handle NaN
         const kasMulaiSummary = Number(cashSummaryData.kas_mulai ?? report.modal_awal ?? 0) || 0;
         const kasExpectedSummary = Number(cashSummaryData.kas_expected) || (kasMulaiSummary + cashShiftSales - cashShiftRefunds);
-        const kasAkhirSummary = typeof cashSummaryData.kas_akhir === 'number' && !isNaN(cashSummaryData.kas_akhir) ? cashSummaryData.kas_akhir : null;
-        let kasSelisihSummary = typeof cashSummaryData.kas_selisih === 'number' && !isNaN(cashSummaryData.kas_selisih)
-            ? cashSummaryData.kas_selisih
-            : kasAkhirSummary !== null && !isNaN(kasExpectedSummary)
-                ? Number((kasAkhirSummary - kasExpectedSummary).toFixed(2))
-                : null;
+        // Coerce to number: IPC/JSON can send kas_akhir/kas_selisih as string from DB
+        const kasAkhirNum = cashSummaryData.kas_akhir != null && String(cashSummaryData.kas_akhir) !== '' ? Number(cashSummaryData.kas_akhir) : NaN;
+        const kasAkhirSummary = Number.isFinite(kasAkhirNum) ? kasAkhirNum : null;
+        const kasSelisihRaw = cashSummaryData.kas_selisih != null && String(cashSummaryData.kas_selisih) !== '' ? Number(cashSummaryData.kas_selisih) : NaN;
+        const SELISIH_MAX = 1e8; // Reject garbage values
+        let kasSelisihSummary = Number.isFinite(kasSelisihRaw) && Math.abs(kasSelisihRaw) <= SELISIH_MAX
+            ? Math.round(kasSelisihRaw)
+            : null;
         let kasSelisihLabelSummary = cashSummaryData.kas_selisih_label ?? null;
-        if (kasSelisihSummary !== null && !isNaN(kasSelisihSummary)) {
-            if (Math.abs(kasSelisihSummary) < 0.01) {
+        // If payload has no selisih but has kas_akhir and kas_expected, compute so print matches app
+        if (kasSelisihSummary === null && kasAkhirSummary !== null && Number.isFinite(kasExpectedSummary)) {
+            const computed = Math.round(Number((kasAkhirSummary - kasExpectedSummary).toFixed(2)));
+            if (Math.abs(computed) <= SELISIH_MAX) {
+                kasSelisihSummary = computed;
+                if (Math.abs(kasSelisihSummary) < 1)
+                    kasSelisihLabelSummary = 'balanced';
+                else if (!kasSelisihLabelSummary)
+                    kasSelisihLabelSummary = kasSelisihSummary > 0 ? 'plus' : 'minus';
+            }
+        }
+        if (kasSelisihSummary !== null) {
+            if (Math.abs(kasSelisihSummary) < 1) {
                 kasSelisihSummary = 0;
                 kasSelisihLabelSummary = 'balanced';
             }
@@ -10286,19 +10869,26 @@ function generateShiftBreakdownHTML(shiftData) {
                 kasSelisihLabelSummary = kasSelisihSummary > 0 ? 'plus' : 'minus';
             }
         }
-        const varianceLabelDisplay = kasSelisihLabelSummary === 'plus'
-            ? 'Plus'
-            : kasSelisihLabelSummary === 'minus'
-                ? 'Minus'
-                : kasSelisihLabelSummary === 'balanced'
-                    ? 'Balanced'
-                    : 'Pending';
+        // Selisih Kas: no "Rp" on print; + / - before number is enough (no "(Plus)" / "(Minus)" label)
         const varianceValueDisplay = kasSelisihSummary === null || isNaN(kasSelisihSummary)
             ? '-'
-            : `${kasSelisihSummary > 0 ? '+' : ''}${kasSelisihSummary.toLocaleString('id-ID')}`;
-        const kasAkhirDisplay = kasAkhirSummary !== null && !isNaN(kasAkhirSummary) ? kasAkhirSummary.toLocaleString('id-ID') : '-';
+            : `${kasSelisihSummary > 0 ? '+' : ''}${formatIntegerId(Math.abs(kasSelisihSummary))}`;
+        const kasAkhirDisplay = kasAkhirSummary !== null && !isNaN(kasAkhirSummary) ? formatIntegerId(kasAkhirSummary) : '-';
         const totalCashInCashierValue = Number(cashSummaryData.total_cash_in_cashier) || kasExpectedSummary;
         const totalCashInCashierDisplay = !isNaN(totalCashInCashierValue) ? totalCashInCashierValue.toLocaleString('id-ID') : '-';
+        const refundList = report.refunds || [];
+        const refundRows = refundList.map((r) => {
+            const txId = r.transaction_uuid_id || r.transaction_uuid || '-';
+            const method = formatPlatformLabel(r.payment_method || 'offline');
+            const total = formatIntegerId(Math.round(Number(r.final_amount || 0)));
+            const refundAmt = formatIntegerId(Math.round(Number(r.refund_amount || 0)));
+            const reason = (r.reason || '-').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+            const refundTime = r.refunded_at ? formatDateTime(r.refunded_at) : '-';
+            const issuer = (r.issuer_email || '-').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+            const waiter = (r.waiter_name || '-').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+            const customer = (r.customer_name || '-').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+            return `<tr><td style="font-size: 7pt;">${txId}</td><td style="font-size: 7pt;">${method}</td><td class="right" style="font-size: 7pt;">${total}</td><td class="right" style="font-size: 7pt; color: #991b1b;">-${refundAmt}</td><td style="font-size: 7pt;">${reason}</td><td style="font-size: 7pt;">${refundTime}</td><td style="font-size: 7pt;">${issuer}</td><td style="font-size: 7pt;">${waiter}</td><td style="font-size: 7pt;">${customer}</td></tr>`;
+        }).join('');
         return `
     <div class="report-block">
       <div class="header">
@@ -10322,7 +10912,7 @@ function generateShiftBreakdownHTML(shiftData) {
       </div>
       <div class="info-line">
         <span class="info-label">Modal Awal:</span>
-        <span class="info-value">${report.modal_awal.toLocaleString('id-ID')}</span>
+        <span class="info-value">${formatIntegerId(Number(report.modal_awal))}</span>
       </div>
 
       <div class="divider"></div>
@@ -10330,138 +10920,80 @@ function generateShiftBreakdownHTML(shiftData) {
       ${sectionOptions.ringkasan === true ? `
       <div class="section-title">RINGKASAN</div>
       <div class="summary">
+        <div class="summary-subtitle">Transaksi</div>
         <div class="summary-block-omset">
           <div class="summary-line summary-line-highlight">
-            <span class="summary-label">Total Omset:</span>
-            <span class="summary-value">Rp ${Number(report.statistics.total_amount || 0).toLocaleString('id-ID')}</span>
+            <span class="summary-label">Total Omset (sebelum refund & diskon):</span>
+            <span class="summary-value">${formatIntegerId(grossTotalOmset || 0)}</span>
           </div>
-          <div class="summary-line summary-line-indent">
-            <span class="summary-label">Jumlah Pesanan:</span>
-            <span class="summary-value">${report.statistics.order_count} transaksi</span>
+          <div class="summary-line summary-line-indent" style="color: #991b1b;">
+            <span class="summary-label">Refund:</span>
+            <span class="summary-value">-${formatIntegerId(cashShiftRefunds)}</span>
           </div>
-          <div class="summary-line summary-line-indent">
-            <span class="summary-label">Jumlah CU:</span>
-            <span class="summary-value">${report.statistics.total_cu ?? 0}</span>
-          </div>
-          ${(() => {
-            const PLATFORM_LABELS = { offline: 'Offline', gofood: 'GoFood', grabfood: 'GrabFood', shopeefood: 'ShopeeFood', qpon: 'Qpon', tiktok: 'TikTok' };
-            const PLATFORM_ORDER = ['offline', 'gofood', 'grabfood', 'shopeefood', 'qpon', 'tiktok'];
-            const countMap = new Map();
-            const amountMap = new Map();
-            (report.paymentBreakdown || []).forEach((p) => {
-                const code = (p.payment_method_code || 'offline').toLowerCase();
-                const platform = PLATFORM_LABELS[code] ? code : 'offline';
-                const count = Number(p.transaction_count || 0);
-                const amount = Number(p.total_amount || 0);
-                countMap.set(platform, (countMap.get(platform) ?? 0) + count);
-                amountMap.set(platform, (amountMap.get(platform) ?? 0) + amount);
-            });
-            return PLATFORM_ORDER.filter((key) => (countMap.get(key) ?? 0) > 0).map((key) => {
-                const count = countMap.get(key) ?? 0;
-                const amount = amountMap.get(key) ?? 0;
-                const label = PLATFORM_LABELS[key];
-                const amountStr = amount.toLocaleString('id-ID');
-                return `<div class="summary-line summary-line-indent"><span class="summary-label">${label}:</span><span class="summary-value">${count} transaksi / Rp ${amountStr}</span></div>`;
-            }).join('');
-        })()}
-        </div>
-        <div class="summary-block-voucher">
-          <div class="summary-line summary-line-highlight-voucher">
-            <span class="summary-label">Total Diskon Voucher:</span>
-            <span class="summary-value">${formattedTotalDiscount}</span>
-          </div>
-          <div class="summary-line summary-line-indent">
-            <span class="summary-label">Voucher Dipakai:</span>
-            <span class="summary-value">${report.statistics.voucher_count} transaksi</span>
-          </div>
-          ${(() => {
+          <div class="summary-block-voucher">
+            <div class="summary-line summary-line-highlight-voucher">
+              <span class="summary-label">Diskon Voucher:</span>
+              <span class="summary-value">${formattedTotalDiscount}</span>
+            </div>
+            ${(() => {
             const vb = report.voucherBreakdown || {};
             return VOUCHER_BREAKDOWN_ORDER.map(({ key, label }) => {
                 const e = vb[key];
                 if (!e || e.count <= 0)
                     return '';
                 return `<div class="summary-line summary-line-indent">
-                <span class="summary-label">${label} (${e.count}):</span>
-                <span class="summary-value">-${(e.total || 0).toLocaleString('id-ID')}</span>
-              </div>`;
+                  <span class="summary-label">${label} (${e.count}):</span>
+                  <span class="summary-value">-${formatIntegerId(e.total || 0)}</span>
+                </div>`;
             }).join('');
         })()}
+          </div>
+          <div class="summary-line summary-line-highlight">
+            <span class="summary-label">Grand Total:</span>
+            <span class="summary-value">${formatIntegerId(Math.max(0, (grossTotalOmset || 0) - cashShiftRefunds - (report.statistics.total_discount || 0)))}</span>
+          </div>
         </div>
+        ${totalCustomizationRevenue > 0 ? `
         <div class="summary-line summary-line-highlight-topping">
           <span class="summary-label">Total Topping:</span>
-          <span class="summary-value">${totalCustomizationRevenue.toLocaleString('id-ID')}</span>
+          <span class="summary-value">${formatIntegerId(totalCustomizationRevenue)}</span>
         </div>
+        ` : ''}
+        <div class="summary-subtitle">Kas</div>
         <div class="summary-line">
           <span class="summary-label">Kas Mulai:</span>
-          <span class="summary-value">${kasMulaiSummary.toLocaleString('id-ID')}</span>
+          <span class="summary-value">${formatIntegerId(kasMulaiSummary)}</span>
         </div>
         <div class="summary-line">
-          <span class="summary-label">Cash Sales (Shift):</span>
-          <span class="summary-value">${cashShiftSales.toLocaleString('id-ID')}</span>
+          <span class="summary-label">Cash Sales:</span>
+          <span class="summary-value">${formatIntegerId(cashShiftSales)}</span>
         </div>
         <div class="summary-line">
-          <span class="summary-label">Cash Refunds (Shift):</span>
-          <span class="summary-value">-${cashShiftRefunds.toLocaleString('id-ID')}</span>
-        </div>
-        <div class="summary-line">
-          <span class="summary-label">Net Cash (Shift):</span>
-          <span class="summary-value">${cashNetShift.toLocaleString('id-ID')}</span>
+          <span class="summary-label">Total Refunds:</span>
+          <span class="summary-value">-${formatIntegerId(cashShiftRefunds)}</span>
         </div>
         <div class="summary-line">
           <span class="summary-label">Kas Diharapkan:</span>
-          <span class="summary-value">${!isNaN(kasExpectedSummary) ? kasExpectedSummary.toLocaleString('id-ID') : '-'}</span>
+          <span class="summary-value">${!isNaN(kasExpectedSummary) ? formatIntegerId(kasExpectedSummary) : '-'}</span>
+        </div>
+        <div class="divider"></div>
+        <div class="summary-line">
+          <span class="summary-label">Jumlah Pesanan:</span>
+          <span class="summary-value">${report.statistics.order_count} transaksi</span>
+        </div>
+        <div class="summary-line">
+          <span class="summary-label">Jumlah CU:</span>
+          <span class="summary-value">${report.statistics.total_cu ?? 0}</span>
         </div>
         <div class="summary-line">
           <span class="summary-label">Kas Akhir:</span>
           <span class="summary-value">${kasAkhirDisplay}</span>
         </div>
         <div class="summary-line">
-          <span class="summary-label">Selisih (${varianceLabelDisplay}):</span>
+          <span class="summary-label">Selisih Kas:</span>
           <span class="summary-value">${varianceValueDisplay}</span>
         </div>
-        <div class="summary-line">
-          <span class="summary-label">Cash Sales (Hari):</span>
-          <span class="summary-value">${cashWholeDaySales.toLocaleString('id-ID')}</span>
-        </div>
-        <div class="summary-line">
-          <span class="summary-label">Cash Refunds (Hari):</span>
-          <span class="summary-value">-${cashWholeDayRefunds.toLocaleString('id-ID')}</span>
-        </div>
-        <div class="summary-line">
-          <span class="summary-label">Net Cash (Hari):</span>
-          <span class="summary-value">${cashNetWholeDay.toLocaleString('id-ID')}</span>
-        </div>
-        <div class="summary-line">
-          <span class="summary-label">Cash in Cashier:</span>
-          <span class="summary-value">${totalCashInCashierDisplay}</span>
-        </div>
       </div>
-
-      <div class="divider"></div>
-      ` : ''}
-
-      ${sectionOptions.barangTerjual === true ? `
-      <div class="section-title">BARANG TERJUAL</div>
-      <table>
-        <thead>
-          <tr>
-            <th>Product</th>
-            <th class="right">Qty</th>
-            <th class="right">Unit Price</th>
-            <th class="right">Subtotal</th>
-          </tr>
-        </thead>
-        <tbody>
-          ${productRows || '<tr><td colSpan="4" style="text-align: center;">Tidak ada produk</td></tr>'}
-          <tr class="total-row">
-            <td>TOTAL</td>
-            <td class="right">${totalProductQty}</td>
-            <td class="right">-</td>
-            <td class="right">${Number(totalProductBaseSubtotal).toLocaleString('id-ID')}</td>
-          </tr>
-          ${productPlatformBreakdownRows}
-        </tbody>
-      </table>
 
       <div class="divider"></div>
       ` : ''}
@@ -10481,7 +11013,7 @@ function generateShiftBreakdownHTML(shiftData) {
           <tr class="total-row">
             <td>TOTAL</td>
             <td class="right">${totalPaymentCount}</td>
-            <td class="right">${Number(totalPaymentAmount).toLocaleString('id-ID')}</td>
+            <td class="right">${formatIntegerId(Math.round(totalPaymentAmount))}</td>
           </tr>
         </tbody>
       </table>
@@ -10495,7 +11027,7 @@ function generateShiftBreakdownHTML(shiftData) {
         <thead>
           <tr>
             <th>Category I</th>
-            <th class="right">Quantity</th>
+            <th style="text-align: left;">Quantity</th>
             <th class="right">Total</th>
           </tr>
         </thead>
@@ -10503,8 +11035,8 @@ function generateShiftBreakdownHTML(shiftData) {
           ${category1Rows || '<tr><td colSpan="3" style="text-align: center;">Tidak ada Category I</td></tr>'}
           <tr class="total-row">
             <td>TOTAL</td>
-            <td class="right">${totalCategory1Quantity}</td>
-            <td class="right">${Number(totalCategory1Amount).toLocaleString('id-ID')}</td>
+            <td style="text-align: left;">${totalCategory1Quantity}</td>
+            <td class="right">${formatIntegerId(Math.round(totalCategory1Amount))}</td>
           </tr>
         </tbody>
       </table>
@@ -10518,7 +11050,7 @@ function generateShiftBreakdownHTML(shiftData) {
         <thead>
           <tr>
             <th>Category II</th>
-            <th class="right">Quantity</th>
+            <th style="text-align: left;">Quantity</th>
             <th class="right">Total</th>
           </tr>
         </thead>
@@ -10526,8 +11058,8 @@ function generateShiftBreakdownHTML(shiftData) {
           ${category2Rows || '<tr><td colSpan="3" style="text-align: center;">Tidak ada Category II</td></tr>'}
           <tr class="total-row">
             <td>TOTAL</td>
-            <td class="right">${totalCategory2Quantity}</td>
-            <td class="right">${Number(totalCategory2Amount).toLocaleString('id-ID')}</td>
+            <td style="text-align: left;">${totalCategory2Quantity}</td>
+            <td class="right">${formatIntegerId(Math.round(totalCategory2Amount))}</td>
           </tr>
         </tbody>
       </table>
@@ -10535,13 +11067,40 @@ function generateShiftBreakdownHTML(shiftData) {
       <div class="divider"></div>
       ` : ''}
 
-      ${sectionOptions.toppingSales === true ? `
+      ${sectionOptions.barangTerjual === true ? `
+      <div class="section-title">BARANG TERJUAL</div>
+      <div class="barang-terjual-note">Nilai per platform sebelum potongan/diskon/voucher. Refund tidak disertakan dalam perhitungan.</div>
+      <table>
+        <thead>
+          <tr>
+            <th>Product</th>
+            <th style="text-align: left;">Qty</th>
+            <th class="right">Unit Price</th>
+            <th class="right">Subtotal</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${productRows || '<tr><td colSpan="4" style="text-align: center;">Tidak ada produk</td></tr>'}
+          <tr class="total-row">
+            <td>TOTAL</td>
+            <td style="text-align: left;">${totalProductQty}</td>
+            <td class="right">-</td>
+            <td class="right">${formatIntegerId(Math.round(totalProductBaseSubtotal))}</td>
+          </tr>
+          ${productPlatformBreakdownRows}
+        </tbody>
+      </table>
+
+      <div class="divider"></div>
+      ` : ''}
+
+      ${sectionOptions.toppingSales === true && totalCustomizationRevenue > 0 ? `
       <div class="section-title">TOPPING SALES BREAKDOWN</div>
       <table>
         <thead>
           <tr>
             <th>Customization</th>
-            <th class="right">Qty</th>
+            <th style="text-align: left;">Qty</th>
             <th class="right">Revenue</th>
           </tr>
         </thead>
@@ -10549,9 +11108,33 @@ function generateShiftBreakdownHTML(shiftData) {
           ${customizationRows || '<tr><td colSpan="3" style="text-align: center;">Tidak ada kustomisasi</td></tr>'}
           <tr class="total-row">
             <td>TOTAL</td>
-            <td class="right">${totalCustomizationUnits}</td>
-            <td class="right">${Number(totalCustomizationRevenue).toLocaleString('id-ID')}</td>
+            <td style="text-align: left;">${totalCustomizationUnits}</td>
+            <td class="right">${formatIntegerId(Math.round(totalCustomizationRevenue))}</td>
           </tr>
+        </tbody>
+      </table>
+
+      <div class="divider"></div>
+      ` : ''}
+
+      ${refundList.length > 0 ? `
+      <div class="section-title">REFUND</div>
+      <table>
+        <thead>
+          <tr>
+            <th style="font-size: 7pt;">Transaction ID</th>
+            <th style="font-size: 7pt;">Method</th>
+            <th class="right" style="font-size: 7pt;">Total</th>
+            <th class="right" style="font-size: 7pt;">Refund Amount</th>
+            <th style="font-size: 7pt;">Alasan</th>
+            <th style="font-size: 7pt;">Refund Time</th>
+            <th style="font-size: 7pt;">Issuer</th>
+            <th style="font-size: 7pt;">Waiter</th>
+            <th style="font-size: 7pt;">Nama Pelanggan</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${refundRows}
         </tbody>
       </table>
 
@@ -10661,6 +11244,20 @@ function generateShiftBreakdownHTML(shiftData) {
       margin: 1.5mm 0 1mm 0;
       text-align: center;
       text-decoration: underline;
+    }
+    .summary-subtitle {
+      font-size: 8pt;
+      font-weight: 700;
+      color: #374151;
+      margin: 1mm 0 0.5mm 0;
+      padding-bottom: 0.5mm;
+      border-bottom: 1px solid #9ca3af;
+    }
+    .barang-terjual-note {
+      font-size: 7pt;
+      color: #6b7280;
+      margin-bottom: 1mm;
+      font-style: italic;
     }
     table {
       width: 100%;
@@ -10785,6 +11382,9 @@ const VOUCHER_BREAKDOWN_ORDER = [
 // Print shift breakdown report
 electron_1.ipcMain.handle('print-shift-breakdown', async (event, data) => {
     try {
+        // #region agent log
+        writeDebugLog(JSON.stringify({ location: 'electron/main.ts:print-shift-breakdown', message: 'Received print payload', data: { gross_total_omset: data.gross_total_omset, statistics_total_amount: data.statistics?.total_amount, user_name: data.user_name }, timestamp: Date.now(), sessionId: 'debug-session', hypothesisId: 'B' }));
+        // #endregion
         console.log('🖨️ [SHIFT PRINT] Starting shift breakdown print...');
         console.log('   - Shift:', data.user_name);
         console.log('   - Products:', data.productSales?.length || 0);
@@ -11570,6 +12170,7 @@ electron_1.ipcMain.handle('localdb-delete-transactions-by-role', async () => {
         printer2_audit_log: 0,
         transaction_items: 0,
         transactions: 0,
+        shifts: 0,
         system_pos_queue: 0,
         system_pos_transactions: 0,
         counters_reset_businesses: [],
@@ -11594,6 +12195,19 @@ electron_1.ipcMain.handle('localdb-delete-transactions-by-role', async () => {
         const distinctBusinessIds = [...new Set(transactionsToDelete.map(t => t.business_id))];
         console.log(`[CLEANUP] [MySQL] Found ${transactionIds.length} transactions to delete`);
         if (transactionIds.length === 0) {
+            // Still delete shifts for target user (marviano.austin@gmail.com)
+            if (targetUserIds.length > 0) {
+                try {
+                    const shiftsDeleted = await (0, mysqlDb_1.executeUpdate)(`DELETE FROM shifts WHERE user_id IN (${targetUserIds.map(() => '?').join(',')})`, targetUserIds);
+                    details.shifts = shiftsDeleted;
+                    if (details.shifts > 0) {
+                        console.log(`[CLEANUP] [MySQL] Deleted ${details.shifts} shifts for target user(s)`);
+                    }
+                }
+                catch (e) {
+                    console.warn('[CLEANUP] Failed to delete shifts:', e);
+                }
+            }
             details.success = true;
             console.log(`✅ [CLEANUP] [MySQL] No transactions to delete`);
             return {
@@ -11646,12 +12260,30 @@ electron_1.ipcMain.handle('localdb-delete-transactions-by-role', async () => {
             sql: `DELETE FROM printer2_audit_log WHERE transaction_id IN (${uuidPlaceholders})`,
             params: [...transactionUuids]
         });
+        // 6b. offline_refunds: delete orphan refunds for deleted transactions
+        queries.push({
+            sql: `DELETE FROM offline_refunds WHERE JSON_UNQUOTE(JSON_EXTRACT(refund_data, '$.transaction_uuid')) IN (${uuidPlaceholders})`,
+            params: [...transactionUuids]
+        });
         // 7. transactions
         queries.push({
             sql: `DELETE FROM transactions ${whereClause}`,
             params: [...params]
         });
         await (0, mysqlDb_1.executeTransaction)(queries);
+        // ----- shifts: delete shifts owned by target user (marviano.austin@gmail.com) -----
+        if (targetUserIds.length > 0) {
+            try {
+                const shiftsDeleted = await (0, mysqlDb_1.executeUpdate)(`DELETE FROM shifts WHERE user_id IN (${targetUserIds.map(() => '?').join(',')})`, targetUserIds);
+                details.shifts = shiftsDeleted;
+                if (details.shifts > 0) {
+                    console.log(`[CLEANUP] [MySQL] Deleted ${details.shifts} shifts for target user(s)`);
+                }
+            }
+            catch (e) {
+                console.warn('[CLEANUP] Failed to delete shifts:', e);
+            }
+        }
         // ----- system_pos -----
         const sysPosQueries = [];
         sysPosQueries.push({
@@ -12186,6 +12818,58 @@ electron_1.ipcMain.handle('restore-from-server', async (event, options) => {
             stats.bundleItems = data.bundleItems.length;
             console.log(`✅ [RESTORE] ${data.bundleItems.length} bundle items restored`);
         }
+        // 2.8a Package Items
+        if (Array.isArray(data.packageItems) && data.packageItems.length > 0) {
+            for (const pi of data.packageItems) {
+                allQueries.push({
+                    sql: `
+            INSERT INTO package_items (id, package_product_id, selection_type, product_id, required_quantity, display_order, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON DUPLICATE KEY UPDATE
+              package_product_id=VALUES(package_product_id),
+              selection_type=VALUES(selection_type),
+              product_id=VALUES(product_id),
+              required_quantity=VALUES(required_quantity),
+              display_order=VALUES(display_order),
+              updated_at=VALUES(updated_at)
+          `,
+                    params: [
+                        pi.id,
+                        pi.package_product_id,
+                        pi.selection_type || 'default',
+                        pi.product_id ?? null,
+                        pi.required_quantity || 1,
+                        pi.display_order ?? 0,
+                        (0, mysqlDb_1.toMySQLTimestamp)(pi.created_at || new Date()),
+                        (0, mysqlDb_1.toMySQLTimestamp)(pi.updated_at || Date.now())
+                    ]
+                });
+            }
+            stats.packageItems = data.packageItems.length;
+            console.log(`✅ [RESTORE] ${data.packageItems.length} package items restored`);
+        }
+        // 2.8b Package Item Products
+        if (Array.isArray(data.packageItemProducts) && data.packageItemProducts.length > 0) {
+            for (const pip of data.packageItemProducts) {
+                allQueries.push({
+                    sql: `
+            INSERT INTO package_item_products (id, package_item_id, product_id, display_order, created_at)
+            VALUES (?, ?, ?, ?, ?)
+            ON DUPLICATE KEY UPDATE
+              display_order=VALUES(display_order)
+          `,
+                    params: [
+                        pip.id,
+                        pip.package_item_id,
+                        pip.product_id,
+                        pip.display_order ?? 0,
+                        (0, mysqlDb_1.toMySQLTimestamp)(pip.created_at || new Date())
+                    ]
+                });
+            }
+            stats.packageItemProducts = data.packageItemProducts.length;
+            console.log(`✅ [RESTORE] ${data.packageItemProducts.length} package item products restored`);
+        }
         // 2.9 Payment Methods
         if (Array.isArray(data.paymentMethods) && data.paymentMethods.length > 0) {
             for (const pm of data.paymentMethods) {
@@ -12277,10 +12961,11 @@ electron_1.ipcMain.handle('restore-from-server', async (event, options) => {
             stats.clAccounts = data.clAccounts.length;
             console.log(`✅ [RESTORE] ${data.clAccounts.length} CL accounts restored`);
         }
-        // Execute all master data queries in a transaction
+        // Execute all master data queries in a transaction (db_host)
         if (allQueries.length > 0) {
             await (0, mysqlDb_1.executeTransaction)(allQueries);
             console.log(`✅ [RESTORE] Executed ${allQueries.length} master data queries`);
+            await upsertMasterDataToSystemPos(allQueries);
         }
         // Step 3: Download and Restore Transactions (if requested)
         if (includeTransactions) {

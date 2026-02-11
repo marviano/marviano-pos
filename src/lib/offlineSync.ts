@@ -307,7 +307,7 @@ class OfflineSyncService {
 
         // const targetBusinessId = Number(syncData.businessId ?? 14);
 
-          const totalSteps = 33; // Updated: added step for restaurant_layout_elements
+          const totalSteps = 35; // Updated: added packageItems, packageItemProducts
           let completedSteps = 0;
           const advanceProgress = () => {
             completedSteps = Math.min(totalSteps, completedSteps + 1);
@@ -663,9 +663,44 @@ class OfflineSyncService {
 
           // Categories and Customizations moved up
 
+          const businessId = syncData.businessId ?? 14;
           if (Array.isArray(data.bundleItems)) {
             if (data.bundleItems.length > 0) {
               await (electronAPI.localDbUpsertBundleItems as (rows: unknown[]) => Promise<{ success: boolean }>)?.(data.bundleItems);
+            }
+            const syncedBundleItemIds = (data.bundleItems || []).map((bi: Record<string, unknown>) => bi.id).filter((id: unknown): id is number => typeof id === 'number');
+            if (electronAPI.localDbMarkInactiveBundleItems) {
+              try {
+                await electronAPI.localDbMarkInactiveBundleItems(businessId, syncedBundleItemIds);
+              } catch (e) {
+                console.warn('⚠️ [SYNC] Mark inactive bundle items failed:', e);
+              }
+            }
+          }
+          advanceProgress();
+
+          if (Array.isArray(data.packageItems) && data.packageItems.length > 0) {
+            await (electronAPI.localDbUpsertPackageItems as (rows: unknown[]) => Promise<{ success: boolean }>)?.(data.packageItems);
+          }
+          const syncedPackageItemIds = (data.packageItems || []).map((pi: Record<string, unknown>) => pi.id).filter((id: unknown): id is number => typeof id === 'number');
+          if (electronAPI.localDbMarkInactivePackageItems) {
+            try {
+              await electronAPI.localDbMarkInactivePackageItems(businessId, syncedPackageItemIds);
+            } catch (e) {
+              console.warn('⚠️ [SYNC] Mark inactive package items failed:', e);
+            }
+          }
+          advanceProgress();
+
+          if (Array.isArray(data.packageItemProducts) && data.packageItemProducts.length > 0) {
+            await (electronAPI.localDbUpsertPackageItemProducts as (rows: unknown[]) => Promise<{ success: boolean }>)?.(data.packageItemProducts);
+          }
+          const syncedPackageItemProductIds = (data.packageItemProducts || []).map((pip: Record<string, unknown>) => pip.id).filter((id: unknown): id is number => typeof id === 'number');
+          if (electronAPI.localDbMarkInactivePackageItemProducts) {
+            try {
+              await electronAPI.localDbMarkInactivePackageItemProducts(businessId, syncedPackageItemProductIds);
+            } catch (e) {
+              console.warn('⚠️ [SYNC] Mark inactive package item products failed:', e);
             }
           }
           advanceProgress();

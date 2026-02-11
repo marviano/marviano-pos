@@ -52,8 +52,8 @@
     "wait-on": "^9.0.1"
   },
   "build": {
-    "appId": "com.salespos.app",
-    "productName": "SalesPOS",
+    "appId": "com.pos.app",
+    "productName": "POS",
     "directories": {
       "output": "dist-electron"
     },

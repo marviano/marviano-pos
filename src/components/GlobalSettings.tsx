@@ -221,22 +221,38 @@ export default function GlobalSettings() {
     try {
       const savePromises = [];
 
-      const buildExtraSettings = (printerType: 'receiptizePrinter' | 'labelPrinter') => {
+      const buildExtraSettings = async (printerType: 'receiptizePrinter' | 'labelPrinter') => {
         const marginAdjust = printerType === 'receiptizePrinter' ? receiptizeOffset : labelOffset;
-        return {
+        const base: { marginAdjustMm: number; copies?: number; nonOfflineCopies?: number } = {
           marginAdjustMm: typeof marginAdjust === 'number' && !Number.isNaN(marginAdjust) ? marginAdjust : 0,
         };
+        if (printerType === 'labelPrinter') {
+          const configsRaw = await window.electronAPI?.localDbGetPrinterConfigs?.();
+          const configs = Array.isArray(configsRaw) ? configsRaw : [];
+          const labelConfig = configs.find((c: unknown) => (c as { printer_type?: string })?.printer_type === 'labelPrinter') as { extra_settings?: unknown } | undefined;
+          if (labelConfig?.extra_settings) {
+            try {
+              const extra = typeof labelConfig.extra_settings === 'string' ? JSON.parse(labelConfig.extra_settings) : labelConfig.extra_settings;
+              if (extra && typeof extra === 'object') {
+                if (typeof extra.copies === 'number' && extra.copies > 0) base.copies = Math.min(10, Math.floor(extra.copies));
+                if (typeof extra.nonOfflineCopies === 'number' && extra.nonOfflineCopies > 0) base.nonOfflineCopies = Math.min(10, Math.floor(extra.nonOfflineCopies));
+              }
+            } catch (_) { /* ignore */ }
+          }
+        }
+        return base;
       };
 
       if (selectedReceiptizePrinter) {
         savePromises.push(
-          window.electronAPI?.localDbSavePrinterConfig?.('receiptizePrinter', selectedReceiptizePrinter, buildExtraSettings('receiptizePrinter'))
+          window.electronAPI?.localDbSavePrinterConfig?.('receiptizePrinter', selectedReceiptizePrinter, { marginAdjustMm: typeof receiptizeOffset === 'number' && !Number.isNaN(receiptizeOffset) ? receiptizeOffset : 0 })
         );
       }
 
       if (selectedLabelPrinter) {
+        const labelExtra = await buildExtraSettings('labelPrinter');
         savePromises.push(
-          window.electronAPI?.localDbSavePrinterConfig?.('labelPrinter', selectedLabelPrinter, buildExtraSettings('labelPrinter'))
+          window.electronAPI?.localDbSavePrinterConfig?.('labelPrinter', selectedLabelPrinter, labelExtra)
         );
       }
 

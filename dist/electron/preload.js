@@ -114,7 +114,14 @@ electron_1.contextBridge.exposeInMainWorld('electronAPI', {
     // Bundle handlers
     localDbGetBundleItems: (productId) => electron_1.ipcRenderer.invoke('localdb-get-bundle-items', productId),
     localDbUpsertBundleItems: (rows) => electron_1.ipcRenderer.invoke('localdb-upsert-bundle-items', rows),
+    localDbGetPackageItems: (packageProductId) => electron_1.ipcRenderer.invoke('localdb-get-package-items', packageProductId),
     localDbDebugBundleItems: () => electron_1.ipcRenderer.invoke('localdb-debug-bundle-items'),
+    // Package handlers
+    localDbUpsertPackageItems: (rows) => electron_1.ipcRenderer.invoke('localdb-upsert-package-items', rows),
+    localDbUpsertPackageItemProducts: (rows) => electron_1.ipcRenderer.invoke('localdb-upsert-package-item-products', rows),
+    localDbMarkInactiveBundleItems: (businessId, syncedBundleItemIds) => electron_1.ipcRenderer.invoke('localdb-mark-inactive-bundle-items', businessId, syncedBundleItemIds),
+    localDbMarkInactivePackageItems: (businessId, syncedPackageItemIds) => electron_1.ipcRenderer.invoke('localdb-mark-inactive-package-items', businessId, syncedPackageItemIds),
+    localDbMarkInactivePackageItemProducts: (businessId, syncedPackageItemProductIds) => electron_1.ipcRenderer.invoke('localdb-mark-inactive-package-item-products', businessId, syncedPackageItemProductIds),
     // New enhanced offline support tables
     // Transactions
     localDbUpsertTransactions: (rows) => electron_1.ipcRenderer.invoke('localdb-upsert-transactions', rows),
@@ -137,6 +144,8 @@ electron_1.contextBridge.exposeInMainWorld('electronAPI', {
     // Transaction Items
     localDbUpsertTransactionItems: (rows) => electron_1.ipcRenderer.invoke('localdb-upsert-transaction-items', rows),
     localDbGetTransactionItems: (transactionId) => electron_1.ipcRenderer.invoke('localdb-get-transaction-items', transactionId),
+    localDbGetPackageLines: (uuidTransactionItemIds) => electron_1.ipcRenderer.invoke('localdb-get-package-lines', uuidTransactionItemIds),
+    localDbUpdatePackageLine: (payload) => electron_1.ipcRenderer.invoke('localdb-update-package-line', payload),
     localDbGetDistinctItemWaiterIdsByTransaction: (transactionIds) => electron_1.ipcRenderer.invoke('localdb-get-distinct-item-waiter-ids-by-transaction', transactionIds),
     localDbGetTransactionItemCustomizationsNormalized: (transactionId) => electron_1.ipcRenderer.invoke('localdb-get-transaction-item-customizations-normalized', transactionId),
     localDbUpsertTransactionItemCustomizations: (rows) => electron_1.ipcRenderer.invoke('localdb-upsert-transaction-item-customizations', rows),

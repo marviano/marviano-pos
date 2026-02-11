@@ -1406,6 +1406,10 @@ class SmartSyncService {
           // Update payload with cleaned data
           Object.assign(payload, cleanedPayload);
 
+          // #region agent log
+          fetch('http://127.0.0.1:7243/ingest/c52d9ed7-b40f-421d-845b-2964011203fd',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'smartSync.ts:refund-pre-send',message:'Refund request payload and URL',data:{refundId:refund.id,transactionUuid,refundUrl:getApiUrl(`/api/transactions/${transactionUuid}/refund`),payloadKeys:Object.keys(payload),refund_amount:payload.refund_amount,refund_amount_type:typeof payload.refund_amount,payment_method_id:payload.payment_method_id,payment_method_id_type:typeof payload.payment_method_id,refunded_at:payload.refunded_at,refund_type:payload.refund_type,status:payload.status,fullPayload:payload},timestamp:Date.now(),sessionId:'debug-session',hypothesisId:'A'})}).catch(()=>{});
+          // #endregion
+
           const refundUrl = getApiUrl(`/api/transactions/${transactionUuid}/refund`);
           console.log(`🌐 [SMART SYNC] Sending refund ${refund.id} to server:`, {
             url: refundUrl,
@@ -1450,12 +1454,74 @@ class SmartSyncService {
               } catch {
                 // Not JSON, use as text
               }
+              // #region agent log
+              fetch('http://127.0.0.1:7243/ingest/c52d9ed7-b40f-421d-845b-2964011203fd',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'smartSync.ts:refund-error',message:'Refund 500 server response body',data:{refundId:refund.id,status:response.status,statusText:response.statusText,errorText:errorText,errorBody:errorBody},timestamp:Date.now(),sessionId:'debug-session',hypothesisId:'B'})}).catch(()=>{});
+              // #endregion
+              const errMsg = String(errorBody?.error ?? errorBody?.message ?? errorText);
+
+              // Handle 404 Transaction not found: check local DB, delete refund if tx missing, or upsert tx then retry next cycle
+              if (response.status === 404 && errMsg.includes('Transaction not found')) {
+                const checkResult = electronAPI.localDbCheckTransactionExists
+                  ? await (electronAPI.localDbCheckTransactionExists as (uuid: string) => Promise<{ exists: boolean }>)(transactionUuid)
+                  : { exists: false };
+                if (!checkResult?.exists) {
+                  console.log(`🗑️ [SMART SYNC] Refund ${refund.id}: Transaction ${transactionUuid} not in local DB - deleting orphan refund`);
+                  if (electronAPI.localDbDeleteRefund) {
+                    await (electronAPI.localDbDeleteRefund as (id: number) => Promise<{ success?: boolean }>)(refund.id);
+                  }
+                  continue;
+                }
+                console.log(`🔄 [SMART SYNC] Refund ${refund.id}: Transaction ${transactionUuid} found locally - syncing transaction to server first`);
+                if (electronAPI.localDbResetTransactionSync) {
+                  await (electronAPI.localDbResetTransactionSync as (id: string) => Promise<{ success?: boolean }>)(transactionUuid);
+                }
+                const pendingAfterReset = await (electronAPI.localDbGetUnsyncedTransactions as (businessId?: number) => Promise<PendingTransaction[]>)();
+                const txToSync = Array.isArray(pendingAfterReset) ? pendingAfterReset.find((t: PendingTransaction) => t.id === transactionUuid) : undefined;
+                if (txToSync) {
+                  const batchResult = await this.processBatch([txToSync], false);
+                  if (batchResult.syncedCount > 0) {
+                    console.log(`✅ [SMART SYNC] Transaction ${transactionUuid} synced - retrying refund ${refund.id} now`);
+                    const retryResponse = await fetch(refundUrl, {
+                      method: 'POST',
+                      headers: { 'Content-Type': 'application/json' },
+                      body: JSON.stringify(payload),
+                    });
+                    if (retryResponse.ok) {
+                      const result = await retryResponse.json() as UnknownRecord;
+                      if (result.refund && electronAPI.localDbApplyTransactionRefund) {
+                        const refundData = typeof refund.refund_data === 'string'
+                          ? JSON.parse(refund.refund_data) as UnknownRecord
+                          : (refund.refund_data as UnknownRecord);
+                        const localRefundUuid = refundData.uuid_id as string;
+                        await (electronAPI.localDbApplyTransactionRefund as (p: UnknownRecord) => Promise<unknown>)({
+                          refund: { ...result.refund, uuid_id: localRefundUuid },
+                          transactionUpdate: { id: transactionUuid, refund_status: undefined, refund_total: undefined, last_refunded_at: undefined, status: undefined },
+                        });
+                      }
+                      await (electronAPI.localDbMarkRefundSynced as (id: number) => Promise<{ success: boolean }>)(refund.id);
+                      console.log(`✅ [SMART SYNC] Refund ${refund.id} synced successfully after transaction upsert`);
+                      continue;
+                    }
+                    console.log(`⚠️ [SMART SYNC] Refund ${refund.id} retry returned ${retryResponse.status} - will retry next sync cycle`);
+                    continue;
+                  }
+                }
+              }
+
+              const isDuplicateRefund = errMsg.includes('Duplicate entry') && errMsg.includes('uk_transaction_refunds_uuid');
+              if (isDuplicateRefund) {
+                // Refund already exists on server (idempotent retry) - mark as synced and continue
+                console.log(`✅ [SMART SYNC] Refund ${refund.id} already exists on server (duplicate key), marking as synced`);
+                await (electronAPI.localDbMarkRefundSynced as (id: number) => Promise<{ success: boolean }>)(refund.id);
+                console.log(`✅ [SMART SYNC] Refund ${refund.id} marked as synced (idempotent)`);
+                continue;
+              }
               console.error(`❌ [SMART SYNC] Refund ${refund.id} server error response:`, {
                 status: response.status,
                 statusText: response.statusText,
                 errorText: errorText.substring(0, 500),
                 errorBody: errorBody,
-                errorMessage: errorBody?.error || errorBody?.message || errorText.substring(0, 200),
+                errorMessage: errMsg.substring(0, 200),
               });
             } catch {
               // Ignore if we can't read response

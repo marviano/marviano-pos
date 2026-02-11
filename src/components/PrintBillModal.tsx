@@ -12,6 +12,7 @@ export interface PrintBillModalData {
   total: number;
   tableNumber: string;
   cashier: string;
+  customerName: string;
   date: string;
   transactionType: string;
   pickupMethod: string;
@@ -146,6 +147,7 @@ export default function PrintBillModal({ isOpen, onClose, data, onPrinted }: Pri
         date: data.date,
         tableNumber: data.tableNumber,
         cashier: data.cashier,
+        customerName: data.customerName ?? (data.transaction && typeof (data.transaction as Record<string, unknown>).customer_name === 'string' ? (data.transaction as Record<string, unknown>).customer_name : ''),
         transactionType: data.transactionType,
         pickupMethod: data.pickupMethod,
         isBill: true,

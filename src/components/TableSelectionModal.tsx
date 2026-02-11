@@ -5,6 +5,7 @@ import { X } from 'lucide-react';
 import { useAuth } from '@/hooks/useAuth';
 import { generateTransactionId, generateTransactionItemId } from '@/lib/uuid';
 import NewItemsConfirmationModal from './NewItemsConfirmationModal';
+import type { PackageSelection } from './PackageSelectionModal';
 
 interface Room {
   id: number;
@@ -85,6 +86,7 @@ interface CartItem {
   }[];
   customNote?: string;
   bundleSelections?: BundleSelectionItem[];
+  packageSelections?: PackageSelection[];
   isLocked?: boolean;
   transactionItemId?: number;
   transactionId?: string;
@@ -98,6 +100,7 @@ interface TableSelectionModalProps {
   transactionType: 'drinks' | 'bakery';
   onSuccess: () => void;
   customerName?: string;
+  customerUnit?: string | number | null;
   pickupMethod?: 'dine-in' | 'take-away';
   loadedTransactionInfo?: {
     transactionId: string;
@@ -120,6 +123,7 @@ export default function TableSelectionModal({
   transactionType,
   onSuccess,
   customerName = '',
+  customerUnit: customerUnitProp = null,
   pickupMethod = 'dine-in',
   loadedTransactionInfo = null,
   onItemsLocked,
@@ -476,7 +480,12 @@ export default function TableSelectionModal({
         bank_name: null,
         contact_id: null,
         customer_name: customerName.trim() || null,
-        customer_unit: null,
+        customer_unit: (() => {
+          const cu = customerUnitProp;
+          if (cu === undefined || cu === null || cu === '') return null;
+          const n = typeof cu === 'number' ? cu : parseInt(String(cu).replace(/\D/g, ''), 10);
+          return !Number.isNaN(n) && n >= 1 && n <= 999 ? n : null;
+        })(),
         bank_id: null,
         card_number: null,
         cl_account_id: null,
@@ -548,6 +557,7 @@ export default function TableSelectionModal({
           total_price: itemPrice * item.quantity,
           custom_note: item.customNote || null,
           bundle_selections_json: item.bundleSelections ? JSON.stringify(item.bundleSelections) : null,
+          package_selections_json: item.packageSelections ? JSON.stringify(item.packageSelections) : null,
           created_at: transactionData.created_at,
           waiter_id: waiterId ?? null,
           production_status: null,
@@ -922,7 +932,8 @@ export default function TableSelectionModal({
             labels: newOrderLabels.length > 0 ? newOrderLabels : [{ orderTime: orderContextForChecker.orderTime, productName: '', counter: 1, itemNumber: 1, totalItems: 1, pickupMethod: pickupMethod === 'take-away' ? 'Take Away' : 'Dine In' }],
             printerType: 'labelPrinter',
             business_id: businessId ?? undefined,
-            orderContext: orderContextForChecker
+            orderContext: orderContextForChecker,
+            isOnlineOrder: false
           });
           await window.electronAPI?.localDbSetTransactionCheckerPrinted?.(transactionId);
         } catch (labelErr) {
@@ -1034,6 +1045,7 @@ export default function TableSelectionModal({
           total_price: itemPrice * item.quantity,
           custom_note: item.customNote || null,
           bundle_selections_json: item.bundleSelections ? JSON.stringify(item.bundleSelections) : null,
+          package_selections_json: item.packageSelections ? JSON.stringify(item.packageSelections) : null,
           created_at: new Date().toISOString(),
           waiter_id: waiterId != null ? waiterId : (existingTransaction.waiter_id as number | null) ?? null,
           production_status: null,
@@ -1398,7 +1410,8 @@ export default function TableSelectionModal({
             labels: allLabels,
             printerType: 'labelPrinter',
             business_id: businessId ?? undefined,
-            orderContext: orderContextForNewItems
+            orderContext: orderContextForNewItems,
+            isOnlineOrder: false
           });
         } catch (labelErr) {
           console.error('❌ Error printing checker for new items:', labelErr);

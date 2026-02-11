@@ -8,6 +8,7 @@ import { smartSyncService } from '@/lib/smartSync';
 import { generateTransactionId, generateTransactionItemId } from '@/lib/uuid';
 import { useAuth } from '@/hooks/useAuth';
 import { getApiUrl } from '@/lib/api';
+import { type PackageSelection, getPackageBreakdownLines } from './PackageSelectionModal';
 
 interface BundleSelection {
   category2_id: number;
@@ -60,6 +61,7 @@ interface CartItem {
   }[];
   customNote?: string;
   bundleSelections?: BundleSelection[];
+  packageSelections?: PackageSelection[];
 }
 
 type ProductInfo = CartItem['product'];
@@ -111,6 +113,7 @@ interface PaymentModalProps {
   isOnline?: boolean;
   selectedOnlinePlatform?: 'qpon' | 'gofood' | 'grabfood' | 'shopeefood' | 'tiktok' | null;
   initialCustomerName?: string;
+  initialCustomerUnit?: string | number;
   loadedTransactionInfo?: {
     transactionId: string;
     tableName: string | null;
@@ -146,6 +149,7 @@ export default function PaymentModal({
   isOnline = false,
   selectedOnlinePlatform = null,
   initialCustomerName = '',
+  initialCustomerUnit: initialCustomerUnitProp = undefined,
   waiterId = null,
   loadedTransactionInfo = null,
   pickupMethod: cartPickupMethod = 'dine-in'
@@ -236,20 +240,25 @@ export default function PaymentModal({
     }
   }, [isOpen, isOnline, selectedOnlinePlatform]);
 
-  // Initialize customer name when modal opens or when initialCustomerName changes
+  // Initialize customer name and CU when modal opens or when props change
   useEffect(() => {
     if (isOpen) {
-      // Always sync customerName with initialCustomerName when modal is open
-      // Use a small timeout to ensure prop value is current
+      // Always sync customerName and customerUnit with props when modal is open
       const timeoutId = setTimeout(() => {
         setCustomerName(initialCustomerName || '');
+        const cu = initialCustomerUnitProp;
+        if (cu !== undefined && cu !== null) {
+          const s = typeof cu === 'number' ? String(Math.min(999, Math.max(1, cu))) : String(cu).replace(/\D/g, '') || '1';
+          setCustomerUnit(s || '1');
+        }
       }, 0);
       return () => clearTimeout(timeoutId);
     } else {
       // Reset when modal closes
       setCustomerName('');
+      setCustomerUnit('1');
     }
-  }, [isOpen, initialCustomerName]);
+  }, [isOpen, initialCustomerName, initialCustomerUnitProp]);
 
   // Pre-fill promotion from loaded transaction (runs after reset when opening with loaded tx that has voucher)
   useEffect(() => {
@@ -779,8 +788,20 @@ export default function PaymentModal({
               updated_at: new Date().toISOString(),
               waiter_id: (waiterId != null && waiterId !== undefined) ? waiterId : (existingTransaction.waiter_id ?? null),
               sync_status: 'pending',
-              shift_uuid: existingTransaction.shift_uuid ?? null, // Preserve original shift (e.g. shift 1 stays when paying in shift 2)
+              shift_uuid: null, // Set below from current active shift (transaction saved to shift when paid)
             };
+            try {
+              if (electronAPI.localDbGetActiveShift && businessId) {
+                const userId = user?.id ? parseInt(String(user.id)) : 0;
+                const activeShiftRes = await electronAPI.localDbGetActiveShift(userId, businessId);
+                const shiftUuid = (activeShiftRes as { shift?: { uuid_id?: string } })?.shift?.uuid_id;
+                if (shiftUuid) {
+                  localTransactionData.shift_uuid = shiftUuid;
+                }
+              }
+            } catch (err) {
+              console.warn('Failed to get active shift for existing transaction payment:', err);
+            }
             console.log('📝 [PAYMENT] Updating existing transaction:', loadedTransactionInfo.transactionId);
           } else {
             // Fallback: create new transaction if existing not found - bind to current active shift
@@ -897,6 +918,7 @@ export default function PaymentModal({
             customizations: item.customizations || null,
             custom_note: item.customNote || null,
             bundle_selections_json: item.bundleSelections ? JSON.stringify(item.bundleSelections) : null,
+            package_selections_json: item.packageSelections ? JSON.stringify(item.packageSelections) : null,
             created_at: transactionData.created_at,
             waiter_id: effectiveWaiterId,
             production_status: existingProductionStatus, // Preserve existing status for previously saved items, null for new items
@@ -1071,6 +1093,7 @@ export default function PaymentModal({
               totalPrice: item.total_price,
               customNote: item.custom_note || undefined,
               bundleSelections: item.bundle_selections_json ? JSON.parse(item.bundle_selections_json) : undefined,
+              packageSelections: item.package_selections_json ? JSON.parse(item.package_selections_json) : undefined,
               // eslint-disable-next-line @typescript-eslint/no-explicit-any
               customizations: item.customizations as unknown as any, // Cast to any to bypass strict type mismatch in IPC
               status: 'preparing' as const
@@ -1363,6 +1386,24 @@ export default function PaymentModal({
                     category1_id: subCategory1Id,
                     category1_name: subCategory1Name,
                   });
+                });
+              });
+            }
+
+            // Add package breakdown as sub-items (main line already pushed above)
+            if (item.packageSelections && item.packageSelections.length > 0) {
+              const pkgLines = getPackageBreakdownLines(item.packageSelections, item.quantity);
+              pkgLines.forEach(line => {
+                receiptItems.push({
+                  name: `  └ ${line.product_name} ×${line.quantity}`,
+                  quantity: line.quantity,
+                  price: 0,
+                  total_price: 0,
+                  customNote: undefined,
+                  custom_note: undefined,
+                  customizations: undefined,
+                  category1_id: category1Id,
+                  category1_name: category1Name,
                 });
               });
             }
@@ -2032,7 +2073,8 @@ export default function PaymentModal({
                 labels: allLabels,
                 printerType: 'labelPrinter',
                 business_id: transactionData.business_id,
-                orderContext: orderContextForChecker
+                orderContext: orderContextForChecker,
+                isOnlineOrder: isOnline && !!selectedOnlinePlatform
               });
 
               if (!isSuccessResponse(batchResult) || !batchResult.success) {

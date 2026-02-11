@@ -669,6 +669,7 @@ export default function ActiveOrdersTab({ businessId, isOpen, onLoadTransaction 
         }
       }
 
+      const customerName = typeof transaction.customer_name === 'string' ? transaction.customer_name : '';
       const modalData: PrintBillModalData = {
         transactionId,
         transaction,
@@ -676,6 +677,7 @@ export default function ActiveOrdersTab({ businessId, isOpen, onLoadTransaction 
         total,
         tableNumber,
         cashier: cashierName,
+        customerName,
         date: typeof transaction.created_at === 'string' ? transaction.created_at : new Date().toISOString(),
         transactionType: typeof transaction.transaction_type === 'string' ? transaction.transaction_type : 'dine-in',
         pickupMethod: typeof transaction.pickup_method === 'string' ? transaction.pickup_method : 'dine-in',

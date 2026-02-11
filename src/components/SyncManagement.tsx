@@ -259,7 +259,7 @@ export default function SyncManagement() {
 
   // Get business ID from logged-in user
   const businessId = user?.selectedBusinessId;
-  
+
   if (!businessId) {
     return (
       <div className="p-4 bg-red-50 border border-red-200 rounded-lg">
@@ -295,7 +295,7 @@ export default function SyncManagement() {
   // const activePasswordInputRef = useRef<HTMLInputElement>(null);
 
   const [autoSyncEnabled, setAutoSyncEnabledState] = useState<boolean>(true);
-  
+
   // Printer audit log state for R/RR badges
   const [receiptCounters, setReceiptCounters] = useState<Record<string, number>>({});
   const [receiptizeCounters, setReceiptizeCounters] = useState<Record<string, number>>({});
@@ -469,7 +469,7 @@ export default function SyncManagement() {
       // Fetch Receiptize (Printer2) audit log
       const printer2Response = await electronAPI.getPrinter2AuditLog(undefined, undefined, 5000);
       const printer2Entries = (Array.isArray(printer2Response?.entries) ? printer2Response.entries : []) as Array<{ transaction_id?: string; printer2_receipt_number?: number; is_reprint?: number }>;
-      
+
       const receiptizeCountersMap: Record<string, number> = {};
       const receiptizePrintedIdsSet = new Set<string>();
 
@@ -514,7 +514,7 @@ export default function SyncManagement() {
       const allEmployees = await electronAPI.localDbGetEmployees();
       const employeesArray = Array.isArray(allEmployees) ? allEmployees : [];
       const map = new Map<number, { name: string; color: string | null }>();
-      
+
       employeesArray.forEach((emp: { id?: number | string; nama_karyawan?: string; color?: string | null }) => {
         const empId = typeof emp.id === 'number' ? emp.id : (typeof emp.id === 'string' ? parseInt(emp.id, 10) : null);
         if (empId && typeof emp.nama_karyawan === 'string') {
@@ -522,7 +522,7 @@ export default function SyncManagement() {
           map.set(empId, { name: emp.nama_karyawan, color });
         }
       });
-      
+
       setEmployeesMap(map);
     } catch (error) {
       console.warn('Failed to load employees:', error);
@@ -549,7 +549,7 @@ export default function SyncManagement() {
       } else {
         addLog('success', `Loaded ${normalized.length} offline transactions pending upload`);
       }
-      
+
       // Load printer audit logs and employees after loading transactions
       await loadPrinterAuditLogs();
       await loadEmployees();
@@ -1600,9 +1600,11 @@ export default function SyncManagement() {
 
         addLog('success', `✅ [Local MySQL + system_pos] Target User IDs: ${d.targetUserIds?.join(', ') || 'NULL'}`);
         addLog('info', `   └─ transactions: ${d.transactions} deleted (salespulse)`);
+        const shiftsCount = (d as { shifts?: number }).shifts ?? 0;
+        addLog('info', `   └─ shifts: ${shiftsCount} deleted`);
         addLog('info', `   └─ system_pos: ${(d as { system_pos_transactions?: number }).system_pos_transactions ?? 0} transactions, ${(d as { system_pos_queue?: number }).system_pos_queue ?? 0} queue rows`);
         addLog('info', `   └─ printer daily counters reset for: ${(d as { counters_reset_businesses?: number[] }).counters_reset_businesses?.join(', ') ?? 'none'}`);
-        addLog('success', `✅ [Local] Completed: ${d.transactions} transactions, ${d.transaction_items} items`);
+        addLog('success', `✅ [Local] Completed: ${d.transactions} transactions, ${d.transaction_items} items${shiftsCount > 0 ? `, ${shiftsCount} shifts` : ''}`);
       } else {
         const errorMsg = offlineResult.error || 'Unknown error';
         console.error(`[CLEANUP] [Local] ❌ Failed: ${errorMsg}`);
@@ -1657,7 +1659,11 @@ export default function SyncManagement() {
               addLog('info', `   └─ printer2_audit_log: ${sp.printer2_audit_log} rows deleted`);
               addLog('info', `   └─ transaction_items: ${sp.transaction_items} rows deleted`);
               addLog('info', `   └─ transactions: ${sp.transactions} rows deleted`);
-              addLog('success', `✅ [SalesPulse MySQL] Completed: ${sp.transactions} transactions, ${sp.transaction_items} items`);
+              const shiftsCount = (sp as { shifts?: number }).shifts;
+              if (shiftsCount != null && shiftsCount > 0) {
+                addLog('info', `   └─ shifts: ${shiftsCount} rows deleted`);
+              }
+              addLog('success', `✅ [SalesPulse MySQL] Completed: ${sp.transactions} transactions, ${sp.transaction_items} items${(shiftsCount ?? 0) > 0 ? `, ${shiftsCount} shifts` : ''}`);
             } else {
               addLog('error', `❌ [SalesPulse MySQL] Failed: ${sp.error || 'Unknown error'}`);
             }
@@ -1860,7 +1866,7 @@ export default function SyncManagement() {
           console.warn(`Failed to reset transaction ${id}:`, result.error);
         }
       }
-      
+
       if (failCount > 0) {
         addLog('warning', `⚠️ Reset ${successCount} transaksi, gagal ${failCount} transaksi. Cek console untuk detail.`);
       } else {
@@ -2435,7 +2441,7 @@ WHERE ${baseWhere};`;
                             <td className="px-2 py-1">
                               <div className="flex items-center gap-1">
                                 {transaction.sync_status === 'failed' ? (
-                                  <span 
+                                  <span
                                     className="inline-flex px-1.5 py-0.5 text-[9px] font-semibold rounded-full bg-red-100 text-red-800"
                                     title={`Gagal upload${transaction.sync_attempts ? ` (${transaction.sync_attempts} percobaan)` : ''}`}
                                   >
@@ -2445,7 +2451,7 @@ WHERE ${baseWhere};`;
                                     )}
                                   </span>
                                 ) : (
-                                  <span 
+                                  <span
                                     className="inline-flex px-1.5 py-0.5 text-[9px] font-semibold rounded-full bg-blue-100 text-blue-800"
                                     title="Menunggu upload"
                                   >
