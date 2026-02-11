@@ -30,6 +30,19 @@ export type PackageSelection =
     chosen: { product_id: number; product_name: string; quantity: number }[];
   };
 
+/** Common size codes (first word = size). If first word is not a size, we use "QTY Name" to avoid corrupting names like "Ayam Goreng" or "Es Teh". */
+const SIZE_PREFIX = /^(L|M|S|R|XL|XXL|XS|XXS)$/i;
+
+/** Format package sub-item: "L 4 Ayam Goreng" when first word is size, else "4 Ayam Goreng Nona Laras" (quantity once, no minus). */
+export function formatPackageLineDisplay(productName: string, quantity: number): string {
+  const t = (productName || '').trim();
+  const m = t.match(/^(\S+)(?:\s+(.*))?$/);
+  if (!m) return `${quantity} ${t}`;
+  const [, first, rest] = m;
+  if (rest !== undefined && SIZE_PREFIX.test(first)) return `${first} ${quantity} ${rest}`;
+  return `${quantity} ${t}`;
+}
+
 /** Flatten package selections to list of { product_name, quantity } for display/print. */
 export function getPackageBreakdownLines(selections: PackageSelection[], packageQuantity: number = 1): { product_name: string; quantity: number }[] {
   const lines: { product_name: string; quantity: number }[] = [];

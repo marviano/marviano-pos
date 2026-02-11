@@ -1,5 +1,6 @@
 import React, { useState, useCallback, useEffect, useMemo } from 'react';
 import RefundModal from './RefundModal';
+import { formatPackageLineDisplay } from './PackageSelectionModal';
 import { useAuth } from '@/hooks/useAuth';
 import { hasPermission } from '@/lib/permissions';
 import { isSuperAdmin } from '@/lib/auth';
@@ -38,6 +39,13 @@ export interface TransactionItem {
       customNote?: string;
     }>;
     requiredQuantity: number;
+  }>;
+  packageSelections?: Array<{
+    package_item_id: number;
+    selection_type: 'default' | 'flexible';
+    product_id: number;
+    product_name: string;
+    quantity: number;
   }>;
 }
 
@@ -381,6 +389,19 @@ const TransactionDetailModal: React.FC<TransactionDetailModalProps> = ({
           price: itemPrice,
           total_price: item.total_price
         });
+
+        // Add package selections as sub-items
+        if (item.packageSelections && item.packageSelections.length > 0) {
+          item.packageSelections.forEach(pkg => {
+            const totalQty = item.quantity * (pkg.quantity ?? 0);
+            receiptItems.push({
+              name: `    ${formatPackageLineDisplay(pkg.product_name, totalQty)}`,
+              quantity: totalQty,
+              price: 0,
+              total_price: 0
+            });
+          });
+        }
 
         // Add bundle selections as sub-items
         if (item.bundleSelections && item.bundleSelections.length > 0) {
@@ -1129,6 +1150,23 @@ const TransactionDetailModal: React.FC<TransactionDetailModalProps> = ({
                                 </div>
                               );
                             })()}
+
+                            {/* Package Selections Display */}
+                            {item.packageSelections && item.packageSelections.length > 0 && (
+                              <div className="mt-2 space-y-1">
+                                <div className="text-xs font-semibold text-teal-700">Package Items:</div>
+                                <div className="ml-2 border-l-2 border-teal-300 pl-2 space-y-0.5">
+                                  {item.packageSelections.map((pkg, idx) => {
+                                    const totalQty = item.quantity * (pkg.quantity ?? 0);
+                                    return (
+                                      <div key={idx} className="text-xs text-gray-600">
+                                        • {formatPackageLineDisplay(pkg.product_name, totalQty)}
+                                      </div>
+                                    );
+                                  })}
+                                </div>
+                              </div>
+                            )}
                           </div>
                         </td>
                         <td className="py-3 px-3 text-center">

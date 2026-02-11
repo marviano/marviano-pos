@@ -8,7 +8,7 @@ import CustomNoteModal from './CustomNoteModal';
 import EditItemModal from './EditItemModal';
 import PaymentModal from './PaymentModal';
 import BundleSelectionModal from './BundleSelectionModal';
-import PackageSelectionModal, { type PackageSelection, type PackageItemForPos, getPackageBreakdownLines } from './PackageSelectionModal';
+import PackageSelectionModal, { type PackageSelection, type PackageItemForPos, getPackageBreakdownLines, formatPackageLineDisplay } from './PackageSelectionModal';
 import TableSelectionModal from './TableSelectionModal';
 import WaiterSelectionModal from './WaiterSelectionModal';
 import { offlineSyncService } from '@/lib/offlineSync';
@@ -1430,7 +1430,7 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
                                 <div className="ml-2 border-l-2 border-amber-300 pl-1.5 space-y-0.5">
                                   {lines.map((line, idx) => (
                                     <div key={idx} className="text-xs text-gray-900 py-0">
-                                      • {line.product_name} ×{line.quantity}
+                                      • {formatPackageLineDisplay(line.product_name, line.quantity)}
                                     </div>
                                   ))}
                                 </div>

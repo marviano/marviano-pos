@@ -9757,37 +9757,9 @@ ipcMain.handle('print-receipt', async (event, data: ReceiptPrintData) => {
           const receiptSettings = await receiptManagementService.getReceiptSettings(data.business_id);
           const displayBusinessName = (receiptSettings?.store_name?.trim() || businessName).trim() || businessName;
 
-          // Generate items HTML string (note/customization only when showNotes is true)
+          // Generate items HTML string (package breakdown as indented bullets; note/customization only when showNotes is true)
           const items = data.items || [];
-          const itemsHTML = items.map((item: any) => {
-            const name = item.name || item.product?.nama || '';
-            const qty = item.quantity || 1;
-            const price = item.price || item.unit_price || 0;
-            const subtotal = item.total_price || (price * qty);
-            const noteParts: string[] = [];
-            if (showNotes && item.custom_note && String(item.custom_note).trim()) {
-              noteParts.push(String(item.custom_note).trim());
-            }
-            if (showNotes && item.customizations) {
-              const cust = item.customizations;
-              const custStr = typeof cust === 'string' ? cust : (Array.isArray(cust) ? cust.map((c: any) => c?.customization_name || c?.option_name || c?.name || String(c)).filter(Boolean).join(', ') : '');
-              if (custStr.trim()) noteParts.push(custStr.trim());
-            }
-            const noteLine = noteParts.length ? noteParts.join(' | ') : '';
-            const noteRow = showNotes && noteLine ? `<tr><td colspan="4" style="text-align: left; padding-bottom: 0.5mm; font-size: 8pt; color: #555;">${noteLine}</td></tr>` : '';
-            return `
-              <tr>
-                <td colspan="4" style="text-align: left; padding-bottom: 0.5mm;">${name}</td>
-              </tr>
-              <tr>
-                <td style="width: 30%;"></td>
-                <td style="width: 25%; text-align: right; padding-top: 0;">${price.toLocaleString('id-ID')}</td>
-                <td style="width: 20%; text-align: right; padding-top: 0;">${qty}</td>
-                <td style="width: 25%; text-align: right; padding-top: 0;">${subtotal.toLocaleString('id-ID')}</td>
-              </tr>
-              ${noteRow}
-            `;
-          }).join('');
+          const itemsHTML = buildItemsHtmlForPrint(items, { showPrices: true, showNotes });
 
           // Calculate total items
           const totalItems = items.reduce((sum: number, item: any) => sum + (item.quantity || 1), 0);
@@ -9928,23 +9900,34 @@ ipcMain.handle('print-receipt', async (event, data: ReceiptPrintData) => {
             ...(deviceName ? { deviceName } : {}),
           };
 
-          currentWindow.webContents.print(printOptions, (success: boolean, errorType: string) => {
-            if (success) {
-              console.log('✅ Print sent successfully');
-              resolve({ success: true });
-            } else {
-              console.error('❌ Print failed:', errorType);
-              resolve({ success: false, error: errorType });
-            }
-            setTimeout(() => {
-              if (currentWindow && !currentWindow.isDestroyed()) {
-                currentWindow.close();
+          let receiptRetriedOnce = false;
+          const doPrint = () => {
+            currentWindow.webContents.print(printOptions, (success: boolean, errorType: string) => {
+              if (success) {
+                console.log('✅ Print sent successfully');
+                resolve({ success: true });
+              } else {
+                const isCanceled = /cancel|canceled/i.test(String(errorType));
+                if (isCanceled && !receiptRetriedOnce && currentWindow && !currentWindow.isDestroyed()) {
+                  receiptRetriedOnce = true;
+                  console.warn('⚠️ Print job canceled, retrying once in 1.5s...');
+                  setTimeout(doPrint, 1500);
+                  return;
+                }
+                console.error('❌ Print failed:', errorType);
+                resolve({ success: false, error: errorType });
               }
-              if (printWindow === currentWindow) {
-                printWindow = null;
-              }
-            }, 1000);
-          });
+              setTimeout(() => {
+                if (currentWindow && !currentWindow.isDestroyed()) {
+                  currentWindow.close();
+                }
+                if (printWindow === currentWindow) {
+                  printWindow = null;
+                }
+              }, 1000);
+            });
+          };
+          doPrint();
         } catch (err) {
           console.error('❌ Exception during webContents.print:', err);
           resolve({ success: false, error: String(err) });
@@ -10380,9 +10363,17 @@ async function executeLabelsBatchPrint(data: {
           // Many label/thermal printers ignore the 'copies' option; print N times to get N physical copies
           const numCopies = Math.max(1, Math.min(10, copies));
           let printedCount = 0;
+          let retriedOnce = false;
           const doOnePrint = () => {
             jobPrintWindow.webContents.print(printOptions, (success: boolean, errorType: string) => {
               if (!success) {
+                const isCanceled = /cancel|canceled/i.test(String(errorType));
+                if (isCanceled && !retriedOnce && jobPrintWindow && !jobPrintWindow.isDestroyed()) {
+                  retriedOnce = true;
+                  console.warn('⚠️ Print job canceled, retrying once in 1.5s...');
+                  setTimeout(doOnePrint, 1500);
+                  return;
+                }
                 console.error('❌ Batch labels print failed:', errorType);
                 resolve({ success: false, error: errorType });
                 setTimeout(() => {
@@ -10814,6 +10805,12 @@ function generateLabelHTMLFromTemplate(templateCode: string, data: LabelPrintDat
   if (out.includes('</head>') && !out.includes('overflow-wrap:break-word')) {
     out = out.replace('</head>', `${wrapStyle}</head>`);
   }
+  // Indent package sub-items (table rows and checker category divs) so DB template does not need editing
+  const hasPackageSubitemStyle = out.includes('.item-line.package-subitem { padding-left');
+  if (out.includes('</head>') && !hasPackageSubitemStyle) {
+    const packageSubitemStyle = '<style>tr.package-subitem td:first-child { padding-left: 8mm; } .item-line.package-subitem { padding-left: 8mm; }</style>';
+    out = out.replace('</head>', `${packageSubitemStyle}</head>`);
+  }
   return out;
 }
 
@@ -11111,6 +11108,139 @@ function generateMultipleLabelsHTML(labels: LabelPrintData[]): string {
   `;
 }
 
+/** Parse package_selections_json into lines { product_name, quantity } (quantity already * packageQuantity). */
+function parsePackageBreakdownFromJson(rawJson: unknown, packageQuantity: number): { product_name: string; quantity: number }[] {
+  const lines: { product_name: string; quantity: number }[] = [];
+  if (packageQuantity <= 0) return lines;
+  let arr: unknown[];
+  if (typeof rawJson === 'string') {
+    try {
+      const parsed = JSON.parse(rawJson);
+      arr = Array.isArray(parsed) ? parsed : [];
+    } catch {
+      return lines;
+    }
+  } else if (Array.isArray(rawJson)) {
+    arr = rawJson;
+  } else {
+    return lines;
+  }
+  for (const sel of arr) {
+    if (!sel || typeof sel !== 'object') continue;
+    const s = sel as Record<string, unknown>;
+    const st = s.selection_type as string | undefined;
+    if (st === 'default') {
+      const name = (s.product_name as string) ?? (s.nama as string) ?? '';
+      const qty = typeof s.quantity === 'number' && !Number.isNaN(s.quantity) ? s.quantity : 0;
+      if (name || qty > 0) lines.push({ product_name: String(name), quantity: qty * packageQuantity });
+    } else if (st === 'flexible' && Array.isArray(s.chosen)) {
+      for (const c of s.chosen) {
+        if (!c || typeof c !== 'object') continue;
+        const cc = c as Record<string, unknown>;
+        const cqty = typeof cc.quantity === 'number' && !Number.isNaN(cc.quantity) ? cc.quantity : 0;
+        if (cqty > 0) {
+          const cname = (cc.product_name as string) ?? (cc.nama as string) ?? '';
+          lines.push({ product_name: String(cname), quantity: cqty * packageQuantity });
+        }
+      }
+    }
+  }
+  return lines;
+}
+
+/** Common size codes (first word = size). Otherwise use "QTY Name" to avoid corrupting names like "Ayam Goreng" or "Es Teh". */
+const SIZE_PREFIX = /^(L|M|S|R|XL|XXL|XS|XXS)$/i;
+function formatPackageLineDisplay(productName: string, quantity: number): string {
+  const t = String(productName ?? '').trim();
+  const m = t.match(/^(\S+)(?:\s+(.*))?$/);
+  if (!m) return `${quantity} ${t}`;
+  const [, first, rest] = m;
+  if (rest !== undefined && SIZE_PREFIX.test(first)) return `${first} ${quantity} ${rest}`;
+  return `${quantity} ${t}`;
+}
+
+/** Detect flattened package sub-row (from frontend receiptItems: total_price 0, name starts with 4 spaces). */
+function isFlattenedPackageSubItem(item: any): boolean {
+  return item.total_price === 0 && String(item.name ?? '').startsWith('    ');
+}
+
+/** Build items table HTML for receipt/bill/checker. Package products: main line + indented bullet sub-items (no price columns on bullets). */
+function buildItemsHtmlForPrint(
+  items: any[],
+  options: { showPrices: boolean; showNotes: boolean }
+): string {
+  const { showPrices, showNotes } = options;
+  const out: string[] = [];
+  for (const item of items) {
+    const name = item.name || item.product?.nama || '';
+    const qty = item.quantity || 1;
+    const price = item.price || item.unit_price || 0;
+    const subtotal = item.total_price || (price * qty);
+    if (isFlattenedPackageSubItem(item)) {
+      const safeName = String(name).trim()
+        .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+      out.push(`
+      <tr class="package-subitem">
+        <td colspan="4" style="text-align: left; padding-left: 5mm; padding-bottom: 0.3mm; font-size: 9pt;">${safeName}</td>
+      </tr>`);
+      continue;
+    }
+    const noteParts: string[] = [];
+    if (showNotes && item.custom_note && String(item.custom_note).trim()) {
+      noteParts.push(String(item.custom_note).trim());
+    }
+    if (showNotes && item.customizations) {
+      const cust = item.customizations;
+      const custStr = typeof cust === 'string' ? cust : (Array.isArray(cust) ? cust.map((c: any) => c?.customization_name || c?.option_name || c?.name || String(c)).filter(Boolean).join(', ') : '');
+      if (custStr.trim()) noteParts.push(custStr.trim());
+    }
+    const noteLine = noteParts.length ? noteParts.join(' | ') : '';
+    const noteRow = showNotes && noteLine ? `<tr><td colspan="4" style="text-align: left; padding-bottom: 0.5mm; font-size: 8pt; color: #555;">${noteLine}</td></tr>` : '';
+
+    let breakdownLines: { product_name: string; quantity: number }[] | undefined = item.packageBreakdownLines;
+    if (!breakdownLines?.length && (item.package_selections_json != null || item.packageSelections != null)) {
+      const raw = item.package_selections_json ?? (item.packageSelections && typeof item.packageSelections === 'object' ? JSON.stringify(item.packageSelections) : null);
+      breakdownLines = raw != null ? parsePackageBreakdownFromJson(raw, qty) : undefined;
+    }
+
+    if (breakdownLines && breakdownLines.length > 0) {
+      // Package: main line (name, price, qty, subtotal) then indented bullet sub-items (no price columns)
+      out.push(`
+      <tr>
+        <td colspan="4" style="text-align: left; padding-bottom: 0.5mm;">${name}</td>
+      </tr>
+      <tr>
+        <td style="width: 30%;"></td>
+        <td style="width: 25%; text-align: right; padding-top: 0;">${showPrices ? price.toLocaleString('id-ID') : ''}</td>
+        <td style="width: 20%; text-align: right; padding-top: 0;">${qty}</td>
+        <td style="width: 25%; text-align: right; padding-top: 0;">${showPrices ? subtotal.toLocaleString('id-ID') : ''}</td>
+      </tr>
+      ${noteRow}`);
+      for (const line of breakdownLines) {
+        const lineText = formatPackageLineDisplay(line.product_name, line.quantity);
+        out.push(`
+      <tr>
+        <td colspan="4" style="text-align: left; padding-left: 5mm; padding-bottom: 0.3mm; font-size: 9pt;">• ${lineText}</td>
+      </tr>`);
+      }
+    } else {
+      // Bundle or regular: single line(s) as before
+      out.push(`
+      <tr>
+        <td colspan="4" style="text-align: left; padding-bottom: 0.5mm;">${name}</td>
+      </tr>
+      <tr>
+        <td style="width: 30%;"></td>
+        <td style="width: 25%; text-align: right; padding-top: 0;">${showPrices ? price.toLocaleString('id-ID') : ''}</td>
+        <td style="width: 20%; text-align: right; padding-top: 0;">${qty}</td>
+        <td style="width: 25%; text-align: right; padding-top: 0;">${showPrices ? subtotal.toLocaleString('id-ID') : ''}</td>
+      </tr>
+      ${noteRow}`);
+    }
+  }
+  return out.join('');
+}
+
 // Generate transaction receipt HTML
 function generateReceiptHTML(data: ReceiptPrintData, businessName: string, options?: ReceiptFormattingOptions): string {
   const marginAdjust = options?.marginAdjustMm ?? 0;
@@ -11128,38 +11258,9 @@ function generateReceiptHTML(data: ReceiptPrintData, businessName: string, optio
   // Calculate total items for summary
   const totalItems = items.reduce((sum: number, item: ReceiptLineItem) => sum + (item.quantity || 1), 0);
 
-  // Generate items HTML (note/customization only when options.showNotes is true)
+  // Generate items HTML (package breakdown as indented bullets; note/customization only when options.showNotes is true)
   const showNotes = options?.showNotes === true;
-  const itemsHTML = items.map((item: ReceiptLineItem) => {
-    // Handle both new format (name, quantity, price, total_price) and old format (product.nama, etc.)
-    const name = item.name || item.product?.nama || '';
-    const qty = item.quantity || 1;
-    const price = item.price || item.unit_price || 0;
-    const subtotal = item.total_price || (price * qty);
-    const noteParts: string[] = [];
-    if (showNotes && item.custom_note && String(item.custom_note).trim()) {
-      noteParts.push(String(item.custom_note).trim());
-    }
-    if (showNotes && item.customizations) {
-      const cust = item.customizations;
-      const custStr = typeof cust === 'string' ? cust : (Array.isArray(cust) ? cust.map((c: any) => c?.customization_name || c?.option_name || c?.name || String(c)).filter(Boolean).join(', ') : '');
-      if (custStr.trim()) noteParts.push(custStr.trim());
-    }
-    const noteLine = noteParts.length ? noteParts.join(' | ') : '';
-    const noteRow = showNotes && noteLine ? `<tr><td colspan="4" style="text-align: left; padding-bottom: 0.5mm; font-size: 8pt; color: #555;">${noteLine}</td></tr>` : '';
-    return `
-      <tr>
-        <td colspan="4" style="text-align: left; padding-bottom: 0.5mm;">${name}</td>
-      </tr>
-      <tr>
-        <td style="width: 30%;"></td>
-        <td style="width: 25%; text-align: right; padding-top: 0;">${price.toLocaleString('id-ID')}</td>
-        <td style="width: 20%; text-align: right; padding-top: 0;">${qty}</td>
-        <td style="width: 25%; text-align: right; padding-top: 0;">${subtotal.toLocaleString('id-ID')}</td>
-      </tr>
-      ${noteRow}
-    `;
-  }).join('');
+  const itemsHTML = buildItemsHtmlForPrint(items, { showPrices: true, showNotes });
 
   // Format date as YYYY-MM-DD HH:MM:SS
   const formatDateTime = (date: Date): string => {

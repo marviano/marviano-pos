@@ -419,6 +419,27 @@ export default function TransactionList({ businessId, onLoadTransaction }: Trans
         const productionStatus = typeof item.production_status === 'string' ? item.production_status : null;
         return productionStatus !== 'cancelled';
       });
+
+      // Fetch package lines from transaction_item_package_lines table
+      const itemUuids = items.map((item) => (item as { uuid_id?: string; id?: string }).uuid_id || (item as { uuid_id?: string; id?: string }).id).filter(Boolean) as string[];
+      const packageLinesByItem = new Map<string, Array<{ product_id: number; quantity: number }>>();
+      if (itemUuids.length > 0 && electronAPI.localDbGetPackageLines) {
+        try {
+          const packageLines = await electronAPI.localDbGetPackageLines(itemUuids);
+          for (const line of packageLines) {
+            const itemUuid = line.uuid_transaction_item_id;
+            if (!packageLinesByItem.has(itemUuid)) {
+              packageLinesByItem.set(itemUuid, []);
+            }
+            packageLinesByItem.get(itemUuid)!.push({
+              product_id: line.product_id,
+              quantity: line.quantity
+            });
+          }
+        } catch (error) {
+          console.warn('Failed to fetch package lines:', error);
+        }
+      }
       
       // Products fetch as fallback in case product_name wasn't in JOIN result
       // Fetch from appropriate database based on mode
@@ -478,6 +499,19 @@ export default function TransactionList({ businessId, onLoadTransaction }: Trans
           return isNaN(parsed) ? 0 : parsed;
         };
         
+        const itemUuid = (item as { uuid_id?: string; id?: string }).uuid_id || (item as { uuid_id?: string; id?: string }).id;
+        const packageLines = itemUuid ? packageLinesByItem.get(String(itemUuid)) : undefined;
+        const packageSelections = packageLines?.map((line, index) => {
+          const prod = products.find((p) => p.id === line.product_id);
+          return {
+            package_item_id: index,
+            selection_type: 'default' as const,
+            product_id: line.product_id,
+            product_name: (prod?.nama && String(prod.nama).trim()) ? String(prod.nama).trim() : 'Unknown Product',
+            quantity: line.quantity
+          };
+        });
+
         const mappedItem = {
           id: item.id,
           product_name: productName,
@@ -486,7 +520,8 @@ export default function TransactionList({ businessId, onLoadTransaction }: Trans
           total_price: parsePrice(item.total_price),
           custom_note: item.custom_note || undefined,
           customizations: customizations,
-          bundleSelections: item.bundleSelections || undefined
+          bundleSelections: item.bundleSelections || undefined,
+          packageSelections: packageSelections || undefined
         };
         
         return mappedItem;

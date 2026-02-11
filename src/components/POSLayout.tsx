@@ -896,6 +896,30 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
         }
       });
 
+      // Fetch package lines from transaction_item_package_lines so loaded cart has packageSelections (for labels/checker/receipt)
+      const activeItemsForPackage = itemsArray.filter((item) => {
+        const productionStatus = typeof item.production_status === 'string' ? item.production_status : null;
+        return productionStatus !== 'cancelled';
+      });
+      const itemUuidsForPackage = activeItemsForPackage
+        .map((i) => (i.uuid_id ?? i.id) as string)
+        .filter(Boolean) as string[];
+      const packageLinesByItem = new Map<string, Array<{ product_id: number; quantity: number }>>();
+      if (itemUuidsForPackage.length > 0 && electronAPI.localDbGetPackageLines) {
+        try {
+          const packageLines = await electronAPI.localDbGetPackageLines(itemUuidsForPackage);
+          for (const line of packageLines) {
+            const itemUuid = line.uuid_transaction_item_id;
+            if (!packageLinesByItem.has(itemUuid)) {
+              packageLinesByItem.set(itemUuid, []);
+            }
+            packageLinesByItem.get(itemUuid)!.push({ product_id: line.product_id, quantity: line.quantity });
+          }
+        } catch (e) {
+          console.warn('loadTransactionIntoCart: failed to fetch package lines', e);
+        }
+      }
+
       // Fetch employees once for transaction waiter and per-item waiter names
       let employeesArray: Array<{ id?: number | string; nama_karyawan?: string; color?: string | null }> = [];
       if (electronAPI.localDbGetEmployees) {
@@ -955,7 +979,22 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
         const itemQuantity = typeof item.quantity === 'number' ? item.quantity : (typeof item.quantity === 'string' ? parseInt(item.quantity, 10) : 1);
         const itemCustomNote = typeof item.custom_note === 'string' ? item.custom_note : undefined;
         const itemBundleSelections = typeof item.bundle_selections_json === 'string' ? item.bundle_selections_json : undefined;
-        const itemPackageSelections = typeof item.package_selections_json === 'string' ? item.package_selections_json : undefined;
+        const itemPackageSelectionsJson = typeof item.package_selections_json === 'string' ? item.package_selections_json : undefined;
+        const itemUuidForPkg = (item.uuid_id ?? item.id) as string | undefined;
+        const pkgLinesForItem = itemUuidForPkg ? packageLinesByItem.get(String(itemUuidForPkg)) : undefined;
+        const itemPackageSelections = pkgLinesForItem && pkgLinesForItem.length > 0
+          ? pkgLinesForItem.map((line, index) => {
+              const p = productsMap.get(line.product_id);
+              const productName = (p && typeof (p as { nama?: string }).nama === 'string') ? (p as { nama: string }).nama : 'Unknown Product';
+              return {
+                package_item_id: index,
+                selection_type: 'default' as const,
+                product_id: line.product_id,
+                product_name: productName,
+                quantity: line.quantity,
+              };
+            })
+          : (itemPackageSelectionsJson ? JSON.parse(itemPackageSelectionsJson) : undefined);
         const transactionTableId = typeof transaction.table_id === 'number' ? transaction.table_id : (typeof transaction.table_id === 'string' ? parseInt(transaction.table_id, 10) : null);
         
         // Check if item should be locked
@@ -997,9 +1036,11 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
           bundleSelections: itemBundleSelections 
             ? JSON.parse(itemBundleSelections) 
             : undefined,
-          packageSelections: itemPackageSelections 
-            ? JSON.parse(itemPackageSelections) 
-            : undefined,
+          packageSelections: itemPackageSelections ?? undefined,
+          // Keep raw JSON so PaymentModal can fall back when building labels if packageSelections is missing
+          ...(typeof item.package_selections_json === 'string' && item.package_selections_json.trim()
+            ? { package_selections_json: item.package_selections_json }
+            : {}),
           isLocked: isItemLocked, // Lock items that are visible on kitchen/barista (production_status IS NULL or 'preparing')
           transactionItemId: itemId || 0, // Database transaction_item ID
           transactionId: transactionId, // Transaction UUID

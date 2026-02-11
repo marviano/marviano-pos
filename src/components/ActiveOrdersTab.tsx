@@ -3,6 +3,7 @@
 import { useState, useEffect, useCallback, useRef, useLayoutEffect } from 'react';
 import { createPortal } from 'react-dom';
 import { Edit, List, LayoutGrid, Printer, Scissors } from 'lucide-react';
+import { formatPackageLineDisplay } from './PackageSelectionModal';
 import TableLayout from './TableLayout';
 import SplitBillModal from './SplitBillModal';
 import PrintBillModal, { type PrintBillModalData } from './PrintBillModal';
@@ -548,6 +549,26 @@ export default function ActiveOrdersTab({ businessId, isOpen, onLoadTransaction 
         }
       });
 
+      // Fetch package lines for bill (same as TransactionList/Daftar Transaksi)
+      const itemUuids = (itemsArray as Array<Record<string, unknown>>)
+        .map((i) => (i.uuid_id ?? i.id) as string)
+        .filter(Boolean) as string[];
+      const packageLinesByItem = new Map<string, Array<{ product_id: number; quantity: number }>>();
+      if (itemUuids.length > 0 && electronAPI.localDbGetPackageLines) {
+        try {
+          const packageLines = await electronAPI.localDbGetPackageLines(itemUuids);
+          for (const line of packageLines) {
+            const itemUuid = line.uuid_transaction_item_id;
+            if (!packageLinesByItem.has(itemUuid)) {
+              packageLinesByItem.set(itemUuid, []);
+            }
+            packageLinesByItem.get(itemUuid)!.push({ product_id: line.product_id, quantity: line.quantity });
+          }
+        } catch (e) {
+          console.warn('Failed to fetch package lines for bill:', e);
+        }
+      }
+
       // Prepare receipt items
       const receiptItems: Array<{ name: string; quantity: number; price: number; total_price: number }> = [];
 
@@ -631,12 +652,37 @@ export default function ActiveOrdersTab({ businessId, isOpen, onLoadTransaction 
           }
         }
 
-        receiptItems.push({
-          name: itemName,
-          quantity: itemQuantity,
-          price: itemPrice,
-          total_price: itemPrice * itemQuantity
-        });
+        // Package: push main line (package name) first, then package sub-items so the bill shows "Package Name" then "  └ selected items"
+        const itemUuid = (item.uuid_id ?? item.id) as string | undefined;
+        const pkgLines = itemUuid ? packageLinesByItem.get(String(itemUuid)) : undefined;
+        const hasPackageLines = pkgLines && pkgLines.length > 0;
+
+        if (hasPackageLines) {
+          receiptItems.push({
+            name: itemName,
+            quantity: itemQuantity,
+            price: itemPrice,
+            total_price: itemPrice * itemQuantity
+          });
+          pkgLines!.forEach((line) => {
+            const p = productsMap.get(line.product_id);
+            const pkgName = (p && typeof (p as { nama?: string }).nama === 'string') ? (p as { nama: string }).nama : (line as { product_name?: string }).product_name ?? 'Unknown';
+            const totalQty = line.quantity * itemQuantity;
+            receiptItems.push({
+              name: `    ${formatPackageLineDisplay(pkgName, totalQty)}`,
+              quantity: totalQty,
+              price: 0,
+              total_price: 0
+            });
+          });
+        } else {
+          receiptItems.push({
+            name: itemName,
+            quantity: itemQuantity,
+            price: itemPrice,
+            total_price: itemPrice * itemQuantity
+          });
+        }
       });
 
       // Calculate total

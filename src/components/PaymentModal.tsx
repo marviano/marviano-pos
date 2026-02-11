@@ -8,7 +8,7 @@ import { smartSyncService } from '@/lib/smartSync';
 import { generateTransactionId, generateTransactionItemId } from '@/lib/uuid';
 import { useAuth } from '@/hooks/useAuth';
 import { getApiUrl } from '@/lib/api';
-import { type PackageSelection, getPackageBreakdownLines } from './PackageSelectionModal';
+import { type PackageSelection, getPackageBreakdownLines, formatPackageLineDisplay } from './PackageSelectionModal';
 
 interface BundleSelection {
   category2_id: number;
@@ -1391,11 +1391,40 @@ export default function PaymentModal({
             }
 
             // Add package breakdown as sub-items (main line already pushed above)
-            if (item.packageSelections && item.packageSelections.length > 0) {
-              const pkgLines = getPackageBreakdownLines(item.packageSelections, item.quantity);
+            // Derive package selections: use packageSelections or parse package_selections_json
+            const rawPkgJson = (item as { package_selections_json?: string }).package_selections_json;
+            const resolvedPackageSelections: typeof item.packageSelections =
+              item.packageSelections && item.packageSelections.length > 0
+                ? item.packageSelections
+                : (typeof rawPkgJson === 'string' && rawPkgJson.trim()
+                    ? (() => {
+                        try {
+                          const parsed = JSON.parse(rawPkgJson) as Array<Record<string, unknown> & { product_name?: string; quantity?: number; selection_type?: string; chosen?: unknown[] }>;
+                          if (!Array.isArray(parsed) || parsed.length === 0) return undefined;
+                          // Normalize: getPackageBreakdownLines only outputs lines when selection_type === 'default'
+                          // or when selection_type is flexible and chosen[].quantity. Parsed JSON may lack selection_type.
+                          const normalized = parsed.map((sel, idx) => {
+                            if (sel.selection_type === 'default') return sel as PackageSelection;
+                            if (sel.selection_type === 'flexible' && Array.isArray(sel.chosen) && sel.chosen.length > 0) return sel as PackageSelection;
+                            const name = (sel.product_name ?? (sel as { nama?: string }).nama ?? '') as string;
+                            const qty = typeof sel.quantity === 'number' ? sel.quantity : 0;
+                            if (name || qty > 0) {
+                              return { package_item_id: idx, selection_type: 'default' as const, product_id: (sel.product_id as number) ?? 0, product_name: name, quantity: qty } as PackageSelection;
+                            }
+                            return sel as PackageSelection;
+                          });
+                          return normalized as typeof item.packageSelections;
+                        } catch {
+                          return undefined;
+                        }
+                      })()
+                    : undefined);
+
+            if (resolvedPackageSelections && resolvedPackageSelections.length > 0) {
+              const pkgLines = getPackageBreakdownLines(resolvedPackageSelections, item.quantity);
               pkgLines.forEach(line => {
                 receiptItems.push({
-                  name: `  └ ${line.product_name} ×${line.quantity}`,
+                  name: `    ${formatPackageLineDisplay(line.product_name, line.quantity)}`,
                   quantity: line.quantity,
                   price: 0,
                   total_price: 0,
@@ -1806,6 +1835,7 @@ export default function PaymentModal({
 
             // Calculate total items for numbering
             // For bundles: count each selected product × quantity
+            // For packages: count all package sub-items via getPackageBreakdownLines
             // For regular products: count the item quantity
             const totalItems = cartItems.reduce((sum, item) => {
               if (item.bundleSelections && item.bundleSelections.length > 0) {
@@ -1821,6 +1851,26 @@ export default function PaymentModal({
                 }
                 return sum + (bundleItemCount * item.quantity);
               } else {
+                // Package product detection: resolve packageSelections or parse package_selections_json
+                const rawPkgJson = (item as { package_selections_json?: string }).package_selections_json;
+                const resolvedPackageSelections: typeof item.packageSelections =
+                  item.packageSelections && item.packageSelections.length > 0
+                    ? item.packageSelections
+                    : (typeof rawPkgJson === 'string' && rawPkgJson.trim()
+                        ? (() => {
+                            try {
+                              const parsed = JSON.parse(rawPkgJson) as Array<{ product_name?: string; quantity?: number; selection_type?: string }>;
+                              return Array.isArray(parsed) && parsed.length > 0 ? parsed as typeof item.packageSelections : undefined;
+                            } catch {
+                              return undefined;
+                            }
+                          })()
+                        : undefined);
+                if (resolvedPackageSelections && resolvedPackageSelections.length > 0) {
+                  const breakdownLines = getPackageBreakdownLines(resolvedPackageSelections, item.quantity);
+                  const packageCount = breakdownLines.reduce((acc, line) => acc + line.quantity, 0);
+                  return sum + packageCount;
+                }
                 // For regular products
                 return sum + item.quantity;
               }
@@ -1896,6 +1946,22 @@ export default function PaymentModal({
             for (const item of cartItems) {
               // Check if this is a bundle product
               const isBundle = item.bundleSelections && item.bundleSelections.length > 0;
+              // Derive package selections: use packageSelections or parse package_selections_json (e.g. from main process or serialized cart)
+              const rawPkgJson = (item as { package_selections_json?: string }).package_selections_json;
+              const resolvedPackageSelections: typeof item.packageSelections =
+                item.packageSelections && item.packageSelections.length > 0
+                  ? item.packageSelections
+                  : (typeof rawPkgJson === 'string' && rawPkgJson.trim()
+                      ? (() => {
+                          try {
+                            const parsed = JSON.parse(rawPkgJson) as Array<{ product_name?: string; quantity?: number; selection_type?: string }>;
+                            return Array.isArray(parsed) && parsed.length > 0 ? parsed as typeof item.packageSelections : undefined;
+                          } catch {
+                            return undefined;
+                          }
+                        })()
+                      : undefined);
+              const isPackage = !isBundle && !!resolvedPackageSelections && resolvedPackageSelections.length > 0;
 
               if (isBundle) {
                 // For bundle products, collect labels for each selected product
@@ -1950,8 +2016,28 @@ export default function PaymentModal({
                     }
                   }
                 }
+              } else if (isPackage) {
+                // For package products: one label per selected package sub-item (like bundle)
+                const pkgLines = getPackageBreakdownLines(resolvedPackageSelections!, item.quantity);
+                for (const line of pkgLines) {
+                  const packageLineLabel = `    ${formatPackageLineDisplay(line.product_name, line.quantity)}`;
+                  for (let qty = 0; qty < line.quantity; qty++) {
+                    currentItemNumber++;
+                    allLabels.push({
+                      printerType: 'labelPrinter',
+                      counter: labelCounter,
+                      itemNumber: currentItemNumber,
+                      totalItems: totalItems,
+                      pickupMethod: finalPickupMethod,
+                      productName: packageLineLabel,
+                      customizations: '',
+                      customNote: '',
+                      orderTime: transactionData.created_at,
+                    });
+                  }
+                }
               } else {
-                // For regular products (non-bundle), use existing logic
+                // For regular products (non-bundle, non-package), use existing logic
                 // Build customization text - format as xxx/xxx/xxx
                 const allOptions: string[] = [];
                 if (item.customizations && item.customizations.length > 0) {
@@ -2031,7 +2117,15 @@ export default function PaymentModal({
               }
               return escapeHtmlForChecker(text).replace(/\n/g, '<br/>');
             };
-            const rowHtml = (ri: ReceiptItem) => `<tr><td>${itemCellContent(ri)}</td><td style="text-align: right;">${ri.quantity}</td><td style="text-align: right;">${ri.total_price}</td></tr>`;
+            const isPackageSubRow = (ri: ReceiptItem) => ri.total_price === 0 && ri.name.startsWith('    ');
+            const rowHtml = (ri: ReceiptItem) => {
+              const trClass = isPackageSubRow(ri) ? ' class="package-subitem"' : '';
+              const displayRi = isPackageSubRow(ri) ? { ...ri, name: ri.name.trim() } : ri;
+              if (isPackageSubRow(ri)) {
+                return `<tr${trClass}><td>${itemCellContent(displayRi)}</td><td style="text-align: right;"></td><td style="text-align: right;"></td><td style="text-align: right;"></td></tr>`;
+              }
+              return `<tr${trClass}><td>${itemCellContent(displayRi)}</td><td style="text-align: right;">${ri.price ?? ''}</td><td style="text-align: right;">${ri.quantity}</td><td style="text-align: right;">${ri.total_price}</td></tr>`;
+            };
             // Group by actual category (category1_name) so Section 1 = one category (e.g. Makanan), Section 2 = other (e.g. Minuman)
             const key = (ri: ReceiptItem) => (ri.category1_name ?? '').trim() || `_id_${ri.category1_id ?? 'null'}`;
             const byCategory = new Map<string, ReceiptItem[]>();
@@ -2051,7 +2145,10 @@ export default function PaymentModal({
             const cat2Items = (secondKey ? byCategory.get(secondKey) : []) ?? [];
             const category1Name = ((cat1Items[0]?.category1_name ?? firstKey.replace(/^_id_/, '')) || 'Kategori 1').trim() || 'Kategori 1';
             const category2Name = ((cat2Items[0]?.category1_name ?? secondKey.replace(/^_id_/, '')) || '').trim() || '';
-            const lineHtml = (ri: ReceiptItem) => `<div class="item-line">- ${ri.quantity}x ${itemCellContent(ri)}</div>`;
+            const lineHtml = (ri: ReceiptItem) =>
+              ri.total_price === 0 && ri.name.startsWith('    ')
+                ? `<div class="item-line package-subitem">${itemCellContent({ ...ri, name: ri.name.trim() })}</div>`
+                : `<div class="item-line">- ${ri.quantity}x ${itemCellContent(ri)}</div>`;
             const itemsCategory1 = cat1Items.map(lineHtml).join('');
             const itemsCategory2 = cat2Items.map(lineHtml).join('');
             const orderContextForChecker = {

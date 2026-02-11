@@ -5,7 +5,7 @@ import { X } from 'lucide-react';
 import { useAuth } from '@/hooks/useAuth';
 import { generateTransactionId, generateTransactionItemId } from '@/lib/uuid';
 import NewItemsConfirmationModal from './NewItemsConfirmationModal';
-import type { PackageSelection } from './PackageSelectionModal';
+import { getPackageBreakdownLines, formatPackageLineDisplay, type PackageSelection } from './PackageSelectionModal';
 
 interface Room {
   id: number;
@@ -91,6 +91,82 @@ interface CartItem {
   transactionItemId?: number;
   transactionId?: string;
   tableId?: number | null;
+}
+
+/** One row for checker slip (same structure as receipt: main line + bundle/package sub-rows). */
+type CheckerRow = { name: string; quantity: number; subtotal: number; category1_name: string };
+
+/** Build receipt-style flat list from cart items (main + bundle sub-rows + package sub-rows) so checker matches receipt/bill. */
+function buildCheckerRowsFromCartItems(cartItems: CartItem[]): CheckerRow[] {
+  const rows: CheckerRow[] = [];
+  for (const item of cartItems) {
+    let unitPrice = item.product.harga_jual || 0;
+    if (item.customizations?.length) {
+      item.customizations.forEach(c => c.selected_options.forEach(o => { unitPrice += o.price_adjustment || 0; }));
+    }
+    const category1Name = ((item.product as { category1_name?: string | null }).category1_name ?? '').trim() || 'Kategori 1';
+
+    rows.push({
+      name: item.product.nama || '',
+      quantity: item.quantity,
+      subtotal: unitPrice * item.quantity,
+      category1_name: category1Name,
+    });
+
+    if (item.bundleSelections?.length) {
+      for (const bundleSel of item.bundleSelections) {
+        for (const sp of bundleSel.selectedProducts) {
+          const selectionQty = typeof sp.quantity === 'number' && !Number.isNaN(sp.quantity) ? sp.quantity : 1;
+          const totalQty = item.quantity * selectionQty;
+          rows.push({
+            name: `  └ ${sp.product.nama}${selectionQty > 1 ? ` (×${selectionQty})` : ''}`,
+            quantity: totalQty,
+            subtotal: 0,
+            category1_name: (sp.product as { category1_name?: string })?.category1_name ?? category1Name,
+          });
+        }
+      }
+    }
+
+    const rawPkgJson = (item as CartItem & { package_selections_json?: string }).package_selections_json;
+    const resolvedPackageSelections: PackageSelection[] | undefined =
+      item.packageSelections && item.packageSelections.length > 0
+        ? item.packageSelections
+        : (typeof rawPkgJson === 'string' && rawPkgJson.trim()
+            ? (() => {
+                try {
+                  const parsed = JSON.parse(rawPkgJson) as Array<Record<string, unknown> & { product_name?: string; quantity?: number; selection_type?: string; chosen?: unknown[] }>;
+                  if (!Array.isArray(parsed) || parsed.length === 0) return undefined;
+                  const normalized = parsed.map((sel, idx) => {
+                    if (sel.selection_type === 'default') return sel as PackageSelection;
+                    if (sel.selection_type === 'flexible' && Array.isArray(sel.chosen) && sel.chosen.length > 0) return sel as PackageSelection;
+                    const name = (sel.product_name ?? (sel as { nama?: string }).nama ?? '') as string;
+                    const qty = typeof sel.quantity === 'number' ? sel.quantity : 0;
+                    if (name || qty > 0) {
+                      return { package_item_id: idx, selection_type: 'default' as const, product_id: (sel.product_id as number) ?? 0, product_name: name, quantity: qty } as PackageSelection;
+                    }
+                    return sel as PackageSelection;
+                  });
+                  return normalized as PackageSelection[];
+                } catch {
+                  return undefined;
+                }
+              })()
+            : undefined);
+
+    if (resolvedPackageSelections?.length) {
+      const pkgLines = getPackageBreakdownLines(resolvedPackageSelections, item.quantity);
+      for (const line of pkgLines) {
+        rows.push({
+          name: `    ${formatPackageLineDisplay(line.product_name, line.quantity)}`,
+          quantity: line.quantity,
+          subtotal: 0,
+          category1_name: category1Name,
+        });
+      }
+    }
+  }
+  return rows;
 }
 
 interface TableSelectionModalProps {
@@ -863,57 +939,43 @@ export default function TableSelectionModal({
           // ignore
         }
       }
-      const rowForItem = (item: typeof cartItems[0]) => {
-        let unitPrice = item.product.harga_jual || 0;
-        if (item.customizations?.length) {
-          item.customizations.forEach(c => c.selected_options.forEach(o => { unitPrice += o.price_adjustment || 0; }));
+      // Receipt-style flat list (main + bundle + package sub-rows) so checker matches receipt/bill
+      const checkerRows = buildCheckerRowsFromCartItems(cartItems);
+      const isPackageSubRow = (row: CheckerRow) => row.subtotal === 0 && row.name.startsWith('    ');
+      const rowForCheckerRow = (row: CheckerRow) => {
+        const trClass = isPackageSubRow(row) ? ' class="package-subitem"' : '';
+        const nameForCell = isPackageSubRow(row) ? row.name.trim() : row.name;
+        const cellHtml = escapeHtmlForChecker(nameForCell).replace(/\n/g, '<br/>');
+        if (isPackageSubRow(row)) {
+          return `<tr${trClass}><td>${cellHtml}</td><td style="text-align: right;"></td><td style="text-align: right;"></td><td style="text-align: right;"></td></tr>`;
         }
-        const subtotal = unitPrice * item.quantity;
-        let cellText = item.product.nama || '';
-        if (item.customNote?.trim()) {
-          cellText += '\nCatatan: ' + item.customNote.trim();
-        }
-        if (item.customizations?.length) {
-          const opts = item.customizations.flatMap(c => c.selected_options.map(o => o.option_name || '')).filter(Boolean);
-          if (opts.length) cellText += '\n' + opts.join(', ');
-        }
-        const cellHtml = escapeHtmlForChecker(cellText).replace(/\n/g, '<br/>');
-        return `<tr><td>${cellHtml}</td><td style="text-align: right;">${item.quantity}</td><td style="text-align: right;">${subtotal}</td></tr>`;
+        const unitPrice = row.quantity > 0 ? row.subtotal / row.quantity : '';
+        return `<tr${trClass}><td>${cellHtml}</td><td style="text-align: right;">${unitPrice}</td><td style="text-align: right;">${row.quantity}</td><td style="text-align: right;">${row.subtotal}</td></tr>`;
       };
-      const lineForItem = (item: typeof cartItems[0]) => {
-        let unitPrice = item.product.harga_jual || 0;
-        if (item.customizations?.length) {
-          item.customizations.forEach(c => c.selected_options.forEach(o => { unitPrice += o.price_adjustment || 0; }));
+      const lineForCheckerRow = (row: CheckerRow) => {
+        if (isPackageSubRow(row)) {
+          const cellHtml = escapeHtmlForChecker(row.name.trim()).replace(/\n/g, '<br/>');
+          return `<div class="item-line package-subitem">${cellHtml}</div>`;
         }
-        const subtotal = unitPrice * item.quantity;
-        let cellText = item.product.nama || '';
-        if (item.customNote?.trim()) cellText += '\nCatatan: ' + item.customNote.trim();
-        if (item.customizations?.length) {
-          const opts = item.customizations.flatMap(c => c.selected_options.map(o => o.option_name || '')).filter(Boolean);
-          if (opts.length) cellText += '\n' + opts.join(', ');
-        }
-        const cellHtml = escapeHtmlForChecker(cellText).replace(/\n/g, '<br/>');
-        return `<div class="item-line">- ${item.quantity}x ${cellHtml}</div>`;
+        const cellHtml = escapeHtmlForChecker(row.name).replace(/\n/g, '<br/>');
+        return `<div class="item-line">- ${row.quantity}x ${cellHtml}</div>`;
       };
-      const category1NameFromProduct = (item: typeof cartItems[0]) => ((item.product as { category1_name?: string | null }).category1_name ?? '').trim();
-      const category1IdFromProduct = (item: typeof cartItems[0]) => (item.product as { category1_id?: number | null }).category1_id ?? null;
-      const key = (item: typeof cartItems[0]) => category1NameFromProduct(item) || `_id_${category1IdFromProduct(item) ?? 'null'}`;
-      const byCategory = new Map<string, typeof cartItems>();
-      for (const item of cartItems) {
-        const k = key(item);
+      const byCategory = new Map<string, CheckerRow[]>();
+      for (const row of checkerRows) {
+        const k = row.category1_name.trim() || '_other';
         if (!byCategory.has(k)) byCategory.set(k, []);
-        byCategory.get(k)!.push(item);
+        byCategory.get(k)!.push(row);
       }
-      const sortedKeys = Array.from(byCategory.keys()).filter(k => !k.startsWith('_id_')).sort();
-      const otherKeys = Array.from(byCategory.keys()).filter(k => k.startsWith('_id_'));
-      const [firstKey, secondKey] = sortedKeys.length >= 2 ? [sortedKeys[0], sortedKeys[1]] : sortedKeys.length === 1 ? [sortedKeys[0], otherKeys[0] ?? ''] : [otherKeys[0] ?? '', otherKeys[1] ?? ''];
-      const cat1Items = (firstKey ? byCategory.get(firstKey) : []) ?? [];
-      const cat2Items = (secondKey ? byCategory.get(secondKey) : []) ?? [];
-      const orderContextRows = cartItems.map(rowForItem).join('');
-      const orderContextRowsCategory1 = cat1Items.map(lineForItem).join('');
-      const orderContextRowsCategory2 = cat2Items.map(lineForItem).join('');
-      const category1Name = (cat1Items[0] && category1NameFromProduct(cat1Items[0])) || firstKey.replace(/^_id_/, '') || 'Kategori 1';
-      const category2Name = (cat2Items[0] && category1NameFromProduct(cat2Items[0])) || secondKey.replace(/^_id_/, '') || '';
+      const sortedKeys = Array.from(byCategory.keys()).filter(k => k !== '_other').sort();
+      const otherKeys = Array.from(byCategory.keys()).filter(k => k === '_other');
+      const [firstKey, secondKey] = sortedKeys.length >= 2 ? [sortedKeys[0], sortedKeys[1]] : sortedKeys.length === 1 ? [sortedKeys[0], otherKeys[0] ?? '_other'] : [otherKeys[0] ?? '_other', otherKeys[1] ?? '_other'];
+      const cat1Rows = (firstKey ? byCategory.get(firstKey) : []) ?? [];
+      const cat2Rows = (secondKey ? byCategory.get(secondKey) : []) ?? [];
+      const orderContextRows = checkerRows.map(rowForCheckerRow).join('');
+      const orderContextRowsCategory1 = cat1Rows.map(lineForCheckerRow).join('');
+      const orderContextRowsCategory2 = cat2Rows.map(lineForCheckerRow).join('');
+      const category1Name = (cat1Rows[0]?.category1_name ?? firstKey.replace(/^_id_/, '')) || 'Kategori 1';
+      const category2Name = (cat2Rows[0]?.category1_name ?? secondKey.replace(/^_id_/, '')) || '';
       const orderContextForChecker = {
         waiterName: waiterNameForChecker,
         customerName: customerName.trim() || '',
@@ -1343,55 +1405,43 @@ export default function TableSelectionModal({
 
       // Build orderContext so order-summary checker template ({{items}}) shows the newly added products
       const escapeHtmlForChecker = (s: string) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
-      const rowForNewItem = (item: typeof itemsToSave[0]) => {
-        let unitPrice = item.product.harga_jual || 0;
-        if (item.customizations?.length) {
-          item.customizations.forEach(c => c.selected_options.forEach(o => { unitPrice += o.price_adjustment || 0; }));
+      // Receipt-style flat list (main + bundle + package sub-rows) so checker matches receipt/bill
+      const newCheckerRows = buildCheckerRowsFromCartItems(itemsToSave as CartItem[]);
+      const isPackageSubRowNew = (row: CheckerRow) => row.subtotal === 0 && row.name.startsWith('    ');
+      const rowForNewCheckerRow = (row: CheckerRow) => {
+        const trClass = isPackageSubRowNew(row) ? ' class="package-subitem"' : '';
+        const nameForCell = isPackageSubRowNew(row) ? row.name.trim() : row.name;
+        const cellHtml = escapeHtmlForChecker(nameForCell).replace(/\n/g, '<br/>');
+        if (isPackageSubRowNew(row)) {
+          return `<tr${trClass}><td>${cellHtml}</td><td style="text-align: right;"></td><td style="text-align: right;"></td><td style="text-align: right;"></td></tr>`;
         }
-        const subtotal = unitPrice * item.quantity;
-        let cellText = item.product.nama || '';
-        if (item.customNote?.trim()) cellText += '\nCatatan: ' + item.customNote.trim();
-        if (item.customizations?.length) {
-          const opts = item.customizations.flatMap(c => c.selected_options.map(o => o.option_name || '')).filter(Boolean);
-          if (opts.length) cellText += '\n' + opts.join(', ');
-        }
-        const cellHtml = escapeHtmlForChecker(cellText).replace(/\n/g, '<br/>');
-        return `<tr><td>${cellHtml}</td><td style="text-align: right;">${item.quantity}</td><td style="text-align: right;">${subtotal}</td></tr>`;
+        const unitPriceNew = row.quantity > 0 ? row.subtotal / row.quantity : '';
+        return `<tr${trClass}><td>${cellHtml}</td><td style="text-align: right;">${unitPriceNew}</td><td style="text-align: right;">${row.quantity}</td><td style="text-align: right;">${row.subtotal}</td></tr>`;
       };
-      const lineForNewItem = (item: typeof itemsToSave[0]) => {
-        let unitPrice = item.product.harga_jual || 0;
-        if (item.customizations?.length) {
-          item.customizations.forEach(c => c.selected_options.forEach(o => { unitPrice += o.price_adjustment || 0; }));
+      const lineForNewCheckerRow = (row: CheckerRow) => {
+        if (isPackageSubRowNew(row)) {
+          const cellHtml = escapeHtmlForChecker(row.name.trim()).replace(/\n/g, '<br/>');
+          return `<div class="item-line package-subitem">${cellHtml}</div>`;
         }
-        const subtotal = unitPrice * item.quantity;
-        let cellText = item.product.nama || '';
-        if (item.customNote?.trim()) cellText += '\nCatatan: ' + item.customNote.trim();
-        if (item.customizations?.length) {
-          const opts = item.customizations.flatMap(c => c.selected_options.map(o => o.option_name || '')).filter(Boolean);
-          if (opts.length) cellText += '\n' + opts.join(', ');
-        }
-        const cellHtml = escapeHtmlForChecker(cellText).replace(/\n/g, '<br/>');
-        return `<div class="item-line">- ${item.quantity}x ${cellHtml}</div>`;
+        const cellHtml = escapeHtmlForChecker(row.name).replace(/\n/g, '<br/>');
+        return `<div class="item-line">- ${row.quantity}x ${cellHtml}</div>`;
       };
-      const category1NameFromNewItem = (item: typeof itemsToSave[0]) => ((item.product as { category1_name?: string | null }).category1_name ?? '').trim();
-      const category1IdNew = (item: typeof itemsToSave[0]) => (item.product as { category1_id?: number | null }).category1_id ?? null;
-      const keyNew = (item: typeof itemsToSave[0]) => category1NameFromNewItem(item) || `_id_${category1IdNew(item) ?? 'null'}`;
-      const byCategoryNew = new Map<string, typeof itemsToSave>();
-      for (const item of itemsToSave) {
-        const k = keyNew(item);
+      const byCategoryNew = new Map<string, CheckerRow[]>();
+      for (const row of newCheckerRows) {
+        const k = row.category1_name.trim() || '_other';
         if (!byCategoryNew.has(k)) byCategoryNew.set(k, []);
-        byCategoryNew.get(k)!.push(item);
+        byCategoryNew.get(k)!.push(row);
       }
-      const sortedKeysNew = Array.from(byCategoryNew.keys()).filter(k => !k.startsWith('_id_')).sort();
-      const otherKeysNew = Array.from(byCategoryNew.keys()).filter(k => k.startsWith('_id_'));
-      const [firstKeyNew, secondKeyNew] = sortedKeysNew.length >= 2 ? [sortedKeysNew[0], sortedKeysNew[1]] : sortedKeysNew.length === 1 ? [sortedKeysNew[0], otherKeysNew[0] ?? ''] : [otherKeysNew[0] ?? '', otherKeysNew[1] ?? ''];
+      const sortedKeysNew = Array.from(byCategoryNew.keys()).filter(k => k !== '_other').sort();
+      const otherKeysNew = Array.from(byCategoryNew.keys()).filter(k => k === '_other');
+      const [firstKeyNew, secondKeyNew] = sortedKeysNew.length >= 2 ? [sortedKeysNew[0], sortedKeysNew[1]] : sortedKeysNew.length === 1 ? [sortedKeysNew[0], otherKeysNew[0] ?? '_other'] : [otherKeysNew[0] ?? '_other', otherKeysNew[1] ?? '_other'];
       const cat1New = (firstKeyNew ? byCategoryNew.get(firstKeyNew) : []) ?? [];
       const cat2New = (secondKeyNew ? byCategoryNew.get(secondKeyNew) : []) ?? [];
-      const newItemsRows = itemsToSave.map(rowForNewItem).join('');
-      const newItemsRowsCategory1 = cat1New.map(lineForNewItem).join('');
-      const newItemsRowsCategory2 = cat2New.map(lineForNewItem).join('');
-      const category1NameNew = (cat1New[0] && category1NameFromNewItem(cat1New[0])) || firstKeyNew.replace(/^_id_/, '') || 'Kategori 1';
-      const category2NameNew = (cat2New[0] && category1NameFromNewItem(cat2New[0])) || secondKeyNew.replace(/^_id_/, '') || '';
+      const newItemsRows = newCheckerRows.map(rowForNewCheckerRow).join('');
+      const newItemsRowsCategory1 = cat1New.map(lineForNewCheckerRow).join('');
+      const newItemsRowsCategory2 = cat2New.map(lineForNewCheckerRow).join('');
+      const category1NameNew = (cat1New[0]?.category1_name ?? firstKeyNew.replace(/^_id_/, '')) || 'Kategori 1';
+      const category2NameNew = (cat2New[0]?.category1_name ?? secondKeyNew.replace(/^_id_/, '')) || '';
       const orderContextForNewItems = {
         waiterName: loadedTransactionInfo?.waiterName ?? '',
         customerName: loadedTransactionInfo?.customerName ?? '',
