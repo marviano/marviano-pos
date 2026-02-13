@@ -1,7 +1,7 @@
 {
   "name": "marviano-pos",
   "version": "0.1.0",
-  "description": "Marviano Point of Sale System",
+  "description": "Pictos Point of Sale System",
   "private": true,
   "main": "dist/electron/main.js",
   "homepage": "./",
@@ -17,7 +17,8 @@
     "electron-pack": "npm run build && electron-builder",
     "build-electron": "tsc -p electron/tsconfig.json",
     "dist": "npm run build-electron && npm run build && node scripts/fix-nested-html-paths.js && electron-builder --publish=never",
-    "dist-clean": "if exist dist-electron rmdir /s /q dist-electron 2>nul & npm run build-electron && npm run build && node scripts/fix-nested-html-paths.js && electron-builder --publish=never"
+    "dist-clean": "if exist dist-electron rmdir /s /q dist-electron 2>nul & npm run build-electron && npm run build && node scripts/fix-nested-html-paths.js && electron-builder --publish=never",
+    "build-icon": "node scripts/convert-icon.js"
   },
   "dependencies": {
     "bcryptjs": "^3.0.2",
@@ -53,7 +54,7 @@
   },
   "build": {
     "appId": "com.pos.app",
-    "productName": "POS",
+    "productName": "Pictos",
     "directories": {
       "output": "dist-electron"
     },
@@ -66,7 +67,7 @@
     ],
     "win": {
       "target": "nsis",
-      "icon": "public/app.ico",
+      "icon": "public/256x256.png",
       "forceCodeSigning": false
     },
     "mac": {

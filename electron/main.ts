@@ -3,7 +3,7 @@ import * as path from 'path';
 import * as fs from 'fs';
 import * as os from 'os';
 import { PrinterManagementService } from './printerManagement';
-import { initializeMySQLPool, getMySQLPool, executeQuery, executeQueryOne, executeUpdate, executeUpsert, executeTransaction, getConnection, initializeSystemPosPool, executeSystemPosQuery, executeSystemPosQueryOne, executeSystemPosUpdate, executeSystemPosTransaction, executeSystemPosDdl, executeSystemPosDdlIgnoreDup, executeDdlIgnoreDup, toMySQLDateTime, toMySQLTimestamp, testDatabaseConnection, insertTransactionToSystemPos } from './mysqlDb';
+import { initializeMySQLPool, getMySQLPool, executeQuery, executeQueryOne, executeUpdate, executeUpsert, executeTransaction, getConnection, initializeSystemPosPool, executeSystemPosQuery, executeSystemPosQueryOne, executeSystemPosUpdate, executeSystemPosTransaction, executeSystemPosDdl, executeSystemPosDdlIgnoreDup, executeDdlIgnoreDup, toMySQLDateTime, toMySQLTimestamp, testDatabaseConnection, insertTransactionToSystemPos, upsertProductsFromMainToSystemPos } from './mysqlDb';
 import { initializeMySQLSchema } from './mysqlSchema';
 import { readConfig, writeConfig, resetConfig, getDbConfig, type AppConfig } from './configManager';
 import { ReceiptManagementService, ReceiptTemplateData } from './receiptManagement';
@@ -517,6 +517,8 @@ let mainWindow: BrowserWindow | null = null;
 let customerWindow: BrowserWindow | null = null;
 let printWindow: BrowserWindow | null = null;
 let baristaKitchenWindow: BrowserWindow | null = null;
+let kitchenDisplayWindow: BrowserWindow | null = null;
+let baristaDisplayWindow: BrowserWindow | null = null;
 // MySQL pool is managed by mysqlDb module
 let printerService: PrinterManagementService | null = null;
 
@@ -774,6 +776,13 @@ async function ensureSystemPosSchema(): Promise<void> {
   const alterColumns: string[] = [
     'ALTER TABLE transactions ADD COLUMN waiter_id INT DEFAULT NULL AFTER user_id',
     'ALTER TABLE transaction_items ADD COLUMN waiter_id INT DEFAULT NULL AFTER created_at',
+    // Keep system_pos.transaction_items schema compatible with inserts from main DB.
+    // These columns exist on main DB (some via lazy migrations); system_pos may be missing them on older installs.
+    "ALTER TABLE transaction_items ADD COLUMN production_started_at TIMESTAMP NULL DEFAULT NULL",
+    "ALTER TABLE transaction_items ADD COLUMN production_status ENUM('preparing','finished','cancelled') DEFAULT NULL",
+    "ALTER TABLE transaction_items ADD COLUMN production_finished_at TIMESTAMP NULL DEFAULT NULL",
+    "ALTER TABLE transaction_items ADD COLUMN package_line_finished_at_json TEXT DEFAULT NULL COMMENT 'Per-line finished-at times for package breakdown (JSON: {\"0\":\"iso\",...})'",
+    "ALTER TABLE transaction_items ADD INDEX idx_transaction_items_production_status (production_status)",
     "ALTER TABLE transactions ADD COLUMN sync_status ENUM('pending','synced','failed') DEFAULT 'pending' AFTER payment_method_id",
     "ALTER TABLE products ADD COLUMN is_package TINYINT(1) NOT NULL DEFAULT 0 COMMENT '1 = package product' AFTER is_bundle",
     'ALTER TABLE transactions ADD COLUMN sync_attempts INT DEFAULT 0 AFTER sync_status',
@@ -940,7 +949,7 @@ function createWindows(): void {
     center: true,
     minWidth: 800,
     minHeight: 432,
-    title: 'Marviano POS - Login',
+    title: 'Pictos - Login',
     frame: false,
     backgroundColor: '#111827',
     movable: true,
@@ -971,7 +980,7 @@ function createWindows(): void {
       height: customerWindowHeight,
       x: customerWindowX,
       y: customerWindowY,
-      title: 'Marviano POS - Customer Display',
+      title: 'Pictos - Customer Display',
       frame: false,
       backgroundColor: '#000000',
       alwaysOnTop: true,
@@ -1378,26 +1387,8 @@ function createWindows(): void {
           return null;
         };
 
-        // Check if product has any platform prices (for online tabs)
-        const hasPlatformPrice =
-          (r.harga_shopeefood != null && r.harga_shopeefood !== undefined) ||
-          (r.harga_gofood != null && r.harga_gofood !== undefined) ||
-          (r.harga_grabfood != null && r.harga_grabfood !== undefined) ||
-          (r.harga_tiktok != null && r.harga_tiktok !== undefined) ||
-          (r.harga_qpon != null && r.harga_qpon !== undefined) ||
-          (r.harga_online != null && r.harga_online !== undefined);
-
-        // Skip products with NULL harga_jual ONLY if they also have no platform prices
-        // If they have platform prices, we'll use harga_jual = 0 as fallback so they show in online tabs
+        // Store all products regardless of harga_jual; use 0 when NULL so they show in POS (including offline tab)
         const hargaJualRaw = getNumber('harga_jual');
-        if ((hargaJualRaw == null) && !hasPlatformPrice) {
-          const productId = getId();
-          const productName = getString('nama');
-          console.log(`⏭️ [PRODUCTS UPSERT] Skipping product ${productId} (${productName}) - harga_jual is NULL and no platform prices`);
-          continue;
-        }
-
-        // Use 0 as fallback for harga_jual if NULL but product has platform prices
         const hargaJual = hargaJualRaw ?? 0;
 
         // Map MySQL columns
@@ -4934,9 +4925,20 @@ function createWindows(): void {
       if (queries.length > 0) { await executeTransaction(queries); }
 
       // Save package line items to transaction_item_package_lines (normalized table)
+      // When an item already has package lines in DB (e.g. order was saved then paid), preserve them
+      // so that kitchen/barista completion (finished_at) is not wiped by payment upsert.
       const packageLineQueries: Array<{ sql: string; params?: (string | number)[] }> = [];
       for (const { itemUuidId, itemQuantity, rawJson } of packageLinesToSave) {
         try {
+          const existingLines = await executeQuery<{ id: number }>(
+            'SELECT id FROM transaction_item_package_lines WHERE uuid_transaction_item_id = ? LIMIT 1',
+            [itemUuidId]
+          );
+          if (existingLines && existingLines.length > 0) {
+            // Item already has package lines (e.g. from "Simpan Order" or previous send). Do not replace:
+            // payment/upsert would otherwise wipe finished_at and make completed items reappear in active orders.
+            continue;
+          }
           const selections = parseJsonArray<{ selection_type: string; product_id?: number; quantity?: number; chosen?: Array<{ product_id: number; quantity?: number }> }>(rawJson, 'package_selections_json');
           // Store per-package quantity only; display will multiply by itemQuantity
           const byProduct = new Map<number, number>();
@@ -5303,6 +5305,27 @@ function createWindows(): void {
       return rows ?? [];
     } catch (error) {
       console.error('Error getting package lines:', error);
+      return [];
+    }
+  });
+
+  /** Returns transaction UUIDs that have at least one package line (for list filtering and package column). */
+  ipcMain.handle('localdb-get-transaction-ids-with-package', async (_event, transactionIds: string[]) => {
+    try {
+      if (!Array.isArray(transactionIds) || transactionIds.length === 0) return [];
+      const ids = transactionIds.filter((id): id is string => typeof id === 'string' && id.length > 0);
+      if (ids.length === 0) return [];
+      const placeholders = ids.map(() => '?').join(',');
+      const rows = await executeQuery<{ uuid_transaction_id: string }>(
+        `SELECT DISTINCT ti.uuid_transaction_id
+         FROM transaction_items ti
+         INNER JOIN transaction_item_package_lines tipl ON ti.uuid_id = tipl.uuid_transaction_item_id
+         WHERE ti.uuid_transaction_id IN (${placeholders})`,
+        ids
+      );
+      return (rows ?? []).map((r) => r.uuid_transaction_id);
+    } catch (error) {
+      console.error('Error getting transaction IDs with package:', error);
       return [];
     }
   });
@@ -5777,7 +5800,55 @@ function createWindows(): void {
         const safeLimit = Math.min(Math.max(limit, 1), 100000);
         query += ` LIMIT ${safeLimit}`;
       }
-      const results = await executeSystemPosQuery<Record<string, unknown>>(query, params);
+      let results = await executeSystemPosQuery<Record<string, unknown>>(query, params);
+      // Enrich with refund totals from main DB (system_pos may not have refunds synced)
+      if (results.length > 0) {
+        try {
+          const uuids = results.map((r: Record<string, unknown>) => {
+            const id = r.id ?? r.uuid_id;
+            return typeof id === 'string' ? id : String(id);
+          }).filter(Boolean);
+          if (uuids.length > 0) {
+            const placeholders = uuids.map(() => '?').join(',');
+            const refundRows = await executeQuery<{ transaction_uuid: string; total_refund: number }>(
+              `SELECT transaction_uuid, SUM(refund_amount) as total_refund
+               FROM transaction_refunds
+               WHERE transaction_uuid IN (${placeholders}) AND status IN ('pending', 'completed')
+               GROUP BY transaction_uuid`,
+              uuids
+            );
+            const refundByUuid = new Map<string, number>();
+            for (const row of refundRows || []) {
+              if (row?.transaction_uuid && (row.total_refund ?? 0) > 0) {
+                refundByUuid.set(String(row.transaction_uuid), Number(row.total_refund));
+              }
+            }
+            if (refundByUuid.size > 0) {
+              results = results.map((r: Record<string, unknown>) => {
+                const uuid = String(r.id ?? r.uuid_id ?? '');
+                const mainRefund = refundByUuid.get(uuid);
+                if (mainRefund != null && mainRefund > 0) {
+                  const finalAmount = typeof r.final_amount === 'number' ? r.final_amount : Number(r.final_amount) || 0;
+                  const status = mainRefund >= (finalAmount - 0.01) ? 'full' : 'partial';
+                  return { ...r, refund_total: mainRefund, refund_status: status };
+                }
+                return r;
+              }) as Record<string, unknown>[];
+            }
+          }
+        } catch (enrichErr) {
+          console.warn('[SYSTEM POS] Failed to enrich refunds from main DB (non-fatal):', enrichErr instanceof Error ? enrichErr.message : String(enrichErr));
+        }
+      }
+      // #region agent log
+      try {
+        const withRefund = results.filter((r: Record<string, unknown>) => {
+          const v = r.refund_total;
+          return v != null && (typeof v === 'number' ? v > 0 : Number(v) > 0);
+        });
+        fetch('http://127.0.0.1:7245/ingest/519de021-d49d-473f-a8a1-4215977c867a', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ location: 'main.ts:localdb-get-system-pos-transactions', message: 'system_pos transactions refund check', data: { total: results.length, withRefundCount: withRefund.length, sampleRefunds: withRefund.slice(0, 3).map((r: Record<string, unknown>) => ({ id: r.id, refund_total: r.refund_total })) }, hypothesisId: 'H1', runId: 'post-fix', timestamp: Date.now() }) }).catch(() => { });
+      } catch (_) { }
+      // #endregion
       return results;
     } catch (error) {
       console.error('Error getting system-pos transactions:', error);
@@ -6270,6 +6341,85 @@ function createWindows(): void {
       }
 
       await executeTransaction(queries);
+      // Sync refund to system_pos so Grand Total card shows refund when system_pos mode is on
+      try {
+        await ensureSystemPosSchema();
+        const txExists = await executeSystemPosQueryOne<{ id: number }>(
+          'SELECT id FROM transactions WHERE uuid_id = ? LIMIT 1',
+          [refund.transaction_uuid]
+        );
+        if (txExists) {
+          const existingRefund = await executeSystemPosQueryOne<{ id: number }>(
+            'SELECT id FROM transaction_refunds WHERE uuid_id = ? LIMIT 1',
+            [refund.uuid_id]
+          );
+          if (existingRefund) {
+            await executeSystemPosUpdate(
+              `UPDATE transaction_refunds SET
+                transaction_uuid = ?, business_id = ?, shift_uuid = ?, refunded_by = ?,
+                refund_amount = ?, cash_delta = ?, payment_method_id = ?, reason = ?, note = ?,
+                refund_type = ?, status = ?, refunded_at = ?, updated_at = ?, synced_at = ?
+                WHERE uuid_id = ?`,
+              [
+                refund.transaction_uuid,
+                Number(refund.business_id),
+                finalShiftUuid ?? null,
+                Number(refund.refunded_by ?? 0),
+                Number(refund.refund_amount ?? 0),
+                Number(refund.cash_delta ?? 0),
+                Number(refund.payment_method_id ?? 1),
+                refund.reason ?? null,
+                refund.note ?? null,
+                refund.refund_type ?? 'full',
+                refund.status ?? 'completed',
+                refundedAt,
+                updatedAt,
+                syncedAt,
+                refund.uuid_id
+              ]
+            );
+          } else {
+            await executeSystemPosUpdate(
+              `INSERT INTO transaction_refunds (
+                uuid_id, transaction_uuid, business_id, shift_uuid, refunded_by,
+                refund_amount, cash_delta, payment_method_id, reason, note,
+                refund_type, status, refunded_at, created_at, updated_at, synced_at
+              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+              [
+                refund.uuid_id,
+                refund.transaction_uuid,
+                Number(refund.business_id),
+                finalShiftUuid ?? null,
+                Number(refund.refunded_by ?? 0),
+                Number(refund.refund_amount ?? 0),
+                Number(refund.cash_delta ?? 0),
+                Number(refund.payment_method_id ?? 1),
+                refund.reason ?? null,
+                refund.note ?? null,
+                refund.refund_type ?? 'full',
+                refund.status ?? 'completed',
+                refundedAt,
+                createdAt,
+                updatedAt,
+                syncedAt
+              ]
+            );
+          }
+          if (transactionUpdate?.refund_total !== undefined) {
+            await executeSystemPosUpdate(
+              'UPDATE transactions SET refund_total = ?, refund_status = ? WHERE uuid_id = ?',
+              [
+                transactionUpdate.refund_total ?? 0,
+                transactionUpdate.refund_status ?? 'partial',
+                refund.transaction_uuid
+              ]
+            );
+          }
+          console.log(`✅ [SYSTEM POS] Synced refund ${refund.uuid_id} to system_pos`);
+        }
+      } catch (sysPosErr) {
+        console.warn('[SYSTEM POS] Failed to sync refund to system_pos (non-fatal):', sysPosErr instanceof Error ? sysPosErr.message : String(sysPosErr));
+      }
       return { success: true };
     } catch (error) {
       console.error('Error applying transaction refund:', error);
@@ -7587,6 +7737,227 @@ function createWindows(): void {
       return { success: false, error: String(error) };
     }
   });
+
+  /**
+   * Get "Paket" sales breakdown for shift/date range.
+   *
+   * - Finds package products by `products.category1_id = 14`
+   * - Returns package totals (qty + allocated gross subtotal) and nested sub-items (qty only)
+   * - Uses the same allocation formula as Category II:
+   *     allocated = ti.total_price / tx_items_total * t.total_amount
+   * - Excludes fully-refunded transactions (t.refund_status != 'full')
+   *
+   * When shiftUuids (non-empty): filter by t.shift_uuid IN (...).
+   * When shiftUuid: filter by t.shift_uuid = ?.
+   * Else: userId + time range.
+   */
+  ipcMain.handle(
+    'localdb-get-package-sales-breakdown',
+    async (
+      event,
+      userId: number | null,
+      shiftStart: string,
+      shiftEnd: string | null,
+      businessId: number | null = null,
+      shiftUuid?: string | null,
+      shiftUuids?: string[]
+    ) => {
+      try {
+        if (businessId === null) {
+          return [];
+        }
+
+        const shiftStartMySQL = toMySQLDateTime(shiftStart);
+        const shiftEndMySQL = shiftEnd ? toMySQLDateTime(shiftEnd) : null;
+
+        type PackageParentRow = {
+          item_uuid: string;
+          package_product_id: number;
+          package_product_name: string;
+          package_qty: number;
+          package_total_price: number;
+          tx_total_amount: number;
+          tx_items_total: number;
+        };
+
+        let query = `
+          SELECT
+            ti.uuid_id as item_uuid,
+            p.id as package_product_id,
+            p.nama as package_product_name,
+            ti.quantity as package_qty,
+            ti.total_price as package_total_price,
+            COALESCE(t.total_amount, 0) as tx_total_amount,
+            (SELECT COALESCE(SUM(ti2.total_price), 0) FROM transaction_items ti2 WHERE ti2.transaction_id = ti.transaction_id) as tx_items_total
+          FROM transaction_items ti
+          INNER JOIN transactions t ON ti.transaction_id = t.id
+          INNER JOIN products p ON ti.product_id = p.id
+          WHERE t.business_id = ?
+            AND t.status = 'completed'
+            AND t.refund_status != 'full'
+            AND p.category1_id = 14
+        `;
+        const params: (string | number | null | boolean)[] = [businessId];
+
+        if (shiftUuids && shiftUuids.length > 0) {
+          query += ' AND t.shift_uuid IN (' + shiftUuids.map(() => '?').join(',') + ')';
+          params.push(...shiftUuids);
+        } else if (shiftUuid) {
+          query += ' AND t.shift_uuid = ?';
+          params.push(shiftUuid);
+        } else {
+          if (userId !== null) {
+            query = query.replace('WHERE t.business_id = ?', 'WHERE t.user_id = ? AND t.business_id = ?');
+            params.unshift(userId);
+          }
+          query += ' AND t.created_at >= ?';
+          params.push(shiftStartMySQL);
+          if (shiftEndMySQL) {
+            query += ' AND t.created_at <= ?';
+            params.push(shiftEndMySQL);
+          }
+        }
+
+        const parentRows = await executeQuery<PackageParentRow>(query, params);
+        if (!parentRows || parentRows.length === 0) {
+          return [];
+        }
+
+        type PackageLineAgg = { product_id: number; product_name: string; total_quantity: number };
+        type PackageAgg = {
+          package_product_id: number;
+          package_product_name: string;
+          total_quantity: number;
+          total_amount: number;
+          base_unit_price: number;
+          lines: PackageLineAgg[];
+          _linesMap: Map<number, PackageLineAgg>;
+        };
+
+        const packages = new Map<number, PackageAgg>();
+        const itemToParent = new Map<string, { package_product_id: number; package_qty: number }>();
+        const itemUuids: string[] = [];
+
+        for (const row of parentRows) {
+          const itemUuid = String(row.item_uuid || '').trim();
+          if (!itemUuid) continue;
+
+          const pkgId = Number(row.package_product_id) || 0;
+          const pkgName = String(row.package_product_name || '').trim() || 'Unknown Paket';
+          const pkgQty = Number(row.package_qty) || 0;
+          const pkgTotalPrice = Number(row.package_total_price) || 0;
+          const txTotalAmount = Number(row.tx_total_amount) || 0;
+          const txItemsTotal = Number(row.tx_items_total) || 0;
+
+          // Allocate gross total_amount proportionally to this line item (aligns with Category II)
+          const allocated = txItemsTotal > 0 ? (pkgTotalPrice / txItemsTotal) * txTotalAmount : 0;
+
+          itemToParent.set(itemUuid, { package_product_id: pkgId, package_qty: pkgQty });
+          itemUuids.push(itemUuid);
+
+          const existing = packages.get(pkgId);
+          if (existing) {
+            existing.total_quantity += pkgQty;
+            existing.total_amount += allocated;
+          } else {
+            packages.set(pkgId, {
+              package_product_id: pkgId,
+              package_product_name: pkgName,
+              total_quantity: pkgQty,
+              total_amount: allocated,
+              base_unit_price: 0,
+              lines: [],
+              _linesMap: new Map<number, PackageLineAgg>(),
+            });
+          }
+        }
+
+        const chunkArray = <T,>(arr: T[], size: number): T[][] => {
+          const out: T[][] = [];
+          for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
+          return out;
+        };
+
+        // Load nested package lines (qty per package). Multiply by purchased package qty for true consumption.
+        type RawPackageLineRow = {
+          uuid_transaction_item_id: string;
+          product_id: number;
+          product_name: string;
+          quantity: number;
+        };
+
+        const chunks = chunkArray(itemUuids, 500);
+        for (const chunk of chunks) {
+          if (chunk.length === 0) continue;
+          const placeholders = chunk.map(() => '?').join(',');
+          const lineRows = await executeQuery<RawPackageLineRow>(
+            `
+              SELECT
+                tipl.uuid_transaction_item_id,
+                tipl.product_id,
+                COALESCE(p.nama, 'Unknown') as product_name,
+                tipl.quantity
+              FROM transaction_item_package_lines tipl
+              LEFT JOIN products p ON tipl.product_id = p.id
+              WHERE tipl.uuid_transaction_item_id IN (${placeholders})
+            `,
+            chunk
+          );
+
+          for (const lr of lineRows) {
+            const itemUuid = String(lr.uuid_transaction_item_id || '').trim();
+            if (!itemUuid) continue;
+            const parent = itemToParent.get(itemUuid);
+            if (!parent) continue;
+
+            const pkg = packages.get(parent.package_product_id);
+            if (!pkg) continue;
+
+            const subProductId = Number(lr.product_id) || 0;
+            const subName = String(lr.product_name || '').trim() || 'Unknown';
+            const perPkgQty = Number(lr.quantity) || 0;
+            const totalQty = perPkgQty * (Number(parent.package_qty) || 0);
+            if (subProductId <= 0 || totalQty <= 0) continue;
+
+            const existingLine = pkg._linesMap.get(subProductId);
+            if (existingLine) {
+              existingLine.total_quantity += totalQty;
+            } else {
+              pkg._linesMap.set(subProductId, {
+                product_id: subProductId,
+                product_name: subName,
+                total_quantity: totalQty,
+              });
+            }
+          }
+        }
+
+        // Finalize output: compute unit prices and convert internal maps to arrays.
+        const result = Array.from(packages.values()).map((pkg) => {
+          const qty = Number(pkg.total_quantity) || 0;
+          const amt = Number(pkg.total_amount) || 0;
+          pkg.base_unit_price = qty > 0 ? amt / qty : 0;
+          pkg.lines = Array.from(pkg._linesMap.values()).sort((a, b) => a.product_name.localeCompare(b.product_name));
+          // @ts-expect-error internal-only map for building result
+          delete pkg._linesMap;
+          return pkg;
+        });
+
+        // Sort packages by amount desc, then name
+        result.sort((a, b) => {
+          const da = Number(a.total_amount) || 0;
+          const db = Number(b.total_amount) || 0;
+          if (db !== da) return db - da;
+          return String(a.package_product_name).localeCompare(String(b.package_product_name));
+        });
+
+        return result;
+      } catch (error) {
+        console.error('Error getting package sales breakdown:', error);
+        return [];
+      }
+    }
+  );
 
   // Get product sales breakdown for shift. Allocate total_amount (gross, before discount) to items proportionally. Full refund tx excluded.
   // When shiftUuids (non-empty): filter by t.shift_uuid IN (...). When shiftUuid: filter by t.shift_uuid = ?. Else: userId + time.
@@ -8928,6 +9299,110 @@ function createWindows(): void {
     }
   });
 
+  // Manual System POS Re-sync: preview count of Printer 2 transactions in date range (by printed_at)
+  ipcMain.handle('get-system-pos-resync-preview', async (event, fromDate: string, toDate: string) => {
+    try {
+      if (!fromDate || !toDate) {
+        return { success: false, error: 'fromDate and toDate are required (YYYY-MM-DD)', count: 0 };
+      }
+      const [yFrom, mFrom, dFrom] = fromDate.split('-').map(Number);
+      const [yTo, mTo, dTo] = toDate.split('-').map(Number);
+      const fromEpoch = new Date(yFrom, mFrom - 1, dFrom, 0, 0, 0, 0).getTime();
+      const toEpoch = new Date(yTo, mTo - 1, dTo, 23, 59, 59, 999).getTime();
+      if (fromEpoch > toEpoch) {
+        return { success: false, error: 'fromDate must be before or equal to toDate', count: 0 };
+      }
+      const rows = await executeQuery<{ transaction_id: string }>(
+        `SELECT DISTINCT transaction_id FROM printer2_audit_log
+         WHERE printed_at_epoch >= ? AND printed_at_epoch <= ?
+         ORDER BY transaction_id`,
+        [fromEpoch, toEpoch]
+      );
+      const transactionIds = rows.map(r => r.transaction_id);
+      console.log(`[SYSTEM POS] Preview: ${transactionIds.length} Printer 2 transactions in ${fromDate}..${toDate}`);
+      return { success: true, count: transactionIds.length, transactionIds };
+    } catch (error) {
+      console.error('[SYSTEM POS] Error getting resync preview:', error);
+      return { success: false, error: String(error), count: 0 };
+    }
+  });
+
+  // Manual System POS Re-sync: sync Printer 2 transactions in date range to system_pos
+  ipcMain.handle('run-system-pos-resync', async (event, fromDate: string, toDate: string) => {
+    try {
+      if (!fromDate || !toDate) {
+        return { success: false, error: 'fromDate and toDate are required (YYYY-MM-DD)', count: 0, synced: 0, failed: 0, errors: [] };
+      }
+      const [yFrom, mFrom, dFrom] = fromDate.split('-').map(Number);
+      const [yTo, mTo, dTo] = toDate.split('-').map(Number);
+      const fromEpoch = new Date(yFrom, mFrom - 1, dFrom, 0, 0, 0, 0).getTime();
+      const toEpoch = new Date(yTo, mTo - 1, dTo, 23, 59, 59, 999).getTime();
+      if (fromEpoch > toEpoch) {
+        return { success: false, error: 'fromDate must be before or equal to toDate', count: 0, synced: 0, failed: 0, errors: [] };
+      }
+      const transactions = await executeQuery<{ transaction_id: string }>(
+        `SELECT DISTINCT transaction_id FROM printer2_audit_log
+         WHERE printed_at_epoch >= ? AND printed_at_epoch <= ?
+         ORDER BY transaction_id`,
+        [fromEpoch, toEpoch]
+      );
+      if (transactions.length === 0) {
+        return { success: true, count: 0, synced: 0, failed: 0, errors: [], message: 'No Printer 2 transactions in date range' };
+      }
+      console.log(`[SYSTEM POS] Manual re-sync: ${transactions.length} Printer 2 transactions (${fromDate}..${toDate})`);
+      const now = Date.now();
+      const queries: Array<{ sql: string; params?: (string | number | null | boolean)[] }> = [];
+      for (const tx of transactions) {
+        const transactionId = tx.transaction_id;
+        queries.push({
+          sql: 'INSERT IGNORE INTO system_pos_queue (transaction_id, queued_at) VALUES (?, ?)',
+          params: [transactionId, now]
+        });
+        queries.push({
+          sql: 'UPDATE system_pos_queue SET synced_at = NULL, retry_count = 0, last_error = NULL WHERE transaction_id = ?',
+          params: [transactionId]
+        });
+      }
+      await executeSystemPosTransaction(queries);
+      let synced = 0;
+      let failed = 0;
+      const errors: Array<{ transactionId: string; error: string }> = [];
+      for (const tx of transactions) {
+        const transactionId = tx.transaction_id;
+        const insertResult = await insertTransactionToSystemPos(transactionId);
+        if (insertResult.success) {
+          await executeSystemPosUpdate('UPDATE system_pos_queue SET synced_at = ? WHERE transaction_id = ?', [now, transactionId]);
+          synced++;
+        } else {
+          const errMsg = (insertResult.error ?? 'Unknown').substring(0, 500);
+          await executeSystemPosUpdate(
+            'UPDATE system_pos_queue SET retry_count = retry_count + 1, last_error = ? WHERE transaction_id = ?',
+            [errMsg, transactionId]
+          );
+          writeSystemPosDebugLog({ source: 'manual-resync', transactionId, reason: insertResult.error ?? 'Unknown error' });
+          failed++;
+          errors.push({ transactionId, error: errMsg });
+        }
+      }
+      console.log(`[SYSTEM POS] Manual re-sync done: ${synced} synced, ${failed} failed`);
+      return { success: true, count: transactions.length, synced, failed, errors };
+    } catch (error) {
+      console.error('[SYSTEM POS] Error running manual resync:', error);
+      return { success: false, error: String(error), count: 0, synced: 0, failed: 0, errors: [] };
+    }
+  });
+
+  // Upsert master data (products + categories) from salespulse to system_pos. Call after "Download master data".
+  ipcMain.handle('upsert-master-data-to-system-pos', async () => {
+    try {
+      const result = await upsertProductsFromMainToSystemPos();
+      return result;
+    } catch (error) {
+      console.error('[SYSTEM POS] upsert-master-data-to-system-pos failed:', error);
+      return { success: false, upserted: 0, error: String(error) };
+    }
+  });
+
   // Get Printer 1 audit log
   ipcMain.handle('get-printer1-audit-log', async (event, fromDate?: string, toDate?: string, limit?: number, transactionId?: string) => {
     console.log(`[IPC] get-printer1-audit-log called: fromDate=${fromDate}, toDate=${toDate}, limit=${limit}, transactionId=${transactionId ?? 'none'}, printerService=${!!printerService}`);
@@ -9548,6 +10023,9 @@ app.on('window-all-closed', () => {
 
 // IPC handlers for POS-specific functionality
 ipcMain.handle('print-receipt', async (event, data: ReceiptPrintData) => {
+  // #region agent log
+  fetch('http://127.0.0.1:7245/ingest/519de021-d49d-473f-a8a1-4215977c867a', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ location: 'main.ts:print-receipt', message: 'print operation', data: { operation: 'print-receipt' }, timestamp: Date.now(), hypothesisId: 'count' }) }).catch(() => { });
+  // #endregion
   try {
     console.log('📄 Printing receipt - Full data received:', JSON.stringify(data, null, 2));
     console.log(`🔍 [PRINT-RECEIPT] Counter values: printer1Counter=${data.printer1Counter}, printer2Counter=${data.printer2Counter}, globalCounter=${data.globalCounter}, printerType=${data.printerType}`);
@@ -9665,7 +10143,7 @@ ipcMain.handle('print-receipt', async (event, data: ReceiptPrintData) => {
     });
 
     // Fetch business name from database if business_id is provided
-    let businessName = 'MARVIANO MADIUN 1'; // Default fallback
+    let businessName = 'Pictos'; // Default fallback
     if (data.business_id) {
       try {
         const business = await executeQueryOne<{ name: string }>(
@@ -10115,6 +10593,12 @@ async function executeLabelPrint(data: LabelPrintData): Promise<{ success: boole
     let htmlContent: string;
     try {
       const checkerResult = await receiptManagementService.getReceiptTemplate('checker', data.business_id);
+      const dataCustomizations = typeof data.customizations === 'string' ? data.customizations : '';
+      const hasCustomizations = (dataCustomizations || '').trim().length > 0;
+      const stripCustomizations = !checkerResult.showNotes;
+      // #region agent log
+      fetch('http://127.0.0.1:7245/ingest/519de021-d49d-473f-a8a1-4215977c867a', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ location: 'main.ts:executeLabelPrint', message: 'label print showNotes branch', data: { business_id: data.business_id, checkerShowNotes: checkerResult.showNotes, hasCheckerTemplate: !!(checkerResult.templateCode && checkerResult.templateCode.trim()), dataHasCustomizations: hasCustomizations, stripCustomizations }, timestamp: Date.now(), hypothesisId: 'A' }) }).catch(() => { });
+      // #endregion
       if (checkerResult.templateCode && checkerResult.templateCode.trim()) {
         const labelData: LabelPrintData = checkerResult.showNotes ? data : { ...data, customizations: '', labelContinuation: '' };
         labelData.leftPadding = labelLeftPadding;
@@ -10198,6 +10682,15 @@ type OrderContextForChecker = {
   category2Name?: string;
 };
 
+/** Minimal template used when checker template has no {{items}} but we have orderContext (print one slip with notes). */
+const FALLBACK_ORDER_SUMMARY_CHECKER_TEMPLATE = `<!DOCTYPE html>
+<html><head><meta charset="UTF-8"><style>@page{size:80mm auto;margin:0;}*{margin:0;padding:0;box-sizing:border-box;}body{font-family:Arial,sans-serif;width:42ch;font-size:9pt;padding:2mm 7mm;}table{width:100%;border-collapse:collapse;}td,th{padding:0.5mm 0;}tr.package-subitem td{font-size:8pt;padding-left:3mm;}</style></head><body>
+<div style="font-weight:700;margin-bottom:1mm;">Pelanggan: {{customerName}}</div>
+<div style="font-weight:700;margin-bottom:1mm;">Meja: {{tableName}}</div>
+<div style="font-size:8pt;margin-bottom:2mm;">{{orderTime}}</div>
+<table><tr><th style="text-align:left;">Item</th><th style="text-align:right;">Harga</th><th style="text-align:right;">Jml</th><th style="text-align:right;">Subtotal</th></tr>{{items}}</table>
+</body></html>`;
+
 async function executeLabelsBatchPrint(data: {
   labels: LabelPrintData[];
   printerName?: string;
@@ -10226,16 +10719,33 @@ async function executeLabelsBatchPrint(data: {
     } catch (_) {
       // ignore
     }
+    const firstLabelCustomizations = data.labels?.[0] && typeof (data.labels[0] as { customizations?: string }).customizations === 'string' ? (data.labels[0] as { customizations: string }).customizations : '';
+    // #region agent log
+    const requestId = (data as any).requestId || 'NO-ID';
+    console.error(`🖨️ [BACKEND] Received printLabelsBatch. ID: ${requestId}. Table: ${data.orderContext?.tableName}. Time: ${data.orderContext?.orderTime}`);
+    fetch('http://127.0.0.1:7245/ingest/519de021-d49d-473f-a8a1-4215977c867a', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ location: 'main.ts:executeLabelsBatchPrint', message: 'batch label checker result', data: { requestId, businessId: businessId ?? null, checkerShowNotes: checkerResult.showNotes, hasCheckerTemplate: !!checkerResult.templateCode?.trim(), firstLabelCustomizationsLength: (firstLabelCustomizations || '').length }, timestamp: Date.now(), hypothesisId: 'A' }) }).catch(() => { });
+    // #endregion
     const checkerTemplateCode = checkerResult.templateCode?.trim() ?? null;
     const templateUsesItems = checkerTemplateCode != null && (checkerTemplateCode.includes('{{items}}') || checkerTemplateCode.includes('{{itemsCategory1}}') || checkerTemplateCode.includes('{{itemsCategory2}}'));
-    const useOrderSummarySlip = templateUsesItems && hasOrderContext;
+    const hasOrderContextWithItems = hasOrderContext && (data.orderContext?.itemsHtml != null && String(data.orderContext.itemsHtml).trim() !== '');
+    // Prefer one order-summary slip when we have order context with items (avoids N per-item labels = "print once")
+    const useOrderSummarySlip = hasOrderContextWithItems && (templateUsesItems || true);
+    const slipTemplateCode = templateUsesItems && checkerTemplateCode
+      ? checkerTemplateCode
+      : hasOrderContextWithItems
+        ? FALLBACK_ORDER_SUMMARY_CHECKER_TEMPLATE
+        : null;
 
     if (!useOrderSummarySlip && (!data.labels || !Array.isArray(data.labels) || data.labels.length === 0)) {
       console.error('❌ No labels provided for batch printing');
       return { success: false, error: 'No labels provided for batch printing.' };
     }
 
-    console.log('🏷️ [EXECUTE] Printing labels batch - Count:', useOrderSummarySlip ? 1 : (data.labels?.length || 0), useOrderSummarySlip ? '(order summary slip)' : '');
+    const effectiveLabelOrSlipCount = useOrderSummarySlip ? 1 : (data.labels?.length || 0);
+    // #region agent log
+    fetch('http://127.0.0.1:7245/ingest/519de021-d49d-473f-a8a1-4215977c867a', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ location: 'main.ts:executeLabelsBatchPrint', message: 'batch print effective count', data: { useOrderSummarySlip, effectiveLabelOrSlipCount, labelsLength: data.labels?.length ?? 0 }, timestamp: Date.now(), hypothesisId: 'count' }) }).catch(() => { });
+    // #endregion
+    console.log('🏷️ [EXECUTE] Printing labels batch - Count:', effectiveLabelOrSlipCount, useOrderSummarySlip ? '(order summary slip)' : '');
     let printerName = data.printerName;
     let copies = 1;
     const dataMargin = (data as unknown as { marginAdjustMm?: number }).marginAdjustMm;
@@ -10303,7 +10813,8 @@ async function executeLabelsBatchPrint(data: {
     // Generate batch label HTML: use checker template if available; showNotes controls customizations per label
     let htmlContent: string;
     try {
-      if (useOrderSummarySlip && checkerTemplateCode && data.orderContext) {
+      // --- 1st checker: build order-summary slip HTML (one slip per order when template uses {{items}}) ---
+      if (useOrderSummarySlip && slipTemplateCode && data.orderContext) {
         const orderData: LabelPrintData = {
           waiterName: data.orderContext.waiterName ?? '',
           customerName: data.orderContext.customerName ?? '',
@@ -10317,7 +10828,10 @@ async function executeLabelsBatchPrint(data: {
           leftPadding: batchLeftPadding,
           rightPadding: batchRightPadding,
         };
-        htmlContent = generateLabelHTMLFromTemplate(checkerTemplateCode, orderData);
+        htmlContent = generateLabelHTMLFromTemplate(slipTemplateCode, orderData); // 1st checker HTML ready
+        // #region agent log — debug what is printed on 1st print (content; printer name logged later when we resolve it)
+        fetch('http://127.0.0.1:7245/ingest/519de021-d49d-473f-a8a1-4215977c867a', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ location: 'main.ts:executeLabelsBatchPrint:1stPrintContent', message: '1st print content (order summary slip)', data: { firstPrintPath: true, orderDataSummary: { waiterName: orderData.waiterName, customerName: orderData.customerName, tableName: orderData.tableName, orderTime: orderData.orderTime, itemsHtmlLength: (orderData.items || '').length, itemsHtmlPreview: (orderData.items || '').substring(0, 500) }, htmlContentLength: htmlContent.length, htmlContentPreview: htmlContent.substring(0, 2500) }, timestamp: Date.now(), hypothesisId: '1stPrint' }) }).catch(() => { });
+        // #endregion
       } else {
         if (checkerTemplateCode) {
           const fullHtmls = data.labels.map((label) => {
@@ -10334,6 +10848,10 @@ async function executeLabelsBatchPrint(data: {
         } else {
           htmlContent = generateMultipleLabelsHTML(data.labels);
         }
+        // #region agent log — debug what is printed when NOT order-summary slip (per-item or merged labels)
+        const firstL = data.labels?.[0];
+        fetch('http://127.0.0.1:7245/ingest/519de021-d49d-473f-a8a1-4215977c867a', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ location: 'main.ts:executeLabelsBatchPrint:1stPrintContent', message: '1st print content (per-item/merged labels path)', data: { firstPrintPath: false, labelsCount: data.labels?.length, firstLabel: firstL ? { productName: (firstL as { productName?: string }).productName, pickupMethod: (firstL as { pickupMethod?: string }).pickupMethod } : undefined, htmlContentLength: htmlContent?.length, htmlContentPreview: (htmlContent || '').substring(0, 2500) }, timestamp: Date.now(), hypothesisId: '1stPrint' }) }).catch(() => { });
+        // #endregion
       }
     } catch (e) {
       console.warn('⚠️ Checker template load failed, using built-in batch label HTML:', e);
@@ -10343,6 +10861,8 @@ async function executeLabelsBatchPrint(data: {
       }
     }
 
+    // --- 1st checker: load generated HTML into print window ---
+    console.log(`📝 [BACKEND] Generated HTML for ID ${requestId} (first 100 chars): ${htmlContent.substring(0, 100)}...`);
     await jobPrintWindow.loadURL(`data:text/html,${encodeURIComponent(htmlContent)}`);
 
     return new Promise((resolve) => {
@@ -10362,9 +10882,15 @@ async function executeLabelsBatchPrint(data: {
 
           // Many label/thermal printers ignore the 'copies' option; print N times to get N physical copies
           const numCopies = Math.max(1, Math.min(10, copies));
+          // #region agent log — how many printed, what is printed, which printer
+          const whatIsPrinted = useOrderSummarySlip ? '1 order summary slip (checker)' : `${data.labels?.length ?? 0} label(s)`;
+          const contentHint = useOrderSummarySlip && data.orderContext ? { table: data.orderContext.tableName || '', itemsHtmlLength: (data.orderContext.itemsHtml || '').length } : { labelsCount: data.labels?.length ?? 0 };
+          fetch('http://127.0.0.1:7245/ingest/519de021-d49d-473f-a8a1-4215977c867a', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ location: 'main.ts:executeLabelsBatchPrint:printSummary', message: 'Print summary: how many and what', data: { totalPhysicalPrints: numCopies, whatIsPrinted, contentHint, printer: printerName || '(default)', deviceName: deviceName || null }, timestamp: Date.now(), hypothesisId: 'count' }) }).catch(() => { });
+          // #endregion
           let printedCount = 0;
           let retriedOnce = false;
           const doOnePrint = () => {
+            // --- 1st print (and subsequent copies): send checker slip to printer ---
             jobPrintWindow.webContents.print(printOptions, (success: boolean, errorType: string) => {
               if (!success) {
                 const isCanceled = /cancel|canceled/i.test(String(errorType));
@@ -10393,7 +10919,7 @@ async function executeLabelsBatchPrint(data: {
               setTimeout(doOnePrint, 400);
             });
           };
-          doOnePrint();
+          doOnePrint(); // --- 1st print: trigger first checker slip (then repeats for numCopies) ---
         } catch (err) {
           console.error('❌ Exception during webContents.print:', err);
           resolve({ success: false, error: String(err) });
@@ -10411,6 +10937,9 @@ async function executeLabelsBatchPrint(data: {
 
 // IPC handler for printing labels (queued)
 ipcMain.handle('print-label', async (event, data: LabelPrintData) => {
+  // #region agent log
+  fetch('http://127.0.0.1:7245/ingest/519de021-d49d-473f-a8a1-4215977c867a', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ location: 'main.ts:print-label', message: 'print operation', data: { operation: 'print-label' }, timestamp: Date.now(), hypothesisId: 'count' }) }).catch(() => { });
+  // #endregion
   return new Promise((resolve, reject) => {
     console.log('📋 [PRINT QUEUE] Adding label print job to queue');
     printQueue.push({
@@ -10450,6 +10979,9 @@ ipcMain.handle('print-labels-batch', async (event, data: {
     return { success: false, error: 'No labels provided for batch printing.' };
   }
 
+  // #region agent log
+  fetch('http://127.0.0.1:7245/ingest/519de021-d49d-473f-a8a1-4215977c867a', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ location: 'main.ts:print-labels-batch', message: 'print operation', data: { operation: 'print-labels-batch', labelsCount: data.labels?.length ?? 0, hasOrderContext }, timestamp: Date.now(), hypothesisId: 'count' }) }).catch(() => { });
+  // #endregion
   return new Promise((resolve, reject) => {
     console.log('📋 [PRINT QUEUE] Adding labels batch print job to queue');
     printQueue.push({
@@ -10805,11 +11337,10 @@ function generateLabelHTMLFromTemplate(templateCode: string, data: LabelPrintDat
   if (out.includes('</head>') && !out.includes('overflow-wrap:break-word')) {
     out = out.replace('</head>', `${wrapStyle}</head>`);
   }
-  // Indent package sub-items (table rows and checker category divs) so DB template does not need editing
-  const hasPackageSubitemStyle = out.includes('.item-line.package-subitem { padding-left');
-  if (out.includes('</head>') && !hasPackageSubitemStyle) {
-    const packageSubitemStyle = '<style>tr.package-subitem td:first-child { padding-left: 8mm; } .item-line.package-subitem { padding-left: 8mm; }</style>';
-    out = out.replace('</head>', `${packageSubitemStyle}</head>`);
+  // Force all checker item lines: same alignment (no indent) and no extra space between lines
+  if (out.includes('</head>') && !out.includes('checker-item-line-align')) {
+    const itemLineStyle = '<style>/* checker-item-line-align */.item-line, .item-line.package-subitem, tr.package-subitem td:first-child { padding-left: 0 !important; margin: 0 !important; padding-top: 0 !important; padding-bottom: 0 !important; line-height: 1.2 !important; }</style>';
+    out = out.replace('</head>', `${itemLineStyle}</head>`);
   }
   return out;
 }
@@ -11449,7 +11980,7 @@ function generateReceiptHTML(data: ReceiptPrintData, businessName: string, optio
 
 // Generate shift breakdown report HTML for printing
 function generateShiftBreakdownHTML(
-  shiftData: PrintableShiftReportSection & { businessName?: string; wholeDayReport?: PrintableShiftReportSection | null; sectionOptions?: { ringkasan?: boolean; barangTerjual?: boolean; paymentMethod?: boolean; categoryI?: boolean; categoryII?: boolean; toppingSales?: boolean } }
+  shiftData: PrintableShiftReportSection & { businessName?: string; wholeDayReport?: PrintableShiftReportSection | null; sectionOptions?: { ringkasan?: boolean; barangTerjual?: boolean; paymentMethod?: boolean; categoryI?: boolean; categoryII?: boolean; paket?: boolean; toppingSales?: boolean } }
 ): string {
   const formatDateTime = (dateString: string): string => {
     const date = new Date(dateString);
@@ -11506,7 +12037,7 @@ function generateShiftBreakdownHTML(
 
   const renderReportSection = (
     report: PrintableShiftReportSection,
-    options: { titleOverride?: string; businessName?: string; sectionOptions?: { ringkasan?: boolean; barangTerjual?: boolean; paymentMethod?: boolean; categoryI?: boolean; categoryII?: boolean; toppingSales?: boolean } } = {}
+    options: { titleOverride?: string; businessName?: string; sectionOptions?: { ringkasan?: boolean; barangTerjual?: boolean; paymentMethod?: boolean; categoryI?: boolean; categoryII?: boolean; paket?: boolean; toppingSales?: boolean } } = {}
   ): string => {
     const sectionTitle = options.titleOverride || report.title || 'LAPORAN SHIFT';
     const businessName = options.businessName || shiftData.businessName || 'Momoyo Bakery Kalimantan';
@@ -11534,6 +12065,7 @@ function generateShiftBreakdownHTML(
       paymentMethod: providedSectionOptions.paymentMethod !== undefined ? providedSectionOptions.paymentMethod : true,
       categoryI: providedSectionOptions.categoryI !== undefined ? providedSectionOptions.categoryI : true,
       categoryII: providedSectionOptions.categoryII !== undefined ? providedSectionOptions.categoryII : true,
+      paket: providedSectionOptions.paket !== undefined ? providedSectionOptions.paket : true,
       toppingSales: providedSectionOptions.toppingSales !== undefined ? providedSectionOptions.toppingSales : true
     } : {
       ringkasan: true,
@@ -11541,6 +12073,7 @@ function generateShiftBreakdownHTML(
       paymentMethod: true,
       categoryI: true,
       categoryII: true,
+      paket: true,
       toppingSales: true
     };
 
@@ -11721,6 +12254,46 @@ function generateShiftBreakdownHTML(
     }).join('');
     const totalCategory2Quantity = (report.category2Breakdown || []).reduce((sum: number, c: { total_quantity: number }) => sum + Number(c.total_quantity || 0), 0);
     const totalCategory2Amount = (report.category2Breakdown || []).reduce((sum: number, c: { total_amount: number }) => sum + Number(c.total_amount || 0), 0);
+
+    const packageData = Array.isArray((report as any).packageSalesBreakdown)
+      ? ((report as any).packageSalesBreakdown as Array<{
+        package_product_id: number;
+        package_product_name: string;
+        total_quantity: number;
+        total_amount: number;
+        base_unit_price: number;
+        lines: Array<{ product_id: number; product_name: string; total_quantity: number }>;
+      }>)
+      : [];
+
+    const packageRows = packageData
+      .map((pkg) => {
+        const qty = Number(pkg.total_quantity || 0) || 0;
+        const amount = Math.round(Number(pkg.total_amount || 0) || 0);
+        const unitPrice = qty > 0 ? amount / qty : 0;
+        const header = `
+      <tr>
+        <td style="text-align: left; padding: 0.3mm 0;">${pkg.package_product_name || 'Unknown Paket'}</td>
+        <td style="text-align: left; padding: 0.3mm 0;">${qty}</td>
+        <td style="text-align: right; padding: 0.3mm 0;">${formatIntegerId(unitPrice)}</td>
+        <td style="text-align: right; padding: 0.3mm 0;">${formatIntegerId(amount)}</td>
+      </tr>
+        `;
+        const lines = Array.isArray(pkg.lines)
+          ? pkg.lines
+            .filter((l) => l && Number(l.total_quantity || 0) > 0)
+            .map((line) => {
+              const lineText = formatPackageLineDisplay(String(line.product_name || ''), Number(line.total_quantity || 0));
+              return `<tr><td colspan="4" style="text-align: left; padding: 0.2mm 0 0.2mm 2mm; font-size: 7pt; color: #555;">• ${lineText}</td></tr>`;
+            })
+            .join('')
+          : '';
+        return header + lines;
+      })
+      .join('');
+
+    const totalPackageQty = packageData.reduce((sum, p) => sum + Number(p?.total_quantity || 0), 0);
+    const totalPackageAmount = packageData.reduce((sum, p) => sum + Number(p?.total_amount || 0), 0);
 
     const formattedTotalDiscount = report.statistics.total_discount > 0
       ? `-${formatIntegerId(Math.abs(report.statistics.total_discount))}`
@@ -11966,6 +12539,32 @@ function generateShiftBreakdownHTML(
       <div class="divider"></div>
       ` : ''}
 
+      ${sectionOptions.paket === true ? `
+      <div class="section-title">PAKET</div>
+      <div class="barang-terjual-note">Isi paket ditampilkan tanpa harga.</div>
+      <table>
+        <thead>
+          <tr>
+            <th>Paket</th>
+            <th style="text-align: left;">Qty</th>
+            <th class="right">Unit Price</th>
+            <th class="right">Subtotal</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${packageRows || '<tr><td colSpan="4" style="text-align: center;">Tidak ada paket terjual</td></tr>'}
+          <tr class="total-row">
+            <td>TOTAL</td>
+            <td style="text-align: left;">${totalPackageQty}</td>
+            <td class="right">-</td>
+            <td class="right">${formatIntegerId(Math.round(totalPackageAmount))}</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <div class="divider"></div>
+      ` : ''}
+
       ${sectionOptions.barangTerjual === true ? `
       <div class="section-title">BARANG TERJUAL</div>
       <div class="barang-terjual-note">Nilai per platform sebelum potongan/diskon/voucher. Refund tidak disertakan dalam perhitungan.</div>
@@ -12050,6 +12649,7 @@ function generateShiftBreakdownHTML(
     paymentMethod: true,
     categoryI: true,
     categoryII: true,
+    paket: true,
     toppingSales: true
   };
   // Respect false values - only use defaults if sectionOptions is not provided at all
@@ -12059,6 +12659,7 @@ function generateShiftBreakdownHTML(
     paymentMethod: shiftData.sectionOptions.paymentMethod !== undefined ? shiftData.sectionOptions.paymentMethod : defaultSectionOptions.paymentMethod,
     categoryI: shiftData.sectionOptions.categoryI !== undefined ? shiftData.sectionOptions.categoryI : defaultSectionOptions.categoryI,
     categoryII: shiftData.sectionOptions.categoryII !== undefined ? shiftData.sectionOptions.categoryII : defaultSectionOptions.categoryII,
+    paket: shiftData.sectionOptions.paket !== undefined ? shiftData.sectionOptions.paket : defaultSectionOptions.paket,
     toppingSales: shiftData.sectionOptions.toppingSales !== undefined ? shiftData.sectionOptions.toppingSales : defaultSectionOptions.toppingSales
   } : defaultSectionOptions;
 
@@ -12327,6 +12928,14 @@ type PrintableShiftReportSection = {
     transaction_type: string;
     is_bundle_item?: boolean;
   }>;
+  packageSalesBreakdown?: Array<{
+    package_product_id: number;
+    package_product_name: string;
+    total_quantity: number;
+    total_amount: number;
+    base_unit_price: number;
+    lines: Array<{ product_id: number; product_name: string; total_quantity: number }>;
+  }>;
   customizationSales: Array<{
     option_id: number;
     option_name: string;
@@ -12355,7 +12964,7 @@ const VOUCHER_BREAKDOWN_ORDER: { key: string; label: string }[] = [
 ];
 
 // Print shift breakdown report
-ipcMain.handle('print-shift-breakdown', async (event, data: PrintableShiftReportSection & { business_id?: number; printerType?: string; wholeDayReport?: PrintableShiftReportSection | null; sectionOptions?: { ringkasan?: boolean; barangTerjual?: boolean; paymentMethod?: boolean; categoryI?: boolean; categoryII?: boolean; toppingSales?: boolean } }) => {
+ipcMain.handle('print-shift-breakdown', async (event, data: PrintableShiftReportSection & { business_id?: number; printerType?: string; wholeDayReport?: PrintableShiftReportSection | null; sectionOptions?: { ringkasan?: boolean; barangTerjual?: boolean; paymentMethod?: boolean; categoryI?: boolean; categoryII?: boolean; paket?: boolean; toppingSales?: boolean } }) => {
   try {
     // #region agent log
     writeDebugLog(JSON.stringify({ location: 'electron/main.ts:print-shift-breakdown', message: 'Received print payload', data: { gross_total_omset: data.gross_total_omset, statistics_total_amount: data.statistics?.total_amount, user_name: data.user_name }, timestamp: Date.now(), sessionId: 'debug-session', hypothesisId: 'B' }));
@@ -12901,7 +13510,7 @@ ipcMain.handle('create-customer-display', async () => {
     height: customerWindowHeight,
     x: secondaryDisplay.workArea.x,
     y: secondaryDisplay.workArea.y,
-    title: 'Marviano POS - Customer Display',
+    title: 'Pictos - Customer Display',
     frame: false,
     backgroundColor: '#000000',
     alwaysOnTop: true,
@@ -12973,7 +13582,7 @@ ipcMain.handle('create-barista-kitchen-window', async () => {
     center: true,
     minWidth: 1280,
     minHeight: 720,
-    title: 'Marviano POS - Barista & Kitchen Display',
+    title: 'Pictos - Barista & Kitchen Display',
     frame: false, // No title bar - frameless window
     backgroundColor: '#f3f4f6',
     movable: true,
@@ -13070,6 +13679,108 @@ ipcMain.handle('create-barista-kitchen-window', async () => {
 
   console.log('✅ [BARISTA-KITCHEN] Window creation completed successfully');
   return { success: true, message: 'Barista & Kitchen window created successfully' };
+});
+
+// Helper to create a single display window (Kitchen or Barista)
+async function createDisplayWindow(
+  getWindow: () => BrowserWindow | null,
+  setWindow: (w: BrowserWindow | null) => void,
+  title: string,
+  routePath: string,
+  htmlFileName: string
+): Promise<{ success: boolean; error?: string }> {
+  let win = getWindow();
+  if (win && !win.isDestroyed()) {
+    win.show();
+    win.focus();
+    return { success: true };
+  }
+  const windowWidth = 1920;
+  const windowHeight = 1080;
+  win = new BrowserWindow({
+    width: windowWidth,
+    height: windowHeight,
+    center: true,
+    minWidth: 1280,
+    minHeight: 720,
+    title: `Pictos - ${title}`,
+    frame: false,
+    backgroundColor: '#f3f4f6',
+    movable: true,
+    resizable: true,
+    webPreferences: {
+      nodeIntegration: false,
+      contextIsolation: true,
+      preload: path.join(__dirname, 'preload.js'),
+      devTools: true,
+    },
+    show: false,
+  });
+  setWindow(win);
+  win.setMenuBarVisibility(false);
+  win.on('closed', () => setWindow(null));
+  win.once('ready-to-show', () => {
+    const w = getWindow();
+    if (w && !w.isDestroyed()) {
+      w.show();
+      w.focus();
+    }
+  });
+  if (isDev) {
+    const ports = [3000, 3001, 3002];
+    let loaded = false;
+    for (const port of ports) {
+      try {
+        await win.loadURL(`http://localhost:${port}${routePath}`);
+        loaded = true;
+        setTimeout(() => {
+          const w = getWindow();
+          if (w && !w.isDestroyed()) {
+            w.show();
+            w.focus();
+          }
+        }, 500);
+        break;
+      } catch {
+        // try next port
+      }
+    }
+    if (!loaded) return { success: false, error: `Failed to load ${title} on any port` };
+  } else {
+    try {
+      await win.loadFile(path.join(__dirname, '../../out', htmlFileName));
+      setTimeout(() => {
+        const w = getWindow();
+        if (w && !w.isDestroyed()) {
+          w.show();
+          w.focus();
+        }
+      }, 500);
+    } catch (error) {
+      return { success: false, error: String(error) };
+    }
+  }
+  return { success: true };
+}
+
+ipcMain.handle('create-kitchen-window', async () => {
+  return createDisplayWindow(
+    () => kitchenDisplayWindow,
+    (w) => { kitchenDisplayWindow = w; },
+    'Kitchen Display',
+    '/kitchen-display',
+    'kitchen-display.html'
+  );
+});
+
+ipcMain.handle('create-barista-window', async () => {
+  return createDisplayWindow(
+    () => baristaDisplayWindow,
+    (w) => { baristaDisplayWindow = w; },
+    'Barista Display',
+    '/barista-display',
+    'barista-display.html'
+  );
 });
 
 function getSlideshowPath(): string {

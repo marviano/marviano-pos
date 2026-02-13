@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, Fragment } from 'react';
 import { 
   Calendar, 
   User, 
@@ -88,6 +88,21 @@ interface Category2Breakdown {
   total_amount: number;
 }
 
+interface PackageSalesBreakdownLine {
+  product_id: number;
+  product_name: string;
+  total_quantity: number;
+}
+
+interface PackageSalesBreakdown {
+  package_product_id: number;
+  package_product_name: string;
+  total_quantity: number;
+  total_amount: number;
+  base_unit_price: number;
+  lines: PackageSalesBreakdownLine[];
+}
+
 interface UserOption {
   user_id: number;
   user_name: string;
@@ -161,6 +176,7 @@ export default function ShiftReport() {
   const [paymentBreakdown, setPaymentBreakdown] = useState<PaymentBreakdown[]>([]);
   const [cashSummary, setCashSummary] = useState<CashSummary | null>(null);
   const [productSales, setProductSales] = useState<ProductSale[]>([]);
+  const [packageSalesBreakdown, setPackageSalesBreakdown] = useState<PackageSalesBreakdown[]>([]);
   const [customizationSales, setCustomizationSales] = useState<CustomizationSale[]>([]);
   const [category2Breakdown, setCategory2Breakdown] = useState<Category2Breakdown[]>([]);
   const [isLoading, setIsLoading] = useState(false);
@@ -230,12 +246,13 @@ export default function ShiftReport() {
       const shiftStart = shift.shift_start;
       const shiftEnd = shift.shift_end || new Date().toISOString(); // Use current time if active
 
-      const [statsResult, breakdownResult, category2Result, cashResult, productSalesResult] = await Promise.allSettled([
+      const [statsResult, breakdownResult, category2Result, cashResult, productSalesResult, packageSalesResult] = await Promise.allSettled([
         electronAPI.localDbGetShiftStatistics?.(shiftOwnerId, shiftStart, shiftEnd, businessId),
         electronAPI.localDbGetPaymentBreakdown?.(shiftOwnerId, shiftStart, shiftEnd, businessId),
         electronAPI.localDbGetCategory2Breakdown?.(shiftOwnerId, shiftStart, shiftEnd, businessId),
         electronAPI.localDbGetCashSummary?.(shiftOwnerId, shiftStart, shiftEnd, businessId),
-        electronAPI.localDbGetProductSales?.(shiftOwnerId, shiftStart, shiftEnd, businessId)
+        electronAPI.localDbGetProductSales?.(shiftOwnerId, shiftStart, shiftEnd, businessId),
+        electronAPI.localDbGetPackageSalesBreakdown?.(shiftOwnerId, shiftStart, shiftEnd, businessId)
       ]);if (statsResult.status === 'fulfilled' && statsResult.value) setStatistics(statsResult.value);
       if (breakdownResult.status === 'fulfilled' && breakdownResult.value) setPaymentBreakdown(breakdownResult.value);
       if (category2Result.status === 'fulfilled' && category2Result.value) setCategory2Breakdown(category2Result.value);
@@ -243,6 +260,11 @@ export default function ShiftReport() {
       if (productSalesResult.status === 'fulfilled' && productSalesResult.value) {
         setProductSales(productSalesResult.value.products || []);
         setCustomizationSales(productSalesResult.value.customizations || []);
+      }
+      if (packageSalesResult.status === 'fulfilled' && packageSalesResult.value) {
+        setPackageSalesBreakdown((packageSalesResult.value as PackageSalesBreakdown[]) || []);
+      } else {
+        setPackageSalesBreakdown([]);
       }
       
       setSelectedShift(shift);
@@ -295,6 +317,7 @@ export default function ShiftReport() {
             platform: p.platform || 'offline',
             transaction_type: p.transaction_type || 'drinks'
           })),
+          packageSalesBreakdown,
           customizationSales: customizationSales,
           paymentBreakdown,
           category2Breakdown: (() => {return category2Breakdown;
@@ -577,6 +600,82 @@ export default function ShiftReport() {
                       <td className="px-6 py-3">Total</td>
                       <td className="px-6 py-3 text-right">{productSales.reduce((sum, p) => sum + p.total_quantity, 0)}</td>
                       <td className="px-6 py-3 text-right">{formatRupiah(productSales.reduce((sum, p) => sum + p.base_subtotal, 0))}</td>
+                    </tr>
+                  </tfoot>
+                )}
+              </table>
+            </div>
+          </div>
+
+          {/* Paket Sales Breakdown */}
+          <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
+            <div className="px-6 py-4 border-b border-gray-200">
+              <h3 className="text-lg font-semibold text-gray-900">Paket</h3>
+              <p className="text-xs text-gray-600 mt-1">
+                Rincian paket terjual beserta isi paketnya (sub-item tidak menampilkan harga).
+              </p>
+            </div>
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm text-left">
+                <thead className="bg-gray-50 text-gray-900 font-medium border-b border-gray-200">
+                  <tr>
+                    <th className="px-6 py-3">Paket</th>
+                    <th className="px-6 py-3 text-right">Qty</th>
+                    <th className="px-6 py-3 text-right">Unit</th>
+                    <th className="px-6 py-3 text-right">Subtotal</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-gray-100">
+                  {packageSalesBreakdown.length > 0 ? (
+                    packageSalesBreakdown.map((pkg) => (
+                      <Fragment key={`pkg-${pkg.package_product_id}`}>
+                        <tr className="bg-white">
+                          <td className="px-6 py-3">
+                            <div className="font-medium text-gray-900">{pkg.package_product_name}</div>
+                          </td>
+                          <td className="px-6 py-3 text-right font-medium text-gray-900">{pkg.total_quantity}</td>
+                          <td className="px-6 py-3 text-right font-medium text-gray-900">
+                            {formatRupiah(pkg.base_unit_price || (pkg.total_quantity > 0 ? pkg.total_amount / pkg.total_quantity : 0))}
+                          </td>
+                          <td className="px-6 py-3 text-right font-medium text-gray-900">{formatRupiah(pkg.total_amount)}</td>
+                        </tr>
+                        {(pkg.lines || []).length > 0 ? (
+                          pkg.lines.map((line) => (
+                            <tr key={`pkg-${pkg.package_product_id}-line-${line.product_id}`} className="bg-white">
+                              <td className="px-6 py-2 text-gray-700">
+                                <div className="pl-5 text-xs">• {line.product_name}</div>
+                              </td>
+                              <td className="px-6 py-2 text-right text-xs text-gray-700">{line.total_quantity}</td>
+                              <td className="px-6 py-2 text-right text-xs text-gray-400">-</td>
+                              <td className="px-6 py-2 text-right text-xs text-gray-400">-</td>
+                            </tr>
+                          ))
+                        ) : (
+                          <tr className="bg-white">
+                            <td className="px-6 py-2 text-xs text-gray-500" colSpan={4}>
+                              Tidak ada data isi paket.
+                            </td>
+                          </tr>
+                        )}
+                      </Fragment>
+                    ))
+                  ) : (
+                    <tr>
+                      <td colSpan={4} className="px-6 py-8 text-center text-gray-900">Tidak ada paket terjual</td>
+                    </tr>
+                  )}
+                </tbody>
+                {packageSalesBreakdown.length > 0 && (
+                  <tfoot className="bg-gray-50 font-semibold text-gray-900">
+                    <tr>
+                      <td className="px-6 py-3">Total</td>
+                      <td className="px-6 py-3 text-right">
+                        {packageSalesBreakdown.reduce((sum, p) => sum + (p.total_quantity || 0), 0)}
+                      </td>
+                      <td className="px-6 py-3 text-right">-</td>
+                      <td className="px-6 py-3 text-right">
+                        {formatRupiah(packageSalesBreakdown.reduce((sum, p) => sum + (p.total_amount || 0), 0))}
+                      </td>
                     </tr>
                   </tfoot>
                 )}

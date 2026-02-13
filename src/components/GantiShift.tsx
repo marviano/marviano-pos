@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
+import { useState, useEffect, useRef, useCallback, useMemo, Fragment } from 'react';
 import {
   Wallet,
   Package,
@@ -107,6 +107,21 @@ interface Category2Breakdown {
   total_amount: number;
 }
 
+interface PackageSalesBreakdownLine {
+  product_id: number;
+  product_name: string;
+  total_quantity: number;
+}
+
+interface PackageSalesBreakdown {
+  package_product_id: number;
+  package_product_name: string;
+  total_quantity: number;
+  total_amount: number;
+  base_unit_price: number;
+  lines: PackageSalesBreakdownLine[];
+}
+
 interface CashSummary {
   cash_shift: number;
   cash_shift_sales?: number;
@@ -169,6 +184,7 @@ interface ReportDataPayload {
   category2Breakdown: Category2Breakdown[];
   cashSummary: CashSummary;
   productSales: ProductSale[];
+  packageSalesBreakdown: PackageSalesBreakdown[];
   customizationSales: CustomizationSale[];
   voucherBreakdown: VoucherBreakdown;
   refunds: RefundDetail[];
@@ -355,6 +371,7 @@ export default function GantiShift() {
     cash_whole_day_refunds: 0
   });
   const [productSales, setProductSales] = useState<ProductSale[]>([]);
+  const [packageSalesBreakdown, setPackageSalesBreakdown] = useState<PackageSalesBreakdown[]>([]);
   const [customizationSales, setCustomizationSales] = useState<CustomizationSale[]>([]);
   const [voucherBreakdown, setVoucherBreakdown] = useState<VoucherBreakdown>({});
   const [refunds, setRefunds] = useState<RefundDetail[]>([]);
@@ -828,6 +845,7 @@ export default function GantiShift() {
         cash_whole_day_refunds: 0
       });
       setProductSales([]);
+      setPackageSalesBreakdown([]);
       setCustomizationSales([]);
       setVoucherBreakdown({});
       setRecalculatedCategory1Breakdown([]);
@@ -1126,7 +1144,7 @@ export default function GantiShift() {
       const defaultCash: CashSummary = { cash_shift: 0, cash_whole_day: 0 };
 
       // Load all statistics in parallel with error handling
-      const [statsResult, breakdownResult, category1BreakdownResult, category2BreakdownResult, cashResult, productSalesResult, refundsResult, voucherBreakdownResult] = await Promise.allSettled([
+      const [statsResult, breakdownResult, category1BreakdownResult, category2BreakdownResult, cashResult, productSalesResult, packageSalesResult, refundsResult, voucherBreakdownResult] = await Promise.allSettled([
         electronAPI.localDbGetShiftStatistics
           ? electronAPI.localDbGetShiftStatistics(null, activeShift.shift_start, activeShift.shift_end, businessId, activeShift.uuid_id)
           : Promise.resolve(defaultStats),
@@ -1145,6 +1163,9 @@ export default function GantiShift() {
         electronAPI.localDbGetProductSales
           ? electronAPI.localDbGetProductSales(null, activeShift.shift_start, activeShift.shift_end, businessId, activeShift.uuid_id)
           : Promise.resolve<ProductSalesPayload>({ products: [], customizations: [] }),
+        electronAPI.localDbGetPackageSalesBreakdown
+          ? electronAPI.localDbGetPackageSalesBreakdown(null, activeShift.shift_start, activeShift.shift_end, businessId, activeShift.uuid_id)
+          : Promise.resolve<PackageSalesBreakdown[]>([]),
         electronAPI.localDbGetShiftRefunds
           ? electronAPI.localDbGetShiftRefunds({
               userId: shiftOwnerId,
@@ -1179,6 +1200,10 @@ export default function GantiShift() {
         productSalesResult.status === 'fulfilled'
           ? (productSalesResult.value as ProductSalesPayload)
           : { products: [], customizations: [] };
+      const packageBreakdownData =
+        packageSalesResult.status === 'fulfilled'
+          ? ((packageSalesResult.value as PackageSalesBreakdown[]) ?? [])
+          : [];
 
       setStatistics({
         order_count: stats.order_count ?? 0,
@@ -1193,6 +1218,7 @@ export default function GantiShift() {
       // Do not overwrite cashSummary: RINGKASAN uses loadTabData as source of truth.
       // loadStatistics overwriting it caused Cash (Hari) to flip (e.g. 92k -> 0) after a few seconds.
       setProductSales(productSalesData.products || []);
+      setPackageSalesBreakdown(packageBreakdownData);
       setCustomizationSales(productSalesData.customizations || []);
       const vb = voucherBreakdownResult.status === 'fulfilled' ? (voucherBreakdownResult.value as VoucherBreakdown) : {};
       setVoucherBreakdown(vb ?? {});
@@ -1321,7 +1347,7 @@ export default function GantiShift() {
           }
         : null;
 
-      const [statsResult, breakdownResult, category1BreakdownResult, category2BreakdownResult, cashResult, productSalesResult, voucherBreakdownResult, refundsResult] = await Promise.allSettled([
+      const [statsResult, breakdownResult, category1BreakdownResult, category2BreakdownResult, cashResult, productSalesResult, packageSalesResult, voucherBreakdownResult, refundsResult] = await Promise.allSettled([
           electronAPI.localDbGetShiftStatistics
             ? electronAPI.localDbGetShiftStatistics(userId, start, end, reportBusinessId, shiftUuid ?? undefined, dayShiftUuids.length > 0 ? dayShiftUuids : undefined)
             : Promise.resolve(defaultStats),
@@ -1340,6 +1366,9 @@ export default function GantiShift() {
           electronAPI.localDbGetProductSales
             ? electronAPI.localDbGetProductSales(userId, start, end, reportBusinessId, shiftUuid ?? undefined, dayShiftUuids.length > 0 ? dayShiftUuids : undefined)
             : Promise.resolve<ProductSalesPayload>({ products: [], customizations: [] }),
+          electronAPI.localDbGetPackageSalesBreakdown
+            ? electronAPI.localDbGetPackageSalesBreakdown(userId, start, end, reportBusinessId, shiftUuid ?? undefined, dayShiftUuids.length > 0 ? dayShiftUuids : undefined)
+            : Promise.resolve<PackageSalesBreakdown[]>([]),
           electronAPI.localDbGetVoucherBreakdown
             ? electronAPI.localDbGetVoucherBreakdown(userId, start, end, reportBusinessId, shiftUuid ?? undefined, dayShiftUuids.length > 0 ? dayShiftUuids : undefined)
             : Promise.resolve<VoucherBreakdown>({}),
@@ -1360,6 +1389,10 @@ export default function GantiShift() {
           productSalesResult.status === 'fulfilled'
             ? (productSalesResult.value as ProductSalesPayload)
             : { products: [], customizations: [] };
+        const packageSalesPayload =
+          packageSalesResult.status === 'fulfilled'
+            ? ((packageSalesResult.value as PackageSalesBreakdown[]) ?? [])
+            : [];
 
         // If list_of_shifts is provided, sum up total_discount from individual shifts
         // This fixes the double-counting issue when shifts overlap in time
@@ -1414,6 +1447,7 @@ export default function GantiShift() {
           category2Breakdown: category2BreakdownPayload,
           cashSummary: resolvedCash,
           productSales: productSalesPayload.products || [],
+          packageSalesBreakdown: packageSalesPayload,
           customizationSales: productSalesPayload.customizations || [],
           voucherBreakdown: voucherBreakdownPayload ?? {},
           refunds: refundsPayload
@@ -1916,6 +1950,7 @@ export default function GantiShift() {
             gross_total_omset: dayGrossOmset,
             refunds: dayReportData.refunds ?? [],
             productSales: productsForPrint,
+            packageSalesBreakdown: dayReportData.packageSalesBreakdown ?? [],
             customizationSales: dayReportData.customizationSales,
             paymentBreakdown: dayReportData.paymentBreakdown.map(p => ({
               payment_method_name: p.payment_method_name || p.payment_method_code,
@@ -2026,6 +2061,7 @@ export default function GantiShift() {
             gross_total_omset: shiftGrossOmset,
             refunds: shiftReportData.refunds ?? [],
             productSales: productsForPrint,
+            packageSalesBreakdown: shiftReportData.packageSalesBreakdown ?? [],
             customizationSales: shiftReportData.customizationSales,
             paymentBreakdown: shiftReportData.paymentBreakdown.map(p => ({
               payment_method_name: p.payment_method_name || p.payment_method_code,
@@ -2153,6 +2189,7 @@ export default function GantiShift() {
         gross_total_omset: customGrossOmset,
         refunds: reportData.refunds ?? [],
         productSales: productsForPrint,
+        packageSalesBreakdown: reportData.packageSalesBreakdown ?? [],
         customizationSales: reportData.customizationSales,
         paymentBreakdown: reportData.paymentBreakdown.map((p) => ({
           payment_method_name: p.payment_method_name || p.payment_method_code,
@@ -2258,6 +2295,7 @@ export default function GantiShift() {
         setCategory2Breakdown(dayData.category2Breakdown);
         setCashSummary(dayData.cashSummary);
         setProductSales(dayData.productSales);
+        setPackageSalesBreakdown(dayData.packageSalesBreakdown ?? []);
         setCustomizationSales(dayData.customizationSales);
         setVoucherBreakdown(dayData.voucherBreakdown ?? {});
         setRefunds(dayData.refunds ?? []);
@@ -2290,6 +2328,7 @@ export default function GantiShift() {
         setCategory2Breakdown(shiftData.category2Breakdown);
         setCashSummary(shiftData.cashSummary);
         setProductSales(shiftData.productSales);
+        setPackageSalesBreakdown(shiftData.packageSalesBreakdown ?? []);
         setCustomizationSales(shiftData.customizationSales);
         setVoucherBreakdown(shiftData.voucherBreakdown ?? {});
         setRefunds(shiftData.refunds ?? []);
@@ -3274,6 +3313,76 @@ export default function GantiShift() {
                           </tr>
                         );
                       })()}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+
+              {/* PAKET */}
+              <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-4">
+                <h2 className="text-base font-semibold text-gray-800 mb-1 text-center">PAKET</h2>
+                <p className="text-[10px] text-gray-500 text-center mb-2">Rincian paket terjual beserta isi paketnya (sub-item tanpa harga).</p>
+                <div className="overflow-x-auto">
+                  <table className="w-full text-xs">
+                    <thead>
+                      <tr className="border-b-2 border-gray-300">
+                        <th className="text-left py-1 px-2 font-semibold text-gray-700">Paket</th>
+                        <th className="text-right py-1 px-2 font-semibold text-gray-700">Qty</th>
+                        <th className="text-right py-1 px-2 font-semibold text-gray-700">Unit Price</th>
+                        <th className="text-right py-1 px-2 font-semibold text-gray-700">Subtotal</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {packageSalesBreakdown.length > 0 ? (
+                        <>
+                          {packageSalesBreakdown.map((pkg) => (
+                            <Fragment key={`pkg-${pkg.package_product_id}`}>
+                              <tr className="border-b border-gray-200 hover:bg-gray-50">
+                                <td className="py-1 px-2 font-medium text-gray-900">{pkg.package_product_name}</td>
+                                <td className="py-1 px-2 text-right font-medium text-gray-900">{pkg.total_quantity}</td>
+                                <td className="py-1 px-2 text-right font-medium text-gray-900">
+                                  {formatRupiah(pkg.base_unit_price || (pkg.total_quantity > 0 ? pkg.total_amount / pkg.total_quantity : 0))}
+                                </td>
+                                <td className="py-1 px-2 text-right font-semibold text-gray-900">{formatRupiah(pkg.total_amount)}</td>
+                              </tr>
+                              {(pkg.lines || []).length > 0 ? (
+                                pkg.lines.map((line) => (
+                                  <tr key={`pkg-${pkg.package_product_id}-line-${line.product_id}`} className="border-b border-gray-100 hover:bg-gray-50">
+                                    <td className="py-1 px-2 text-gray-700">
+                                      <div className="pl-4 text-[10px]">• {line.product_name}</div>
+                                    </td>
+                                    <td className="py-1 px-2 text-right text-[10px] text-gray-700">{line.total_quantity}</td>
+                                    <td className="py-1 px-2 text-right text-[10px] text-gray-400">-</td>
+                                    <td className="py-1 px-2 text-right text-[10px] text-gray-400">-</td>
+                                  </tr>
+                                ))
+                              ) : (
+                                <tr className="border-b border-gray-100">
+                                  <td colSpan={4} className="py-2 px-2 text-center text-gray-500 text-[10px]">
+                                    Tidak ada data isi paket
+                                  </td>
+                                </tr>
+                              )}
+                            </Fragment>
+                          ))}
+                          <tr className="border-t-2 border-gray-300 bg-gray-100">
+                            <td className="py-1 px-2 font-bold text-gray-900">TOTAL</td>
+                            <td className="py-1 px-2 text-right font-bold text-gray-900">
+                              {packageSalesBreakdown.reduce((sum, p) => sum + Number(p.total_quantity || 0), 0)}
+                            </td>
+                            <td className="py-1 px-2 text-right font-bold text-gray-900">-</td>
+                            <td className="py-1 px-2 text-right font-bold text-gray-900">
+                              {formatRupiah(packageSalesBreakdown.reduce((sum, p) => sum + Number(p.total_amount || 0), 0))}
+                            </td>
+                          </tr>
+                        </>
+                      ) : (
+                        <tr>
+                          <td colSpan={4} className="py-4 text-center text-gray-500">
+                            Tidak ada paket terjual
+                          </td>
+                        </tr>
+                      )}
                     </tbody>
                   </table>
                 </div>

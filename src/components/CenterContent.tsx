@@ -512,11 +512,8 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
       if (p === null) return null; // NULL price - don't show
       return p; // Return 0 if price is 0, or the actual price
     }
-    // For offline mode, check if harga_jual is null
-    if (product.harga_jual === null || product.harga_jual === undefined) {
-      return null;
-    }
-    return product.harga_jual;
+    // Offline mode: show 0 when harga_jual is null/undefined so product is visible and addable
+    return product.harga_jual ?? 0;
   };
 
   const handleProductClick = async (product: Product) => {
@@ -526,13 +523,8 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
         return; // disabled in online mode for this platform (NULL price)
       }
       // Allow 0 prices - they should be clickable
-    } else {
-      // Offline mode - check if harga_jual is null
-      const price = effectiveProductPrice(product);
-      if (price === null) {
-        return; // disabled if price is null
-      }
     }
+    // Offline mode: allow add (effectiveProductPrice returns 0 for null/undefined harga_jual)
     setLoadingProductId(product.id);
 
     try {
@@ -1657,20 +1649,15 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
           <div className={`grid ${gridStyles.gridCols} gap-2`}>
             {(() => {
 
-              // Helper function to check if price is null/undefined
-              // Note: 0 is handled separately in filtering logic (filtered out in offline mode)
+              // Helper function to check if price is null/undefined (used for online platform filtering)
               const isPriceNull = (price: number | null | undefined): boolean => {
                 return price === null || price === undefined;
               };
 
               // First filter by platform/online status and null harga_jual
               let filteredProducts = products.filter((product) => {
-                // ALWAYS filter out products with null/undefined/zero harga_jual in offline mode
+                // Offline mode: show all products (including 0/NULL regular price)
                 if (!isOnline) {
-                  // Filter out NULL, undefined, or 0 (0 is used as fallback for products that only have platform prices)
-                  if (isPriceNull(product.harga_jual) || product.harga_jual === 0) {
-                    return false; // Don't show products with NULL or 0 harga_jual in offline mode
-                  }
                   return true;
                 }
 

@@ -33,6 +33,14 @@ declare global {
       transaction_type: string;
       is_bundle_item?: boolean;
     }>;
+    packageSalesBreakdown?: Array<{
+      package_product_id: number;
+      package_product_name: string;
+      total_quantity: number;
+      total_amount: number;
+      base_unit_price: number;
+      lines: Array<{ product_id: number; product_name: string; total_quantity: number }>;
+    }>;
     customizationSales: Array<{
       option_id: number;
       option_name: string;
@@ -71,6 +79,7 @@ declare global {
       paymentMethod?: boolean;
       categoryI?: boolean;
       categoryII?: boolean;
+      paket?: boolean;
       toppingSales?: boolean;
     };
   };
@@ -81,6 +90,7 @@ declare global {
       printReceipt: (data: unknown) => Promise<unknown>;
       printLabel: (data: unknown) => Promise<unknown>;
       printLabelsBatch: (data: {
+        requestId?: string;
         labels: unknown[];
         printerName?: string;
         printerType?: string;
@@ -113,6 +123,8 @@ declare global {
       getCustomerDisplayStatus: () => Promise<unknown>;
       createCustomerDisplay: () => Promise<unknown>;
       createBaristaKitchenWindow: () => Promise<{ success: boolean; error?: string }>;
+      createKitchenWindow: () => Promise<{ success: boolean; error?: string }>;
+      createBaristaWindow: () => Promise<{ success: boolean; error?: string }>;
 
       // Customer display event listeners
       onOrderUpdate?: (callback: (data: unknown) => void) => void;
@@ -274,6 +286,7 @@ declare global {
       }>;
       localDbUpsertTransactionItems?: (rows: unknown[]) => Promise<unknown>;
       localDbGetPackageLines?: (uuidTransactionItemIds: string[]) => Promise<Array<{ id: number; uuid_transaction_item_id: string; product_id: number; quantity: number; finished_at: string | null }>>;
+      localDbGetTransactionIdsWithPackage?: (transactionIds: string[]) => Promise<string[]>;
       localDbUpdatePackageLine?: (payload: { id: number; finished_at: string | null }) => Promise<{ success: boolean; error?: string }>;
       localDbUpsertTransactionItemCustomizations?: (rows: unknown[]) => Promise<{ success: boolean; count: number; error?: string }>;
       localDbUpsertTransactionItemCustomizationOptions?: (rows: unknown[]) => Promise<{ success: boolean; count: number; error?: string }>;
@@ -527,6 +540,14 @@ declare global {
           total_revenue: number;
         }>;
       }>;
+      localDbGetPackageSalesBreakdown?: (userId: number | null, shiftStart: string, shiftEnd: string | null, businessId?: number, shiftUuid?: string | null, shiftUuids?: string[]) => Promise<Array<{
+        package_product_id: number;
+        package_product_name: string;
+        total_quantity: number;
+        total_amount: number;
+        base_unit_price: number;
+        lines: Array<{ product_id: number; product_name: string; total_quantity: number }>;
+      }>>;
       printShiftBreakdown?: (data: ShiftPrintBreakdownPayload) => Promise<{ success: boolean; error?: string }>;
       printTransactionsReport?: (payload: {
         businessId: number;
@@ -577,6 +598,22 @@ declare global {
       markSystemPosFailed?: (transactionId: string, error: string) => Promise<{ success: boolean }>;
       resetSystemPosRetryCount?: (transactionIds?: string[]) => Promise<{ success: boolean; error?: string }>;
       repopulateSystemPosQueue?: (options?: { days?: number }) => Promise<{ success: boolean; count?: number; error?: string }>;
+      getSystemPosResyncPreview?: (fromDate: string, toDate: string) => Promise<{
+        success: boolean;
+        count: number;
+        transactionIds?: string[];
+        error?: string;
+      }>;
+      runSystemPosResync?: (fromDate: string, toDate: string) => Promise<{
+        success: boolean;
+        count: number;
+        synced: number;
+        failed: number;
+        errors?: Array<{ transactionId: string; error: string }>;
+        error?: string;
+        message?: string;
+      }>;
+      upsertMasterDataToSystemPos?: () => Promise<{ success: boolean; upserted: number; error?: string }>;
       debugSystemPosTransaction?: (transactionId: string) => Promise<{
         success: boolean;
         transaction: { id: string; business_id: number; user_id: number; created_at: string; synced_at: number | null } | null;

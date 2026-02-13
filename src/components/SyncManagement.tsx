@@ -302,6 +302,24 @@ export default function SyncManagement() {
   const [receiptizePrintedIds, setReceiptizePrintedIds] = useState<Set<string>>(new Set());
   const [employeesMap, setEmployeesMap] = useState<Map<number, { name: string; color: string | null }>>(new Map());
 
+  // Manual System POS Re-sync (Printer 2 → system_pos)
+  const [systemPosResyncFrom, setSystemPosResyncFrom] = useState<string>(() => {
+    const d = new Date();
+    return d.toISOString().slice(0, 10);
+  });
+  const [systemPosResyncTo, setSystemPosResyncTo] = useState<string>(() => {
+    const d = new Date();
+    return d.toISOString().slice(0, 10);
+  });
+  const [systemPosResyncPreviewCount, setSystemPosResyncPreviewCount] = useState<number | null>(null);
+  const [systemPosResyncPreviewLoading, setSystemPosResyncPreviewLoading] = useState(false);
+  const [systemPosResyncRunning, setSystemPosResyncRunning] = useState(false);
+  const [systemPosResyncResult, setSystemPosResyncResult] = useState<{
+    synced: number;
+    failed: number;
+    errors: Array<{ transactionId: string; error: string }>;
+  } | null>(null);
+
   // Initialize auto-sync enabled state
   useEffect(() => {
     setAutoSyncEnabledState(getAutoSyncEnabled());
@@ -1340,7 +1358,7 @@ export default function SyncManagement() {
     }
 
     const confirmMessage = `🔄 RE-SYNC SEMUA TRANSAKSI\n\n` +
-      `Anda akan mengunggah ulang SEMUA transaksi dari marviano-pos ke salespulse.cc.\n\n` +
+      `Anda akan mengunggah ulang SEMUA transaksi dari Pictos ke salespulse.cc.\n\n` +
       `⚠️ PERINGATAN:\n` +
       `• Proses ini akan mengunggah ulang semua transaksi (termasuk yang sudah di-sync)\n` +
       `• Transaksi yang sudah ada di server akan ditandai sebagai duplicate dan di-skip\n` +
@@ -1422,6 +1440,21 @@ export default function SyncManagement() {
       addLog('success', '🎉 Sync completed! Products/prices downloaded from server (local overwritten).');
       setSyncProgress(100);
 
+      // Upsert products (and categories) from salespulse to system_pos so re-sync and transaction sync never fail on missing product
+      const electronAPI = getElectronAPI();
+      if (electronAPI?.upsertMasterDataToSystemPos) {
+        try {
+          const upsertResult = await electronAPI.upsertMasterDataToSystemPos();
+          if (upsertResult?.success && upsertResult.upserted !== undefined) {
+            addLog('info', `System POS: ${upsertResult.upserted} produk di-upsert ke system_pos.`);
+          } else if (upsertResult?.error) {
+            addLog('warning', `System POS upsert: ${upsertResult.error}`);
+          }
+        } catch (e) {
+          addLog('warning', `System POS upsert (non-fatal): ${e instanceof Error ? e.message : String(e)}`);
+        }
+      }
+
       await updateSyncStatus(true);
       await fetchTransactionCounts();
       await loadOfflineTransactions();
@@ -1447,6 +1480,68 @@ export default function SyncManagement() {
     }
   }, [addLog, fetchTransactionCounts, loadOfflineTransactions, updateSyncStatus]);
 
+  // Manual System POS Re-sync: preview count for date range
+  const handleSystemPosResyncPreview = useCallback(async () => {
+    const api = getElectronAPI();
+    if (!api?.getSystemPosResyncPreview) return;
+    if (!systemPosResyncFrom || !systemPosResyncTo) {
+      addLog('warning', 'Pilih rentang tanggal (dari – sampai)');
+      return;
+    }
+    setSystemPosResyncPreviewLoading(true);
+    setSystemPosResyncResult(null);
+    try {
+      const result = await api.getSystemPosResyncPreview(systemPosResyncFrom, systemPosResyncTo);
+      if (result.success) {
+        setSystemPosResyncPreviewCount(result.count);
+        addLog('info', `Preview: ${result.count} transaksi Printer 2 akan disinkronkan ke system_pos (${systemPosResyncFrom} s/d ${systemPosResyncTo})`);
+      } else {
+        setSystemPosResyncPreviewCount(null);
+        addLog('error', result.error ?? 'Gagal preview');
+      }
+    } catch (e) {
+      setSystemPosResyncPreviewCount(null);
+      addLog('error', `Preview gagal: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setSystemPosResyncPreviewLoading(false);
+    }
+  }, [systemPosResyncFrom, systemPosResyncTo, addLog]);
+
+  // Manual System POS Re-sync: run sync for date range
+  const handleSystemPosResyncRun = useCallback(async () => {
+    const api = getElectronAPI();
+    if (!api?.runSystemPosResync) return;
+    if (!systemPosResyncFrom || !systemPosResyncTo) {
+      addLog('warning', 'Pilih rentang tanggal (dari – sampai)');
+      return;
+    }
+    setSystemPosResyncRunning(true);
+    setSystemPosResyncResult(null);
+    addLog('info', `Memulai re-sync System POS (Printer 2) untuk ${systemPosResyncFrom} s/d ${systemPosResyncTo}...`);
+    try {
+      const result = await api.runSystemPosResync(systemPosResyncFrom, systemPosResyncTo);
+      if (result.success) {
+        setSystemPosResyncResult({
+          synced: result.synced,
+          failed: result.failed,
+          errors: result.errors ?? []
+        });
+        addLog(
+          'success',
+          `Re-sync selesai: ${result.synced} berhasil, ${result.failed} gagal (total ${result.count} transaksi)`
+        );
+        if ((result.errors?.length ?? 0) > 0) {
+          addLog('warning', `Detail gagal: ${result.errors!.slice(0, 5).map(e => e.transactionId).join(', ')}${result.errors!.length > 5 ? '...' : ''}`);
+        }
+      } else {
+        addLog('error', result.error ?? 'Re-sync gagal');
+      }
+    } catch (e) {
+      addLog('error', `Re-sync gagal: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setSystemPosResyncRunning(false);
+    }
+  }, [systemPosResyncFrom, systemPosResyncTo, addLog]);
 
   // Archive all transactions
   const archiveAllTransactions = async () => {
@@ -2116,25 +2211,25 @@ WHERE ${baseWhere};`;
             </div>
 
             {/* Sync Buttons */}
-            <div className="flex gap-3 items-center">
+            <div className="flex gap-2 items-center">
               {/* Auto Sync Toggle */}
-              <div className="flex items-center gap-3 bg-white rounded-lg shadow-sm border border-gray-200 px-4 py-2">
-                <Activity className="w-5 h-5 text-blue-600" />
-                <div>
-                  <h3 className="text-sm font-semibold text-gray-900">Auto Sync (Smart Sync)</h3>
-                  <p className="text-xs text-gray-500 mt-0.5">
+              <div className="flex items-center gap-2 bg-white rounded-lg shadow-sm border border-gray-200 px-3 py-1">
+                <Activity className="w-4 h-4 text-blue-600 shrink-0" />
+                <div className="min-w-0">
+                  <h3 className="text-xs font-semibold text-gray-900 leading-tight">Auto Sync (Smart Sync)</h3>
+                  <p className="text-[10px] text-gray-500 leading-tight">
                     Otomatis mengunggah transaksi ke server setiap 30 detik
                   </p>
                 </div>
-                <label className="relative inline-flex items-center cursor-pointer ml-4">
+                <label className="relative inline-flex items-center cursor-pointer ml-2 shrink-0">
                   <input
                     type="checkbox"
                     checked={autoSyncEnabled}
                     onChange={(e) => handleAutoSyncToggle(e.target.checked)}
                     className="sr-only peer"
                   />
-                  <div className="w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-blue-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-600"></div>
-                  <span className="ml-3 text-sm font-medium text-gray-700">
+                  <div className="w-9 h-5 bg-gray-200 peer-focus:outline-none peer-focus:ring-2 peer-focus:ring-blue-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-blue-600"></div>
+                  <span className="ml-2 text-xs font-medium text-gray-700">
                     {autoSyncEnabled ? 'Aktif' : 'Nonaktif'}
                   </span>
                 </label>
@@ -2144,7 +2239,7 @@ WHERE ${baseWhere};`;
                 onClick={handleFullSyncClick}
                 disabled={syncStatus.syncInProgress || isResyncing}
                 className={`
-                  flex items-center justify-center gap-2 px-4 py-2 rounded-lg font-medium transition-all text-sm
+                  w-24 h-24 flex flex-col items-center justify-center gap-0 py-1 px-0.5 rounded-lg font-medium transition-all text-[10px] shrink-0
                   ${syncStatus.syncInProgress || isResyncing
                     ? 'bg-gray-400 text-white cursor-not-allowed'
                     : 'bg-blue-600 hover:bg-blue-700 text-white'
@@ -2153,15 +2248,15 @@ WHERE ${baseWhere};`;
               >
                 {syncStatus.syncInProgress ? (
                   <>
-                    <Download className="w-4 h-4 animate-spin" />
-                    <span>Syncing...</span>
+                    <Download className="w-3 h-3 animate-spin" />
+                    <span className="text-[10px]">Syncing...</span>
                   </>
                 ) : (
                   <>
-                    <Download className="w-4 h-4" />
-                    <div className="flex flex-col items-center">
-                      <span className="font-semibold">Download Master Data</span>
-                      <span className="text-xs opacity-80">Knowledge Base PoS</span>
+                    <Download className="w-3 h-3 shrink-0" />
+                    <div className="flex flex-col items-center gap-0 leading-tight">
+                      <span className="font-semibold text-[10px] leading-tight">Download Master Data</span>
+                      <span className="text-[8px] opacity-80 leading-tight">Knowledge Base PoS</span>
                     </div>
                   </>
                 )}
@@ -2171,32 +2266,32 @@ WHERE ${baseWhere};`;
                 onClick={handleResyncAllTransactions}
                 disabled={syncStatus.syncInProgress || isResyncing}
                 className={`
-                  flex items-center justify-center gap-2 px-4 py-2 rounded-lg font-medium transition-all text-sm
+                  w-24 h-24 flex flex-col items-center justify-center gap-0 py-1 px-0.5 rounded-lg font-medium transition-all text-[10px] shrink-0
                   ${syncStatus.syncInProgress || isResyncing
                     ? 'bg-gray-400 text-white cursor-not-allowed'
                     : 'bg-green-600 hover:bg-green-700 text-white'
                   }
                 `}
-                title="Re-upload semua transaksi dari marviano-pos ke salespulse.cc"
+                title="Re-upload semua transaksi dari Pictos ke salespulse.cc"
               >
                 {isResyncing ? (
                   <>
-                    <RefreshCw className="w-4 h-4 animate-spin" />
-                    <div className="flex flex-col items-start">
-                      <span className="font-semibold">Re-syncing...</span>
+                    <RefreshCw className="w-3 h-3 animate-spin shrink-0" />
+                    <div className="flex flex-col items-center gap-0 leading-tight">
+                      <span className="font-semibold text-[10px]">Re-syncing...</span>
                       {resyncProgress && (
-                        <span className="text-xs opacity-80">
-                          {resyncProgress.current}/{resyncProgress.total} - {resyncProgress.status}
+                        <span className="text-[8px] opacity-80 leading-tight">
+                          {resyncProgress.current}/{resyncProgress.total}
                         </span>
                       )}
                     </div>
                   </>
                 ) : (
                   <>
-                    <RefreshCw className="w-4 h-4" />
-                    <div className="flex flex-col items-start">
-                      <span className="font-semibold">Re-sync Semua Transaksi</span>
-                      <span className="text-xs opacity-80">Upload ulang ke salespulse.cc</span>
+                    <RefreshCw className="w-3 h-3 shrink-0" />
+                    <div className="flex flex-col items-center gap-0 leading-tight">
+                      <span className="font-semibold text-[10px] leading-tight">Re-sync Semua Transaksi</span>
+                      <span className="text-[8px] opacity-80 leading-tight">Upload ulang ke salespulse.cc</span>
                     </div>
                   </>
                 )}
@@ -2233,6 +2328,101 @@ WHERE ${baseWhere};`;
               <AlertCircle className="w-5 h-5 text-red-600" />
               <p className="text-red-800">{syncStatus.error}</p>
             </div>
+          </div>
+        )}
+
+        {/* Manual System POS Re-sync (Printer 2 → system_pos) */}
+        {isElectron && getElectronAPI()?.getSystemPosResyncPreview && (
+          <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-6 mb-6">
+            <h2 className="text-sm font-semibold text-gray-800 flex items-center gap-2 mb-4">
+              <RefreshCw className="w-4 h-4" />
+              Re-sync ke System POS (Printer 2)
+            </h2>
+            <p className="text-xs text-gray-600 mb-4">
+              Sinkronkan ulang transaksi yang tercetak di Printer 2 (receipt) ke database system_pos untuk rentang tanggal tertentu. Berguna untuk menutup celah data jika sync otomatis terlewat.
+            </p>
+            <div className="flex flex-wrap items-end gap-4 mb-4">
+              <div>
+                <label className="block text-xs font-medium text-gray-700 mb-1">Dari tanggal</label>
+                <input
+                  type="date"
+                  value={systemPosResyncFrom}
+                  onChange={(e) => { setSystemPosResyncFrom(e.target.value); setSystemPosResyncPreviewCount(null); setSystemPosResyncResult(null); }}
+                  className="border border-gray-300 rounded px-3 py-2 text-sm"
+                />
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-gray-700 mb-1">Sampai tanggal</label>
+                <input
+                  type="date"
+                  value={systemPosResyncTo}
+                  onChange={(e) => { setSystemPosResyncTo(e.target.value); setSystemPosResyncPreviewCount(null); setSystemPosResyncResult(null); }}
+                  className="border border-gray-300 rounded px-3 py-2 text-sm"
+                />
+              </div>
+              <button
+                type="button"
+                onClick={handleSystemPosResyncPreview}
+                disabled={systemPosResyncPreviewLoading}
+                className="px-4 py-2 rounded-lg bg-gray-100 hover:bg-gray-200 text-gray-800 text-sm font-medium disabled:opacity-50 flex items-center gap-2"
+              >
+                {systemPosResyncPreviewLoading ? (
+                  <>
+                    <RefreshCw className="w-4 h-4 animate-spin" />
+                    Cek...
+                  </>
+                ) : (
+                  'Preview'
+                )}
+              </button>
+              <button
+                type="button"
+                onClick={handleSystemPosResyncRun}
+                disabled={systemPosResyncRunning}
+                className="px-4 py-2 rounded-lg bg-green-600 hover:bg-green-700 text-white text-sm font-medium disabled:opacity-50 flex items-center gap-2"
+              >
+                {systemPosResyncRunning ? (
+                  <>
+                    <RefreshCw className="w-4 h-4 animate-spin" />
+                    Menyinkronkan...
+                  </>
+                ) : (
+                  <>
+                    <RefreshCw className="w-4 h-4" />
+                    Jalankan Re-sync
+                  </>
+                )}
+              </button>
+            </div>
+            {systemPosResyncPreviewCount !== null && !systemPosResyncResult && (
+              <p className="text-sm text-gray-700 mb-2">
+                <span className="font-medium">{systemPosResyncPreviewCount}</span> transaksi Printer 2 akan disinkronkan ke system_pos.
+              </p>
+            )}
+            {systemPosResyncResult && (
+              <div className="mt-4 p-4 bg-gray-50 rounded-lg border border-gray-200">
+                <p className="text-sm font-medium text-gray-800 mb-2">Hasil re-sync</p>
+                <p className="text-sm text-gray-700">
+                  Berhasil: <span className="font-semibold text-green-700">{systemPosResyncResult.synced}</span>
+                  {' · '}
+                  Gagal: <span className="font-semibold text-red-700">{systemPosResyncResult.failed}</span>
+                </p>
+                {systemPosResyncResult.errors.length > 0 && (
+                  <details className="mt-2">
+                    <summary className="text-xs text-gray-600 cursor-pointer hover:underline">
+                      Tampilkan detail error ({systemPosResyncResult.errors.length})
+                    </summary>
+                    <ul className="mt-2 text-xs text-red-700 space-y-1 max-h-32 overflow-y-auto">
+                      {systemPosResyncResult.errors.map((e, i) => (
+                        <li key={i}>
+                          <span className="font-mono">{e.transactionId}</span>: {e.error}
+                        </li>
+                      ))}
+                    </ul>
+                  </details>
+                )}
+              </div>
+            )}
           </div>
         )}
 

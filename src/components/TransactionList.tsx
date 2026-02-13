@@ -22,6 +22,15 @@ const formatPrice = (price: number | string) => {
   }).format(numPrice);
 };
 
+// Amount range filter: parse display string (e.g. "Rp 100.000") to number; null if empty/invalid
+const parseAmountDisplay = (s: string): number | null => {
+  if (!s || typeof s !== 'string') return null;
+  const digits = s.replace(/\D/g, '');
+  if (digits.length === 0) return null;
+  const n = parseInt(digits, 10);
+  return isNaN(n) ? null : n;
+};
+
 interface Transaction {
   id: string; // Changed to string for UUID
   business_id: number;
@@ -63,6 +72,7 @@ const TRANSACTION_COLUMNS: Array<{ key: string; label: string; sortKey: string |
   { key: 'paid_at', label: 'Paid at', sortKey: 'paid_at' },
   { key: 'payment_method', label: 'Metode', sortKey: 'payment_method' },
   { key: 'pickup_method', label: 'DI/TA', sortKey: 'pickup_method' },
+  { key: 'package', label: 'Pkg', sortKey: null },
   { key: 'total_amount', label: 'Total', sortKey: 'total_amount' },
   { key: 'voucher_discount', label: 'Disc/Vc', sortKey: 'voucher_discount' },
   { key: 'final_amount', label: 'Final', sortKey: 'final_amount' },
@@ -219,6 +229,8 @@ interface ElectronAPI {
     systemPosQueries?: Array<{ sql: string; params: (string | number)[]; description: string }>;
   }>;
   localDbDeleteSingleTransaction?: (transactionUuid: string) => Promise<{ success: boolean; error?: string }>;
+  localDbGetPackageLines?: (uuidTransactionItemIds: string[]) => Promise<Array<{ id: number; uuid_transaction_item_id: string; product_id: number; quantity: number; finished_at: string | null }>>;
+  localDbGetTransactionIdsWithPackage?: (transactionIds: string[]) => Promise<string[]>;
 }
 
 export default function TransactionList({ businessId, onLoadTransaction }: TransactionListProps) {
@@ -229,7 +241,10 @@ export default function TransactionList({ businessId, onLoadTransaction }: Trans
   const [error, setError] = useState<string | null>(null);
   const [searchTerm, setSearchTerm] = useState('');
   const [filterMethod, setFilterMethod] = useState<string>('all');
+  const [amountFrom, setAmountFrom] = useState<string>('');
+  const [amountTo, setAmountTo] = useState<string>('');
   const [shiftFilterUuid, setShiftFilterUuid] = useState<string>(''); // '' = All, 'none' = No shift, else shift uuid (for all users)
+  const [transactionIdsWithPackage, setTransactionIdsWithPackage] = useState<Set<string>>(new Set());
   
   // Use businessId from props, or fallback to user's selectedBusinessId
   const effectiveBusinessId = businessId ?? user?.selectedBusinessId;
@@ -876,6 +891,15 @@ export default function TransactionList({ businessId, onLoadTransaction }: Trans
 
       setTransactions(filteredTransactions);
 
+      // #region agent log
+      if (useSystemPos && filteredTransactions.length > 0) {
+        const withRefund = filteredTransactions.filter(t => (t.refund_total ?? 0) > 0);
+        if (typeof fetch === 'function') {
+          fetch('http://127.0.0.1:7245/ingest/519de021-d49d-473f-a8a1-4215977c867a', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ location: 'TransactionList.tsx:fetchTransactions', message: 'system_pos mapped refund_total', data: { total: filteredTransactions.length, withRefundCount: withRefund.length, sample: withRefund.slice(0, 3).map(t => ({ id: t.id, refund_total: t.refund_total })) }, hypothesisId: 'H2', timestamp: Date.now() }) }).catch(() => {});
+        }
+      }
+      // #endregion
+
       // Fetch shifts for date range to build shift labels (Shift 1, Shift 2, ...)
       // Only show shifts that fall within the selected date range
       if (!useSystemPos && electronAPI.localDbGetShifts) {
@@ -1180,6 +1204,23 @@ export default function TransactionList({ businessId, onLoadTransaction }: Trans
     electronAPI.localDbGetDistinctItemWaiterIdsByTransaction(ids).then(setItemWaiterIdsByTx).catch(() => setItemWaiterIdsByTx({}));
   }, [transactions]);
 
+  // Fetch transaction IDs that have package lines (for package column and filter)
+  useEffect(() => {
+    if (transactions.length === 0) {
+      setTransactionIdsWithPackage(new Set());
+      return;
+    }
+    const electronAPI = typeof window !== 'undefined' ? (window as { electronAPI?: ElectronAPI }).electronAPI : undefined;
+    if (!electronAPI?.localDbGetTransactionIdsWithPackage) {
+      setTransactionIdsWithPackage(new Set());
+      return;
+    }
+    const ids = transactions.map((t) => t.id);
+    electronAPI.localDbGetTransactionIdsWithPackage(ids).then((withPkg) => {
+      setTransactionIdsWithPackage(new Set(withPkg));
+    }).catch(() => setTransactionIdsWithPackage(new Set()));
+  }, [transactions]);
+
   useEffect(() => {
     setShowAllTransactions(false);
     setReceiptizeCounters({});
@@ -1441,7 +1482,19 @@ export default function TransactionList({ businessId, onLoadTransaction }: Trans
         shiftFilterUuid === '' ||
         (shiftFilterUuid === 'none' ? !transaction.shift_uuid : transaction.shift_uuid === shiftFilterUuid);
 
-      return matchesSearch && matchesFilter && matchesShiftFilter;
+      // Amount range filter (total_amount = pre-discount)
+      const fromNum = parseAmountDisplay(amountFrom);
+      const toNum = parseAmountDisplay(amountTo);
+      let matchesAmount = true;
+      if (fromNum != null && toNum != null) {
+        matchesAmount = (transaction.total_amount ?? 0) >= fromNum && (transaction.total_amount ?? 0) <= toNum;
+      } else if (toNum != null) {
+        matchesAmount = (transaction.total_amount ?? 0) > 0 && (transaction.total_amount ?? 0) <= toNum;
+      } else if (fromNum != null) {
+        matchesAmount = (transaction.total_amount ?? 0) >= fromNum;
+      }
+
+      return matchesSearch && matchesFilter && matchesShiftFilter && matchesAmount;
     })
     .sort((a, b) => {
       let aValue: string | number = a[sortField as keyof Transaction] as string | number;
@@ -1481,6 +1534,12 @@ export default function TransactionList({ businessId, onLoadTransaction }: Trans
     const amount = typeof t.refund_total === 'string' ? parseFloat(t.refund_total) : (t.refund_total || 0);
     return sum + (isNaN(amount) ? 0 : amount);
   }, 0);
+  // #region agent log
+  if (isSystemPosMode && typeof fetch === 'function') {
+    const withRefund = filteredTransactions.filter(t => (t.refund_total ?? 0) > 0);
+    fetch('http://127.0.0.1:7245/ingest/519de021-d49d-473f-a8a1-4215977c867a', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ location: 'TransactionList.tsx:totalRefund', message: 'grand total calc system_pos', data: { totalRefund, baseTransactionsLen: baseTransactions.length, filteredLen: filteredTransactions.length, withRefundCount: withRefund.length, receiptizePrintedIdsSize: receiptizePrintedIds.size }, hypothesisId: 'H3', hypothesisId2: 'H4', hypothesisId3: 'H5', timestamp: Date.now() }) }).catch(() => {});
+  }
+  // #endregion
   const totalVoucherDiscount = filteredTransactions.reduce((sum, t) => {
     const amount = typeof t.voucher_discount === 'string' ? parseFloat(t.voucher_discount) : t.voucher_discount;
     return sum + (isNaN(amount) ? 0 : amount);
@@ -1836,6 +1895,34 @@ export default function TransactionList({ businessId, onLoadTransaction }: Trans
                   />
                 </div>
               </div>
+              {/* Amount range — Total (min) / Total (max) */}
+              <div className="flex items-center gap-1.5 flex-shrink-0">
+                <div className="min-w-0 w-[115px]">
+                  <input
+                    type="text"
+                    value={amountFrom}
+                    onChange={(e) => {
+                      const raw = e.target.value.replace(/\D/g, '');
+                      setAmountFrom(raw === '' ? '' : 'Rp ' + raw.replace(/\B(?=(\d{3})+(?!\d))/g, '.'));
+                    }}
+                    placeholder="Total (min)"
+                    className="w-full px-2 py-1.5 border border-gray-300 rounded text-xs focus:ring-2 focus:ring-blue-500 focus:border-blue-500 text-gray-900"
+                  />
+                </div>
+                <span className="text-gray-400 text-xs">–</span>
+                <div className="min-w-0 w-[115px]">
+                  <input
+                    type="text"
+                    value={amountTo}
+                    onChange={(e) => {
+                      const raw = e.target.value.replace(/\D/g, '');
+                      setAmountTo(raw === '' ? '' : 'Rp ' + raw.replace(/\B(?=(\d{3})+(?!\d))/g, '.'));
+                    }}
+                    placeholder="Total (max)"
+                    className="w-full px-2 py-1.5 border border-gray-300 rounded text-xs focus:ring-2 focus:ring-blue-500 focus:border-blue-500 text-gray-900"
+                  />
+                </div>
+              </div>
               <div className="min-w-0 max-w-[120px]">
                 <div className="relative">
                   <select
@@ -1865,7 +1952,7 @@ export default function TransactionList({ businessId, onLoadTransaction }: Trans
                     onChange={(e) => setFilterMethod(e.target.value)}
                     className="w-full pl-6 pr-6 py-1.5 border border-gray-300 rounded text-xs focus:ring-2 focus:ring-blue-500 focus:border-blue-500 appearance-none bg-white text-gray-900"
                   >
-                    <option value="all">All</option>
+                    <option value="all">Payment</option>
                     <option value="cash">Cash</option>
                     <option value="debit">Debit</option>
                     <option value="qr">QR Code</option>
@@ -1880,6 +1967,51 @@ export default function TransactionList({ businessId, onLoadTransaction }: Trans
                   </select>
                   <ChevronDown className="absolute right-2 top-1/2 -translate-y-1/2 w-3 h-3 text-gray-400 pointer-events-none" />
                 </div>
+              </div>
+              <div className="flex items-center gap-1 flex-shrink-0">
+                <button
+                  type="button"
+                  onClick={() => {
+                    const today = getTodayUTC7();
+                    setFromDate(today);
+                    setToDate(today);
+                  }}
+                  className="px-2 py-1 text-[10px] bg-white border border-gray-300 hover:bg-gray-50 text-gray-700 rounded"
+                >
+                  1D
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    const today = getTodayUTC7();
+                    const [y, m, d] = today.split('-').map(Number);
+                    const end = new Date(y, m - 1, d);
+                    const start = new Date(end);
+                    start.setDate(start.getDate() - 6);
+                    const fmt = (x: Date) => `${x.getFullYear()}-${String(x.getMonth() + 1).padStart(2, '0')}-${String(x.getDate()).padStart(2, '0')}`;
+                    setFromDate(fmt(start));
+                    setToDate(fmt(end));
+                  }}
+                  className="px-2 py-1 text-[10px] bg-white border border-gray-300 hover:bg-gray-50 text-gray-700 rounded"
+                >
+                  7D
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    const today = getTodayUTC7();
+                    const [y, m, d] = today.split('-').map(Number);
+                    const end = new Date(y, m - 1, d);
+                    const start = new Date(end);
+                    start.setDate(start.getDate() - 29);
+                    const fmt = (x: Date) => `${x.getFullYear()}-${String(x.getMonth() + 1).padStart(2, '0')}-${String(x.getDate()).padStart(2, '0')}`;
+                    setFromDate(fmt(start));
+                    setToDate(fmt(end));
+                  }}
+                  className="px-2 py-1 text-[10px] bg-white border border-gray-300 hover:bg-gray-50 text-gray-700 rounded"
+                >
+                  30D
+                </button>
               </div>
               <div className="relative" ref={columnPickerRef}>
                 <button
@@ -1921,6 +2053,8 @@ export default function TransactionList({ businessId, onLoadTransaction }: Trans
                 onClick={() => {
                   setSearchTerm('');
                   setFilterMethod('all');
+                  setAmountFrom('');
+                  setAmountTo('');
                   setShiftFilterUuid('');
                   setShiftLabelByUuid({}); // Clear to avoid stale shift labels before refetch
                   const gmt7Offset = 7 * 60 * 60 * 1000;
@@ -2076,6 +2210,11 @@ export default function TransactionList({ businessId, onLoadTransaction }: Trans
                               </div>
                             )}
                             {col.key === 'pickup_method' && <span className="text-xs text-gray-900 capitalize">{transaction.pickup_method.replace('-', ' ')}</span>}
+                            {col.key === 'package' && (
+                              transactionIdsWithPackage.has(String(transaction.id))
+                                ? <span className="inline-flex px-1.5 py-0.5 text-[10px] font-medium rounded bg-amber-100 text-amber-800" title="Memiliki item paket">Pkg</span>
+                                : <span className="text-xs text-gray-400">-</span>
+                            )}
                             {col.key === 'total_amount' && <span className="text-xs font-medium text-gray-900 tabular-nums">{formatPrice(transaction.total_amount)}</span>}
                             {col.key === 'voucher_discount' && (
                               transaction.voucher_discount > 0 ? (

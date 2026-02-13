@@ -118,6 +118,9 @@ export class ReceiptManagementService {
         );
         if (businessTemplate?.template_code) {
           console.log(`✅ Found business-specific default ${templateType} template for business ${businessId}`);
+          // #region agent log
+          fetch('http://127.0.0.1:7245/ingest/519de021-d49d-473f-a8a1-4215977c867a',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'receiptManagement.ts:getReceiptTemplate',message:'checker/receipt template result',data:{templateType,businessId,showNotes:businessTemplate.show_notes===1,hasTemplateCode:true,scope:'business'},timestamp:Date.now(),hypothesisId:'A'})}).catch(()=>{});
+          // #endregion
           return { templateCode: businessTemplate.template_code, showNotes: businessTemplate.show_notes === 1 };
         }
       }
@@ -130,10 +133,16 @@ export class ReceiptManagementService {
       );
       if (globalTemplate?.template_code) {
         console.log(`✅ Found global default ${templateType} template`);
+        // #region agent log
+        fetch('http://127.0.0.1:7245/ingest/519de021-d49d-473f-a8a1-4215977c867a',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'receiptManagement.ts:getReceiptTemplate',message:'checker/receipt template result',data:{templateType,businessId:businessId??null,showNotes:globalTemplate.show_notes===1,hasTemplateCode:true,scope:'global'},timestamp:Date.now(),hypothesisId:'B'})}).catch(()=>{});
+        // #endregion
         return { templateCode: globalTemplate.template_code, showNotes: globalTemplate.show_notes === 1 };
       }
 
       console.warn(`⚠️ No default ${templateType} template found in database`);
+      // #region agent log
+      fetch('http://127.0.0.1:7245/ingest/519de021-d49d-473f-a8a1-4215977c867a',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'receiptManagement.ts:getReceiptTemplate',message:'no default template',data:{templateType,businessId:businessId??null,showNotes:false,hasTemplateCode:false},timestamp:Date.now(),hypothesisId:'D'})}).catch(()=>{});
+      // #endregion
       return { templateCode: null, showNotes: false };
     } catch (error) {
       console.error(`❌ Error loading ${templateType} template:`, error);

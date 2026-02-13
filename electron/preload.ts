@@ -8,7 +8,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // POS functionality
   printReceipt: (data: UnknownRecord) => ipcRenderer.invoke('print-receipt', data),
   printLabel: (data: UnknownRecord) => ipcRenderer.invoke('print-label', data),
-  printLabelsBatch: (data: { labels: UnknownRecord[]; printerName?: string; printerType?: string }) => ipcRenderer.invoke('print-labels-batch', data),
+  printLabelsBatch: (data: { labels: UnknownRecord[]; printerName?: string; printerType?: string; requestId?: string; business_id?: number; orderContext?: UnknownRecord; isOnlineOrder?: boolean }) => ipcRenderer.invoke('print-labels-batch', data),
   openCashDrawer: () => ipcRenderer.invoke('open-cash-drawer'),
   playSound: (soundType: string) => ipcRenderer.invoke('play-sound', soundType),
   // System printers
@@ -36,6 +36,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getCustomerDisplayStatus: () => ipcRenderer.invoke('get-customer-display-status'),
   createCustomerDisplay: () => ipcRenderer.invoke('create-customer-display'),
   createBaristaKitchenWindow: () => ipcRenderer.invoke('create-barista-kitchen-window'),
+  createKitchenWindow: () => ipcRenderer.invoke('create-kitchen-window'),
+  createBaristaWindow: () => ipcRenderer.invoke('create-barista-window'),
 
   // Offline/local DB primitives
   downloadAndRewriteSyncImages: (payload: { baseUrl: string; products: UnknownRecord[]; businesses: UnknownRecord[] }) =>
@@ -120,8 +122,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   // Restaurant Table Layout
   getRestaurantRooms: (businessId: number) => ipcRenderer.invoke('get-restaurant-rooms', businessId),
-    getRestaurantTables: (roomId: number) => ipcRenderer.invoke('get-restaurant-tables', roomId),
-    getRestaurantLayoutElements: (roomId: number) => ipcRenderer.invoke('get-restaurant-layout-elements', roomId),
+  getRestaurantTables: (roomId: number) => ipcRenderer.invoke('get-restaurant-tables', roomId),
+  getRestaurantLayoutElements: (roomId: number) => ipcRenderer.invoke('get-restaurant-layout-elements', roomId),
   localDbUpsertRestaurantRooms: (rows: UnknownRecord[]) => ipcRenderer.invoke('localdb-upsert-restaurant-rooms', rows),
   localDbUpsertRestaurantTables: (rows: UnknownRecord[]) => ipcRenderer.invoke('localdb-upsert-restaurant-tables', rows),
   localDbUpsertRestaurantLayoutElements: (rows: UnknownRecord[]) => ipcRenderer.invoke('localdb-upsert-restaurant-layout-elements', rows),
@@ -178,6 +180,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   localDbUpsertTransactionItems: (rows: UnknownRecord[]) => ipcRenderer.invoke('localdb-upsert-transaction-items', rows),
   localDbGetTransactionItems: (transactionId?: number | string) => ipcRenderer.invoke('localdb-get-transaction-items', transactionId),
   localDbGetPackageLines: (uuidTransactionItemIds: string[]) => ipcRenderer.invoke('localdb-get-package-lines', uuidTransactionItemIds),
+  localDbGetTransactionIdsWithPackage: (transactionIds: string[]) => ipcRenderer.invoke('localdb-get-transaction-ids-with-package', transactionIds),
   localDbUpdatePackageLine: (payload: { id: number; finished_at: string | null }) => ipcRenderer.invoke('localdb-update-package-line', payload),
   localDbGetDistinctItemWaiterIdsByTransaction: (transactionIds: string[]) => ipcRenderer.invoke('localdb-get-distinct-item-waiter-ids-by-transaction', transactionIds),
   localDbGetTransactionItemCustomizationsNormalized: (transactionId: string) => ipcRenderer.invoke('localdb-get-transaction-item-customizations-normalized', transactionId),
@@ -246,6 +249,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   resetSystemPosRetryCount: (transactionIds?: string[]) => ipcRenderer.invoke('reset-system-pos-retry-count', transactionIds),
   debugSystemPosTransaction: (transactionId: string) => ipcRenderer.invoke('debug-system-pos-transaction', transactionId),
   repopulateSystemPosQueue: (options?: { days?: number }) => ipcRenderer.invoke('repopulate-system-pos-queue', options),
+  getSystemPosResyncPreview: (fromDate: string, toDate: string) => ipcRenderer.invoke('get-system-pos-resync-preview', fromDate, toDate),
+  runSystemPosResync: (fromDate: string, toDate: string) => ipcRenderer.invoke('run-system-pos-resync', fromDate, toDate),
+  upsertMasterDataToSystemPos: () => ipcRenderer.invoke('upsert-master-data-to-system-pos'),
   logPrinter1Print: (transactionId: string, printer1ReceiptNumber: number, globalCounter?: number, isReprint?: boolean, reprintCount?: number) =>
     ipcRenderer.invoke('log-printer1-print', transactionId, printer1ReceiptNumber, globalCounter, isReprint, reprintCount),
   getPrinter1AuditLog: (fromDate?: string, toDate?: string, limit?: number, transactionId?: string) => ipcRenderer.invoke('get-printer1-audit-log', fromDate, toDate, limit, transactionId),
@@ -285,6 +291,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   localDbCheckTodayTransactions: (userId: number, shiftStart: string, businessId?: number) => ipcRenderer.invoke('localdb-check-today-transactions', userId, shiftStart, businessId),
   localDbUpdateShiftStart: (shiftId: number, newStartTime: string) => ipcRenderer.invoke('localdb-update-shift-start', shiftId, newStartTime),
   localDbGetProductSales: (userId: number | null, shiftStart: string, shiftEnd: string | null, businessId?: number, shiftUuid?: string | null, shiftUuids?: string[]) => ipcRenderer.invoke('localdb-get-product-sales', userId, shiftStart, shiftEnd, businessId, shiftUuid, shiftUuids),
+  localDbGetPackageSalesBreakdown: (userId: number | null, shiftStart: string, shiftEnd: string | null, businessId?: number, shiftUuid?: string | null, shiftUuids?: string[]) =>
+    ipcRenderer.invoke('localdb-get-package-sales-breakdown', userId, shiftStart, shiftEnd, businessId, shiftUuid, shiftUuids),
   printShiftBreakdown: (data: {
     user_name: string;
     shift_start: string;
@@ -292,6 +300,14 @@ contextBridge.exposeInMainWorld('electronAPI', {
     modal_awal: number;
     statistics: { order_count: number; total_amount: number; total_discount: number; voucher_count: number };
     productSales: Array<{ product_name: string; total_quantity: number; total_subtotal: number; customization_subtotal: number; base_subtotal: number; base_unit_price: number; platform: string; transaction_type: string }>;
+    packageSalesBreakdown?: Array<{
+      package_product_id: number;
+      package_product_name: string;
+      total_quantity: number;
+      total_amount: number;
+      base_unit_price: number;
+      lines: Array<{ product_id: number; product_name: string; total_quantity: number }>;
+    }>;
     customizationSales: Array<{ option_id: number; option_name: string; customization_id: number; customization_name: string; total_quantity: number; total_revenue: number }>;
     paymentBreakdown: Array<{ payment_method_name: string; transaction_count: number; total_amount: number }>;
     category2Breakdown: Array<{ category2_name: string; category2_id: number; total_quantity: number; total_amount: number }>;
@@ -312,6 +328,16 @@ contextBridge.exposeInMainWorld('electronAPI', {
     };
     business_id?: number;
     printerType?: string;
+    wholeDayReport?: unknown;
+    sectionOptions?: {
+      ringkasan?: boolean;
+      barangTerjual?: boolean;
+      paymentMethod?: boolean;
+      categoryI?: boolean;
+      categoryII?: boolean;
+      paket?: boolean;
+      toppingSales?: boolean;
+    };
   }) => ipcRenderer.invoke('print-shift-breakdown', data),
   printTransactionsReport: (payload: {
     businessId: number;

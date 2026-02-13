@@ -5,7 +5,7 @@ import { X } from 'lucide-react';
 import { useAuth } from '@/hooks/useAuth';
 import { generateTransactionId, generateTransactionItemId } from '@/lib/uuid';
 import NewItemsConfirmationModal from './NewItemsConfirmationModal';
-import { getPackageBreakdownLines, formatPackageLineDisplay, type PackageSelection } from './PackageSelectionModal';
+import { getPackageBreakdownLines, getPackageBreakdownLinesWithProductId, type PackageSelection } from './PackageSelectionModal';
 
 interface Room {
   id: number;
@@ -96,8 +96,27 @@ interface CartItem {
 /** One row for checker slip (same structure as receipt: main line + bundle/package sub-rows). */
 type CheckerRow = { name: string; quantity: number; subtotal: number; category1_name: string };
 
+/** True for package sub-rows (subtotal 0, name like "2x Ayam Goreng (Paket...)" or legacy "(Paket...) 6 Product" / "    Product") so we skip redundant "quantityx" prefix on kitchen labels. */
+function isPackageSubRowCheckerRow(row: CheckerRow): boolean {
+  if (row.subtotal !== 0) return false;
+  const name = (row.name ?? '').trimStart();
+  if ((row.name ?? '').startsWith('    ')) return true;
+  if (/^\([^)]*\)\s+\d+/.test(name)) return true;
+  return /^\d+x\s+.+\s+\([^)]+\)$/.test(name);
+}
+
+/** Build note/customization line from item or bundle selected product (for checker/struk). */
+function buildCheckerNoteLine(item: { customizations?: { selected_options: { option_name: string }[] }[]; customNote?: string }): string {
+  const parts: string[] = [];
+  if (item.customizations?.length) {
+    item.customizations.forEach(c => c.selected_options.forEach(o => parts.push(o.option_name)));
+  }
+  if (item.customNote?.trim()) parts.push(item.customNote.trim());
+  return parts.length ? parts.join(', ') : '';
+}
+
 /** Build receipt-style flat list from cart items (main + bundle sub-rows + package sub-rows) so checker matches receipt/bill. */
-function buildCheckerRowsFromCartItems(cartItems: CartItem[]): CheckerRow[] {
+function buildCheckerRowsFromCartItems(cartItems: CartItem[], productsMap: Map<number, Record<string, unknown>>): CheckerRow[] {
   const rows: CheckerRow[] = [];
   for (const item of cartItems) {
     let unitPrice = item.product.harga_jual || 0;
@@ -105,9 +124,11 @@ function buildCheckerRowsFromCartItems(cartItems: CartItem[]): CheckerRow[] {
       item.customizations.forEach(c => c.selected_options.forEach(o => { unitPrice += o.price_adjustment || 0; }));
     }
     const category1Name = ((item.product as { category1_name?: string | null }).category1_name ?? '').trim() || 'Kategori 1';
+    const noteLine = buildCheckerNoteLine(item);
+    const mainName = (item.product.nama || '') + (noteLine ? `\n${noteLine}` : '');
 
     rows.push({
-      name: item.product.nama || '',
+      name: mainName,
       quantity: item.quantity,
       subtotal: unitPrice * item.quantity,
       category1_name: category1Name,
@@ -118,8 +139,10 @@ function buildCheckerRowsFromCartItems(cartItems: CartItem[]): CheckerRow[] {
         for (const sp of bundleSel.selectedProducts) {
           const selectionQty = typeof sp.quantity === 'number' && !Number.isNaN(sp.quantity) ? sp.quantity : 1;
           const totalQty = item.quantity * selectionQty;
+          const spNote = buildCheckerNoteLine(sp as { customizations?: { selected_options: { option_name: string }[] }[]; customNote?: string });
+          const bundleName = `  └ ${sp.product.nama}${selectionQty > 1 ? ` (×${selectionQty})` : ''}` + (spNote ? `\n${spNote}` : '');
           rows.push({
-            name: `  └ ${sp.product.nama}${selectionQty > 1 ? ` (×${selectionQty})` : ''}`,
+            name: bundleName,
             quantity: totalQty,
             subtotal: 0,
             category1_name: (sp.product as { category1_name?: string })?.category1_name ?? category1Name,
@@ -155,13 +178,15 @@ function buildCheckerRowsFromCartItems(cartItems: CartItem[]): CheckerRow[] {
             : undefined);
 
     if (resolvedPackageSelections?.length) {
-      const pkgLines = getPackageBreakdownLines(resolvedPackageSelections, item.quantity);
+      const pkgLines = getPackageBreakdownLinesWithProductId(resolvedPackageSelections, item.quantity);
       for (const line of pkgLines) {
+        const lineProduct = productsMap.get(line.product_id);
+        const lineCategory1Name = (lineProduct as { category1_name?: string } | undefined)?.category1_name ?? category1Name;
         rows.push({
-          name: `    ${formatPackageLineDisplay(line.product_name, line.quantity)}`,
+          name: `${line.quantity}x ${line.product_name} (${item.product.nama})`,
           quantity: line.quantity,
           subtotal: 0,
-          category1_name: category1Name,
+          category1_name: lineCategory1Name,
         });
       }
     }
@@ -500,6 +525,9 @@ export default function TableSelectionModal({
   };
 
   const savePendingTransaction = async (tableId: number | null) => {
+    // #region agent log
+    fetch('http://127.0.0.1:7245/ingest/519de021-d49d-473f-a8a1-4215977c867a',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'TableSelectionModal.tsx:savePendingTransaction',message:'Simpan Order save started',data:{tableId,source:'Simpan Order'},timestamp:Date.now(),hypothesisId:'count'})}).catch(()=>{});
+    // #endregion
     setIsSaving(true);
     try {
       const electronAPI = getElectronAPI();
@@ -940,25 +968,28 @@ export default function TableSelectionModal({
         }
       }
       // Receipt-style flat list (main + bundle + package sub-rows) so checker matches receipt/bill
-      const checkerRows = buildCheckerRowsFromCartItems(cartItems);
-      const isPackageSubRow = (row: CheckerRow) => row.subtotal === 0 && row.name.startsWith('    ');
+      const allProducts = await electronAPI.localDbGetAllProducts?.();
+      const productsArray = Array.isArray(allProducts) ? allProducts as Record<string, unknown>[] : [];
+      const productsMap = new Map<number, Record<string, unknown>>();
+      productsArray.forEach((p) => {
+        const id = typeof p.id === 'number' ? p.id : (typeof p.id === 'string' ? parseInt(p.id, 10) : null);
+        if (id) productsMap.set(id, p);
+      });
+      const checkerRows = buildCheckerRowsFromCartItems(cartItems, productsMap);
       const rowForCheckerRow = (row: CheckerRow) => {
-        const trClass = isPackageSubRow(row) ? ' class="package-subitem"' : '';
-        const nameForCell = isPackageSubRow(row) ? row.name.trim() : row.name;
-        const cellHtml = escapeHtmlForChecker(nameForCell).replace(/\n/g, '<br/>');
-        if (isPackageSubRow(row)) {
-          return `<tr${trClass}><td>${cellHtml}</td><td style="text-align: right;"></td><td style="text-align: right;"></td><td style="text-align: right;"></td></tr>`;
+        const cellHtml = escapeHtmlForChecker(row.name).replace(/\n/g, '<br/>');
+        if (isPackageSubRowCheckerRow(row)) {
+          return `<tr class="package-subitem"><td>${cellHtml}</td><td style="text-align: right;"></td><td style="text-align: right;"></td><td style="text-align: right;"></td></tr>`;
         }
         const unitPrice = row.quantity > 0 ? row.subtotal / row.quantity : '';
-        return `<tr${trClass}><td>${cellHtml}</td><td style="text-align: right;">${unitPrice}</td><td style="text-align: right;">${row.quantity}</td><td style="text-align: right;">${row.subtotal}</td></tr>`;
+        return `<tr><td>${cellHtml}</td><td style="text-align: right;">${unitPrice}</td><td style="text-align: right;">${row.quantity}</td><td style="text-align: right;">${row.subtotal}</td></tr>`;
       };
       const lineForCheckerRow = (row: CheckerRow) => {
-        if (isPackageSubRow(row)) {
-          const cellHtml = escapeHtmlForChecker(row.name.trim()).replace(/\n/g, '<br/>');
+        const cellHtml = escapeHtmlForChecker(row.name).replace(/\n/g, '<br/>');
+        if (isPackageSubRowCheckerRow(row)) {
           return `<div class="item-line package-subitem">${cellHtml}</div>`;
         }
-        const cellHtml = escapeHtmlForChecker(row.name).replace(/\n/g, '<br/>');
-        return `<div class="item-line">- ${row.quantity}x ${cellHtml}</div>`;
+        return `<div class="item-line">${row.quantity}x ${cellHtml}</div>`;
       };
       const byCategory = new Map<string, CheckerRow[]>();
       for (const row of checkerRows) {
@@ -990,14 +1021,23 @@ export default function TableSelectionModal({
 
       if ((newOrderLabels.length > 0 || orderContextForChecker.itemsHtml) && window.electronAPI?.printLabelsBatch) {
         try {
+          // #region agent log
+          const requestId = `REQ-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
+          console.log(`🖨️ [FRONTEND] Simpan Order requesting printLabelsBatch. ID: ${requestId}. Table: ${orderContextForChecker.tableName}. Time: ${orderContextForChecker.orderTime}`);
+          
+          fetch('http://127.0.0.1:7245/ingest/519de021-d49d-473f-a8a1-4215977c867a',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'TableSelectionModal.tsx:printLabelsBatch',message:'Simpan Order calling printLabelsBatch',data:{requestId,source:'Simpan Order',table:orderContextForChecker.tableName,time:orderContextForChecker.orderTime,labelsCount:newOrderLabels.length,hasChecker:!!(orderContextForChecker.itemsHtml&&orderContextForChecker.itemsHtml.trim())},timestamp:Date.now(),hypothesisId:'count'})}).catch(()=>{});
+          // #endregion
+
+          // Mark checker as printed before starting print so PaymentModal won't print again (avoids double print)
+          await window.electronAPI?.localDbSetTransactionCheckerPrinted?.(transactionId);
           await window.electronAPI.printLabelsBatch({
+            requestId, // Pass ID to backend for tracing
             labels: newOrderLabels.length > 0 ? newOrderLabels : [{ orderTime: orderContextForChecker.orderTime, productName: '', counter: 1, itemNumber: 1, totalItems: 1, pickupMethod: pickupMethod === 'take-away' ? 'Take Away' : 'Dine In' }],
             printerType: 'labelPrinter',
             business_id: businessId ?? undefined,
             orderContext: orderContextForChecker,
             isOnlineOrder: false
           });
-          await window.electronAPI?.localDbSetTransactionCheckerPrinted?.(transactionId);
         } catch (labelErr) {
           console.error('❌ Error printing checker for new order:', labelErr);
         }
@@ -1406,25 +1446,28 @@ export default function TableSelectionModal({
       // Build orderContext so order-summary checker template ({{items}}) shows the newly added products
       const escapeHtmlForChecker = (s: string) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
       // Receipt-style flat list (main + bundle + package sub-rows) so checker matches receipt/bill
-      const newCheckerRows = buildCheckerRowsFromCartItems(itemsToSave as CartItem[]);
-      const isPackageSubRowNew = (row: CheckerRow) => row.subtotal === 0 && row.name.startsWith('    ');
+      const allProductsNew = await electronAPI.localDbGetAllProducts?.();
+      const productsArrayNew = Array.isArray(allProductsNew) ? allProductsNew as Record<string, unknown>[] : [];
+      const productsMapNew = new Map<number, Record<string, unknown>>();
+      productsArrayNew.forEach((p) => {
+        const id = typeof p.id === 'number' ? p.id : (typeof p.id === 'string' ? parseInt(p.id, 10) : null);
+        if (id) productsMapNew.set(id, p);
+      });
+      const newCheckerRows = buildCheckerRowsFromCartItems(itemsToSave as CartItem[], productsMapNew);
       const rowForNewCheckerRow = (row: CheckerRow) => {
-        const trClass = isPackageSubRowNew(row) ? ' class="package-subitem"' : '';
-        const nameForCell = isPackageSubRowNew(row) ? row.name.trim() : row.name;
-        const cellHtml = escapeHtmlForChecker(nameForCell).replace(/\n/g, '<br/>');
-        if (isPackageSubRowNew(row)) {
-          return `<tr${trClass}><td>${cellHtml}</td><td style="text-align: right;"></td><td style="text-align: right;"></td><td style="text-align: right;"></td></tr>`;
+        const cellHtml = escapeHtmlForChecker(row.name).replace(/\n/g, '<br/>');
+        if (isPackageSubRowCheckerRow(row)) {
+          return `<tr class="package-subitem"><td>${cellHtml}</td><td style="text-align: right;"></td><td style="text-align: right;"></td><td style="text-align: right;"></td></tr>`;
         }
         const unitPriceNew = row.quantity > 0 ? row.subtotal / row.quantity : '';
-        return `<tr${trClass}><td>${cellHtml}</td><td style="text-align: right;">${unitPriceNew}</td><td style="text-align: right;">${row.quantity}</td><td style="text-align: right;">${row.subtotal}</td></tr>`;
+        return `<tr><td>${cellHtml}</td><td style="text-align: right;">${unitPriceNew}</td><td style="text-align: right;">${row.quantity}</td><td style="text-align: right;">${row.subtotal}</td></tr>`;
       };
       const lineForNewCheckerRow = (row: CheckerRow) => {
-        if (isPackageSubRowNew(row)) {
-          const cellHtml = escapeHtmlForChecker(row.name.trim()).replace(/\n/g, '<br/>');
+        const cellHtml = escapeHtmlForChecker(row.name).replace(/\n/g, '<br/>');
+        if (isPackageSubRowCheckerRow(row)) {
           return `<div class="item-line package-subitem">${cellHtml}</div>`;
         }
-        const cellHtml = escapeHtmlForChecker(row.name).replace(/\n/g, '<br/>');
-        return `<div class="item-line">- ${row.quantity}x ${cellHtml}</div>`;
+        return `<div class="item-line">${row.quantity}x ${cellHtml}</div>`;
       };
       const byCategoryNew = new Map<string, CheckerRow[]>();
       for (const row of newCheckerRows) {
@@ -1456,6 +1499,8 @@ export default function TableSelectionModal({
 
       if ((allLabels.length > 0 || orderContextForNewItems.itemsHtml) && window.electronAPI?.printLabelsBatch) {
         try {
+          // Mark checker as printed before starting print so PaymentModal won't print again (avoids double print)
+          await window.electronAPI?.localDbSetTransactionCheckerPrinted?.(transactionId);
           await window.electronAPI.printLabelsBatch({
             labels: allLabels,
             printerType: 'labelPrinter',

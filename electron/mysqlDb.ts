@@ -659,6 +659,34 @@ function convertToMySQLParam(value: unknown): string | number | null | boolean {
 }
 
 /**
+ * Insert a minimal product row into system_pos.products so transaction_items FK is satisfied.
+ * Used when the product is missing from salespulse or when full product insert fails.
+ * Uses only id, nama, satuan to avoid UNIQUE/FK issues; never throws.
+ */
+async function insertStubProductIntoSystemPos(productId: number): Promise<void> {
+  const nama = `Produk #${productId}`;
+  try {
+    await executeSystemPosUpdate(
+      'INSERT IGNORE INTO products (id, nama, satuan) VALUES (?, ?, ?)',
+      [productId, nama, 'pcs']
+    );
+    console.log(`✅ [SYSTEM POS] Inserted stub product ${productId} into system_pos`);
+  } catch (e1: unknown) {
+    const msg = e1 instanceof Error ? e1.message : String(e1);
+    console.warn(`⚠️ [SYSTEM POS] Stub insert (id,nama,satuan) failed for ${productId}:`, msg);
+    try {
+      await executeSystemPosUpdate(
+        'INSERT INTO products (id, nama, satuan) VALUES (?, ?, ?) ON DUPLICATE KEY UPDATE id=id',
+        [productId, nama, 'pcs']
+      );
+      console.log(`✅ [SYSTEM POS] Inserted stub product ${productId} (ON DUPLICATE) into system_pos`);
+    } catch (e2: unknown) {
+      console.error(`❌ [SYSTEM POS] Stub product ${productId} insert failed:`, e2 instanceof Error ? e2.message : String(e2));
+    }
+  }
+}
+
+/**
  * Insert complete transaction data into system_pos database
  * Fetches transaction and all related data from salespulse DB and inserts into system_pos DB
  */
@@ -733,7 +761,7 @@ export async function insertTransactionToSystemPos(transactionId: string): Promi
       );
     }
 
-    // Step 7: Check and insert missing products
+    // Step 7: Ensure every product referenced by items exists in system_pos (so transaction data matches)
     const productIds = items
       .map(item => item.product_id)
       .filter((id): id is number => typeof id === 'number' && id > 0);
@@ -741,7 +769,6 @@ export async function insertTransactionToSystemPos(transactionId: string): Promi
     const uniqueProductIds = [...new Set(productIds)];
     
     let productsInserted = 0;
-    let productsFailed = 0;
     let productsSkipped = 0;
     
     for (const productId of uniqueProductIds) {
@@ -750,39 +777,50 @@ export async function insertTransactionToSystemPos(transactionId: string): Promi
         [productId]
       );
 
-      if (!existingProduct) {
-        // Fetch product from salespulse DB
-        const product = await executeQueryOne<Record<string, unknown>>(
-          'SELECT * FROM products WHERE id = ?',
-          [productId]
-        );
+      if (existingProduct) {
+        productsSkipped++;
+        continue;
+      }
 
-        if (product) {
-          try {
-            // Insert product into system_pos
-            // Build INSERT statement with all product fields
-            const productFields = Object.keys(product).filter(key => key !== 'id' || product.id === productId);
-            const productValues = productFields.map(field => convertToMySQLParam(product[field]));
-            const productPlaceholders = productFields.map(() => '?').join(', ');
-            
-            await executeSystemPosUpdate(
-              `INSERT INTO products (${productFields.join(', ')}) VALUES (${productPlaceholders})`,
-              productValues
-            );
-            productsInserted++;
-            console.log(`✅ [SYSTEM POS] Inserted missing product ${productId} into system_pos`);
-          } catch (productError: unknown) {
-            productsFailed++;
-            const errorMsg = productError instanceof Error ? productError.message : String(productError);
-            console.error(`⚠️ [SYSTEM POS] Failed to insert product ${productId}:`, errorMsg);
-            // Continue with transaction insertion even if product insert fails
-          }
-        } else {
-          productsFailed++;
-          console.warn(`⚠️ [SYSTEM POS] Product ${productId} not found in salespulse DB, transaction may fail`);
+      // Fetch product from salespulse DB and try full insert
+      const product = await executeQueryOne<Record<string, unknown>>(
+        'SELECT * FROM products WHERE id = ?',
+        [productId]
+      );
+
+      if (product) {
+        try {
+          const productFields = Object.keys(product).filter(key => key !== 'id' || product.id === productId);
+          const productValues = productFields.map(field => convertToMySQLParam(product[field]));
+          const productPlaceholders = productFields.map(() => '?').join(', ');
+          await executeSystemPosUpdate(
+            `INSERT INTO products (${productFields.join(', ')}) VALUES (${productPlaceholders})`,
+            productValues
+          );
+          productsInserted++;
+          console.log(`✅ [SYSTEM POS] Inserted missing product ${productId} into system_pos`);
+        } catch (productError: unknown) {
+          const errorMsg = productError instanceof Error ? productError.message : String(productError);
+          console.warn(`⚠️ [SYSTEM POS] Full product insert failed for ${productId}, inserting stub:`, errorMsg);
+          await insertStubProductIntoSystemPos(productId);
+          productsInserted++;
         }
       } else {
-        productsSkipped++;
+        console.warn(`⚠️ [SYSTEM POS] Product ${productId} not in salespulse DB, inserting stub so transaction can sync`);
+        await insertStubProductIntoSystemPos(productId);
+        productsInserted++;
+      }
+    }
+
+    // Step 7a: Ensure every product really exists in system_pos (retry stub for any still missing)
+    for (const productId of uniqueProductIds) {
+      const exists = await executeSystemPosQueryOne<{ id: number }>(
+        'SELECT id FROM products WHERE id = ?',
+        [productId]
+      );
+      if (!exists) {
+        console.warn(`⚠️ [SYSTEM POS] Product ${productId} still missing before insert, retrying stub`);
+        await insertStubProductIntoSystemPos(productId);
       }
     }
 
@@ -917,6 +955,56 @@ export async function insertTransactionToSystemPos(transactionId: string): Promi
       console.error(`❌ [SYSTEM POS] Stack trace:`, error.stack);
     }
     return { success: false, error: errorMsg };
+  }
+}
+
+/**
+ * Upsert category1 and category2 from main to system_pos so product FK inserts succeed.
+ */
+async function upsertCategoriesFromMainToSystemPos(): Promise<void> {
+  for (const table of ['category1', 'category2'] as const) {
+    const rows = await executeQuery<Record<string, unknown>>(`SELECT * FROM \`${table}\``);
+    for (const row of rows) {
+      const fields = Object.keys(row);
+      const values = fields.map(f => convertToMySQLParam(row[f]));
+      const placeholders = fields.map(() => '?').join(', ');
+      const updateSet = fields.filter(f => f !== 'id').map(f => `\`${f}\`=VALUES(\`${f}\`)`).join(', ');
+      const sql = `INSERT INTO \`${table}\` (${fields.map(f => `\`${f}\``).join(', ')}) VALUES (${placeholders}) ON DUPLICATE KEY UPDATE ${updateSet}`;
+      await executeSystemPosUpdate(sql, values);
+    }
+    console.log(`✅ [SYSTEM POS] Upserted ${rows.length} rows from salespulse.${table} to system_pos`);
+  }
+}
+
+/**
+ * Upsert all products (and their category refs) from main (salespulse) DB into system_pos so transaction sync never fails on missing product.
+ * Call after "Download master data" or before bulk re-sync.
+ */
+export async function upsertProductsFromMainToSystemPos(): Promise<{ success: boolean; upserted: number; error?: string }> {
+  try {
+    await upsertCategoriesFromMainToSystemPos();
+    const products = await executeQuery<Record<string, unknown>>('SELECT * FROM products');
+    if (!products.length) {
+      return { success: true, upserted: 0 };
+    }
+    let upserted = 0;
+    for (const product of products) {
+      const fields = Object.keys(product);
+      const values = fields.map(f => convertToMySQLParam(product[f]));
+      const placeholders = fields.map(() => '?').join(', ');
+      const updateSet = fields.filter(f => f !== 'id').map(f => `\`${f}\`=VALUES(\`${f}\`)`).join(', ');
+      const sql = updateSet
+        ? `INSERT INTO products (${fields.map(f => `\`${f}\``).join(', ')}) VALUES (${placeholders}) ON DUPLICATE KEY UPDATE ${updateSet}`
+        : `INSERT IGNORE INTO products (${fields.map(f => `\`${f}\``).join(', ')}) VALUES (${placeholders})`;
+      await executeSystemPosUpdate(sql, values);
+      upserted++;
+    }
+    console.log(`✅ [SYSTEM POS] Upserted ${upserted} products from salespulse to system_pos`);
+    return { success: true, upserted };
+  } catch (error: unknown) {
+    const errorMsg = error instanceof Error ? error.message : String(error);
+    console.error('❌ [SYSTEM POS] upsertProductsFromMainToSystemPos failed:', errorMsg);
+    return { success: false, upserted: 0, error: errorMsg };
   }
 }
 

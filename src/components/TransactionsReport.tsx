@@ -194,6 +194,15 @@ const PAYMENT_COLORS: Record<string, string> = {
 const getPaymentLabel = (method: string) => PAYMENT_LABELS[method?.toLowerCase()] || method;
 const getPaymentColor = (method: string) => PAYMENT_COLORS[method?.toLowerCase()] || 'bg-gray-100 text-gray-800';
 
+// Amount range filter: parse display string (e.g. "Rp 100.000" or "100000") to number; null if empty/invalid
+const parseAmountDisplay = (s: string): number | null => {
+  if (!s || typeof s !== 'string') return null;
+  const digits = s.replace(/\D/g, '');
+  if (digits.length === 0) return null;
+  const n = parseInt(digits, 10);
+  return isNaN(n) ? null : n;
+};
+
 const getElectronAPI = () => (typeof window !== 'undefined' ? window.electronAPI : undefined);
 
 export default function TransactionsReport() {
@@ -257,6 +266,8 @@ export default function TransactionsReport() {
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [selectedPaymentMethod, setSelectedPaymentMethod] = useState<string>('all');
   const [selectedStatus, setSelectedStatus] = useState<string>('all');
+  const [amountFrom, setAmountFrom] = useState<string>('');
+  const [amountTo, setAmountTo] = useState<string>('');
   const [isLoading, setIsLoading] = useState(false);
   // Load users and business name on mount
   useEffect(() => {
@@ -434,8 +445,19 @@ export default function TransactionsReport() {
       );
     }
 
+    // Amount range filter (total_amount = pre-discount)
+    const fromNum = parseAmountDisplay(amountFrom);
+    const toNum = parseAmountDisplay(amountTo);
+    if (fromNum != null && toNum != null) {
+      filtered = filtered.filter(tx => (tx.total_amount ?? 0) >= fromNum && (tx.total_amount ?? 0) <= toNum);
+    } else if (toNum != null) {
+      filtered = filtered.filter(tx => (tx.total_amount ?? 0) > 0 && (tx.total_amount ?? 0) <= toNum);
+    } else if (fromNum != null) {
+      filtered = filtered.filter(tx => (tx.total_amount ?? 0) >= fromNum);
+    }
+
     setFilteredTransactions(filtered);
-  }, [transactions, startDate, endDate, receiptCounters, receiptizeCounters, selectedUserId, selectedPaymentMethod, selectedStatus, searchQuery]);
+  }, [transactions, startDate, endDate, receiptCounters, receiptizeCounters, selectedUserId, selectedPaymentMethod, selectedStatus, searchQuery, amountFrom, amountTo]);
 
   // Fetch distinct item-level waiter IDs per transaction (for multi-waiter tooltip)
   useEffect(() => {
@@ -721,6 +743,34 @@ export default function TransactionsReport() {
                   />
                 </div>
               </div>
+              {/* Amount range — Total (min) / Total (max) */}
+              <div className="flex items-center gap-1.5 flex-shrink-0">
+                <div className="min-w-0 w-[115px]">
+                  <input
+                    type="text"
+                    value={amountFrom}
+                    onChange={(e) => {
+                      const raw = e.target.value.replace(/\D/g, '');
+                      setAmountFrom(raw === '' ? '' : 'Rp ' + raw.replace(/\B(?=(\d{3})+(?!\d))/g, '.'));
+                    }}
+                    placeholder="Total (min)"
+                    className="w-full px-2 py-1.5 border border-gray-300 rounded text-xs focus:ring-2 focus:ring-blue-500 focus:border-blue-500 text-gray-900"
+                  />
+                </div>
+                <span className="text-gray-400 text-xs">–</span>
+                <div className="min-w-0 w-[115px]">
+                  <input
+                    type="text"
+                    value={amountTo}
+                    onChange={(e) => {
+                      const raw = e.target.value.replace(/\D/g, '');
+                      setAmountTo(raw === '' ? '' : 'Rp ' + raw.replace(/\B(?=(\d{3})+(?!\d))/g, '.'));
+                    }}
+                    placeholder="Total (max)"
+                    className="w-full px-2 py-1.5 border border-gray-300 rounded text-xs focus:ring-2 focus:ring-blue-500 focus:border-blue-500 text-gray-900"
+                  />
+                </div>
+              </div>
               {/* User — default All; no label */}
               <div className="min-w-0 max-w-[110px]">
                 <div className="relative">
@@ -747,7 +797,7 @@ export default function TransactionsReport() {
                     onChange={(e) => setSelectedPaymentMethod(e.target.value)}
                     className="w-full pl-6 pr-6 py-1.5 border border-gray-300 rounded text-xs focus:ring-2 focus:ring-blue-500 focus:border-blue-500 appearance-none bg-white text-gray-900"
                   >
-                    <option value="all">All</option>
+                    <option value="all">Payment</option>
                     {paymentMethods.map(method => (
                       <option key={method} value={method}>{formatPaymentMethod(method)}</option>
                     ))}
@@ -784,6 +834,8 @@ export default function TransactionsReport() {
                   setSelectedUserId('all');
                   setSelectedPaymentMethod('all');
                   setSelectedStatus('all');
+                  setAmountFrom('');
+                  setAmountTo('');
                   const gmt7Offset = 7 * 60 * 60 * 1000;
                   const now = new Date();
                   const nowGmt7 = new Date(now.getTime() + gmt7Offset);

@@ -8,7 +8,7 @@ import { smartSyncService } from '@/lib/smartSync';
 import { generateTransactionId, generateTransactionItemId } from '@/lib/uuid';
 import { useAuth } from '@/hooks/useAuth';
 import { getApiUrl } from '@/lib/api';
-import { type PackageSelection, getPackageBreakdownLines, formatPackageLineDisplay } from './PackageSelectionModal';
+import { type PackageSelection, getPackageBreakdownLines, getPackageBreakdownLinesWithProductId, formatPackageLineDisplay } from './PackageSelectionModal';
 
 interface BundleSelection {
   category2_id: number;
@@ -1258,6 +1258,14 @@ export default function PaymentModal({
             }
             return randomizationResult;
           };
+
+          // Online platform orders require 100% audit tracking on Printer 2 when Single Printer Mode is enabled
+          // (see Epic: Platform-Based Printer Audit Log Routing).
+          const ONLINE_PLATFORM_METHODS = new Set<PaymentMethod>(['gofood', 'grabfood', 'shopeefood', 'tiktok', 'qpon']);
+          const isOnlinePlatformTransaction =
+            ONLINE_PLATFORM_METHODS.has(selectedPaymentMethod) ||
+            (isOnline && !!selectedOnlinePlatform);
+          const forcePrinter2AuditForPlatform = singlePrinterModeEnabled && isOnlinePlatformTransaction;
           
           // Determine user-selected print targets (original target for database tracking)
           const originalTarget = target;
@@ -1295,6 +1303,17 @@ export default function PaymentModal({
 
           // Prepare receipt data for printing
           const receiptNumber = transactionData.id; // Use transaction ID as receipt number
+          // Fetch products for package breakdown category lookups
+          const allProductsForReceipt = await electronAPI.localDbGetAllProducts?.();
+          const productsMapForReceipt = new Map<number, { id: number; category1_id?: number | null; category1_name?: string | null; [key: string]: unknown }>();
+          if (Array.isArray(allProductsForReceipt)) {
+            allProductsForReceipt.forEach((p: unknown) => {
+              if (p && typeof p === 'object' && 'id' in p && typeof (p as { id: unknown }).id === 'number') {
+                const product = p as { id: number; category1_id?: number | null; category1_name?: string | null; [key: string]: unknown };
+                productsMapForReceipt.set(product.id, product);
+              }
+            });
+          }
           const getTableNumber = () => {
             // Extract table number from receipt number
             if (typeof receiptNumber === 'string') {
@@ -1421,20 +1440,23 @@ export default function PaymentModal({
                     : undefined);
 
             if (resolvedPackageSelections && resolvedPackageSelections.length > 0) {
-              const pkgLines = getPackageBreakdownLines(resolvedPackageSelections, item.quantity);
-              pkgLines.forEach(line => {
+              const pkgLines = getPackageBreakdownLinesWithProductId(resolvedPackageSelections, item.quantity);
+              for (const line of pkgLines) {
+                const lineProduct = productsMapForReceipt.get(line.product_id);
+                const lineCategory1Id = (lineProduct as { category1_id?: number | null } | undefined)?.category1_id ?? null;
+                const lineCategory1Name = (lineProduct as { category1_name?: string | null } | undefined)?.category1_name ?? null;
                 receiptItems.push({
-                  name: `    ${formatPackageLineDisplay(line.product_name, line.quantity)}`,
+                  name: `${line.quantity}x ${line.product_name} (${item.product.nama})`,
                   quantity: line.quantity,
                   price: 0,
                   total_price: 0,
                   customNote: undefined,
                   custom_note: undefined,
                   customizations: undefined,
-                  category1_id: category1Id,
-                  category1_name: category1Name,
+                  category1_id: lineCategory1Id,
+                  category1_name: lineCategory1Name,
                 });
-              });
+              }
             }
           });
 
@@ -1579,7 +1601,11 @@ export default function PaymentModal({
               try {
                 let shouldLogToPrinter1 = true;
                 
-                if (singlePrinterModeEnabled && printer2AuditLogChance !== null && printer2AuditLogChance > 0) {
+                if (forcePrinter2AuditForPlatform) {
+                  // Platform orders must always be tracked in Printer 2 audit log for reconciliation
+                  shouldLogToPrinter1 = false;
+                  console.log('🖨️ [SINGLE PRINTER MODE] Online platform transaction detected → forcing Printer 2 audit log (skip Printer 1 audit log)');
+                } else if (singlePrinterModeEnabled && printer2AuditLogChance !== null && printer2AuditLogChance > 0) {
                   // Randomization is enabled - randomly decide which audit log to use
                   const logToPrinter2 = shouldLogToPrinter2Audit();
                   if (logToPrinter2) {
@@ -1738,11 +1764,17 @@ export default function PaymentModal({
           
           // Handle Single Printer Mode: Log to Printer 2 audit if original target was 'receiptize' (even though we printed to Printer 1)
           // OR if randomization decided to log to Printer 2 audit
-          if (singlePrinterModeEnabled && (originalTarget === 'receiptize' || (printer2AuditLogChance !== null && printer2AuditLogChance > 0))) {
+          if (
+            singlePrinterModeEnabled &&
+            (forcePrinter2AuditForPlatform || originalTarget === 'receiptize' || (printer2AuditLogChance !== null && printer2AuditLogChance > 0))
+          ) {
             // Check if we should log to Printer 2 audit
             let shouldLogToPrinter2 = false;
             
-            if (printer2AuditLogChance !== null && printer2AuditLogChance > 0) {
+            if (forcePrinter2AuditForPlatform) {
+              // Platform orders must always be tracked in Printer 2 audit log for reconciliation
+              shouldLogToPrinter2 = true;
+            } else if (printer2AuditLogChance !== null && printer2AuditLogChance > 0) {
               // Randomization is enabled - use randomization result
               shouldLogToPrinter2 = shouldLogToPrinter2Audit();
             } else {
@@ -2117,7 +2149,21 @@ export default function PaymentModal({
               }
               return escapeHtmlForChecker(text).replace(/\n/g, '<br/>');
             };
-            const isPackageSubRow = (ri: ReceiptItem) => ri.total_price === 0 && ri.name.startsWith('    ');
+            /**
+             * Package sub-items: subtotal 0 and name in one of:
+             * - legacy indented: "    Ayam Goreng ..."
+             * - legacy prefix: "(Paket...) 6 Product..."
+             * - current: "2x Ayam Goreng (Paket Ayam Sedih)"
+             * We skip the redundant "- quantityx " prefix for these on the checker.
+             */
+            const isPackageSubRow = (ri: ReceiptItem) => {
+              if (ri.total_price !== 0) return false;
+              const name = (ri.name ?? '').trimStart();
+              if ((ri.name ?? '').startsWith('    ')) return true;
+              if (/^\([^)]*\)\s+\d+/.test(name)) return true;
+              // "2x Ayam Goreng (Paket Ayam Sedih)"
+              return /^\d+x\s+.+\s+\([^)]+\)$/.test(name);
+            };
             const rowHtml = (ri: ReceiptItem) => {
               const trClass = isPackageSubRow(ri) ? ' class="package-subitem"' : '';
               const displayRi = isPackageSubRow(ri) ? { ...ri, name: ri.name.trim() } : ri;
@@ -2146,9 +2192,9 @@ export default function PaymentModal({
             const category1Name = ((cat1Items[0]?.category1_name ?? firstKey.replace(/^_id_/, '')) || 'Kategori 1').trim() || 'Kategori 1';
             const category2Name = ((cat2Items[0]?.category1_name ?? secondKey.replace(/^_id_/, '')) || '').trim() || '';
             const lineHtml = (ri: ReceiptItem) =>
-              ri.total_price === 0 && ri.name.startsWith('    ')
+              isPackageSubRow(ri)
                 ? `<div class="item-line package-subitem">${itemCellContent({ ...ri, name: ri.name.trim() })}</div>`
-                : `<div class="item-line">- ${ri.quantity}x ${itemCellContent(ri)}</div>`;
+                : `<div class="item-line">${ri.quantity}x ${itemCellContent(ri)}</div>`;
             const itemsCategory1 = cat1Items.map(lineHtml).join('');
             const itemsCategory2 = cat2Items.map(lineHtml).join('');
             const orderContextForChecker = {

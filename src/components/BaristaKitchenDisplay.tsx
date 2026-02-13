@@ -13,7 +13,7 @@ const getElectronAPI = () => (typeof window !== 'undefined' ? window.electronAPI
 export default function BaristaKitchenDisplay() {
   const { user } = useAuth();
   const [view, setView] = useState<'split' | 'barista' | 'kitchen'>('split');
-  
+
   // Wait for user to load
   if (!user) {
     return (
@@ -25,9 +25,9 @@ export default function BaristaKitchenDisplay() {
       </div>
     );
   }
-  
+
   const businessId = user?.selectedBusinessId;
-  
+
   if (!businessId) {
     return (
       <div className="h-screen flex items-center justify-center bg-gray-100">
@@ -46,7 +46,7 @@ export default function BaristaKitchenDisplay() {
   const hasDirectPermWithUnderscores = user?.permissions?.includes('access_barista_and_kitchen') || false;
   const isAdmin = isSuperAdmin(user);
   const hasAccess = isAdmin || perm1 || perm2 || hasDirectPerm || hasDirectPermWithUnderscores;
-  
+
   if (!hasAccess) {
     return (
       <div className="h-screen flex items-center justify-center bg-gray-100">
@@ -81,7 +81,7 @@ export default function BaristaKitchenDisplay() {
 
   const playTestSound = () => {
     try {
-      const audio = new Audio('./blacksmith_refine.mp3');
+      const audio = new Audio('/blacksmith_refine.mp3');
       audio.volume = 0.7;
       audio.play().catch((err) => console.warn('Test sound failed:', err));
     } catch (err) {
@@ -92,7 +92,7 @@ export default function BaristaKitchenDisplay() {
   return (
     <div className="h-screen flex flex-col bg-gray-50">
       {/* Custom Title Bar - Draggable */}
-      <div 
+      <div
         className="bg-gray-800 text-white flex items-center justify-between px-2 py-1 flex-shrink-0"
         style={{ WebkitAppRegion: 'drag' } as React.CSSProperties}
       >
@@ -110,25 +110,22 @@ export default function BaristaKitchenDisplay() {
             </button>
             <button
               onClick={() => setView('split')}
-              className={`px-2 py-1 text-xs rounded transition-colors ${
-                view === 'split' ? 'bg-blue-600' : 'bg-gray-700 hover:bg-gray-600'
-              }`}
+              className={`px-2 py-1 text-xs rounded transition-colors ${view === 'split' ? 'bg-blue-600' : 'bg-gray-700 hover:bg-gray-600'
+                }`}
             >
               View Semua
             </button>
             <button
               onClick={() => setView('barista')}
-              className={`px-2 py-1 text-xs rounded transition-colors ${
-                view === 'barista' ? 'bg-blue-600' : 'bg-gray-700 hover:bg-gray-600'
-              }`}
+              className={`px-2 py-1 text-xs rounded transition-colors ${view === 'barista' ? 'bg-blue-600' : 'bg-gray-700 hover:bg-gray-600'
+                }`}
             >
               View barista
             </button>
             <button
               onClick={() => setView('kitchen')}
-              className={`px-2 py-1 text-xs rounded transition-colors ${
-                view === 'kitchen' ? 'bg-blue-600' : 'bg-gray-700 hover:bg-gray-600'
-              }`}
+              className={`px-2 py-1 text-xs rounded transition-colors ${view === 'kitchen' ? 'bg-blue-600' : 'bg-gray-700 hover:bg-gray-600'
+                }`}
             >
               View Kitchen
             </button>
@@ -163,15 +160,15 @@ export default function BaristaKitchenDisplay() {
         {view === 'split' && (
           <div className="h-full flex">
             <div className="w-1/2 border-r border-gray-300">
-              <BaristaDisplay viewOnly={true} legacyCardLayout={true} />
+              <BaristaDisplay viewOnly={true} legacyCardLayout={true} enableSound={true} />
             </div>
             <div className="w-1/2">
-              <KitchenDisplay viewOnly={true} legacyCardLayout={true} />
+              <KitchenDisplay viewOnly={true} legacyCardLayout={true} enableSound={true} />
             </div>
           </div>
         )}
-        {view === 'barista' && <BaristaDisplay viewOnly={true} />}
-        {view === 'kitchen' && <KitchenDisplay viewOnly={true} />}
+        {view === 'barista' && <BaristaDisplay viewOnly={true} enableSound={true} />}
+        {view === 'kitchen' && <KitchenDisplay viewOnly={true} enableSound={true} />}
       </div>
     </div>
   );

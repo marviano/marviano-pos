@@ -13,8 +13,6 @@ import Laporan from './Laporan';
 import GlobalSettings from './GlobalSettings';
 import StartShiftModal from './StartShiftModal';
 import ActiveOrdersTab from './ActiveOrdersTab';
-import KitchenDisplay from './KitchenDisplay';
-import BaristaDisplay from './BaristaDisplay';
 import ReceiptTemplateSettings from './ReceiptTemplateSettings';
 import { mockMenuItems } from '@/data/mockData';
 import { fetchCategories, fetchProducts } from '@/lib/offlineDataFetcher';
@@ -188,30 +186,47 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
     }
   }, [activeMenuItem]);
 
-  // Handle opening Barista & Kitchen window
+  // Handle opening Barista & Kitchen, Kitchen, or Barista in a new window
   useEffect(() => {
+    const electronAPI = getElectronAPI();
     if (activeMenuItem === 'Barista & Kitchen') {
       const canAccess = isSuperAdmin(user) || hasPermission(user, 'access_baristaandkitchen');
-      
-      if (canAccess) {
-        const electronAPI = getElectronAPI();
-        if (electronAPI?.createBaristaKitchenWindow) {
-          electronAPI.createBaristaKitchenWindow()
-            .then((result) => {
-              console.log('✅ Barista & Kitchen window result:', result);
-              if (result?.success === false) {
-                console.error('❌ Failed to create window:', result.error);
-                alert(`Failed to open Barista & Kitchen window: ${result.error || 'Unknown error'}`);
-              }
-            })
-            .catch((error) => {
-              console.error('❌ Error creating Barista & Kitchen window:', error);
-              alert(`Error opening window: ${error instanceof Error ? error.message : String(error)}`);
-            });
-        } else {
-          console.error('❌ createBaristaKitchenWindow method not available');
-          alert('Window creation method not available. Please check Electron API.');
-        }
+      if (canAccess && electronAPI?.createBaristaKitchenWindow) {
+        electronAPI.createBaristaKitchenWindow()
+          .then((result) => {
+            if (result?.success === false) {
+              alert(`Failed to open Barista & Kitchen window: ${result.error || 'Unknown error'}`);
+            }
+          })
+          .catch((error) => {
+            alert(`Error opening window: ${error instanceof Error ? error.message : String(error)}`);
+          });
+      }
+    } else if (activeMenuItem === 'Kitchen') {
+      const canAccess = isSuperAdmin(user) || hasPermission(user, 'access_kitchen');
+      if (canAccess && electronAPI?.createKitchenWindow) {
+        electronAPI.createKitchenWindow()
+          .then((result) => {
+            if (result?.success === false) {
+              alert(`Failed to open Kitchen window: ${result.error || 'Unknown error'}`);
+            }
+          })
+          .catch((error) => {
+            alert(`Error opening window: ${error instanceof Error ? error.message : String(error)}`);
+          });
+      }
+    } else if (activeMenuItem === 'Barista') {
+      const canAccess = isSuperAdmin(user) || hasPermission(user, 'access_barista');
+      if (canAccess && electronAPI?.createBaristaWindow) {
+        electronAPI.createBaristaWindow()
+          .then((result) => {
+            if (result?.success === false) {
+              alert(`Failed to open Barista window: ${result.error || 'Unknown error'}`);
+            }
+          })
+          .catch((error) => {
+            alert(`Error opening window: ${error instanceof Error ? error.message : String(error)}`);
+          });
       }
     }
   }, [activeMenuItem, user]);
@@ -1512,9 +1527,9 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
           </div>
         );
 
-      case 'Kitchen':
-        // Check permission before rendering
-        if (!isSuperAdmin(user) && !hasPermission(user, 'access_kitchen')) {
+      case 'Kitchen': {
+        const canAccessKitchen = isSuperAdmin(user) || hasPermission(user, 'access_kitchen');
+        if (!canAccessKitchen) {
           return (
             <div className="flex-1 flex items-center justify-center">
               <div className="text-center p-8 bg-white rounded-lg shadow-lg">
@@ -1524,11 +1539,19 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
             </div>
           );
         }
-        return <KitchenDisplay />;
+        return (
+          <div className="flex-1 flex items-center justify-center">
+            <div className="text-center p-8 bg-white rounded-lg shadow-lg">
+              <h2 className="text-xl font-bold text-blue-600 mb-2">Kitchen Display (Dapur)</h2>
+              <p className="text-gray-700">A new window has been opened. You can close this view.</p>
+            </div>
+          </div>
+        );
+      }
 
-      case 'Barista':
-        // Check permission before rendering
-        if (!isSuperAdmin(user) && !hasPermission(user, 'access_barista')) {
+      case 'Barista': {
+        const canAccessBarista = isSuperAdmin(user) || hasPermission(user, 'access_barista');
+        if (!canAccessBarista) {
           return (
             <div className="flex-1 flex items-center justify-center">
               <div className="text-center p-8 bg-white rounded-lg shadow-lg">
@@ -1538,7 +1561,15 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
             </div>
           );
         }
-        return <BaristaDisplay />;
+        return (
+          <div className="flex-1 flex items-center justify-center">
+            <div className="text-center p-8 bg-white rounded-lg shadow-lg">
+              <h2 className="text-xl font-bold text-blue-600 mb-2">Barista Display</h2>
+              <p className="text-gray-700">A new window has been opened. You can close this view.</p>
+            </div>
+          </div>
+        );
+      }
 
       case 'Barista & Kitchen':
         // Check permissions before opening window
