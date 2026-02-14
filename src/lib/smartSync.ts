@@ -213,7 +213,8 @@ class SmartSyncService {
 
     try {
       // Check if the method is available
-      const electronAPI = typeof window !== 'undefined' ? (window as { electronAPI?: UnknownRecord }).electronAPI : undefined;if (!electronAPI?.localDbGetUnsyncedTransactions) {console.error('❌ [SMART SYNC] localDbGetUnsyncedTransactions not available - Electron may need restart', {
+      const electronAPI = typeof window !== 'undefined' ? (window as { electronAPI?: UnknownRecord }).electronAPI : undefined; if (!electronAPI?.localDbGetUnsyncedTransactions) {
+        console.error('❌ [SMART SYNC] localDbGetUnsyncedTransactions not available - Electron may need restart', {
           electronAPI: !!electronAPI,
           hasLocalDbGetUnsyncedTransactions: !!electronAPI?.localDbGetUnsyncedTransactions
         });
@@ -307,13 +308,13 @@ class SmartSyncService {
         syncedTransactions: syncedTransactionCount
       });
 
-      const message = syncedTransactionCount === 0 
-        ? 'No pending transactions to sync' 
+      const message = syncedTransactionCount === 0
+        ? 'No pending transactions to sync'
         : `Synced ${syncedTransactionCount} transaction(s)`;
       return { success: true, syncedCount: syncedTransactionCount, message };
 
     } catch (error) {
-      const syncDuration = Date.now() - syncStartTime;console.error('❌ [SMART SYNC] ===== SYNC FAILED =====', {
+      const syncDuration = Date.now() - syncStartTime; console.error('❌ [SMART SYNC] ===== SYNC FAILED =====', {
         error: error instanceof Error ? error.message : String(error),
         stack: error instanceof Error ? error.stack : undefined,
         errorObject: error,
@@ -321,10 +322,10 @@ class SmartSyncService {
         timestamp: new Date().toISOString()
       });
       this.consecutiveFailures++;
-      return { 
-        success: false, 
-        syncedCount: 0, 
-        message: `Sync failed: ${error instanceof Error ? error.message : String(error)}` 
+      return {
+        success: false,
+        syncedCount: 0,
+        message: `Sync failed: ${error instanceof Error ? error.message : String(error)}`
       };
 
       // Exponential backoff on consecutive failures
@@ -344,7 +345,7 @@ class SmartSyncService {
    * Returns count of successfully synced transactions, skipped, and failed
    */
   private async processBatch(
-    batch: PendingTransaction[], 
+    batch: PendingTransaction[],
     forceSync: boolean = false,
     onProgress?: (transaction: PendingTransaction, status: string) => void
   ): Promise<{ syncedCount: number; skippedCount: number; failedCount: number }> {
@@ -358,7 +359,7 @@ class SmartSyncService {
       const transaction = batch[i];
       const transactionIndex = i + 1;
       console.log(`📤 [SMART SYNC] Processing transaction ${transactionIndex}/${batch.length}: ${transaction.id || 'unknown'}`);
-      
+
       try {
         // Check server load before processing
         const serverLoad = await this.checkServerLoad();
@@ -380,7 +381,7 @@ class SmartSyncService {
           // uuid_id might be the same as id if id is UUID string
           transactionData.uuid_id = typeof transactionData.id === 'string' ? transactionData.id : transactionData.uuid_id;
         }
-        
+
         // Ensure these columns are included (they might be null/undefined, which is fine)
         if (transactionData.shift_uuid === undefined) transactionData.shift_uuid = null;
         if (transactionData.refund_status === undefined) transactionData.refund_status = 'none';
@@ -421,7 +422,7 @@ class SmartSyncService {
         }
 
         // Phase 2: Validate NOT NULL constraints for transactions
-        const transactionRequiredFields = ['id', 'business_id', 'user_id', 'payment_method', 'pickup_method', 
+        const transactionRequiredFields = ['id', 'business_id', 'user_id', 'payment_method', 'pickup_method',
           'total_amount', 'final_amount', 'amount_received', 'payment_method_id', 'created_at'];
         const missingFields = validateNotNullFields(transactionData, transactionRequiredFields);
         if (missingFields.length > 0) {
@@ -532,34 +533,34 @@ class SmartSyncService {
           receipt_number: transactionData.receipt_number,
           table_id: transactionData.table_id,
           created_at: transactionData.created_at,
-          customizations_count: Array.isArray(transactionData.transaction_item_customizations) 
-            ? transactionData.transaction_item_customizations.length 
+          customizations_count: Array.isArray(transactionData.transaction_item_customizations)
+            ? transactionData.transaction_item_customizations.length
             : 0,
-          options_count: Array.isArray(transactionData.transaction_item_customization_options) 
-            ? transactionData.transaction_item_customization_options.length 
+          options_count: Array.isArray(transactionData.transaction_item_customization_options)
+            ? transactionData.transaction_item_customization_options.length
             : 0,
-          activity_logs_count: Array.isArray(transactionData.activity_logs) 
-            ? transactionData.activity_logs.length 
+          activity_logs_count: Array.isArray(transactionData.activity_logs)
+            ? transactionData.activity_logs.length
             : 0,
         });
 
         // Log full payload structure (summary)
         console.log(`📋 [SMART SYNC] Transaction payload structure:`, {
           topLevelKeys: Object.keys(transactionData),
-          items: Array.isArray(transactionData.items) 
+          items: Array.isArray(transactionData.items)
             ? transactionData.items.map((item: UnknownRecord) => ({
-                id: item.id,
-                product_id: item.product_id,
-                quantity: item.quantity,
-                unit_price: item.unit_price,
-                total_price: item.total_price,
-                has_custom_note: !!item.custom_note,
-                has_bundle_selections: !!item.bundle_selections_json,
-              }))
+              id: item.id,
+              product_id: item.product_id,
+              quantity: item.quantity,
+              unit_price: item.unit_price,
+              total_price: item.total_price,
+              has_custom_note: !!item.custom_note,
+              has_bundle_selections: !!item.bundle_selections_json,
+            }))
             : [],
-          hasCustomizations: Array.isArray(transactionData.transaction_item_customizations) && 
+          hasCustomizations: Array.isArray(transactionData.transaction_item_customizations) &&
             transactionData.transaction_item_customizations.length > 0,
-          hasOptions: Array.isArray(transactionData.transaction_item_customization_options) && 
+          hasOptions: Array.isArray(transactionData.transaction_item_customization_options) &&
             transactionData.transaction_item_customization_options.length > 0,
         });
 
@@ -574,7 +575,7 @@ class SmartSyncService {
           is_object: typeof paymentMethodValue === 'object' && paymentMethodValue !== null,
           object_stringified: typeof paymentMethodValue === 'object' ? JSON.stringify(paymentMethodValue) : 'N/A',
         });
-        
+
         // Log full payload (truncated for readability, but more than before)
         const fullPayloadStr = JSON.stringify(transactionData, null, 2);
         console.log(`📦 [SMART SYNC] Full transaction payload (first 2000 chars):`, fullPayloadStr.substring(0, 2000));
@@ -609,21 +610,21 @@ class SmartSyncService {
                   // Production status columns (CRITICAL - updated by Kitchen/Barista)
                   production_status: item.production_status as string | null | undefined,
                   production_started_at: item.production_started_at ? (
-                    typeof item.production_started_at === 'string' 
-                      ? item.production_started_at.replace('T', ' ').slice(0, 19) 
+                    typeof item.production_started_at === 'string'
+                      ? item.production_started_at.replace('T', ' ').slice(0, 19)
                       : item.production_started_at
                   ) : null,
                   production_finished_at: item.production_finished_at ? (
-                    typeof item.production_finished_at === 'string' 
-                      ? item.production_finished_at.replace('T', ' ').slice(0, 19) 
+                    typeof item.production_finished_at === 'string'
+                      ? item.production_finished_at.replace('T', ' ').slice(0, 19)
                       : item.production_finished_at
                   ) : null,
                 };
 
                 // Add created_at if it exists (convert to MySQL format)
                 if (item.created_at) {
-                  itemData.created_at = typeof item.created_at === 'string' 
-                    ? item.created_at.replace('T', ' ').slice(0, 19) 
+                  itemData.created_at = typeof item.created_at === 'string'
+                    ? item.created_at.replace('T', ' ').slice(0, 19)
                     : item.created_at;
                 }
 
@@ -633,7 +634,7 @@ class SmartSyncService {
             }
 
             // Fetch normalized customizations
-            
+
             const normalizedCustomizations = await (electronAPI.localDbGetTransactionItemCustomizationsNormalized as (transactionId: string) => Promise<{
               customizations: Array<{
                 id: number;
@@ -659,7 +660,7 @@ class SmartSyncService {
 
             // Log customization details for debugging
             console.log(`✅ [SMART SYNC] Added ${normalizedCustomizations.customizations.length} customizations and ${normalizedCustomizations.options.length} options to transaction ${transactionData.id}`);
-            
+
             // Debug: Log customization details to detect if all options are being sent
             if (normalizedCustomizations.customizations.length > 0) {
               const customizationDetails = normalizedCustomizations.customizations.map(cust => {
@@ -674,7 +675,7 @@ class SmartSyncService {
                 };
               });
               console.log(`🔍 [SMART SYNC] Customization details:`, JSON.stringify(customizationDetails, null, 2));
-              
+
               // Warn if there are suspiciously many options (might indicate all options are stored)
               const totalOptions = normalizedCustomizations.options.length;
               const totalCustomizations = normalizedCustomizations.customizations.length;
@@ -708,17 +709,17 @@ class SmartSyncService {
                   business_id: log.business_id,
                   details: log.details,
                 };
-                
+
                 // Format created_at
                 if (log.created_at) {
-                  formattedLog.created_at = typeof log.created_at === 'string' 
-                    ? log.created_at.replace('T', ' ').slice(0, 19) 
+                  formattedLog.created_at = typeof log.created_at === 'string'
+                    ? log.created_at.replace('T', ' ').slice(0, 19)
                     : log.created_at;
                 }
-                
+
                 return formattedLog;
               });
-              
+
               transactionData.activity_logs = formattedActivityLogs;
               console.log(`✅ [SMART SYNC] Added ${formattedActivityLogs.length} activity log(s) for transaction ${transactionData.id}`);
             }
@@ -739,19 +740,19 @@ class SmartSyncService {
                   if (log.details) {
                     try {
                       const details = typeof log.details === 'string' ? JSON.parse(log.details) : log.details;
-                      return details.transaction_id === transactionIdStr || 
-                             details.transaction_id === transactionData.uuid_id ||
-                             String(details.transaction_id) === transactionIdStr;
+                      return details.transaction_id === transactionIdStr ||
+                        details.transaction_id === transactionData.uuid_id ||
+                        String(details.transaction_id) === transactionIdStr;
                     } catch {
                       // If details is not JSON, check if it contains transaction ID as string
                       const detailsStr = String(log.details);
-                      return detailsStr.includes(transactionIdStr) || 
-                             (transactionData.uuid_id && detailsStr.includes(String(transactionData.uuid_id)));
+                      return detailsStr.includes(transactionIdStr) ||
+                        (transactionData.uuid_id && detailsStr.includes(String(transactionData.uuid_id)));
                     }
                   }
                   return false;
                 });
-                
+
                 if (relatedLogs.length > 0) {
                   const formattedActivityLogs = relatedLogs.map((log: UnknownRecord) => {
                     const formattedLog: UnknownRecord = {
@@ -761,16 +762,16 @@ class SmartSyncService {
                       business_id: log.business_id,
                       details: log.details,
                     };
-                    
+
                     if (log.created_at) {
-                      formattedLog.created_at = typeof log.created_at === 'string' 
-                        ? log.created_at.replace('T', ' ').slice(0, 19) 
+                      formattedLog.created_at = typeof log.created_at === 'string'
+                        ? log.created_at.replace('T', ' ').slice(0, 19)
                         : log.created_at;
                     }
-                    
+
                     return formattedLog;
                   });
-                  
+
                   transactionData.activity_logs = formattedActivityLogs;
                   console.log(`✅ [SMART SYNC] Added ${formattedActivityLogs.length} activity log(s) for transaction ${transactionData.id} (via fallback method)`);
                 }
@@ -784,7 +785,7 @@ class SmartSyncService {
         // Send to server
         const startTime = Date.now();
         const apiUrl = getApiUrl('/api/transactions');
-        
+
         console.log(`🌐 [SMART SYNC] Sending transaction ${transaction.id} to server:`, {
           url: apiUrl,
           transactionId: transaction.id,
@@ -798,7 +799,7 @@ class SmartSyncService {
             'Content-Type': 'application/json',
           },
           body: JSON.stringify(transactionData),
-        });const responseTime = Date.now() - startTime;
+        }); const responseTime = Date.now() - startTime;
         this.serverLoadHistory.push(responseTime);
 
         console.log(`📥 [SMART SYNC] Server response for transaction ${transaction.id}:`, {
@@ -825,7 +826,7 @@ class SmartSyncService {
             },
             fullResult: result,
           });
-          
+
           // Log server confirmation details for verification
           if (result.success) {
             console.log(`🔍 [SMART SYNC] Server confirmed transaction:`, {
@@ -888,8 +889,8 @@ class SmartSyncService {
               const errorStr = String(errorBody.error || '').toLowerCase();
               const messageStr = String(errorBody.message || '').toLowerCase();
               const errorMessageStr = String(errorMessage || '').toLowerCase();
-              const isDuplicate = response.status === 409 || 
-                errorStr.includes('duplicate') || 
+              const isDuplicate = response.status === 409 ||
+                errorStr.includes('duplicate') ||
                 errorStr.includes('already exists') ||
                 messageStr.includes('duplicate') ||
                 messageStr.includes('already exists') ||
@@ -1041,17 +1042,20 @@ class SmartSyncService {
    * Force immediate sync (for manual trigger)
    * Returns sync result with count of synced transactions
    */
-  async forceSync(): Promise<{ success: boolean; syncedCount: number; message: string }> {console.log('🔘 [SMART SYNC] forceSync() called manually', {
+  async forceSync(): Promise<{ success: boolean; syncedCount: number; message: string }> {
+    console.log('🔘 [SMART SYNC] forceSync() called manually', {
       isOnline: this.isOnline,
       isSyncing: this.isSyncing,
       timestamp: new Date().toISOString()
     });
 
-    if (!this.isOnline) {return { success: false, syncedCount: 0, message: 'Offline - cannot sync' };
+    if (!this.isOnline) {
+      return { success: false, syncedCount: 0, message: 'Offline - cannot sync' };
     }
 
-    if (this.isSyncing) {return { success: false, syncedCount: 0, message: 'Sync already in progress' };
-    }const result = await this.syncPendingTransactions();
+    if (this.isSyncing) {
+      return { success: false, syncedCount: 0, message: 'Sync already in progress' };
+    } const result = await this.syncPendingTransactions();
     return result;
   }
 
@@ -1106,9 +1110,9 @@ class SmartSyncService {
    * Re-sync ALL transactions (regardless of sync_status)
    * This forces a re-upload of all transactions to the server
    */
-  async resyncAllTransactions(businessId?: number, onProgress?: (progress: { current: number; total: number; transactionId: string | number; status: string }) => void): Promise<{ success: boolean; syncedCount: number; skippedCount: number; failedCount: number; message: string }> {
+  async resyncAllTransactions(businessId?: number, onProgress?: (progress: { current: number; total: number; transactionId: string | number; status: string }) => void | null, from?: string, to?: string): Promise<{ success: boolean; syncedCount: number; skippedCount: number; failedCount: number; message: string }> {
 
-    console.log('🔄 [RE-SYNC] Starting re-sync of ALL transactions', { businessId, isElectron, isOnline: this.isOnline });
+    console.log('🔄 [RE-SYNC] Starting re-sync of ALL transactions', { businessId, from, to, isElectron, isOnline: this.isOnline });
 
     if (!isElectron || !this.isOnline) {
       const message = !isElectron ? 'Not Electron' : 'Offline';
@@ -1122,8 +1126,8 @@ class SmartSyncService {
     }
 
     try {
-      // Get ALL transactions (not just unsynced)
-      const allTransactions = await (electronAPI.localDbGetAllTransactions as (businessId?: number) => Promise<PendingTransaction[]>)(businessId);
+      // Get ALL transactions (not just unsynced), filtered by date range if provided
+      const allTransactions = await (electronAPI.localDbGetAllTransactions as (businessId?: number, from?: string, to?: string) => Promise<PendingTransaction[]>)(businessId, from, to);
       console.log(`📦 [RE-SYNC] Found ${allTransactions.length} transactions to re-sync`);
 
       let syncedCount = 0;
@@ -1225,11 +1229,11 @@ class SmartSyncService {
       // Format shifts for server (server expects { shifts: [...] })
       const formattedShifts = unsyncedShifts.map(shift => {
         const shiftRecord = shift as unknown as UnknownRecord;
-        
+
         // Phase 2: Validate NOT NULL constraints for shifts
         const shiftRequiredFields = ['uuid_id', 'business_id', 'user_id', 'shift_start'];
         const missingFields = validateNotNullFields(shiftRecord, shiftRequiredFields);
-        
+
         if (missingFields.length > 0) {
           console.warn(`⚠️ [SMART SYNC] Shift missing required fields: ${missingFields.join(', ')}`);
           return null; // Will be filtered out
@@ -1299,7 +1303,7 @@ class SmartSyncService {
             },
             fullResult: result,
           });
-          
+
           const syncedShiftIds: number[] = unsyncedShifts.map(s => (s as UnknownRecord).id).filter((id): id is number => typeof id === 'number');
 
           if (syncedShiftIds.length > 0 && electronAPI?.localDbMarkShiftsSynced) {
@@ -1360,7 +1364,7 @@ class SmartSyncService {
       for (let i = 0; i < pendingRefunds.length; i++) {
         const refund = pendingRefunds[i];
         console.log(`🔄 [SMART SYNC] Processing refund ${i + 1}/${pendingRefunds.length}: ${refund.id}`);
-        
+
         let transactionUuid: string = '';
         try {
           const payload = typeof refund.refund_data === 'string'
@@ -1372,10 +1376,10 @@ class SmartSyncService {
           }
 
           // Phase 2: Validate NOT NULL constraints for refunds
-          const refundRequiredFields = ['transaction_uuid', 'business_id', 'refunded_by', 'refund_amount', 
+          const refundRequiredFields = ['transaction_uuid', 'business_id', 'refunded_by', 'refund_amount',
             'payment_method_id', 'refunded_at'];
           const missingFields = validateNotNullFields(payload, refundRequiredFields);
-          
+
           if (missingFields.length > 0) {
             console.warn(`⚠️ [SMART SYNC] Refund ${refund.id} missing required fields: ${missingFields.join(', ')}`);
             await (electronAPI.localDbMarkRefundFailed as (id: number) => Promise<{ success: boolean }>)(refund.id);
@@ -1397,17 +1401,17 @@ class SmartSyncService {
 
           // Phase 2 Part 2: Clean and validate refund data (ENUMs, dates, etc.)
           const cleanedPayload = cleanRefundForMySQL(payload);
-          
+
           // Ensure refunded_at exists (required by MySQL)
           if (!cleanedPayload.refunded_at) {
             cleanedPayload.refunded_at = new Date().toISOString().slice(0, 19).replace('T', ' ');
           }
-          
+
           // Update payload with cleaned data
           Object.assign(payload, cleanedPayload);
 
           // #region agent log
-          fetch('http://127.0.0.1:7243/ingest/c52d9ed7-b40f-421d-845b-2964011203fd',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'smartSync.ts:refund-pre-send',message:'Refund request payload and URL',data:{refundId:refund.id,transactionUuid,refundUrl:getApiUrl(`/api/transactions/${transactionUuid}/refund`),payloadKeys:Object.keys(payload),refund_amount:payload.refund_amount,refund_amount_type:typeof payload.refund_amount,payment_method_id:payload.payment_method_id,payment_method_id_type:typeof payload.payment_method_id,refunded_at:payload.refunded_at,refund_type:payload.refund_type,status:payload.status,fullPayload:payload},timestamp:Date.now(),sessionId:'debug-session',hypothesisId:'A'})}).catch(()=>{});
+          fetch('http://127.0.0.1:7243/ingest/c52d9ed7-b40f-421d-845b-2964011203fd', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ location: 'smartSync.ts:refund-pre-send', message: 'Refund request payload and URL', data: { refundId: refund.id, transactionUuid, refundUrl: getApiUrl(`/api/transactions/${transactionUuid}/refund`), payloadKeys: Object.keys(payload), refund_amount: payload.refund_amount, refund_amount_type: typeof payload.refund_amount, payment_method_id: payload.payment_method_id, payment_method_id_type: typeof payload.payment_method_id, refunded_at: payload.refunded_at, refund_type: payload.refund_type, status: payload.status, fullPayload: payload }, timestamp: Date.now(), sessionId: 'debug-session', hypothesisId: 'A' }) }).catch(() => { });
           // #endregion
 
           const refundUrl = getApiUrl(`/api/transactions/${transactionUuid}/refund`);
@@ -1455,7 +1459,7 @@ class SmartSyncService {
                 // Not JSON, use as text
               }
               // #region agent log
-              fetch('http://127.0.0.1:7243/ingest/c52d9ed7-b40f-421d-845b-2964011203fd',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'smartSync.ts:refund-error',message:'Refund 500 server response body',data:{refundId:refund.id,status:response.status,statusText:response.statusText,errorText:errorText,errorBody:errorBody},timestamp:Date.now(),sessionId:'debug-session',hypothesisId:'B'})}).catch(()=>{});
+              fetch('http://127.0.0.1:7243/ingest/c52d9ed7-b40f-421d-845b-2964011203fd', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ location: 'smartSync.ts:refund-error', message: 'Refund 500 server response body', data: { refundId: refund.id, status: response.status, statusText: response.statusText, errorText: errorText, errorBody: errorBody }, timestamp: Date.now(), sessionId: 'debug-session', hypothesisId: 'B' }) }).catch(() => { });
               // #endregion
               const errMsg = String(errorBody?.error ?? errorBody?.message ?? errorText);
 
@@ -1538,8 +1542,8 @@ class SmartSyncService {
             resultSummary: {
               success: result.success,
               message: result.message,
-              refundId: result.refund && typeof result.refund === 'object' && 'id' in result.refund 
-                ? (result.refund as { id: unknown }).id 
+              refundId: result.refund && typeof result.refund === 'object' && 'id' in result.refund
+                ? (result.refund as { id: unknown }).id
                 : undefined,
             },
             fullResult: result,
@@ -1556,7 +1560,7 @@ class SmartSyncService {
               ? JSON.parse(refund.refund_data) as UnknownRecord
               : (refund.refund_data as UnknownRecord);
             const localRefundUuid = refundData.uuid_id as string;
-            
+
             // Only update the refund record's synced_at, do NOT update transaction
             // Pass empty transactionUpdate object to skip transaction update
             await (electronAPI.localDbApplyTransactionRefund as (payload: UnknownRecord) => Promise<unknown>)({
@@ -1660,7 +1664,7 @@ class SmartSyncService {
                 .filter((id) => !isNaN(id))
             );
         };
-        
+
         if (electronAPI.localDbMarkPrinterAuditsSynced) {
           await (electronAPI.localDbMarkPrinterAuditsSynced as (payload: { p1Ids: number[]; p2Ids: number[] }) => Promise<{ success: boolean }>)?.({
             p1Ids: toIdArray(printer1Audits),

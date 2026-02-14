@@ -27,7 +27,8 @@
   }
 }
 
-html, body {
+html,
+body {
   overflow: hidden;
   height: 100%;
   margin: 0;
@@ -59,7 +60,8 @@ body {
 *::-webkit-scrollbar-thumb {
   background: var(--scrollbar-thumb);
   border-radius: 999px;
-  min-height: 40px; /* Keeps thumb usable on touch/small viewports */
+  min-height: 40px;
+  /* Keeps thumb usable on touch/small viewports */
 }
 
 *::-webkit-scrollbar-thumb:hover {
@@ -76,14 +78,17 @@ body {
     opacity: 0;
     transform: translateY(-10px);
   }
+
   20% {
     opacity: 1;
     transform: translateY(0);
   }
+
   80% {
     opacity: 1;
     transform: translateY(0);
   }
+
   100% {
     opacity: 0;
     transform: translateY(-10px);
@@ -101,6 +106,8 @@ body {
 
 /* Hide scrollbar for IE, Edge and Firefox */
 .scrollbar-hide {
-  -ms-overflow-style: none;  /* IE and Edge */
-  scrollbar-width: none;  /* Firefox */
+  -ms-overflow-style: none;
+  /* IE and Edge */
+  scrollbar-width: none;
+  /* Firefox */
 }

@@ -6,7 +6,7 @@ import { useAuth } from '@/hooks/useAuth';
 import { isSuperAdmin } from '@/lib/auth';
 import POSLayout from '@/components/POSLayout';
 import OfflineStatus from '@/components/OfflineStatus';
-import { LogOut, X, RefreshCw, Monitor, Download } from 'lucide-react';
+import { LogOut, X, RefreshCw, Monitor, Download, Loader2 } from 'lucide-react';
 import { databaseHealthService } from '@/lib/databaseHealth';
 import { smartSyncService } from '@/lib/smartSync';
 import { offlineSyncService } from '@/lib/offlineSync';
@@ -220,7 +220,7 @@ export default function Home() {
   return (
     <div className="h-screen flex flex-col overflow-hidden">
       {/* Top Bar with User Info and Logout - Windows XP Style */}
-      <div 
+      <div
         className="h-[30px] flex items-center justify-between relative border-b-2 border-[#245edb]"
         style={{
           background: 'linear-gradient(to bottom, #3a6ea5 0%, #245edb 50%, #1e4a8f 100%)',
@@ -398,7 +398,11 @@ export default function Home() {
               }}
               title="Download master data"
             >
-              <Download className={`w-[10px] h-[10px] ${isDownloading ? 'animate-spin' : ''}`} style={{ color: '#000000' }} strokeWidth={2.5} />
+              {isDownloading ? (
+                <Loader2 className="w-[10px] h-[10px] animate-spin" style={{ color: '#000000' }} strokeWidth={2.5} />
+              ) : (
+                <Download className="w-[10px] h-[10px]" style={{ color: '#000000' }} strokeWidth={2.5} />
+              )}
             </button>
           )}
           <div className="w-[1px] h-[20px] bg-[#1e4a8f]" style={{ boxShadow: '1px 0 0 rgba(255,255,255,0.1)' }}></div>

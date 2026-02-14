@@ -1,6 +1,7 @@
 const fs = require('fs');
 const path = require('path');
 
+// To change the app icon: replace public/256x256.png with your image (256x256 recommended), then run: npm run build-icon
 const pngPath = path.join(__dirname, '..', 'public', '256x256.png');
 const icoPath = path.join(__dirname, '..', 'public', 'pictos.ico');
 

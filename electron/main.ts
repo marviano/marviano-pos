@@ -941,6 +941,13 @@ function createWindows(): void {
     console.log('❌ No secondary display detected');
   }
 
+  // App icon path (so replacing public/256x256.png takes effect without rebuilding .exe)
+  const iconPath = path.join(__dirname, '../public/256x256.png');
+  const iconPathIco = path.join(__dirname, '../public/Momoyo.ico');
+  const iconPathPictos = path.join(__dirname, '../public/pictos.ico');
+  const appIcon = fs.existsSync(iconPathIco) ? iconPathIco
+    : (fs.existsSync(iconPathPictos) ? iconPathPictos : (fs.existsSync(iconPath) ? iconPath : undefined));
+
   // Create main POS window (cashier display)
   // Start with login size (800x432), will be resized after successful login
   mainWindow = new BrowserWindow({
@@ -952,6 +959,7 @@ function createWindows(): void {
     title: 'Pictos - Login',
     frame: false,
     backgroundColor: '#111827',
+    ...(appIcon ? { icon: appIcon } : {}),
     movable: true,
     resizable: false, // Don't allow resizing on login
     webPreferences: {
@@ -4646,7 +4654,7 @@ function createWindows(): void {
   });
 
   // Get ALL transactions (for re-sync purposes)
-  ipcMain.handle('localdb-get-all-transactions', async (event, businessId?: number) => {
+  ipcMain.handle('localdb-get-all-transactions', async (event, businessId?: number, from?: string, to?: string) => {
     try {
       let query = `
         SELECT 
@@ -4667,6 +4675,25 @@ function createWindows(): void {
       if (businessId) {
         query += ' AND t.business_id = ?';
         params.push(businessId);
+      }
+
+      const ensureIsoString = (value?: string | null): string | null => {
+        if (!value) return null;
+        const date = new Date(value);
+        if (Number.isNaN(date.getTime())) return null;
+        return date.toISOString();
+      };
+
+      const startIso = ensureIsoString(from);
+      const endIso = ensureIsoString(to);
+
+      if (startIso) {
+        query += ' AND t.created_at >= ?';
+        params.push(toMySQLDateTime(startIso));
+      }
+      if (endIso) {
+        query += ' AND t.created_at <= ?';
+        params.push(toMySQLDateTime(endIso)); // Include the entire end date (e.g. if time is 00:00:00, equal might miss end of day if caller doesn't handle it. But toMySQLDateTime usually handles it if input is correct. Assuming caller passes end of day or date only)
       }
 
       query += ' ORDER BY t.created_at DESC';
@@ -5755,6 +5782,210 @@ function createWindows(): void {
     } catch (error) {
       console.error('Error getting transaction refunds:', error);
       return [];
+    }
+  });
+
+  /** Waiters Performance Report: aggregated metrics per waiter for completed transactions in date range.
+   * Excludes cancelled items, deducts refunds proportionally from revenue.
+   * Returns: waiters (waiter_id, waiter_name, color, total_items_sold, total_revenue, transaction_count, avg_transaction_value, top_products). */
+  ipcMain.handle('localdb-get-waiter-performance-report', async (
+    _event,
+    payload: { businessId: number; startDate: string; endDate: string }
+  ) => {
+    try {
+      await ensureTransactionItemsWaiterIdColumn();
+      const { businessId, startDate, endDate } = payload || {};
+      if (!businessId) {
+        return { waiters: [], topProductsLimit: 5 };
+      }
+
+      const startIso = startDate ? (startDate.includes('T') ? startDate : `${startDate}T00:00:00`) : null;
+      const endIso = endDate ? (endDate.includes('T') ? endDate : `${endDate}T23:59:59`) : null;
+
+      // 1. Get all completed transactions in date range for this business
+      let txQuery = `
+        SELECT t.uuid_id, t.id as tx_int_id, t.final_amount, t.created_at
+        FROM transactions t
+        WHERE t.business_id = ? AND t.status = 'completed'
+      `;
+      const txParams: (string | number)[] = [businessId];
+      if (startIso != null) {
+        txQuery += ' AND t.created_at >= ?';
+        txParams.push(toMySQLDateTime(startIso) ?? '');
+      }
+      if (endIso != null) {
+        txQuery += ' AND t.created_at <= ?';
+        txParams.push(toMySQLDateTime(endIso) ?? '');
+      }
+
+      const transactions = await executeQuery<{ uuid_id: string; tx_int_id: number; final_amount: number; created_at: string }>(txQuery, txParams);
+      if (transactions.length === 0) {
+        return { waiters: [], topProductsLimit: 5 };
+      }
+
+      const txUuids = transactions.map(t => t.uuid_id);
+      const txById = new Map(transactions.map(t => [t.uuid_id, t]));
+
+      // 2. Get refund total per transaction
+      const placeholders = txUuids.map(() => '?').join(',');
+      const refundRows = await executeQuery<{ transaction_uuid: string; total_refund: number }>(
+        `SELECT transaction_uuid, SUM(refund_amount) as total_refund
+         FROM transaction_refunds
+         WHERE transaction_uuid IN (${placeholders}) AND status IN ('pending', 'completed')
+         GROUP BY transaction_uuid`,
+        txUuids
+      );
+      const refundByTx = new Map<string, number>();
+      for (const r of refundRows) {
+        refundByTx.set(r.transaction_uuid, Number(r.total_refund) || 0);
+      }
+
+      // 3. Compute per-transaction total (all non-cancelled items) for refund proportion
+      const txTotalQuery = `
+        SELECT ti.uuid_transaction_id, COALESCE(SUM(ti.total_price), 0) as items_total
+        FROM transaction_items ti
+        WHERE ti.uuid_transaction_id IN (${placeholders})
+          AND (ti.production_status IS NULL OR ti.production_status != 'cancelled')
+        GROUP BY ti.uuid_transaction_id
+      `;
+      const txTotalRows = await executeQuery<{ uuid_transaction_id: string; items_total: number }>(txTotalQuery, txUuids);
+      const txItemsTotal = new Map<string, number>();
+      for (const r of txTotalRows) {
+        txItemsTotal.set(r.uuid_transaction_id, Number(r.items_total) || 0);
+      }
+
+      // 4. Get items: waiter_id, transaction_uuid, product_id, quantity, total_price (exclude cancelled)
+      const itemsQuery = `
+        SELECT ti.waiter_id, ti.uuid_transaction_id, ti.product_id, ti.quantity, ti.total_price, COALESCE(p.nama, 'Unknown') as product_name
+        FROM transaction_items ti
+        LEFT JOIN products p ON ti.product_id = p.id
+        INNER JOIN transactions t ON ti.uuid_transaction_id = t.uuid_id AND t.id = ti.transaction_id
+        WHERE ti.uuid_transaction_id IN (${placeholders})
+          AND (ti.production_status IS NULL OR ti.production_status != 'cancelled')
+          AND ti.waiter_id IS NOT NULL
+      `;
+      const items = await executeQuery<{
+        waiter_id: number;
+        uuid_transaction_id: string;
+        product_id: number;
+        quantity: number;
+        total_price: number;
+        product_name: string;
+      }>(itemsQuery, txUuids);
+
+      // 5. Aggregate per waiter (items only - waiter items)
+      type WaiterAgg = {
+        waiter_id: number;
+        total_items_sold: number;
+        gross_revenue: number;
+        transaction_ids: Set<string>;
+        products: Map<number, { product_name: string; quantity: number; revenue: number }>;
+      };
+      const waiterAgg = new Map<number, WaiterAgg>();
+
+      for (const it of items) {
+        const wid = it.waiter_id;
+        if (!waiterAgg.has(wid)) {
+          waiterAgg.set(wid, {
+            waiter_id: wid,
+            total_items_sold: 0,
+            gross_revenue: 0,
+            transaction_ids: new Set(),
+            products: new Map(),
+          });
+        }
+        const agg = waiterAgg.get(wid)!;
+        agg.total_items_sold += Number(it.quantity) || 0;
+        const rev = Number(it.total_price) || 0;
+        agg.gross_revenue += rev;
+        agg.transaction_ids.add(it.uuid_transaction_id);
+
+        const pid = it.product_id;
+        if (!agg.products.has(pid)) {
+          agg.products.set(pid, { product_name: it.product_name, quantity: 0, revenue: 0 });
+        }
+        const prod = agg.products.get(pid)!;
+        prod.quantity += Number(it.quantity) || 0;
+        prod.revenue += rev;
+      }
+
+      // 6. Deduct proportional refunds per waiter per transaction (waiter's share of items * refund)
+      for (const [wid, agg] of waiterAgg) {
+        let totalRefundDeduction = 0;
+        for (const txUuid of agg.transaction_ids) {
+          const tx = txById.get(txUuid);
+          const refund = refundByTx.get(txUuid) || 0;
+          if (!tx || refund <= 0) continue;
+          const txTotal = txItemsTotal.get(txUuid) || 1;
+          const waiterShare = agg.gross_revenue > 0 ? 1 : 0;
+          // Proportional: waiter's share of this tx's items / tx total items * refund
+          let waiterTxRevenue = 0;
+          for (const it of items) {
+            if (it.waiter_id === wid && it.uuid_transaction_id === txUuid) {
+              waiterTxRevenue += Number(it.total_price) || 0;
+            }
+          }
+          const proportion = txTotal > 0 ? waiterTxRevenue / txTotal : 0;
+          totalRefundDeduction += proportion * refund;
+        }
+        (agg as WaiterAgg & { net_revenue: number }).net_revenue = Math.max(0, agg.gross_revenue - totalRefundDeduction);
+      }
+
+      // 7. Get employee names and colors
+      const waiterIds = Array.from(waiterAgg.keys());
+      const empPlaceholders = waiterIds.map(() => '?').join(',');
+      const employees = await executeQuery<{ id: number; nama_karyawan: string; color: string | null }>(
+        `SELECT id, nama_karyawan, color FROM employees WHERE id IN (${empPlaceholders})`,
+        waiterIds
+      );
+      const empMap = new Map(employees.map(e => [e.id, { name: e.nama_karyawan, color: e.color }]));
+
+      // 8. Build result: sort by net_revenue desc, add rank and top products
+      const TOP_PRODUCTS_LIMIT = 5;
+      const waitersResult: Array<{
+        waiter_id: number;
+        waiter_name: string;
+        color: string | null;
+        total_items_sold: number;
+        total_revenue: number;
+        transaction_count: number;
+        avg_transaction_value: number;
+        rank: number;
+        top_products: Array<{ product_id: number; product_name: string; total_quantity: number; total_revenue: number }>;
+      }> = [];
+
+      const sorted = Array.from(waiterAgg.entries())
+        .map(([wid, a]) => ({
+          wid,
+          ...a,
+          net_revenue: (a as WaiterAgg & { net_revenue?: number }).net_revenue ?? a.gross_revenue,
+        }))
+        .sort((a, b) => b.net_revenue - a.net_revenue);
+
+      sorted.forEach((w, idx) => {
+        const emp = empMap.get(w.wid);
+        const topProducts = Array.from(w.products.entries())
+          .map(([pid, p]) => ({ product_id: pid, ...p, total_quantity: p.quantity, total_revenue: p.revenue }))
+          .sort((a, b) => b.total_revenue - a.total_revenue)
+          .slice(0, TOP_PRODUCTS_LIMIT);
+
+        waitersResult.push({
+          waiter_id: w.wid,
+          waiter_name: emp?.name ?? `Waiter #${w.wid}`,
+          color: emp?.color ?? null,
+          total_items_sold: w.total_items_sold,
+          total_revenue: w.net_revenue,
+          transaction_count: w.transaction_ids.size,
+          avg_transaction_value: w.transaction_ids.size > 0 ? w.net_revenue / w.transaction_ids.size : 0,
+          rank: idx + 1,
+          top_products: topProducts,
+        });
+      });
+
+      return { waiters: waitersResult, topProductsLimit: TOP_PRODUCTS_LIMIT };
+    } catch (error) {
+      console.error('Error getting waiter performance report:', error);
+      return { waiters: [], topProductsLimit: 5 };
     }
   });
 

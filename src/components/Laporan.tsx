@@ -1,11 +1,12 @@
 'use client';
 
 import { useState } from 'react';
-import { Clock, FileText, Receipt, XCircle, Scissors } from 'lucide-react';
+import { Clock, FileText, Receipt, XCircle, Scissors, Users } from 'lucide-react';
 import ShiftReport from './ShiftReport';
 import TransactionsReport from './TransactionsReport';
 import CancelledItemsReport from './CancelledItemsReport';
 import SplitBillReport from './SplitBillReport';
+import WaitersReport from './WaitersReport';
 
 export default function Laporan() {
   const [activeTab, setActiveTab] = useState('shift');
@@ -20,6 +21,8 @@ export default function Laporan() {
         return <CancelledItemsReport />;
       case 'splitbill':
         return <SplitBillReport />;
+      case 'waiters':
+        return <WaitersReport />;
       default:
         return (
           <div className="flex-1 flex items-center justify-center">
@@ -78,6 +81,17 @@ export default function Laporan() {
           >
             <Scissors className="w-4 h-4" />
             <span>Split Bill/Pindah Meja</span>
+          </button>
+          <button
+            onClick={() => setActiveTab('waiters')}
+            className={`flex items-center space-x-2 px-4 py-3 text-sm font-medium transition-colors border-b-2 -mb-px ${
+              activeTab === 'waiters'
+                ? 'border-blue-600 text-blue-600 bg-white'
+                : 'border-transparent text-gray-600 hover:text-gray-900 hover:border-gray-300'
+            }`}
+          >
+            <Users className="w-4 h-4" />
+            <span>Waiters</span>
           </button>
           <button
             disabled

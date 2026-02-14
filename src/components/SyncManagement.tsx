@@ -13,7 +13,11 @@ import {
   X,
   Copy,
   Check,
-  Download
+  Download,
+  Upload,
+  Search,
+  Monitor,
+  Loader2
 } from 'lucide-react';
 import { offlineSyncService } from '@/lib/offlineSync';
 import { smartSyncService } from '@/lib/smartSync';
@@ -287,6 +291,8 @@ export default function SyncManagement() {
   const [showOrphanedData, setShowOrphanedData] = useState(false);
   const [dangerFrom, setDangerFrom] = useState<string>('');
   const [dangerTo, setDangerTo] = useState<string>('');
+  const [resyncFrom, setResyncFrom] = useState<string>('');
+  const [resyncTo, setResyncTo] = useState<string>('');
   const [copiedSqlPreview, setCopiedSqlPreview] = useState<string | null>(null);
   const [isResyncing, setIsResyncing] = useState(false);
   const [resyncProgress, setResyncProgress] = useState<{ current: number; total: number; transactionId: string | number; status: string } | null>(null);
@@ -1357,10 +1363,14 @@ export default function SyncManagement() {
       return;
     }
 
-    const confirmMessage = `🔄 RE-SYNC SEMUA TRANSAKSI\n\n` +
-      `Anda akan mengunggah ulang SEMUA transaksi dari Pictos ke salespulse.cc.\n\n` +
+    const rangeDesc = (resyncFrom || resyncTo)
+      ? ` (${resyncFrom || 'Awal'} s/d ${resyncTo || 'Akhir'})`
+      : ' (SEMUA WAKTU)';
+
+    const confirmMessage = `🔄 RE-SYNC TRANSAKSI${rangeDesc}\n\n` +
+      `Anda akan mengunggah ulang transaksi dari Pictos ke salespulse.cc sesuai filter tanggal.\n\n` +
       `⚠️ PERINGATAN:\n` +
-      `• Proses ini akan mengunggah ulang semua transaksi (termasuk yang sudah di-sync)\n` +
+      `• Proses ini akan mengunggah ulang transaksi dalam rentang waktu tersebut (termasuk yang sudah di-sync)\n` +
       `• Transaksi yang sudah ada di server akan ditandai sebagai duplicate dan di-skip\n` +
       `• Proses ini mungkin memakan waktu lama tergantung jumlah transaksi\n\n` +
       `Apakah Anda yakin ingin melanjutkan?`;
@@ -1372,15 +1382,23 @@ export default function SyncManagement() {
 
     setIsResyncing(true);
     setResyncProgress(null);
-    addLog('info', '🔄 Memulai re-sync semua transaksi...');
+    addLog('info', `🔄 Memulai re-sync transaksi${rangeDesc}...`);
 
     try {
+      const fromIso = normalizeDateInput(resyncFrom, false) ?? undefined;
+      const toIso = normalizeDateInput(resyncTo, true) ?? undefined;
+
       const result = await smartSyncService.resyncAllTransactions(
         businessId,
         (progress) => {
           setResyncProgress(progress);
-          addLog('info', `📤 Memproses transaksi ${progress.current}/${progress.total}: ${progress.transactionId} - ${progress.status}`);
-        }
+          // Only log every 10 transactions or if status is failed to reduce log spam
+          if (progress.current % 10 === 0 || progress.status === 'failed') {
+            addLog('info', `📤 Memproses transaksi ${progress.current}/${progress.total}: ${progress.transactionId} - ${progress.status}`);
+          }
+        },
+        fromIso,
+        toIso
       );
 
       if (result.success) {
@@ -1401,7 +1419,7 @@ export default function SyncManagement() {
       setIsResyncing(false);
       setResyncProgress(null);
     }
-  }, [businessId, addLog, loadOfflineTransactions, fetchTransactionCounts]);
+  }, [businessId, addLog, loadOfflineTransactions, fetchTransactionCounts, resyncFrom, resyncTo]);
 
   // Download master data from server
   const handleFullSyncClick = useCallback(async () => {
@@ -2212,90 +2230,167 @@ WHERE ${baseWhere};`;
 
             {/* Sync Buttons */}
             <div className="flex gap-2 items-center">
-              {/* Auto Sync Toggle */}
-              <div className="flex items-center gap-2 bg-white rounded-lg shadow-sm border border-gray-200 px-3 py-1">
-                <Activity className="w-4 h-4 text-blue-600 shrink-0" />
-                <div className="min-w-0">
-                  <h3 className="text-xs font-semibold text-gray-900 leading-tight">Auto Sync (Smart Sync)</h3>
-                  <p className="text-[10px] text-gray-500 leading-tight">
-                    Otomatis mengunggah transaksi ke server setiap 30 detik
-                  </p>
+              <div className="flex bg-white rounded-xl shadow-sm border border-gray-200 h-24 overflow-hidden">
+                <div className="flex flex-col w-64 border-r border-gray-100">
+                  {/* Row 1: Auto Sync Toggle */}
+                  <div className="flex-1 flex items-center justify-between px-3 border-b border-gray-100 bg-gray-50/50">
+                    <div className="flex items-center gap-2">
+                      <Activity className="w-3.5 h-3.5 text-blue-600 shrink-0" />
+                      <span className="text-[10px] font-semibold text-gray-700">Auto Sync</span>
+                    </div>
+                    <label className="relative inline-flex items-center cursor-pointer ml-2 shrink-0 scale-75 origin-right">
+                      <input
+                        type="checkbox"
+                        checked={autoSyncEnabled}
+                        onChange={(e) => handleAutoSyncToggle(e.target.checked)}
+                        className="sr-only peer"
+                      />
+                      <div className="w-9 h-5 bg-gray-200 peer-focus:outline-none peer-focus:ring-2 peer-focus:ring-blue-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-blue-600"></div>
+                    </label>
+                  </div>
+
+                  {/* Row 2: Download Master Data Button */}
+                  <button
+                    onClick={handleFullSyncClick}
+                    disabled={syncStatus.syncInProgress || isResyncing}
+                    className={`
+                      flex-1 flex items-center justify-between px-3 transition-colors text-left group
+                      ${syncStatus.syncInProgress || isResyncing
+                        ? 'bg-gray-50 text-gray-400 cursor-not-allowed'
+                        : 'hover:bg-blue-50/50 text-gray-700'
+                      }
+                    `}
+                  >
+                    <div className="flex items-center gap-2">
+                      {syncStatus.syncInProgress ? (
+                        <Loader2 className="w-3.5 h-3.5 shrink-0 text-blue-400 animate-spin" />
+                      ) : (
+                        <Download className="w-3.5 h-3.5 shrink-0 text-blue-600" />
+                      )}
+                      <span className="text-[10px] font-semibold">Download Master Data</span>
+                    </div>
+                    {!syncStatus.syncInProgress && (
+                      <span className="text-[9px] text-gray-400 group-hover:text-blue-500">Run</span>
+                    )}
+                  </button>
                 </div>
-                <label className="relative inline-flex items-center cursor-pointer ml-2 shrink-0">
-                  <input
-                    type="checkbox"
-                    checked={autoSyncEnabled}
-                    onChange={(e) => handleAutoSyncToggle(e.target.checked)}
-                    className="sr-only peer"
-                  />
-                  <div className="w-9 h-5 bg-gray-200 peer-focus:outline-none peer-focus:ring-2 peer-focus:ring-blue-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-blue-600"></div>
-                  <span className="ml-2 text-xs font-medium text-gray-700">
-                    {autoSyncEnabled ? 'Aktif' : 'Nonaktif'}
-                  </span>
-                </label>
               </div>
 
-              <button
-                onClick={handleFullSyncClick}
-                disabled={syncStatus.syncInProgress || isResyncing}
-                className={`
-                  w-24 h-24 flex flex-col items-center justify-center gap-0 py-1 px-0.5 rounded-lg font-medium transition-all text-[10px] shrink-0
-                  ${syncStatus.syncInProgress || isResyncing
-                    ? 'bg-gray-400 text-white cursor-not-allowed'
-                    : 'bg-blue-600 hover:bg-blue-700 text-white'
-                  }
-                `}
-              >
-                {syncStatus.syncInProgress ? (
-                  <>
-                    <Download className="w-3 h-3 animate-spin" />
-                    <span className="text-[10px]">Syncing...</span>
-                  </>
-                ) : (
-                  <>
-                    <Download className="w-3 h-3 shrink-0" />
-                    <div className="flex flex-col items-center gap-0 leading-tight">
-                      <span className="font-semibold text-[10px] leading-tight">Download Master Data</span>
-                      <span className="text-[8px] opacity-80 leading-tight">Knowledge Base PoS</span>
-                    </div>
-                  </>
-                )}
-              </button>
+              {/* Re-sync Transaction Controls */}
+              <div className="flex gap-2 items-stretch bg-gray-50 p-1.5 rounded-xl border border-gray-200 h-24">
+                <div className="flex flex-col justify-center gap-1.5 px-0.5">
+                  <div className="flex flex-col gap-0.5">
+                    <label className="text-[9px] text-gray-500 font-semibold uppercase tracking-wider">Dari</label>
+                    <input
+                      type="date"
+                      value={resyncFrom}
+                      onChange={(e) => setResyncFrom(e.target.value)}
+                      className="text-[10px] border border-gray-300 rounded px-1.5 py-1 w-28 focus:ring-1 focus:ring-green-500 focus:border-green-500 outline-none text-black"
+                    />
+                  </div>
+                  <div className="flex flex-col gap-0.5">
+                    <label className="text-[9px] text-gray-500 font-semibold uppercase tracking-wider">Sampai</label>
+                    <input
+                      type="date"
+                      value={resyncTo}
+                      onChange={(e) => setResyncTo(e.target.value)}
+                      className="text-[10px] border border-gray-300 rounded px-1.5 py-1 w-28 focus:ring-1 focus:ring-green-500 focus:border-green-500 outline-none text-black"
+                    />
+                  </div>
+                </div>
 
-              <button
-                onClick={handleResyncAllTransactions}
-                disabled={syncStatus.syncInProgress || isResyncing}
-                className={`
-                  w-24 h-24 flex flex-col items-center justify-center gap-0 py-1 px-0.5 rounded-lg font-medium transition-all text-[10px] shrink-0
-                  ${syncStatus.syncInProgress || isResyncing
-                    ? 'bg-gray-400 text-white cursor-not-allowed'
-                    : 'bg-green-600 hover:bg-green-700 text-white'
-                  }
-                `}
-                title="Re-upload semua transaksi dari Pictos ke salespulse.cc"
-              >
-                {isResyncing ? (
-                  <>
-                    <RefreshCw className="w-3 h-3 animate-spin shrink-0" />
-                    <div className="flex flex-col items-center gap-0 leading-tight">
-                      <span className="font-semibold text-[10px]">Re-syncing...</span>
-                      {resyncProgress && (
-                        <span className="text-[8px] opacity-80 leading-tight">
-                          {resyncProgress.current}/{resyncProgress.total}
-                        </span>
+                <div className="flex flex-col gap-1 h-full">
+                  <button
+                    onClick={handleResyncAllTransactions}
+                    disabled={syncStatus.syncInProgress || isResyncing}
+                    className={`
+                      flex-1 w-24 flex flex-col items-center justify-center gap-1 py-1 px-1 rounded-lg font-medium transition-all text-[10px] shrink-0 shadow-sm
+                      ${syncStatus.syncInProgress || isResyncing
+                        ? 'bg-gray-400 text-white cursor-not-allowed'
+                        : 'bg-green-600 hover:bg-green-700 text-white'
+                      }
+                    `}
+                    title="Re-upload semua transaksi dari Pictos ke salespulse.cc"
+                  >
+                    {isResyncing ? (
+                      <>
+                        <RefreshCw className="w-5 h-5 animate-spin shrink-0" />
+                        <div className="flex flex-col items-center gap-0 leading-tight">
+                          <span className="font-semibold text-[10px]">Re-syncing...</span>
+                          {resyncProgress && (
+                            <span className="text-[9px] opacity-90 leading-tight font-mono mt-0.5 bg-green-700/50 px-1 rounded">
+                              {resyncProgress.current} / {resyncProgress.total}
+                            </span>
+                          )}
+                        </div>
+                      </>
+                    ) : (
+                      <>
+                        <RefreshCw className="w-5 h-5 shrink-0" />
+                        <div className="flex flex-col items-center gap-0 leading-tight text-center">
+                          <span className="font-bold text-[10px] leading-tight">Upsert salespulse.cc</span>
+                        </div>
+                      </>
+                    )}
+                  </button>
+                </div>
+              </div>
+
+              {/* System POS (Printer 2) Upsert Controls */}
+              {isElectron && getElectronAPI()?.getSystemPosResyncPreview && (
+                <div className="flex gap-2 items-stretch bg-gray-50 p-1.5 rounded-xl border border-gray-200 h-24">
+                  <div className="flex flex-col justify-center gap-1.5 px-0.5">
+                    <div className="flex flex-col gap-0.5">
+                      <label className="text-[9px] text-gray-500 font-semibold uppercase tracking-wider">Dari</label>
+                      <input
+                        type="date"
+                        value={systemPosResyncFrom}
+                        onChange={(e) => { setSystemPosResyncFrom(e.target.value); setSystemPosResyncPreviewCount(null); setSystemPosResyncResult(null); }}
+                        className="text-[10px] border border-gray-300 rounded px-1.5 py-1 w-28 focus:ring-1 focus:ring-green-500 focus:border-green-500 outline-none text-black"
+                      />
+                    </div>
+                    <div className="flex flex-col gap-0.5">
+                      <label className="text-[9px] text-gray-500 font-semibold uppercase tracking-wider">Sampai</label>
+                      <input
+                        type="date"
+                        value={systemPosResyncTo}
+                        onChange={(e) => { setSystemPosResyncTo(e.target.value); setSystemPosResyncPreviewCount(null); setSystemPosResyncResult(null); }}
+                        className="text-[10px] border border-gray-300 rounded px-1.5 py-1 w-28 focus:ring-1 focus:ring-green-500 focus:border-green-500 outline-none text-black"
+                      />
+                    </div>
+                  </div>
+
+                  <div className="flex flex-col gap-1 h-full">
+                    {/* Action Button (Bottom Half) - Green */}
+                    <button
+                      type="button"
+                      onClick={handleSystemPosResyncRun}
+                      disabled={systemPosResyncRunning}
+                      className={`
+                          flex-1 w-24 flex flex-col items-center justify-center gap-1 py-1 px-1 rounded-lg font-medium transition-all text-[10px] shrink-0 shadow-sm
+                          ${systemPosResyncRunning
+                          ? 'bg-gray-400 text-white cursor-not-allowed'
+                          : 'bg-green-600 hover:bg-green-700 text-white'
+                        }
+                        `}
+                    >
+                      {systemPosResyncRunning ? (
+                        <>
+                          <RefreshCw className="w-4 h-4 animate-spin shrink-0" />
+                          <span className="font-semibold text-[9px]">Syncing...</span>
+                        </>
+                      ) : (
+                        <>
+                          <RefreshCw className="w-4 h-4 shrink-0" />
+                          <div className="flex flex-col items-center gap-0 leading-tight text-center">
+                            <span className="font-bold text-[10px] leading-tight">Upsert System POS</span>
+                          </div>
+                        </>
                       )}
-                    </div>
-                  </>
-                ) : (
-                  <>
-                    <RefreshCw className="w-3 h-3 shrink-0" />
-                    <div className="flex flex-col items-center gap-0 leading-tight">
-                      <span className="font-semibold text-[10px] leading-tight">Re-sync Semua Transaksi</span>
-                      <span className="text-[8px] opacity-80 leading-tight">Upload ulang ke salespulse.cc</span>
-                    </div>
-                  </>
-                )}
-              </button>
+                    </button>
+                  </div>
+                </div>
+              )}
 
             </div>
           </div>
@@ -2331,97 +2426,29 @@ WHERE ${baseWhere};`;
           </div>
         )}
 
-        {/* Manual System POS Re-sync (Printer 2 → system_pos) */}
-        {isElectron && getElectronAPI()?.getSystemPosResyncPreview && (
-          <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-6 mb-6">
-            <h2 className="text-sm font-semibold text-gray-800 flex items-center gap-2 mb-4">
-              <RefreshCw className="w-4 h-4" />
-              Re-sync ke System POS (Printer 2)
-            </h2>
-            <p className="text-xs text-gray-600 mb-4">
-              Sinkronkan ulang transaksi yang tercetak di Printer 2 (receipt) ke database system_pos untuk rentang tanggal tertentu. Berguna untuk menutup celah data jika sync otomatis terlewat.
-            </p>
-            <div className="flex flex-wrap items-end gap-4 mb-4">
-              <div>
-                <label className="block text-xs font-medium text-gray-700 mb-1">Dari tanggal</label>
-                <input
-                  type="date"
-                  value={systemPosResyncFrom}
-                  onChange={(e) => { setSystemPosResyncFrom(e.target.value); setSystemPosResyncPreviewCount(null); setSystemPosResyncResult(null); }}
-                  className="border border-gray-300 rounded px-3 py-2 text-sm"
-                />
-              </div>
-              <div>
-                <label className="block text-xs font-medium text-gray-700 mb-1">Sampai tanggal</label>
-                <input
-                  type="date"
-                  value={systemPosResyncTo}
-                  onChange={(e) => { setSystemPosResyncTo(e.target.value); setSystemPosResyncPreviewCount(null); setSystemPosResyncResult(null); }}
-                  className="border border-gray-300 rounded px-3 py-2 text-sm"
-                />
-              </div>
-              <button
-                type="button"
-                onClick={handleSystemPosResyncPreview}
-                disabled={systemPosResyncPreviewLoading}
-                className="px-4 py-2 rounded-lg bg-gray-100 hover:bg-gray-200 text-gray-800 text-sm font-medium disabled:opacity-50 flex items-center gap-2"
-              >
-                {systemPosResyncPreviewLoading ? (
-                  <>
-                    <RefreshCw className="w-4 h-4 animate-spin" />
-                    Cek...
-                  </>
-                ) : (
-                  'Preview'
-                )}
-              </button>
-              <button
-                type="button"
-                onClick={handleSystemPosResyncRun}
-                disabled={systemPosResyncRunning}
-                className="px-4 py-2 rounded-lg bg-green-600 hover:bg-green-700 text-white text-sm font-medium disabled:opacity-50 flex items-center gap-2"
-              >
-                {systemPosResyncRunning ? (
-                  <>
-                    <RefreshCw className="w-4 h-4 animate-spin" />
-                    Menyinkronkan...
-                  </>
-                ) : (
-                  <>
-                    <RefreshCw className="w-4 h-4" />
-                    Jalankan Re-sync
-                  </>
-                )}
-              </button>
+
+
+        {/* System POS Resync Result Display */}
+        {systemPosResyncResult && (
+          <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-4 mb-6">
+            <p className="text-sm font-medium text-gray-800 mb-2">Hasil Upsert System POS</p>
+            <div className="flex gap-4 text-xs text-gray-700 mb-2">
+              <span>Berhasil: <span className="font-bold text-green-700">{systemPosResyncResult.synced}</span></span>
+              <span>Gagal: <span className="font-bold text-red-700">{systemPosResyncResult.failed}</span></span>
             </div>
-            {systemPosResyncPreviewCount !== null && !systemPosResyncResult && (
-              <p className="text-sm text-gray-700 mb-2">
-                <span className="font-medium">{systemPosResyncPreviewCount}</span> transaksi Printer 2 akan disinkronkan ke system_pos.
-              </p>
-            )}
-            {systemPosResyncResult && (
-              <div className="mt-4 p-4 bg-gray-50 rounded-lg border border-gray-200">
-                <p className="text-sm font-medium text-gray-800 mb-2">Hasil re-sync</p>
-                <p className="text-sm text-gray-700">
-                  Berhasil: <span className="font-semibold text-green-700">{systemPosResyncResult.synced}</span>
-                  {' · '}
-                  Gagal: <span className="font-semibold text-red-700">{systemPosResyncResult.failed}</span>
-                </p>
-                {systemPosResyncResult.errors.length > 0 && (
-                  <details className="mt-2">
-                    <summary className="text-xs text-gray-600 cursor-pointer hover:underline">
-                      Tampilkan detail error ({systemPosResyncResult.errors.length})
-                    </summary>
-                    <ul className="mt-2 text-xs text-red-700 space-y-1 max-h-32 overflow-y-auto">
-                      {systemPosResyncResult.errors.map((e, i) => (
-                        <li key={i}>
-                          <span className="font-mono">{e.transactionId}</span>: {e.error}
-                        </li>
-                      ))}
-                    </ul>
-                  </details>
-                )}
-              </div>
+            {systemPosResyncResult.errors.length > 0 && (
+              <details className="mt-1">
+                <summary className="text-xs text-gray-600 cursor-pointer hover:underline">
+                  Tampilkan detail error ({systemPosResyncResult.errors.length})
+                </summary>
+                <ul className="mt-2 text-xs text-red-700 space-y-1 max-h-32 overflow-y-auto border border-red-100 rounded p-2 bg-red-50/50">
+                  {systemPosResyncResult.errors.map((e, i) => (
+                    <li key={i}>
+                      <span className="font-mono">{e.transactionId}</span>: {e.error}
+                    </li>
+                  ))}
+                </ul>
+              </details>
             )}
           </div>
         )}

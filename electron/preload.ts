@@ -171,7 +171,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   localDbDeleteTransactionItems: (payload: { businessId: number; from?: string | null; to?: string | null }) =>
     ipcRenderer.invoke('localdb-delete-transaction-items', payload),
   localDbGetUnsyncedTransactions: (businessId?: number) => ipcRenderer.invoke('localdb-get-unsynced-transactions', businessId),
-  localDbGetAllTransactions: (businessId?: number) => ipcRenderer.invoke('localdb-get-all-transactions', businessId),
+  localDbGetAllTransactions: (businessId?: number, from?: string, to?: string) => ipcRenderer.invoke('localdb-get-all-transactions', businessId, from, to),
   localDbDeleteUnsyncedTransactions: (businessId?: number) => ipcRenderer.invoke('localdb-delete-unsynced-transactions', businessId),
   localDbMarkTransactionsSynced: (transactionIds: string[]) => ipcRenderer.invoke('localdb-mark-transactions-synced', transactionIds),
   localDbResetTransactionSync: (transactionId: string) => ipcRenderer.invoke('localdb-reset-transaction-sync', transactionId),
@@ -187,6 +187,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   localDbUpsertTransactionItemCustomizations: (rows: UnknownRecord[]) => ipcRenderer.invoke('localdb-upsert-transaction-item-customizations', rows),
   localDbUpsertTransactionItemCustomizationOptions: (rows: UnknownRecord[]) => ipcRenderer.invoke('localdb-upsert-transaction-item-customization-options', rows),
   localDbGetTransactionRefunds: (transactionUuid: string) => ipcRenderer.invoke('localdb-get-transaction-refunds', transactionUuid),
+  localDbGetWaiterPerformanceReport: (payload: { businessId: number; startDate: string; endDate: string }) =>
+    ipcRenderer.invoke('localdb-get-waiter-performance-report', payload),
   // System POS database handlers
   localDbGetSystemPosTransactions: (businessId?: number, limit?: number) => ipcRenderer.invoke('localdb-get-system-pos-transactions', businessId, limit),
   localDbGetSystemPosTransactionItems: (transactionId?: number | string) => ipcRenderer.invoke('localdb-get-system-pos-transaction-items', transactionId),
