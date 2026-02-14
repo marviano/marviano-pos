@@ -506,11 +506,11 @@ type TransactionRefundRow = {
 const isDev = process.env.NODE_ENV === 'development' || !app.isPackaged;
 const shouldLog = process.env.POS_DEBUG_LOGS === 'true';
 
-if (!shouldLog) {
-  console.log = () => { };
-  console.info = () => { };
-  console.debug = () => { };
-}
+// if (!shouldLog) {
+//   console.log = () => { };
+//   console.info = () => { };
+//   console.debug = () => { };
+// }
 
 // Global references to windows and services
 let mainWindow: BrowserWindow | null = null;
@@ -9305,6 +9305,7 @@ function createWindows(): void {
   // Only transactions printed on Printer 2 are queued (enforced by PaymentModal / TransactionDetailModal).
   // We queue, then immediately insert into system_pos.transactions and mark synced/failed.
   ipcMain.handle('queue-transaction-for-system-pos', async (event, transactionId: string) => {
+    console.log(`🔌 [IPC] queue-transaction-for-system-pos called for ${transactionId}`);
     try {
       await ensureSystemPosSchema();
       const now = Date.now();
