@@ -18,7 +18,9 @@ export default function StandaloneDisplayFrame({
   const handleMaximize = () => getElectronAPI()?.maximizeWindow?.();
   const playTestSound = () => {
     try {
-      const audio = new Audio('/blacksmith_refine.mp3');
+      const isFile = typeof window !== 'undefined' && window.location?.protocol === 'file:';
+      const soundPath = isFile ? './blacksmith_refine.mp3' : '/blacksmith_refine.mp3';
+      const audio = new Audio(soundPath);
       audio.volume = 0.7;
       audio.play().catch((err) => console.warn('Test sound failed:', err));
     } catch (err) {

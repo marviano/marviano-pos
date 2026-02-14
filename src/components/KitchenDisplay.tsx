@@ -571,7 +571,12 @@ export default function KitchenDisplay({ viewOnly = false, legacyCardLayout = fa
         const newOrderIds = [...currentOrderIds].filter(id => !previousOrderIdsRef.current.has(id));
         if (newOrderIds.length > 0) {
           try {
-            const soundPath = '/blacksmith_refine.mp3';
+            // #region agent log
+            const isFileProtocol = typeof window !== 'undefined' && window.location?.protocol === 'file:';
+            const soundPath = isFileProtocol ? './blacksmith_refine.mp3' : '/blacksmith_refine.mp3';
+            const resolvedUrl = typeof window !== 'undefined' ? new URL(soundPath, window.location.href).href : soundPath;
+            fetch('http://127.0.0.1:7245/ingest/519de021-d49d-473f-a8a1-4215977c867a',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'KitchenDisplay.tsx:sound',message:'New order sound attempt',data:{protocol:window?.location?.protocol,soundPath,resolvedUrl,newOrderCount:newOrderIds.length},timestamp:Date.now(),hypothesisId:'A'})}).catch(()=>{});
+            // #endregion
             if (!soundRef.current) {
               soundRef.current = new Audio(soundPath);
               soundRef.current.volume = 0.7;
@@ -579,6 +584,9 @@ export default function KitchenDisplay({ viewOnly = false, legacyCardLayout = fa
             soundRef.current.pause();
             soundRef.current.currentTime = 0;
             soundRef.current.play().catch(error => {
+              // #region agent log
+              fetch('http://127.0.0.1:7245/ingest/519de021-d49d-473f-a8a1-4215977c867a',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'KitchenDisplay.tsx:play',message:'Sound play failed',data:{error:String(error),name:(error as Error)?.name},timestamp:Date.now(),hypothesisId:'B'})}).catch(()=>{});
+              // #endregion
               console.warn('Failed to play sound:', error);
             });
           } catch (error) {
@@ -988,7 +996,9 @@ export default function KitchenDisplay({ viewOnly = false, legacyCardLayout = fa
 
   const playTestSound = () => {
     try {
-      const audio = new Audio('/blacksmith_refine.mp3');
+      const isFile = typeof window !== 'undefined' && window.location?.protocol === 'file:';
+      const soundPath = isFile ? './blacksmith_refine.mp3' : '/blacksmith_refine.mp3';
+      const audio = new Audio(soundPath);
       audio.volume = 0.7;
       audio.play().catch((err) => console.warn('Test sound failed:', err));
     } catch (err) {
