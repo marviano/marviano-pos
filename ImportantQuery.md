@@ -1,5 +1,4 @@
 # Daily comparison: SalesPulse Printer 2 vs system_pos
-
 ```sql
 SELECT
   d.date,
@@ -36,7 +35,6 @@ ORDER BY d.date DESC;
 ---
 
 ## Transactions in Printer 2 audit but NOT in system_pos
-
 ```sql
 SELECT
   t.uuid_id           AS transaction_id,
@@ -55,7 +53,6 @@ ORDER BY p2.printed_at DESC;
 ---
 
 ## Transactions in system_pos but NOT in Salespulse (Printer 2)
-
 ```sql
 SELECT
   sp.uuid_id           AS transaction_id,
@@ -76,7 +73,6 @@ ORDER BY sp.created_at DESC;
 ---
 
 ## Side‑by‑side summary: Salespulse (Printer 2) vs system_pos
-
 Use the same date range for both sides (adjust `@from` / `@to` or remove the date filter for all time). Explains differences in **Txs/CU**, **Gross**, **Refund**, **Net** like in Daftar Transaksi. If `salespulse.transaction_refunds` does not exist, use only `t.refund_total` and drop the refund subquery for salespulse.
 
 ```sql
@@ -143,7 +139,6 @@ FROM system_pos_tx;
 ---
 
 ## Payment method & pickup breakdown (Salespulse vs system_pos)
-
 Same date logic as above; compare Metode Pembayaran and Metode Pengambilan.
 
 ```sql
@@ -198,7 +193,6 @@ ORDER BY source, payment_method, pickup_method;
 ---
 
 ## Quick count difference (by date)
-
 Daily count of Salespulse (Printer 2) vs system_pos to spot which dates diverge.
 
 ```sql
@@ -228,5 +222,40 @@ LEFT JOIN (
   GROUP BY DATE(created_at)
 ) s ON d.date = s.dt
 ORDER BY d.date DESC;
+```
+
+---
+
+## Check Transaction Detail by UUID (Salespulse)
+Provides full details of a specific transaction including all line items. Replace `'YOUR_UUID_HERE'` with the transaction UUID.
+
+```sql
+SELECT 
+    t.uuid_id AS transaction_uuid,
+    t.receipt_number,
+    t.created_at,
+    t.paid_at,
+    t.status,
+    u.name AS cashier_name,
+    t.customer_name,
+    t.customer_unit,
+    t.payment_method,
+    t.pickup_method,
+    t.total_amount AS tx_subtotal,
+    t.voucher_discount,
+    t.final_amount AS tx_final_amount,
+    t.refund_total,
+    ti.quantity,
+    p.nama AS item_name,
+    ti.unit_price,
+    ti.total_price AS item_total,
+    ti.custom_note,
+    e.nama_karyawan AS item_waiter
+FROM salespulse.transactions t
+LEFT JOIN salespulse.users u ON t.user_id = u.id
+LEFT JOIN salespulse.transaction_items ti ON t.uuid_id = ti.uuid_transaction_id
+LEFT JOIN salespulse.products p ON ti.product_id = p.id
+LEFT JOIN salespulse.employees e ON ti.waiter_id = e.id
+WHERE t.uuid_id = 'YOUR_UUID_HERE';
 ```
 
