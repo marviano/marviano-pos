@@ -72,7 +72,7 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
   // Use external state if provided, otherwise use internal state
   const [internalActiveMenuItem, setInternalActiveMenuItem] = useState('Kasir');
   const activeMenuItem = externalActiveMenuItem ?? internalActiveMenuItem;
-  
+
   // Sidebar visibility state - auto-hide for Kitchen/Barista displays
   const [sidebarVisible, setSidebarVisible] = useState(true);
 
@@ -107,7 +107,7 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
     customer_unit?: number | null;
   } | null>(null);
   const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false);
-  
+
   const [categories, setCategories] = useState<LocalCategory[]>([]); // Start with empty array
   const [isLoadingCategories, setIsLoadingCategories] = useState(true);
   const [products, setProducts] = useState<Product[]>([]); // Start with empty array
@@ -117,6 +117,7 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
   const [allProductsForSearch, setAllProductsForSearch] = useState<Product[] | null>(null);
   const [isLoadingAllProductsForSearch, setIsLoadingAllProductsForSearch] = useState(false);
   const [showStartShiftModal, setShowStartShiftModal] = useState(false);
+  const [showWaiterNoShiftMessage, setShowWaiterNoShiftMessage] = useState(false);
   const [hasCheckedShift, setHasCheckedShift] = useState(false);
   const [newOrderResetSignal, setNewOrderResetSignal] = useState(0);
 
@@ -134,7 +135,7 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
 
   // Get business ID from logged-in user
   const businessId = user.selectedBusinessId;
-  
+
   const permissions = user.permissions ?? [];
   const isAdmin = isSuperAdmin(user);
   const canAccessSync = isAdmin ||
@@ -164,7 +165,7 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
     }
     return true; // Proceed with action
   };
-  
+
   // Wrapper for setActiveMenuItem with unsaved changes check
   const setActiveMenuItemWithCheck = (item: string) => {
     // If trying to change page and there are unsaved changes, show confirmation
@@ -174,9 +175,9 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
     const setter = externalSetActiveMenuItem ?? setInternalActiveMenuItem;
     setter(item);
   };
-  
+
   const setActiveMenuItem = setActiveMenuItemWithCheck;
-  
+
   // Auto-hide sidebar when switching to Kitchen/Barista
   useEffect(() => {
     if (activeMenuItem === 'Kitchen' || activeMenuItem === 'Barista') {
@@ -230,7 +231,7 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
       }
     }
   }, [activeMenuItem, user]);
-  
+
   if (!businessId) {
     return (
       <div className="h-screen flex items-center justify-center bg-gray-100">
@@ -310,7 +311,7 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
   // NEW: Fetch both drinks AND bakery categories together
   useEffect(() => {
     if (!businessId || !fetchCategories) return;
-    
+
     let isCancelled = false;
     setIsLoadingCategories(true);
 
@@ -415,7 +416,7 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
   // NEW: We need to determine transactionType from the selected category's products
   useEffect(() => {
     if (!businessId || !fetchProducts) return;
-    
+
     let isCancelled = false;
 
     const loadProducts = async () => {
@@ -550,7 +551,7 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
   // Auto-sync master data on app startup to get latest data
   useEffect(() => {
     if (!businessId || !offlineSyncService) return;
-    
+
     const syncOnStartup = async () => {
       try {
         // console.log('🔄 [STARTUP] Auto-syncing master data on app start...');
@@ -572,7 +573,7 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
   // Listen for data sync events to refresh categories and products
   useEffect(() => {
     if (!businessId || !fetchCategories || !fetchProducts) return;
-    
+
     const handleDataSynced = async () => {
       setIsLoadingCategories(true);
       setIsLoadingProducts(true);
@@ -684,6 +685,8 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
 
   // Check for active shift when Kasir page is active (only if user has access_kasir)
   const canAccessKasir = isSuperAdmin(user) || hasPermission(user, 'access_kasir');
+  // Only users with payment button access (cashiers) can manage shifts
+  const canManageShift = isSuperAdmin(user) || hasPermission(user, 'access_kasir_bayar_button');
   useEffect(() => {
     if (!businessId) return;
     if (activeMenuItem === 'Kasir' && canAccessKasir && user.id && !hasCheckedShift) {
@@ -694,8 +697,20 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
             const userId = typeof user.id === 'string' ? parseInt(user.id, 10) : user.id;
             const response = await electronAPI.localDbGetActiveShift(userId, businessId);
             if (!response.shift) {
-              // No active shift, show modal
-              setShowStartShiftModal(true);
+              // No active shift
+              if (canManageShift) {
+                // Cashier: show the Start Shift modal
+                setShowStartShiftModal(true);
+                setShowWaiterNoShiftMessage(false);
+              } else {
+                // Waiter: show informational message, don't allow shift creation
+                setShowWaiterNoShiftMessage(true);
+                setShowStartShiftModal(false);
+              }
+            } else {
+              // Shift is active, clear any messages
+              setShowWaiterNoShiftMessage(false);
+              setShowStartShiftModal(false);
             }
           }
         } catch (error) {
@@ -709,8 +724,34 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
       // Reset the check flag when navigating away from Kasir page
       setHasCheckedShift(false);
       setShowStartShiftModal(false);
+      setShowWaiterNoShiftMessage(false);
     }
-  }, [activeMenuItem, canAccessKasir, user.id, businessId, hasCheckedShift]);
+  }, [activeMenuItem, canAccessKasir, canManageShift, user.id, businessId, hasCheckedShift]);
+
+  // Poll for active shift when waiter message is shown (to automatically clear it when cashier opens shift)
+  useEffect(() => {
+    if (!showWaiterNoShiftMessage || !businessId || !user.id) return;
+
+    const pollShift = async () => {
+      try {
+        const electronAPI = getElectronAPI();
+        if (electronAPI?.localDbGetActiveShift) {
+          const userId = typeof user.id === 'string' ? parseInt(user.id, 10) : user.id;
+          const response = await electronAPI.localDbGetActiveShift(userId, businessId);
+          if (response.shift) {
+            setShowWaiterNoShiftMessage(false);
+            // We set this to true so the main check effect doesn't immediately re-open it
+            setHasCheckedShift(true);
+          }
+        }
+      } catch (error) {
+        console.warn('Error polling shift for waiter:', error);
+      }
+    };
+
+    const interval = setInterval(pollShift, 5000);
+    return () => clearInterval(interval);
+  }, [showWaiterNoShiftMessage, businessId, user.id]);
 
   // Fetch pending orders count when on Kasir page
   useEffect(() => {
@@ -737,13 +778,13 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
       };
 
       fetchPendingCount();
-      
+
       // Listen for immediate refresh when transaction is saved
       const handlePendingTransactionSaved = () => {
         fetchPendingCount();
       };
       window.addEventListener('pendingTransactionSaved', handlePendingTransactionSaved);
-      
+
       // Refresh count every 5 seconds
       const interval = setInterval(fetchPendingCount, 5000);
       return () => {
@@ -761,7 +802,7 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
       console.error('❌ No business ID available');
       return;
     }
-    
+
     console.log('🔄 Loading transaction into cart:', transactionId);
     try {
       const electronAPI = getElectronAPI();
@@ -773,9 +814,9 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
 
       // Fetch transaction
       const transactions = await electronAPI.localDbGetTransactions?.(businessId, 10000);
-      const transactionsArray = Array.isArray(transactions) ? transactions as Record<string, unknown>[] : [];const transaction = transactionsArray.find((tx) => 
+      const transactionsArray = Array.isArray(transactions) ? transactions as Record<string, unknown>[] : []; const transaction = transactionsArray.find((tx) =>
         tx.uuid_id === transactionId || tx.id === transactionId
-      ) as Record<string, unknown> | undefined;if (!transaction) {
+      ) as Record<string, unknown> | undefined; if (!transaction) {
         alert('Transaksi tidak ditemukan');
         return;
       }
@@ -800,7 +841,7 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
             if (room.id) {
               const tables = await electronAPI.getRestaurantTables(room.id);
               const tablesArray = Array.isArray(tables) ? tables : [];
-              const foundTable = tablesArray.find((table: { id: number; table_number: string; room_id: number }) => 
+              const foundTable = tablesArray.find((table: { id: number; table_number: string; room_id: number }) =>
                 table.id === transaction.table_id
               );
               if (foundTable) {
@@ -854,10 +895,11 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
       // Group customizations by transaction_item_id (can be string or number)
       customizations.forEach((cust) => {
         // transaction_item_id might be string or number, convert to number for matching
-        const itemId = typeof cust.transaction_item_id === 'number' 
-          ? cust.transaction_item_id 
+        const itemId = typeof cust.transaction_item_id === 'number'
+          ? cust.transaction_item_id
           : (typeof cust.transaction_item_id === 'string' ? parseInt(cust.transaction_item_id, 10) : null);// Skip if item not found
-        if (!itemId || !itemsByIdMap.has(itemId)) {return;
+        if (!itemId || !itemsByIdMap.has(itemId)) {
+          return;
         }
 
         if (!customizationsMap.has(itemId)) {
@@ -865,15 +907,15 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
         }
 
         // Find options for this customization
-        const options = customizationOptions.filter((opt) => 
+        const options = customizationOptions.filter((opt) =>
           opt.transaction_item_customization_id === cust.id
         ).map((opt) => {
           // Ensure price_adjustment is a number (database might return string)
-          const priceAdj = typeof opt.price_adjustment === 'number' 
-            ? opt.price_adjustment 
+          const priceAdj = typeof opt.price_adjustment === 'number'
+            ? opt.price_adjustment
             : (typeof opt.price_adjustment === 'string' ? parseFloat(opt.price_adjustment) || 0 : 0);
-          const optionId = typeof opt.customization_option_id === 'number' 
-            ? opt.customization_option_id 
+          const optionId = typeof opt.customization_option_id === 'number'
+            ? opt.customization_option_id
             : (typeof opt.customization_option_id === 'string' ? parseInt(opt.customization_option_id, 10) : 0);
           const optionName = typeof opt.option_name === 'string' ? opt.option_name : String(opt.option_name || '');
           return {
@@ -882,22 +924,24 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
             price_adjustment: priceAdj,
           };
         });// Find or create customization type entry
-        const custTypeId = typeof cust.customization_type_id === 'number' 
-          ? cust.customization_type_id 
+        const custTypeId = typeof cust.customization_type_id === 'number'
+          ? cust.customization_type_id
           : (typeof cust.customization_type_id === 'string' ? parseInt(cust.customization_type_id, 10) : 0);
-        const existingCust = customizationsMap.get(itemId)!.find(c => 
+        const existingCust = customizationsMap.get(itemId)!.find(c =>
           c.customization_id === custTypeId
         );
 
         if (existingCust) {
-          existingCust.selected_options.push(...options);} else {
+          existingCust.selected_options.push(...options);
+        } else {
           // Use customization_type_name from the query result (already fetched via JOIN)
           const customizationName = (cust.customization_type_name as string) || `Customization ${custTypeId}`;
           customizationsMap.get(itemId)!.push({
             customization_id: custTypeId,
             customization_name: customizationName,
             selected_options: options,
-          });}
+          });
+        }
       });
 
       // Fetch all products to get product details
@@ -969,11 +1013,11 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
         const productionStatus = typeof item.production_status === 'string' ? item.production_status : null;
         return productionStatus !== 'cancelled';
       });
-      
+
       const cartItems = activeItems.map((item) => {
         const productId = typeof item.product_id === 'number' ? item.product_id : (typeof item.product_id === 'string' ? parseInt(item.product_id, 10) : null);
         if (!productId) return null;
-        
+
         const product = productsMap.get(productId);
         if (!product) {
           console.warn(`Product ${productId} not found`);
@@ -990,7 +1034,7 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
             option_name: string;
             price_adjustment: number;
           }>;
-        }> = itemId ? (customizationsMap.get(itemId) || []) : [];const productIdValue = typeof product.id === 'number' ? product.id : (typeof product.id === 'string' ? parseInt(product.id, 10) : 0);
+        }> = itemId ? (customizationsMap.get(itemId) || []) : []; const productIdValue = typeof product.id === 'number' ? product.id : (typeof product.id === 'string' ? parseInt(product.id, 10) : 0);
         const itemQuantity = typeof item.quantity === 'number' ? item.quantity : (typeof item.quantity === 'string' ? parseInt(item.quantity, 10) : 1);
         const itemCustomNote = typeof item.custom_note === 'string' ? item.custom_note : undefined;
         const itemBundleSelections = typeof item.bundle_selections_json === 'string' ? item.bundle_selections_json : undefined;
@@ -999,19 +1043,19 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
         const pkgLinesForItem = itemUuidForPkg ? packageLinesByItem.get(String(itemUuidForPkg)) : undefined;
         const itemPackageSelections = pkgLinesForItem && pkgLinesForItem.length > 0
           ? pkgLinesForItem.map((line, index) => {
-              const p = productsMap.get(line.product_id);
-              const productName = (p && typeof (p as { nama?: string }).nama === 'string') ? (p as { nama: string }).nama : 'Unknown Product';
-              return {
-                package_item_id: index,
-                selection_type: 'default' as const,
-                product_id: line.product_id,
-                product_name: productName,
-                quantity: line.quantity,
-              };
-            })
+            const p = productsMap.get(line.product_id);
+            const productName = (p && typeof (p as { nama?: string }).nama === 'string') ? (p as { nama: string }).nama : 'Unknown Product';
+            return {
+              package_item_id: index,
+              selection_type: 'default' as const,
+              product_id: line.product_id,
+              product_name: productName,
+              quantity: line.quantity,
+            };
+          })
           : (itemPackageSelectionsJson ? JSON.parse(itemPackageSelectionsJson) : undefined);
         const transactionTableId = typeof transaction.table_id === 'number' ? transaction.table_id : (typeof transaction.table_id === 'string' ? parseInt(transaction.table_id, 10) : null);
-        
+
         // Check if item should be locked
         // In "lihat" mode, ALL items should be locked because they've already been saved to the transaction
         // Items with production_status IS NULL or 'preparing' are visible on kitchen/barista and should be locked
@@ -1048,8 +1092,8 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
           quantity: itemQuantity,
           customizations: itemCustomizations.length > 0 ? itemCustomizations : undefined,
           customNote: itemCustomNote,
-          bundleSelections: itemBundleSelections 
-            ? JSON.parse(itemBundleSelections) 
+          bundleSelections: itemBundleSelections
+            ? JSON.parse(itemBundleSelections)
             : undefined,
           packageSelections: itemPackageSelections ?? undefined,
           // Keep raw JSON so PaymentModal can fall back when building labels if packageSelections is missing
@@ -1070,7 +1114,7 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
       setOfflineCart(cartItems);
       setIsOnlineTab(false);
       setSelectedOnlinePlatform(null);
-      
+
       // Transaction-level waiter (and all waiters for header "+N" / popover)
       const waiterId = typeof transaction.waiter_id === 'number' ? transaction.waiter_id : (typeof transaction.waiter_id === 'string' ? parseInt(transaction.waiter_id, 10) : null);
       const waiterIdsFromItems = activeItems.map((i: Record<string, unknown>) => typeof i.waiter_id === 'number' ? i.waiter_id : (typeof i.waiter_id === 'string' ? parseInt(String(i.waiter_id), 10) : null));
@@ -1101,8 +1145,8 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
       const paymentMethod = typeof transaction.payment_method === 'string' ? (transaction.payment_method as string).toLowerCase() : '';
       const pickupMethod: 'dine-in' | 'take-away' =
         pm === 'take-away' || pm === 'dine-in' ? pm
-        : platformPaymentMethods.includes(paymentMethod) ? 'take-away'
-        : 'dine-in';
+          : platformPaymentMethods.includes(paymentMethod) ? 'take-away'
+            : 'dine-in';
       setLoadedTransactionInfo({
         transactionId: transactionId,
         tableName,
@@ -1165,28 +1209,25 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
                       setSelectedOnlinePlatform(null);
                       setShowActiveOrders(false);
                     }}
-                    className={`group relative px-5 py-2.5 rounded-md font-semibold text-sm transition-all duration-200 flex items-center gap-2 shrink-0 ${
-                      !isOnlineTab && !showActiveOrders
-                        ? 'bg-indigo-600 text-white shadow-md hover:bg-indigo-700 active:scale-[0.98]'
-                        : 'bg-white text-slate-700 border border-slate-300 hover:bg-indigo-50 hover:border-indigo-400 active:scale-[0.98]'
-                    }`}
+                    className={`group relative px-5 py-2.5 rounded-md font-semibold text-sm transition-all duration-200 flex items-center gap-2 shrink-0 ${!isOnlineTab && !showActiveOrders
+                      ? 'bg-indigo-600 text-white shadow-md hover:bg-indigo-700 active:scale-[0.98]'
+                      : 'bg-white text-slate-700 border border-slate-300 hover:bg-indigo-50 hover:border-indigo-400 active:scale-[0.98]'
+                      }`}
                   >
                     <Store className="w-4 h-4 shrink-0" />
                     <span>Offline</span>
                   </button>
 
                   {/* Online Section with Platform Buttons — selected = filled cyan, unselected = outline */}
-                  <div className={`flex items-center rounded-md overflow-hidden border transition-all duration-200 ${
-                    isOnlineTab && !showActiveOrders && !loadedTransactionInfo 
-                      ? 'bg-cyan-600 shadow-md border-cyan-600' 
-                      : 'bg-white border-slate-300 hover:border-cyan-400'
+                  <div className={`flex items-center rounded-md overflow-hidden border transition-all duration-200 ${isOnlineTab && !showActiveOrders && !loadedTransactionInfo
+                    ? 'bg-cyan-600 shadow-md border-cyan-600'
+                    : 'bg-white border-slate-300 hover:border-cyan-400'
                     } ${loadedTransactionInfo ? 'opacity-50 cursor-not-allowed' : ''}`}
                   >
                     <div
-                      className={`px-4 py-2.5 font-semibold text-sm flex items-center gap-2 shrink-0 ${
-                        isOnlineTab && !showActiveOrders && !loadedTransactionInfo 
-                          ? 'text-white' 
-                          : 'text-slate-700'
+                      className={`px-4 py-2.5 font-semibold text-sm flex items-center gap-2 shrink-0 ${isOnlineTab && !showActiveOrders && !loadedTransactionInfo
+                        ? 'text-white'
+                        : 'text-slate-700'
                         } ${loadedTransactionInfo ? 'cursor-not-allowed' : 'cursor-default'}`}
                     >
                       <Globe className="w-4 h-4" />
@@ -1203,13 +1244,12 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
                           setShowActiveOrders(false);
                         }}
                         disabled={!!loadedTransactionInfo}
-                        className={`px-3 py-2.5 text-sm font-semibold transition-all duration-200 h-full shrink-0 ${
-                          selectedOnlinePlatform === 'gofood' && isOnlineTab && !showActiveOrders && !loadedTransactionInfo
-                            ? 'bg-green-600 text-white'
-                            : isOnlineTab && !showActiveOrders && !loadedTransactionInfo 
-                              ? 'text-white hover:bg-cyan-500/80' 
-                              : 'text-slate-700 hover:bg-slate-100'
-                        } ${loadedTransactionInfo ? 'cursor-not-allowed' : ''}`}
+                        className={`px-3 py-2.5 text-sm font-semibold transition-all duration-200 h-full shrink-0 ${selectedOnlinePlatform === 'gofood' && isOnlineTab && !showActiveOrders && !loadedTransactionInfo
+                          ? 'bg-green-600 text-white'
+                          : isOnlineTab && !showActiveOrders && !loadedTransactionInfo
+                            ? 'text-white hover:bg-cyan-500/80'
+                            : 'text-slate-700 hover:bg-slate-100'
+                          } ${loadedTransactionInfo ? 'cursor-not-allowed' : ''}`}
                       >
                         GoFood
                       </button>
@@ -1222,13 +1262,12 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
                           setShowActiveOrders(false);
                         }}
                         disabled={!!loadedTransactionInfo}
-                        className={`px-3 py-2.5 text-sm font-semibold transition-all duration-200 h-full shrink-0 ${
-                          selectedOnlinePlatform === 'grabfood' && isOnlineTab && !showActiveOrders && !loadedTransactionInfo
-                            ? 'bg-green-600 text-white'
-                            : isOnlineTab && !showActiveOrders && !loadedTransactionInfo 
-                              ? 'text-white hover:bg-cyan-500/80' 
-                              : 'text-slate-700 hover:bg-slate-100'
-                        } ${loadedTransactionInfo ? 'cursor-not-allowed' : ''}`}
+                        className={`px-3 py-2.5 text-sm font-semibold transition-all duration-200 h-full shrink-0 ${selectedOnlinePlatform === 'grabfood' && isOnlineTab && !showActiveOrders && !loadedTransactionInfo
+                          ? 'bg-green-600 text-white'
+                          : isOnlineTab && !showActiveOrders && !loadedTransactionInfo
+                            ? 'text-white hover:bg-cyan-500/80'
+                            : 'text-slate-700 hover:bg-slate-100'
+                          } ${loadedTransactionInfo ? 'cursor-not-allowed' : ''}`}
                       >
                         Grab
                       </button>
@@ -1241,13 +1280,12 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
                           setShowActiveOrders(false);
                         }}
                         disabled={!!loadedTransactionInfo}
-                        className={`px-3 py-2.5 text-sm font-semibold transition-all duration-200 h-full shrink-0 ${
-                          selectedOnlinePlatform === 'shopeefood' && isOnlineTab && !showActiveOrders && !loadedTransactionInfo
-                            ? 'bg-green-600 text-white'
-                            : isOnlineTab && !showActiveOrders && !loadedTransactionInfo 
-                              ? 'text-white hover:bg-cyan-500/80' 
-                              : 'text-slate-700 hover:bg-slate-100'
-                        } ${loadedTransactionInfo ? 'cursor-not-allowed' : ''}`}
+                        className={`px-3 py-2.5 text-sm font-semibold transition-all duration-200 h-full shrink-0 ${selectedOnlinePlatform === 'shopeefood' && isOnlineTab && !showActiveOrders && !loadedTransactionInfo
+                          ? 'bg-green-600 text-white'
+                          : isOnlineTab && !showActiveOrders && !loadedTransactionInfo
+                            ? 'text-white hover:bg-cyan-500/80'
+                            : 'text-slate-700 hover:bg-slate-100'
+                          } ${loadedTransactionInfo ? 'cursor-not-allowed' : ''}`}
                       >
                         Shopee
                       </button>
@@ -1260,13 +1298,12 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
                           setShowActiveOrders(false);
                         }}
                         disabled={!!loadedTransactionInfo}
-                        className={`px-3 py-2.5 text-sm font-semibold transition-all duration-200 h-full shrink-0 ${
-                          selectedOnlinePlatform === 'qpon' && isOnlineTab && !showActiveOrders && !loadedTransactionInfo
-                            ? 'bg-green-600 text-white'
-                            : isOnlineTab && !showActiveOrders && !loadedTransactionInfo 
-                              ? 'text-white hover:bg-cyan-500/80' 
-                              : 'text-slate-700 hover:bg-slate-100'
-                        } ${loadedTransactionInfo ? 'cursor-not-allowed' : ''}`}
+                        className={`px-3 py-2.5 text-sm font-semibold transition-all duration-200 h-full shrink-0 ${selectedOnlinePlatform === 'qpon' && isOnlineTab && !showActiveOrders && !loadedTransactionInfo
+                          ? 'bg-green-600 text-white'
+                          : isOnlineTab && !showActiveOrders && !loadedTransactionInfo
+                            ? 'text-white hover:bg-cyan-500/80'
+                            : 'text-slate-700 hover:bg-slate-100'
+                          } ${loadedTransactionInfo ? 'cursor-not-allowed' : ''}`}
                       >
                         Qpon
                       </button>
@@ -1279,13 +1316,12 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
                           setShowActiveOrders(false);
                         }}
                         disabled={!!loadedTransactionInfo}
-                        className={`px-3 py-2.5 text-sm font-semibold transition-all duration-200 h-full shrink-0 rounded-r-md ${
-                          selectedOnlinePlatform === 'tiktok' && isOnlineTab && !showActiveOrders && !loadedTransactionInfo
-                            ? 'bg-green-600 text-white'
-                            : isOnlineTab && !showActiveOrders && !loadedTransactionInfo 
-                              ? 'text-white hover:bg-cyan-500/80' 
-                              : 'text-slate-700 hover:bg-slate-100'
-                        } ${loadedTransactionInfo ? 'cursor-not-allowed' : ''}`}
+                        className={`px-3 py-2.5 text-sm font-semibold transition-all duration-200 h-full shrink-0 rounded-r-md ${selectedOnlinePlatform === 'tiktok' && isOnlineTab && !showActiveOrders && !loadedTransactionInfo
+                          ? 'bg-green-600 text-white'
+                          : isOnlineTab && !showActiveOrders && !loadedTransactionInfo
+                            ? 'text-white hover:bg-cyan-500/80'
+                            : 'text-slate-700 hover:bg-slate-100'
+                          } ${loadedTransactionInfo ? 'cursor-not-allowed' : ''}`}
                       >
                         TikTok
                       </button>
@@ -1314,20 +1350,18 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
                         setSelectedOnlinePlatform(null);
                       }
                     }}
-                    className={`px-5 py-2.5 rounded-md font-semibold text-sm transition-all duration-200 flex items-center gap-2 shrink-0 ${
-                      showActiveOrders
-                        ? 'bg-emerald-600 text-white shadow-md hover:bg-emerald-700 active:scale-[0.98]'
-                        : 'bg-white text-slate-700 border border-slate-300 hover:bg-emerald-50 hover:border-emerald-400 active:scale-[0.98]'
-                    }`}
+                    className={`px-5 py-2.5 rounded-md font-semibold text-sm transition-all duration-200 flex items-center gap-2 shrink-0 ${showActiveOrders
+                      ? 'bg-emerald-600 text-white shadow-md hover:bg-emerald-700 active:scale-[0.98]'
+                      : 'bg-white text-slate-700 border border-slate-300 hover:bg-emerald-50 hover:border-emerald-400 active:scale-[0.98]'
+                      }`}
                   >
                     <ClipboardList className="w-4 h-4 shrink-0" />
                     <span>Active Orders</span>
                     {pendingOrdersCount > 0 && (
-                      <span className={`ml-1 inline-flex items-center justify-center min-w-[22px] h-5 px-2 text-xs font-bold leading-none rounded-full ${
-                        showActiveOrders 
-                          ? 'text-emerald-600 bg-white' 
-                          : 'text-white bg-red-500'
-                      }`}>
+                      <span className={`ml-1 inline-flex items-center justify-center min-w-[22px] h-5 px-2 text-xs font-bold leading-none rounded-full ${showActiveOrders
+                        ? 'text-emerald-600 bg-white'
+                        : 'text-white bg-red-500'
+                        }`}>
                         {pendingOrdersCount > 99 ? '99+' : pendingOrdersCount}
                       </span>
                     )}
@@ -1340,8 +1374,8 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
             <div className="flex-1 flex h-full min-h-0 relative">
               {/* Active Orders Tab - Overlay when active */}
               {showActiveOrders && (
-                <ActiveOrdersTab 
-                  businessId={businessId} 
+                <ActiveOrdersTab
+                  businessId={businessId}
                   isOpen={showActiveOrders}
                   onLoadTransaction={loadTransactionIntoCart}
                 />
@@ -1401,16 +1435,15 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
         }
         // #region agent log
         if (typeof fetch === 'function') {
-          fetch('http://127.0.0.1:7242/ingest/7b565785-72b5-49f7-b2c0-57606ea0d0b5', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ location: 'POSLayout.tsx:DaftarTransaksi', message: 'Rendering TransactionList for Daftar Transaksi', data: { activeMenuItem }, timestamp: Date.now(), sessionId: 'debug-session', hypothesisId: 'H1' }) }).catch(() => {});
+          fetch('http://127.0.0.1:7242/ingest/7b565785-72b5-49f7-b2c0-57606ea0d0b5', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ location: 'POSLayout.tsx:DaftarTransaksi', message: 'Rendering TransactionList for Daftar Transaksi', data: { activeMenuItem }, timestamp: Date.now(), sessionId: 'debug-session', hypothesisId: 'H1' }) }).catch(() => { });
         }
         // #endregion
         return <TransactionList businessId={businessId} onLoadTransaction={loadTransactionIntoCart} />;
       }
 
       case 'Ganti Shift': {
-        // Check permission to access Ganti Shift page
-        const canAccessGantiShift = isSuperAdmin(user) || hasPermission(user, 'access_gantishift');
-        if (!canAccessGantiShift) {
+        // Check permission to access Ganti Shift page - restricted to cashiers only
+        if (!canManageShift) {
           return (
             <div className="flex-1 flex items-center justify-center">
               <div className="text-center space-y-2">
@@ -1574,7 +1607,7 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
       case 'Barista & Kitchen':
         // Check permissions before opening window
         const canAccess = isSuperAdmin(user) || hasPermission(user, 'access_baristaandkitchen');
-        
+
         if (!canAccess) {
           return (
             <div className="flex-1 flex items-center justify-center">
@@ -1633,13 +1666,13 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
         </button>
       )}
 
-      {/* Main Content Area - Blurred when shift modal is shown on Kasir page */}
-      <div className={`flex-1 relative ${showStartShiftModal && activeMenuItem === 'Kasir' ? 'blur-sm pointer-events-none' : ''}`}>
+      {/* Main Content Area - Blurred when shift modal or waiter message is shown on Kasir page */}
+      <div className={`flex-1 relative ${(showStartShiftModal || showWaiterNoShiftMessage) && activeMenuItem === 'Kasir' ? 'blur-sm pointer-events-none' : ''}`}>
         {renderMainContent()}
       </div>
 
-      {/* Start Shift Modal - Only show on Kasir page when user has access_kasir */}
-      {activeMenuItem === 'Kasir' && canAccessKasir && user && (
+      {/* Start Shift Modal - Only show on Kasir page for cashiers (users with access_kasir_bayar_button) */}
+      {activeMenuItem === 'Kasir' && canAccessKasir && canManageShift && user && (
         <StartShiftModal
           isOpen={showStartShiftModal}
           userId={typeof user.id === 'string' ? parseInt(user.id, 10) : user.id}
@@ -1650,6 +1683,26 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
             setHasCheckedShift(false); // Allow re-checking if needed
           }}
         />
+      )}
+
+      {/* Waiter No Shift Message - Show when waiter accesses Kasir but no shift is active */}
+      {activeMenuItem === 'Kasir' && canAccessKasir && !canManageShift && showWaiterNoShiftMessage && (
+        <div
+          className="fixed top-[25.6px] right-0 bottom-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-50 p-4"
+          style={{ left: '96px' }}
+        >
+          <div className="bg-white rounded-2xl w-full max-w-md shadow-xl p-8 text-center">
+            <div className="mx-auto mb-4 w-16 h-16 rounded-full bg-amber-100 flex items-center justify-center">
+              <svg className="w-8 h-8 text-amber-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v2m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+              </svg>
+            </div>
+            <h2 className="text-xl font-bold text-gray-900 mb-3">Shift Belum Dibuka</h2>
+            <p className="text-gray-600 text-sm leading-relaxed">
+              Bru bisa akses klo kasir udah open shift ya...
+            </p>
+          </div>
+        </div>
       )}
     </div>
   );

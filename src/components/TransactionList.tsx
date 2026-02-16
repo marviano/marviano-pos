@@ -245,10 +245,10 @@ export default function TransactionList({ businessId, onLoadTransaction }: Trans
   const [amountTo, setAmountTo] = useState<string>('');
   const [shiftFilterUuid, setShiftFilterUuid] = useState<string>(''); // '' = All, 'none' = No shift, else shift uuid (for all users)
   const [transactionIdsWithPackage, setTransactionIdsWithPackage] = useState<Set<string>>(new Set());
-  
+
   // Use businessId from props, or fallback to user's selectedBusinessId
   const effectiveBusinessId = businessId ?? user?.selectedBusinessId;
-  
+
   if (!effectiveBusinessId) {
     return (
       <div className="p-4 bg-red-50 border border-red-200 rounded-lg">
@@ -400,12 +400,12 @@ export default function TransactionList({ businessId, onLoadTransaction }: Trans
       const transactions: ElectronTransaction[] = useSystemPos && electronAPI.localDbGetSystemPosTransactions
         ? await electronAPI.localDbGetSystemPosTransactions(effectiveBusinessId, 1000)
         : await electronAPI.localDbGetTransactions(effectiveBusinessId, 1000);
-      
+
       // Try to find transaction by ID (UUID) or receipt_number
       let transaction = transactions.find((tx) => {
         return String(tx.id) === String(transactionId);
       });
-      
+
       // If not found by ID, try by receipt_number
       if (!transaction) {
         transaction = transactions.find((tx) => {
@@ -420,7 +420,7 @@ export default function TransactionList({ businessId, onLoadTransaction }: Trans
         });
         throw new Error(`Transaction not found in ${useSystemPos ? 'system_pos' : 'offline'} database`);
       }
-      
+
       // Get the actual UUID from the transaction (id field should be UUID)
       const transactionUuid = transaction.id;
 
@@ -428,12 +428,9 @@ export default function TransactionList({ businessId, onLoadTransaction }: Trans
       const allItems: ElectronTransactionItem[] = useSystemPos && electronAPI.localDbGetSystemPosTransactionItems
         ? await electronAPI.localDbGetSystemPosTransactionItems(transactionUuid)
         : await electronAPI.localDbGetTransactionItems(transactionUuid);
-      
-      // Filter out cancelled items - they should not appear in transaction details
-      const items: ElectronTransactionItem[] = allItems.filter(item => {
-        const productionStatus = typeof item.production_status === 'string' ? item.production_status : null;
-        return productionStatus !== 'cancelled';
-      });
+
+      // Include all items, including cancelled ones, so they can be shown in the detail modal
+      const items: ElectronTransactionItem[] = allItems;
 
       // Fetch package lines from transaction_item_package_lines table
       const itemUuids = items.map((item) => (item as { uuid_id?: string; id?: string }).uuid_id || (item as { uuid_id?: string; id?: string }).id).filter(Boolean) as string[];
@@ -455,7 +452,7 @@ export default function TransactionList({ businessId, onLoadTransaction }: Trans
           console.warn('Failed to fetch package lines:', error);
         }
       }
-      
+
       // Products fetch as fallback in case product_name wasn't in JOIN result
       // Fetch from appropriate database based on mode
       const products: ElectronProduct[] = useSystemPos && electronAPI.localDbGetSystemPosAllProducts
@@ -470,7 +467,7 @@ export default function TransactionList({ businessId, onLoadTransaction }: Trans
       const businesses: ElectronBusiness[] = useSystemPos && electronAPI.localDbGetSystemPosBusinesses
         ? await electronAPI.localDbGetSystemPosBusinesses()
         : await electronAPI.localDbGetBusinesses();
-      
+
       // Get refunds from appropriate database
       const refunds: TransactionRefund[] = useSystemPos && electronAPI.localDbGetSystemPosTransactionRefunds
         ? await electronAPI.localDbGetSystemPosTransactionRefunds(transactionId)
@@ -501,11 +498,11 @@ export default function TransactionList({ businessId, onLoadTransaction }: Trans
           : (product?.nama && String(product.nama).trim())
             ? String(product.nama).trim()
             : 'Unknown Product';
-        
-        const customizations = Array.isArray(item.customizations) 
-          ? item.customizations 
+
+        const customizations = Array.isArray(item.customizations)
+          ? item.customizations
           : (item.customizations ? [item.customizations] : []);
-        
+
         // Safely convert prices to numbers (handle null, undefined, string, or number)
         const parsePrice = (value: unknown): number => {
           if (typeof value === 'number' && !isNaN(value)) return value;
@@ -513,7 +510,7 @@ export default function TransactionList({ businessId, onLoadTransaction }: Trans
           const parsed = Number(value);
           return isNaN(parsed) ? 0 : parsed;
         };
-        
+
         const itemUuid = (item as { uuid_id?: string; id?: string }).uuid_id || (item as { uuid_id?: string; id?: string }).id;
         const packageLines = itemUuid ? packageLinesByItem.get(String(itemUuid)) : undefined;
         const packageSelections = packageLines?.map((line, index) => {
@@ -536,9 +533,10 @@ export default function TransactionList({ businessId, onLoadTransaction }: Trans
           custom_note: item.custom_note || undefined,
           customizations: customizations,
           bundleSelections: item.bundleSelections || undefined,
-          packageSelections: packageSelections || undefined
+          packageSelections: packageSelections || undefined,
+          production_status: item.production_status || null
         };
-        
+
         return mappedItem;
       });
 
@@ -555,7 +553,7 @@ export default function TransactionList({ businessId, onLoadTransaction }: Trans
         refund_total: refundTotalValue,
         refund_status: refundStatusValue
       };
-      
+
       setSelectedTransaction(response);
       setIsDetailModalOpen(true);
     } catch (error: unknown) {
@@ -570,13 +568,13 @@ export default function TransactionList({ businessId, onLoadTransaction }: Trans
   // Handle row click
   const handleRowClick = (transaction: Transaction) => {
     const transactionId = transaction.id;
-    
+
     // If transaction is pending and onLoadTransaction is provided, load it into cart and navigate to kasir
     if (transaction.status === 'pending' && onLoadTransaction) {
       onLoadTransaction(transactionId);
       return;
     }
-    
+
     // Otherwise, open detail modal as usual
     setLoadingTransactionId(transactionId);
     setIsLoadingDetail(true);
@@ -719,7 +717,7 @@ export default function TransactionList({ businessId, onLoadTransaction }: Trans
           originalCounters[txId] = counterValue;
         }
       }
-      
+
       // Debug: Log sample IDs to see what format they are
       // Removed unused sampleIds variable
 
@@ -827,11 +825,11 @@ export default function TransactionList({ businessId, onLoadTransaction }: Trans
         // The database should have uuid_id field, but if not, use id as fallback
         // This ensures consistency with the API which uses UUIDs
         const transactionId = tx.id; // DB already uses UUID as id
-        
+
         // Calculate refund_total and refund_status from the transaction data
         // The query should already include these, but ensure they're properly typed
-        const refundTotal = tx.refund_total !== undefined && tx.refund_total !== null 
-          ? (typeof tx.refund_total === 'number' ? tx.refund_total : Number(tx.refund_total)) 
+        const refundTotal = tx.refund_total !== undefined && tx.refund_total !== null
+          ? (typeof tx.refund_total === 'number' ? tx.refund_total : Number(tx.refund_total))
           : null;
         const refundStatus = tx.refund_status || null;
 
@@ -895,7 +893,7 @@ export default function TransactionList({ businessId, onLoadTransaction }: Trans
       if (useSystemPos && filteredTransactions.length > 0) {
         const withRefund = filteredTransactions.filter(t => (t.refund_total ?? 0) > 0);
         if (typeof fetch === 'function') {
-          fetch('http://127.0.0.1:7245/ingest/519de021-d49d-473f-a8a1-4215977c867a', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ location: 'TransactionList.tsx:fetchTransactions', message: 'system_pos mapped refund_total', data: { total: filteredTransactions.length, withRefundCount: withRefund.length, sample: withRefund.slice(0, 3).map(t => ({ id: t.id, refund_total: t.refund_total })) }, hypothesisId: 'H2', timestamp: Date.now() }) }).catch(() => {});
+          fetch('http://127.0.0.1:7245/ingest/519de021-d49d-473f-a8a1-4215977c867a', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ location: 'TransactionList.tsx:fetchTransactions', message: 'system_pos mapped refund_total', data: { total: filteredTransactions.length, withRefundCount: withRefund.length, sample: withRefund.slice(0, 3).map(t => ({ id: t.id, refund_total: t.refund_total })) }, hypothesisId: 'H2', timestamp: Date.now() }) }).catch(() => { });
         }
       }
       // #endregion
@@ -1163,7 +1161,7 @@ export default function TransactionList({ businessId, onLoadTransaction }: Trans
         const allEmployees = isSystemPosMode && electronAPI.localDbGetSystemPosEmployees
           ? await electronAPI.localDbGetSystemPosEmployees()
           : (electronAPI.localDbGetEmployees ? await electronAPI.localDbGetEmployees() : []);
-        
+
         const employeesArray = Array.isArray(allEmployees) ? allEmployees : [];
         const map = new Map<number, { name: string; color: string | null }>();
         employeesArray.forEach((emp: { id?: number | string; nama_karyawan?: string; color?: string | null }) => {
@@ -1236,7 +1234,7 @@ export default function TransactionList({ businessId, onLoadTransaction }: Trans
       const table = document.querySelector('table.w-full.text-sm');
       if (!table) {
         if (typeof fetch === 'function') {
-          fetch('http://127.0.0.1:7242/ingest/7b565785-72b5-49f7-b2c0-57606ea0d0b5', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ location: 'TransactionList.tsx:useEffect', message: 'Table not found in DOM', data: { transactionsLength: transactions.length }, timestamp: Date.now(), sessionId: 'debug-session', hypothesisId: 'H2' }) }).catch(() => {});
+          fetch('http://127.0.0.1:7242/ingest/7b565785-72b5-49f7-b2c0-57606ea0d0b5', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ location: 'TransactionList.tsx:useEffect', message: 'Table not found in DOM', data: { transactionsLength: transactions.length }, timestamp: Date.now(), sessionId: 'debug-session', hypothesisId: 'H2' }) }).catch(() => { });
         }
         return;
       }
@@ -1246,7 +1244,7 @@ export default function TransactionList({ businessId, onLoadTransaction }: Trans
       const tdStyle = td6 ? window.getComputedStyle(td6).textAlign : null;
       const thInline = th6 && (th6 as HTMLElement).getAttribute ? (th6 as HTMLElement).getAttribute('style') : null;
       if (typeof fetch === 'function') {
-        fetch('http://127.0.0.1:7242/ingest/7b565785-72b5-49f7-b2c0-57606ea0d0b5', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ location: 'TransactionList.tsx:useEffect', message: 'Computed style Disc/Vc column', data: { thComputedTextAlign: thStyle, tdComputedTextAlign: tdStyle, thInlineStyle: thInline }, timestamp: Date.now(), sessionId: 'debug-session', hypothesisId: 'H3' }) }).catch(() => {});
+        fetch('http://127.0.0.1:7242/ingest/7b565785-72b5-49f7-b2c0-57606ea0d0b5', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ location: 'TransactionList.tsx:useEffect', message: 'Computed style Disc/Vc column', data: { thComputedTextAlign: thStyle, tdComputedTextAlign: tdStyle, thInlineStyle: thInline }, timestamp: Date.now(), sessionId: 'debug-session', hypothesisId: 'H3' }) }).catch(() => { });
       }
     }, 300);
     return () => clearTimeout(t);
@@ -1263,7 +1261,7 @@ export default function TransactionList({ businessId, onLoadTransaction }: Trans
   const handleFiveClickToggle = useCallback(() => {
     const now = Date.now();
     const timeSinceLastClick = now - lastGrandTotalClickRef.current;
-    
+
     if (timeSinceLastClick > 3000) {
       // Reset counter if more than 3 seconds passed
       grandTotalClickCountRef.current = 1;
@@ -1530,14 +1528,14 @@ export default function TransactionList({ businessId, onLoadTransaction }: Trans
   const totalRevenue = filteredTransactions.reduce((sum, t) => {
     const amount = typeof t.final_amount === 'string' ? parseFloat(t.final_amount) : t.final_amount;
     return sum + (isNaN(amount) ? 0 : amount);
-  }, 0);const totalRefund = filteredTransactions.reduce((sum, t) => {
+  }, 0); const totalRefund = filteredTransactions.reduce((sum, t) => {
     const amount = typeof t.refund_total === 'string' ? parseFloat(t.refund_total) : (t.refund_total || 0);
     return sum + (isNaN(amount) ? 0 : amount);
   }, 0);
   // #region agent log
   if (isSystemPosMode && typeof fetch === 'function') {
     const withRefund = filteredTransactions.filter(t => (t.refund_total ?? 0) > 0);
-    fetch('http://127.0.0.1:7245/ingest/519de021-d49d-473f-a8a1-4215977c867a', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ location: 'TransactionList.tsx:totalRefund', message: 'grand total calc system_pos', data: { totalRefund, baseTransactionsLen: baseTransactions.length, filteredLen: filteredTransactions.length, withRefundCount: withRefund.length, receiptizePrintedIdsSize: receiptizePrintedIds.size }, hypothesisId: 'H3', hypothesisId2: 'H4', hypothesisId3: 'H5', timestamp: Date.now() }) }).catch(() => {});
+    fetch('http://127.0.0.1:7245/ingest/519de021-d49d-473f-a8a1-4215977c867a', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ location: 'TransactionList.tsx:totalRefund', message: 'grand total calc system_pos', data: { totalRefund, baseTransactionsLen: baseTransactions.length, filteredLen: filteredTransactions.length, withRefundCount: withRefund.length, receiptizePrintedIdsSize: receiptizePrintedIds.size }, hypothesisId: 'H3', hypothesisId2: 'H4', hypothesisId3: 'H5', timestamp: Date.now() }) }).catch(() => { });
   }
   // #endregion
   const totalVoucherDiscount = filteredTransactions.reduce((sum, t) => {
@@ -1626,18 +1624,18 @@ export default function TransactionList({ businessId, onLoadTransaction }: Trans
         <div className="text-center p-8 bg-red-50 rounded-lg border border-red-200">
           <div className="text-red-600 text-lg font-semibold mb-2">Permission Error</div>
           <div className="text-red-700">User have both permissions, contact admin        </div>
+        </div>
+        {showPrinterManager && (
+          <Printer1ToPrinter2Manager onClose={() => setShowPrinterManager(false)} />
+        )}
       </div>
-      {showPrinterManager && (
-        <Printer1ToPrinter2Manager onClose={() => setShowPrinterManager(false)} />
-      )}
-    </div>
-  );
-}
+    );
+  }
 
 
   // #region agent log
   if (typeof fetch === 'function') {
-    fetch('http://127.0.0.1:7242/ingest/7b565785-72b5-49f7-b2c0-57606ea0d0b5', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ location: 'TransactionList.tsx:mainReturn', message: 'TransactionList main return', data: { filteredCount: filteredTransactions.length, isLoading, hasTable: filteredTransactions.length > 0 }, timestamp: Date.now(), sessionId: 'debug-session', hypothesisId: 'H2' }) }).catch(() => {});
+    fetch('http://127.0.0.1:7242/ingest/7b565785-72b5-49f7-b2c0-57606ea0d0b5', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ location: 'TransactionList.tsx:mainReturn', message: 'TransactionList main return', data: { filteredCount: filteredTransactions.length, isLoading, hasTable: filteredTransactions.length > 0 }, timestamp: Date.now(), sessionId: 'debug-session', hypothesisId: 'H2' }) }).catch(() => { });
   }
   // #endregion
   return (
@@ -1645,24 +1643,24 @@ export default function TransactionList({ businessId, onLoadTransaction }: Trans
       <div className="flex-1 flex flex-col w-full min-w-0 max-w-[95%] xl:max-w-[1600px] mx-auto px-4 sm:px-6 py-6">
         {/* Header */}
         <div className="mb-6 flex items-center justify-between">
-          <h1 
+          <h1
             className="text-2xl font-bold text-gray-800 cursor-pointer select-none"
             onClick={() => {
               if (!canAccessPrinterManager) return;
-              
+
               // Clear existing timeout
               if (headerClickTimeoutRef.current) {
                 clearTimeout(headerClickTimeoutRef.current);
               }
-              
+
               const newCount = headerClickCount + 1;
               setHeaderClickCount(newCount);
-              
+
               // Reset counter after 2 seconds
               headerClickTimeoutRef.current = setTimeout(() => {
                 setHeaderClickCount(0);
               }, 2000);
-              
+
               // If clicked 5 times, open the manager
               if (newCount >= 5) {
                 setShowPrinterManager(true);
@@ -1842,10 +1840,10 @@ export default function TransactionList({ businessId, onLoadTransaction }: Trans
           </div>
 
           {/* Grand Total Card */}
-          <GrandTotalCard 
-            totalRevenue={totalRevenue} 
-            totalRefund={totalRefund} 
-            totalCustomerUnit={totalCustomerUnit} 
+          <GrandTotalCard
+            totalRevenue={totalRevenue}
+            totalRefund={totalRefund}
+            totalCustomerUnit={totalCustomerUnit}
             totalTransactionCount={totalTransactionCount}
             onFiveClick={handleFiveClickToggle}
           />
@@ -2162,10 +2160,10 @@ export default function TransactionList({ businessId, onLoadTransaction }: Trans
                             }}
                             className={
                               col.key === 'customer_name' || col.key === 'user_name' ? 'min-w-0 align-middle' :
-                              col.key === 'waiter' ? 'whitespace-nowrap' :
-                              col.key === 'voucher_discount' ? 'whitespace-nowrap cursor-pointer tabular-nums' :
-                              col.key === 'refund_total' ? 'whitespace-nowrap tabular-nums' :
-                              col.key === 'actions' ? '' : 'whitespace-nowrap'
+                                col.key === 'waiter' ? 'whitespace-nowrap' :
+                                  col.key === 'voucher_discount' ? 'whitespace-nowrap cursor-pointer tabular-nums' :
+                                    col.key === 'refund_total' ? 'whitespace-nowrap tabular-nums' :
+                                      col.key === 'actions' ? '' : 'whitespace-nowrap'
                             }
                             onClick={col.key === 'voucher_discount' ? (e) => { e.stopPropagation(); setVoucherClickCount(prev => { const next = prev + 1; if (next >= 5 && canViewPrintingLogs) { setShowPrintingLogs(true); return 0; } return next; }); } : undefined}
                           >
@@ -2511,7 +2509,7 @@ function GrandTotalCard({ totalRevenue, totalRefund, totalCustomerUnit, totalTra
   const netRevenue = totalRevenue - totalRefund;
 
   return (
-    <div 
+    <div
       className="bg-white rounded-lg shadow-sm border border-gray-200 p-4 md:col-span-1 cursor-pointer hover:bg-gray-50 transition-colors"
       onClick={onFiveClick}
       title="Click 5 times to toggle R/RR badge display"
@@ -2541,5 +2539,5 @@ function GrandTotalCard({ totalRevenue, totalRefund, totalCustomerUnit, totalTra
         </div>
       </div>
     </div>
-    );
-  }
+  );
+}

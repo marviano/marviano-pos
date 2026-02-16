@@ -7,7 +7,7 @@ import { getMySQLPool, executeUpdate } from './mysqlDb';
 
 export async function initializeMySQLSchema(): Promise<void> {
   console.log('📋 Initializing MySQL schema...');
-  
+
   const tables = [
     // Users table
     `CREATE TABLE IF NOT EXISTS users (
@@ -407,6 +407,9 @@ export async function initializeMySQLSchema(): Promise<void> {
       production_started_at TIMESTAMP NULL DEFAULT NULL,
       production_status ENUM('preparing','finished','cancelled') DEFAULT NULL,
       production_finished_at TIMESTAMP NULL DEFAULT NULL,
+      cancelled_at TIMESTAMP NULL DEFAULT NULL COMMENT 'When this item was cancelled',
+      cancelled_by_user_id INT DEFAULT NULL COMMENT 'User who authorized the cancellation',
+      cancelled_by_waiter_id INT DEFAULT NULL COMMENT 'Waiter who performed the cancellation via PIN',
       PRIMARY KEY (id),
       UNIQUE KEY uuid_id (uuid_id),
       KEY idx_transaction_items_transaction (transaction_id),
@@ -415,9 +418,13 @@ export async function initializeMySQLSchema(): Promise<void> {
       KEY idx_transaction_items_waiter (waiter_id),
       KEY fk_transaction_items_transaction_uuid (uuid_transaction_id),
       KEY idx_transaction_items_production_status (production_status),
+      KEY idx_transaction_items_cancelled_by_user (cancelled_by_user_id),
+      KEY idx_transaction_items_cancelled_by_waiter (cancelled_by_waiter_id),
       CONSTRAINT fk_transaction_items_product FOREIGN KEY (product_id) REFERENCES products(id) ON DELETE CASCADE,
       CONSTRAINT fk_transaction_items_transaction_uuid FOREIGN KEY (uuid_transaction_id) REFERENCES transactions(uuid_id) ON DELETE CASCADE,
-      CONSTRAINT fk_transaction_items_waiter FOREIGN KEY (waiter_id) REFERENCES employees(id) ON DELETE SET NULL
+      CONSTRAINT fk_transaction_items_waiter FOREIGN KEY (waiter_id) REFERENCES employees(id) ON DELETE SET NULL,
+      CONSTRAINT fk_transaction_items_cancelled_by_user FOREIGN KEY (cancelled_by_user_id) REFERENCES users(id) ON DELETE SET NULL,
+      CONSTRAINT fk_transaction_items_cancelled_by_waiter FOREIGN KEY (cancelled_by_waiter_id) REFERENCES employees(id) ON DELETE SET NULL
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci`,
 
     // Package line items (normalized: which products were chosen inside each package sale; finished_at = per-line completion)

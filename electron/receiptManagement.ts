@@ -500,7 +500,9 @@ export class ReceiptManagementService {
       // Bill discount (optional)
       '{{voucherDiscount}}': (data.voucherDiscount ?? 0).toLocaleString('id-ID'),
       '{{voucherLabel}}': data.voucherLabel || '',
+      // finalAmount/grandTotal = amount to pay (subtotal - voucher discount). Use for "Pembayaran Sebenarnya", "Total Bayar"
       '{{finalAmount}}': (data.finalAmount ?? data.total).toLocaleString('id-ID'),
+      '{{grandTotal}}': (data.finalAmount ?? data.total).toLocaleString('id-ID'),
     };
 
     // Handle conditional sections

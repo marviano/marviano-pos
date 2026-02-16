@@ -26,6 +26,7 @@ interface WaiterSelectionModalProps {
   onClose: () => void;
   onSelect: (employeeId: number, employeeName: string, employeeColor: string | null) => void;
   businessId: number;
+  title?: string;
 }
 
 const getElectronAPI = () => (typeof window !== 'undefined' ? window.electronAPI : undefined);
@@ -35,6 +36,7 @@ export default function WaiterSelectionModal({
   onClose,
   onSelect,
   businessId,
+  title = 'Pilih Waiter',
 }: WaiterSelectionModalProps) {
   const [employees, setEmployees] = useState<Employee[]>([]);
   const [isLoading, setIsLoading] = useState(false);
@@ -84,11 +86,11 @@ export default function WaiterSelectionModal({
     const waiters = employees
       .filter(emp => emp.jabatan_id === 1)
       .sort((a, b) => a.nama_karyawan.localeCompare(b.nama_karyawan));
-    
+
     const spvCashier = employees
       .filter(emp => emp.jabatan_id === 2 || emp.jabatan_id === 6)
       .sort((a, b) => a.nama_karyawan.localeCompare(b.nama_karyawan));
-    
+
     const result = [...waiters, ...spvCashier];
     return result;
   }, [employees]);
@@ -136,7 +138,7 @@ export default function WaiterSelectionModal({
       onClose();
       return;
     }
-    
+
     // Show PIN input
     setPendingWaiter(employee);
     setPinInput('');
@@ -145,7 +147,7 @@ export default function WaiterSelectionModal({
 
   const handlePinConfirm = () => {
     if (!pendingWaiter) return;
-    
+
     if (pinInput.trim() === '') {
       setPinError('PIN tidak boleh kosong');
       return;
@@ -197,18 +199,18 @@ export default function WaiterSelectionModal({
   };
 
   return (
-    <div 
+    <div
       className="fixed inset-0 bg-black/30 flex items-center justify-center z-50"
       onClick={onClose}
       style={{ backdropFilter: 'blur(4px)', WebkitBackdropFilter: 'blur(4px)' }}
     >
-      <div 
+      <div
         className="bg-white rounded-lg shadow-xl w-full max-w-4xl max-h-[90vh] flex flex-col"
         onClick={(e) => e.stopPropagation()}
       >
         {/* Header */}
         <div className="flex items-center justify-between p-4 border-b border-gray-200">
-          <h2 className="text-xl font-bold text-gray-900">Pilih Waiter</h2>
+          <h2 className="text-xl font-bold text-gray-900">{title}</h2>
           <button
             onClick={onClose}
             className="text-gray-400 hover:text-gray-600 transition-colors"
@@ -250,18 +252,18 @@ export default function WaiterSelectionModal({
 
       {/* PIN Input Overlay */}
       {pendingWaiter && (
-        <div 
+        <div
           className="absolute inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center rounded-lg z-10"
           onClick={(e) => e.stopPropagation()}
         >
-          <div 
+          <div
             className="bg-white rounded-2xl w-full max-w-md mx-4 shadow-xl"
             onClick={(e) => e.stopPropagation()}
           >
             {/* Header */}
             <div className="flex items-center justify-between p-6 pb-4">
               <div className="flex items-center gap-3">
-                <div 
+                <div
                   className="w-10 h-10 rounded-full flex items-center justify-center"
                   style={{ backgroundColor: pendingWaiter.color || '#9CA3AF' }}
                 >

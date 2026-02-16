@@ -177,6 +177,18 @@ type TabView = 'all-day' | number; // 'all-day' or shift ID
 
 type VoucherBreakdown = Record<string, { count: number; total: number }>;
 
+interface CancelledItemDetail {
+  product_name: string;
+  quantity: number;
+  unit_price: number;
+  total_price: number;
+  cancelled_at: string;
+  cancelled_by_user_name: string;
+  cancelled_by_waiter_name: string;
+  receipt_number?: string | null;
+  customer_name?: string | null;
+}
+
 interface ReportDataPayload {
   statistics: ShiftStatistics;
   paymentBreakdown: PaymentBreakdown[];
@@ -188,6 +200,7 @@ interface ReportDataPayload {
   customizationSales: CustomizationSale[];
   voucherBreakdown: VoucherBreakdown;
   refunds: RefundDetail[];
+  cancelledItems: CancelledItemDetail[];
 }
 
 interface RefundDetail {
@@ -375,6 +388,7 @@ export default function GantiShift() {
   const [customizationSales, setCustomizationSales] = useState<CustomizationSale[]>([]);
   const [voucherBreakdown, setVoucherBreakdown] = useState<VoucherBreakdown>({});
   const [refunds, setRefunds] = useState<RefundDetail[]>([]);
+  const [cancelledItems, setCancelledItems] = useState<CancelledItemDetail[]>([]);
   const [recalculatedCategory1Breakdown, setRecalculatedCategory1Breakdown] = useState<Category1Breakdown[]>([]);
   const [recalculatedCategory2Breakdown, setRecalculatedCategory2Breakdown] = useState<Category2Breakdown[]>([]);
   const [groupProducts, setGroupProducts] = useState(false); // Default: ungrouped
@@ -721,7 +735,8 @@ export default function GantiShift() {
     paymentMethod: true,
     categoryI: true,
     categoryII: true,
-    toppingSales: true
+    toppingSales: true,
+    itemDibatalkan: true
   });
   const [ringkasanOnly, setRingkasanOnly] = useState(false);
   const [showSettingsModal, setShowSettingsModal] = useState(false);
@@ -1144,7 +1159,7 @@ export default function GantiShift() {
       const defaultCash: CashSummary = { cash_shift: 0, cash_whole_day: 0 };
 
       // Load all statistics in parallel with error handling
-      const [statsResult, breakdownResult, category1BreakdownResult, category2BreakdownResult, cashResult, productSalesResult, packageSalesResult, refundsResult, voucherBreakdownResult] = await Promise.allSettled([
+      const [statsResult, breakdownResult, category1BreakdownResult, category2BreakdownResult, cashResult, productSalesResult, packageSalesResult, refundsResult, voucherBreakdownResult, cancelledItemsResult] = await Promise.allSettled([
         electronAPI.localDbGetShiftStatistics
           ? electronAPI.localDbGetShiftStatistics(null, activeShift.shift_start, activeShift.shift_end, businessId, activeShift.uuid_id)
           : Promise.resolve(defaultStats),
@@ -1177,7 +1192,10 @@ export default function GantiShift() {
           : Promise.resolve<RefundDetail[]>([]),
         electronAPI.localDbGetVoucherBreakdown
           ? electronAPI.localDbGetVoucherBreakdown(null, activeShift.shift_start, activeShift.shift_end, businessId, activeShift.uuid_id)
-          : Promise.resolve<VoucherBreakdown>({})
+          : Promise.resolve<VoucherBreakdown>({}),
+        electronAPI.localDbGetShiftCancelledItems
+          ? electronAPI.localDbGetShiftCancelledItems(null, activeShift.shift_start, activeShift.shift_end, businessId, activeShift.uuid_id)
+          : Promise.resolve<CancelledItemDetail[]>([])
       ]);
 
       const stats =
@@ -1234,6 +1252,8 @@ export default function GantiShift() {
       
       const refundsData = refundsResult.status === 'fulfilled' ? (refundsResult.value as RefundDetail[]) : [];
       setRefunds(refundsData);
+      const cancelledItemsData = cancelledItemsResult.status === 'fulfilled' ? (cancelledItemsResult.value as CancelledItemDetail[]) : [];
+      setCancelledItems(cancelledItemsData);
 
       // Only show error if all requests failed
       if (
@@ -1347,7 +1367,7 @@ export default function GantiShift() {
           }
         : null;
 
-      const [statsResult, breakdownResult, category1BreakdownResult, category2BreakdownResult, cashResult, productSalesResult, packageSalesResult, voucherBreakdownResult, refundsResult] = await Promise.allSettled([
+      const [statsResult, breakdownResult, category1BreakdownResult, category2BreakdownResult, cashResult, productSalesResult, packageSalesResult, voucherBreakdownResult, refundsResult, cancelledItemsResult] = await Promise.allSettled([
           electronAPI.localDbGetShiftStatistics
             ? electronAPI.localDbGetShiftStatistics(userId, start, end, reportBusinessId, shiftUuid ?? undefined, dayShiftUuids.length > 0 ? dayShiftUuids : undefined)
             : Promise.resolve(defaultStats),
@@ -1374,7 +1394,10 @@ export default function GantiShift() {
             : Promise.resolve<VoucherBreakdown>({}),
           refundsRequestPayload && electronAPI.localDbGetShiftRefunds
             ? electronAPI.localDbGetShiftRefunds(refundsRequestPayload)
-            : Promise.resolve<RefundDetail[]>([])
+            : Promise.resolve<RefundDetail[]>([]),
+          electronAPI.localDbGetShiftCancelledItems
+            ? electronAPI.localDbGetShiftCancelledItems(userId, start, end ?? start, reportBusinessId, shiftUuid ?? undefined, dayShiftUuids.length > 0 ? dayShiftUuids : undefined)
+            : Promise.resolve<CancelledItemDetail[]>([])
         ]);
 
         const statsPayload = statsResult.status === 'fulfilled' ? (statsResult.value as ShiftStatistics) : defaultStats;
@@ -1434,6 +1457,7 @@ export default function GantiShift() {
 
         const voucherBreakdownPayload = voucherBreakdownResult.status === 'fulfilled' ? (voucherBreakdownResult.value as VoucherBreakdown) : {};
         const refundsPayload = refundsResult.status === 'fulfilled' ? (refundsResult.value as RefundDetail[]) : [];
+        const cancelledItemsPayload = cancelledItemsResult.status === 'fulfilled' ? (cancelledItemsResult.value as CancelledItemDetail[]) : [];
         return {
           statistics: {
             order_count: statsPayload.order_count ?? 0,
@@ -1450,7 +1474,8 @@ export default function GantiShift() {
           packageSalesBreakdown: packageSalesPayload,
           customizationSales: productSalesPayload.customizations || [],
           voucherBreakdown: voucherBreakdownPayload ?? {},
-          refunds: refundsPayload
+          refunds: refundsPayload,
+          cancelledItems: cancelledItemsPayload
         };
       } catch (error) {
         console.error('Error fetching report payload:', error);
@@ -1897,9 +1922,10 @@ export default function GantiShift() {
             orders: dayReportData.statistics.order_count,
             total: dayReportData.statistics.total_amount,
             products: dayReportData.productSales.length
-          });const dayCash = dayReportData.cashSummary;
+          });          const dayCash = dayReportData.cashSummary;
           const dayCashSales = dayCash.cash_shift_sales ?? dayCash.cash_shift ?? 0;
-          const dayCashRefunds = dayCash.cash_shift_refunds ?? 0;
+          // Whole-day: use cash_whole_day_refunds for correct Grand Total calculation (matches print handler)
+          const dayCashRefunds = dayCash.cash_whole_day_refunds ?? dayCash.cash_shift_refunds ?? 0;
           // const dailyKasExpected = (dayCash.cash_whole_day ?? dayCash.cash_shift ?? 0) || dayCashSales - dayCashRefunds;
 
           // Get modal awal from day's shifts
@@ -1949,6 +1975,7 @@ export default function GantiShift() {
             statistics: dayReportData.statistics,
             gross_total_omset: dayGrossOmset,
             refunds: dayReportData.refunds ?? [],
+            cancelledItems: dayReportData.cancelledItems ?? [],
             productSales: productsForPrint,
             packageSalesBreakdown: dayReportData.packageSalesBreakdown ?? [],
             customizationSales: dayReportData.customizationSales,
@@ -2059,8 +2086,9 @@ export default function GantiShift() {
             modal_awal: shift.modal_awal,
             statistics: shiftReportData.statistics,
             gross_total_omset: shiftGrossOmset,
-            refunds: shiftReportData.refunds ?? [],
-            productSales: productsForPrint,
+        refunds: shiftReportData.refunds ?? [],
+        cancelledItems: shiftReportData.cancelledItems ?? [],
+        productSales: productsForPrint,
             packageSalesBreakdown: shiftReportData.packageSalesBreakdown ?? [],
             customizationSales: shiftReportData.customizationSales,
             paymentBreakdown: shiftReportData.paymentBreakdown.map(p => ({
@@ -2188,6 +2216,7 @@ export default function GantiShift() {
         statistics: reportData.statistics,
         gross_total_omset: customGrossOmset,
         refunds: reportData.refunds ?? [],
+        cancelledItems: reportData.cancelledItems ?? [],
         productSales: productsForPrint,
         packageSalesBreakdown: reportData.packageSalesBreakdown ?? [],
         customizationSales: reportData.customizationSales,
@@ -2299,6 +2328,7 @@ export default function GantiShift() {
         setCustomizationSales(dayData.customizationSales);
         setVoucherBreakdown(dayData.voucherBreakdown ?? {});
         setRefunds(dayData.refunds ?? []);
+        setCancelledItems(dayData.cancelledItems ?? []);
         didLoad = true;
       } else {
         // Load specific shift data
@@ -2332,6 +2362,7 @@ export default function GantiShift() {
         setCustomizationSales(shiftData.customizationSales);
         setVoucherBreakdown(shiftData.voucherBreakdown ?? {});
         setRefunds(shiftData.refunds ?? []);
+        setCancelledItems(shiftData.cancelledItems ?? []);
         didLoad = true;
       }
     } catch (error) {
@@ -2455,8 +2486,22 @@ export default function GantiShift() {
     0
   );
 
+  // Effective total discount: use sum of voucher breakdown when stats.total_discount is 0 but breakdown has values
+  const voucherBreakdownSum = VOUCHER_BREAKDOWN_ORDER.reduce(
+    (sum, { key }) => sum + (Number(voucherBreakdown[key]?.total) || 0),
+    0
+  );
+  const effectiveTotalDiscount =
+    voucherBreakdownSum > 0 ? voucherBreakdownSum : (Number(statistics.total_discount) || 0);
+
+  // Total of cancelled items (sum of total_price) - used for deduction in Category I, II, Paket, Barang Terjual
+  const totalCancelledAmount = cancelledItems.reduce((s, i) => s + Number(i.total_price || 0), 0);
+
   // Gross total omset (before refund and before discount) for Ringkasan display
-  const grossTotalOmset = (Number(statistics.total_amount) || 0) + (Number(totalRefundsActive) || 0) + (Number(statistics.total_discount) || 0);
+  const grossTotalOmset =
+    (Number(statistics.total_amount) || 0) +
+    (Number(totalRefundsActive) || 0) +
+    effectiveTotalDiscount;
   const totalToppingRevenue = customizationSales.reduce((sum, c) => sum + (c.total_revenue || 0), 0);
 
   return (
@@ -2877,7 +2922,7 @@ export default function GantiShift() {
                           <span className="text-xs font-semibold text-green-800">Diskon Voucher:</span>
                           <span className="flex-grow border-b border-dotted border-green-200 mx-2"></span>
                           <span className="text-xs font-bold text-green-700">
-                            {statistics.total_discount > 0 ? `-${formatRupiah(statistics.total_discount)}` : formatRupiah(0)}
+                            {effectiveTotalDiscount > 0 ? `-${formatRupiah(effectiveTotalDiscount)}` : formatRupiah(0)}
                           </span>
                         </div>
                         {VOUCHER_BREAKDOWN_ORDER.map(({ key, label }) => {
@@ -2897,7 +2942,7 @@ export default function GantiShift() {
                         <span className="text-xs font-bold text-gray-800">Grand Total:</span>
                         <span className="flex-grow border-b border-dotted border-gray-300 mx-2"></span>
                         <span className="text-sm font-bold text-gray-900">
-                          {formatRupiah(Math.max(0, grossTotalOmset - (Number(totalRefundsActive) || 0) - (Number(statistics.total_discount) || 0)))}
+                          {formatRupiah(Math.max(0, grossTotalOmset - (Number(totalRefundsActive) || 0) - effectiveTotalDiscount))}
                         </span>
                       </div>
                     </div>
@@ -3043,6 +3088,73 @@ export default function GantiShift() {
                             </tr>
                           );
                         })}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
+
+              {/* ITEM DIBATALKAN - Cancelled items with who cancelled (user/waiter) */}
+              {cancelledItems.length > 0 && (
+                <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-4">
+                  <h2 className="text-base font-semibold text-gray-800 mb-3 text-center">ITEM DIBATALKAN</h2>
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-xs">
+                      <thead>
+                        <tr className="border-b-2 border-gray-300 bg-gray-50">
+                          <th className="px-2 py-2 text-left font-semibold text-gray-700">Waktu Pembatalan</th>
+                          <th className="px-2 py-2 text-left font-semibold text-gray-700">Item</th>
+                          <th className="px-2 py-2 text-right font-semibold text-gray-700">Jumlah</th>
+                          <th className="px-2 py-2 text-right font-semibold text-gray-700">Harga</th>
+                          <th className="px-2 py-2 text-left font-semibold text-gray-700">Transaksi</th>
+                          <th className="px-2 py-2 text-left font-semibold text-gray-700">Pelanggan</th>
+                          <th className="px-2 py-2 text-left font-semibold text-gray-700">Dibatalkan Oleh</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {cancelledItems.map((item, idx) => {
+                          const cancelledDate = new Date(item.cancelled_at);
+                          const formatDateTime = (d: Date) =>
+                            d.toLocaleString('id-ID', {
+                              year: 'numeric',
+                              month: '2-digit',
+                              day: '2-digit',
+                              hour: '2-digit',
+                              minute: '2-digit',
+                              second: '2-digit',
+                              hour12: false,
+                              timeZone: 'Asia/Jakarta'
+                            });
+                          const cancelledByDisplay = item.cancelled_by_user_name
+                            ? item.cancelled_by_waiter_name && item.cancelled_by_waiter_name !== item.cancelled_by_user_name
+                              ? `${item.cancelled_by_user_name} / Waiters ${item.cancelled_by_waiter_name}`
+                              : item.cancelled_by_user_name
+                            : item.cancelled_by_waiter_name
+                              ? `Waiters ${item.cancelled_by_waiter_name}`
+                              : 'Tidak diketahui';
+                          return (
+                            <tr key={`${item.receipt_number}-${item.product_name}-${item.cancelled_at}-${idx}`} className="border-b border-gray-200 hover:bg-gray-50">
+                              <td className="px-2 py-2 text-gray-600">{formatDateTime(cancelledDate)}</td>
+                              <td className="px-2 py-2 text-gray-900">{item.product_name}</td>
+                              <td className="px-2 py-2 text-right text-gray-900">{item.quantity}x</td>
+                              <td className="px-2 py-2 text-right text-gray-900">{formatRupiah(Number(item.total_price || 0))}</td>
+                              <td className="px-2 py-2 text-gray-700 font-mono text-[10px]">#{item.receipt_number || '-'}</td>
+                              <td className="px-2 py-2 text-gray-600">{item.customer_name || 'Guest'}</td>
+                              <td className="px-2 py-2 text-gray-800">{cancelledByDisplay}</td>
+                            </tr>
+                          );
+                        })}
+                        <tr className="border-t-2 border-gray-300 bg-gray-100">
+                          <td className="py-1 px-2 font-bold text-gray-900">TOTAL</td>
+                          <td className="py-1 px-2"></td>
+                          <td className="py-1 px-2 text-right font-bold text-gray-900">
+                            {cancelledItems.reduce((s, i) => s + i.quantity, 0)}x
+                          </td>
+                          <td className="py-1 px-2 text-right font-bold text-gray-900">
+                            {formatRupiah(totalCancelledAmount)}
+                          </td>
+                          <td colSpan={3} className="py-1 px-2"></td>
+                        </tr>
                       </tbody>
                     </table>
                   </div>
@@ -3243,13 +3355,20 @@ export default function GantiShift() {
                                 <td className="py-1 px-2 text-right font-semibold text-gray-900">{formatRupiah(item.total_amount)}</td>
                               </tr>
                             ))}
+                            {totalCancelledAmount > 0 && (
+                              <tr className="border-b border-gray-200">
+                                <td className="py-1 px-2 text-red-700 font-medium">(-) Total Item Dibatalkan</td>
+                                <td className="py-1 px-2 text-right text-red-700">-</td>
+                                <td className="py-1 px-2 text-right font-semibold text-red-700">-{formatRupiah(totalCancelledAmount)}</td>
+                              </tr>
+                            )}
                             <tr className="border-t-2 border-gray-300 bg-gray-100">
                               <td className="py-1 px-2 font-bold text-gray-900">TOTAL</td>
                               <td className="py-1 px-2 text-right font-bold text-gray-900">
                                 {displayData.reduce((sum, item) => sum + item.total_quantity, 0)}
                               </td>
                               <td className="py-1 px-2 text-right font-bold text-gray-900">
-                                {formatRupiah(displayData.reduce((sum, item) => sum + item.total_amount, 0))}
+                                {formatRupiah(Math.max(0, displayData.reduce((sum, item) => sum + item.total_amount, 0) - totalCancelledAmount))}
                               </td>
                             </tr>
                           </>
@@ -3295,13 +3414,20 @@ export default function GantiShift() {
                                 <td className="py-1 px-2 text-right font-semibold text-gray-900">{formatRupiah(item.total_amount)}</td>
                               </tr>
                             ))}
+                            {totalCancelledAmount > 0 && (
+                              <tr className="border-b border-gray-200">
+                                <td className="py-1 px-2 text-red-700 font-medium">(-) Total Item Dibatalkan</td>
+                                <td className="py-1 px-2 text-right text-red-700">-</td>
+                                <td className="py-1 px-2 text-right font-semibold text-red-700">-{formatRupiah(totalCancelledAmount)}</td>
+                              </tr>
+                            )}
                             <tr className="border-t-2 border-gray-300 bg-gray-100">
                               <td className="py-1 px-2 font-bold text-gray-900">TOTAL</td>
                               <td className="py-1 px-2 text-right font-bold text-gray-900">
                                 {displayData.reduce((sum, item) => sum + item.total_quantity, 0)}
                               </td>
                               <td className="py-1 px-2 text-right font-bold text-gray-900">
-                                {formatRupiah(displayData.reduce((sum, item) => sum + item.total_amount, 0))}
+                                {formatRupiah(Math.max(0, displayData.reduce((sum, item) => sum + item.total_amount, 0) - totalCancelledAmount))}
                               </td>
                             </tr>
                           </>
@@ -3365,6 +3491,14 @@ export default function GantiShift() {
                               )}
                             </Fragment>
                           ))}
+                          {totalCancelledAmount > 0 && (
+                            <tr className="border-b border-gray-200">
+                              <td className="py-1 px-2 text-red-700 font-medium">(-) Total Item Dibatalkan</td>
+                              <td className="py-1 px-2 text-right text-red-700">-</td>
+                              <td className="py-1 px-2 text-right text-red-700">-</td>
+                              <td className="py-1 px-2 text-right font-semibold text-red-700">-{formatRupiah(totalCancelledAmount)}</td>
+                            </tr>
+                          )}
                           <tr className="border-t-2 border-gray-300 bg-gray-100">
                             <td className="py-1 px-2 font-bold text-gray-900">TOTAL</td>
                             <td className="py-1 px-2 text-right font-bold text-gray-900">
@@ -3372,7 +3506,7 @@ export default function GantiShift() {
                             </td>
                             <td className="py-1 px-2 text-right font-bold text-gray-900">-</td>
                             <td className="py-1 px-2 text-right font-bold text-gray-900">
-                              {formatRupiah(packageSalesBreakdown.reduce((sum, p) => sum + Number(p.total_amount || 0), 0))}
+                              {formatRupiah(Math.max(0, packageSalesBreakdown.reduce((sum, p) => sum + Number(p.total_amount || 0), 0) - totalCancelledAmount))}
                             </td>
                           </tr>
                         </>
@@ -3442,6 +3576,14 @@ export default function GantiShift() {
                               </tr>
                             );
                           })}
+                          {totalCancelledAmount > 0 && (
+                            <tr className="border-b border-gray-200">
+                              <td className="py-1 px-2 text-red-700 font-medium">(-) Total Item Dibatalkan</td>
+                              <td className="py-1 px-2 text-right text-red-700">-</td>
+                              <td className="py-1 px-2 text-right text-red-700">-</td>
+                              <td className="py-1 px-2 text-right font-semibold text-red-700">-{formatRupiah(totalCancelledAmount)}</td>
+                            </tr>
+                          )}
                           <tr className="border-t-2 border-gray-300 bg-gray-100">
                             <td className="py-1 px-2 font-bold text-gray-900">TOTAL</td>
                             <td className="py-1 px-2 text-right font-bold text-gray-900">
@@ -3449,10 +3591,10 @@ export default function GantiShift() {
                             </td>
                             <td className="py-1 px-2 text-right font-bold text-gray-900">-</td>
                             <td className="py-1 px-2 text-right font-bold text-gray-900">
-                              {formatRupiah(displayProductSales.reduce((sum, p) => {
+                              {formatRupiah(Math.max(0, displayProductSales.reduce((sum, p) => {
                                 const baseSubtotal = isGroupedProduct(p) ? p.total_base_subtotal : p.base_subtotal;
                                 return sum + baseSubtotal;
-                              }, 0))}
+                              }, 0) - totalCancelledAmount))}
                             </td>
                           </tr>
                           {barangTerjualByPlatform.map(({ label, qty, amount }) => (
@@ -3764,6 +3906,19 @@ export default function GantiShift() {
                       className="w-5 h-5 text-blue-600 rounded focus:ring-2 focus:ring-blue-500 disabled:opacity-50 disabled:cursor-not-allowed"
                     />
                   </label>
+
+                  <label className={`flex items-center justify-between cursor-pointer p-2 rounded hover:bg-gray-50 ${ringkasanOnly ? 'opacity-50' : ''}`}>
+                    <span className="text-sm font-medium text-gray-700">ITEM DIBATALKAN</span>
+                    <input
+                      type="checkbox"
+                      checked={printSectionOptions.itemDibatalkan}
+                      onChange={(e) => {
+                        setPrintSectionOptions((prev) => ({ ...prev, itemDibatalkan: e.target.checked }));
+                      }}
+                      disabled={ringkasanOnly}
+                      className="w-5 h-5 text-blue-600 rounded focus:ring-2 focus:ring-blue-500 disabled:opacity-50 disabled:cursor-not-allowed"
+                    />
+                  </label>
                 </div>
               </div>
             </div>
@@ -3974,6 +4129,19 @@ export default function GantiShift() {
                       className="w-5 h-5 text-blue-600 rounded focus:ring-2 focus:ring-blue-500 disabled:opacity-50 disabled:cursor-not-allowed"
                     />
                   </label>
+
+                  <label className={`flex items-center justify-between cursor-pointer p-2 rounded hover:bg-gray-50 ${ringkasanOnly ? 'opacity-50' : ''}`}>
+                    <span className="text-sm font-medium text-gray-700">ITEM DIBATALKAN</span>
+                    <input
+                      type="checkbox"
+                      checked={printSectionOptions.itemDibatalkan}
+                      onChange={(e) => {
+                        setPrintSectionOptions((prev) => ({ ...prev, itemDibatalkan: e.target.checked }));
+                      }}
+                      disabled={ringkasanOnly}
+                      className="w-5 h-5 text-blue-600 rounded focus:ring-2 focus:ring-blue-500 disabled:opacity-50 disabled:cursor-not-allowed"
+                    />
+                  </label>
                 </div>
               </div>
             </div>
@@ -4065,7 +4233,7 @@ export default function GantiShift() {
               <div className="flex justify-between">
                 <span className="text-gray-800 font-medium">Total Diskon Voucher:</span>
                 <span className="font-semibold text-green-700">
-                  {statistics.total_discount > 0 ? formatRupiah(-statistics.total_discount) : formatRupiah(0)}
+                  {effectiveTotalDiscount > 0 ? formatRupiah(-effectiveTotalDiscount) : formatRupiah(0)}
                 </span>
               </div>
               <div className="flex justify-between">

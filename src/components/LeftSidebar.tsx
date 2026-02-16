@@ -142,7 +142,7 @@ export default function LeftSidebar({ menuItems, activeMenuItem, onMenuItemClick
               const perm1 = hasPermission(user, 'access_baristaandkitchen');
               const perm2 = hasPermission(user, 'access_barista_and_kitchen');
               const hasAccess = isAdmin || perm1 || perm2;
-              
+
               if (!hasAccess) {
                 return null;
               }
@@ -155,9 +155,9 @@ export default function LeftSidebar({ menuItems, activeMenuItem, onMenuItemClick
               }
             }
 
-            // Ganti Shift - requires access_gantishift permission
+            // Ganti Shift - requires shift management access (access_kasir_bayar_button)
             if (item.name === 'Ganti Shift') {
-              if (!isAdmin && !hasPermission(user, 'access_gantishift')) {
+              if (!isAdmin && !hasPermission(user, 'access_kasir_bayar_button')) {
                 return null;
               }
             }
@@ -171,19 +171,18 @@ export default function LeftSidebar({ menuItems, activeMenuItem, onMenuItemClick
 
             // Setelan Global - always accessible, but display as "Setelan"
             const displayName = item.name === 'Setelan Global' ? 'Setelan' : item.name;
-            
+
             return (
               <button
                 key={item.id}
                 onClick={() => !item.disabled && onMenuItemClick(item.name)}
                 disabled={item.disabled}
-                className={`w-full flex flex-col items-center justify-center space-y-1 px-2 py-2 rounded-lg mb-1.5 transition-colors ${
-                  item.disabled
+                className={`w-full flex flex-col items-center justify-center space-y-1 px-2 py-2 rounded-lg mb-1.5 transition-colors ${item.disabled
                     ? 'text-gray-300 cursor-not-allowed opacity-50'
                     : activeMenuItem === item.name
-                    ? 'bg-green-500 text-white'
-                    : 'text-white hover:bg-blue-900'
-                }`}
+                      ? 'bg-green-500 text-white'
+                      : 'text-white hover:bg-blue-900'
+                  }`}
               >
                 {getIcon(item.name)}
                 <span className={`text-xs font-medium text-center leading-tight ${item.disabled ? 'line-through' : ''}`}>{displayName}</span>

@@ -616,6 +616,24 @@ async function ensureTransactionItemPackageLinesFinishedAtColumn(): Promise<void
   }
 }
 
+/** Lazy migration: ensure transaction_items cancellation audit columns exist. */
+let transactionItemsCancellationColumnsEnsured = false;
+async function ensureTransactionItemsCancellationColumns(): Promise<void> {
+  if (transactionItemsCancellationColumnsEnsured) return;
+  try {
+    await executeDdlIgnoreDup('ALTER TABLE transaction_items ADD COLUMN cancelled_by_user_id INT DEFAULT NULL COMMENT \'User who authorized the cancellation\' AFTER production_finished_at');
+    await executeDdlIgnoreDup('ALTER TABLE transaction_items ADD COLUMN cancelled_by_waiter_id INT DEFAULT NULL COMMENT \'Waiter who performed the cancellation via PIN\' AFTER cancelled_by_user_id');
+    await executeDdlIgnoreDup('ALTER TABLE transaction_items ADD COLUMN cancelled_at TIMESTAMP NULL DEFAULT NULL COMMENT \'When this item was cancelled\' AFTER cancelled_by_waiter_id');
+    await executeDdlIgnoreDup('ALTER TABLE transaction_items ADD INDEX idx_transaction_items_cancelled_by_user (cancelled_by_user_id)');
+    await executeDdlIgnoreDup('ALTER TABLE transaction_items ADD INDEX idx_transaction_items_cancelled_by_waiter (cancelled_by_waiter_id)');
+    await executeDdlIgnoreDup('ALTER TABLE transaction_items ADD INDEX idx_transaction_items_cancelled_at (cancelled_at)');
+    transactionItemsCancellationColumnsEnsured = true;
+    console.log('✅ transaction_items cancellation audit columns ensured (lazy migration)');
+  } catch (e) {
+    console.warn('⚠️ Lazy migration transaction_items cancellation columns failed (will retry on next use):', (e as Error)?.message);
+  }
+}
+
 async function ensureSystemPosQueueTable(): Promise<void> {
   const sql = `CREATE TABLE IF NOT EXISTS system_pos_queue (
     id INT NOT NULL AUTO_INCREMENT,
@@ -701,6 +719,9 @@ async function ensureSystemPosSchema(): Promise<void> {
       package_selections_json TEXT DEFAULT NULL,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
       waiter_id INT DEFAULT NULL,
+      cancelled_by_user_id INT DEFAULT NULL,
+      cancelled_by_waiter_id INT DEFAULT NULL,
+      cancelled_at TIMESTAMP NULL DEFAULT NULL COMMENT 'When this item was cancelled',
       PRIMARY KEY (id),
       UNIQUE KEY uk_transaction_items_uuid (uuid_id),
       KEY idx_transaction_id (transaction_id),
@@ -708,6 +729,9 @@ async function ensureSystemPosSchema(): Promise<void> {
       KEY idx_product_id (product_id),
       KEY idx_created_at (created_at),
       KEY idx_transaction_items_waiter (waiter_id),
+      KEY idx_transaction_items_cancelled_by_user (cancelled_by_user_id),
+      KEY idx_transaction_items_cancelled_by_waiter (cancelled_by_waiter_id),
+      KEY idx_transaction_items_cancelled_at (cancelled_at),
       CONSTRAINT fk_ti_transaction FOREIGN KEY (transaction_id) REFERENCES transactions(id) ON DELETE CASCADE
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
     `CREATE TABLE IF NOT EXISTS transaction_item_customizations (
@@ -4224,6 +4248,8 @@ function createWindows(): void {
       let query = `
         SELECT 
           t.*,
+          t.final_amount,
+          t.total_amount,
           COALESCE(t.uuid_id, t.id) as id,
           CASE 
             WHEN t.created_at IS NOT NULL THEN
@@ -4242,12 +4268,21 @@ function createWindows(): void {
           CASE 
             WHEN COALESCE(refund_summary.total_refund, t.refund_total, 0) > 0 THEN
               CASE 
-                WHEN COALESCE(refund_summary.total_refund, t.refund_total, 0) >= (t.final_amount - 0.01) THEN 'full'
+                WHEN COALESCE(refund_summary.total_refund, t.refund_total, 0) >= ((t.final_amount - COALESCE(cancelled.total_cancelled, 0)) - 0.01) THEN 'full'
                 ELSE 'partial'
               END
             ELSE 'none'
           END as refund_status
         FROM transactions t
+        LEFT JOIN (
+          SELECT 
+            transaction_id, 
+            uuid_transaction_id,
+            SUM(total_price) as total_cancelled
+          FROM transaction_items
+          WHERE production_status = 'cancelled'
+          GROUP BY uuid_transaction_id, transaction_id
+        ) cancelled ON (t.uuid_id = cancelled.uuid_transaction_id OR t.id = cancelled.transaction_id)
         LEFT JOIN (
           SELECT 
             transaction_uuid,
@@ -4816,6 +4851,7 @@ function createWindows(): void {
       await ensureTransactionItemsWaiterIdColumn();
       await ensureTransactionItemsPackageLineFinishedAtColumn();
       await ensureTransactionItemPackageLinesFinishedAtColumn();
+      await ensureTransactionItemsCancellationColumns();
       console.log('🔍 [MYSQL] Inserting transaction items:', rows.length); const queries: Array<{ sql: string; params?: (string | number | null | boolean)[] }> = [];
 
       // Map to store transaction UUID -> INT id lookups
@@ -4919,31 +4955,43 @@ function createWindows(): void {
           try { return JSON.stringify(raw); } catch { return null; }
         })();
 
+        const cancelledByUserId = typeof (r as any).cancelled_by_user_id === 'number' ? (r as any).cancelled_by_user_id : (typeof (r as any).cancelled_by_user_id === 'string' ? parseInt(String((r as any).cancelled_by_user_id), 10) : null);
+        const cancelledByWaiterId = typeof (r as any).cancelled_by_waiter_id === 'number' ? (r as any).cancelled_by_waiter_id : (typeof (r as any).cancelled_by_waiter_id === 'string' ? parseInt(String((r as any).cancelled_by_waiter_id), 10) : null);
+        const cancelledAtDate = getDate('cancelled_at');
+        const cancelledAt = cancelledAtDate ? toMySQLDateTime(cancelledAtDate as string | number | Date) : null;
+
         console.log('🔧 [MYSQL] Production status update:', {
           itemId: r.id,
           itemUuidId,
           productionStatus,
           productionStartedAt,
-          productionFinishedAt
+          productionFinishedAt,
+          cancelledByUserId,
+          cancelledByWaiterId,
+          cancelledAt
         });
 
         queries.push({
           sql: `INSERT INTO transaction_items (
             uuid_id, transaction_id, uuid_transaction_id, product_id, quantity, unit_price, total_price,
             bundle_selections_json, package_selections_json, custom_note, created_at, waiter_id,
-            production_status, production_started_at, production_finished_at, package_line_finished_at_json
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            production_status, production_started_at, production_finished_at, package_line_finished_at_json,
+            cancelled_by_user_id, cancelled_by_waiter_id, cancelled_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
           ON DUPLICATE KEY UPDATE
             transaction_id=VALUES(transaction_id), uuid_transaction_id=VALUES(uuid_transaction_id), product_id=VALUES(product_id), quantity=VALUES(quantity),
             unit_price=VALUES(unit_price), total_price=VALUES(total_price),
             bundle_selections_json=VALUES(bundle_selections_json), package_selections_json=VALUES(package_selections_json),
             custom_note=VALUES(custom_note), created_at=VALUES(created_at), waiter_id=VALUES(waiter_id),
             production_status=VALUES(production_status), production_started_at=VALUES(production_started_at), production_finished_at=VALUES(production_finished_at),
-            package_line_finished_at_json=VALUES(package_line_finished_at_json)`,
+            package_line_finished_at_json=VALUES(package_line_finished_at_json),
+            cancelled_by_user_id=VALUES(cancelled_by_user_id), cancelled_by_waiter_id=VALUES(cancelled_by_waiter_id),
+            cancelled_at=VALUES(cancelled_at)`,
           params: [
             itemUuidId, transactionIntId, transactionUuidId, productId, quantity, unitPrice, totalPrice,
             bundleSelectionsJson, packageSelectionsJson, customNote, createdAt, waiterIdItem,
-            productionStatus, productionStartedAt, productionFinishedAt, packageLineFinishedAtJson
+            productionStatus, productionStartedAt, productionFinishedAt, packageLineFinishedAtJson,
+            cancelledByUserId, cancelledByWaiterId, cancelledAt
           ]
         });
       }
@@ -5994,9 +6042,12 @@ function createWindows(): void {
     try {
       await ensureSystemPosSchema();
       let query = `
-        SELECT 
+        SELECT
           t.*,
-          COALESCE(t.uuid_id, t.id) as id,
+
+          t.final_amount,
+          t.total_amount,
+          t.id,
           t.receipt_number,
           COALESCE(
             NULLIF(t.refund_total, 0),
@@ -6011,6 +6062,15 @@ function createWindows(): void {
             ELSE 'none'
           END as refund_status
         FROM transactions t
+        LEFT JOIN (
+          SELECT 
+            transaction_id, 
+            uuid_transaction_id,
+            SUM(total_price) as total_cancelled
+          FROM transaction_items
+          WHERE production_status = 'cancelled'
+          GROUP BY uuid_transaction_id, transaction_id
+        ) cancelled ON (t.uuid_id = cancelled.uuid_transaction_id OR t.id = cancelled.transaction_id)
         LEFT JOIN (
           SELECT 
             transaction_uuid,
@@ -6295,6 +6355,71 @@ function createWindows(): void {
       return await executeQuery(query, params);
     } catch (error) {
       console.error('Error getting shift refunds:', error);
+      return [];
+    }
+  });
+
+  // Get cancelled items for shift (for Ganti Shift report). Same filters as other shift handlers.
+  // Returns: product_name, quantity, unit_price, total_price, cancelled_at, cancelled_by_user_name, cancelled_by_waiter_name, transaction info.
+  ipcMain.handle('localdb-get-shift-cancelled-items', async (event, userId: number | null, shiftStart: string, shiftEnd: string | null, businessId: number | null = null, shiftUuid?: string | null, shiftUuids?: string[]) => {
+    try {
+      if (businessId === null) return [];
+      const shiftStartMySQL = toMySQLDateTime(shiftStart);
+      const shiftEndMySQL = shiftEnd ? toMySQLDateTime(shiftEnd) : null;
+
+      let query = `
+        SELECT 
+          ti.uuid_id as item_uuid_id,
+          ti.transaction_id,
+          ti.uuid_transaction_id,
+          ti.product_id,
+          COALESCE(p.nama, 'Unknown') as product_name,
+          ti.quantity,
+          ti.unit_price,
+          ti.total_price,
+          ti.custom_note,
+          ti.cancelled_at,
+          ti.cancelled_by_user_id,
+          ti.cancelled_by_waiter_id,
+          COALESCE(u.name, u.email, 'Tidak diketahui') as cancelled_by_user_name,
+          COALESCE(e.nama_karyawan, 'Tidak diketahui') as cancelled_by_waiter_name,
+          t.receipt_number,
+          t.customer_name
+        FROM transaction_items ti
+        INNER JOIN transactions t ON ti.transaction_id = t.id
+        LEFT JOIN products p ON ti.product_id = p.id
+        LEFT JOIN users u ON COALESCE(ti.cancelled_by_user_id, t.user_id) = u.id
+        LEFT JOIN employees e ON ti.cancelled_by_waiter_id = e.id
+        WHERE t.business_id = ?
+        AND t.status = 'completed'
+        AND ti.production_status = 'cancelled'
+      `;
+      const params: (string | number | null | boolean)[] = [businessId];
+
+      if (shiftUuids && shiftUuids.length > 0) {
+        query += ' AND t.shift_uuid IN (' + shiftUuids.map(() => '?').join(',') + ')';
+        params.push(...shiftUuids);
+      } else if (shiftUuid) {
+        query += ' AND t.shift_uuid = ?';
+        params.push(shiftUuid);
+      } else {
+        if (userId !== null) {
+          query += ' AND t.user_id = ?';
+          params.push(userId);
+        }
+        query += ' AND t.created_at >= ?';
+        params.push(shiftStartMySQL);
+        if (shiftEnd) {
+          query += ' AND t.created_at <= ?';
+          params.push(shiftEndMySQL);
+        }
+      }
+
+      query += ' ORDER BY ti.cancelled_at DESC, ti.id DESC';
+
+      return await executeQuery(query, params);
+    } catch (error) {
+      console.error('Error getting shift cancelled items:', error);
       return [];
     }
   });
@@ -7038,8 +7163,8 @@ function createWindows(): void {
       const cashMethodId = cashMethod?.id || 1;
 
       const shiftSalesResult = await executeQueryOne<{ cash_total: number }>(`
-        SELECT COALESCE(SUM(final_amount), 0) as cash_total
-        FROM transactions
+        SELECT COALESCE(SUM(t.final_amount), 0) as cash_total
+        FROM transactions t
         WHERE business_id = ?
           AND user_id = ?
           AND created_at >= ?
@@ -7150,10 +7275,10 @@ function createWindows(): void {
       let statsQuery = `
         SELECT 
           COUNT(*) as order_count,
-          COALESCE(SUM(final_amount), 0) as total_amount,
+          COALESCE(SUM(t.final_amount - COALESCE(cancelled.total_cancelled, 0)), 0) as total_amount,
           COALESCE(SUM(
             CASE 
-              WHEN voucher_type = 'free' THEN total_amount
+              WHEN voucher_type = 'free' THEN (t.total_amount - COALESCE(cancelled.total_cancelled, 0))
               ELSE COALESCE(voucher_discount, 0)
             END
           ), 0) as total_discount,
@@ -7164,7 +7289,16 @@ function createWindows(): void {
             END
           ), 0) as voucher_count,
           COALESCE(SUM(COALESCE(customer_unit, 0)), 0) as total_cu
-        FROM transactions
+        FROM transactions t
+        LEFT JOIN (
+          SELECT 
+            transaction_id, 
+            uuid_transaction_id,
+            SUM(total_price) as total_cancelled
+          FROM transaction_items
+          WHERE production_status = 'cancelled'
+          GROUP BY uuid_transaction_id, transaction_id
+        ) cancelled ON (t.uuid_id = cancelled.uuid_transaction_id OR t.id = cancelled.transaction_id)
         WHERE business_id = ?
         AND status = 'completed'
       `;
@@ -7333,8 +7467,8 @@ function createWindows(): void {
         return [];
       }
 
-      // Payment breakdown: total_amount only (gross, before discount). Exclude fully refunded transactions.
-      // Exclude transactions with no line items (or zero sum of item totals) so payment total matches Category/Barang basis.
+      // Payment breakdown: net amount (gross - cancelled - refund). Exclude fully refunded transactions.
+      // Refund (full and partial) excluded from amount: subtract t.refund_total.
       const onlyTxWithItems = ' AND t.id IN (SELECT transaction_id FROM transaction_items GROUP BY transaction_id HAVING COALESCE(SUM(total_price), 0) > 0)';
       if (shiftUuids && shiftUuids.length > 0) {
         const query = `
@@ -7342,9 +7476,18 @@ function createWindows(): void {
             COALESCE(pm.name, 'Unknown') as payment_method_name,
             COALESCE(pm.code, 'unknown') as payment_method_code,
             COUNT(t.id) as transaction_count,
-            COALESCE(SUM(t.total_amount), 0) as total_amount
+            COALESCE(SUM(GREATEST(0, (t.total_amount - COALESCE(cancelled.total_cancelled, 0)) - COALESCE(t.refund_total, 0))), 0) as total_amount
           FROM transactions t
           LEFT JOIN payment_methods pm ON t.payment_method_id = pm.id
+          LEFT JOIN (
+            SELECT 
+              transaction_id, 
+              uuid_transaction_id,
+              SUM(total_price) as total_cancelled
+            FROM transaction_items
+            WHERE production_status = 'cancelled'
+            GROUP BY uuid_transaction_id, transaction_id
+          ) cancelled ON (t.uuid_id = cancelled.uuid_transaction_id OR t.id = cancelled.transaction_id)
           WHERE t.business_id = ? AND t.shift_uuid IN (${shiftUuids.map(() => '?').join(',')}) AND t.status = 'completed' AND t.refund_status != 'full'${onlyTxWithItems}
           GROUP BY t.payment_method_id, pm.name, pm.code ORDER BY transaction_count DESC
         `;
@@ -7358,9 +7501,18 @@ function createWindows(): void {
             COALESCE(pm.name, 'Unknown') as payment_method_name,
             COALESCE(pm.code, 'unknown') as payment_method_code,
             COUNT(t.id) as transaction_count,
-            COALESCE(SUM(t.total_amount), 0) as total_amount
+            COALESCE(SUM(GREATEST(0, (t.total_amount - COALESCE(cancelled.total_cancelled, 0)) - COALESCE(t.refund_total, 0))), 0) as total_amount
           FROM transactions t
           LEFT JOIN payment_methods pm ON t.payment_method_id = pm.id
+          LEFT JOIN (
+            SELECT 
+              transaction_id, 
+              uuid_transaction_id,
+              SUM(total_price) as total_cancelled
+            FROM transaction_items
+            WHERE production_status = 'cancelled'
+            GROUP BY uuid_transaction_id, transaction_id
+          ) cancelled ON (t.uuid_id = cancelled.uuid_transaction_id OR t.id = cancelled.transaction_id)
           WHERE t.business_id = ? AND t.shift_uuid = ? AND t.status = 'completed' AND t.refund_status != 'full'${onlyTxWithItems}
           GROUP BY t.payment_method_id, pm.name, pm.code ORDER BY transaction_count DESC
         `;
@@ -7377,9 +7529,18 @@ function createWindows(): void {
           COALESCE(pm.name, 'Unknown') as payment_method_name,
           COALESCE(pm.code, 'unknown') as payment_method_code,
           COUNT(t.id) as transaction_count,
-          COALESCE(SUM(t.total_amount), 0) as total_amount
+          COALESCE(SUM(GREATEST(0, (t.total_amount - COALESCE(cancelled.total_cancelled, 0)) - COALESCE(t.refund_total, 0))), 0) as total_amount
         FROM transactions t
         LEFT JOIN payment_methods pm ON t.payment_method_id = pm.id
+        LEFT JOIN (
+          SELECT 
+            transaction_id, 
+            uuid_transaction_id,
+            SUM(total_price) as total_cancelled
+          FROM transaction_items
+          WHERE production_status = 'cancelled'
+          GROUP BY uuid_transaction_id, transaction_id
+        ) cancelled ON (t.uuid_id = cancelled.uuid_transaction_id OR t.id = cancelled.transaction_id)
         WHERE t.business_id = ?
         AND t.created_at >= ?
         AND t.status = 'completed'
@@ -7408,7 +7569,7 @@ function createWindows(): void {
     }
   });
 
-  // Get Category I breakdown: only product's category1 (no category2). Refunds excluded (full-refund tx excluded; partial prorated).
+  // Get Category I breakdown: only product's category1 (no category2). Refund (full & partial) excluded from amount.
   // When shiftUuids (non-empty): filter by t.shift_uuid IN (...). When shiftUuid: filter by t.shift_uuid = ?. Else: userId + time.
   ipcMain.handle('localdb-get-category1-breakdown', async (event, userId: number | null, shiftStart: string, shiftEnd: string | null, businessId: number | null = null, shiftUuid?: string | null, shiftUuids?: string[]) => {
     try {
@@ -7423,18 +7584,28 @@ function createWindows(): void {
           COALESCE(c1.id, 0) as category1_id,
           COALESCE(SUM(ti.quantity), 0) as total_quantity,
           COALESCE(SUM(
-            ti.total_price / NULLIF((SELECT COALESCE(SUM(ti2.total_price), 0) FROM transaction_items ti2 WHERE ti2.transaction_id = ti.transaction_id), 0)
-            * COALESCE(t.total_amount, 0)
+            ti.total_price / NULLIF((SELECT COALESCE(SUM(ti2.total_price), 0) FROM transaction_items ti2 WHERE ti2.transaction_id = ti.transaction_id AND (ti2.production_status IS NULL OR ti2.production_status != 'cancelled')), 0)
+            * COALESCE(GREATEST(0, (t.total_amount - COALESCE(cancelled.total_cancelled, 0)) - COALESCE(t.refund_total, 0)), 0)
           ), 0) as total_amount
         FROM transaction_items ti
         INNER JOIN transactions t ON ti.transaction_id = t.id
         INNER JOIN products p ON ti.product_id = p.id
         LEFT JOIN category1 c1 ON p.category1_id = c1.id
+        LEFT JOIN (
+            SELECT 
+              transaction_id, 
+              uuid_transaction_id,
+              SUM(total_price) as total_cancelled
+            FROM transaction_items
+            WHERE production_status = 'cancelled'
+            GROUP BY uuid_transaction_id, transaction_id
+          ) cancelled ON (t.uuid_id = cancelled.uuid_transaction_id OR t.id = cancelled.transaction_id)
         WHERE t.business_id = ?
         AND t.status = 'completed'
         AND t.refund_status != 'full'
         AND p.category1_id IS NOT NULL
         AND c1.id IS NOT NULL
+        AND (ti.production_status IS NULL OR ti.production_status != 'cancelled')
       `;
       const params: (string | number | null | boolean)[] = [businessId];
       if (shiftUuids && shiftUuids.length > 0) {
@@ -7464,7 +7635,7 @@ function createWindows(): void {
     }
   });
 
-  // Get Category II breakdown: only product's category2 that belongs to this business (category2_businesses). Refunds excluded.
+  // Get Category II breakdown: only product's category2 that belongs to this business (category2_businesses). Refund (full & partial) excluded from amount.
   // When shiftUuids (non-empty): filter by t.shift_uuid IN (...). When shiftUuid: filter by t.shift_uuid = ?. Else: userId + time.
   ipcMain.handle('localdb-get-category2-breakdown', async (event, userId: number | null, shiftStart: string, shiftEnd: string | null, businessId: number | null = null, shiftUuid?: string | null, shiftUuids?: string[]) => {
     try {
@@ -7480,19 +7651,29 @@ function createWindows(): void {
           COALESCE(c2.id, 0) as category2_id,
           COALESCE(SUM(ti.quantity), 0) as total_quantity,
           COALESCE(SUM(
-            ti.total_price / NULLIF((SELECT COALESCE(SUM(ti2.total_price), 0) FROM transaction_items ti2 WHERE ti2.transaction_id = ti.transaction_id), 0)
-            * COALESCE(t.total_amount, 0)
+            ti.total_price / NULLIF((SELECT COALESCE(SUM(ti2.total_price), 0) FROM transaction_items ti2 WHERE ti2.transaction_id = ti.transaction_id AND (ti2.production_status IS NULL OR ti2.production_status != 'cancelled')), 0)
+            * COALESCE(GREATEST(0, (t.total_amount - COALESCE(cancelled.total_cancelled, 0)) - COALESCE(t.refund_total, 0)), 0)
           ), 0) as total_amount
         FROM transaction_items ti
         INNER JOIN transactions t ON ti.transaction_id = t.id
         INNER JOIN products p ON ti.product_id = p.id
         INNER JOIN category2_businesses cb ON cb.category2_id = p.category2_id AND cb.business_id = t.business_id
         LEFT JOIN category2 c2 ON p.category2_id = c2.id
+        LEFT JOIN (
+            SELECT 
+              transaction_id, 
+              uuid_transaction_id,
+              SUM(total_price) as total_cancelled
+            FROM transaction_items
+            WHERE production_status = 'cancelled'
+            GROUP BY uuid_transaction_id, transaction_id
+          ) cancelled ON (t.uuid_id = cancelled.uuid_transaction_id OR t.id = cancelled.transaction_id)
         WHERE t.business_id = ?
         AND t.status = 'completed'
         AND t.refund_status != 'full'
         AND p.category2_id IS NOT NULL
         AND c2.id IS NOT NULL
+        AND (ti.production_status IS NULL OR ti.production_status != 'cancelled')
       `;
       const params: (string | number | null | boolean)[] = [businessId];
 
@@ -7538,8 +7719,17 @@ function createWindows(): void {
       }
 
       let shiftQuery = `
-        SELECT COALESCE(SUM(final_amount), 0) as cash_total
+        SELECT COALESCE(SUM(t.final_amount - COALESCE(cancelled.total_cancelled, 0)), 0) as cash_total
         FROM transactions t
+        LEFT JOIN (
+          SELECT 
+            transaction_id, 
+            uuid_transaction_id,
+            SUM(total_price) as total_cancelled
+          FROM transaction_items
+          WHERE production_status = 'cancelled'
+          GROUP BY uuid_transaction_id, transaction_id
+        ) cancelled ON (t.uuid_id = cancelled.uuid_transaction_id OR t.id = cancelled.transaction_id)
         WHERE t.business_id = ?
         AND t.payment_method_id = ?
         AND t.status = 'completed'
@@ -7594,8 +7784,17 @@ function createWindows(): void {
         const dayEnd = new Date(dayEndGMT7.getTime() - gmt7Offset);
 
         wholeDayResult = await executeQueryOne<{ cash_total: number }>(`
-          SELECT COALESCE(SUM(final_amount), 0) as cash_total
+          SELECT COALESCE(SUM(t.final_amount - COALESCE(cancelled.total_cancelled, 0)), 0) as cash_total
           FROM transactions t
+          LEFT JOIN (
+            SELECT 
+              transaction_id, 
+              uuid_transaction_id,
+              SUM(total_price) as total_cancelled
+            FROM transaction_items
+            WHERE production_status = 'cancelled'
+            GROUP BY uuid_transaction_id, transaction_id
+          ) cancelled ON (t.uuid_id = cancelled.uuid_transaction_id OR t.id = cancelled.transaction_id)
           WHERE t.business_id = ?
           AND t.created_at >= ?
           AND t.created_at <= ?
@@ -7975,8 +8174,8 @@ function createWindows(): void {
    * - Finds package products by `products.category1_id = 14`
    * - Returns package totals (qty + allocated gross subtotal) and nested sub-items (qty only)
    * - Uses the same allocation formula as Category II:
-   *     allocated = ti.total_price / tx_items_total * t.total_amount
-   * - Excludes fully-refunded transactions (t.refund_status != 'full')
+   *     allocated = ti.total_price / tx_items_total * (t.total_amount - t.refund_total)
+   * - Refund (full & partial) excluded from amount. Fully refunded tx excluded.
    *
    * When shiftUuids (non-empty): filter by t.shift_uuid IN (...).
    * When shiftUuid: filter by t.shift_uuid = ?.
@@ -8018,8 +8217,8 @@ function createWindows(): void {
             p.nama as package_product_name,
             ti.quantity as package_qty,
             ti.total_price as package_total_price,
-            COALESCE(t.total_amount, 0) as tx_total_amount,
-            (SELECT COALESCE(SUM(ti2.total_price), 0) FROM transaction_items ti2 WHERE ti2.transaction_id = ti.transaction_id) as tx_items_total
+            COALESCE(GREATEST(0, (t.total_amount - COALESCE(t.refund_total, 0))), 0) as tx_total_amount,
+            (SELECT COALESCE(SUM(ti2.total_price), 0) FROM transaction_items ti2 WHERE ti2.transaction_id = ti.transaction_id AND (ti2.production_status IS NULL OR ti2.production_status != 'cancelled')) as tx_items_total
           FROM transaction_items ti
           INNER JOIN transactions t ON ti.transaction_id = t.id
           INNER JOIN products p ON ti.product_id = p.id
@@ -8027,6 +8226,7 @@ function createWindows(): void {
             AND t.status = 'completed'
             AND t.refund_status != 'full'
             AND p.category1_id = 14
+            AND (ti.production_status IS NULL OR ti.production_status != 'cancelled')
         `;
         const params: (string | number | null | boolean)[] = [businessId];
 
@@ -8190,7 +8390,7 @@ function createWindows(): void {
     }
   );
 
-  // Get product sales breakdown for shift. Allocate total_amount (gross, before discount) to items proportionally. Full refund tx excluded.
+  // Get product sales breakdown for shift. Allocate net amount (gross - refund) to items proportionally. Refund (full & partial) excluded.
   // When shiftUuids (non-empty): filter by t.shift_uuid IN (...). When shiftUuid: filter by t.shift_uuid = ?. Else: userId + time.
   ipcMain.handle('localdb-get-product-sales', async (event, userId: number | null, shiftStart: string, shiftEnd: string | null, businessId: number | null = null, shiftUuid?: string | null, shiftUuids?: string[]) => {
     try {
@@ -8220,9 +8420,9 @@ function createWindows(): void {
           p.harga_qpon,
           p.harga_tiktok,
           COALESCE(t.refund_total, 0) as refund_total,
-          t.final_amount as final_amount,
-          t.total_amount as total_amount,
-          (SELECT COALESCE(SUM(ti2.total_price), 0) FROM transaction_items ti2 WHERE ti2.transaction_id = ti.transaction_id) as tx_items_total
+          t.final_amount,
+          t.total_amount,
+          (SELECT COALESCE(SUM(ti2.total_price), 0) FROM transaction_items ti2 WHERE ti2.transaction_id = ti.transaction_id AND (ti2.production_status IS NULL OR ti2.production_status != 'cancelled')) as tx_items_total
         FROM transaction_items ti
         INNER JOIN transactions t ON ti.transaction_id = t.id
         LEFT JOIN payment_methods pm ON t.payment_method_id = pm.id
@@ -8230,6 +8430,7 @@ function createWindows(): void {
         WHERE t.business_id = ?
         AND t.status = 'completed'
         AND t.refund_status != 'full'
+        AND (ti.production_status IS NULL OR ti.production_status != 'cancelled')
       `;
       const params: (string | number | null | boolean)[] = [businessId];
 
@@ -8437,10 +8638,12 @@ function createWindows(): void {
           baseSubtotal = 0;
         }
 
-        // Allocate transaction total_amount (gross, before discount) to items proportionally
+        // Allocate net transaction amount (gross - refund) to items proportionally
         const totalAmountTx = Number(row.total_amount ?? 0);
+        const refundTotal = Number(row.refund_total ?? 0);
+        const netAmountTx = Math.max(0, totalAmountTx - refundTotal);
         const txItemsTotal = Number(row.tx_items_total ?? 0);
-        const allocatedRatio = txItemsTotal > 0 ? totalAmountTx / txItemsTotal : 0;
+        const allocatedRatio = txItemsTotal > 0 ? netAmountTx / txItemsTotal : 0;
         const netBaseSubtotal = baseSubtotal * allocatedRatio;
         const netTotalPrice = totalPrice * allocatedRatio;
         const netCustomizationSubtotal = customizationSubtotal * allocatedRatio;
@@ -10437,8 +10640,9 @@ ipcMain.handle('print-receipt', async (event, data: ReceiptPrintData) => {
         const templateResult = await receiptManagementService.getReceiptTemplate(templateType, data.business_id);
         let templateCode = templateResult.templateCode;
         const showNotes = templateResult.showNotes;
-        const billHasVoucher = isBill && typeof data.voucherDiscount === 'number' && data.voucherDiscount > 0;
-        if (templateCode && isBill && billHasVoucher && !templateCode.includes('{{#ifVoucher}}')) {
+        // Inject voucher block for both bill and receipt templates when voucher is applied
+        const hasVoucher = typeof data.voucherDiscount === 'number' && data.voucherDiscount > 0;
+        if (templateCode && hasVoucher && !templateCode.includes('{{#ifVoucher}}')) {
           const voucherBlock = `
   {{#ifVoucher}}
   <div class="summary-line">
@@ -10456,7 +10660,7 @@ ipcMain.handle('print-receipt', async (event, data: ReceiptPrintData) => {
             `$1${voucherBlock}\n  $2`
           );
           if (templateCode.includes('{{#ifVoucher}}')) {
-            console.log('✅ Injected {{#ifVoucher}} block into bill template');
+            console.log(`✅ Injected {{#ifVoucher}} block into ${templateType} template`);
           }
         }
 
@@ -10522,8 +10726,12 @@ ipcMain.handle('print-receipt', async (event, data: ReceiptPrintData) => {
           }
 
           const hasVoucher = typeof data.voucherDiscount === 'number' && data.voucherDiscount > 0;
-          const subTotal = data.total ?? 0;
-          const finalAmount = (typeof data.final_amount === 'number' ? data.final_amount : subTotal) as number;
+          // Subtotal: prefer data.total; fallback to sum of items when total is missing/zero but items exist
+          const itemsSum = items.reduce((sum: number, item: { total_price?: number }) => sum + (Number(item?.total_price) || 0), 0);
+          const subTotal = (typeof data.total === 'number' && data.total >= 0) ? data.total : (itemsSum > 0 ? itemsSum : 0);
+          const finalAmount = (typeof data.final_amount === 'number' && data.final_amount >= 0)
+            ? data.final_amount
+            : Math.max(0, subTotal - (typeof data.voucherDiscount === 'number' ? data.voucherDiscount : 0));
           const voucherDiscount = typeof data.voucherDiscount === 'number' ? data.voucherDiscount : 0;
           const voucherLabel = typeof data.voucherLabel === 'string' ? data.voucherLabel : '';
 
@@ -10553,10 +10761,10 @@ ipcMain.handle('print-receipt', async (event, data: ReceiptPrintData) => {
             logo: logoHTML,
             address: receiptSettings?.address || '',
             footerText: receiptSettings?.footer_text || '',
-            // Bill discount (optional)
+            // Bill discount (optional) - finalAmount is grand total (subtotal - voucher)
             voucherDiscount,
             voucherLabel,
-            finalAmount: hasVoucher ? finalAmount : subTotal,
+            finalAmount,
             hasVoucher,
           };
 
@@ -12013,7 +12221,14 @@ function generateReceiptHTML(data: ReceiptPrintData, businessName: string, optio
   const rightPadding = Math.max(0, baseRightPadding + marginAdjust);
 
   const items = data.items || [];
-  const total = data.total || data.final_amount || 0;
+  // Subtotal (Total Harga) = sum of items before discount
+  const itemsSum = items.reduce((sum: number, item: ReceiptLineItem) => sum + (Number(item.total_price) || 0), 0);
+  const subTotal = typeof data.total === 'number' && data.total >= 0 ? data.total : (itemsSum > 0 ? itemsSum : 0);
+  const voucherDiscount = typeof data.voucherDiscount === 'number' && data.voucherDiscount > 0 ? data.voucherDiscount : 0;
+  // Grand total (Pembayaran Sebenarnya) = subtotal - voucher discount, or use final_amount when provided
+  const grandTotal = typeof data.final_amount === 'number' && data.final_amount >= 0
+    ? data.final_amount
+    : Math.max(0, subTotal - voucherDiscount);
   const paymentMethod = data.paymentMethod || 'Cash';
   const amountReceived = data.amountReceived || 0;
   const change = data.change || 0;
@@ -12173,8 +12388,18 @@ function generateReceiptHTML(data: ReceiptPrintData, businessName: string, optio
   </div>
   <div class="summary-line">
     <span class="summary-label">Total Harga:</span>
-    <span class="summary-value">${total.toLocaleString('id-ID')}</span>
+    <span class="summary-value">${subTotal.toLocaleString('id-ID')}</span>
   </div>
+  ${voucherDiscount > 0 ? `
+  <div class="summary-line">
+    <span class="summary-label">Diskon (${(data.voucherLabel || 'Voucher').trim() || 'Voucher'}):</span>
+    <span class="summary-value">-${voucherDiscount.toLocaleString('id-ID')}</span>
+  </div>
+  <div class="summary-line">
+    <span class="summary-label">Total Bayar:</span>
+    <span class="summary-value">${grandTotal.toLocaleString('id-ID')}</span>
+  </div>
+  ` : ''}
   
   <div class="dashed-line"></div>
   
@@ -12194,7 +12419,7 @@ function generateReceiptHTML(data: ReceiptPrintData, businessName: string, optio
   ` : ''}
   <div class="summary-line">
     <span class="summary-label">Pembayaran Sebenarnya:</span>
-    <span class="summary-value">${total.toLocaleString('id-ID')}</span>
+    <span class="summary-value">${grandTotal.toLocaleString('id-ID')}</span>
   </div>
   
   <div class="dashed-line"></div>
@@ -12212,7 +12437,7 @@ function generateReceiptHTML(data: ReceiptPrintData, businessName: string, optio
 
 // Generate shift breakdown report HTML for printing
 function generateShiftBreakdownHTML(
-  shiftData: PrintableShiftReportSection & { businessName?: string; wholeDayReport?: PrintableShiftReportSection | null; sectionOptions?: { ringkasan?: boolean; barangTerjual?: boolean; paymentMethod?: boolean; categoryI?: boolean; categoryII?: boolean; paket?: boolean; toppingSales?: boolean } }
+  shiftData: PrintableShiftReportSection & { businessName?: string; wholeDayReport?: PrintableShiftReportSection | null; sectionOptions?: { ringkasan?: boolean; barangTerjual?: boolean; paymentMethod?: boolean; categoryI?: boolean; categoryII?: boolean; paket?: boolean; toppingSales?: boolean; itemDibatalkan?: boolean } }
 ): string {
   const formatDateTime = (dateString: string): string => {
     const date = new Date(dateString);
@@ -12269,7 +12494,7 @@ function generateShiftBreakdownHTML(
 
   const renderReportSection = (
     report: PrintableShiftReportSection,
-    options: { titleOverride?: string; businessName?: string; sectionOptions?: { ringkasan?: boolean; barangTerjual?: boolean; paymentMethod?: boolean; categoryI?: boolean; categoryII?: boolean; paket?: boolean; toppingSales?: boolean } } = {}
+    options: { titleOverride?: string; businessName?: string; sectionOptions?: { ringkasan?: boolean; barangTerjual?: boolean; paymentMethod?: boolean; categoryI?: boolean; categoryII?: boolean; paket?: boolean; toppingSales?: boolean; itemDibatalkan?: boolean } } = {}
   ): string => {
     const sectionTitle = options.titleOverride || report.title || 'LAPORAN SHIFT';
     const businessName = options.businessName || shiftData.businessName || 'Momoyo Bakery Kalimantan';
@@ -12298,7 +12523,8 @@ function generateShiftBreakdownHTML(
       categoryI: providedSectionOptions.categoryI !== undefined ? providedSectionOptions.categoryI : true,
       categoryII: providedSectionOptions.categoryII !== undefined ? providedSectionOptions.categoryII : true,
       paket: providedSectionOptions.paket !== undefined ? providedSectionOptions.paket : true,
-      toppingSales: providedSectionOptions.toppingSales !== undefined ? providedSectionOptions.toppingSales : true
+      toppingSales: providedSectionOptions.toppingSales !== undefined ? providedSectionOptions.toppingSales : true,
+      itemDibatalkan: (providedSectionOptions as { itemDibatalkan?: boolean }).itemDibatalkan !== undefined ? (providedSectionOptions as { itemDibatalkan?: boolean }).itemDibatalkan : true
     } : {
       ringkasan: true,
       barangTerjual: true,
@@ -12306,7 +12532,8 @@ function generateShiftBreakdownHTML(
       categoryI: true,
       categoryII: true,
       paket: true,
-      toppingSales: true
+      toppingSales: true,
+      itemDibatalkan: true
     };
 
     // Debug logging
@@ -12527,12 +12754,25 @@ function generateShiftBreakdownHTML(
     const totalPackageQty = packageData.reduce((sum, p) => sum + Number(p?.total_quantity || 0), 0);
     const totalPackageAmount = packageData.reduce((sum, p) => sum + Number(p?.total_amount || 0), 0);
 
-    const formattedTotalDiscount = report.statistics.total_discount > 0
-      ? `-${formatIntegerId(Math.abs(report.statistics.total_discount))}`
+    // Effective total discount: use sum of voucher breakdown when stats.total_discount is 0 but breakdown has values
+    const voucherBreakdownSum = VOUCHER_BREAKDOWN_ORDER.reduce(
+      (sum, { key }) => sum + (Number((report.voucherBreakdown || {})[key]?.total) || 0),
+      0
+    );
+    const effectiveTotalDiscount =
+      voucherBreakdownSum > 0 ? voucherBreakdownSum : (Number(report.statistics.total_discount) || 0);
+
+    const formattedTotalDiscount = effectiveTotalDiscount > 0
+      ? `-${formatIntegerId(Math.abs(effectiveTotalDiscount))}`
       : formatIntegerId(0);
     const cashSummaryData = report.cashSummary;
+    // Use refund matching report scope: whole-day (Semua Shift) uses cash_whole_day_refunds, single-shift uses cash_shift_refunds
+    const isWholeDayReport = report.user_name === 'Semua Shift';
+    const totalRefundsForGrandTotal = isWholeDayReport
+      ? Number(cashSummaryData.cash_whole_day_refunds ?? cashSummaryData.cash_shift_refunds ?? 0)
+      : Number(cashSummaryData.cash_shift_refunds ?? 0);
     // Coerce to number: IPC can send gross_total_omset as string (e.g. "55771000.00244" from number+string concat on frontend)
-    const grossTotalOmsetRaw = report.gross_total_omset ?? (Number(report.statistics.total_amount || 0) + Number(cashSummaryData.cash_shift_refunds ?? 0) + Number(report.statistics.total_discount || 0));
+    const grossTotalOmsetRaw = report.gross_total_omset ?? (Number(report.statistics.total_amount || 0) + totalRefundsForGrandTotal + effectiveTotalDiscount);
     const grossTotalOmset = Math.round(Number(grossTotalOmsetRaw));
     const cashShiftSales = Number(cashSummaryData.cash_shift_sales ?? cashSummaryData.cash_shift ?? 0) || 0;
     const cashShiftRefunds = Number(cashSummaryData.cash_shift_refunds ?? 0) || 0;
@@ -12581,6 +12821,7 @@ function generateShiftBreakdownHTML(
     const totalCashInCashierDisplay = !isNaN(totalCashInCashierValue) ? totalCashInCashierValue.toLocaleString('id-ID') : '-';
 
     const refundList = report.refunds || [];
+    const cancelledItemsList = report.cancelledItems || [];
     const refundRows = refundList.map((r: PrintableShiftRefundRow) => {
       const txId = r.transaction_uuid_id || r.transaction_uuid || '-';
       const method = formatPlatformLabel(r.payment_method || 'offline');
@@ -12593,6 +12834,25 @@ function generateShiftBreakdownHTML(
       const customer = (r.customer_name || '-').replace(/</g, '&lt;').replace(/>/g, '&gt;');
       return `<tr><td style="font-size: 7pt;">${txId}</td><td style="font-size: 7pt;">${method}</td><td class="right" style="font-size: 7pt;">${total}</td><td class="right" style="font-size: 7pt; color: #991b1b;">-${refundAmt}</td><td style="font-size: 7pt;">${reason}</td><td style="font-size: 7pt;">${refundTime}</td><td style="font-size: 7pt;">${issuer}</td><td style="font-size: 7pt;">${waiter}</td><td style="font-size: 7pt;">${customer}</td></tr>`;
     }).join('');
+
+    const cancelledItemsRows = cancelledItemsList.map((item: { product_name: string; quantity: number; total_price: number; cancelled_at: string; cancelled_by_user_name: string; cancelled_by_waiter_name: string; receipt_number?: string | null; customer_name?: string | null }) => {
+      const cancelledByDisplay = item.cancelled_by_user_name
+        ? (item.cancelled_by_waiter_name && item.cancelled_by_waiter_name !== item.cancelled_by_user_name)
+          ? `${item.cancelled_by_user_name} / Waiters ${item.cancelled_by_waiter_name}`
+          : item.cancelled_by_user_name
+        : item.cancelled_by_waiter_name
+          ? `Waiters ${item.cancelled_by_waiter_name}`
+          : 'Tidak diketahui';
+      const cancelledTime = item.cancelled_at ? formatDateTime(item.cancelled_at) : '-';
+      const priceStr = formatIntegerId(Math.round(Number(item.total_price || 0)));
+      const receipt = (item.receipt_number || '-').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+      const customer = (item.customer_name || 'Guest').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+      const productName = (item.product_name || '-').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+      const cancelledBy = cancelledByDisplay.replace(/</g, '&lt;').replace(/>/g, '&gt;');
+      return `<tr><td style="font-size: 7pt;">${cancelledTime}</td><td style="font-size: 7pt;">${productName}</td><td class="right" style="font-size: 7pt;">${item.quantity}x</td><td class="right" style="font-size: 7pt;">${priceStr}</td><td style="font-size: 7pt;">#${receipt}</td><td style="font-size: 7pt;">${customer}</td><td style="font-size: 7pt;">${cancelledBy}</td></tr>`;
+    }).join('');
+
+    const totalCancelledItemsAmount = cancelledItemsList.reduce((s: number, i: { total_price?: number }) => s + Number(i.total_price || 0), 0);
 
     return `
     <div class="report-block">
@@ -12633,7 +12893,7 @@ function generateShiftBreakdownHTML(
           </div>
           <div class="summary-line summary-line-indent" style="color: #991b1b;">
             <span class="summary-label">Refund:</span>
-            <span class="summary-value">-${formatIntegerId(cashShiftRefunds)}</span>
+            <span class="summary-value">-${formatIntegerId(totalRefundsForGrandTotal)}</span>
           </div>
           <div class="summary-block-voucher">
             <div class="summary-line summary-line-highlight-voucher">
@@ -12654,7 +12914,7 @@ function generateShiftBreakdownHTML(
           </div>
           <div class="summary-line summary-line-highlight">
             <span class="summary-label">Grand Total:</span>
-            <span class="summary-value">${formatIntegerId(Math.max(0, (grossTotalOmset || 0) - cashShiftRefunds - (report.statistics.total_discount || 0)))}</span>
+            <span class="summary-value">${formatIntegerId(Math.max(0, (grossTotalOmset || 0) - totalRefundsForGrandTotal - effectiveTotalDiscount))}</span>
           </div>
         </div>
         ${totalCustomizationRevenue > 0 ? `
@@ -12702,6 +12962,35 @@ function generateShiftBreakdownHTML(
       <div class="divider"></div>
       ` : ''}
 
+      ${sectionOptions.itemDibatalkan !== false && cancelledItemsList.length > 0 ? `
+      <div class="section-title">ITEM DIBATALKAN</div>
+      <table>
+        <thead>
+          <tr>
+            <th style="font-size: 7pt;">Waktu Pembatalan</th>
+            <th style="font-size: 7pt;">Item</th>
+            <th class="right" style="font-size: 7pt;">Jumlah</th>
+            <th class="right" style="font-size: 7pt;">Harga</th>
+            <th style="font-size: 7pt;">Transaksi</th>
+            <th style="font-size: 7pt;">Pelanggan</th>
+            <th style="font-size: 7pt;">Dibatalkan Oleh</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${cancelledItemsRows}
+          <tr class="total-row">
+            <td style="font-size: 7pt;">TOTAL</td>
+            <td></td>
+            <td class="right" style="font-size: 7pt;">${cancelledItemsList.reduce((s: number, i: { quantity?: number }) => s + Number(i.quantity || 0), 0)}x</td>
+            <td class="right" style="font-size: 7pt;">${formatIntegerId(Math.round(totalCancelledItemsAmount))}</td>
+            <td colspan="3"></td>
+          </tr>
+        </tbody>
+      </table>
+
+      <div class="divider"></div>
+      ` : ''}
+
       ${sectionOptions.paymentMethod === true ? `
       <div class="section-title">PAYMENT METHOD</div>
       <table>
@@ -12737,10 +13026,11 @@ function generateShiftBreakdownHTML(
         </thead>
         <tbody>
           ${category1Rows || '<tr><td colSpan="3" style="text-align: center;">Tidak ada Category I</td></tr>'}
+          ${totalCancelledItemsAmount > 0 ? `<tr><td style="color: #991b1b; font-size: 7pt;">(-) Total Item Dibatalkan</td><td></td><td class="right" style="color: #991b1b;">-${formatIntegerId(Math.round(totalCancelledItemsAmount))}</td></tr>` : ''}
           <tr class="total-row">
             <td>TOTAL</td>
             <td style="text-align: left;">${totalCategory1Quantity}</td>
-            <td class="right">${formatIntegerId(Math.round(totalCategory1Amount))}</td>
+            <td class="right">${formatIntegerId(Math.round(Math.max(0, totalCategory1Amount - totalCancelledItemsAmount)))}</td>
           </tr>
         </tbody>
       </table>
@@ -12760,10 +13050,11 @@ function generateShiftBreakdownHTML(
         </thead>
         <tbody>
           ${category2Rows || '<tr><td colSpan="3" style="text-align: center;">Tidak ada Category II</td></tr>'}
+          ${totalCancelledItemsAmount > 0 ? `<tr><td style="color: #991b1b; font-size: 7pt;">(-) Total Item Dibatalkan</td><td></td><td class="right" style="color: #991b1b;">-${formatIntegerId(Math.round(totalCancelledItemsAmount))}</td></tr>` : ''}
           <tr class="total-row">
             <td>TOTAL</td>
             <td style="text-align: left;">${totalCategory2Quantity}</td>
-            <td class="right">${formatIntegerId(Math.round(totalCategory2Amount))}</td>
+            <td class="right">${formatIntegerId(Math.round(Math.max(0, totalCategory2Amount - totalCancelledItemsAmount)))}</td>
           </tr>
         </tbody>
       </table>
@@ -12785,11 +13076,12 @@ function generateShiftBreakdownHTML(
         </thead>
         <tbody>
           ${packageRows || '<tr><td colSpan="4" style="text-align: center;">Tidak ada paket terjual</td></tr>'}
+          ${totalCancelledItemsAmount > 0 ? `<tr><td colspan="2" style="color: #991b1b; font-size: 7pt;">(-) Total Item Dibatalkan</td><td></td><td class="right" style="color: #991b1b;">-${formatIntegerId(Math.round(totalCancelledItemsAmount))}</td></tr>` : ''}
           <tr class="total-row">
             <td>TOTAL</td>
             <td style="text-align: left;">${totalPackageQty}</td>
             <td class="right">-</td>
-            <td class="right">${formatIntegerId(Math.round(totalPackageAmount))}</td>
+            <td class="right">${formatIntegerId(Math.round(Math.max(0, totalPackageAmount - totalCancelledItemsAmount)))}</td>
           </tr>
         </tbody>
       </table>
@@ -12811,11 +13103,12 @@ function generateShiftBreakdownHTML(
         </thead>
         <tbody>
           ${productRows || '<tr><td colSpan="4" style="text-align: center;">Tidak ada produk</td></tr>'}
+          ${totalCancelledItemsAmount > 0 ? `<tr><td colspan="2" style="color: #991b1b; font-size: 7pt;">(-) Total Item Dibatalkan</td><td></td><td class="right" style="color: #991b1b;">-${formatIntegerId(Math.round(totalCancelledItemsAmount))}</td></tr>` : ''}
           <tr class="total-row">
             <td>TOTAL</td>
             <td style="text-align: left;">${totalProductQty}</td>
             <td class="right">-</td>
-            <td class="right">${formatIntegerId(Math.round(totalProductBaseSubtotal))}</td>
+            <td class="right">${formatIntegerId(Math.round(Math.max(0, totalProductBaseSubtotal - totalCancelledItemsAmount)))}</td>
           </tr>
           ${productPlatformBreakdownRows}
         </tbody>
@@ -12882,17 +13175,20 @@ function generateShiftBreakdownHTML(
     categoryI: true,
     categoryII: true,
     paket: true,
-    toppingSales: true
+    toppingSales: true,
+    itemDibatalkan: true
   };
+  const shiftSectionOpts = shiftData.sectionOptions as { ringkasan?: boolean; barangTerjual?: boolean; paymentMethod?: boolean; categoryI?: boolean; categoryII?: boolean; paket?: boolean; toppingSales?: boolean; itemDibatalkan?: boolean } | undefined;
   // Respect false values - only use defaults if sectionOptions is not provided at all
-  const sectionOptions = shiftData.sectionOptions ? {
-    ringkasan: shiftData.sectionOptions.ringkasan !== undefined ? shiftData.sectionOptions.ringkasan : defaultSectionOptions.ringkasan,
-    barangTerjual: shiftData.sectionOptions.barangTerjual !== undefined ? shiftData.sectionOptions.barangTerjual : defaultSectionOptions.barangTerjual,
-    paymentMethod: shiftData.sectionOptions.paymentMethod !== undefined ? shiftData.sectionOptions.paymentMethod : defaultSectionOptions.paymentMethod,
-    categoryI: shiftData.sectionOptions.categoryI !== undefined ? shiftData.sectionOptions.categoryI : defaultSectionOptions.categoryI,
-    categoryII: shiftData.sectionOptions.categoryII !== undefined ? shiftData.sectionOptions.categoryII : defaultSectionOptions.categoryII,
-    paket: shiftData.sectionOptions.paket !== undefined ? shiftData.sectionOptions.paket : defaultSectionOptions.paket,
-    toppingSales: shiftData.sectionOptions.toppingSales !== undefined ? shiftData.sectionOptions.toppingSales : defaultSectionOptions.toppingSales
+  const sectionOptions = shiftSectionOpts ? {
+    ringkasan: shiftSectionOpts.ringkasan !== undefined ? shiftSectionOpts.ringkasan : defaultSectionOptions.ringkasan,
+    barangTerjual: shiftSectionOpts.barangTerjual !== undefined ? shiftSectionOpts.barangTerjual : defaultSectionOptions.barangTerjual,
+    paymentMethod: shiftSectionOpts.paymentMethod !== undefined ? shiftSectionOpts.paymentMethod : defaultSectionOptions.paymentMethod,
+    categoryI: shiftSectionOpts.categoryI !== undefined ? shiftSectionOpts.categoryI : defaultSectionOptions.categoryI,
+    categoryII: shiftSectionOpts.categoryII !== undefined ? shiftSectionOpts.categoryII : defaultSectionOptions.categoryII,
+    paket: shiftSectionOpts.paket !== undefined ? shiftSectionOpts.paket : defaultSectionOptions.paket,
+    toppingSales: shiftSectionOpts.toppingSales !== undefined ? shiftSectionOpts.toppingSales : defaultSectionOptions.toppingSales,
+    itemDibatalkan: shiftSectionOpts.itemDibatalkan !== undefined ? shiftSectionOpts.itemDibatalkan : defaultSectionOptions.itemDibatalkan
   } : defaultSectionOptions;
 
   // Debug logging
@@ -13149,6 +13445,7 @@ type PrintableShiftReportSection = {
   statistics: { order_count: number; total_amount: number; total_discount: number; voucher_count: number; total_cu?: number };
   gross_total_omset?: number;
   refunds?: PrintableShiftRefundRow[];
+  cancelledItems?: Array<{ product_name: string; quantity: number; total_price: number; cancelled_at: string; cancelled_by_user_name: string; cancelled_by_waiter_name: string; receipt_number?: string | null; customer_name?: string | null }>;
   productSales: Array<{
     product_name: string;
     total_quantity: number;
@@ -13196,7 +13493,7 @@ const VOUCHER_BREAKDOWN_ORDER: { key: string; label: string }[] = [
 ];
 
 // Print shift breakdown report
-ipcMain.handle('print-shift-breakdown', async (event, data: PrintableShiftReportSection & { business_id?: number; printerType?: string; wholeDayReport?: PrintableShiftReportSection | null; sectionOptions?: { ringkasan?: boolean; barangTerjual?: boolean; paymentMethod?: boolean; categoryI?: boolean; categoryII?: boolean; paket?: boolean; toppingSales?: boolean } }) => {
+ipcMain.handle('print-shift-breakdown', async (event, data: PrintableShiftReportSection & { business_id?: number; printerType?: string; wholeDayReport?: PrintableShiftReportSection | null; sectionOptions?: { ringkasan?: boolean; barangTerjual?: boolean; paymentMethod?: boolean; categoryI?: boolean; categoryII?: boolean; paket?: boolean; toppingSales?: boolean; itemDibatalkan?: boolean } }) => {
   try {
     // #region agent log
     writeDebugLog(JSON.stringify({ location: 'electron/main.ts:print-shift-breakdown', message: 'Received print payload', data: { gross_total_omset: data.gross_total_omset, statistics_total_amount: data.statistics?.total_amount, user_name: data.user_name }, timestamp: Date.now(), sessionId: 'debug-session', hypothesisId: 'B' }));

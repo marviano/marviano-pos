@@ -285,6 +285,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   localDbGetCategory1Breakdown: (userId: number | null, shiftStart: string, shiftEnd: string | null, businessId?: number, shiftUuid?: string | null, shiftUuids?: string[]) => ipcRenderer.invoke('localdb-get-category1-breakdown', userId, shiftStart, shiftEnd, businessId, shiftUuid, shiftUuids),
   localDbGetCategory2Breakdown: (userId: number | null, shiftStart: string, shiftEnd: string | null, businessId?: number, shiftUuid?: string | null, shiftUuids?: string[]) => ipcRenderer.invoke('localdb-get-category2-breakdown', userId, shiftStart, shiftEnd, businessId, shiftUuid, shiftUuids),
   localDbGetCashSummary: (userId: number | null, shiftStart: string, shiftEnd: string | null, businessId?: number, shiftUuid?: string | null, shiftUuids?: string[]) => ipcRenderer.invoke('localdb-get-cash-summary', userId, shiftStart, shiftEnd, businessId, shiftUuid, shiftUuids),
+  localDbGetShiftCancelledItems: (userId: number | null, shiftStart: string, shiftEnd: string | null, businessId?: number, shiftUuid?: string | null, shiftUuids?: string[]) => ipcRenderer.invoke('localdb-get-shift-cancelled-items', userId, shiftStart, shiftEnd, businessId, shiftUuid, shiftUuids),
   localDbGetShifts: (filters: { businessId?: number; startDate?: string; endDate?: string; userId?: number; limit?: number; offset?: number } | undefined) => ipcRenderer.invoke('localdb-get-shifts', filters),
   localDbGetShiftUsers: (businessId?: number) => ipcRenderer.invoke('localdb-get-shift-users', businessId),
   localDbGetUnsyncedShifts: (businessId?: number) => ipcRenderer.invoke('localdb-get-unsynced-shifts', businessId),
@@ -339,6 +340,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
       categoryII?: boolean;
       paket?: boolean;
       toppingSales?: boolean;
+      itemDibatalkan?: boolean;
     };
   }) => ipcRenderer.invoke('print-shift-breakdown', data),
   printTransactionsReport: (payload: {

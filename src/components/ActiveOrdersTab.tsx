@@ -103,7 +103,7 @@ export default function ActiveOrdersTab({ businessId, isOpen, onLoadTransaction 
       const roomsMap = new Map<number, string>();
       const employeesMap = new Map<number, string>();
       const employeesColorMap = new Map<number, string | null>();
-      
+
       // Fetch employees to get waiter names and colors
       if (electronAPI.localDbGetEmployees) {
         try {
@@ -125,7 +125,7 @@ export default function ActiveOrdersTab({ businessId, isOpen, onLoadTransaction 
           console.warn('Failed to fetch employees:', error);
         }
       }
-      
+
       if (electronAPI.getRestaurantTables && electronAPI.getRestaurantRooms) {
         // Get all rooms first
         const rooms = await electronAPI.getRestaurantRooms(businessId);
@@ -157,9 +157,9 @@ export default function ActiveOrdersTab({ businessId, isOpen, onLoadTransaction 
       // First pass: Check each pending transaction for items
       for (const tx of transactionsArray) {
         if (tx && typeof tx === 'object' && 'status' in tx) {
-          const transaction = tx as Record<string, unknown> & { 
-            status: string; 
-            uuid_id?: string; 
+          const transaction = tx as Record<string, unknown> & {
+            status: string;
+            uuid_id?: string;
             id?: string;
             table_id?: number | null;
             customer_name?: string | null;
@@ -171,7 +171,7 @@ export default function ActiveOrdersTab({ businessId, isOpen, onLoadTransaction 
             payment_method?: string;
             shift_uuid?: string | null;
           };
-          
+
           // Only process pending transactions
           if (transaction.status !== 'pending') {
             continue;
@@ -185,10 +185,14 @@ export default function ActiveOrdersTab({ businessId, isOpen, onLoadTransaction 
             try {
               const items = await electronAPI.localDbGetTransactionItems(txId);
               const itemsArray = Array.isArray(items) ? items : [];
-              
-              // If transaction has no items, mark it for cancellation
-              if (itemsArray.length === 0) {
-                console.log(`⚠️ [ACTIVE ORDERS] Transaction ${txId} has no items, marking as cancelled`);
+
+              // Filter out cancelled items to check for truly empty transactions
+              // Cast as any because type definition might be loose here
+              const activeItems = itemsArray.filter((item: any) => item.production_status !== 'cancelled');
+
+              // If transaction has no ACTIVE items, mark it for cancellation
+              if (activeItems.length === 0) {
+                console.log(`⚠️ [ACTIVE ORDERS] Transaction ${txId} has no active items (all cancelled or empty), marking as cancelled`);
                 transactionsToCancel.push(transaction);
                 continue; // Skip adding to pending list
               }
@@ -211,8 +215,8 @@ export default function ActiveOrdersTab({ businessId, isOpen, onLoadTransaction 
             : 'Take-away';
 
           // Get waiter name and color
-          const waiterId = typeof transaction.waiter_id === 'number' 
-            ? transaction.waiter_id 
+          const waiterId = typeof transaction.waiter_id === 'number'
+            ? transaction.waiter_id
             : (typeof transaction.waiter_id === 'string' ? parseInt(transaction.waiter_id, 10) : null);
           const waiterName = waiterId && employeesMap.has(waiterId) ? employeesMap.get(waiterId)! : null;
           const waiterColor = waiterId ? (employeesColorMap.get(waiterId) ?? null) : null;
@@ -231,8 +235,8 @@ export default function ActiveOrdersTab({ businessId, isOpen, onLoadTransaction 
           const paymentMethod = typeof transaction.payment_method === 'string' ? (transaction.payment_method as string).toLowerCase() : '';
           const pickupMethod: 'dine-in' | 'take-away' =
             pm === 'take-away' || pm === 'dine-in' ? pm
-            : platformPaymentMethods.includes(paymentMethod) ? 'take-away'
-            : 'dine-in';
+              : platformPaymentMethods.includes(paymentMethod) ? 'take-away'
+                : 'dine-in';
 
           pendingTransactionsWithItems.push({
             id: txId,
@@ -281,7 +285,7 @@ export default function ActiveOrdersTab({ businessId, isOpen, onLoadTransaction 
             status: 'cancelled',
             updated_at: new Date().toISOString()
           }));
-          
+
           await electronAPI.localDbUpsertTransactions(transactionsToUpdate);
           console.log(`✅ [ACTIVE ORDERS] Updated ${transactionsToUpdate.length} empty transaction(s) to cancelled status`);
         } catch (error) {
@@ -434,7 +438,7 @@ export default function ActiveOrdersTab({ businessId, isOpen, onLoadTransaction 
     try {
       setPrintingBill(transactionId);
       const electronAPI = getElectronAPI();
-      
+
       if (!electronAPI?.localDbGetTransactions || !electronAPI?.localDbGetTransactionItems || !electronAPI?.localDbGetTransactionItemCustomizationsNormalized) {
         alert('Print Bill tidak tersedia. Pastikan aplikasi terhubung dengan database lokal.');
         return;
@@ -459,7 +463,7 @@ export default function ActiveOrdersTab({ businessId, isOpen, onLoadTransaction 
       // Fetch transaction items
       const transactionItems = await electronAPI.localDbGetTransactionItems(transactionId);
       const itemsArray = Array.isArray(transactionItems) ? transactionItems : [];
-      
+
       if (itemsArray.length === 0) {
         alert('Tidak ada item dalam transaksi ini');
         return;
@@ -492,8 +496,8 @@ export default function ActiveOrdersTab({ businessId, isOpen, onLoadTransaction 
 
       // Group customizations by transaction_item_id
       customizations.forEach((cust: Record<string, unknown>) => {
-        const itemId = typeof cust.transaction_item_id === 'number' 
-          ? cust.transaction_item_id 
+        const itemId = typeof cust.transaction_item_id === 'number'
+          ? cust.transaction_item_id
           : (typeof cust.transaction_item_id === 'string' ? parseInt(cust.transaction_item_id, 10) : null);
         if (!itemId || !itemsByIdMap.has(itemId)) return;
 
@@ -501,14 +505,14 @@ export default function ActiveOrdersTab({ businessId, isOpen, onLoadTransaction 
           customizationsMap.set(itemId, []);
         }
 
-        const options = (customizationOptions as Array<Record<string, unknown>>).filter((opt) => 
+        const options = (customizationOptions as Array<Record<string, unknown>>).filter((opt) =>
           opt.transaction_item_customization_id === cust.id
         ).map((opt) => {
-          const priceAdj = typeof opt.price_adjustment === 'number' 
-            ? opt.price_adjustment 
+          const priceAdj = typeof opt.price_adjustment === 'number'
+            ? opt.price_adjustment
             : (typeof opt.price_adjustment === 'string' ? parseFloat(opt.price_adjustment) || 0 : 0);
-          const optionId = typeof opt.customization_option_id === 'number' 
-            ? opt.customization_option_id 
+          const optionId = typeof opt.customization_option_id === 'number'
+            ? opt.customization_option_id
             : (typeof opt.customization_option_id === 'string' ? parseInt(opt.customization_option_id, 10) : 0);
           const optionName = typeof opt.option_name === 'string' ? opt.option_name : String(opt.option_name || '');
           return {
@@ -518,10 +522,10 @@ export default function ActiveOrdersTab({ businessId, isOpen, onLoadTransaction 
           };
         });
 
-        const custTypeId = typeof cust.customization_type_id === 'number' 
-          ? cust.customization_type_id 
+        const custTypeId = typeof cust.customization_type_id === 'number'
+          ? cust.customization_type_id
           : (typeof cust.customization_type_id === 'string' ? parseInt(cust.customization_type_id, 10) : 0);
-        const existingCust = customizationsMap.get(itemId)!.find(c => 
+        const existingCust = customizationsMap.get(itemId)!.find(c =>
           c.customization_id === custTypeId
         );
 
@@ -575,7 +579,7 @@ export default function ActiveOrdersTab({ businessId, isOpen, onLoadTransaction 
       (itemsArray as Array<Record<string, unknown>>).forEach((item) => {
         const productId = typeof item.product_id === 'number' ? item.product_id : (typeof item.product_id === 'string' ? parseInt(item.product_id, 10) : null);
         if (!productId) return;
-        
+
         const product = productsMap.get(productId);
         if (!product) return;
 
@@ -610,13 +614,13 @@ export default function ActiveOrdersTab({ businessId, isOpen, onLoadTransaction 
                 customNote?: string;
               }>;
             }>;
-            
+
             if (Array.isArray(bundleSelections)) {
               bundleSelections.forEach(bundleSel => {
                 (bundleSel.selectedProducts || []).forEach(sp => {
                   const selectionQty = typeof sp.quantity === 'number' && !Number.isNaN(sp.quantity) ? sp.quantity : 1;
                   const totalQty = itemQuantity * selectionQty;
-                  
+
                   const customizationDetails: string[] = [];
                   if (sp.customizations && sp.customizations.length > 0) {
                     sp.customizations.forEach(customization => {
@@ -753,11 +757,10 @@ export default function ActiveOrdersTab({ businessId, isOpen, onLoadTransaction 
             <button
               onClick={() => setShowSplitBillModal(true)}
               disabled={!canAccessSplitBillButton}
-              className={`px-[14px] py-[7px] text-sm rounded-lg transition-all flex items-center gap-1.5 font-medium shadow-lg active:scale-95 active:shadow-md focus:outline-none focus:ring-2 focus:ring-purple-500 focus:ring-offset-2 ${
-                canAccessSplitBillButton
+              className={`px-[14px] py-[7px] text-sm rounded-lg transition-all flex items-center gap-1.5 font-medium shadow-lg active:scale-95 active:shadow-md focus:outline-none focus:ring-2 focus:ring-purple-500 focus:ring-offset-2 ${canAccessSplitBillButton
                   ? 'bg-gradient-to-r from-purple-600 to-purple-700 text-white hover:shadow-xl hover:from-purple-700 hover:to-purple-800'
                   : 'bg-gray-400 text-gray-200 cursor-not-allowed'
-              }`}
+                }`}
               title={!canAccessSplitBillButton ? 'Anda tidak memiliki izin untuk mengakses fitur Split Bill/Pindah Meja' : undefined}
             >
               <Scissors className="w-3.5 h-3.5" />
@@ -767,22 +770,20 @@ export default function ActiveOrdersTab({ businessId, isOpen, onLoadTransaction 
           <div className="flex gap-2">
             <button
               onClick={() => setViewMode('list')}
-              className={`px-4 py-2 rounded-md transition-colors flex items-center gap-2 ${
-                viewMode === 'list'
+              className={`px-4 py-2 rounded-md transition-colors flex items-center gap-2 ${viewMode === 'list'
                   ? 'bg-blue-600 text-white'
                   : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
-              }`}
+                }`}
             >
               <List className="w-4 h-4" />
               List
             </button>
             <button
               onClick={() => setViewMode('layout')}
-              className={`px-4 py-2 rounded-md transition-colors flex items-center gap-2 ${
-                viewMode === 'layout'
+              className={`px-4 py-2 rounded-md transition-colors flex items-center gap-2 ${viewMode === 'layout'
                   ? 'bg-blue-600 text-white'
                   : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
-              }`}
+                }`}
             >
               <LayoutGrid className="w-4 h-4" />
               Layout
@@ -861,105 +862,106 @@ export default function ActiveOrdersTab({ businessId, isOpen, onLoadTransaction 
                     {pendingTransactions.map((transaction) => {
                       const borderColor = transaction.waiter_color || undefined;
                       return (
-                      <tr
-                        key={transaction.id}
-                        className="hover:bg-blue-50 transition-colors group"
-                        style={borderColor ? { boxShadow: `inset 10px 0 0 0 ${borderColor}` } : undefined}
-                      >
-                        <td className="pl-3 pr-2 py-3 whitespace-nowrap">
-                          <span className="text-xs font-medium text-gray-900">
-                            {transaction.table_number}
-                          </span>
-                        </td>
-                        <td className="px-2 py-3 whitespace-nowrap">
-                          <span className={`inline-flex px-1.5 py-0.5 text-xs font-semibold rounded-full ${transaction.pickup_method === 'take-away' ? 'bg-green-100 text-green-800' : 'bg-blue-100 text-blue-800'}`}>
-                            {transaction.pickup_method === 'take-away' ? 'Take Away' : 'Dine In'}
-                          </span>
-                        </td>
-                        <td className="px-2 py-3 whitespace-nowrap">
-                          <div className="relative inline-block">
-                            <button
-                              ref={openWaiterPopoverFor === transaction.uuid_id ? waiterTriggerRef : undefined}
-                              type="button"
-                              onClick={(e) => { e.stopPropagation(); setOpenWaiterPopoverFor((id) => (id === transaction.uuid_id ? null : transaction.uuid_id)); }}
-                              className="text-left text-xs text-gray-900 hover:underline cursor-pointer rounded focus:outline-none focus:ring-2 focus:ring-blue-400"
-                              title={transaction.waiter_names_all && transaction.waiter_names_all.length > 1 ? transaction.waiter_names_all.join(', ') : undefined}
-                            >
-                              {transaction.waiter_name || '-'}
-                              {transaction.waiter_names_all && transaction.waiter_names_all.length > 1 && (
-                                <span className="text-gray-500 ml-0.5">(+{transaction.waiter_names_all.length - 1})</span>
-                              )}
-                            </button>
-                            {openWaiterPopoverFor === transaction.uuid_id && transaction.waiter_names_all && transaction.waiter_names_all.length > 0 && waiterPopoverPos && typeof document !== 'undefined' && createPortal(
-                              <div
-                                ref={waiterPopoverRef}
-                                className="fixed z-[9999] min-w-[120px] rounded-lg border border-gray-200 bg-white py-2 shadow-lg"
-                                style={{ top: waiterPopoverPos.top, left: waiterPopoverPos.left }}
+                        <tr
+                          key={transaction.id}
+                          className="hover:bg-blue-50 transition-colors group"
+                          style={borderColor ? { boxShadow: `inset 10px 0 0 0 ${borderColor}` } : undefined}
+                        >
+                          <td className="pl-3 pr-2 py-3 whitespace-nowrap">
+                            <span className="text-xs font-medium text-gray-900">
+                              {transaction.table_number}
+                            </span>
+                          </td>
+                          <td className="px-2 py-3 whitespace-nowrap">
+                            <span className={`inline-flex px-1.5 py-0.5 text-xs font-semibold rounded-full ${transaction.pickup_method === 'take-away' ? 'bg-green-100 text-green-800' : 'bg-blue-100 text-blue-800'}`}>
+                              {transaction.pickup_method === 'take-away' ? 'Take Away' : 'Dine In'}
+                            </span>
+                          </td>
+                          <td className="px-2 py-3 whitespace-nowrap">
+                            <div className="relative inline-block">
+                              <button
+                                ref={openWaiterPopoverFor === transaction.uuid_id ? waiterTriggerRef : undefined}
+                                type="button"
+                                onClick={(e) => { e.stopPropagation(); setOpenWaiterPopoverFor((id) => (id === transaction.uuid_id ? null : transaction.uuid_id)); }}
+                                className="text-left text-xs text-gray-900 hover:underline cursor-pointer rounded focus:outline-none focus:ring-2 focus:ring-blue-400"
+                                title={transaction.waiter_names_all && transaction.waiter_names_all.length > 1 ? transaction.waiter_names_all.join(', ') : undefined}
                               >
-                                <div className="px-3 py-1 text-xs font-semibold text-gray-500 uppercase">Waiters</div>
-                                {transaction.waiter_names_all.map((name, i) => (
-                                  <div key={i} className="px-3 py-1.5 text-sm text-gray-900">{name}</div>
-                                ))}
-                              </div>,
-                              document.body
-                            )}
-                          </div>
-                        </td>
-                        <td className="px-2 py-3 whitespace-nowrap">
-                          <span className="text-xs text-gray-900 truncate block max-w-[120px]" title={transaction.customer_name || '-'}>
-                            {transaction.customer_name || '-'}
-                          </span>
-                        </td>
-                        <td className="px-2 py-3 whitespace-nowrap">
-                          <span className="text-xs font-medium text-gray-900">
-                            {formatPrice(transaction.final_amount)}
-                          </span>
-                        </td>
-                        <td className="px-2 py-3 whitespace-nowrap">
-                          <span className="text-xs text-gray-700" title={transaction.shift_uuid ?? undefined}>
-                            {transaction.shift_uuid ? (shiftLabelByUuid[transaction.shift_uuid] ?? 'Shift') : '-'}
-                          </span>
-                        </td>
-                        <td className="px-2 py-3 whitespace-nowrap">
-                          <span className="text-[10px] text-gray-900">
-                            {formatCreatedAt(transaction.created_at)}
-                          </span>
-                        </td>
-                        <td className="px-2 py-3 whitespace-nowrap">
-                          <span className="text-xs font-mono text-gray-900">
-                            {formatTimer(transaction.created_at)}
-                          </span>
-                        </td>
-                        <td className="px-2 py-3 whitespace-nowrap">
-                          <span className="text-[10px] text-gray-600 font-mono truncate block max-w-[140px]" title={transaction.uuid_id}>
-                            {transaction.uuid_id}
-                          </span>
-                        </td>
-                        <td className="px-2 py-3 whitespace-nowrap">
-                          <div className="flex gap-1.5">
-                            <button
-                              className="inline-flex items-center px-2 py-1.5 border border-gray-300 shadow-sm text-xs leading-4 font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500"
-                              onClick={() => {
-                                if (onLoadTransaction) {
-                                  onLoadTransaction(transaction.uuid_id);
-                                }
-                              }}
-                            >
-                              <Edit className="w-3.5 h-3.5 mr-1.5" />
-                              Lihat
-                            </button>
-                            <button
-                              className="inline-flex items-center px-2 py-1.5 border border-gray-300 shadow-sm text-xs leading-4 font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 disabled:opacity-50 disabled:cursor-not-allowed"
-                              onClick={() => handlePrintBill(transaction.uuid_id)}
-                              disabled={printingBill === transaction.uuid_id}
-                            >
-                              <Printer className="w-3.5 h-3.5 mr-1.5" />
-                              {printingBill === transaction.uuid_id ? 'Mencetak...' : 'Print Bill'}
-                            </button>
-                          </div>
-                        </td>
-                      </tr>
-                    );})}
+                                {transaction.waiter_name || '-'}
+                                {transaction.waiter_names_all && transaction.waiter_names_all.length > 1 && (
+                                  <span className="text-gray-500 ml-0.5">(+{transaction.waiter_names_all.length - 1})</span>
+                                )}
+                              </button>
+                              {openWaiterPopoverFor === transaction.uuid_id && transaction.waiter_names_all && transaction.waiter_names_all.length > 0 && waiterPopoverPos && typeof document !== 'undefined' && createPortal(
+                                <div
+                                  ref={waiterPopoverRef}
+                                  className="fixed z-[9999] min-w-[120px] rounded-lg border border-gray-200 bg-white py-2 shadow-lg"
+                                  style={{ top: waiterPopoverPos.top, left: waiterPopoverPos.left }}
+                                >
+                                  <div className="px-3 py-1 text-xs font-semibold text-gray-500 uppercase">Waiters</div>
+                                  {transaction.waiter_names_all.map((name, i) => (
+                                    <div key={i} className="px-3 py-1.5 text-sm text-gray-900">{name}</div>
+                                  ))}
+                                </div>,
+                                document.body
+                              )}
+                            </div>
+                          </td>
+                          <td className="px-2 py-3 whitespace-nowrap">
+                            <span className="text-xs text-gray-900 truncate block max-w-[120px]" title={transaction.customer_name || '-'}>
+                              {transaction.customer_name || '-'}
+                            </span>
+                          </td>
+                          <td className="px-2 py-3 whitespace-nowrap">
+                            <span className="text-xs font-medium text-gray-900">
+                              {formatPrice(transaction.final_amount)}
+                            </span>
+                          </td>
+                          <td className="px-2 py-3 whitespace-nowrap">
+                            <span className="text-xs text-gray-700" title={transaction.shift_uuid ?? undefined}>
+                              {transaction.shift_uuid ? (shiftLabelByUuid[transaction.shift_uuid] ?? 'Shift') : '-'}
+                            </span>
+                          </td>
+                          <td className="px-2 py-3 whitespace-nowrap">
+                            <span className="text-[10px] text-gray-900">
+                              {formatCreatedAt(transaction.created_at)}
+                            </span>
+                          </td>
+                          <td className="px-2 py-3 whitespace-nowrap">
+                            <span className="text-xs font-mono text-gray-900">
+                              {formatTimer(transaction.created_at)}
+                            </span>
+                          </td>
+                          <td className="px-2 py-3 whitespace-nowrap">
+                            <span className="text-[10px] text-gray-600 font-mono truncate block max-w-[140px]" title={transaction.uuid_id}>
+                              {transaction.uuid_id}
+                            </span>
+                          </td>
+                          <td className="px-2 py-3 whitespace-nowrap">
+                            <div className="flex gap-1.5">
+                              <button
+                                className="inline-flex items-center px-2 py-1.5 border border-gray-300 shadow-sm text-xs leading-4 font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500"
+                                onClick={() => {
+                                  if (onLoadTransaction) {
+                                    onLoadTransaction(transaction.uuid_id);
+                                  }
+                                }}
+                              >
+                                <Edit className="w-3.5 h-3.5 mr-1.5" />
+                                Lihat
+                              </button>
+                              <button
+                                className="inline-flex items-center px-2 py-1.5 border border-gray-300 shadow-sm text-xs leading-4 font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 disabled:opacity-50 disabled:cursor-not-allowed"
+                                onClick={() => handlePrintBill(transaction.uuid_id)}
+                                disabled={printingBill === transaction.uuid_id}
+                              >
+                                <Printer className="w-3.5 h-3.5 mr-1.5" />
+                                {printingBill === transaction.uuid_id ? 'Mencetak...' : 'Print Bill'}
+                              </button>
+                            </div>
+                          </td>
+                        </tr>
+                      );
+                    })}
                   </tbody>
                 </table>
               </div>

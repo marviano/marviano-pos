@@ -47,6 +47,7 @@ export interface TransactionItem {
     product_name: string;
     quantity: number;
   }>;
+  production_status?: string | null;
 }
 
 export interface TransactionRefund {
@@ -139,7 +140,7 @@ const TransactionDetailModal: React.FC<TransactionDetailModalProps> = ({
   useEffect(() => {
     const fetchUsers = async () => {
       if (!isOpen) return;
-      
+
       const electronAPI = typeof window !== 'undefined' ? (window as { electronAPI?: { localDbGetUsers?: () => Promise<Array<{ id: number; name: string; email: string }>> } }).electronAPI : undefined;
       if (electronAPI?.localDbGetUsers) {
         try {
@@ -187,8 +188,8 @@ const TransactionDetailModal: React.FC<TransactionDetailModalProps> = ({
     // Fallback: calculate from refunds array, ensuring all values are numbers
     const calculated = (transaction.refunds || []).reduce(
       (sum, refund) => {
-        const amount = typeof refund.refund_amount === 'number' 
-          ? refund.refund_amount 
+        const amount = typeof refund.refund_amount === 'number'
+          ? refund.refund_amount
           : (typeof refund.refund_amount === 'string' ? parseFloat(refund.refund_amount) : 0);
         return sum + (Number.isNaN(amount) ? 0 : amount);
       },
@@ -604,15 +605,15 @@ const TransactionDetailModal: React.FC<TransactionDetailModalProps> = ({
     if (price === null || price === undefined) {
       return 'Rp 0';
     }
-    
+
     // Convert to number if it's a string
     const numPrice = typeof price === 'string' ? parseFloat(price) : price;
-    
+
     // Check if it's a valid number
     if (Number.isNaN(numPrice) || !Number.isFinite(numPrice)) {
       return 'Rp 0';
     }
-    
+
     // Format with proper locale and no decimal places for IDR
     return `Rp ${numPrice.toLocaleString('id-ID', { minimumFractionDigits: 0, maximumFractionDigits: 0 })}`;
   };
@@ -639,16 +640,16 @@ const TransactionDetailModal: React.FC<TransactionDetailModalProps> = ({
   };
 
   return (
-    <div 
+    <div
       className="fixed inset-0 flex items-center justify-center z-50 p-4"
-      style={{ 
+      style={{
         backgroundColor: 'rgba(0, 0, 0, 0.2)',
         backdropFilter: 'blur(4px)',
         WebkitBackdropFilter: 'blur(4px)'
       }}
       onClick={onClose}
     >
-      <div 
+      <div
         className="bg-white rounded-xl shadow-2xl max-w-4xl w-full max-h-[90vh] overflow-y-auto"
         onClick={(e) => e.stopPropagation()}
       >
@@ -914,10 +915,10 @@ const TransactionDetailModal: React.FC<TransactionDetailModalProps> = ({
                               : 'text-green-700 bg-green-100'
                               } px-2 py-0.5 rounded-full`}
                           >
-                            {refund.status === 'pending' 
-                              ? 'Pending Upload' 
-                              : refund.status === 'completed' 
-                                ? 'Uploaded' 
+                            {refund.status === 'pending'
+                              ? 'Pending Upload'
+                              : refund.status === 'completed'
+                                ? 'Uploaded'
                                 : refund.status ?? 'Uploaded'}
                           </span>
                         </div>
@@ -967,220 +968,231 @@ const TransactionDetailModal: React.FC<TransactionDetailModalProps> = ({
                     </tr>
                   </thead>
                   <tbody>
-                    {transaction.items.map((item, index) => {return (
-                      <tr key={item.id} className={`border-b border-gray-100 ${index % 2 === 0 ? 'bg-gray-50' : 'bg-white'}`}>
-                        <td className="py-3 px-3">
-                          <div>
-                            <p className="font-medium text-gray-900">{item.product_name || 'Unknown Product'}</p>
-
-                            {/* Customizations Display */}
-                            {item.customizations && item.customizations.length > 0 && (() => {
-                              const customizations = item.customizations;
-                              if (!customizations || customizations.length === 0) return null;
-
-                              // Helper function to safely convert to number
-                              const parseNumber = (value: unknown): number => {
-                                if (typeof value === 'number' && !isNaN(value)) return value;
-                                if (value === null || value === undefined) return 0;
-                                const parsed = Number(value);
-                                return isNaN(parsed) ? 0 : parsed;
-                              };
-                              
-                              // Calculate total customization adjustments
-                              // Ensure price_adjustment is converted to number (may be string from database)
-                              const totalAdjustments = customizations.reduce((total, customization) => {
-                                return total + (customization.selected_options || []).reduce((optTotal, option) => {
-                                  return optTotal + parseNumber(option.price_adjustment);
-                                }, 0);
-                              }, 0);
-
-                              // Calculate base price (unit price minus customization adjustments)
-                              
-                              // Get unit_price, or calculate from total_price / quantity if unit_price is missing
-                              let unitPrice = parseNumber(item.unit_price);
-                              if (isNaN(unitPrice)) {
-                                const totalPrice = parseNumber(item.total_price);
-                                const quantity = parseNumber(item.quantity);
-                                if (!isNaN(totalPrice) && !isNaN(quantity) && quantity > 0) {
-                                  unitPrice = totalPrice / quantity;
-                                } else {
-                                  unitPrice = 0;
-                                }
-                              }
-                              
-                              // Base price = unit price minus customization adjustments
-                              const basePrice = unitPrice - totalAdjustments;
-
-                              return (
-                                <div className="mt-2 space-y-2">
-                                  {/* Base Price */}
-                                  <div className="border-b border-gray-200 pb-1">
-                                    <div className="flex items-center justify-between text-xs">
-                                      <span className="text-gray-500 font-medium">Base Price:</span>
-                                      <span className="text-gray-700 font-medium">{formatPrice(basePrice)}</span>
-                                    </div>
-                                  </div>
-
-                                  {/* Customizations */}
-                                  <div className="space-y-2">
-                                    {customizations.map((customization, idx) => (
-                                      <div key={idx} className="text-xs">
-                                        <div className="border-b border-gray-100 pb-1 mb-1">
-                                          <span className="text-gray-500 font-medium">{customization.customization_name}:</span>
-                                        </div>
-                                        <div className="ml-2 space-y-0.5">
-                                          {(customization.selected_options || []).map((option, optIdx) => (
-                                            <div key={optIdx} className="flex items-center justify-between">
-                                              <span className="text-gray-600">• {option.option_name}</span>
-                                              {option.price_adjustment !== 0 && (
-                                                <span className={`text-xs font-medium ${option.price_adjustment > 0 ? 'text-green-600' : 'text-red-600'
-                                                  }`}>
-                                                  {option.price_adjustment > 0 ? '+' : ''}{formatPrice(Math.abs(option.price_adjustment))}
-                                                </span>
-                                              )}
-                                            </div>
-                                          ))}
-                                        </div>
-                                      </div>
-                                    ))}
-                                  </div>
-
-                                  {/* Total Line */}
-                                  <div className="border-t border-gray-200 pt-1">
-                                    <div className="flex items-center justify-between text-xs font-medium">
-                                      <span className="text-gray-700">Total:</span>
-                                      <span className="text-gray-900">{formatPrice(item.unit_price)}</span>
-                                    </div>
-                                  </div>
-                                </div>
-                              );
-                            })()}
-
-                            {/* Custom Note Display */}
-                            {item.custom_note && (
-                              <div className="mt-1">
-                                <p className="text-xs text-gray-500">
-                                  <span className="text-gray-400">Note:</span>
-                                  <span className="text-gray-700 ml-1 italic">&quot;{item.custom_note}&quot;</span>
+                    {transaction.items.map((item, index) => {
+                      const isCancelled = item.production_status === 'cancelled';
+                      return (
+                        <tr key={item.id} className={`border-b border-gray-100 ${index % 2 === 0 ? 'bg-gray-50' : 'bg-white'} ${isCancelled ? 'bg-red-50' : ''}`}>
+                          <td className="py-3 px-3">
+                            <div>
+                              <div className="flex items-center gap-2">
+                                <p className={`font-medium ${isCancelled ? 'text-gray-500 line-through' : 'text-gray-900'}`}>
+                                  {item.product_name || 'Unknown Product'}
                                 </p>
+                                {isCancelled && (
+                                  <span className="text-[10px] font-bold text-red-700 bg-red-100 px-2 py-0.5 rounded-full uppercase tracking-wider border border-red-200">
+                                    Cancelled
+                                  </span>
+                                )}
                               </div>
-                            )}
 
-                            {/* Bundle Selections Display */}
-                            {item.bundleSelections && item.bundleSelections.length > 0 && (() => {
-                              const bundleSelections = item.bundleSelections as Array<{
-                                category2_name: string;
-                                selectedProducts: Array<{
-                                  product: { nama: string };
-                                  quantity?: number;
-                                  customizations?: Array<{
-                                    customization_name?: string;
-                                    selected_options?: Array<{
-                                      option_name?: string;
-                                      price_adjustment?: number;
+                              {/* Customizations Display */}
+                              {item.customizations && item.customizations.length > 0 && (() => {
+                                const customizations = item.customizations;
+                                if (!customizations || customizations.length === 0) return null;
+
+                                // Helper function to safely convert to number
+                                const parseNumber = (value: unknown): number => {
+                                  if (typeof value === 'number' && !isNaN(value)) return value;
+                                  if (value === null || value === undefined) return 0;
+                                  const parsed = Number(value);
+                                  return isNaN(parsed) ? 0 : parsed;
+                                };
+
+                                // Calculate total customization adjustments
+                                // Ensure price_adjustment is converted to number (may be string from database)
+                                const totalAdjustments = customizations.reduce((total, customization) => {
+                                  return total + (customization.selected_options || []).reduce((optTotal, option) => {
+                                    return optTotal + parseNumber(option.price_adjustment);
+                                  }, 0);
+                                }, 0);
+
+                                // Calculate base price (unit price minus customization adjustments)
+
+                                // Get unit_price, or calculate from total_price / quantity if unit_price is missing
+                                let unitPrice = parseNumber(item.unit_price);
+                                if (isNaN(unitPrice)) {
+                                  const totalPrice = parseNumber(item.total_price);
+                                  const quantity = parseNumber(item.quantity);
+                                  if (!isNaN(totalPrice) && !isNaN(quantity) && quantity > 0) {
+                                    unitPrice = totalPrice / quantity;
+                                  } else {
+                                    unitPrice = 0;
+                                  }
+                                }
+
+                                // Base price = unit price minus customization adjustments
+                                const basePrice = unitPrice - totalAdjustments;
+
+                                return (
+                                  <div className="mt-2 space-y-2">
+                                    {/* Base Price */}
+                                    <div className="border-b border-gray-200 pb-1">
+                                      <div className="flex items-center justify-between text-xs">
+                                        <span className="text-gray-500 font-medium">Base Price:</span>
+                                        <span className="text-gray-700 font-medium">{formatPrice(basePrice)}</span>
+                                      </div>
+                                    </div>
+
+                                    {/* Customizations */}
+                                    <div className="space-y-2">
+                                      {customizations.map((customization, idx) => (
+                                        <div key={idx} className="text-xs">
+                                          <div className="border-b border-gray-100 pb-1 mb-1">
+                                            <span className="text-gray-500 font-medium">{customization.customization_name}:</span>
+                                          </div>
+                                          <div className="ml-2 space-y-0.5">
+                                            {(customization.selected_options || []).map((option, optIdx) => (
+                                              <div key={optIdx} className="flex items-center justify-between">
+                                                <span className="text-gray-600">• {option.option_name}</span>
+                                                {option.price_adjustment !== 0 && (
+                                                  <span className={`text-xs font-medium ${option.price_adjustment > 0 ? 'text-green-600' : 'text-red-600'
+                                                    }`}>
+                                                    {option.price_adjustment > 0 ? '+' : ''}{formatPrice(Math.abs(option.price_adjustment))}
+                                                  </span>
+                                                )}
+                                              </div>
+                                            ))}
+                                          </div>
+                                        </div>
+                                      ))}
+                                    </div>
+
+                                    {/* Total Line */}
+                                    <div className="border-t border-gray-200 pt-1">
+                                      <div className="flex items-center justify-between text-xs font-medium">
+                                        <span className="text-gray-700">Total:</span>
+                                        <span className="text-gray-900">{formatPrice(item.unit_price)}</span>
+                                      </div>
+                                    </div>
+                                  </div>
+                                );
+                              })()}
+
+                              {/* Custom Note Display */}
+                              {item.custom_note && (
+                                <div className="mt-1">
+                                  <p className="text-xs text-gray-500">
+                                    <span className="text-gray-400">Note:</span>
+                                    <span className="text-gray-700 ml-1 italic">&quot;{item.custom_note}&quot;</span>
+                                  </p>
+                                </div>
+                              )}
+
+                              {/* Bundle Selections Display */}
+                              {item.bundleSelections && item.bundleSelections.length > 0 && (() => {
+                                const bundleSelections = item.bundleSelections as Array<{
+                                  category2_name: string;
+                                  selectedProducts: Array<{
+                                    product: { nama: string };
+                                    quantity?: number;
+                                    customizations?: Array<{
+                                      customization_name?: string;
+                                      selected_options?: Array<{
+                                        option_name?: string;
+                                        price_adjustment?: number;
+                                      }>;
                                     }>;
+                                    customNote?: string;
                                   }>;
-                                  customNote?: string;
+                                  requiredQuantity: number;
                                 }>;
-                                requiredQuantity: number;
-                              }>;
-                              if (!bundleSelections || bundleSelections.length === 0) return null;
+                                if (!bundleSelections || bundleSelections.length === 0) return null;
 
-                              return (
-                                <div className="mt-2 space-y-2">
-                                  <div className="text-xs font-semibold text-purple-700">Bundle Items:</div>
-                                  {bundleSelections.map((bundleSel, idx) => {
-                                    // Support both old format (array of products) and new format (array of {product, quantity})
-                                    const selectedProducts = bundleSel.selectedProducts || [];
-                                    const isNewFormat = selectedProducts.length > 0 && selectedProducts[0]?.product;
-                                    const totalQuantity = isNewFormat
-                                      ? selectedProducts.reduce((sum, sp) => sum + (sp.quantity ?? 1), 0)
-                                      : selectedProducts.length;
+                                return (
+                                  <div className="mt-2 space-y-2">
+                                    <div className="text-xs font-semibold text-purple-700">Bundle Items:</div>
+                                    {bundleSelections.map((bundleSel, idx) => {
+                                      // Support both old format (array of products) and new format (array of {product, quantity})
+                                      const selectedProducts = bundleSel.selectedProducts || [];
+                                      const isNewFormat = selectedProducts.length > 0 && selectedProducts[0]?.product;
+                                      const totalQuantity = isNewFormat
+                                        ? selectedProducts.reduce((sum, sp) => sum + (sp.quantity ?? 1), 0)
+                                        : selectedProducts.length;
 
-                                    return (
-                                      <div key={idx} className="ml-2 border-l-2 border-purple-300 pl-2">
-                                        <div className="text-xs font-medium text-purple-600">
-                                          {bundleSel.category2_name} ({totalQuantity}/{bundleSel.requiredQuantity}):
-                                        </div>
-                                        <div className="ml-2 mt-1 space-y-0.5">
-                                          {isNewFormat
-                                            ? selectedProducts.map((sp, spIdx) => (
-                                              <div key={spIdx} className="text-xs text-gray-600 space-y-1">
-                                                <div>• {sp.product?.nama || ''}</div>
-                                                {sp.customizations && Array.isArray(sp.customizations) && sp.customizations.length > 0 && (
-                                                  <div className="ml-4 text-[11px] text-gray-500">
-                                                    {sp.customizations.map((customization) => (
-                                                      <div key={customization.customization_name || String(Math.random())} className="mt-0.5">
-                                                        <div className="font-medium text-gray-600">
-                                                          {customization.customization_name}
+                                      return (
+                                        <div key={idx} className="ml-2 border-l-2 border-purple-300 pl-2">
+                                          <div className="text-xs font-medium text-purple-600">
+                                            {bundleSel.category2_name} ({totalQuantity}/{bundleSel.requiredQuantity}):
+                                          </div>
+                                          <div className="ml-2 mt-1 space-y-0.5">
+                                            {isNewFormat
+                                              ? selectedProducts.map((sp, spIdx) => (
+                                                <div key={spIdx} className="text-xs text-gray-600 space-y-1">
+                                                  <div>• {sp.product?.nama || ''}</div>
+                                                  {sp.customizations && Array.isArray(sp.customizations) && sp.customizations.length > 0 && (
+                                                    <div className="ml-4 text-[11px] text-gray-500">
+                                                      {sp.customizations.map((customization) => (
+                                                        <div key={customization.customization_name || String(Math.random())} className="mt-0.5">
+                                                          <div className="font-medium text-gray-600">
+                                                            {customization.customization_name}
+                                                          </div>
+                                                          <div className="ml-2 space-y-0.5">
+                                                            {(customization.selected_options || []).map((opt, optIdx) => (
+                                                              <div key={opt.option_name || String(optIdx)} className="flex items-center justify-between">
+                                                                <span>• {opt.option_name}</span>
+                                                                {opt.price_adjustment ? (
+                                                                  <span className={`text-[10px] ${opt.price_adjustment > 0 ? 'text-green-600' : 'text-red-600'}`}>
+                                                                    {opt.price_adjustment > 0 ? '+' : ''}{formatPrice(opt.price_adjustment)}
+                                                                  </span>
+                                                                ) : null}
+                                                              </div>
+                                                            ))}
+                                                          </div>
                                                         </div>
-                                                        <div className="ml-2 space-y-0.5">
-                                                          {(customization.selected_options || []).map((opt, optIdx) => (
-                                                            <div key={opt.option_name || String(optIdx)} className="flex items-center justify-between">
-                                                              <span>• {opt.option_name}</span>
-                                                              {opt.price_adjustment ? (
-                                                                <span className={`text-[10px] ${opt.price_adjustment > 0 ? 'text-green-600' : 'text-red-600'}`}>
-                                                                  {opt.price_adjustment > 0 ? '+' : ''}{formatPrice(opt.price_adjustment)}
-                                                                </span>
-                                                              ) : null}
-                                                            </div>
-                                                          ))}
-                                                        </div>
-                                                      </div>
-                                                    ))}
-                                                  </div>
-                                                )}
-                                                {sp.customNote && (
-                                                  <div className="ml-4 text-[11px] text-purple-600 italic">
-                                                    Note: {sp.customNote}
-                                                  </div>
-                                                )}
-                                              </div>
-                                            ))
-                                            : selectedProducts.map((p, pIdx) => (
-                                              <div key={pIdx} className="text-xs text-gray-600">
-                                                • {(p as { nama?: string })?.nama || ''}
-                                              </div>
-                                            ))
-                                          }
+                                                      ))}
+                                                    </div>
+                                                  )}
+                                                  {sp.customNote && (
+                                                    <div className="ml-4 text-[11px] text-purple-600 italic">
+                                                      Note: {sp.customNote}
+                                                    </div>
+                                                  )}
+                                                </div>
+                                              ))
+                                              : selectedProducts.map((p, pIdx) => (
+                                                <div key={pIdx} className="text-xs text-gray-600">
+                                                  • {(p as { nama?: string })?.nama || ''}
+                                                </div>
+                                              ))
+                                            }
+                                          </div>
                                         </div>
-                                      </div>
-                                    );
-                                  })}
-                                </div>
-                              );
-                            })()}
+                                      );
+                                    })}
+                                  </div>
+                                );
+                              })()}
 
-                            {/* Package Selections Display */}
-                            {item.packageSelections && item.packageSelections.length > 0 && (
-                              <div className="mt-2 space-y-1">
-                                <div className="text-xs font-semibold text-teal-700">Package Items:</div>
-                                <div className="ml-2 border-l-2 border-teal-300 pl-2 space-y-0.5">
-                                  {item.packageSelections.map((pkg, idx) => {
-                                    const totalQty = item.quantity * (pkg.quantity ?? 0);
-                                    return (
-                                      <div key={idx} className="text-xs text-gray-600">
-                                        • {formatPackageLineDisplay(pkg.product_name, totalQty)}
-                                      </div>
-                                    );
-                                  })}
+                              {/* Package Selections Display */}
+                              {item.packageSelections && item.packageSelections.length > 0 && (
+                                <div className="mt-2 space-y-1">
+                                  <div className="text-xs font-semibold text-teal-700">Package Items:</div>
+                                  <div className="ml-2 border-l-2 border-teal-300 pl-2 space-y-0.5">
+                                    {item.packageSelections.map((pkg, idx) => {
+                                      const totalQty = item.quantity * (pkg.quantity ?? 0);
+                                      return (
+                                        <div key={idx} className="text-xs text-gray-600">
+                                          • {formatPackageLineDisplay(pkg.product_name, totalQty)}
+                                        </div>
+                                      );
+                                    })}
+                                  </div>
                                 </div>
-                              </div>
-                            )}
-                          </div>
-                        </td>
-                        <td className="py-3 px-3 text-center">
-                          <span className="bg-blue-100 text-blue-800 px-2 py-1 rounded-full text-sm font-medium">
-                            {item.quantity}
-                          </span>
-                        </td>
-                        <td className="py-3 px-3 text-right font-medium text-gray-900">
-                          {formatPrice(item.unit_price)}
-                        </td>
-                        <td className="py-3 px-3 text-right font-bold text-gray-900">
-                          {formatPrice(item.total_price)}
-                        </td>
-                      </tr>
+                              )}
+                            </div>
+                          </td>
+                          <td className="py-3 px-3 text-center">
+                            <span className={`px-2 py-1 rounded-full text-sm font-medium ${isCancelled ? 'bg-gray-200 text-gray-500' : 'bg-blue-100 text-blue-800'}`}>
+                              {item.quantity}
+                            </span>
+                          </td>
+                          <td className={`py-3 px-3 text-right font-medium ${isCancelled ? 'text-gray-400 line-through' : 'text-gray-900'}`}>
+                            {formatPrice(item.unit_price)}
+                          </td>
+                          <td className={`py-3 px-3 text-right font-bold ${isCancelled ? 'text-gray-400 line-through' : 'text-gray-900'}`}>
+                            {formatPrice(item.total_price)}
+                          </td>
+                        </tr>
                       );
                     })}
                   </tbody>

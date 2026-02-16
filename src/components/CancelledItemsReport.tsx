@@ -14,11 +14,12 @@ interface CancelledItem {
   unit_price: number;
   total_price: number;
   custom_note: string | null;
-  cancelled_at: string; // created_at of cancelled item
+  cancelled_at: string;
   transaction_receipt_number: string | null;
   customer_name: string | null;
   cancelled_by_user_id: number | null;
   cancelled_by_user_name: string | null;
+  cancelled_by_waiter_name: string | null;
   printer_type: 'R' | 'RR' | null; // R = Printer 1, RR = Printer 2
 }
 
@@ -27,6 +28,7 @@ interface ElectronAPI {
   localDbGetTransactionItems?: (transactionId: string) => Promise<unknown[]>;
   localDbGetAllProducts?: () => Promise<unknown[]>;
   localDbGetUsers?: () => Promise<unknown[]>;
+  localDbGetEmployees?: () => Promise<unknown[]>;
   getPrinter1AuditLog?: (fromDate?: string, toDate?: string, limit?: number) => Promise<{ success: boolean; entries: unknown[] }>;
   getPrinter2AuditLog?: (fromDate?: string, toDate?: string, limit?: number) => Promise<{ success: boolean; entries: unknown[] }>;
 }
@@ -42,14 +44,14 @@ const formatCancelledDate = (dateString: string): string => {
     const date = new Date(dateString);
     const days = ['Minggu', 'Senin', 'Selasa', 'Rabu', 'Kamis', 'Jumat', 'Sabtu'];
     const months = ['Jan', 'Feb', 'Mar', 'Apr', 'Mei', 'Jun', 'Jul', 'Agu', 'Sep', 'Okt', 'Nov', 'Des'];
-    
+
     const dayName = days[date.getDay()];
     const hours = String(date.getHours()).padStart(2, '0');
     const minutes = String(date.getMinutes()).padStart(2, '0');
     const day = date.getDate();
     const month = months[date.getMonth()];
     const year = date.getFullYear();
-    
+
     return `${dayName}, ${hours}.${minutes} ${day} ${month} ${year}`;
   } catch (error) {
     return dateString;
@@ -164,6 +166,17 @@ export default function CancelledItemsReport() {
         }
       });
 
+      // Get all employees to map waiter names
+      const allEmployees = electronAPI.localDbGetEmployees ? await electronAPI.localDbGetEmployees() : [];
+      const employeesArray = Array.isArray(allEmployees) ? allEmployees as Record<string, unknown>[] : [];
+      const employeesMap = new Map<number, Record<string, unknown>>();
+      employeesArray.forEach((e) => {
+        const id = typeof e.id === 'number' ? e.id : (typeof e.id === 'string' ? parseInt(e.id, 10) : null);
+        if (id) {
+          employeesMap.set(id, e);
+        }
+      });
+
       // Get all pending transactions to find cancelled items
       // We need to query all transactions and get their items
       const cancelledItemsList: CancelledItem[] = [];
@@ -190,24 +203,44 @@ export default function CancelledItemsReport() {
 
           const transaction = transactionsMap.get(txUuid);
           // Receipt number can be number or string, handle both
-          const receiptNumber = transaction 
-            ? (typeof transaction.receipt_number === 'number' 
-                ? transaction.receipt_number.toString() 
-                : (typeof transaction.receipt_number === 'string' ? transaction.receipt_number : null))
+          const receiptNumber = transaction
+            ? (typeof transaction.receipt_number === 'number'
+              ? transaction.receipt_number.toString()
+              : (typeof transaction.receipt_number === 'string' ? transaction.receipt_number : null))
             : null;
           const customerName = transaction && typeof transaction.customer_name === 'string' ? transaction.customer_name : null;
 
-          // Try to get user from transaction (who created it)
-          // Note: Ideally we'd query activity_logs to get who actually cancelled it,
-          // but for now we use the transaction creator as a reasonable approximation
-          const transactionUserId = transaction && typeof transaction.user_id === 'number' 
-            ? transaction.user_id 
+          // Determine who cancelled the item
+          // Resolve both waiter name and user name independently so we can show both
+          const cancelledByWaiterId = typeof item.cancelled_by_waiter_id === 'number' ? item.cancelled_by_waiter_id : (typeof item.cancelled_by_waiter_id === 'string' ? parseInt(item.cancelled_by_waiter_id, 10) : null);
+          const cancelledByUserIdFromItem = typeof item.cancelled_by_user_id === 'number' ? item.cancelled_by_user_id : (typeof item.cancelled_by_user_id === 'string' ? parseInt(item.cancelled_by_user_id, 10) : null);
+
+          const transactionUserId = transaction && typeof transaction.user_id === 'number'
+            ? transaction.user_id
             : (transaction && typeof transaction.user_id === 'string' ? parseInt(transaction.user_id, 10) : null);
-          
-          const user = transactionUserId ? usersMap.get(transactionUserId) : null;
-          const userName = user && typeof user.name === 'string' 
-            ? user.name 
-            : (user && typeof user.email === 'string' ? user.email : 'Tidak diketahui');
+
+          const finalCancelledByUserId = cancelledByUserIdFromItem || transactionUserId;
+
+          // Resolve waiter name (employee who performed the cancellation via PIN)
+          let waiterName: string | null = null;
+          if (cancelledByWaiterId) {
+            const waiter = employeesMap.get(cancelledByWaiterId);
+            if (waiter && typeof waiter.nama_karyawan === 'string') {
+              waiterName = waiter.nama_karyawan;
+            } else {
+              const altUser = usersMap.get(cancelledByWaiterId);
+              waiterName = altUser && typeof altUser.name === 'string' ? altUser.name : 'Waiter (PIN)';
+            }
+          }
+
+          // Resolve user/cashier name (user who authorized the cancellation)
+          let userName: string | null = null;
+          if (finalCancelledByUserId) {
+            const user = usersMap.get(finalCancelledByUserId);
+            userName = user && typeof user.name === 'string'
+              ? user.name
+              : (user && typeof user.email === 'string' ? user.email : null);
+          }
 
           const itemId = typeof item.id === 'number' ? item.id : (typeof item.id === 'string' ? parseInt(item.id, 10) : 0);
           const itemUuidId = typeof item.uuid_id === 'string' ? item.uuid_id : String(item.uuid_id || '');
@@ -217,7 +250,16 @@ export default function CancelledItemsReport() {
           const unitPrice = typeof item.unit_price === 'number' ? item.unit_price : (typeof item.unit_price === 'string' ? parseFloat(String(item.unit_price)) : 0);
           const totalPrice = typeof item.total_price === 'number' ? item.total_price : (typeof item.total_price === 'string' ? parseFloat(String(item.total_price)) : 0);
           const customNote = typeof item.custom_note === 'string' ? item.custom_note : null;
-          const cancelledAt = typeof item.created_at === 'string' ? item.created_at : new Date().toISOString();
+          const toISOString = (val: unknown): string | null => {
+            if (!val) return null;
+            if (val instanceof Date) return val.toISOString();
+            if (typeof val === 'string' && val.length > 0) return val;
+            if (typeof val === 'number') return new Date(val).toISOString();
+            // mysql2 may return an object with toISOString on the prototype
+            if (typeof val === 'object' && val !== null && 'toISOString' in val && typeof (val as any).toISOString === 'function') return (val as any).toISOString();
+            return String(val);
+          };
+          const cancelledAt = toISOString(item.cancelled_at) || toISOString(item.created_at) || new Date().toISOString();
 
           // Determine printer type (R/RR)
           // RR = Printer 2 (Receiptize) if in receiptizePrintedIds or has receiptizeCounter
@@ -226,15 +268,15 @@ export default function CancelledItemsReport() {
           // Try both UUID and numeric ID for matching (audit logs might use either)
           const txUuidId = transactionUuidId;
           const txNumericId = transactionIntId.toString();
-          
+
           // Check both UUID and numeric ID formats
           const hasReceiptizeCounter = (typeof receiptizeCounters[txUuidId] === 'number' && receiptizeCounters[txUuidId] > 0) ||
-                                      (typeof receiptizeCounters[txNumericId] === 'number' && receiptizeCounters[txNumericId] > 0);
+            (typeof receiptizeCounters[txNumericId] === 'number' && receiptizeCounters[txNumericId] > 0);
           const hasReceiptCounter = (typeof receiptCounters[txUuidId] === 'number' && receiptCounters[txUuidId] > 0) ||
-                                   (typeof receiptCounters[txNumericId] === 'number' && receiptCounters[txNumericId] > 0);
+            (typeof receiptCounters[txNumericId] === 'number' && receiptCounters[txNumericId] > 0);
           const isInReceiptizeIds = receiptizePrintedIds.has(txUuidId) || receiptizePrintedIds.has(txNumericId);
           const isReceiptize = isInReceiptizeIds || hasReceiptizeCounter;
-          
+
           let printerType: 'R' | 'RR' | null = null;
           if (isReceiptize) {
             printerType = 'RR'; // Printer 2 (Receiptize)
@@ -258,15 +300,16 @@ export default function CancelledItemsReport() {
             cancelled_at: cancelledAt,
             transaction_receipt_number: receiptNumber,
             customer_name: customerName,
-            cancelled_by_user_id: transactionUserId,
-            cancelled_by_user_name: userName,
+            cancelled_by_user_id: finalCancelledByUserId,
+            cancelled_by_user_name: userName || waiterName || 'Tidak diketahui',
+            cancelled_by_waiter_name: waiterName,
             printer_type: printerType,
           });
         }
       }
 
       // Sort by cancelled_at descending (newest first)
-      cancelledItemsList.sort((a, b) => 
+      cancelledItemsList.sort((a, b) =>
         new Date(b.cancelled_at).getTime() - new Date(a.cancelled_at).getTime()
       );
 
@@ -387,15 +430,14 @@ export default function CancelledItemsReport() {
                       <div className="flex items-center gap-2 text-sm text-gray-900">
                         <Receipt className="w-4 h-4 text-gray-400 flex-shrink-0" />
                         {item.printer_type ? (
-                          <span className={`inline-flex items-center px-1.5 py-0.5 rounded text-xs font-medium flex-shrink-0 ${
-                            item.printer_type === 'RR' 
-                              ? 'bg-green-100 text-green-800' 
-                              : 'bg-blue-100 text-blue-800'
-                          }`} title={item.printer_type === 'RR' ? 'Printer 2 (Receiptize)' : 'Printer 1 (Receipt)'}>
+                          <span className={`inline-flex items-center px-1.5 py-0.5 rounded text-xs font-medium flex-shrink-0 ${item.printer_type === 'RR'
+                            ? 'bg-green-100 text-green-800'
+                            : 'bg-blue-100 text-blue-800'
+                            }`} title={item.printer_type === 'RR' ? 'Printer 2 (Receiptize)' : 'Printer 1 (Receipt)'}>
                             {item.printer_type}
                           </span>
                         ) : (
-                          <span 
+                          <span
                             className="inline-flex items-center px-1.5 py-0.5 rounded text-xs font-medium bg-gray-100 text-gray-500 flex-shrink-0"
                             title="Transaksi belum dicetak (semua item dibatalkan sebelum pembayaran)"
                           >
@@ -403,8 +445,8 @@ export default function CancelledItemsReport() {
                           </span>
                         )}
                         <span className="whitespace-nowrap">
-                          {item.transaction_receipt_number 
-                            ? `#${item.transaction_receipt_number}` 
+                          {item.transaction_receipt_number
+                            ? `#${item.transaction_receipt_number}`
                             : `ID: ${item.transaction_id}`}
                         </span>
                       </div>
@@ -416,9 +458,19 @@ export default function CancelledItemsReport() {
                       </div>
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap">
-                      <div className="flex items-center text-sm text-gray-900">
-                        <User className="w-4 h-4 text-gray-400 mr-2" />
-                        {item.cancelled_by_user_name}
+                      <div className="flex items-start text-sm text-gray-900">
+                        <User className="w-4 h-4 text-gray-400 mr-2 mt-0.5 flex-shrink-0" />
+                        <div>
+                          {item.cancelled_by_user_name && (
+                            <div>{item.cancelled_by_user_name}</div>
+                          )}
+                          {item.cancelled_by_waiter_name && item.cancelled_by_user_name !== item.cancelled_by_waiter_name && (
+                            <div className="text-xs text-gray-500">Waiters {item.cancelled_by_waiter_name}</div>
+                          )}
+                          {!item.cancelled_by_user_name && !item.cancelled_by_waiter_name && (
+                            <div>Tidak diketahui</div>
+                          )}
+                        </div>
                       </div>
                     </td>
                   </tr>

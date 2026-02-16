@@ -245,6 +245,7 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
   const [showPasswordModal, setShowPasswordModal] = useState(false);
   const [passwordInput, setPasswordInput] = useState('');
   const [pendingLockedItemAction, setPendingLockedItemAction] = useState<{ item: CartItem; action: 'reduce' | 'delete' } | null>(null);
+  const [showCancellationWaiterModal, setShowCancellationWaiterModal] = useState(false);
 
   // Waiter selection state
   const [currentUserEmployee, setCurrentUserEmployee] = useState<Employee | null>(null);
@@ -766,6 +767,367 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
     }
   };
 
+  const performLockedItemCancellation = async (
+    item: CartItem,
+    action: 'reduce' | 'delete',
+    authorizedByUserId: string | number | null,
+    authorizedByWaiterId: number | null = null
+  ) => {
+    const electronAPI = typeof window !== 'undefined' ? window.electronAPI : undefined;
+    if (!electronAPI) return;
+
+    const authByUserId = typeof authorizedByUserId === 'string' ? parseInt(authorizedByUserId, 10) : authorizedByUserId;
+
+    try {
+      if (action === 'delete') {
+        // For locked items, update production_status to 'cancelled' instead of hard delete
+        if (item.transactionItemId && item.transactionId && electronAPI?.localDbGetTransactionItems && electronAPI?.localDbUpsertTransactionItems) {
+          // Fetch the full transaction item data
+          const transactionItems = await electronAPI.localDbGetTransactionItems(item.transactionId);
+          const itemsArray = Array.isArray(transactionItems) ? transactionItems as Record<string, unknown>[] : [];
+          const transactionItem = itemsArray.find((ti) => {
+            const tiId = typeof ti.id === 'number' ? ti.id : (typeof ti.id === 'string' ? parseInt(ti.id, 10) : null);
+            return tiId === item.transactionItemId;
+          });
+
+          if (transactionItem) {
+            // Prepare the item data with production_status set to 'cancelled'
+            const itemUuidId = typeof transactionItem.uuid_id === 'string' ? transactionItem.uuid_id : String(transactionItem.uuid_id || '');
+            const transactionIntId = typeof transactionItem.transaction_id === 'number' ? transactionItem.transaction_id : (typeof transactionItem.transaction_id === 'string' ? parseInt(transactionItem.transaction_id, 10) : 0);
+            const transactionUuidId = typeof transactionItem.uuid_transaction_id === 'string' ? transactionItem.uuid_transaction_id : String(transactionItem.uuid_transaction_id || '');
+            const productId = typeof transactionItem.product_id === 'number' ? transactionItem.product_id : (typeof transactionItem.product_id === 'string' ? parseInt(transactionItem.product_id, 10) : 0);
+            const quantity = typeof transactionItem.quantity === 'number' ? transactionItem.quantity : (typeof transactionItem.quantity === 'string' ? parseInt(transactionItem.quantity, 10) : 1);
+            const unitPrice = typeof transactionItem.unit_price === 'number' ? transactionItem.unit_price : (typeof transactionItem.unit_price === 'string' ? parseFloat(String(transactionItem.unit_price)) : 0);
+            const totalPrice = typeof transactionItem.total_price === 'number' ? transactionItem.total_price : (typeof transactionItem.total_price === 'string' ? parseFloat(String(transactionItem.total_price)) : 0);
+            const customNote = typeof transactionItem.custom_note === 'string' ? transactionItem.custom_note : null;
+            const bundleSelectionsJson = typeof transactionItem.bundle_selections_json === 'string' ? transactionItem.bundle_selections_json : (transactionItem.bundle_selections_json ? JSON.stringify(transactionItem.bundle_selections_json) : null);
+            const waiterIdItem = typeof transactionItem.waiter_id === 'number' ? transactionItem.waiter_id : (typeof transactionItem.waiter_id === 'string' ? parseInt(String(transactionItem.waiter_id), 10) : null);
+
+            // Get created_at - preserve original timestamp
+            const createdAt = transactionItem.created_at ? String(transactionItem.created_at) : new Date().toISOString();
+
+            // Set production_status to 'cancelled' and add audit fields
+            const productionStatus = 'cancelled';
+            const productionStartedAt = transactionItem.production_started_at ? String(transactionItem.production_started_at) : null;
+            const productionFinishedAt = transactionItem.production_finished_at ? String(transactionItem.production_finished_at) : null;
+
+            // Update the transaction item in database
+            await (electronAPI as any).localDbUpsertTransactionItems([{
+              id: item.transactionItemId,
+              uuid_id: itemUuidId,
+              transaction_id: transactionIntId,
+              uuid_transaction_id: transactionUuidId,
+              product_id: productId,
+              quantity: quantity,
+              unit_price: unitPrice,
+              total_price: totalPrice,
+              custom_note: customNote,
+              bundle_selections_json: bundleSelectionsJson,
+              created_at: createdAt,
+              waiter_id: waiterIdItem ?? null,
+              production_status: productionStatus,
+              production_started_at: productionStartedAt,
+              production_finished_at: productionFinishedAt,
+              cancelled_by_user_id: authByUserId,
+              cancelled_by_waiter_id: authorizedByWaiterId,
+              cancelled_at: new Date().toISOString(),
+            }]);
+          } else {
+            console.warn('Transaction item not found in database');
+          }
+        }
+
+        // Recalculate Transaction Totals (excluding cancelled items)
+        if (item.transactionId && electronAPI?.localDbGetTransactionItems && electronAPI?.localDbGetTransactions && electronAPI?.localDbUpsertTransactions) {
+          try {
+            // 1. Fetch all items to calculate new total
+            const allItems = await electronAPI.localDbGetTransactionItems(item.transactionId);
+            const itemsArray = Array.isArray(allItems) ? allItems as Record<string, unknown>[] : [];
+
+            // 2. Sum price of active items only
+            const newTotalAmount = itemsArray.reduce((sum, ti) => {
+              const status = typeof ti.production_status === 'string' ? ti.production_status : null;
+              if (status === 'cancelled') return sum;
+
+              const price = typeof ti.total_price === 'number' ? ti.total_price : (typeof ti.total_price === 'string' ? parseFloat(ti.total_price) : 0);
+              return sum + price;
+            }, 0);
+
+            // 3. Update transaction record
+            const txs = await electronAPI.localDbGetTransactions(businessId, 10000);
+            const txArray = Array.isArray(txs) ? txs : [];
+            const transaction = txArray.find((tx: unknown) => {
+              if (tx && typeof tx === 'object' && 'uuid_id' in tx) {
+                const t = tx as { uuid_id?: string; id?: string };
+                return (t.uuid_id === item.transactionId) || (t.id === item.transactionId);
+              }
+              return false;
+            }) as Record<string, unknown> | undefined;
+
+            if (transaction) {
+              const voucherDiscount = typeof transaction.voucher_discount === 'number'
+                ? transaction.voucher_discount
+                : (typeof transaction.voucher_discount === 'string' ? parseFloat(transaction.voucher_discount) : 0);
+
+              const newFinalAmount = Math.max(0, newTotalAmount - voucherDiscount);
+
+              await electronAPI.localDbUpsertTransactions([{
+                ...transaction,
+                total_amount: newTotalAmount,
+                final_amount: newFinalAmount,
+                updated_at: new Date().toISOString()
+              }]);
+
+              console.log(`✅ Transaction ${item.transactionId} totals updated: ${newTotalAmount} (was ${transaction.total_amount})`);
+            }
+          } catch (error) {
+            console.error('Error recalculating transaction totals:', error);
+          }
+        }
+
+        // Check if transaction has any active (non-cancelled) items left
+        if (item.transactionId && electronAPI?.localDbGetTransactionItems && electronAPI?.localDbGetTransactions && electronAPI?.localDbUpsertTransactions) {
+          try {
+            const allTransactionItems = await electronAPI.localDbGetTransactionItems(item.transactionId);
+            const allItemsArray = Array.isArray(allTransactionItems) ? allTransactionItems as Record<string, unknown>[] : [];
+            const hasActiveItems = allItemsArray.some((ti) => {
+              const status = typeof ti.production_status === 'string' ? ti.production_status : null;
+              return status !== 'cancelled';
+            });
+
+            if (!hasActiveItems) {
+              const allTransactions = await electronAPI.localDbGetTransactions(businessId, 10000);
+              const transactionsArray = Array.isArray(allTransactions) ? allTransactions : [];
+              const transaction = transactionsArray.find((tx: unknown) => {
+                if (tx && typeof tx === 'object' && 'uuid_id' in tx) {
+                  const t = tx as { uuid_id?: string; id?: string };
+                  return (t.uuid_id === item.transactionId) || (t.id === item.transactionId);
+                }
+                return false;
+              }) as Record<string, unknown> | undefined;
+
+              if (transaction) {
+                const updatedTransaction = {
+                  ...transaction,
+                  status: 'cancelled',
+                  updated_at: new Date().toISOString(),
+                };
+                await electronAPI.localDbUpsertTransactions([updatedTransaction]);
+              }
+            }
+          } catch (error) {
+            console.error('Error checking/updating transaction status:', error);
+          }
+        }
+
+        // Remove from cart UI
+        const newCartItems = cartItems.filter(cartItem => cartItem.id !== item.id);
+        setCartItems(newCartItems);
+        sendCartUpdate(newCartItems);
+
+        // Log activity
+        await logActivity(
+          'delete_locked_cart_item',
+          JSON.stringify({
+            product_name: item.product.nama,
+            product_id: item.product.id,
+            quantity: item.quantity,
+            transaction_id: item.transactionId || null,
+            transaction_item_id: item.transactionItemId || null,
+            authorized_by_user_id: authorizedByUserId,
+            authorized_by_waiter_id: authorizedByWaiterId,
+          })
+        );
+      } else if (action === 'reduce') {
+        // For reduce, create a separate cancelled record
+        if (item.transactionItemId && item.transactionId && electronAPI?.localDbGetTransactionItems && electronAPI?.localDbUpsertTransactionItems) {
+          const transactionItems = await electronAPI.localDbGetTransactionItems(item.transactionId);
+          const itemsArray = Array.isArray(transactionItems) ? transactionItems as Record<string, unknown>[] : [];
+          const transactionItem = itemsArray.find((ti) => {
+            const tiId = typeof ti.id === 'number' ? ti.id : (typeof ti.id === 'string' ? parseInt(ti.id, 10) : null);
+            return tiId === item.transactionItemId;
+          });
+
+          if (transactionItem) {
+            const cancelledQuantity = 1;
+            const remainingQuantity = item.quantity - cancelledQuantity;
+
+            const transactionIntId = typeof transactionItem.transaction_id === 'number' ? transactionItem.transaction_id : (typeof transactionItem.transaction_id === 'string' ? parseInt(transactionItem.transaction_id, 10) : 0);
+            const transactionUuidId = typeof transactionItem.uuid_transaction_id === 'string' ? transactionItem.uuid_transaction_id : String(transactionItem.uuid_transaction_id || '');
+            const productId = typeof transactionItem.product_id === 'number' ? transactionItem.product_id : (typeof transactionItem.product_id === 'string' ? parseInt(transactionItem.product_id, 10) : 0);
+            const unitPrice = typeof transactionItem.unit_price === 'number' ? transactionItem.unit_price : (typeof transactionItem.unit_price === 'string' ? parseFloat(String(transactionItem.unit_price)) : 0);
+            const customNote = typeof transactionItem.custom_note === 'string' ? transactionItem.custom_note : null;
+            const bundleSelectionsJson = typeof transactionItem.bundle_selections_json === 'string' ? transactionItem.bundle_selections_json : (transactionItem.bundle_selections_json ? JSON.stringify(transactionItem.bundle_selections_json) : null);
+            const waiterIdItem = typeof transactionItem.waiter_id === 'number' ? transactionItem.waiter_id : (typeof transactionItem.waiter_id === 'string' ? parseInt(String(transactionItem.waiter_id), 10) : null);
+            const createdAt = transactionItem.created_at ? String(transactionItem.created_at) : new Date().toISOString();
+
+            const productionStatus = typeof transactionItem.production_status === 'string' ? transactionItem.production_status : null;
+            const productionStartedAt = transactionItem.production_started_at ? String(transactionItem.production_started_at) : null;
+            const productionFinishedAt = transactionItem.production_finished_at ? String(transactionItem.production_finished_at) : null;
+
+            const itemUuidId = typeof transactionItem.uuid_id === 'string' ? transactionItem.uuid_id : String(transactionItem.uuid_id || '');
+            const remainingTotalPrice = unitPrice * remainingQuantity;
+
+            // 1. Update original record
+            await (electronAPI as any).localDbUpsertTransactionItems([{
+              id: item.transactionItemId,
+              uuid_id: itemUuidId,
+              transaction_id: transactionIntId,
+              uuid_transaction_id: transactionUuidId,
+              product_id: productId,
+              quantity: remainingQuantity,
+              unit_price: unitPrice,
+              total_price: remainingTotalPrice,
+              custom_note: customNote,
+              bundle_selections_json: bundleSelectionsJson,
+              created_at: createdAt,
+              waiter_id: waiterIdItem ?? null,
+              production_status: productionStatus,
+              production_started_at: productionStartedAt,
+              production_finished_at: productionFinishedAt,
+            }]);
+
+            // 2. Create new cancelled record
+            const cancelledUuidId = generateUUID();
+            const cancelledTotalPrice = unitPrice * cancelledQuantity;
+
+            await (electronAPI as any).localDbUpsertTransactionItems([{
+              uuid_id: cancelledUuidId,
+              transaction_id: transactionIntId,
+              uuid_transaction_id: transactionUuidId,
+              product_id: productId,
+              quantity: cancelledQuantity,
+              unit_price: unitPrice,
+              total_price: cancelledTotalPrice,
+              custom_note: customNote,
+              bundle_selections_json: bundleSelectionsJson,
+              created_at: new Date().toISOString(),
+              waiter_id: waiterIdItem ?? null,
+              production_status: 'cancelled',
+              production_started_at: null,
+              production_finished_at: null,
+              cancelled_by_user_id: authByUserId,
+              cancelled_by_waiter_id: authorizedByWaiterId,
+              cancelled_at: new Date().toISOString(),
+            }]);
+          } else {
+            console.warn('Transaction item not found in database');
+          }
+        }
+
+        // Recalculate Transaction Totals (excluding cancelled items)
+        if (item.transactionId && electronAPI?.localDbGetTransactionItems && electronAPI?.localDbGetTransactions && electronAPI?.localDbUpsertTransactions) {
+          try {
+            // 1. Fetch all items to calculate new total
+            const allItems = await electronAPI.localDbGetTransactionItems(item.transactionId);
+            const itemsArray = Array.isArray(allItems) ? allItems as Record<string, unknown>[] : [];
+
+            // 2. Sum price of active items only
+            const newTotalAmount = itemsArray.reduce((sum, ti) => {
+              const status = typeof ti.production_status === 'string' ? ti.production_status : null;
+              if (status === 'cancelled') return sum;
+
+              const price = typeof ti.total_price === 'number' ? ti.total_price : (typeof ti.total_price === 'string' ? parseFloat(ti.total_price) : 0);
+              return sum + price;
+            }, 0);
+
+            // 3. Update transaction record
+            const txs = await electronAPI.localDbGetTransactions(businessId, 10000);
+            const txArray = Array.isArray(txs) ? txs : [];
+            const transaction = txArray.find((tx: unknown) => {
+              if (tx && typeof tx === 'object' && 'uuid_id' in tx) {
+                const t = tx as { uuid_id?: string; id?: string };
+                return (t.uuid_id === item.transactionId) || (t.id === item.transactionId);
+              }
+              return false;
+            }) as Record<string, unknown> | undefined;
+
+            if (transaction) {
+              const voucherDiscount = typeof transaction.voucher_discount === 'number'
+                ? transaction.voucher_discount
+                : (typeof transaction.voucher_discount === 'string' ? parseFloat(transaction.voucher_discount) : 0);
+
+              const newFinalAmount = Math.max(0, newTotalAmount - voucherDiscount);
+
+              await electronAPI.localDbUpsertTransactions([{
+                ...transaction,
+                total_amount: newTotalAmount,
+                final_amount: newFinalAmount,
+                updated_at: new Date().toISOString()
+              }]);
+
+              console.log(`✅ Transaction ${item.transactionId} totals updated: ${newTotalAmount} (was ${transaction.total_amount})`);
+            }
+          } catch (error) {
+            console.error('Error recalculating transaction totals:', error);
+          }
+        }
+
+        // Check transaction status
+        if (item.transactionId && electronAPI?.localDbGetTransactionItems && electronAPI?.localDbGetTransactions && electronAPI?.localDbUpsertTransactions) {
+          try {
+            const allTransactionItems = await electronAPI.localDbGetTransactionItems(item.transactionId);
+            const allItemsArray = Array.isArray(allTransactionItems) ? allTransactionItems as Record<string, unknown>[] : [];
+            const hasActiveItems = allItemsArray.some((ti) => {
+              const status = typeof ti.production_status === 'string' ? ti.production_status : null;
+              return status !== 'cancelled';
+            });
+
+            if (!hasActiveItems) {
+              const allTransactions = await electronAPI.localDbGetTransactions(businessId, 10000);
+              const transactionsArray = Array.isArray(allTransactions) ? allTransactions : [];
+              const transaction = transactionsArray.find((tx: unknown) => {
+                if (tx && typeof tx === 'object' && 'uuid_id' in tx) {
+                  const t = tx as { uuid_id?: string; id?: string };
+                  return (t.uuid_id === item.transactionId) || (t.id === item.transactionId);
+                }
+                return false;
+              }) as Record<string, unknown> | undefined;
+
+              if (transaction) {
+                const updatedTransaction = {
+                  ...transaction,
+                  status: 'cancelled',
+                  updated_at: new Date().toISOString(),
+                };
+                await electronAPI.localDbUpsertTransactions([updatedTransaction]);
+              }
+            }
+          } catch (error) {
+            console.error('Error checking/updating transaction status:', error);
+          }
+        }
+
+        // Update cart UI
+        const newCartItems = cartItems.map(cartItem =>
+          cartItem.id === item.id
+            ? { ...cartItem, quantity: cartItem.quantity - 1 }
+            : cartItem
+        );
+        setCartItems(newCartItems);
+        sendCartUpdate(newCartItems);
+
+        // Log activity
+        await logActivity(
+          'reduce_locked_cart_item',
+          JSON.stringify({
+            product_name: item.product.nama,
+            product_id: item.product.id,
+            old_quantity: item.quantity,
+            new_quantity: item.quantity - 1,
+            transaction_id: item.transactionId || null,
+            transaction_item_id: item.transactionItemId || null,
+            authorized_by_user_id: authorizedByUserId,
+            authorized_by_waiter_id: authorizedByWaiterId,
+          })
+        );
+      }
+    } catch (error) {
+      console.error('Error updating transaction item:', error);
+      throw error;
+    }
+  };
+
   // Handle password verification for locked items
   const handlePasswordSubmit = async () => {
     if (passwordInput === 'KONFIRMASI') {
@@ -773,281 +1135,31 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
 
       if (pendingLockedItemAction) {
         const { item, action } = pendingLockedItemAction;
-        const electronAPI = typeof window !== 'undefined' ? window.electronAPI : undefined;
-
         try {
-          // Perform the action
-          if (action === 'delete') {
-            // For locked items, update production_status to 'cancelled' instead of hard delete
-            if (item.transactionItemId && item.transactionId && electronAPI?.localDbGetTransactionItems && electronAPI?.localDbUpsertTransactionItems) {
-              // Fetch the full transaction item data
-              const transactionItems = await electronAPI.localDbGetTransactionItems(item.transactionId);
-              const itemsArray = Array.isArray(transactionItems) ? transactionItems as Record<string, unknown>[] : [];
-              const transactionItem = itemsArray.find((ti) => {
-                const tiId = typeof ti.id === 'number' ? ti.id : (typeof ti.id === 'string' ? parseInt(ti.id, 10) : null);
-                return tiId === item.transactionItemId;
-              });
-
-              if (transactionItem) {
-                // Prepare the item data with production_status set to 'cancelled'
-                const itemUuidId = typeof transactionItem.uuid_id === 'string' ? transactionItem.uuid_id : String(transactionItem.uuid_id || '');
-                const transactionIntId = typeof transactionItem.transaction_id === 'number' ? transactionItem.transaction_id : (typeof transactionItem.transaction_id === 'string' ? parseInt(transactionItem.transaction_id, 10) : 0);
-                const transactionUuidId = typeof transactionItem.uuid_transaction_id === 'string' ? transactionItem.uuid_transaction_id : String(transactionItem.uuid_transaction_id || '');
-                const productId = typeof transactionItem.product_id === 'number' ? transactionItem.product_id : (typeof transactionItem.product_id === 'string' ? parseInt(transactionItem.product_id, 10) : 0);
-                const quantity = typeof transactionItem.quantity === 'number' ? transactionItem.quantity : (typeof transactionItem.quantity === 'string' ? parseInt(transactionItem.quantity, 10) : 1);
-                const unitPrice = typeof transactionItem.unit_price === 'number' ? transactionItem.unit_price : (typeof transactionItem.unit_price === 'string' ? parseFloat(String(transactionItem.unit_price)) : 0);
-                const totalPrice = typeof transactionItem.total_price === 'number' ? transactionItem.total_price : (typeof transactionItem.total_price === 'string' ? parseFloat(String(transactionItem.total_price)) : 0);
-                const customNote = typeof transactionItem.custom_note === 'string' ? transactionItem.custom_note : null;
-                const bundleSelectionsJson = typeof transactionItem.bundle_selections_json === 'string' ? transactionItem.bundle_selections_json : (transactionItem.bundle_selections_json ? JSON.stringify(transactionItem.bundle_selections_json) : null);
-                const waiterIdItem = typeof transactionItem.waiter_id === 'number' ? transactionItem.waiter_id : (typeof transactionItem.waiter_id === 'string' ? parseInt(String(transactionItem.waiter_id), 10) : null);
-
-                // Get created_at - preserve original timestamp
-                const createdAt = transactionItem.created_at ? String(transactionItem.created_at) : new Date().toISOString();
-
-                // Set production_status to 'cancelled'
-                const productionStatus = 'cancelled';
-                const productionStartedAt = transactionItem.production_started_at ? String(transactionItem.production_started_at) : null;
-                const productionFinishedAt = transactionItem.production_finished_at ? String(transactionItem.production_finished_at) : null;
-
-                // Update the transaction item in database
-                await electronAPI.localDbUpsertTransactionItems([{
-                  id: item.transactionItemId,
-                  uuid_id: itemUuidId,
-                  transaction_id: transactionIntId,
-                  uuid_transaction_id: transactionUuidId,
-                  product_id: productId,
-                  quantity: quantity,
-                  unit_price: unitPrice,
-                  total_price: totalPrice,
-                  custom_note: customNote,
-                  bundle_selections_json: bundleSelectionsJson,
-                  created_at: createdAt,
-                  waiter_id: waiterIdItem ?? null,
-                  production_status: productionStatus,
-                  production_started_at: productionStartedAt,
-                  production_finished_at: productionFinishedAt,
-                }]);
-              } else {
-                console.warn('Transaction item not found in database');
-              }
-            }
-
-            // Check if transaction has any active (non-cancelled) items left
-            // If all items are cancelled, update transaction status to 'cancelled'
-            if (item.transactionId && electronAPI?.localDbGetTransactionItems && electronAPI?.localDbGetTransactions && electronAPI?.localDbUpsertTransactions) {
-              try {
-                // Fetch all items for this transaction
-                const allTransactionItems = await electronAPI.localDbGetTransactionItems(item.transactionId);
-                const allItemsArray = Array.isArray(allTransactionItems) ? allTransactionItems as Record<string, unknown>[] : [];
-
-                // Check if there are any active (non-cancelled) items
-                const hasActiveItems = allItemsArray.some((ti) => {
-                  const status = typeof ti.production_status === 'string' ? ti.production_status : null;
-                  return status !== 'cancelled';
-                });
-
-                // If no active items, update transaction status to 'cancelled'
-                if (!hasActiveItems) {
-                  // Fetch the transaction to get all its data
-                  const allTransactions = await electronAPI.localDbGetTransactions(businessId, 10000);
-                  const transactionsArray = Array.isArray(allTransactions) ? allTransactions : [];
-                  const transaction = transactionsArray.find((tx: unknown) => {
-                    if (tx && typeof tx === 'object' && 'uuid_id' in tx) {
-                      const t = tx as { uuid_id?: string; id?: string };
-                      return (t.uuid_id === item.transactionId) || (t.id === item.transactionId);
-                    }
-                    return false;
-                  }) as Record<string, unknown> | undefined;
-
-                  if (transaction) {
-                    // Update transaction status to 'cancelled'
-                    const updatedTransaction = {
-                      ...transaction,
-                      status: 'cancelled',
-                      updated_at: new Date().toISOString(),
-                    };
-
-                    await electronAPI.localDbUpsertTransactions([updatedTransaction]);
-                    console.log(`✅ Transaction ${item.transactionId} status updated to 'cancelled' (all items cancelled)`);
-                  }
-                }
-              } catch (error) {
-                console.error('Error checking/updating transaction status:', error);
-                // Don't block the item removal if this check fails
-              }
-            }
-
-            // Remove from cart UI
-            const newCartItems = cartItems.filter(cartItem => cartItem.id !== item.id);
-            setCartItems(newCartItems);
-            sendCartUpdate(newCartItems);
-
-            // Log activity
-            await logActivity(
-              'delete_locked_cart_item',
-              JSON.stringify({
-                product_name: item.product.nama,
-                product_id: item.product.id,
-                quantity: item.quantity,
-                transaction_id: item.transactionId || null,
-                transaction_item_id: item.transactionItemId || null,
-              })
-            );
-          } else if (action === 'reduce') {
-            // For reduce, create a separate cancelled record (Option B - production quality)
-            if (item.transactionItemId && item.transactionId && electronAPI?.localDbGetTransactionItems && electronAPI?.localDbUpsertTransactionItems) {
-              // Fetch the full transaction item data
-              const transactionItems = await electronAPI.localDbGetTransactionItems(item.transactionId);
-              const itemsArray = Array.isArray(transactionItems) ? transactionItems as Record<string, unknown>[] : [];
-              const transactionItem = itemsArray.find((ti) => {
-                const tiId = typeof ti.id === 'number' ? ti.id : (typeof ti.id === 'string' ? parseInt(ti.id, 10) : null);
-                return tiId === item.transactionItemId;
-              });
-
-              if (transactionItem) {
-                const cancelledQuantity = 1; // Always cancel 1 item when reducing
-                const remainingQuantity = item.quantity - cancelledQuantity;
-
-                // Extract common fields
-                const transactionIntId = typeof transactionItem.transaction_id === 'number' ? transactionItem.transaction_id : (typeof transactionItem.transaction_id === 'string' ? parseInt(transactionItem.transaction_id, 10) : 0);
-                const transactionUuidId = typeof transactionItem.uuid_transaction_id === 'string' ? transactionItem.uuid_transaction_id : String(transactionItem.uuid_transaction_id || '');
-                const productId = typeof transactionItem.product_id === 'number' ? transactionItem.product_id : (typeof transactionItem.product_id === 'string' ? parseInt(transactionItem.product_id, 10) : 0);
-                const unitPrice = typeof transactionItem.unit_price === 'number' ? transactionItem.unit_price : (typeof transactionItem.unit_price === 'string' ? parseFloat(String(transactionItem.unit_price)) : 0);
-                const customNote = typeof transactionItem.custom_note === 'string' ? transactionItem.custom_note : null;
-                const bundleSelectionsJson = typeof transactionItem.bundle_selections_json === 'string' ? transactionItem.bundle_selections_json : (transactionItem.bundle_selections_json ? JSON.stringify(transactionItem.bundle_selections_json) : null);
-                const waiterIdItem = typeof transactionItem.waiter_id === 'number' ? transactionItem.waiter_id : (typeof transactionItem.waiter_id === 'string' ? parseInt(String(transactionItem.waiter_id), 10) : null);
-                const createdAt = transactionItem.created_at ? String(transactionItem.created_at) : new Date().toISOString();
-
-                // Preserve production_status for original record
-                const productionStatus = typeof transactionItem.production_status === 'string' ? transactionItem.production_status : null;
-                const productionStartedAt = transactionItem.production_started_at ? String(transactionItem.production_started_at) : null;
-                const productionFinishedAt = transactionItem.production_finished_at ? String(transactionItem.production_finished_at) : null;
-
-                // 1. Update original record: reduce quantity to remaining items, keep production_status
-                const itemUuidId = typeof transactionItem.uuid_id === 'string' ? transactionItem.uuid_id : String(transactionItem.uuid_id || '');
-                const remainingTotalPrice = unitPrice * remainingQuantity;
-
-                await electronAPI.localDbUpsertTransactionItems([{
-                  id: item.transactionItemId,
-                  uuid_id: itemUuidId,
-                  transaction_id: transactionIntId,
-                  uuid_transaction_id: transactionUuidId,
-                  product_id: productId,
-                  quantity: remainingQuantity,
-                  unit_price: unitPrice,
-                  total_price: remainingTotalPrice,
-                  custom_note: customNote,
-                  bundle_selections_json: bundleSelectionsJson,
-                  created_at: createdAt,
-                  waiter_id: waiterIdItem ?? null,
-                  production_status: productionStatus,
-                  production_started_at: productionStartedAt,
-                  production_finished_at: productionFinishedAt,
-                }]);
-
-                // 2. Create new cancelled record: quantity 1, production_status 'cancelled'
-                const cancelledUuidId = generateUUID();
-                const cancelledTotalPrice = unitPrice * cancelledQuantity;
-
-                await electronAPI.localDbUpsertTransactionItems([{
-                  uuid_id: cancelledUuidId,
-                  transaction_id: transactionIntId,
-                  uuid_transaction_id: transactionUuidId,
-                  product_id: productId,
-                  quantity: cancelledQuantity,
-                  unit_price: unitPrice,
-                  total_price: cancelledTotalPrice,
-                  custom_note: customNote,
-                  bundle_selections_json: bundleSelectionsJson,
-                  created_at: new Date().toISOString(), // Current timestamp for cancelled record
-                  waiter_id: waiterIdItem ?? null,
-                  production_status: 'cancelled',
-                  production_started_at: null,
-                  production_finished_at: null,
-                }]);
-              } else {
-                console.warn('Transaction item not found in database');
-              }
-            }
-
-            // Check if transaction has any active (non-cancelled) items left
-            // If all items are cancelled, update transaction status to 'cancelled'
-            if (item.transactionId && electronAPI?.localDbGetTransactionItems && electronAPI?.localDbGetTransactions && electronAPI?.localDbUpsertTransactions) {
-              try {
-                // Fetch all items for this transaction
-                const allTransactionItems = await electronAPI.localDbGetTransactionItems(item.transactionId);
-                const allItemsArray = Array.isArray(allTransactionItems) ? allTransactionItems as Record<string, unknown>[] : [];
-
-                // Check if there are any active (non-cancelled) items
-                const hasActiveItems = allItemsArray.some((ti) => {
-                  const status = typeof ti.production_status === 'string' ? ti.production_status : null;
-                  return status !== 'cancelled';
-                });
-
-                // If no active items, update transaction status to 'cancelled'
-                if (!hasActiveItems) {
-                  // Fetch the transaction to get all its data
-                  const allTransactions = await electronAPI.localDbGetTransactions(businessId, 10000);
-                  const transactionsArray = Array.isArray(allTransactions) ? allTransactions : [];
-                  const transaction = transactionsArray.find((tx: unknown) => {
-                    if (tx && typeof tx === 'object' && 'uuid_id' in tx) {
-                      const t = tx as { uuid_id?: string; id?: string };
-                      return (t.uuid_id === item.transactionId) || (t.id === item.transactionId);
-                    }
-                    return false;
-                  }) as Record<string, unknown> | undefined;
-
-                  if (transaction) {
-                    // Update transaction status to 'cancelled'
-                    const updatedTransaction = {
-                      ...transaction,
-                      status: 'cancelled',
-                      updated_at: new Date().toISOString(),
-                    };
-
-                    await electronAPI.localDbUpsertTransactions([updatedTransaction]);
-                    console.log(`✅ Transaction ${item.transactionId} status updated to 'cancelled' (all items cancelled)`);
-                  }
-                }
-              } catch (error) {
-                console.error('Error checking/updating transaction status:', error);
-                // Don't block the item removal if this check fails
-              }
-            }
-
-            // Update cart UI
-            const newCartItems = cartItems.map(cartItem =>
-              cartItem.id === item.id
-                ? { ...cartItem, quantity: cartItem.quantity - 1 }
-                : cartItem
-            );
-            setCartItems(newCartItems);
-            sendCartUpdate(newCartItems);
-
-            // Log activity
-            await logActivity(
-              'reduce_locked_cart_item',
-              JSON.stringify({
-                product_name: item.product.nama,
-                product_id: item.product.id,
-                old_quantity: item.quantity,
-                new_quantity: item.quantity - 1,
-                transaction_id: item.transactionId || null,
-                transaction_item_id: item.transactionItemId || null,
-              })
-            );
-          }
+          await performLockedItemCancellation(item, action, user?.id || null, null);
         } catch (error) {
-          console.error('Error updating transaction item:', error);
           alert('Gagal memperbarui item. Silakan coba lagi.');
         }
-
         setPendingLockedItemAction(null);
         setPasswordInput('');
       }
     } else {
       alert('Password salah. Silakan coba lagi.');
       setPasswordInput('');
+    }
+  };
+
+  /** Handle cancellation authorized by waiter PIN */
+  const handleCancellationAuthorized = async (waiterId: number) => {
+    if (pendingLockedItemAction) {
+      const { item, action } = pendingLockedItemAction;
+      try {
+        await performLockedItemCancellation(item, action, user?.id || null, waiterId);
+      } catch (error) {
+        alert('Gagal memperbarui item. Silakan coba lagi.');
+      }
+      setPendingLockedItemAction(null);
+      setShowCancellationWaiterModal(false);
     }
   };
 
@@ -1293,8 +1405,8 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
                       key={item.id}
                       onClick={() => !isLocked && handleEditItem(item)}
                       className={`rounded-lg border p-3 transition-all duration-200 ${isLocked
-                          ? 'bg-gray-100 border-gray-300 cursor-not-allowed'
-                          : 'bg-white border-gray-200 cursor-pointer hover:border-blue-300 hover:shadow-sm'
+                        ? 'bg-gray-100 border-gray-300 cursor-not-allowed'
+                        : 'bg-white border-gray-200 cursor-pointer hover:border-blue-300 hover:shadow-sm'
                         }`}
                       title={isLocked ? 'Item terkunci - sudah dikirim ke kitchen/barista' : 'Click to edit item'}
                     >
@@ -1435,13 +1547,18 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
                             onClick={(e) => {
                               e.stopPropagation(); // Prevent opening edit modal
                               if (isLocked) {
-                                // For locked items, show password modal
+                                // For locked items, show verification modal
                                 if (item.quantity > 1) {
                                   setPendingLockedItemAction({ item, action: 'reduce' });
                                 } else {
                                   setPendingLockedItemAction({ item, action: 'delete' });
                                 }
-                                setShowPasswordModal(true);
+
+                                if (canAccessBayarButton) {
+                                  setShowPasswordModal(true);
+                                } else {
+                                  setShowCancellationWaiterModal(true);
+                                }
                                 return;
                               }
 
@@ -1461,8 +1578,8 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
                               }
                             }}
                             className={`w-6 h-6 rounded-full flex items-center justify-center text-xs ${isLocked
-                                ? 'bg-red-500 hover:bg-red-600 text-white'
-                                : 'bg-red-500 hover:bg-red-600 text-white'
+                              ? 'bg-red-500 hover:bg-red-600 text-white'
+                              : 'bg-red-500 hover:bg-red-600 text-white'
                               }`}
                             title={isLocked ? 'Kurangi jumlah (memerlukan password)' : 'Kurangi jumlah'}
                           >
@@ -1485,8 +1602,8 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
                             }}
                             disabled={isLocked}
                             className={`w-6 h-6 rounded-full flex items-center justify-center text-xs ${isLocked
-                                ? 'bg-gray-300 text-gray-500 cursor-not-allowed'
-                                : 'bg-green-500 hover:bg-green-600 text-white'
+                              ? 'bg-gray-300 text-gray-500 cursor-not-allowed'
+                              : 'bg-green-500 hover:bg-green-600 text-white'
                               }`}
                             title={isLocked ? 'Item terkunci - tidak dapat diubah' : 'Tambah jumlah'}
                           >
@@ -2104,6 +2221,13 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
           // This selection is only for "who is adding new items" (item-level waiter_id).
         }}
         businessId={businessId}
+      />
+      <WaiterSelectionModal
+        isOpen={showCancellationWaiterModal}
+        onClose={() => setShowCancellationWaiterModal(false)}
+        onSelect={handleCancellationAuthorized}
+        businessId={businessId || 0}
+        title="Otorisasi Pembatalan (PIN Waiter)"
       />
     </div>
   );

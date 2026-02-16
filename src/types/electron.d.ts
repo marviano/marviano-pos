@@ -81,6 +81,7 @@ declare global {
       categoryII?: boolean;
       paket?: boolean;
       toppingSales?: boolean;
+      itemDibatalkan?: boolean;
     };
   };
 
@@ -497,6 +498,17 @@ declare global {
         category2_id: number;
         total_quantity: number;
         total_amount: number;
+      }>>;
+      localDbGetShiftCancelledItems?: (userId: number | null, shiftStart: string, shiftEnd: string | null, businessId?: number, shiftUuid?: string | null, shiftUuids?: string[]) => Promise<Array<{
+        product_name: string;
+        quantity: number;
+        unit_price: number;
+        total_price: number;
+        cancelled_at: string;
+        cancelled_by_user_name: string;
+        cancelled_by_waiter_name: string;
+        receipt_number?: string | null;
+        customer_name?: string | null;
       }>>;
       localDbGetCashSummary?: (userId: number | null, shiftStart: string, shiftEnd: string | null, businessId?: number, shiftUuid?: string | null, shiftUuids?: string[]) => Promise<{
         cash_shift: number;

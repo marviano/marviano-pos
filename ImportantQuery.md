@@ -84,7 +84,8 @@ Use the same date range for both sides (adjust `@from` / `@to` or remove the dat
 WITH salespulse_tx AS (
   SELECT
     t.uuid_id,
-    t.final_amount,
+    -- Subtract cancelled items from final_amount
+    (t.final_amount - COALESCE(cancelled.total_cancelled, 0)) AS final_amount,
     t.payment_method,
     t.pickup_method,
     COALESCE(r.total_refund, t.refund_total, 0) AS refund_total,
@@ -97,12 +98,19 @@ WITH salespulse_tx AS (
     WHERE status IN ('pending', 'completed')
     GROUP BY transaction_uuid
   ) r ON t.uuid_id = r.transaction_uuid
+  LEFT JOIN (
+    SELECT uuid_transaction_id, SUM(total_price) AS total_cancelled
+    FROM salespulse.transaction_items
+    WHERE production_status = 'cancelled'
+    GROUP BY uuid_transaction_id
+  ) cancelled ON t.uuid_id = cancelled.uuid_transaction_id
   -- AND (t.created_at BETWEEN @from AND @to)   -- uncomment if using @from/@to
 ),
 system_pos_tx AS (
   SELECT
     sp.uuid_id,
-    sp.final_amount,
+    -- Subtract cancelled items from final_amount
+    (sp.final_amount - COALESCE(cancelled.total_cancelled, 0)) AS final_amount,
     sp.payment_method,
     sp.pickup_method,
     COALESCE(r.total_refund, sp.refund_total, 0) AS refund_total,
@@ -114,6 +122,12 @@ system_pos_tx AS (
     WHERE status IN ('pending', 'completed')
     GROUP BY transaction_uuid
   ) r ON sp.uuid_id = r.transaction_uuid
+  LEFT JOIN (
+    SELECT uuid_transaction_id, SUM(total_price) AS total_cancelled
+    FROM system_pos.transaction_items
+    WHERE production_status = 'cancelled'
+    GROUP BY uuid_transaction_id
+  ) cancelled ON sp.uuid_id = cancelled.uuid_transaction_id
   WHERE sp.status != 'archived' AND sp.business_id = 4
   -- AND (sp.created_at BETWEEN @from AND @to)   -- uncomment if using @from/@to
 )
@@ -145,7 +159,8 @@ Same date logic as above; compare Metode Pembayaran and Metode Pengambilan.
 WITH salespulse_tx AS (
   SELECT
     t.uuid_id,
-    t.final_amount,
+    -- Subtract cancelled items from final_amount
+    (t.final_amount - COALESCE(cancelled.total_cancelled, 0)) AS final_amount,
     LOWER(TRIM(t.payment_method)) AS payment_method,
     LOWER(TRIM(t.pickup_method)) AS pickup_method,
     COALESCE(r.total_refund, t.refund_total, 0) AS refund_total
@@ -157,11 +172,18 @@ WITH salespulse_tx AS (
     WHERE status IN ('pending', 'completed')
     GROUP BY transaction_uuid
   ) r ON t.uuid_id = r.transaction_uuid
+  LEFT JOIN (
+    SELECT uuid_transaction_id, SUM(total_price) AS total_cancelled
+    FROM salespulse.transaction_items
+    WHERE production_status = 'cancelled'
+    GROUP BY uuid_transaction_id
+  ) cancelled ON t.uuid_id = cancelled.uuid_transaction_id
 ),
 system_pos_tx AS (
   SELECT
     sp.uuid_id,
-    sp.final_amount,
+    -- Subtract cancelled items from final_amount
+    (sp.final_amount - COALESCE(cancelled.total_cancelled, 0)) AS final_amount,
     LOWER(TRIM(sp.payment_method)) AS payment_method,
     LOWER(TRIM(sp.pickup_method)) AS pickup_method,
     COALESCE(r.total_refund, sp.refund_total, 0) AS refund_total
@@ -172,6 +194,12 @@ system_pos_tx AS (
     WHERE status IN ('pending', 'completed')
     GROUP BY transaction_uuid
   ) r ON sp.uuid_id = r.transaction_uuid
+  LEFT JOIN (
+    SELECT uuid_transaction_id, SUM(total_price) AS total_cancelled
+    FROM system_pos.transaction_items
+    WHERE production_status = 'cancelled'
+    GROUP BY uuid_transaction_id
+  ) cancelled ON sp.uuid_id = cancelled.uuid_transaction_id
   WHERE sp.status != 'archived' AND sp.business_id = 4
 ),
 agg AS (
@@ -228,14 +256,13 @@ ORDER BY d.date DESC;
 
 ## Check Transaction Detail by UUID (Salespulse)
 Provides full details of a specific transaction including all line items. Replace `'YOUR_UUID_HERE'` with the transaction UUID.
-
 ```sql
 SELECT 
     t.uuid_id AS transaction_uuid,
     t.receipt_number,
     t.created_at,
     t.paid_at,
-    t.status,
+    t.status AS tx_status,
     u.name AS cashier_name,
     t.customer_name,
     t.customer_unit,
@@ -249,6 +276,9 @@ SELECT
     p.nama AS item_name,
     ti.unit_price,
     ti.total_price AS item_total,
+    ti.production_status AS item_status,
+    ti.production_started_at,
+    ti.production_finished_at,
     ti.custom_note,
     e.nama_karyawan AS item_waiter
 FROM salespulse.transactions t

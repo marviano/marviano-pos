@@ -250,9 +250,9 @@ export default function TransactionsReport() {
     return () => document.removeEventListener('mousedown', close);
   }, [openWaiterPopoverFor]);
   const [businessName, setBusinessName] = useState<string>('');
-  
+
   const businessId = user?.selectedBusinessId;
-  
+
   if (!businessId) {
     return (
       <div className="p-4 bg-red-50 border border-red-200 rounded-lg">
@@ -498,7 +498,7 @@ export default function TransactionsReport() {
       }
       const transactionUuid = String(tx.id);
       const allItems = (await electronAPI.localDbGetTransactionItems(transactionUuid)) as Array<{ production_status?: string | null; product_id: number; product_name?: string; quantity: number; unit_price: number; total_price: number; custom_note?: string | null; customizations?: unknown; bundleSelections?: unknown; id: string }>;
-      const items = (Array.isArray(allItems) ? allItems : []).filter((item) => item.production_status !== 'cancelled');
+      const items = Array.isArray(allItems) ? allItems : [];
       const products = electronAPI.localDbGetAllProducts ? await electronAPI.localDbGetAllProducts(businessId) : [];
       const usersList = electronAPI.localDbGetUsers ? await electronAPI.localDbGetUsers() : [];
       const businessesList = electronAPI.localDbGetBusinesses ? await electronAPI.localDbGetBusinesses() : [];
@@ -522,6 +522,7 @@ export default function TransactionsReport() {
           custom_note: item.custom_note || undefined,
           customizations,
           bundleSelections: item.bundleSelections,
+          production_status: item.production_status || null
         };
       });
       const response: TransactionDetail = {
@@ -623,27 +624,29 @@ export default function TransactionsReport() {
 
   // Print report for selected date range (like Ganti Shift)
   const handlePrintReport = async () => {
-    const electronAPI = getElectronAPI() as { printTransactionsReport?: (payload: {
-      businessId: number;
-      businessName: string;
-      dateRangeStart: string;
-      dateRangeEnd: string;
-      transactions: Array<{
-        num: number;
-        badge: 'R' | 'RR';
-        uuid: string;
-        waktu: string;
-        metode: string;
-        diTa: string;
-        total: string;
-        discVc: string;
-        final: string;
-        refund: string;
-        pelanggan: string;
-        waiter: string;
-        kasir: string;
-      }>;
-    }) => Promise<{ success: boolean; error?: string }> };
+    const electronAPI = getElectronAPI() as {
+      printTransactionsReport?: (payload: {
+        businessId: number;
+        businessName: string;
+        dateRangeStart: string;
+        dateRangeEnd: string;
+        transactions: Array<{
+          num: number;
+          badge: 'R' | 'RR';
+          uuid: string;
+          waktu: string;
+          metode: string;
+          diTa: string;
+          total: string;
+          discVc: string;
+          final: string;
+          refund: string;
+          pelanggan: string;
+          waiter: string;
+          kasir: string;
+        }>;
+      }) => Promise<{ success: boolean; error?: string }>
+    };
     if (!electronAPI?.printTransactionsReport) {
       alert('Print tidak tersedia. Pastikan aplikasi berjalan di Electron.');
       return;
@@ -694,164 +697,164 @@ export default function TransactionsReport() {
   // List View — row click opens TransactionDetailModal (same as Daftar Transaksi)
   return (
     <>
-    <div className="flex-1 flex flex-col overflow-hidden bg-gray-50">
-      {/* Header — filters and Export/Print in one row; Export/Print stuck right */}
-      <div className="bg-white border-b border-gray-200 px-6 py-3">
-        <div className="bg-gray-50 rounded-lg p-3">
+      <div className="flex-1 flex flex-col overflow-hidden bg-gray-50">
+        {/* Header — filters and Export/Print in one row; Export/Print stuck right */}
+        <div className="bg-white border-b border-gray-200 px-6 py-3">
+          <div className="bg-gray-50 rounded-lg p-3">
             <div className="flex flex-wrap items-center gap-2">
               <div className="flex flex-wrap items-center gap-2 flex-1 min-w-0">
-              {/* Search — no label, placeholder only */}
-              <div className="relative flex-1 min-w-[100px] max-w-[153px]">
-                <Search className="absolute left-2 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-gray-400" />
-                <input
-                  type="text"
-                  value={searchQuery}
-                  onChange={(e) => setSearchQuery(e.target.value)}
-                  placeholder="Search..."
-                  className="w-full pl-8 pr-7 py-1.5 border border-gray-300 rounded text-xs focus:ring-2 focus:ring-blue-500 focus:border-blue-500 text-gray-900"
-                />
-                {searchQuery && (
-                  <button
-                    onClick={() => setSearchQuery('')}
-                    className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600"
-                  >
-                    <X className="w-3 h-3" />
-                  </button>
-                )}
-              </div>
-              {/* Start — date picker, default range; no label */}
-              <div className="min-w-0 max-w-[130px]">
-                <div className="relative">
-                  <Calendar className="absolute left-2 top-1/2 -translate-y-1/2 w-3 h-3 text-gray-400" />
-                  <input
-                    type="date"
-                    value={startDate}
-                    onChange={(e) => setStartDate(e.target.value)}
-                    className="w-full pl-7 pr-2 py-1.5 border border-gray-300 rounded text-xs focus:ring-2 focus:ring-blue-500 focus:border-blue-500 text-gray-900"
-                  />
-                </div>
-              </div>
-              {/* End — date picker; no label */}
-              <div className="min-w-0 max-w-[130px]">
-                <div className="relative">
-                  <Calendar className="absolute left-2 top-1/2 -translate-y-1/2 w-3 h-3 text-gray-400" />
-                  <input
-                    type="date"
-                    value={endDate}
-                    onChange={(e) => setEndDate(e.target.value)}
-                    className="w-full pl-7 pr-2 py-1.5 border border-gray-300 rounded text-xs focus:ring-2 focus:ring-blue-500 focus:border-blue-500 text-gray-900"
-                  />
-                </div>
-              </div>
-              {/* Amount range — Total (min) / Total (max) */}
-              <div className="flex items-center gap-1.5 flex-shrink-0">
-                <div className="min-w-0 w-[115px]">
+                {/* Search — no label, placeholder only */}
+                <div className="relative flex-1 min-w-[100px] max-w-[153px]">
+                  <Search className="absolute left-2 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-gray-400" />
                   <input
                     type="text"
-                    value={amountFrom}
-                    onChange={(e) => {
-                      const raw = e.target.value.replace(/\D/g, '');
-                      setAmountFrom(raw === '' ? '' : 'Rp ' + raw.replace(/\B(?=(\d{3})+(?!\d))/g, '.'));
-                    }}
-                    placeholder="Total (min)"
-                    className="w-full px-2 py-1.5 border border-gray-300 rounded text-xs focus:ring-2 focus:ring-blue-500 focus:border-blue-500 text-gray-900"
+                    value={searchQuery}
+                    onChange={(e) => setSearchQuery(e.target.value)}
+                    placeholder="Search..."
+                    className="w-full pl-8 pr-7 py-1.5 border border-gray-300 rounded text-xs focus:ring-2 focus:ring-blue-500 focus:border-blue-500 text-gray-900"
                   />
+                  {searchQuery && (
+                    <button
+                      onClick={() => setSearchQuery('')}
+                      className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600"
+                    >
+                      <X className="w-3 h-3" />
+                    </button>
+                  )}
                 </div>
-                <span className="text-gray-400 text-xs">–</span>
-                <div className="min-w-0 w-[115px]">
-                  <input
-                    type="text"
-                    value={amountTo}
-                    onChange={(e) => {
-                      const raw = e.target.value.replace(/\D/g, '');
-                      setAmountTo(raw === '' ? '' : 'Rp ' + raw.replace(/\B(?=(\d{3})+(?!\d))/g, '.'));
-                    }}
-                    placeholder="Total (max)"
-                    className="w-full px-2 py-1.5 border border-gray-300 rounded text-xs focus:ring-2 focus:ring-blue-500 focus:border-blue-500 text-gray-900"
-                  />
+                {/* Start — date picker, default range; no label */}
+                <div className="min-w-0 max-w-[130px]">
+                  <div className="relative">
+                    <Calendar className="absolute left-2 top-1/2 -translate-y-1/2 w-3 h-3 text-gray-400" />
+                    <input
+                      type="date"
+                      value={startDate}
+                      onChange={(e) => setStartDate(e.target.value)}
+                      className="w-full pl-7 pr-2 py-1.5 border border-gray-300 rounded text-xs focus:ring-2 focus:ring-blue-500 focus:border-blue-500 text-gray-900"
+                    />
+                  </div>
                 </div>
-              </div>
-              {/* User — default All; no label */}
-              <div className="min-w-0 max-w-[110px]">
-                <div className="relative">
-                  <User className="absolute left-2 top-1/2 -translate-y-1/2 w-3 h-3 text-gray-400" />
+                {/* End — date picker; no label */}
+                <div className="min-w-0 max-w-[130px]">
+                  <div className="relative">
+                    <Calendar className="absolute left-2 top-1/2 -translate-y-1/2 w-3 h-3 text-gray-400" />
+                    <input
+                      type="date"
+                      value={endDate}
+                      onChange={(e) => setEndDate(e.target.value)}
+                      className="w-full pl-7 pr-2 py-1.5 border border-gray-300 rounded text-xs focus:ring-2 focus:ring-blue-500 focus:border-blue-500 text-gray-900"
+                    />
+                  </div>
+                </div>
+                {/* Amount range — Total (min) / Total (max) */}
+                <div className="flex items-center gap-1.5 flex-shrink-0">
+                  <div className="min-w-0 w-[115px]">
+                    <input
+                      type="text"
+                      value={amountFrom}
+                      onChange={(e) => {
+                        const raw = e.target.value.replace(/\D/g, '');
+                        setAmountFrom(raw === '' ? '' : 'Rp ' + raw.replace(/\B(?=(\d{3})+(?!\d))/g, '.'));
+                      }}
+                      placeholder="Total (min)"
+                      className="w-full px-2 py-1.5 border border-gray-300 rounded text-xs focus:ring-2 focus:ring-blue-500 focus:border-blue-500 text-gray-900"
+                    />
+                  </div>
+                  <span className="text-gray-400 text-xs">–</span>
+                  <div className="min-w-0 w-[115px]">
+                    <input
+                      type="text"
+                      value={amountTo}
+                      onChange={(e) => {
+                        const raw = e.target.value.replace(/\D/g, '');
+                        setAmountTo(raw === '' ? '' : 'Rp ' + raw.replace(/\B(?=(\d{3})+(?!\d))/g, '.'));
+                      }}
+                      placeholder="Total (max)"
+                      className="w-full px-2 py-1.5 border border-gray-300 rounded text-xs focus:ring-2 focus:ring-blue-500 focus:border-blue-500 text-gray-900"
+                    />
+                  </div>
+                </div>
+                {/* User — default All; no label */}
+                <div className="min-w-0 max-w-[110px]">
+                  <div className="relative">
+                    <User className="absolute left-2 top-1/2 -translate-y-1/2 w-3 h-3 text-gray-400" />
+                    <select
+                      value={selectedUserId}
+                      onChange={(e) => setSelectedUserId(e.target.value)}
+                      className="w-full pl-6 pr-6 py-1.5 border border-gray-300 rounded text-xs focus:ring-2 focus:ring-blue-500 focus:border-blue-500 appearance-none bg-white text-gray-900"
+                    >
+                      <option value="all">All</option>
+                      {users.map(user => (
+                        <option key={user.user_id} value={user.user_id}>{user.user_name}</option>
+                      ))}
+                    </select>
+                    <ChevronDown className="absolute right-2 top-1/2 -translate-y-1/2 w-3 h-3 text-gray-400 pointer-events-none" />
+                  </div>
+                </div>
+                {/* Payment — default All; no label */}
+                <div className="min-w-0 max-w-[110px]">
+                  <div className="relative">
+                    <CreditCard className="absolute left-2 top-1/2 -translate-y-1/2 w-3 h-3 text-gray-400" />
+                    <select
+                      value={selectedPaymentMethod}
+                      onChange={(e) => setSelectedPaymentMethod(e.target.value)}
+                      className="w-full pl-6 pr-6 py-1.5 border border-gray-300 rounded text-xs focus:ring-2 focus:ring-blue-500 focus:border-blue-500 appearance-none bg-white text-gray-900"
+                    >
+                      <option value="all">Payment</option>
+                      {paymentMethods.map(method => (
+                        <option key={method} value={method}>{formatPaymentMethod(method)}</option>
+                      ))}
+                    </select>
+                    <ChevronDown className="absolute right-2 top-1/2 -translate-y-1/2 w-3 h-3 text-gray-400 pointer-events-none" />
+                  </div>
+                </div>
+                {/* Status — default All; no label */}
+                <div className="min-w-0 max-w-[100px]">
                   <select
-                    value={selectedUserId}
-                    onChange={(e) => setSelectedUserId(e.target.value)}
-                    className="w-full pl-6 pr-6 py-1.5 border border-gray-300 rounded text-xs focus:ring-2 focus:ring-blue-500 focus:border-blue-500 appearance-none bg-white text-gray-900"
+                    value={selectedStatus}
+                    onChange={(e) => setSelectedStatus(e.target.value)}
+                    className="w-full px-2 py-1.5 border border-gray-300 rounded text-xs focus:ring-2 focus:ring-blue-500 focus:border-blue-500 bg-white text-gray-900"
                   >
                     <option value="all">All</option>
-                    {users.map(user => (
-                      <option key={user.user_id} value={user.user_id}>{user.user_name}</option>
-                    ))}
+                    <option value="completed">Completed</option>
+                    <option value="pending">Pending</option>
+                    <option value="cancelled">Cancelled</option>
                   </select>
-                  <ChevronDown className="absolute right-2 top-1/2 -translate-y-1/2 w-3 h-3 text-gray-400 pointer-events-none" />
                 </div>
-              </div>
-              {/* Payment — default All; no label */}
-              <div className="min-w-0 max-w-[110px]">
-                <div className="relative">
-                  <CreditCard className="absolute left-2 top-1/2 -translate-y-1/2 w-3 h-3 text-gray-400" />
-                  <select
-                    value={selectedPaymentMethod}
-                    onChange={(e) => setSelectedPaymentMethod(e.target.value)}
-                    className="w-full pl-6 pr-6 py-1.5 border border-gray-300 rounded text-xs focus:ring-2 focus:ring-blue-500 focus:border-blue-500 appearance-none bg-white text-gray-900"
-                  >
-                    <option value="all">Payment</option>
-                    {paymentMethods.map(method => (
-                      <option key={method} value={method}>{formatPaymentMethod(method)}</option>
-                    ))}
-                  </select>
-                  <ChevronDown className="absolute right-2 top-1/2 -translate-y-1/2 w-3 h-3 text-gray-400 pointer-events-none" />
-                </div>
-              </div>
-              {/* Status — default All; no label */}
-              <div className="min-w-0 max-w-[100px]">
-                <select
-                  value={selectedStatus}
-                  onChange={(e) => setSelectedStatus(e.target.value)}
-                  className="w-full px-2 py-1.5 border border-gray-300 rounded text-xs focus:ring-2 focus:ring-blue-500 focus:border-blue-500 bg-white text-gray-900"
+                {/* Refresh — icon only, same height as dropdowns/inputs (py-1.5 + border to match) */}
+                <button
+                  onClick={fetchTransactions}
+                  disabled={isLoading}
+                  title="Refresh"
+                  className="flex items-center justify-center min-w-8 px-2 py-1.5 text-white bg-blue-600 hover:bg-blue-700 rounded border border-blue-600 transition-colors disabled:opacity-50 flex-shrink-0"
                 >
-                  <option value="all">All</option>
-                  <option value="completed">Completed</option>
-                  <option value="pending">Pending</option>
-                  <option value="cancelled">Cancelled</option>
-                </select>
-              </div>
-              {/* Refresh — icon only, same height as dropdowns/inputs (py-1.5 + border to match) */}
-              <button
-                onClick={fetchTransactions}
-                disabled={isLoading}
-                title="Refresh"
-                className="flex items-center justify-center min-w-8 px-2 py-1.5 text-white bg-blue-600 hover:bg-blue-700 rounded border border-blue-600 transition-colors disabled:opacity-50 flex-shrink-0"
-              >
-                <RefreshCw className={`w-3.5 h-3.5 ${isLoading ? 'animate-spin' : ''}`} />
-              </button>
-              {/* Clear All Filters — same line */}
-              <button
-                onClick={() => {
-                  setSearchQuery('');
-                  setSelectedUserId('all');
-                  setSelectedPaymentMethod('all');
-                  setSelectedStatus('all');
-                  setAmountFrom('');
-                  setAmountTo('');
-                  const gmt7Offset = 7 * 60 * 60 * 1000;
-                  const now = new Date();
-                  const nowGmt7 = new Date(now.getTime() + gmt7Offset);
-                  const end = new Date(nowGmt7);
-                  const start = new Date(nowGmt7);
-                  start.setUTCDate(start.getUTCDate() - 30);
-                  const formatDateInput = (d: Date) =>
-                    `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}-${String(d.getUTCDate()).padStart(2, '0')}`;
-                  setEndDate(formatDateInput(end));
-                  setStartDate(formatDateInput(start));
-                }}
-                className="flex items-center gap-1.5 px-2.5 py-1.5 text-xs bg-gray-200 hover:bg-gray-300 text-gray-700 rounded transition-colors flex-shrink-0"
-              >
-                <X className="w-3 h-3" />
-                Clear
-              </button>
+                  <RefreshCw className={`w-3.5 h-3.5 ${isLoading ? 'animate-spin' : ''}`} />
+                </button>
+                {/* Clear All Filters — same line */}
+                <button
+                  onClick={() => {
+                    setSearchQuery('');
+                    setSelectedUserId('all');
+                    setSelectedPaymentMethod('all');
+                    setSelectedStatus('all');
+                    setAmountFrom('');
+                    setAmountTo('');
+                    const gmt7Offset = 7 * 60 * 60 * 1000;
+                    const now = new Date();
+                    const nowGmt7 = new Date(now.getTime() + gmt7Offset);
+                    const end = new Date(nowGmt7);
+                    const start = new Date(nowGmt7);
+                    start.setUTCDate(start.getUTCDate() - 30);
+                    const formatDateInput = (d: Date) =>
+                      `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}-${String(d.getUTCDate()).padStart(2, '0')}`;
+                    setEndDate(formatDateInput(end));
+                    setStartDate(formatDateInput(start));
+                  }}
+                  className="flex items-center gap-1.5 px-2.5 py-1.5 text-xs bg-gray-200 hover:bg-gray-300 text-gray-700 rounded transition-colors flex-shrink-0"
+                >
+                  <X className="w-3 h-3" />
+                  Clear
+                </button>
               </div>
               {/* Export CSV & Print — stuck right, same size */}
               <div className="flex items-center gap-2 flex-shrink-0">
@@ -874,159 +877,159 @@ export default function TransactionsReport() {
               </div>
             </div>
           </div>
-      </div>
+        </div>
 
-      {/* Table — Daftar Transaksi style: #, UUID, Waktu, Metode, DI/TA, Total, Disc/Vc, Final, Refund, Pelanggan, Waiter, Kasir */}
-      <div className="flex-1 overflow-auto p-4">
-        <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
-          <table className="w-full text-sm text-left">
-            <thead className="bg-gray-50 text-gray-900 font-semibold border-b border-gray-200">
-              <tr>
-                <th className="pl-3 pr-2 py-3 text-[10px] font-medium text-gray-500 uppercase tracking-wider" style={{ minWidth: '4rem' }}>#</th>
-                <th className="px-2 py-3 text-[10px] font-medium text-gray-500 uppercase tracking-wider">UUID</th>
-                <th className="px-2 py-3 text-[10px] font-medium text-gray-500 uppercase tracking-wider">Waktu</th>
-                <th className="px-2 py-3 text-[10px] font-medium text-gray-500 uppercase tracking-wider">Metode</th>
-                <th className="px-2 py-3 text-[10px] font-medium text-gray-500 uppercase tracking-wider w-16">DI/TA</th>
-                <th className="px-2 py-3 text-[10px] font-medium text-gray-500 uppercase tracking-wider">Total</th>
-                <th className="px-2 py-3 text-[10px] font-medium text-gray-500 uppercase tracking-wider">Disc/Vc</th>
-                <th className="px-2 py-3 text-[10px] font-medium text-gray-500 uppercase tracking-wider">Final</th>
-                <th className="px-4 py-3 text-[10px] font-medium text-gray-500 uppercase tracking-wider">Refund</th>
-                <th className="px-2 py-3 text-[10px] font-medium text-gray-500 uppercase tracking-wider">Pelanggan</th>
-                <th className="px-2 py-3 text-[10px] font-medium text-gray-500 uppercase tracking-wider w-24">Waiter</th>
-                <th className="px-2 py-3 text-[10px] font-medium text-gray-500 uppercase tracking-wider" style={{ width: '12%' }}>Kasir</th>
-                <th className="px-2 py-3 w-8"></th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-gray-100">
-              {isLoading ? (
+        {/* Table — Daftar Transaksi style: #, UUID, Waktu, Metode, DI/TA, Total, Disc/Vc, Final, Refund, Pelanggan, Waiter, Kasir */}
+        <div className="flex-1 overflow-auto p-4">
+          <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
+            <table className="w-full text-sm text-left">
+              <thead className="bg-gray-50 text-gray-900 font-semibold border-b border-gray-200">
                 <tr>
-                  <td colSpan={13} className="px-4 py-12 text-center">
-                    <RefreshCw className="w-8 h-8 text-blue-600 animate-spin mx-auto mb-2" />
-                    <p className="text-gray-600">Loading transactions...</p>
-                  </td>
+                  <th className="pl-3 pr-2 py-3 text-[10px] font-medium text-gray-500 uppercase tracking-wider" style={{ minWidth: '4rem' }}>#</th>
+                  <th className="px-2 py-3 text-[10px] font-medium text-gray-500 uppercase tracking-wider">UUID</th>
+                  <th className="px-2 py-3 text-[10px] font-medium text-gray-500 uppercase tracking-wider">Waktu</th>
+                  <th className="px-2 py-3 text-[10px] font-medium text-gray-500 uppercase tracking-wider">Metode</th>
+                  <th className="px-2 py-3 text-[10px] font-medium text-gray-500 uppercase tracking-wider w-16">DI/TA</th>
+                  <th className="px-2 py-3 text-[10px] font-medium text-gray-500 uppercase tracking-wider">Total</th>
+                  <th className="px-2 py-3 text-[10px] font-medium text-gray-500 uppercase tracking-wider">Disc/Vc</th>
+                  <th className="px-2 py-3 text-[10px] font-medium text-gray-500 uppercase tracking-wider">Final</th>
+                  <th className="px-4 py-3 text-[10px] font-medium text-gray-500 uppercase tracking-wider">Refund</th>
+                  <th className="px-2 py-3 text-[10px] font-medium text-gray-500 uppercase tracking-wider">Pelanggan</th>
+                  <th className="px-2 py-3 text-[10px] font-medium text-gray-500 uppercase tracking-wider w-24">Waiter</th>
+                  <th className="px-2 py-3 text-[10px] font-medium text-gray-500 uppercase tracking-wider" style={{ width: '12%' }}>Kasir</th>
+                  <th className="px-2 py-3 w-8"></th>
                 </tr>
-              ) : filteredTransactions.length > 0 ? (
-                filteredTransactions.map((transaction) => {
-                  const txId = String(transaction.id);
-                  const hasRR = typeof receiptizeCounters[txId] === 'number' && receiptizeCounters[txId] > 0;
-                  const hasR = typeof receiptCounters[txId] === 'number' && receiptCounters[txId] > 0;
-                  const displayNum = resolveReceiptSequence(transaction);
-                  const waiterId = (transaction as Transaction & { waiter_id?: number | null }).waiter_id;
-                  const itemIds = itemWaiterIdsByTx[transaction.id] || [];
-                  const allWaiterIds = [...new Set([waiterId, ...itemIds].filter((id): id is number => id != null))];
-                  const primaryWaiterId = waiterId ?? allWaiterIds[0];
-                  const waiterName = primaryWaiterId != null && employeesMap.has(primaryWaiterId) ? employeesMap.get(primaryWaiterId)!.name : '-';
-                  const waiterNamesTooltip = allWaiterIds.length > 1 ? allWaiterIds.map((id) => employeesMap.get(id)?.name).filter(Boolean).join(', ') : undefined;
-                  return (
-                    <tr
-                      key={transaction.id}
-                      onClick={() => loadTransactionDetails(transaction)}
-                      className="hover:bg-blue-50 cursor-pointer transition-colors group"
-                    >
-                      <td className="pl-3 pr-2 py-3 whitespace-nowrap" style={{ minWidth: '4rem' }}>
-                        {hasRR ? (
-                          <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-xs font-medium bg-green-100 text-green-800">
-                            <span>{displayNum}</span>
-                            <span className="inline-block min-w-[1.75rem] text-center">RR</span>
+              </thead>
+              <tbody className="divide-y divide-gray-100">
+                {isLoading ? (
+                  <tr>
+                    <td colSpan={13} className="px-4 py-12 text-center">
+                      <RefreshCw className="w-8 h-8 text-blue-600 animate-spin mx-auto mb-2" />
+                      <p className="text-gray-600">Loading transactions...</p>
+                    </td>
+                  </tr>
+                ) : filteredTransactions.length > 0 ? (
+                  filteredTransactions.map((transaction) => {
+                    const txId = String(transaction.id);
+                    const hasRR = typeof receiptizeCounters[txId] === 'number' && receiptizeCounters[txId] > 0;
+                    const hasR = typeof receiptCounters[txId] === 'number' && receiptCounters[txId] > 0;
+                    const displayNum = resolveReceiptSequence(transaction);
+                    const waiterId = (transaction as Transaction & { waiter_id?: number | null }).waiter_id;
+                    const itemIds = itemWaiterIdsByTx[transaction.id] || [];
+                    const allWaiterIds = [...new Set([waiterId, ...itemIds].filter((id): id is number => id != null))];
+                    const primaryWaiterId = waiterId ?? allWaiterIds[0];
+                    const waiterName = primaryWaiterId != null && employeesMap.has(primaryWaiterId) ? employeesMap.get(primaryWaiterId)!.name : '-';
+                    const waiterNamesTooltip = allWaiterIds.length > 1 ? allWaiterIds.map((id) => employeesMap.get(id)?.name).filter(Boolean).join(', ') : undefined;
+                    return (
+                      <tr
+                        key={transaction.id}
+                        onClick={() => loadTransactionDetails(transaction)}
+                        className="hover:bg-blue-50 cursor-pointer transition-colors group"
+                      >
+                        <td className="pl-3 pr-2 py-3 whitespace-nowrap" style={{ minWidth: '4rem' }}>
+                          {hasRR ? (
+                            <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-xs font-medium bg-green-100 text-green-800">
+                              <span>{displayNum}</span>
+                              <span className="inline-block min-w-[1.75rem] text-center">RR</span>
+                            </span>
+                          ) : hasR ? (
+                            <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-xs font-medium bg-blue-100 text-blue-800">
+                              <span>{displayNum}</span>
+                              <span className="inline-block min-w-[1.75rem] text-center">R</span>
+                            </span>
+                          ) : (
+                            <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-xs font-medium bg-gray-100 text-gray-600">
+                              <span>{displayNum}</span>
+                            </span>
+                          )}
+                        </td>
+                        <td className="pl-2 pr-2 py-3 whitespace-nowrap font-mono text-[10px] text-gray-600 truncate max-w-[80px]" title={transaction.id}>{transaction.id}</td>
+                        <td className="px-2 py-3 whitespace-nowrap text-[10px] text-gray-900">{formatDate(transaction.created_at)} {formatTime(transaction.created_at)}</td>
+                        <td className="px-2 py-3 whitespace-nowrap">
+                          <span className={`inline-flex px-1.5 py-0.5 text-xs font-semibold rounded-full ${getPaymentColor(transaction.payment_method)}`}>
+                            {getPaymentLabel(transaction.payment_method)}
                           </span>
-                        ) : hasR ? (
-                          <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-xs font-medium bg-blue-100 text-blue-800">
-                            <span>{displayNum}</span>
-                            <span className="inline-block min-w-[1.75rem] text-center">R</span>
-                          </span>
-                        ) : (
-                          <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-xs font-medium bg-gray-100 text-gray-600">
-                            <span>{displayNum}</span>
-                          </span>
-                        )}
-                      </td>
-                      <td className="pl-2 pr-2 py-3 whitespace-nowrap font-mono text-[10px] text-gray-600 truncate max-w-[80px]" title={transaction.id}>{transaction.id}</td>
-                      <td className="px-2 py-3 whitespace-nowrap text-[10px] text-gray-900">{formatDate(transaction.created_at)} {formatTime(transaction.created_at)}</td>
-                      <td className="px-2 py-3 whitespace-nowrap">
-                        <span className={`inline-flex px-1.5 py-0.5 text-xs font-semibold rounded-full ${getPaymentColor(transaction.payment_method)}`}>
-                          {getPaymentLabel(transaction.payment_method)}
-                        </span>
-                      </td>
-                      <td className="px-2 py-3 whitespace-nowrap text-xs text-gray-900 capitalize">{(transaction.pickup_method || '').replace('-', ' ')}</td>
-                      <td className="px-2 py-3 whitespace-nowrap text-xs font-medium text-gray-900">{formatRupiah(transaction.total_amount ?? 0)}</td>
-                      <td className="px-2 py-3 whitespace-nowrap">
-                        {(transaction.voucher_discount ?? 0) > 0 ? (
-                          <span className="text-xs text-green-600 font-medium">-{formatRupiah(transaction.voucher_discount ?? 0)}</span>
-                        ) : (
-                          <span className="text-xs text-gray-400">-</span>
-                        )}
-                      </td>
-                      <td className="px-2 py-3 whitespace-nowrap text-xs font-bold text-gray-900">{formatRupiah(transaction.final_amount ?? 0)}</td>
-                      <td className="px-4 py-3 whitespace-nowrap">
-                        {(transaction.refund_total ?? 0) > 0 ? (
-                          <span className="text-xs text-red-600 font-medium">-{formatRupiah(transaction.refund_total ?? 0)}</span>
-                        ) : (
-                          <span className="text-xs text-gray-400">-</span>
-                        )}
-                      </td>
-                      <td className="px-2 py-3 truncate max-w-[120px] text-xs text-gray-900" title={transaction.customer_name || 'Guest'}>{transaction.customer_name || 'Guest'}</td>
-                      <td className="px-2 py-3 whitespace-nowrap text-xs text-gray-900">
-                        <div className="relative inline-block">
-                          <button
-                            ref={openWaiterPopoverFor === String(transaction.id) ? waiterTriggerRef : undefined}
-                            type="button"
-                            onClick={(e) => { e.stopPropagation(); setOpenWaiterPopoverFor((id) => (id === String(transaction.id) ? null : String(transaction.id))); }}
-                            className="cursor-pointer rounded focus:outline-none focus:ring-2 focus:ring-blue-400 hover:underline"
-                            title={waiterNamesTooltip}
-                          >
-                            {waiterName}
-                            {allWaiterIds.length > 1 && <span className="text-gray-500 ml-0.5">(+{allWaiterIds.length - 1})</span>}
-                          </button>
-                          {openWaiterPopoverFor === String(transaction.id) && (() => {
-                            const names = allWaiterIds.map((id) => employeesMap.get(id)?.name).filter(Boolean) as string[];
-                            return names.length > 0 && waiterPopoverPos && typeof document !== 'undefined' && createPortal(
-                              <div
-                                ref={waiterPopoverRef}
-                                className="fixed z-[9999] min-w-[120px] rounded-lg border border-gray-200 bg-white py-2 shadow-lg"
-                                style={{ top: waiterPopoverPos.top, left: waiterPopoverPos.left }}
-                              >
-                                <div className="px-3 py-1 text-xs font-semibold text-gray-500 uppercase">Waiters</div>
-                                {names.map((name, i) => (
-                                  <div key={i} className="px-3 py-1.5 text-sm text-gray-900">{name}</div>
-                                ))}
-                              </div>,
-                              document.body
-                            );
-                          })()}
-                        </div>
-                      </td>
-                      <td className="px-2 py-3 text-xs text-gray-900">{userIdToName[transaction.user_id] ?? '-'}</td>
-                      <td className="px-2 py-3 text-right">
-                        <ChevronRight className="w-4 h-4 text-gray-400 group-hover:text-blue-500 transition-colors" />
-                      </td>
-                    </tr>
-                  );
-                })
-              ) : (
-                <tr>
-                  <td colSpan={13} className="px-4 py-12 text-center">
-                    <div className="flex flex-col items-center justify-center text-gray-500">
-                      <Filter className="w-12 h-12 mb-3 text-gray-300" />
-                      <p className="font-medium">No transactions found</p>
-                      <p className="text-sm mt-1">Pilih rentang tanggal dan pastikan ada transaksi dengan R/RR</p>
-                    </div>
-                  </td>
-                </tr>
-              )}
-            </tbody>
-          </table>
+                        </td>
+                        <td className="px-2 py-3 whitespace-nowrap text-xs text-gray-900 capitalize">{(transaction.pickup_method || '').replace('-', ' ')}</td>
+                        <td className="px-2 py-3 whitespace-nowrap text-xs font-medium text-gray-900">{formatRupiah(transaction.total_amount ?? 0)}</td>
+                        <td className="px-2 py-3 whitespace-nowrap">
+                          {(transaction.voucher_discount ?? 0) > 0 ? (
+                            <span className="text-xs text-green-600 font-medium">-{formatRupiah(transaction.voucher_discount ?? 0)}</span>
+                          ) : (
+                            <span className="text-xs text-gray-400">-</span>
+                          )}
+                        </td>
+                        <td className="px-2 py-3 whitespace-nowrap text-xs font-bold text-gray-900">{formatRupiah(transaction.final_amount ?? 0)}</td>
+                        <td className="px-4 py-3 whitespace-nowrap">
+                          {(transaction.refund_total ?? 0) > 0 ? (
+                            <span className="text-xs text-red-600 font-medium">-{formatRupiah(transaction.refund_total ?? 0)}</span>
+                          ) : (
+                            <span className="text-xs text-gray-400">-</span>
+                          )}
+                        </td>
+                        <td className="px-2 py-3 truncate max-w-[120px] text-xs text-gray-900" title={transaction.customer_name || 'Guest'}>{transaction.customer_name || 'Guest'}</td>
+                        <td className="px-2 py-3 whitespace-nowrap text-xs text-gray-900">
+                          <div className="relative inline-block">
+                            <button
+                              ref={openWaiterPopoverFor === String(transaction.id) ? waiterTriggerRef : undefined}
+                              type="button"
+                              onClick={(e) => { e.stopPropagation(); setOpenWaiterPopoverFor((id) => (id === String(transaction.id) ? null : String(transaction.id))); }}
+                              className="cursor-pointer rounded focus:outline-none focus:ring-2 focus:ring-blue-400 hover:underline"
+                              title={waiterNamesTooltip}
+                            >
+                              {waiterName}
+                              {allWaiterIds.length > 1 && <span className="text-gray-500 ml-0.5">(+{allWaiterIds.length - 1})</span>}
+                            </button>
+                            {openWaiterPopoverFor === String(transaction.id) && (() => {
+                              const names = allWaiterIds.map((id) => employeesMap.get(id)?.name).filter(Boolean) as string[];
+                              return names.length > 0 && waiterPopoverPos && typeof document !== 'undefined' && createPortal(
+                                <div
+                                  ref={waiterPopoverRef}
+                                  className="fixed z-[9999] min-w-[120px] rounded-lg border border-gray-200 bg-white py-2 shadow-lg"
+                                  style={{ top: waiterPopoverPos.top, left: waiterPopoverPos.left }}
+                                >
+                                  <div className="px-3 py-1 text-xs font-semibold text-gray-500 uppercase">Waiters</div>
+                                  {names.map((name, i) => (
+                                    <div key={i} className="px-3 py-1.5 text-sm text-gray-900">{name}</div>
+                                  ))}
+                                </div>,
+                                document.body
+                              );
+                            })()}
+                          </div>
+                        </td>
+                        <td className="px-2 py-3 text-xs text-gray-900">{userIdToName[transaction.user_id] ?? '-'}</td>
+                        <td className="px-2 py-3 text-right">
+                          <ChevronRight className="w-4 h-4 text-gray-400 group-hover:text-blue-500 transition-colors" />
+                        </td>
+                      </tr>
+                    );
+                  })
+                ) : (
+                  <tr>
+                    <td colSpan={13} className="px-4 py-12 text-center">
+                      <div className="flex flex-col items-center justify-center text-gray-500">
+                        <Filter className="w-12 h-12 mb-3 text-gray-300" />
+                        <p className="font-medium">No transactions found</p>
+                        <p className="text-sm mt-1">Pilih rentang tanggal dan pastikan ada transaksi dengan R/RR</p>
+                      </div>
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
         </div>
       </div>
-    </div>
 
-    <TransactionDetailModal
-      isOpen={isDetailModalOpen}
-      onClose={handleCloseDetailModal}
-      transaction={detailTransaction}
-      isLoading={isLoadingDetail}
-      canRefund={canRefund}
-      onTransactionUpdated={handleTransactionUpdated}
-    />
+      <TransactionDetailModal
+        isOpen={isDetailModalOpen}
+        onClose={handleCloseDetailModal}
+        transaction={detailTransaction}
+        isLoading={isLoadingDetail}
+        canRefund={canRefund}
+        onTransactionUpdated={handleTransactionUpdated}
+      />
     </>
   );
 }
