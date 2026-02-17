@@ -3,7 +3,7 @@ import * as path from 'path';
 import * as fs from 'fs';
 import * as os from 'os';
 import { PrinterManagementService } from './printerManagement';
-import { initializeMySQLPool, getMySQLPool, executeQuery, executeQueryOne, executeUpdate, executeUpsert, executeTransaction, getConnection, initializeSystemPosPool, executeSystemPosQuery, executeSystemPosQueryOne, executeSystemPosUpdate, executeSystemPosTransaction, executeSystemPosDdl, executeSystemPosDdlIgnoreDup, executeDdlIgnoreDup, toMySQLDateTime, toMySQLTimestamp, testDatabaseConnection, insertTransactionToSystemPos, upsertProductsFromMainToSystemPos } from './mysqlDb';
+import { initializeMySQLPool, getMySQLPool, executeQuery, executeQueryOne, executeUpdate, executeUpsert, executeTransaction, getConnection, initializeSystemPosPool, executeSystemPosQuery, executeSystemPosQueryOne, executeSystemPosUpdate, executeSystemPosTransaction, executeSystemPosDdl, executeSystemPosDdlIgnoreDup, executeDdlIgnoreDup, toMySQLDateTime, toMySQLTimestamp, testDatabaseConnection, insertTransactionToSystemPos, upsertProductsFromMainToSystemPos, syncRefundedTransactionsToSystemPos } from './mysqlDb';
 import { initializeMySQLSchema } from './mysqlSchema';
 import { readConfig, writeConfig, resetConfig, getDbConfig, type AppConfig } from './configManager';
 import { ReceiptManagementService, ReceiptTemplateData } from './receiptManagement';
@@ -816,6 +816,7 @@ async function ensureSystemPosSchema(): Promise<void> {
     'ALTER TABLE transactions ADD COLUMN checker_printed TINYINT(1) NOT NULL DEFAULT 0 COMMENT \'1 = kitchen labels/checker already printed\'',
     'ALTER TABLE transactions ADD COLUMN paid_at DATETIME DEFAULT NULL COMMENT \'When the transaction was paid\' AFTER updated_at',
     'ALTER TABLE transactions ADD INDEX idx_transactions_sync_status (sync_status)',
+    "ALTER TABLE transactions ADD COLUMN system_pos_synced_at DATETIME DEFAULT NULL COMMENT 'When refund data was last synced from main DB' AFTER last_refunded_at",
   ];
   for (const sql of alterColumns) {
     await executeSystemPosDdlIgnoreDup(sql);
@@ -4233,14 +4234,16 @@ function createWindows(): void {
     }
   });
 
-  ipcMain.handle('localdb-get-transactions', async (event, businessId?: number, limit?: number) => {
+  ipcMain.handle('localdb-get-transactions', async (event, businessId?: number, limit?: number, options?: { todayOnly?: boolean }) => {
     try {
+      const todayOnly = options?.todayOnly === true;
+
       // Diagnostic logging
       const diagLogPathTx = path.join(app.getPath('userData'), 'path-diagnostic.log');
       try {
         const txCountResult = await executeQueryOne<{ cnt: number }>('SELECT COUNT(*) as cnt FROM transactions');
         const txCount = txCountResult?.cnt || 0;
-        fs.appendFileSync(diagLogPathTx, `${new Date().toISOString()} [GET-TX] businessId=${businessId}, limit=${limit}, totalTxInDb=${txCount}\n`);
+        fs.appendFileSync(diagLogPathTx, `${new Date().toISOString()} [GET-TX] businessId=${businessId}, limit=${limit}, todayOnly=${todayOnly}, totalTxInDb=${txCount}\n`);
       } catch (e) {
         try { fs.appendFileSync(diagLogPathTx, `${new Date().toISOString()} [GET-TX] ERROR: ${e}\n`); } catch (e2) { }
       }
@@ -4299,6 +4302,12 @@ function createWindows(): void {
 
       // Exclude archived transactions
       conditions.push('t.status != \'archived\'');
+
+      // Kitchen/barista display optimization: fetch only today's active orders
+      if (todayOnly) {
+        conditions.push('DATE(t.created_at) = CURDATE()');
+        conditions.push("t.status IN ('pending', 'paid', 'completed')");
+      }
 
       if (businessId) {
         conditions.push('t.business_id = ?');
@@ -6064,13 +6073,12 @@ function createWindows(): void {
         FROM transactions t
         LEFT JOIN (
           SELECT 
-            transaction_id, 
             uuid_transaction_id,
             SUM(total_price) as total_cancelled
           FROM transaction_items
           WHERE production_status = 'cancelled'
-          GROUP BY uuid_transaction_id, transaction_id
-        ) cancelled ON (t.uuid_id = cancelled.uuid_transaction_id OR t.id = cancelled.transaction_id)
+          GROUP BY uuid_transaction_id
+        ) cancelled ON t.uuid_id = cancelled.uuid_transaction_id
         LEFT JOIN (
           SELECT 
             transaction_uuid,
@@ -9835,6 +9843,18 @@ function createWindows(): void {
     } catch (error) {
       console.error('[SYSTEM POS] upsert-master-data-to-system-pos failed:', error);
       return { success: false, upserted: 0, error: String(error) };
+    }
+  });
+
+  // Auto re-sync refunded Printer 2 transactions to system_pos. Called during Smart Sync cycle.
+  ipcMain.handle('sync-refunded-transactions-to-system-pos', async () => {
+    try {
+      await ensureSystemPosSchema();
+      const result = await syncRefundedTransactionsToSystemPos();
+      return result;
+    } catch (error) {
+      console.error('[SYSTEM POS] sync-refunded-transactions-to-system-pos failed:', error);
+      return { success: false, syncedCount: 0, error: String(error) };
     }
   });
 

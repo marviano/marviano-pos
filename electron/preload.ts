@@ -160,7 +160,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.invoke('localdb-update-transaction-waiter', transactionId, waiterId),
   localDbGetTransactionCheckerPrinted: (transactionUuid: string) => ipcRenderer.invoke('localdb-get-transaction-checker-printed', transactionUuid),
   localDbSetTransactionCheckerPrinted: (transactionUuid: string) => ipcRenderer.invoke('localdb-set-transaction-checker-printed', transactionUuid),
-  localDbGetTransactions: (businessId?: number, limit?: number) => ipcRenderer.invoke('localdb-get-transactions', businessId, limit),
+  localDbGetTransactions: (businessId?: number, limit?: number, options?: { todayOnly?: boolean }) =>
+    ipcRenderer.invoke('localdb-get-transactions', businessId, limit, options),
   localDbUpdateTransactionShift: (transactionUuid: string, shiftUuid: string | null) => ipcRenderer.invoke('localdb-update-transaction-shift', transactionUuid, shiftUuid),
   localDbDeleteSingleTransactionPreview: (transactionUuid: string) => ipcRenderer.invoke('localdb-delete-single-transaction-preview', transactionUuid),
   localDbDeleteSingleTransaction: (transactionUuid: string) => ipcRenderer.invoke('localdb-delete-single-transaction', transactionUuid),
@@ -254,6 +255,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getSystemPosResyncPreview: (fromDate: string, toDate: string) => ipcRenderer.invoke('get-system-pos-resync-preview', fromDate, toDate),
   runSystemPosResync: (fromDate: string, toDate: string) => ipcRenderer.invoke('run-system-pos-resync', fromDate, toDate),
   upsertMasterDataToSystemPos: () => ipcRenderer.invoke('upsert-master-data-to-system-pos'),
+  syncRefundedTransactionsToSystemPos: () => ipcRenderer.invoke('sync-refunded-transactions-to-system-pos'),
   logPrinter1Print: (transactionId: string, printer1ReceiptNumber: number, globalCounter?: number, isReprint?: boolean, reprintCount?: number) =>
     ipcRenderer.invoke('log-printer1-print', transactionId, printer1ReceiptNumber, globalCounter, isReprint, reprintCount),
   getPrinter1AuditLog: (fromDate?: string, toDate?: string, limit?: number, transactionId?: string) => ipcRenderer.invoke('get-printer1-audit-log', fromDate, toDate, limit, transactionId),

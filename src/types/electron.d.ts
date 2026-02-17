@@ -22,6 +22,7 @@ declare global {
     statistics: { order_count: number; total_amount: number; total_discount: number; voucher_count: number; total_cu?: number };
     gross_total_omset?: number;
     refunds?: ShiftPrintRefundRow[];
+    cancelledItems?: Array<{ product_name: string; quantity: number; total_price: number; cancelled_at: string; cancelled_by_user_name: string; cancelled_by_waiter_name: string; receipt_number?: string | null; customer_name?: string | null }>;
     productSales: Array<{
       product_name: string;
       total_quantity: number;
@@ -251,7 +252,7 @@ declare global {
       localDbUpsertRestaurantLayoutElements?: (rows: unknown[]) => Promise<{ success: boolean }>;
 
       // Transaction operations
-      localDbGetTransactions?: (businessId?: number, limit?: number) => Promise<unknown[]>;
+      localDbGetTransactions?: (businessId?: number, limit?: number, options?: { todayOnly?: boolean }) => Promise<unknown[]>;
       localDbUpdateTransactionShift?: (transactionUuid: string, shiftUuid: string | null) => Promise<{ success: boolean; error?: string }>;
       localDbDeleteSingleTransactionPreview?: (transactionUuid: string) => Promise<{
         success: boolean;
@@ -626,6 +627,7 @@ declare global {
         message?: string;
       }>;
       upsertMasterDataToSystemPos?: () => Promise<{ success: boolean; upserted: number; error?: string }>;
+      syncRefundedTransactionsToSystemPos?: () => Promise<{ success: boolean; syncedCount: number; error?: string }>;
       debugSystemPosTransaction?: (transactionId: string) => Promise<{
         success: boolean;
         transaction: { id: string; business_id: number; user_id: number; created_at: string; synced_at: number | null } | null;

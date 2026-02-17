@@ -3780,7 +3780,8 @@ export default function GantiShift() {
                               paymentMethod: !isEnabled,
                               categoryI: !isEnabled,
                               categoryII: !isEnabled,
-                              toppingSales: !isEnabled
+                              toppingSales: !isEnabled,
+                              itemDibatalkan: !isEnabled
                             });
                           }}
                           className="sr-only"
@@ -4004,7 +4005,8 @@ export default function GantiShift() {
                               paymentMethod: !isEnabled,
                               categoryI: !isEnabled,
                               categoryII: !isEnabled,
-                              toppingSales: !isEnabled
+                              toppingSales: !isEnabled,
+                              itemDibatalkan: !isEnabled
                             });
                           }}
                           className="sr-only"

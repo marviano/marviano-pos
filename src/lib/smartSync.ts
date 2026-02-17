@@ -299,6 +299,24 @@ class SmartSyncService {
       await this.syncPendingRefunds();
       console.log('✅ [SMART SYNC] Refund sync completed');
 
+      // Auto re-sync refunded Printer 2 transactions to system_pos (local DB, works offline)
+      if (isElectron) {
+        try {
+          const electronAPI = typeof window !== 'undefined' ? (window as { electronAPI?: UnknownRecord }).electronAPI : undefined;
+          if (electronAPI?.syncRefundedTransactionsToSystemPos) {
+            console.log('🔄 [SMART SYNC] Starting system_pos refunded transactions re-sync...');
+            const sysPosResult = await (electronAPI.syncRefundedTransactionsToSystemPos as () => Promise<{ success: boolean; syncedCount: number; error?: string }>)();
+            if (sysPosResult.success && sysPosResult.syncedCount > 0) {
+              console.log(`✅ [SMART SYNC] system_pos refund re-sync completed: ${sysPosResult.syncedCount} transaction(s)`);
+            } else if (!sysPosResult.success) {
+              console.warn('⚠️ [SMART SYNC] system_pos refund re-sync failed (non-fatal):', sysPosResult.error);
+            }
+          }
+        } catch (sysPosErr) {
+          console.warn('⚠️ [SMART SYNC] system_pos refund re-sync error (non-fatal):', sysPosErr instanceof Error ? sysPosErr.message : String(sysPosErr));
+        }
+      }
+
       this.consecutiveFailures = 0;
       this.lastSyncTime = Date.now();
       const syncDuration = Date.now() - syncStartTime;

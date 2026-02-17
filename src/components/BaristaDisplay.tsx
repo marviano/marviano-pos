@@ -62,6 +62,12 @@ interface GroupedOrderItem extends OrderItem {
 
 const getElectronAPI = () => (typeof window !== 'undefined' ? window.electronAPI : undefined);
 
+/** Cache TTL for static data (products, tables, rooms) - refresh every 5 minutes */
+const STATIC_DATA_CACHE_TTL_MS = 5 * 60 * 1000;
+
+/** Limit for today's transactions (barista display - only needs today's active orders) */
+const TODAY_TRANSACTIONS_LIMIT = 200;
+
 export default function BaristaDisplay({ viewOnly = false, legacyCardLayout = false, enableSound }: { viewOnly?: boolean; legacyCardLayout?: boolean; enableSound?: boolean; }) {
   const { user } = useAuth();
   const [activeOrders, setActiveOrders] = useState<GroupedOrderItem[]>([]);
@@ -74,6 +80,13 @@ export default function BaristaDisplay({ viewOnly = false, legacyCardLayout = fa
   const persistingIdsRef = useRef<Set<string>>(new Set());
   /** Last finished list we displayed; used so a stale fetch never moves an item back to active. */
   const lastFinishedMapRef = useRef<Map<string, GroupedOrderItem>>(new Map());
+  /** Cache for products, tables, rooms - reduces DB load during polling */
+  const staticDataCacheRef = useRef<{
+    productsMap: Map<number, Record<string, unknown>>;
+    tablesMap: Map<number, { table_number: string; room_id: number }>;
+    roomsMap: Map<number, string>;
+    fetchedAt: number;
+  } | null>(null);
   const firstTextWrapperRef = useRef<HTMLDivElement | null>(null);
   const firstProductNameRef = useRef<HTMLDivElement | null>(null);
   const firstCardRef = useRef<HTMLDivElement | null>(null);
@@ -120,53 +133,53 @@ export default function BaristaDisplay({ viewOnly = false, legacyCardLayout = fa
         return;
       }
 
-      // Fetch all transactions (pending, paid, and completed)
-      // We include paid/completed transactions because items might still be in production
-      const transactions = await electronAPI.localDbGetTransactions?.(businessId, 1000);
+      // Fetch only today's transactions (pending, paid, completed) - optimized for display performance
+      const transactions = await electronAPI.localDbGetTransactions?.(businessId, TODAY_TRANSACTIONS_LIMIT, { todayOnly: true });
       const transactionsArray = Array.isArray(transactions) ? transactions as Record<string, unknown>[] : [];
+      const relevantTransactions = transactionsArray;
 
-      // Filter for transactions that might have items in production
-      // Include pending (unpaid), paid, and completed transactions
-      // Items will be filtered by production_status later (only show unfinished items)
-      const relevantTransactions = transactionsArray.filter((tx) => {
-        const status = typeof tx.status === 'string' ? tx.status.toLowerCase() : '';
-        return status === 'pending' || status === 'paid' || status === 'completed';
-      });
-
-      // Fetch all products to get category info
-      const allProducts = await electronAPI.localDbGetAllProducts?.();
-      const productsArray = Array.isArray(allProducts) ? allProducts as Record<string, unknown>[] : [];
-      const productsMap = new Map<number, Record<string, unknown>>();
-      productsArray.forEach((p) => {
-        if (p.id) {
-          const productId = typeof p.id === 'number' ? p.id : Number(p.id);
-          if (!isNaN(productId)) {
-            productsMap.set(productId, p);
-          }
-        }
-      });
-
-      // Fetch tables and rooms
-      const tablesMap = new Map<number, { table_number: string; room_id: number }>();
-      const roomsMap = new Map<number, string>();
-      if (electronAPI.getRestaurantRooms) {
-        const rooms = await electronAPI.getRestaurantRooms(businessId);
-        const roomsArray = Array.isArray(rooms) ? rooms : [];
-        roomsArray.forEach((room: { id: number; name: string }) => {
-          if (room.id) {
-            roomsMap.set(room.id, room.name);
+      // Use cached products/tables/rooms when fresh to reduce DB load
+      const now = Date.now();
+      let productsMap: Map<number, Record<string, unknown>>;
+      let tablesMap: Map<number, { table_number: string; room_id: number }>;
+      let roomsMap: Map<number, string>;
+      if (staticDataCacheRef.current && (now - staticDataCacheRef.current.fetchedAt) < STATIC_DATA_CACHE_TTL_MS) {
+        productsMap = staticDataCacheRef.current.productsMap;
+        tablesMap = staticDataCacheRef.current.tablesMap;
+        roomsMap = staticDataCacheRef.current.roomsMap;
+      } else {
+        const allProducts = await electronAPI.localDbGetAllProducts?.();
+        const productsArray = Array.isArray(allProducts) ? allProducts as Record<string, unknown>[] : [];
+        productsMap = new Map<number, Record<string, unknown>>();
+        productsArray.forEach((p) => {
+          if (p.id) {
+            const productId = typeof p.id === 'number' ? p.id : Number(p.id);
+            if (!isNaN(productId)) {
+              productsMap.set(productId, p);
+            }
           }
         });
-
-        for (const room of roomsArray) {
-          if (room.id && electronAPI.getRestaurantTables) {
-            const tables = await electronAPI.getRestaurantTables(room.id);
-            const tablesArray = Array.isArray(tables) ? tables : [];
-            tablesArray.forEach((table: { id: number; table_number: string; room_id: number }) => {
-              tablesMap.set(table.id, { table_number: table.table_number, room_id: table.room_id });
-            });
+        tablesMap = new Map<number, { table_number: string; room_id: number }>();
+        roomsMap = new Map<number, string>();
+        if (electronAPI.getRestaurantRooms) {
+          const rooms = await electronAPI.getRestaurantRooms(businessId);
+          const roomsArray = Array.isArray(rooms) ? rooms : [];
+          roomsArray.forEach((room: { id: number; name: string }) => {
+            if (room.id) {
+              roomsMap.set(room.id, room.name);
+            }
+          });
+          for (const room of roomsArray) {
+            if (room.id && electronAPI.getRestaurantTables) {
+              const tables = await electronAPI.getRestaurantTables(room.id);
+              const tablesArray = Array.isArray(tables) ? tables : [];
+              tablesArray.forEach((table: { id: number; table_number: string; room_id: number }) => {
+                tablesMap.set(table.id, { table_number: table.table_number, room_id: table.room_id });
+              });
+            }
           }
         }
+        staticDataCacheRef.current = { productsMap, tablesMap, roomsMap, fetchedAt: now };
       }
 
       // Fetch transaction items for all relevant transactions
@@ -526,8 +539,8 @@ export default function BaristaDisplay({ viewOnly = false, legacyCardLayout = fa
       });
 
       // Only show Pesanan Selesai from today to avoid unbounded list and keep relevance
-      const now = new Date();
-      const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0, 0).getTime();
+      const nowDate = new Date();
+      const todayStart = new Date(nowDate.getFullYear(), nowDate.getMonth(), nowDate.getDate(), 0, 0, 0, 0).getTime();
       const todayEnd = todayStart + 24 * 60 * 60 * 1000 - 1;
       finishedMerged = finishedMerged.filter((item) => {
         let finishedAt: number;
@@ -625,10 +638,10 @@ export default function BaristaDisplay({ viewOnly = false, legacyCardLayout = fa
     return date.toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
   };
 
-  // Poll database every 5 seconds
+  // Poll database every 2 seconds (optimized for faster order visibility)
   useEffect(() => {
     fetchOrders();
-    const interval = setInterval(fetchOrders, 5000);
+    const interval = setInterval(fetchOrders, 2000);
     return () => clearInterval(interval);
   }, [fetchOrders]);
 
@@ -678,7 +691,7 @@ export default function BaristaDisplay({ viewOnly = false, legacyCardLayout = fa
       try {
         const items = await electronAPI.localDbGetTransactionItems?.(item.transaction_id);
         const itemsArray = Array.isArray(items) ? items as Record<string, unknown>[] : [];
-        const transactions = await electronAPI.localDbGetTransactions?.(businessId, 10000);
+        const transactions = await electronAPI.localDbGetTransactions?.(businessId, TODAY_TRANSACTIONS_LIMIT, { todayOnly: true });
         const transactionsArray = Array.isArray(transactions) ? transactions as Record<string, unknown>[] : [];
         const currentTransaction = transactionsArray.find((tx) =>
           tx.uuid_id === item.transaction_id || tx.id === item.transaction_id

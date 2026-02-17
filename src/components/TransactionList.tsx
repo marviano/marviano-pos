@@ -369,7 +369,11 @@ export default function TransactionList({ businessId, onLoadTransaction }: Trans
   const canBindToShift = isSuperAdmin(user);
   const canDeleteTransaction = isSuperAdmin(user);
 
-  const visibleColumns = TRANSACTION_COLUMNS.filter((c) => columnVisibility[c.key] !== false);
+  const visibleColumns = TRANSACTION_COLUMNS.filter((c) => {
+    if (columnVisibility[c.key] === false) return false;
+    if (isSystemPosMode && c.key === 'receipt_number') return false; // No # column in system_pos
+    return true;
+  });
 
   const setColumnVisible = (key: string, visible: boolean) => {
     setColumnVisibility((prev) => ({ ...prev, [key]: visible }));
@@ -1410,12 +1414,15 @@ export default function TransactionList({ businessId, onLoadTransaction }: Trans
     }
   };
 
-  // Apply Receiptize filter unless full list unlocked
+  // Apply Receiptize filter unless full list unlocked (or system_pos: show all as-is, no R/RR filter)
   // In default mode, only show transactions that are in receiptizePrintedIds (printed to Printer2/receiptize).
   // If no receiptize data is available, show empty list — never fall back to all transactions.
+  // In system_pos mode: show all transactions as-is (no R/RR filter).
   let baseTransactions: Transaction[];
 
-  if (showAllTransactions) {
+  if (isSystemPosMode) {
+    baseTransactions = transactions;
+  } else if (showAllTransactions) {
     baseTransactions = transactions;
   } else if (receiptizePrintedIds.size > 0) {
     const filtered = transactions.filter(transaction => {
@@ -2126,6 +2133,9 @@ export default function TransactionList({ businessId, onLoadTransaction }: Trans
             </div>
           ) : (
             <div className="flex-1 overflow-auto p-4 min-h-0 min-w-0">
+              <p className="text-xs text-gray-500 mb-2" aria-live="polite">
+                {filteredTransactions.length} baris
+              </p>
               <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
                 <table className="w-full text-sm" style={{ tableLayout: 'auto' }}>
                   <thead className="bg-gray-50 text-gray-900 font-semibold border-b border-gray-200 sticky top-0 z-10">

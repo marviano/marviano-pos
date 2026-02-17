@@ -1009,6 +1009,127 @@ export async function upsertProductsFromMainToSystemPos(): Promise<{ success: bo
 }
 
 /**
+ * Auto re-sync refunded Printer 2 transactions to system_pos.
+ * During Smart Sync, detects transactions with refunds in main DB that need their
+ * refund data synced to system_pos. Handles both:
+ * - Existing transactions: UPDATE refund_total, refund_status, last_refunded_at; upsert transaction_refunds
+ * - Missing transactions: Full insert via insertTransactionToSystemPos
+ */
+export async function syncRefundedTransactionsToSystemPos(): Promise<{ success: boolean; syncedCount: number; error?: string }> {
+  try {
+    // Get Printer 2 transactions that have refunds in main DB
+    const rows = await executeQuery<{
+      uuid_id: string;
+      refund_total: number;
+      refund_status: string;
+      last_refunded_at: string | null;
+    }>(`
+      SELECT
+        t.uuid_id,
+        COALESCE(r.total_refund, t.refund_total, 0) AS refund_total,
+        CASE
+          WHEN COALESCE(r.total_refund, t.refund_total, 0) >= (t.final_amount - 0.01) THEN 'full'
+          WHEN COALESCE(r.total_refund, t.refund_total, 0) > 0 THEN 'partial'
+          ELSE 'none'
+        END AS refund_status,
+        (SELECT MAX(refunded_at) FROM transaction_refunds WHERE transaction_uuid = t.uuid_id AND status IN ('pending', 'completed')) AS last_refunded_at
+      FROM transactions t
+      INNER JOIN printer2_audit_log p2 ON p2.transaction_id = t.uuid_id
+      LEFT JOIN (
+        SELECT transaction_uuid, SUM(refund_amount) AS total_refund
+        FROM transaction_refunds
+        WHERE status IN ('pending', 'completed')
+        GROUP BY transaction_uuid
+      ) r ON t.uuid_id = r.transaction_uuid
+      WHERE COALESCE(r.total_refund, t.refund_total, 0) > 0
+    `);
+
+    if (!rows.length) {
+      return { success: true, syncedCount: 0 };
+    }
+
+    let syncedCount = 0;
+
+    for (const row of rows) {
+      const transactionId = row.uuid_id;
+
+      const existingTx = await executeSystemPosQueryOne<{
+        id: number;
+        refund_total: number | string;
+        last_refunded_at: string | null;
+      }>(
+        'SELECT id, refund_total, last_refunded_at FROM transactions WHERE uuid_id = ?',
+        [transactionId]
+      );
+
+      if (!existingTx) {
+        // Transaction missing in system_pos - full sync
+        const insertResult = await insertTransactionToSystemPos(transactionId);
+        if (insertResult.success) {
+          syncedCount++;
+          console.log(`✅ [SYSTEM POS] Auto re-sync: inserted missing refunded transaction ${transactionId}`);
+        }
+        continue;
+      }
+
+      // Transaction exists - skip if refund data already in sync (prevent duplicate syncs)
+      const mainRefundTotal = Number(row.refund_total) || 0;
+      const sysRefundTotal = Number(existingTx.refund_total) || 0;
+      const mainLastRefundedAt = row.last_refunded_at ? toMySQLDateTime(row.last_refunded_at) : null;
+      const sysLastRefundedAt = existingTx.last_refunded_at
+        ? (typeof existingTx.last_refunded_at === 'string'
+          ? existingTx.last_refunded_at.replace('T', ' ').slice(0, 19)
+          : String(existingTx.last_refunded_at))
+        : null;
+      if (sysRefundTotal === mainRefundTotal && sysLastRefundedAt === mainLastRefundedAt) {
+        continue; // Already in sync
+      }
+
+      // Update transaction refund fields and set system_pos_synced_at
+      const lastRefundedAt = mainLastRefundedAt;
+      await executeSystemPosUpdate(
+        `UPDATE transactions SET refund_total = ?, refund_status = ?, last_refunded_at = ?, system_pos_synced_at = NOW() WHERE uuid_id = ?`,
+        [mainRefundTotal, row.refund_status || 'partial', lastRefundedAt, transactionId]
+      );
+
+      // Sync transaction_refunds from main to system_pos
+      const refunds = await executeQuery<Record<string, unknown>>(
+        'SELECT * FROM transaction_refunds WHERE transaction_uuid = ? AND status IN (?, ?) ORDER BY refunded_at ASC',
+        [transactionId, 'pending', 'completed']
+      );
+
+      const refundFields = ['uuid_id', 'transaction_uuid', 'business_id', 'shift_uuid', 'refunded_by',
+        'refund_amount', 'cash_delta', 'payment_method_id', 'reason', 'note',
+        'refund_type', 'status', 'refunded_at', 'created_at', 'updated_at', 'synced_at'];
+
+      for (const refund of refunds) {
+        const values = refundFields.map(f => convertToMySQLParam(refund[f]));
+        const placeholders = refundFields.map(() => '?').join(', ');
+        const updateSet = refundFields.filter(f => f !== 'uuid_id').map(f => `${f}=VALUES(${f})`).join(', ');
+        await executeSystemPosUpdate(
+          `INSERT INTO transaction_refunds (${refundFields.join(', ')}) VALUES (${placeholders})
+           ON DUPLICATE KEY UPDATE ${updateSet}`,
+          values
+        );
+      }
+
+      syncedCount++;
+      console.log(`✅ [SYSTEM POS] Auto re-sync: updated refund data for transaction ${transactionId}`);
+    }
+
+    if (syncedCount > 0) {
+      console.log(`✅ [SYSTEM POS] Auto re-sync completed: ${syncedCount} refunded transaction(s) synced`);
+    }
+
+    return { success: true, syncedCount };
+  } catch (error: unknown) {
+    const errorMsg = error instanceof Error ? error.message : String(error);
+    console.error('❌ [SYSTEM POS] syncRefundedTransactionsToSystemPos failed:', errorMsg);
+    return { success: false, syncedCount: 0, error: errorMsg };
+  }
+}
+
+/**
  * Close the MySQL connection pools
  */
 export async function closeMySQLPool(): Promise<void> {
