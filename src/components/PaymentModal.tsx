@@ -1445,13 +1445,14 @@ export default function PaymentModal({
                 const lineProduct = productsMapForReceipt.get(line.product_id);
                 const lineCategory1Id = (lineProduct as { category1_id?: number | null } | undefined)?.category1_id ?? null;
                 const lineCategory1Name = (lineProduct as { category1_name?: string | null } | undefined)?.category1_name ?? null;
+                const lineNote = (line as { note?: string }).note?.trim() || undefined;
                 receiptItems.push({
                   name: `${line.quantity}x ${line.product_name} (${item.product.nama})`,
                   quantity: line.quantity,
                   price: 0,
                   total_price: 0,
-                  customNote: undefined,
-                  custom_note: undefined,
+                  customNote: lineNote,
+                  custom_note: lineNote,
                   customizations: undefined,
                   category1_id: lineCategory1Id,
                   category1_name: lineCategory1Name,

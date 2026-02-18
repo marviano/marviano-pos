@@ -801,6 +801,7 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
             const totalPrice = typeof transactionItem.total_price === 'number' ? transactionItem.total_price : (typeof transactionItem.total_price === 'string' ? parseFloat(String(transactionItem.total_price)) : 0);
             const customNote = typeof transactionItem.custom_note === 'string' ? transactionItem.custom_note : null;
             const bundleSelectionsJson = typeof transactionItem.bundle_selections_json === 'string' ? transactionItem.bundle_selections_json : (transactionItem.bundle_selections_json ? JSON.stringify(transactionItem.bundle_selections_json) : null);
+            const packageSelectionsJson = typeof transactionItem.package_selections_json === 'string' ? transactionItem.package_selections_json : (transactionItem.package_selections_json != null ? JSON.stringify(transactionItem.package_selections_json) : null);
             const waiterIdItem = typeof transactionItem.waiter_id === 'number' ? transactionItem.waiter_id : (typeof transactionItem.waiter_id === 'string' ? parseInt(String(transactionItem.waiter_id), 10) : null);
 
             // Get created_at - preserve original timestamp
@@ -823,6 +824,7 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
               total_price: totalPrice,
               custom_note: customNote,
               bundle_selections_json: bundleSelectionsJson,
+              package_selections_json: packageSelectionsJson,
               created_at: createdAt,
               waiter_id: waiterIdItem ?? null,
               production_status: productionStatus,
@@ -958,6 +960,7 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
             const unitPrice = typeof transactionItem.unit_price === 'number' ? transactionItem.unit_price : (typeof transactionItem.unit_price === 'string' ? parseFloat(String(transactionItem.unit_price)) : 0);
             const customNote = typeof transactionItem.custom_note === 'string' ? transactionItem.custom_note : null;
             const bundleSelectionsJson = typeof transactionItem.bundle_selections_json === 'string' ? transactionItem.bundle_selections_json : (transactionItem.bundle_selections_json ? JSON.stringify(transactionItem.bundle_selections_json) : null);
+            const packageSelectionsJson = typeof transactionItem.package_selections_json === 'string' ? transactionItem.package_selections_json : (transactionItem.package_selections_json != null ? JSON.stringify(transactionItem.package_selections_json) : null);
             const waiterIdItem = typeof transactionItem.waiter_id === 'number' ? transactionItem.waiter_id : (typeof transactionItem.waiter_id === 'string' ? parseInt(String(transactionItem.waiter_id), 10) : null);
             const createdAt = transactionItem.created_at ? String(transactionItem.created_at) : new Date().toISOString();
 
@@ -980,6 +983,7 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
               total_price: remainingTotalPrice,
               custom_note: customNote,
               bundle_selections_json: bundleSelectionsJson,
+              package_selections_json: packageSelectionsJson,
               created_at: createdAt,
               waiter_id: waiterIdItem ?? null,
               production_status: productionStatus,
@@ -1001,6 +1005,7 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
               total_price: cancelledTotalPrice,
               custom_note: customNote,
               bundle_selections_json: bundleSelectionsJson,
+              package_selections_json: packageSelectionsJson,
               created_at: new Date().toISOString(),
               waiter_id: waiterIdItem ?? null,
               production_status: 'cancelled',
@@ -1535,6 +1540,7 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
                                   {lines.map((line, idx) => (
                                     <div key={idx} className="text-xs text-gray-900 py-0">
                                       • {formatPackageLineDisplay(line.product_name, line.quantity)}
+                                      {line.note && <span className="text-amber-700 font-medium ml-1"> — {line.note}</span>}
                                     </div>
                                   ))}
                                 </div>

@@ -4892,9 +4892,14 @@ function createWindows(): void {
           }
         }
 
-        // Package selections: will be saved to transaction_item_package_lines table below; store null in transaction_items
+        // Package selections: persist full JSON (with per-item notes) in transaction_items; also write lines to transaction_item_package_lines for id/finished_at
         const rawPackageJson = (r as Record<string, unknown>).package_selections_json;
-        const packageSelectionsJson = null; // Stored in transaction_item_package_lines, not JSON column
+        const packageSelectionsJson =
+          rawPackageJson == null
+            ? null
+            : typeof rawPackageJson === 'string'
+              ? rawPackageJson
+              : JSON.stringify(rawPackageJson);
         if (rawPackageJson) {
           const itemUuidIdForPackage = typeof (r as any).uuid_id === 'string' && (r as any).uuid_id ? (r as any).uuid_id : (typeof r.id === 'string' ? r.id : String(r.id ?? ''));
           const itemQty = typeof r.quantity === 'number' ? r.quantity : (typeof r.quantity === 'string' ? parseInt(String(r.quantity), 10) : 1);
@@ -5344,18 +5349,32 @@ function createWindows(): void {
           }
         }
 
-        // Attach package lines from transaction_item_package_lines (id + finished_at for Kitchen/Barista completion)
-        let package_selections_json = item.package_selections_json;
+        // Attach package lines from transaction_item_package_lines (id + finished_at for Kitchen/Barista completion).
+        // Keep original package_selections_json (with notes). Merge notes into lines by index (DB insert order matches selection flatten order).
+        const package_selections_json = item.package_selections_json;
         const lines = packageLinesByItem.get(itemUuid) ?? (item.id != null ? packageLinesByItem.get(String(item.id)) : undefined);
+        let linesWithNotes: Array<{ id: number; product_id: number; product_name: string; quantity: number; finished_at: string | null; category1_id?: number; category1_name?: string; note?: string }> | undefined;
         if (lines && lines.length > 0) {
-          const reconstructed = lines.map((l) => ({
-            selection_type: 'default' as const,
-            package_item_id: 0,
-            product_id: l.product_id,
-            product_name: l.product_name,
-            quantity: l.quantity,
+          const flatNotes: string[] = [];
+          if (package_selections_json) {
+            try {
+              const parsed = typeof package_selections_json === 'string' ? JSON.parse(package_selections_json) : package_selections_json;
+              const arr = Array.isArray(parsed) ? parsed : [];
+              for (const sel of arr) {
+                if (sel.selection_type === 'default' && sel.product_id != null) {
+                  flatNotes.push(sel.note?.trim() ?? '');
+                } else if (sel.selection_type === 'flexible' && Array.isArray(sel.chosen)) {
+                  for (const c of sel.chosen) {
+                    flatNotes.push(c.note?.trim() ?? '');
+                  }
+                }
+              }
+            } catch (_) {}
+          }
+          linesWithNotes = lines.map((l, i) => ({
+            ...l,
+            note: flatNotes[i] ? flatNotes[i] : undefined,
           }));
-          package_selections_json = JSON.stringify(reconstructed);
         }
 
         return {
@@ -5363,7 +5382,7 @@ function createWindows(): void {
           customizations: customizations || [],  // Main product customizations
           bundleSelections: bundleSelections || null,  // Bundle selections with customizations from normalized tables
           package_selections_json: package_selections_json ?? item.package_selections_json,
-          packageBreakdownLines: lines && lines.length > 0 ? lines : undefined,  // Normalized lines with id, finished_at for display
+          packageBreakdownLines: linesWithNotes && linesWithNotes.length > 0 ? linesWithNotes : undefined,
         };
       }));
 
@@ -7475,8 +7494,7 @@ function createWindows(): void {
         return [];
       }
 
-      // Payment breakdown: net amount (gross - cancelled - refund). Exclude fully refunded transactions.
-      // Refund (full and partial) excluded from amount: subtract t.refund_total.
+      // Payment breakdown: gross amount per method (minus refund only). Item dibatalkan deduction is centralised in Ringkasan.
       const onlyTxWithItems = ' AND t.id IN (SELECT transaction_id FROM transaction_items GROUP BY transaction_id HAVING COALESCE(SUM(total_price), 0) > 0)';
       if (shiftUuids && shiftUuids.length > 0) {
         const query = `
@@ -7484,18 +7502,9 @@ function createWindows(): void {
             COALESCE(pm.name, 'Unknown') as payment_method_name,
             COALESCE(pm.code, 'unknown') as payment_method_code,
             COUNT(t.id) as transaction_count,
-            COALESCE(SUM(GREATEST(0, (t.total_amount - COALESCE(cancelled.total_cancelled, 0)) - COALESCE(t.refund_total, 0))), 0) as total_amount
+            COALESCE(SUM(GREATEST(0, t.total_amount - COALESCE(t.refund_total, 0))), 0) as total_amount
           FROM transactions t
           LEFT JOIN payment_methods pm ON t.payment_method_id = pm.id
-          LEFT JOIN (
-            SELECT 
-              transaction_id, 
-              uuid_transaction_id,
-              SUM(total_price) as total_cancelled
-            FROM transaction_items
-            WHERE production_status = 'cancelled'
-            GROUP BY uuid_transaction_id, transaction_id
-          ) cancelled ON (t.uuid_id = cancelled.uuid_transaction_id OR t.id = cancelled.transaction_id)
           WHERE t.business_id = ? AND t.shift_uuid IN (${shiftUuids.map(() => '?').join(',')}) AND t.status = 'completed' AND t.refund_status != 'full'${onlyTxWithItems}
           GROUP BY t.payment_method_id, pm.name, pm.code ORDER BY transaction_count DESC
         `;
@@ -7509,18 +7518,9 @@ function createWindows(): void {
             COALESCE(pm.name, 'Unknown') as payment_method_name,
             COALESCE(pm.code, 'unknown') as payment_method_code,
             COUNT(t.id) as transaction_count,
-            COALESCE(SUM(GREATEST(0, (t.total_amount - COALESCE(cancelled.total_cancelled, 0)) - COALESCE(t.refund_total, 0))), 0) as total_amount
+            COALESCE(SUM(GREATEST(0, t.total_amount - COALESCE(t.refund_total, 0))), 0) as total_amount
           FROM transactions t
           LEFT JOIN payment_methods pm ON t.payment_method_id = pm.id
-          LEFT JOIN (
-            SELECT 
-              transaction_id, 
-              uuid_transaction_id,
-              SUM(total_price) as total_cancelled
-            FROM transaction_items
-            WHERE production_status = 'cancelled'
-            GROUP BY uuid_transaction_id, transaction_id
-          ) cancelled ON (t.uuid_id = cancelled.uuid_transaction_id OR t.id = cancelled.transaction_id)
           WHERE t.business_id = ? AND t.shift_uuid = ? AND t.status = 'completed' AND t.refund_status != 'full'${onlyTxWithItems}
           GROUP BY t.payment_method_id, pm.name, pm.code ORDER BY transaction_count DESC
         `;
@@ -7537,18 +7537,9 @@ function createWindows(): void {
           COALESCE(pm.name, 'Unknown') as payment_method_name,
           COALESCE(pm.code, 'unknown') as payment_method_code,
           COUNT(t.id) as transaction_count,
-          COALESCE(SUM(GREATEST(0, (t.total_amount - COALESCE(cancelled.total_cancelled, 0)) - COALESCE(t.refund_total, 0))), 0) as total_amount
+          COALESCE(SUM(GREATEST(0, t.total_amount - COALESCE(t.refund_total, 0))), 0) as total_amount
         FROM transactions t
         LEFT JOIN payment_methods pm ON t.payment_method_id = pm.id
-        LEFT JOIN (
-          SELECT 
-            transaction_id, 
-            uuid_transaction_id,
-            SUM(total_price) as total_cancelled
-          FROM transaction_items
-          WHERE production_status = 'cancelled'
-          GROUP BY uuid_transaction_id, transaction_id
-        ) cancelled ON (t.uuid_id = cancelled.uuid_transaction_id OR t.id = cancelled.transaction_id)
         WHERE t.business_id = ?
         AND t.created_at >= ?
         AND t.status = 'completed'
@@ -10659,7 +10650,8 @@ ipcMain.handle('print-receipt', async (event, data: ReceiptPrintData) => {
         const templateType = isBill ? 'bill' : 'receipt';
         const templateResult = await receiptManagementService.getReceiptTemplate(templateType, data.business_id);
         let templateCode = templateResult.templateCode;
-        const showNotes = templateResult.showNotes;
+        // Notes only on printed checker and dapur/barista; never on customer receipt or bill
+        const showNotes = false;
         // Inject voucher block for both bill and receipt templates when voucher is applied
         const hasVoucher = typeof data.voucherDiscount === 'number' && data.voucherDiscount > 0;
         if (templateCode && hasVoucher && !templateCode.includes('{{#ifVoucher}}')) {
@@ -12623,7 +12615,7 @@ function generateShiftBreakdownHTML(
           <div style="font-size: 7pt; color: #555;">${transactionLabel} · ${platformLabel}</div>
         </td>
         <td style="text-align: left; padding: 0.3mm 0;">${quantity}</td>
-        <td style="text-align: right; padding: 0.3mm 0;">${isBundleItem ? '-' : (isNaN(unitPrice) ? '0' : formatIntegerId(unitPrice))}</td>
+        <td style="text-align: left; padding: 0.3mm 0; font-size: 6pt;">${isBundleItem ? '-' : (isNaN(unitPrice) ? '0' : formatIntegerId(unitPrice))}</td>
         <td style="text-align: right; padding: 0.3mm 0;">${isBundleItem ? '-' : (isNaN(baseSubtotal) ? '0' : formatIntegerId(baseSubtotal))}</td>
       </tr>
       `;
@@ -12662,7 +12654,7 @@ function generateShiftBreakdownHTML(
       const amount = productPlatformAmount.get(key) ?? 0;
       const label = PLATFORM_LABELS_BT[key];
       const amountStr = Number.isFinite(amount) ? formatIntegerId(Math.round(amount)) : '0';
-      return `<tr><td style="padding-left: 2mm; font-size: 7pt;">${label}</td><td style="text-align: left; font-size: 7pt;">${qty}</td><td class="right">-</td><td class="right" style="font-size: 7pt;">${amountStr}</td></tr>`;
+      return `<tr><td style="padding-left: 2mm; font-size: 7pt;">${label}</td><td style="text-align: left; font-size: 7pt;">${qty}</td><td style="text-align: left; font-size: 6pt;">-</td><td class="right" style="font-size: 7pt;">${amountStr}</td></tr>`;
     }).join('');
 
     const customizationRows = report.customizationSales.map(item => {
@@ -12701,7 +12693,7 @@ function generateShiftBreakdownHTML(
       return `
       <tr>
         <td style="text-align: left; padding: 0.3mm 0;">${payment.payment_method_name || 'N/A'}</td>
-        <td style="text-align: right; padding: 0.3mm 0;">${count}</td>
+        <td style="text-align: left; padding: 0.3mm 0;">${count}</td>
         <td style="text-align: right; padding: 0.3mm 0;">${formatIntegerId(Math.round(amount))}</td>
       </tr>
     `;
@@ -12792,7 +12784,9 @@ function generateShiftBreakdownHTML(
       ? Number(cashSummaryData.cash_whole_day_refunds ?? cashSummaryData.cash_shift_refunds ?? 0)
       : Number(cashSummaryData.cash_shift_refunds ?? 0);
     // Coerce to number: IPC can send gross_total_omset as string (e.g. "55771000.00244" from number+string concat on frontend)
-    const grossTotalOmsetRaw = report.gross_total_omset ?? (Number(report.statistics.total_amount || 0) + totalRefundsForGrandTotal + effectiveTotalDiscount);
+    // gross_total_omset includes totalCancelledItemsAmount so Ringkasan can show it as explicit deduction
+    const totalCancelledItemsAmount = (report.cancelledItems || []).reduce((s: number, i: { total_price?: number }) => s + Number(i.total_price || 0), 0);
+    const grossTotalOmsetRaw = report.gross_total_omset ?? (Number(report.statistics.total_amount || 0) + totalRefundsForGrandTotal + effectiveTotalDiscount + totalCancelledItemsAmount);
     const grossTotalOmset = Math.round(Number(grossTotalOmsetRaw));
     const cashShiftSales = Number(cashSummaryData.cash_shift_sales ?? cashSummaryData.cash_shift ?? 0) || 0;
     const cashShiftRefunds = Number(cashSummaryData.cash_shift_refunds ?? 0) || 0;
@@ -12856,13 +12850,15 @@ function generateShiftBreakdownHTML(
     }).join('');
 
     const cancelledItemsRows = cancelledItemsList.map((item: { product_name: string; quantity: number; total_price: number; cancelled_at: string; cancelled_by_user_name: string; cancelled_by_waiter_name: string; receipt_number?: string | null; customer_name?: string | null }) => {
-      const cancelledByDisplay = item.cancelled_by_user_name
-        ? (item.cancelled_by_waiter_name && item.cancelled_by_waiter_name !== item.cancelled_by_user_name)
-          ? `${item.cancelled_by_user_name} / Waiters ${item.cancelled_by_waiter_name}`
-          : item.cancelled_by_user_name
-        : item.cancelled_by_waiter_name
-          ? `Waiters ${item.cancelled_by_waiter_name}`
-          : 'Tidak diketahui';
+      const userName = item.cancelled_by_user_name && item.cancelled_by_user_name !== 'Tidak diketahui' ? item.cancelled_by_user_name : null;
+      const waiterName = item.cancelled_by_waiter_name && item.cancelled_by_waiter_name !== 'Tidak diketahui' ? item.cancelled_by_waiter_name : null;
+      const cancelledByDisplay = userName && waiterName && waiterName !== userName
+        ? `${userName} / Waiters ${waiterName}`
+        : userName
+          ? userName
+          : waiterName
+            ? `Waiters ${waiterName}`
+            : '-';
       const cancelledTime = item.cancelled_at ? formatDateTime(item.cancelled_at) : '-';
       const priceStr = formatIntegerId(Math.round(Number(item.total_price || 0)));
       const receipt = (item.receipt_number || '-').replace(/</g, '&lt;').replace(/>/g, '&gt;');
@@ -12871,8 +12867,6 @@ function generateShiftBreakdownHTML(
       const cancelledBy = cancelledByDisplay.replace(/</g, '&lt;').replace(/>/g, '&gt;');
       return `<tr><td style="font-size: 7pt;">${cancelledTime}</td><td style="font-size: 7pt;">${productName}</td><td class="right" style="font-size: 7pt;">${item.quantity}x</td><td class="right" style="font-size: 7pt;">${priceStr}</td><td style="font-size: 7pt;">#${receipt}</td><td style="font-size: 7pt;">${customer}</td><td style="font-size: 7pt;">${cancelledBy}</td></tr>`;
     }).join('');
-
-    const totalCancelledItemsAmount = cancelledItemsList.reduce((s: number, i: { total_price?: number }) => s + Number(i.total_price || 0), 0);
 
     return `
     <div class="report-block">
@@ -12915,6 +12909,12 @@ function generateShiftBreakdownHTML(
             <span class="summary-label">Refund:</span>
             <span class="summary-value">-${formatIntegerId(totalRefundsForGrandTotal)}</span>
           </div>
+          ${totalCancelledItemsAmount > 0 ? `
+          <div class="summary-line summary-line-indent" style="color: #991b1b;">
+            <span class="summary-label">Item Dibatalkan:</span>
+            <span class="summary-value">-${formatIntegerId(Math.round(totalCancelledItemsAmount))}</span>
+          </div>
+          ` : ''}
           <div class="summary-block-voucher">
             <div class="summary-line summary-line-highlight-voucher">
               <span class="summary-label">Diskon Voucher:</span>
@@ -12934,7 +12934,7 @@ function generateShiftBreakdownHTML(
           </div>
           <div class="summary-line summary-line-highlight">
             <span class="summary-label">Grand Total:</span>
-            <span class="summary-value">${formatIntegerId(Math.max(0, (grossTotalOmset || 0) - totalRefundsForGrandTotal - effectiveTotalDiscount))}</span>
+            <span class="summary-value">${formatIntegerId(Math.max(0, (grossTotalOmset || 0) - totalRefundsForGrandTotal - totalCancelledItemsAmount - effectiveTotalDiscount))}</span>
           </div>
         </div>
         ${totalCustomizationRevenue > 0 ? `
@@ -12968,14 +12968,6 @@ function generateShiftBreakdownHTML(
         <div class="summary-line">
           <span class="summary-label">Jumlah CU:</span>
           <span class="summary-value">${report.statistics.total_cu ?? 0}</span>
-        </div>
-        <div class="summary-line">
-          <span class="summary-label">Kas Akhir:</span>
-          <span class="summary-value">${kasAkhirDisplay}</span>
-        </div>
-        <div class="summary-line">
-          <span class="summary-label">Selisih Kas:</span>
-          <span class="summary-value">${varianceValueDisplay}</span>
         </div>
       </div>
 
@@ -13017,7 +13009,7 @@ function generateShiftBreakdownHTML(
         <thead>
           <tr>
             <th>Payment Method</th>
-            <th class="right">Count</th>
+            <th style="text-align: left;">Count</th>
             <th class="right">Total</th>
           </tr>
         </thead>
@@ -13025,7 +13017,7 @@ function generateShiftBreakdownHTML(
           ${paymentRows || '<tr><td colSpan="3" style="text-align: center;">Tidak ada transaksi</td></tr>'}
           <tr class="total-row">
             <td>TOTAL</td>
-            <td class="right">${totalPaymentCount}</td>
+            <td style="text-align: left;">${totalPaymentCount}</td>
             <td class="right">${formatIntegerId(Math.round(totalPaymentAmount))}</td>
           </tr>
         </tbody>
@@ -13046,11 +13038,10 @@ function generateShiftBreakdownHTML(
         </thead>
         <tbody>
           ${category1Rows || '<tr><td colSpan="3" style="text-align: center;">Tidak ada Category I</td></tr>'}
-          ${totalCancelledItemsAmount > 0 ? `<tr><td style="color: #991b1b; font-size: 7pt;">(-) Total Item Dibatalkan</td><td></td><td class="right" style="color: #991b1b;">-${formatIntegerId(Math.round(totalCancelledItemsAmount))}</td></tr>` : ''}
           <tr class="total-row">
             <td>TOTAL</td>
             <td style="text-align: left;">${totalCategory1Quantity}</td>
-            <td class="right">${formatIntegerId(Math.round(Math.max(0, totalCategory1Amount - totalCancelledItemsAmount)))}</td>
+            <td class="right">${formatIntegerId(Math.round(totalCategory1Amount))}</td>
           </tr>
         </tbody>
       </table>
@@ -13070,11 +13061,10 @@ function generateShiftBreakdownHTML(
         </thead>
         <tbody>
           ${category2Rows || '<tr><td colSpan="3" style="text-align: center;">Tidak ada Category II</td></tr>'}
-          ${totalCancelledItemsAmount > 0 ? `<tr><td style="color: #991b1b; font-size: 7pt;">(-) Total Item Dibatalkan</td><td></td><td class="right" style="color: #991b1b;">-${formatIntegerId(Math.round(totalCancelledItemsAmount))}</td></tr>` : ''}
           <tr class="total-row">
             <td>TOTAL</td>
             <td style="text-align: left;">${totalCategory2Quantity}</td>
-            <td class="right">${formatIntegerId(Math.round(Math.max(0, totalCategory2Amount - totalCancelledItemsAmount)))}</td>
+            <td class="right">${formatIntegerId(Math.round(totalCategory2Amount))}</td>
           </tr>
         </tbody>
       </table>
@@ -13084,7 +13074,6 @@ function generateShiftBreakdownHTML(
 
       ${sectionOptions.paket === true ? `
       <div class="section-title">PAKET</div>
-      <div class="barang-terjual-note">Isi paket ditampilkan tanpa harga.</div>
       <table>
         <thead>
           <tr>
@@ -13096,12 +13085,11 @@ function generateShiftBreakdownHTML(
         </thead>
         <tbody>
           ${packageRows || '<tr><td colSpan="4" style="text-align: center;">Tidak ada paket terjual</td></tr>'}
-          ${totalCancelledItemsAmount > 0 ? `<tr><td colspan="2" style="color: #991b1b; font-size: 7pt;">(-) Total Item Dibatalkan</td><td></td><td class="right" style="color: #991b1b;">-${formatIntegerId(Math.round(totalCancelledItemsAmount))}</td></tr>` : ''}
           <tr class="total-row">
             <td>TOTAL</td>
             <td style="text-align: left;">${totalPackageQty}</td>
             <td class="right">-</td>
-            <td class="right">${formatIntegerId(Math.round(Math.max(0, totalPackageAmount - totalCancelledItemsAmount)))}</td>
+            <td class="right">${formatIntegerId(Math.round(totalPackageAmount))}</td>
           </tr>
         </tbody>
       </table>
@@ -13111,24 +13099,22 @@ function generateShiftBreakdownHTML(
 
       ${sectionOptions.barangTerjual === true ? `
       <div class="section-title">BARANG TERJUAL</div>
-      <div class="barang-terjual-note">Nilai per platform sebelum potongan/diskon/voucher. Refund tidak disertakan dalam perhitungan.</div>
       <table>
         <thead>
           <tr>
             <th>Product</th>
             <th style="text-align: left;">Qty</th>
-            <th class="right">Unit Price</th>
+            <th style="text-align: left; font-size: 6pt;">Unit Price</th>
             <th class="right">Subtotal</th>
           </tr>
         </thead>
         <tbody>
           ${productRows || '<tr><td colSpan="4" style="text-align: center;">Tidak ada produk</td></tr>'}
-          ${totalCancelledItemsAmount > 0 ? `<tr><td colspan="2" style="color: #991b1b; font-size: 7pt;">(-) Total Item Dibatalkan</td><td></td><td class="right" style="color: #991b1b;">-${formatIntegerId(Math.round(totalCancelledItemsAmount))}</td></tr>` : ''}
           <tr class="total-row">
             <td>TOTAL</td>
             <td style="text-align: left;">${totalProductQty}</td>
-            <td class="right">-</td>
-            <td class="right">${formatIntegerId(Math.round(Math.max(0, totalProductBaseSubtotal - totalCancelledItemsAmount)))}</td>
+            <td style="text-align: left; font-size: 6pt;">-</td>
+            <td class="right">${formatIntegerId(Math.round(totalProductBaseSubtotal))}</td>
           </tr>
           ${productPlatformBreakdownRows}
         </tbody>

@@ -1038,22 +1038,34 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
         const itemQuantity = typeof item.quantity === 'number' ? item.quantity : (typeof item.quantity === 'string' ? parseInt(item.quantity, 10) : 1);
         const itemCustomNote = typeof item.custom_note === 'string' ? item.custom_note : undefined;
         const itemBundleSelections = typeof item.bundle_selections_json === 'string' ? item.bundle_selections_json : undefined;
-        const itemPackageSelectionsJson = typeof item.package_selections_json === 'string' ? item.package_selections_json : undefined;
+        const rawPkgJson = item.package_selections_json;
+        const itemPackageSelectionsJson = typeof rawPkgJson === 'string' ? rawPkgJson : undefined;
+        const itemPackageSelectionsRaw = rawPkgJson != null && typeof rawPkgJson === 'object' && Array.isArray(rawPkgJson) ? rawPkgJson : undefined;
         const itemUuidForPkg = (item.uuid_id ?? item.id) as string | undefined;
         const pkgLinesForItem = itemUuidForPkg ? packageLinesByItem.get(String(itemUuidForPkg)) : undefined;
-        const itemPackageSelections = pkgLinesForItem && pkgLinesForItem.length > 0
-          ? pkgLinesForItem.map((line, index) => {
-            const p = productsMap.get(line.product_id);
-            const productName = (p && typeof (p as { nama?: string }).nama === 'string') ? (p as { nama: string }).nama : 'Unknown Product';
-            return {
-              package_item_id: index,
-              selection_type: 'default' as const,
-              product_id: line.product_id,
-              product_name: productName,
-              quantity: line.quantity,
-            };
-          })
-          : (itemPackageSelectionsJson ? JSON.parse(itemPackageSelectionsJson) : undefined);
+        // Prefer package_selections_json when present (string or object—MySQL JSON returns object) so per-item notes are preserved; fall back to building from package lines (no notes)
+        const itemPackageSelections = itemPackageSelectionsRaw ?? (itemPackageSelectionsJson
+          ? (() => {
+            try {
+              return JSON.parse(itemPackageSelectionsJson);
+            } catch {
+              return undefined;
+            }
+          })()
+          : undefined);
+        const itemPackageSelectionsFinal = itemPackageSelections && Array.isArray(itemPackageSelections) ? itemPackageSelections : (pkgLinesForItem && pkgLinesForItem.length > 0
+            ? pkgLinesForItem.map((line, index) => {
+              const p = productsMap.get(line.product_id);
+              const productName = (p && typeof (p as { nama?: string }).nama === 'string') ? (p as { nama: string }).nama : 'Unknown Product';
+              return {
+                package_item_id: index,
+                selection_type: 'default' as const,
+                product_id: line.product_id,
+                product_name: productName,
+                quantity: line.quantity,
+              };
+            })
+            : undefined);
         const transactionTableId = typeof transaction.table_id === 'number' ? transaction.table_id : (typeof transaction.table_id === 'string' ? parseInt(transaction.table_id, 10) : null);
 
         // Check if item should be locked
@@ -1095,10 +1107,10 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
           bundleSelections: itemBundleSelections
             ? JSON.parse(itemBundleSelections)
             : undefined,
-          packageSelections: itemPackageSelections ?? undefined,
+          packageSelections: itemPackageSelectionsFinal ?? undefined,
           // Keep raw JSON so PaymentModal can fall back when building labels if packageSelections is missing
-          ...(typeof item.package_selections_json === 'string' && item.package_selections_json.trim()
-            ? { package_selections_json: item.package_selections_json }
+          ...(rawPkgJson != null && (typeof rawPkgJson === 'string' ? rawPkgJson.trim() : true)
+            ? { package_selections_json: typeof rawPkgJson === 'string' ? rawPkgJson : JSON.stringify(rawPkgJson) }
             : {}),
           isLocked: isItemLocked, // Lock items that are visible on kitchen/barista (production_status IS NULL or 'preparing')
           transactionItemId: itemId || 0, // Database transaction_item ID

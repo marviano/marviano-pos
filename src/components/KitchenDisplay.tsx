@@ -32,9 +32,9 @@ interface OrderItem {
     }>;
   }>;
   /** Package breakdown lines (from DB: id, finished_at; or from JSON fallback). Filtered lines include originalIdx. */
-  packageBreakdownLines?: { id?: number; product_id: number; product_name: string; quantity: number; category1_id?: number; category1_name?: string; originalIdx?: number; finished_at?: string | null }[];
+  packageBreakdownLines?: { id?: number; product_id: number; product_name: string; quantity: number; category1_id?: number; category1_name?: string; originalIdx?: number; finished_at?: string | null; note?: string }[];
   /** Full unfiltered package breakdown (all lines) for completion tracking. */
-  originalPackageBreakdownLines?: { id?: number; product_id: number; product_name: string; quantity: number; category1_id?: number; category1_name?: string; finished_at?: string | null }[];
+  originalPackageBreakdownLines?: { id?: number; product_id: number; product_name: string; quantity: number; category1_id?: number; category1_name?: string; finished_at?: string | null; note?: string }[];
   /** Legacy: per-line completion (JSON). Prefer line.finished_at from DB when available. */
   package_line_finished_at?: Record<string, string>;
 }
@@ -278,7 +278,7 @@ export default function KitchenDisplay({ viewOnly = false, legacyCardLayout = fa
           const productNama = typeof product.nama === 'string' ? product.nama : 'Unknown';
 
           // Prefer packageBreakdownLines from DB (id + finished_at); fallback to package_selections_json
-          let packageBreakdownLines: { id?: number; product_id: number; product_name: string; quantity: number; category1_id?: number; category1_name?: string; finished_at?: string | null }[] | undefined;
+          let packageBreakdownLines: { id?: number; product_id: number; product_name: string; quantity: number; category1_id?: number; category1_name?: string; finished_at?: string | null; note?: string }[] | undefined;
           const dbLines = (item as Record<string, unknown>).packageBreakdownLines;
           if (Array.isArray(dbLines) && dbLines.length > 0) {
             // DB stores per-package quantity; show as-is (header "Paket: 2x ..." indicates package count)
@@ -290,6 +290,7 @@ export default function KitchenDisplay({ viewOnly = false, legacyCardLayout = fa
               category1_id: l.category1_id != null ? (typeof l.category1_id === 'number' ? l.category1_id : parseInt(String(l.category1_id), 10)) : undefined,
               category1_name: l.category1_name != null ? String(l.category1_name) : undefined,
               finished_at: l.finished_at != null ? String(l.finished_at) : null,
+              note: l.note != null ? String(l.note) : undefined,
             }));
           } else {
             try {
@@ -1063,6 +1064,9 @@ export default function KitchenDisplay({ viewOnly = false, legacyCardLayout = fa
                           <div className="text-black font-semibold truncate" title={item.pickup_method === 'take-away' ? 'Take Away' : (item.table_number || '-')}>
                             {item.pickup_method === 'take-away' ? 'Take Away' : (item.table_number || '-')}
                           </div>
+                          {item.custom_note && (
+                            <div className="text-purple-700 font-bold text-base break-words">note: {item.custom_note}</div>
+                          )}
                           <div className="border-l-2 border-amber-400 pl-2 mt-1 space-y-1">
                             {item.packageBreakdownLines!.map((line, idx) => {
                               // Optimistic state first so UI updates instantly (no timer flicker)
@@ -1076,14 +1080,17 @@ export default function KitchenDisplay({ viewOnly = false, legacyCardLayout = fa
                                 <div
                                   key={idx}
                                   onDoubleClick={viewOnly ? undefined : () => handlePackageSubItemDoubleClick(item, idx)}
-                                  className={`py-0.5 px-1 rounded min-h-[44px] flex items-center justify-between gap-2 text-gray-900 font-medium ${viewOnly ? '' : 'cursor-pointer hover:bg-amber-100'} ${lineChecked ? 'line-through opacity-75 bg-amber-50' : ''}`}
+                                  className={`py-0.5 px-1 rounded min-h-[44px] flex flex-col justify-center gap-0.5 text-gray-900 font-medium ${viewOnly ? '' : 'cursor-pointer hover:bg-amber-100'} ${lineChecked ? 'line-through opacity-75 bg-amber-50' : ''}`}
                                 >
-                                  <span>{line.quantity}x {line.product_name}</span>
-                                  <span className="text-base font-mono font-bold text-blue-700 shrink-0" title={lineChecked ? 'Waktu penyelesaian per item' : 'Timer per item'}>
-                                    {lineChecked && lineDurationMinutes != null
-                                      ? `${lineDurationMinutes} Menit`
-                                      : <OrderTimer startedAt={item.production_started_at} createdAt={item.created_at} />}
-                                  </span>
+                                  <div className="flex items-center justify-between gap-2">
+                                    <span>{line.quantity}x {line.product_name}</span>
+                                    <span className="text-base font-mono font-bold text-blue-700 shrink-0" title={lineChecked ? 'Waktu penyelesaian per item' : 'Timer per item'}>
+                                      {lineChecked && lineDurationMinutes != null
+                                        ? `${lineDurationMinutes} Menit`
+                                        : <OrderTimer startedAt={item.production_started_at} createdAt={item.created_at} />}
+                                    </span>
+                                  </div>
+                                  {line.note && <div className="text-purple-700 font-bold text-sm break-words">note: {line.note}</div>}
                                 </div>
                               );
                             })}
@@ -1278,13 +1285,19 @@ export default function KitchenDisplay({ viewOnly = false, legacyCardLayout = fa
                                 ? Math.max(0, Math.round((new Date(lineFinishedAt).getTime() - new Date(lineStart).getTime()) / 60000))
                                 : durationMinutes;
                               return (
-                                <div key={idx} className="flex items-center justify-between gap-2 text-gray-700 text-sm">
-                                  <span className="line-through">{line.quantity}x {line.product_name}</span>
-                                  {lineDurationMinutes != null && <span className="font-mono text-gray-600 shrink-0">{lineDurationMinutes} Menit</span>}
+                                <div key={idx} className="flex flex-col gap-0.5 text-gray-700 text-sm">
+                                  <div className="flex items-center justify-between gap-2">
+                                    <span className="line-through">{line.quantity}x {line.product_name}</span>
+                                    {lineDurationMinutes != null && <span className="font-mono text-gray-600 shrink-0">{lineDurationMinutes} Menit</span>}
+                                  </div>
+                                  {line.note && <div className="text-purple-900 text-xs line-through">note: {line.note}</div>}
                                 </div>
                               );
                             })}
                           </div>
+                          {item.custom_note && (
+                            <div className="text-sm text-purple-900 break-words font-medium line-through mt-1">note: {item.custom_note}</div>
+                          )}
                         </>
                       ) : (
                         <>

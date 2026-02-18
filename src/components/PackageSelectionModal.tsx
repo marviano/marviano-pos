@@ -14,7 +14,7 @@ export interface PackageItemForPos {
   choice_products: { id: number; nama: string }[];
 }
 
-/** One card: either default (always included) or flexible (cashier picks) */
+/** One card: either default (always included) or flexible (cashier picks). Per-sub-item note for Kitchen/Barista. */
 export type PackageSelection =
   | {
     package_item_id: number;
@@ -22,12 +22,13 @@ export type PackageSelection =
     product_id: number;
     product_name: string;
     quantity: number;
+    note?: string;
   }
   | {
     package_item_id: number;
     selection_type: 'flexible';
     required_quantity: number;
-    chosen: { product_id: number; product_name: string; quantity: number }[];
+    chosen: { product_id: number; product_name: string; quantity: number; note?: string }[];
   };
 
 /** Common size codes (first word = size). If first word is not a size, we use "QTY Name" to avoid corrupting names like "Ayam Goreng" or "Es Teh". */
@@ -43,33 +44,34 @@ export function formatPackageLineDisplay(productName: string, quantity: number):
   return `${quantity} ${t}`;
 }
 
-/** Flatten package selections to list of { product_name, quantity } for display/print. */
-export function getPackageBreakdownLines(selections: PackageSelection[], packageQuantity: number = 1): { product_name: string; quantity: number }[] {
-  const lines: { product_name: string; quantity: number }[] = [];
+/** Flatten package selections to list of { product_name, quantity, note? } for display/print. */
+export function getPackageBreakdownLines(selections: PackageSelection[], packageQuantity: number = 1): { product_name: string; quantity: number; note?: string }[] {
+  const lines: { product_name: string; quantity: number; note?: string }[] = [];
   (selections || []).forEach(sel => {
     if (sel.selection_type === 'default') {
-      lines.push({ product_name: sel.product_name, quantity: sel.quantity * packageQuantity });
+      lines.push({ product_name: sel.product_name, quantity: sel.quantity * packageQuantity, note: sel.note?.trim() || undefined });
     } else {
       (sel.chosen || []).forEach(c => {
-        if (c.quantity > 0) lines.push({ product_name: c.product_name, quantity: c.quantity * packageQuantity });
+        if (c.quantity > 0) lines.push({ product_name: c.product_name, quantity: c.quantity * packageQuantity, note: c.note?.trim() || undefined });
       });
     }
   });
   return lines;
 }
 
-/** Breakdown lines with product_id for display filtering by category (Kitchen/Barista). */
+/** Breakdown lines with product_id and optional note for display filtering by category (Kitchen/Barista). */
 export function getPackageBreakdownLinesWithProductId(
   selections: PackageSelection[],
   packageQuantity: number
-): { product_id: number; product_name: string; quantity: number }[] {
-  const lines: { product_id: number; product_name: string; quantity: number }[] = [];
+): { product_id: number; product_name: string; quantity: number; note?: string }[] {
+  const lines: { product_id: number; product_name: string; quantity: number; note?: string }[] = [];
   (selections || []).forEach(sel => {
     if (sel.selection_type === 'default') {
       lines.push({
         product_id: sel.product_id,
         product_name: sel.product_name,
         quantity: sel.quantity * packageQuantity,
+        note: sel.note?.trim() || undefined,
       });
     } else {
       (sel.chosen || []).forEach(c => {
@@ -78,6 +80,7 @@ export function getPackageBreakdownLinesWithProductId(
             product_id: c.product_id,
             product_name: c.product_name,
             quantity: c.quantity * packageQuantity,
+            note: c.note?.trim() || undefined,
           });
         }
       });
@@ -130,6 +133,10 @@ export default function PackageSelectionModal({
   // For package overall quantity
   const [packageQuantity, setPackageQuantity] = useState(1);
 
+  // Per-item customization notes: default item -> note; flexible item -> productId -> note
+  const [defaultNotes, setDefaultNotes] = useState<Record<number, string>>({});
+  const [flexibleNotes, setFlexibleNotes] = useState<Record<number, Record<number, string>>>({});
+
   // For flexible items: itemId -> productId -> quantity
   const [flexibleQtys, setFlexibleQtys] = useState<Record<number, Record<number, number>>>({});
 
@@ -137,6 +144,8 @@ export default function PackageSelectionModal({
   useEffect(() => {
     if (!isOpen || sortedItems.length === 0) return;
     setPackageQuantity(1);
+    setDefaultNotes({});
+    setFlexibleNotes({});
     const initial: Record<number, Record<number, number>> = {};
     sortedItems.forEach(item => {
       if (item.selection_type === 'flexible') {
@@ -204,22 +213,25 @@ export default function PackageSelectionModal({
           selection_type: 'default' as const,
           product_id: item.product_id!,
           product_name: item.product_name || '',
-          quantity: item.required_quantity
+          quantity: item.required_quantity,
+          note: defaultNotes[item.id]?.trim() || undefined,
         };
       }
       const q = flexibleQtys[item.id] || {};
+      const notes = flexibleNotes[item.id] || {};
       const chosen = (item.choice_products || [])
         .filter(p => (q[p.id] || 0) > 0)
         .map(p => ({
           product_id: p.id,
           product_name: p.nama,
-          quantity: q[p.id] || 0
+          quantity: q[p.id] || 0,
+          note: notes[p.id]?.trim() || undefined,
         }));
       return {
         package_item_id: item.id,
         selection_type: 'flexible' as const,
         required_quantity: item.required_quantity,
-        chosen
+        chosen,
       };
     });
     onConfirm(selections, packageQuantity);
@@ -332,17 +344,30 @@ export default function PackageSelectionModal({
               </div>
 
               {item.selection_type === 'default' ? (
-                <div className="flex items-center gap-4 bg-white dark:bg-gray-800/50 rounded-2xl p-4 border border-gray-100 dark:border-gray-700 shadow-sm">
-                  <div className="flex flex-col">
-                    <span className="text-[10px] font-bold text-gray-400 dark:text-gray-500 uppercase tracking-widest mb-1">Quantity</span>
-                    <span className="font-mono text-xl font-black text-gray-900 dark:text-white">
-                      {item.required_quantity * packageQuantity}×
+                <div className="space-y-3">
+                  <div className="flex items-center gap-4 bg-white dark:bg-gray-800/50 rounded-2xl p-4 border border-gray-100 dark:border-gray-700 shadow-sm">
+                    <div className="flex flex-col">
+                      <span className="text-[10px] font-bold text-gray-400 dark:text-gray-500 uppercase tracking-widest mb-1">Quantity</span>
+                      <span className="font-mono text-xl font-black text-gray-900 dark:text-white">
+                        {item.required_quantity * packageQuantity}×
+                      </span>
+                    </div>
+                    <div className="w-px h-10 bg-gray-100 dark:bg-gray-700 mx-2" />
+                    <span className="text-lg text-gray-800 dark:text-gray-200 font-semibold">
+                      {item.product_name || '—'}
                     </span>
                   </div>
-                  <div className="w-px h-10 bg-gray-100 dark:bg-gray-700 mx-2" />
-                  <span className="text-lg text-gray-800 dark:text-gray-200 font-semibold">
-                    {item.product_name || '—'}
-                  </span>
+                  <div>
+                    <label className="block text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">Catatan untuk item ini (opsional)</label>
+                    <input
+                      type="text"
+                      value={defaultNotes[item.id] ?? ''}
+                      onChange={(e) => setDefaultNotes(prev => ({ ...prev, [item.id]: e.target.value }))}
+                      placeholder="misal: kurang pedas, no ice..."
+                      className="w-full px-3 py-2 border border-gray-200 dark:border-gray-600 rounded-xl text-sm text-gray-800 dark:text-gray-200 bg-white dark:bg-gray-700/50 focus:border-blue-500 focus:ring-1 focus:ring-blue-500/20"
+                      maxLength={120}
+                    />
+                  </div>
                 </div>
               ) : (
                 <div className="space-y-4">
@@ -354,38 +379,56 @@ export default function PackageSelectionModal({
                       return (
                         <div
                           key={product.id}
-                          className={`flex items-center gap-3 bg-white dark:bg-gray-800 rounded-2xl border-2 transition-all duration-200 p-3 ${qty > 0
+                          className={`flex flex-col gap-2 bg-white dark:bg-gray-800 rounded-2xl border-2 transition-all duration-200 p-3 ${qty > 0
                             ? 'border-blue-500 shadow-md scale-[1.02]'
                             : 'border-gray-100 dark:border-gray-700 opacity-80'
                             }`}
                         >
-                          <div className="flex items-center gap-1 bg-gray-50 dark:bg-gray-700 rounded-xl p-1">
-                            <button
-                              type="button"
-                              onClick={() => setFlexibleQty(item.id, product.id, qty - 1)}
-                              disabled={qty <= 0}
-                              className="w-10 h-10 flex items-center justify-center rounded-lg bg-white dark:bg-gray-600 text-red-500 hover:bg-red-50 dark:hover:bg-red-900/20 disabled:opacity-30 disabled:cursor-not-allowed transition-colors shadow-sm active:scale-90"
-                              aria-label="Decrease"
-                            >
-                              <Minus className="w-5 h-5 stroke-[2.5]" />
-                            </button>
-                            <span className="min-w-[2.5rem] text-center font-mono font-black text-lg text-gray-900 dark:text-white" aria-live="polite">
-                              {qty}
+                          <div className="flex items-center gap-3">
+                            <div className="flex items-center gap-1 bg-gray-50 dark:bg-gray-700 rounded-xl p-1">
+                              <button
+                                type="button"
+                                onClick={() => setFlexibleQty(item.id, product.id, qty - 1)}
+                                disabled={qty <= 0}
+                                className="w-10 h-10 flex items-center justify-center rounded-lg bg-white dark:bg-gray-600 text-red-500 hover:bg-red-50 dark:hover:bg-red-900/20 disabled:opacity-30 disabled:cursor-not-allowed transition-colors shadow-sm active:scale-90"
+                                aria-label="Decrease"
+                              >
+                                <Minus className="w-5 h-5 stroke-[2.5]" />
+                              </button>
+                              <span className="min-w-[2.5rem] text-center font-mono font-black text-lg text-gray-900 dark:text-white" aria-live="polite">
+                                {qty}
+                              </span>
+                              <button
+                                type="button"
+                                onClick={() => setFlexibleQty(item.id, product.id, qty + 1)}
+                                disabled={!canIncrease}
+                                className="w-10 h-10 flex items-center justify-center rounded-lg bg-white dark:bg-gray-600 text-emerald-500 hover:bg-emerald-50 dark:hover:bg-emerald-900/20 disabled:opacity-30 disabled:cursor-not-allowed transition-colors shadow-sm active:scale-90"
+                                aria-label="Increase"
+                              >
+                                <Plus className="w-5 h-5 stroke-[2.5]" />
+                              </button>
+                            </div>
+                            <span className={`flex-1 font-bold text-sm leading-tight transition-colors ${qty > 0 ? 'text-gray-900 dark:text-white' : 'text-gray-500 dark:text-gray-400'
+                              }`}>
+                              {product.nama}
                             </span>
-                            <button
-                              type="button"
-                              onClick={() => setFlexibleQty(item.id, product.id, qty + 1)}
-                              disabled={!canIncrease}
-                              className="w-10 h-10 flex items-center justify-center rounded-lg bg-white dark:bg-gray-600 text-emerald-500 hover:bg-emerald-50 dark:hover:bg-emerald-900/20 disabled:opacity-30 disabled:cursor-not-allowed transition-colors shadow-sm active:scale-90"
-                              aria-label="Increase"
-                            >
-                              <Plus className="w-5 h-5 stroke-[2.5]" />
-                            </button>
                           </div>
-                          <span className={`flex-1 font-bold text-sm leading-tight transition-colors ${qty > 0 ? 'text-gray-900 dark:text-white' : 'text-gray-500 dark:text-gray-400'
-                            }`}>
-                            {product.nama}
-                          </span>
+                          {qty > 0 && (
+                            <div>
+                              <label className="block text-[10px] font-medium text-gray-500 dark:text-gray-400 mb-0.5">Catatan (opsional)</label>
+                              <input
+                                type="text"
+                                value={flexibleNotes[item.id]?.[product.id] ?? ''}
+                                onChange={(e) => setFlexibleNotes(prev => ({
+                                  ...prev,
+                                  [item.id]: { ...(prev[item.id] || {}), [product.id]: e.target.value },
+                                }))}
+                                placeholder="misal: less sugar, no cream..."
+                                className="w-full px-2 py-1.5 border border-gray-200 dark:border-gray-600 rounded-lg text-xs text-gray-800 dark:text-gray-200 bg-white dark:bg-gray-700/50 focus:border-blue-500 focus:ring-1 focus:ring-blue-500/20"
+                                maxLength={120}
+                              />
+                            </div>
+                          )}
                         </div>
                       );
                     })}
