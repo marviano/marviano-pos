@@ -963,7 +963,7 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
       const itemUuidsForPackage = activeItemsForPackage
         .map((i) => (i.uuid_id ?? i.id) as string)
         .filter(Boolean) as string[];
-      const packageLinesByItem = new Map<string, Array<{ product_id: number; quantity: number }>>();
+      const packageLinesByItem = new Map<string, Array<{ product_id: number; quantity: number; note?: string }>>();
       if (itemUuidsForPackage.length > 0 && electronAPI.localDbGetPackageLines) {
         try {
           const packageLines = await electronAPI.localDbGetPackageLines(itemUuidsForPackage);
@@ -972,7 +972,12 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
             if (!packageLinesByItem.has(itemUuid)) {
               packageLinesByItem.set(itemUuid, []);
             }
-            packageLinesByItem.get(itemUuid)!.push({ product_id: line.product_id, quantity: line.quantity });
+            const note = (line as { note?: string | null }).note;
+            packageLinesByItem.get(itemUuid)!.push({
+              product_id: line.product_id,
+              quantity: line.quantity,
+              ...(note != null && String(note).trim() ? { note: String(note).trim() } : {}),
+            });
           }
         } catch (e) {
           console.warn('loadTransactionIntoCart: failed to fetch package lines', e);
@@ -1063,6 +1068,7 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
                 product_id: line.product_id,
                 product_name: productName,
                 quantity: line.quantity,
+                ...(line.note != null && String(line.note).trim() ? { note: String(line.note).trim() } : {}),
               };
             })
             : undefined);

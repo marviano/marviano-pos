@@ -433,6 +433,7 @@ export async function initializeMySQLSchema(): Promise<void> {
       uuid_transaction_item_id VARCHAR(36) NOT NULL,
       product_id INT NOT NULL,
       quantity INT NOT NULL DEFAULT 1,
+      note VARCHAR(120) NULL DEFAULT NULL,
       finished_at TIMESTAMP NULL DEFAULT NULL,
       created_at TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP,
       PRIMARY KEY (id),

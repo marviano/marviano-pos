@@ -1361,7 +1361,13 @@ export default function PaymentModal({
             const itemName = item.product.nama;
             const productWithCat = item.product as { category1_id?: number | null; category1_name?: string | null };
             const category1Id = productWithCat.category1_id ?? null;
-            const category1Name = productWithCat.category1_name ?? null;
+            let category1Name = productWithCat.category1_name ?? null;
+            // Package main row: route to _other so it doesn't displace real categories from {{itemsCategory1}}/{{itemsCategory2}}
+            const hasPackageSelections = item.packageSelections && item.packageSelections.length > 0;
+            const rawPkgForMain = (item as { package_selections_json?: string }).package_selections_json;
+            if (hasPackageSelections || (typeof rawPkgForMain === 'string' && rawPkgForMain.trim())) {
+              category1Name = '';
+            }
 
             // Add main bundle item (custom_note/customizations for backend; backend shows only when show_notes is true)
             receiptItems.push({
@@ -1446,8 +1452,9 @@ export default function PaymentModal({
                 const lineCategory1Id = (lineProduct as { category1_id?: number | null } | undefined)?.category1_id ?? null;
                 const lineCategory1Name = (lineProduct as { category1_name?: string | null } | undefined)?.category1_name ?? null;
                 const lineNote = (line as { note?: string }).note?.trim() || undefined;
+                const lineName = `${line.quantity}x ${line.product_name} (${item.product.nama})${lineNote ? `\nnote: ${lineNote}` : ''}`;
                 receiptItems.push({
-                  name: `${line.quantity}x ${line.product_name} (${item.product.nama})`,
+                  name: lineName,
                   quantity: line.quantity,
                   price: 0,
                   total_price: 0,
@@ -2137,8 +2144,10 @@ export default function PaymentModal({
             }
             const itemCellContent = (ri: ReceiptItem) => {
               let text = ri.name;
-              if (ri.customNote || ri.custom_note) {
-                text += '\nCatatan: ' + (ri.customNote || ri.custom_note);
+              // Skip appending note if name already contains "\nnote:" (e.g. package sub-rows) to avoid duplicate
+              const alreadyHasNoteLine = /\nnote:\s*/.test(ri.name ?? '');
+              if ((ri.customNote || ri.custom_note) && !alreadyHasNoteLine) {
+                text += '\nnote: ' + (ri.customNote || ri.custom_note);
               }
               if (ri.customizations && Array.isArray(ri.customizations)) {
                 const opts = (ri.customizations as Array<{ selected_options?: Array<{ option_name?: string }> }>).flatMap(
@@ -2154,16 +2163,16 @@ export default function PaymentModal({
              * Package sub-items: subtotal 0 and name in one of:
              * - legacy indented: "    Ayam Goreng ..."
              * - legacy prefix: "(Paket...) 6 Product..."
-             * - current: "2x Ayam Goreng (Paket Ayam Sedih)"
-             * We skip the redundant "- quantityx " prefix for these on the checker.
+             * - current: "2x Ayam Goreng (Paket Ayam Sedih)" (match first line only so "\nnote: ..." does not break)
+             * We skip the redundant "quantityx " prefix for these on the checker.
              */
             const isPackageSubRow = (ri: ReceiptItem) => {
               if (ri.total_price !== 0) return false;
               const name = (ri.name ?? '').trimStart();
               if ((ri.name ?? '').startsWith('    ')) return true;
               if (/^\([^)]*\)\s+\d+/.test(name)) return true;
-              // "2x Ayam Goreng (Paket Ayam Sedih)"
-              return /^\d+x\s+.+\s+\([^)]+\)$/.test(name);
+              const firstLine = name.split('\n')[0].trim();
+              return /^\d+x\s+.+\s+\([^)]+\)$/.test(firstLine);
             };
             const rowHtml = (ri: ReceiptItem) => {
               const trClass = isPackageSubRow(ri) ? ' class="package-subitem"' : '';

@@ -616,6 +616,19 @@ async function ensureTransactionItemPackageLinesFinishedAtColumn(): Promise<void
   }
 }
 
+/** Lazy migration: ensure transaction_item_package_lines.note exists (per-item customization notes). */
+let transactionItemPackageLinesNoteEnsured = false;
+async function ensureTransactionItemPackageLinesNoteColumn(): Promise<void> {
+  if (transactionItemPackageLinesNoteEnsured) return;
+  try {
+    await executeDdlIgnoreDup('ALTER TABLE transaction_item_package_lines ADD COLUMN note VARCHAR(120) NULL DEFAULT NULL AFTER quantity');
+    transactionItemPackageLinesNoteEnsured = true;
+    console.log('✅ transaction_item_package_lines.note column ensured (lazy migration)');
+  } catch (e) {
+    console.warn('⚠️ Lazy migration transaction_item_package_lines.note failed (will retry on next use):', (e as Error)?.message);
+  }
+}
+
 /** Lazy migration: ensure transaction_items cancellation audit columns exist. */
 let transactionItemsCancellationColumnsEnsured = false;
 async function ensureTransactionItemsCancellationColumns(): Promise<void> {
@@ -5016,6 +5029,7 @@ function createWindows(): void {
       // Save package line items to transaction_item_package_lines (normalized table)
       // When an item already has package lines in DB (e.g. order was saved then paid), preserve them
       // so that kitchen/barista completion (finished_at) is not wiped by payment upsert.
+      if (packageLinesToSave.length > 0) await ensureTransactionItemPackageLinesNoteColumn();
       const packageLineQueries: Array<{ sql: string; params?: (string | number)[] }> = [];
       for (const { itemUuidId, itemQuantity, rawJson } of packageLinesToSave) {
         try {
@@ -5028,27 +5042,31 @@ function createWindows(): void {
             // payment/upsert would otherwise wipe finished_at and make completed items reappear in active orders.
             continue;
           }
-          const selections = parseJsonArray<{ selection_type: string; product_id?: number; quantity?: number; chosen?: Array<{ product_id: number; quantity?: number }> }>(rawJson, 'package_selections_json');
-          // Store per-package quantity only; display will multiply by itemQuantity
+          const selections = parseJsonArray<{ selection_type: string; product_id?: number; quantity?: number; note?: string; chosen?: Array<{ product_id: number; quantity?: number; note?: string }> }>(rawJson, 'package_selections_json');
+          // Store per-package quantity and note; display will multiply quantity by itemQuantity
           const byProduct = new Map<number, number>();
+          const byProductNote = new Map<number, string>();
           for (const sel of selections || []) {
             if (sel.selection_type === 'default' && sel.product_id != null) {
               const q = typeof sel.quantity === 'number' ? sel.quantity : 1;
               byProduct.set(sel.product_id, (byProduct.get(sel.product_id) || 0) + q);
+              if (sel.note?.trim()) byProductNote.set(sel.product_id, sel.note.trim());
             } else if (sel.selection_type === 'flexible' && Array.isArray(sel.chosen)) {
               for (const c of sel.chosen) {
                 if (c.product_id == null) continue;
                 const q = typeof c.quantity === 'number' ? c.quantity : 1;
                 byProduct.set(c.product_id, (byProduct.get(c.product_id) || 0) + q);
+                if (c.note?.trim()) byProductNote.set(c.product_id, c.note.trim());
               }
             }
           }
           packageLineQueries.push({ sql: 'DELETE FROM transaction_item_package_lines WHERE uuid_transaction_item_id = ?', params: [itemUuidId] });
           for (const [pid, qty] of byProduct.entries()) {
             if (qty > 0) {
+              const note = byProductNote.get(pid) ?? '';
               packageLineQueries.push({
-                sql: 'INSERT INTO transaction_item_package_lines (uuid_transaction_item_id, product_id, quantity, finished_at) VALUES (?, ?, ?, NULL)',
-                params: [itemUuidId, pid, qty],
+                sql: 'INSERT INTO transaction_item_package_lines (uuid_transaction_item_id, product_id, quantity, note, finished_at) VALUES (?, ?, ?, ?, NULL)',
+                params: [itemUuidId, pid, qty, note],
               });
             }
           }
@@ -5264,12 +5282,13 @@ function createWindows(): void {
 
       // Load package lines from transaction_item_package_lines for all items (normalized table; id + finished_at for completion)
       const itemUuids = items.map((i) => (i.uuid_id || i.id) as string).filter(Boolean);
-      const packageLinesByItem = new Map<string, Array<{ id: number; product_id: number; product_name: string; quantity: number; finished_at: string | null; category1_id?: number; category1_name?: string }>>();
+      const packageLinesByItem = new Map<string, Array<{ id: number; product_id: number; product_name: string; quantity: number; note?: string | null; finished_at: string | null; category1_id?: number; category1_name?: string }>>();
       if (itemUuids.length > 0) {
         await ensureTransactionItemPackageLinesFinishedAtColumn();
+        await ensureTransactionItemPackageLinesNoteColumn();
         const placeholders = itemUuids.map(() => '?').join(',');
         const packageRows = await executeQuery<Record<string, unknown>>(
-          `SELECT tipl.id, tipl.uuid_transaction_item_id, ti.id as ti_id, tipl.product_id, tipl.quantity, tipl.finished_at,
+          `SELECT tipl.id, tipl.uuid_transaction_item_id, ti.id as ti_id, tipl.product_id, tipl.quantity, tipl.note, tipl.finished_at,
                   p.nama as product_name, p.category1_id as category1_id, c1.name as category1_name
            FROM transaction_item_package_lines tipl
            LEFT JOIN transaction_items ti ON ti.uuid_id = tipl.uuid_transaction_item_id
@@ -5287,6 +5306,7 @@ function createWindows(): void {
             product_id: row.product_id as number,
             product_name: (row.product_name as string) || '',
             quantity: (row.quantity as number) || 1,
+            note: row.note != null && String(row.note).trim() !== '' ? String(row.note) : undefined,
             finished_at: row.finished_at != null ? (typeof row.finished_at === 'string' ? row.finished_at : String(row.finished_at)) : null,
             category1_id: row.category1_id != null ? (typeof row.category1_id === 'number' ? row.category1_id : parseInt(String(row.category1_id), 10)) : undefined,
             category1_name: row.category1_name != null ? String(row.category1_name) : undefined,
@@ -5349,8 +5369,8 @@ function createWindows(): void {
           }
         }
 
-        // Attach package lines from transaction_item_package_lines (id + finished_at for Kitchen/Barista completion).
-        // Keep original package_selections_json (with notes). Merge notes into lines by index (DB insert order matches selection flatten order).
+        // Attach package lines from transaction_item_package_lines (id + finished_at + note for Kitchen/Barista completion).
+        // Prefer tipl.note from DB; fall back to index-based merge from package_selections_json for legacy rows inserted before note column.
         const package_selections_json = item.package_selections_json;
         const lines = packageLinesByItem.get(itemUuid) ?? (item.id != null ? packageLinesByItem.get(String(item.id)) : undefined);
         let linesWithNotes: Array<{ id: number; product_id: number; product_name: string; quantity: number; finished_at: string | null; category1_id?: number; category1_name?: string; note?: string }> | undefined;
@@ -5373,7 +5393,7 @@ function createWindows(): void {
           }
           linesWithNotes = lines.map((l, i) => ({
             ...l,
-            note: flatNotes[i] ? flatNotes[i] : undefined,
+            note: (l.note != null && String(l.note).trim() !== '') ? l.note : (flatNotes[i] ? flatNotes[i] : undefined),
           }));
         }
 
@@ -5399,7 +5419,7 @@ function createWindows(): void {
       if (!Array.isArray(uuidTransactionItemIds) || uuidTransactionItemIds.length === 0) return [];
       const placeholders = uuidTransactionItemIds.map(() => '?').join(',');
       const rows = await executeQuery<Record<string, unknown>>(
-        `SELECT id, uuid_transaction_item_id, product_id, quantity, finished_at, created_at
+        `SELECT id, uuid_transaction_item_id, product_id, quantity, note, finished_at, created_at
          FROM transaction_item_package_lines
          WHERE uuid_transaction_item_id IN (${placeholders})
          ORDER BY id ASC`,
@@ -12091,9 +12111,9 @@ function generateMultipleLabelsHTML(labels: LabelPrintData[]): string {
   `;
 }
 
-/** Parse package_selections_json into lines { product_name, quantity } (quantity already * packageQuantity). */
-function parsePackageBreakdownFromJson(rawJson: unknown, packageQuantity: number): { product_name: string; quantity: number }[] {
-  const lines: { product_name: string; quantity: number }[] = [];
+/** Parse package_selections_json into lines { product_name, quantity, note? } (quantity already * packageQuantity). */
+function parsePackageBreakdownFromJson(rawJson: unknown, packageQuantity: number): { product_name: string; quantity: number; note?: string }[] {
+  const lines: { product_name: string; quantity: number; note?: string }[] = [];
   if (packageQuantity <= 0) return lines;
   let arr: unknown[];
   if (typeof rawJson === 'string') {
@@ -12115,7 +12135,8 @@ function parsePackageBreakdownFromJson(rawJson: unknown, packageQuantity: number
     if (st === 'default') {
       const name = (s.product_name as string) ?? (s.nama as string) ?? '';
       const qty = typeof s.quantity === 'number' && !Number.isNaN(s.quantity) ? s.quantity : 0;
-      if (name || qty > 0) lines.push({ product_name: String(name), quantity: qty * packageQuantity });
+      const note = s.note != null && String(s.note).trim() ? String(s.note).trim() : undefined;
+      if (name || qty > 0) lines.push({ product_name: String(name), quantity: qty * packageQuantity, note });
     } else if (st === 'flexible' && Array.isArray(s.chosen)) {
       for (const c of s.chosen) {
         if (!c || typeof c !== 'object') continue;
@@ -12123,12 +12144,20 @@ function parsePackageBreakdownFromJson(rawJson: unknown, packageQuantity: number
         const cqty = typeof cc.quantity === 'number' && !Number.isNaN(cc.quantity) ? cc.quantity : 0;
         if (cqty > 0) {
           const cname = (cc.product_name as string) ?? (cc.nama as string) ?? '';
-          lines.push({ product_name: String(cname), quantity: cqty * packageQuantity });
+          const cnote = cc.note != null && String(cc.note).trim() ? String(cc.note).trim() : undefined;
+          lines.push({ product_name: String(cname), quantity: cqty * packageQuantity, note: cnote });
         }
       }
     }
   }
   return lines;
+}
+
+/** Strip trailing " (anything)" from a name for receipt display (no package name on receipt). */
+function stripPackageNameParenthetical(name: string): string {
+  const s = String(name ?? '').trim();
+  const m = s.match(/^(.+?)\s+\([^)]*\)\s*$/);
+  return m ? m[1].trim() : s;
 }
 
 /** Common size codes (first word = size). Otherwise use "QTY Name" to avoid corrupting names like "Ayam Goreng" or "Es Teh". */
@@ -12142,9 +12171,13 @@ function formatPackageLineDisplay(productName: string, quantity: number): string
   return `${quantity} ${t}`;
 }
 
-/** Detect flattened package sub-row (from frontend receiptItems: total_price 0, name starts with 4 spaces). */
+/** Detect flattened package sub-row: total_price 0 and (name starts with 4 spaces, or first line matches "Nx ProductName (PackageName)"). */
 function isFlattenedPackageSubItem(item: any): boolean {
-  return item.total_price === 0 && String(item.name ?? '').startsWith('    ');
+  if (item.total_price !== 0) return false;
+  const name = String(item.name ?? '').trimStart();
+  if (name.startsWith('    ')) return true;
+  const firstLine = name.split('\n')[0].trim();
+  return /^\d+x\s+.+\s+\([^)]+\)$/.test(firstLine);
 }
 
 /** Build items table HTML for receipt/bill/checker. Package products: main line + indented bullet sub-items (no price columns on bullets). */
@@ -12160,8 +12193,14 @@ function buildItemsHtmlForPrint(
     const price = item.price || item.unit_price || 0;
     const subtotal = item.total_price || (price * qty);
     if (isFlattenedPackageSubItem(item)) {
-      const safeName = String(name).trim()
-        .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+      // Receipt: no note and no (package name) for package sub-items
+      let displayName = String(name).trim();
+      const noteLineMatch = displayName.match(/\nnote:\s*.+/i);
+      if (noteLineMatch) displayName = displayName.slice(0, displayName.indexOf(noteLineMatch[0])).trim();
+      displayName = stripPackageNameParenthetical(displayName);
+      const safeName = displayName
+        .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
+        .replace(/\n/g, '<br/>');
       out.push(`
       <tr class="package-subitem">
         <td colspan="4" style="text-align: left; padding-left: 5mm; padding-bottom: 0.3mm; font-size: 9pt;">${safeName}</td>
@@ -12180,14 +12219,14 @@ function buildItemsHtmlForPrint(
     const noteLine = noteParts.length ? noteParts.join(' | ') : '';
     const noteRow = showNotes && noteLine ? `<tr><td colspan="4" style="text-align: left; padding-bottom: 0.5mm; font-size: 8pt; color: #555;">${noteLine}</td></tr>` : '';
 
-    let breakdownLines: { product_name: string; quantity: number }[] | undefined = item.packageBreakdownLines;
+    let breakdownLines: { product_name: string; quantity: number; note?: string }[] | undefined = item.packageBreakdownLines;
     if (!breakdownLines?.length && (item.package_selections_json != null || item.packageSelections != null)) {
       const raw = item.package_selections_json ?? (item.packageSelections && typeof item.packageSelections === 'object' ? JSON.stringify(item.packageSelections) : null);
       breakdownLines = raw != null ? parsePackageBreakdownFromJson(raw, qty) : undefined;
     }
 
     if (breakdownLines && breakdownLines.length > 0) {
-      // Package: main line (name, price, qty, subtotal) then indented bullet sub-items (no price columns)
+      // Package: main line (name, price, qty, subtotal) then indented bullet sub-items (no price columns). Receipt: no per-item note, no (package name).
       out.push(`
       <tr>
         <td colspan="4" style="text-align: left; padding-bottom: 0.5mm;">${name}</td>
@@ -12200,7 +12239,8 @@ function buildItemsHtmlForPrint(
       </tr>
       ${noteRow}`);
       for (const line of breakdownLines) {
-        const lineText = formatPackageLineDisplay(line.product_name, line.quantity);
+        const displayName = stripPackageNameParenthetical(line.product_name);
+        const lineText = formatPackageLineDisplay(displayName, line.quantity);
         out.push(`
       <tr>
         <td colspan="4" style="text-align: left; padding-left: 5mm; padding-bottom: 0.3mm; font-size: 9pt;">• ${lineText}</td>

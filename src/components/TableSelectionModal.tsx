@@ -96,23 +96,24 @@ interface CartItem {
 /** One row for checker slip (same structure as receipt: main line + bundle/package sub-rows). */
 type CheckerRow = { name: string; quantity: number; subtotal: number; category1_name: string };
 
-/** True for package sub-rows (subtotal 0, name like "2x Ayam Goreng (Paket...)" or legacy "(Paket...) 6 Product" / "    Product") so we skip redundant "quantityx" prefix on kitchen labels. */
+/** True for package sub-rows (subtotal 0, name like "2x Ayam Goreng (Paket...)" or legacy "(Paket...) 6 Product" / "    Product") so we skip redundant "quantityx" prefix on kitchen labels. Match on first line only so "\nnote: ..." does not break the pattern. */
 function isPackageSubRowCheckerRow(row: CheckerRow): boolean {
   if (row.subtotal !== 0) return false;
   const name = (row.name ?? '').trimStart();
   if ((row.name ?? '').startsWith('    ')) return true;
   if (/^\([^)]*\)\s+\d+/.test(name)) return true;
-  return /^\d+x\s+.+\s+\([^)]+\)$/.test(name);
+  const firstLine = name.split('\n')[0].trim();
+  return /^\d+x\s+.+\s+\([^)]+\)$/.test(firstLine);
 }
 
-/** Build note/customization line from item or bundle selected product (for checker/struk). */
+/** Build note/customization line from item or bundle selected product (for checker/struk). Prefix with "note: " for consistency with package sub-item notes. */
 function buildCheckerNoteLine(item: { customizations?: { selected_options: { option_name: string }[] }[]; customNote?: string }): string {
   const parts: string[] = [];
   if (item.customizations?.length) {
     item.customizations.forEach(c => c.selected_options.forEach(o => parts.push(o.option_name)));
   }
   if (item.customNote?.trim()) parts.push(item.customNote.trim());
-  return parts.length ? parts.join(', ') : '';
+  return parts.length ? 'note: ' + parts.join(', ') : '';
 }
 
 /** Build receipt-style flat list from cart items (main + bundle sub-rows + package sub-rows) so checker matches receipt/bill. */
@@ -126,12 +127,16 @@ function buildCheckerRowsFromCartItems(cartItems: CartItem[], productsMap: Map<n
     const category1Name = ((item.product as { category1_name?: string | null }).category1_name ?? '').trim() || 'Kategori 1';
     const noteLine = buildCheckerNoteLine(item);
     const mainName = (item.product.nama || '') + (noteLine ? `\n${noteLine}` : '');
+    const rawPkgJsonForMain = (item as CartItem & { package_selections_json?: string }).package_selections_json;
+    const hasPackageSelections = (item.packageSelections && item.packageSelections.length > 0) ||
+      (typeof rawPkgJsonForMain === 'string' && rawPkgJsonForMain.trim());
+    const mainCategory1Name = hasPackageSelections ? '' : category1Name;
 
     rows.push({
       name: mainName,
       quantity: item.quantity,
       subtotal: unitPrice * item.quantity,
-      category1_name: category1Name,
+      category1_name: mainCategory1Name,
     });
 
     if (item.bundleSelections?.length) {
@@ -182,8 +187,9 @@ function buildCheckerRowsFromCartItems(cartItems: CartItem[], productsMap: Map<n
       for (const line of pkgLines) {
         const lineProduct = productsMap.get(line.product_id);
         const lineCategory1Name = (lineProduct as { category1_name?: string } | undefined)?.category1_name ?? category1Name;
+        const lineName = `${line.quantity}x ${line.product_name} (${item.product.nama})${line.note ? `\nnote: ${line.note}` : ''}`;
         rows.push({
-          name: `${line.quantity}x ${line.product_name} (${item.product.nama})`,
+          name: lineName,
           quantity: line.quantity,
           subtotal: 0,
           category1_name: lineCategory1Name,
