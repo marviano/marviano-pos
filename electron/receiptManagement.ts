@@ -1,4 +1,40 @@
-import { executeQuery, executeQueryOne, executeUpdate, executeUpsert, executeOnMirror } from './mysqlDb';
+import { executeQuery, executeQueryOne, executeUpdate, executeUpsert, executeOnMirror, executeQueryOnMirror } from './mysqlDb';
+
+/** Fallback when no checker template is saved – same layout as label.html (40mm, placeholders). */
+const FALLBACK_CHECKER_TEMPLATE = `<html>
+<head>
+  <meta charset="UTF-8">
+  <style>
+    @page { size: 40mm 30mm; margin: 0; }
+    * { margin: 0; padding: 0; box-sizing: border-box; color: black; }
+    body { font-family: 'Arial', 'Helvetica', sans-serif; width: 22ch; max-width: 22ch; font-size: 8pt; font-weight: 600; line-height: 1.4; padding: 3mm 0 3mm 3mm; word-wrap: break-word; overflow-wrap: break-word; color: black; }
+    .content { }
+    .row { display: table; width: calc(100% + 3mm); table-layout: fixed; margin-right: -3mm; }
+    .row > div { display: table-cell; }
+    .counter { font-size: 9pt; font-weight: 700; }
+    .pickup { text-align: left; font-size: 7pt; font-weight: 700; text-transform: uppercase; }
+    .product { text-align: left; font-size: 7pt; font-weight: 600; }
+    .customizations { text-align: left; font-size: 7pt; font-weight: 500; }
+    .number { font-size: 9pt; font-weight: 700; text-align: right; }
+    .footer { margin-top: 2mm; }
+    .time { text-align: left; font-size: 7pt; font-weight: 500; }
+  </style>
+</head>
+<body>
+  <div class="content">
+    <div class="row">
+      <div class="counter">{{counter}}</div>
+      <div class="number">{{itemNumber}}/{{totalItems}}</div>
+    </div>
+    <div class="pickup">{{pickupMethod}}</div>
+    <div class="product">{{productName}}</div>
+    <div class="customizations">{{customizations}}</div>
+  </div>
+  <div class="footer">
+    <div class="time">{{orderTime}}</div>
+  </div>
+</body>
+</html>`;
 
 const ALTER_CHECKER_ENUM_SQL = `ALTER TABLE receipt_templates MODIFY COLUMN template_type ENUM('receipt', 'bill', 'refund', 'checker') NOT NULL COMMENT 'Type of template: receipt (paid transaction), bill (unpaid order), refund, or checker (kitchen label)'`;
 
@@ -49,7 +85,14 @@ interface ReceiptTemplate {
   show_notes?: number;
 }
 
-export type GetReceiptTemplateResult = { templateCode: string | null; showNotes: boolean };
+export type GetReceiptTemplateResult = { templateCode: string | null; showNotes: boolean; templateName?: string | null; oneLabelPerProduct?: boolean };
+
+/** Result of per-template VPS upload or download. */
+export interface TemplateSyncResult {
+  success: boolean;
+  skipped?: boolean;   // true = destination was same or newer; not an error
+  message: string;     // user-facing Indonesian message
+}
 
 interface ReceiptSettings {
   id: number;
@@ -108,9 +151,9 @@ export class ReceiptManagementService {
     logDbOperation('read', 'receipt_templates', `templateType=${templateType} businessId=${businessId ?? 'null'}`);
     // #endregion
     try {
-      const selectCols = 'template_code, COALESCE(show_notes, 0) as show_notes';
+      const selectCols = 'template_code, COALESCE(show_notes, 0) as show_notes, template_name, COALESCE(one_label_per_product, 1) as one_label_per_product';
       if (businessId) {
-        const businessTemplate = await executeQueryOne<{ template_code: string; show_notes: number }>(
+        const businessTemplate = await executeQueryOne<{ template_code: string; show_notes: number; template_name: string | null; one_label_per_product: number }>(
           `SELECT ${selectCols} FROM receipt_templates 
            WHERE template_type = ? AND business_id = ? AND is_active = 1 AND is_default = 1 
            ORDER BY version DESC LIMIT 1`,
@@ -119,13 +162,18 @@ export class ReceiptManagementService {
         if (businessTemplate?.template_code) {
           console.log(`✅ Found business-specific default ${templateType} template for business ${businessId}`);
           // #region agent log
-          fetch('http://127.0.0.1:7245/ingest/519de021-d49d-473f-a8a1-4215977c867a',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'receiptManagement.ts:getReceiptTemplate',message:'checker/receipt template result',data:{templateType,businessId,showNotes:businessTemplate.show_notes===1,hasTemplateCode:true,scope:'business'},timestamp:Date.now(),hypothesisId:'A'})}).catch(()=>{});
+          fetch('http://127.0.0.1:7245/ingest/519de021-d49d-473f-a8a1-4215977c867a',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'receiptManagement.ts:getReceiptTemplate',message:'checker/receipt template result',data:{templateType,businessId,showNotes:businessTemplate.show_notes===1,hasTemplateCode:true,scope:'business',templateName:businessTemplate.template_name},timestamp:Date.now(),hypothesisId:'A'})}).catch(()=>{});
           // #endregion
-          return { templateCode: businessTemplate.template_code, showNotes: businessTemplate.show_notes === 1 };
+          return {
+            templateCode: businessTemplate.template_code,
+            showNotes: businessTemplate.show_notes === 1,
+            templateName: businessTemplate.template_name ?? null,
+            oneLabelPerProduct: businessTemplate.one_label_per_product !== 0,
+          };
         }
       }
 
-      const globalTemplate = await executeQueryOne<{ template_code: string; show_notes: number }>(
+      const globalTemplate = await executeQueryOne<{ template_code: string; show_notes: number; template_name: string | null; one_label_per_product: number }>(
         `SELECT ${selectCols} FROM receipt_templates 
          WHERE template_type = ? AND business_id IS NULL AND is_active = 1 AND is_default = 1 
          ORDER BY version DESC LIMIT 1`,
@@ -134,39 +182,52 @@ export class ReceiptManagementService {
       if (globalTemplate?.template_code) {
         console.log(`✅ Found global default ${templateType} template`);
         // #region agent log
-        fetch('http://127.0.0.1:7245/ingest/519de021-d49d-473f-a8a1-4215977c867a',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'receiptManagement.ts:getReceiptTemplate',message:'checker/receipt template result',data:{templateType,businessId:businessId??null,showNotes:globalTemplate.show_notes===1,hasTemplateCode:true,scope:'global'},timestamp:Date.now(),hypothesisId:'B'})}).catch(()=>{});
+        fetch('http://127.0.0.1:7245/ingest/519de021-d49d-473f-a8a1-4215977c867a',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'receiptManagement.ts:getReceiptTemplate',message:'checker/receipt template result',data:{templateType,businessId:businessId??null,showNotes:globalTemplate.show_notes===1,hasTemplateCode:true,scope:'global',templateName:globalTemplate.template_name},timestamp:Date.now(),hypothesisId:'B'})}).catch(()=>{});
         // #endregion
-        return { templateCode: globalTemplate.template_code, showNotes: globalTemplate.show_notes === 1 };
+        return {
+          templateCode: globalTemplate.template_code,
+          showNotes: globalTemplate.show_notes === 1,
+          templateName: globalTemplate.template_name ?? null,
+          oneLabelPerProduct: globalTemplate.one_label_per_product !== 0,
+        };
       }
 
       console.warn(`⚠️ No default ${templateType} template found in database`);
       // #region agent log
       fetch('http://127.0.0.1:7245/ingest/519de021-d49d-473f-a8a1-4215977c867a',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'receiptManagement.ts:getReceiptTemplate',message:'no default template',data:{templateType,businessId:businessId??null,showNotes:false,hasTemplateCode:false},timestamp:Date.now(),hypothesisId:'D'})}).catch(()=>{});
       // #endregion
-      return { templateCode: null, showNotes: false };
+      // When no checker template is saved, use built-in label layout so labels still print with expected placeholders
+      if (templateType === 'checker') {
+        return { templateCode: FALLBACK_CHECKER_TEMPLATE, showNotes: true, templateName: '(fallback)', oneLabelPerProduct: true };
+      }
+      return { templateCode: null, showNotes: false, templateName: null, oneLabelPerProduct: true };
     } catch (error) {
       console.error(`❌ Error loading ${templateType} template:`, error);
-      return { templateCode: null, showNotes: false };
+      return { templateCode: null, showNotes: false, templateName: null };
     }
   }
 
   /**
    * Get template code and show_notes by template id (for copy/edit).
    */
-  async getReceiptTemplateById(id: number): Promise<{ templateCode: string | null; showNotes: boolean }> {
+  async getReceiptTemplateById(id: number): Promise<{ templateCode: string | null; showNotes: boolean; oneLabelPerProduct: boolean }> {
     // #region agent log
     logDbOperation('read', 'receipt_templates', `byId=${id}`);
     // #endregion
     try {
-      const row = await executeQueryOne<{ template_code: string; show_notes: number }>(
-        `SELECT template_code, COALESCE(show_notes, 0) as show_notes FROM receipt_templates WHERE id = ? AND is_active = 1 LIMIT 1`,
+      const row = await executeQueryOne<{ template_code: string; show_notes: number; one_label_per_product: number | null }>(
+        `SELECT template_code, COALESCE(show_notes, 0) as show_notes, COALESCE(one_label_per_product, 1) as one_label_per_product FROM receipt_templates WHERE id = ? AND is_active = 1 LIMIT 1`,
         [id]
       );
-      if (!row) return { templateCode: null, showNotes: false };
-      return { templateCode: row.template_code ?? null, showNotes: row.show_notes === 1 };
+      if (!row) return { templateCode: null, showNotes: false, oneLabelPerProduct: true };
+      return {
+        templateCode: row.template_code ?? null,
+        showNotes: row.show_notes === 1,
+        oneLabelPerProduct: (row.one_label_per_product ?? 1) !== 0,
+      };
     } catch (error) {
       console.error('Error loading receipt template by id:', error);
-      return { templateCode: null, showNotes: false };
+      return { templateCode: null, showNotes: false, oneLabelPerProduct: true };
     }
   }
 
@@ -238,9 +299,9 @@ export class ReceiptManagementService {
   }
 
   /**
-   * Update existing template by id (overwrite template_code, optionally template_name and show_notes).
+   * Update existing template by id (overwrite template_code, optionally template_name, show_notes, one_label_per_product).
    */
-  async updateReceiptTemplate(id: number, templateCode: string, templateName?: string | null, showNotes?: boolean): Promise<boolean> {
+  async updateReceiptTemplate(id: number, templateCode: string, templateName?: string | null, showNotes?: boolean, oneLabelPerProduct?: boolean): Promise<boolean> {
     // #region agent log
     logDbOperation('save', 'receipt_templates', `update id=${id}`);
     // #endregion
@@ -249,8 +310,9 @@ export class ReceiptManagementService {
         ? String(templateName).trim()
         : null;
     const showNotesVal = showNotes === true ? 1 : 0;
-    const sql = `UPDATE receipt_templates SET template_code = ?, template_name = COALESCE(?, template_name), show_notes = ?, updated_at = NOW() WHERE id = ? AND is_active = 1`;
-    const params: (string | number | null)[] = [templateCode, nameToSet, showNotesVal, id];
+    const oneLabelPerProductVal = oneLabelPerProduct !== false ? 1 : 0;
+    const sql = `UPDATE receipt_templates SET template_code = ?, template_name = COALESCE(?, template_name), show_notes = ?, one_label_per_product = ?, updated_at = NOW() WHERE id = ? AND is_active = 1`;
+    const params: (string | number | null)[] = [templateCode, nameToSet, showNotesVal, oneLabelPerProductVal, id];
     try {
       const result = await executeUpdate(sql, params);
       if (result > 0) {
@@ -264,15 +326,17 @@ export class ReceiptManagementService {
           is_active: number;
           is_default: number;
           show_notes: number;
+          one_label_per_product: number;
           version: number;
           created_at: string;
           updated_at: string;
         }>(
-          `SELECT id, template_type, template_name, business_id, template_code, is_active, is_default, COALESCE(show_notes, 0) AS show_notes, version, created_at, updated_at FROM receipt_templates WHERE id = ? AND is_active = 1 LIMIT 1`,
+          `SELECT id, template_type, template_name, business_id, template_code, is_active, is_default, COALESCE(show_notes, 0) AS show_notes, COALESCE(one_label_per_product, 1) AS one_label_per_product, version, created_at, updated_at FROM receipt_templates WHERE id = ? AND is_active = 1 LIMIT 1`,
           [id]
         );
         if (row) {
-          const upsertSql = `INSERT INTO receipt_templates (id, template_type, template_name, business_id, template_code, is_active, is_default, show_notes, version, created_at, updated_at)
+          // VPS may have older schema without one_label_per_product; omit it for mirror write
+          const mirrorUpsertSql = `INSERT INTO receipt_templates (id, template_type, template_name, business_id, template_code, is_active, is_default, show_notes, version, created_at, updated_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON DUPLICATE KEY UPDATE
               template_code = VALUES(template_code),
@@ -280,7 +344,7 @@ export class ReceiptManagementService {
               show_notes = VALUES(show_notes),
               version = VALUES(version),
               updated_at = VALUES(updated_at)`;
-          const upsertParams: (string | number | null)[] = [
+          const mirrorUpsertParams: (string | number | null)[] = [
             row.id,
             row.template_type,
             row.template_name ?? null,
@@ -293,7 +357,7 @@ export class ReceiptManagementService {
             row.created_at,
             row.updated_at,
           ];
-          await executeOnMirror(upsertSql, upsertParams);
+          await executeOnMirror(mirrorUpsertSql, mirrorUpsertParams);
         } else {
           await executeOnMirror(sql, params);
         }
@@ -308,6 +372,152 @@ export class ReceiptManagementService {
   }
 
   /**
+   * Upload a single template to VPS (local → VPS). Newest wins; if VPS is same or newer, skips.
+   */
+  async uploadTemplateToVps(id: number): Promise<TemplateSyncResult> {
+    try {
+      const localRow = await executeQueryOne<{
+        id: number;
+        template_type: string;
+        template_name: string | null;
+        business_id: number | null;
+        template_code: string;
+        is_active: number;
+        is_default: number;
+        show_notes: number;
+        one_label_per_product: number;
+        version: number;
+        created_at: string;
+        updated_at: string;
+      }>(
+        `SELECT id, template_type, template_name, business_id, template_code, is_active, is_default,
+         COALESCE(show_notes, 0) AS show_notes, COALESCE(one_label_per_product, 1) AS one_label_per_product,
+         version, created_at, updated_at FROM receipt_templates WHERE id = ? AND is_active = 1 LIMIT 1`,
+        [id]
+      );
+      if (!localRow) {
+        return { success: false, message: 'Template tidak ditemukan' };
+      }
+      const vpsRows = await executeQueryOnMirror<{ updated_at: string }>(
+        'SELECT updated_at FROM receipt_templates WHERE id = ? LIMIT 1',
+        [id]
+      );
+      const vpsRow = vpsRows[0];
+      const localUpdated = localRow.updated_at ? String(localRow.updated_at).replace('T', ' ').slice(0, 19) : '';
+      const vpsUpdated = vpsRow?.updated_at ? String(vpsRow.updated_at).replace('T', ' ').slice(0, 19) : '';
+      if (vpsRow && vpsUpdated >= localUpdated) {
+        return { success: true, skipped: true, message: 'VPS sudah lebih baru, tidak ada perubahan' };
+      }
+      // VPS may have older schema without one_label_per_product; omit it for mirror write
+      const mirrorUpsertSql = `INSERT INTO receipt_templates (id, template_type, template_name, business_id, template_code, is_active, is_default, show_notes, version, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON DUPLICATE KEY UPDATE
+          template_code = VALUES(template_code),
+          template_name = VALUES(template_name),
+          show_notes = VALUES(show_notes),
+          version = VALUES(version),
+          updated_at = VALUES(updated_at)`;
+      const mirrorUpsertParams: (string | number | null)[] = [
+        localRow.id,
+        localRow.template_type,
+        localRow.template_name ?? null,
+        localRow.business_id,
+        localRow.template_code,
+        localRow.is_active,
+        localRow.is_default,
+        localRow.show_notes,
+        localRow.version,
+        localRow.created_at,
+        localRow.updated_at,
+      ];
+      await executeOnMirror(mirrorUpsertSql, mirrorUpsertParams);
+      return { success: true, message: 'Berhasil diupload ke VPS' };
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      if (msg === 'VPS_NOT_CONFIGURED') {
+        return { success: false, message: 'VPS tidak terhubung' };
+      }
+      return { success: false, message: msg || 'Gagal upload' };
+    }
+  }
+
+  /**
+   * Download a single template from VPS (VPS → local). Newest wins; if local is same or newer, skips.
+   */
+  async downloadTemplateFromVps(id: number): Promise<TemplateSyncResult> {
+    try {
+      // VPS may have older schema without one_label_per_product; do not SELECT it from VPS
+      const vpsRows = await executeQueryOnMirror<{
+        id: number;
+        template_type: string;
+        template_name: string | null;
+        business_id: number | null;
+        template_code: string;
+        is_active: number;
+        is_default: number;
+        show_notes: number;
+        version: number;
+        created_at: string;
+        updated_at: string;
+      }>(
+        `SELECT id, template_type, template_name, business_id, template_code, is_active, is_default,
+         COALESCE(show_notes, 0) AS show_notes, version, created_at, updated_at FROM receipt_templates WHERE id = ? LIMIT 1`,
+        [id]
+      );
+      const vpsRow = vpsRows[0];
+      if (!vpsRow) {
+        return { success: false, message: 'Template tidak ditemukan di VPS' };
+      }
+      const localRow = await executeQueryOne<{ updated_at: string }>(
+        'SELECT updated_at FROM receipt_templates WHERE id = ? LIMIT 1',
+        [id]
+      );
+      const vpsUpdated = vpsRow.updated_at ? String(vpsRow.updated_at).replace('T', ' ').slice(0, 19) : '';
+      const localUpdated = localRow?.updated_at ? String(localRow.updated_at).replace('T', ' ').slice(0, 19) : '';
+      if (localRow && localUpdated >= vpsUpdated) {
+        return { success: true, skipped: true, message: 'Template lokal sudah lebih baru, tidak ada perubahan' };
+      }
+      // Local DB has one_label_per_product; default to 1 when downloading from VPS (old schema)
+      const oneLabelPerProduct = 1;
+      const upsertSql = `INSERT INTO receipt_templates (id, template_type, template_name, business_id, template_code, is_active, is_default, show_notes, one_label_per_product, version, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON DUPLICATE KEY UPDATE
+          template_type = VALUES(template_type),
+          template_name = VALUES(template_name),
+          business_id = VALUES(business_id),
+          template_code = VALUES(template_code),
+          is_active = VALUES(is_active),
+          is_default = VALUES(is_default),
+          show_notes = VALUES(show_notes),
+          one_label_per_product = VALUES(one_label_per_product),
+          version = VALUES(version),
+          updated_at = VALUES(updated_at)`;
+      const upsertParams: (string | number | null)[] = [
+        vpsRow.id,
+        vpsRow.template_type,
+        vpsRow.template_name ?? null,
+        vpsRow.business_id,
+        vpsRow.template_code,
+        vpsRow.is_active,
+        vpsRow.is_default,
+        vpsRow.show_notes,
+        oneLabelPerProduct,
+        vpsRow.version,
+        vpsRow.created_at,
+        vpsRow.updated_at,
+      ];
+      await executeUpdate(upsertSql, upsertParams);
+      return { success: true, message: 'Berhasil didownload dari VPS' };
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      if (msg === 'VPS_NOT_CONFIGURED') {
+        return { success: false, message: 'VPS tidak terhubung' };
+      }
+      return { success: false, message: msg || 'Gagal download' };
+    }
+  }
+
+  /**
    * Save receipt template to database
    */
   async saveReceiptTemplate(
@@ -315,7 +525,8 @@ export class ReceiptManagementService {
     templateCode: string,
     templateName?: string,
     businessId?: number,
-    showNotes?: boolean
+    showNotes?: boolean,
+    oneLabelPerProduct?: boolean
   ): Promise<boolean> {
     // #region agent log
     logDbOperation('save', 'receipt_templates', `save templateType=${templateType} businessId=${businessId ?? 'null'}`);
@@ -333,8 +544,22 @@ export class ReceiptManagementService {
 
       const newVersion = existing?.version ? existing.version + 1 : 1;
       const showNotesVal = showNotes === true ? 1 : 0;
+      const oneLabelPerProductVal = templateType === 'checker' ? (oneLabelPerProduct !== false ? 1 : 0) : 1;
 
-      const templateUpsertSql = `INSERT INTO receipt_templates (template_type, template_name, business_id, template_code, is_active, show_notes, version, updated_at)
+      const templateUpsertSql = `INSERT INTO receipt_templates (template_type, template_name, business_id, template_code, is_active, show_notes, one_label_per_product, version, updated_at)
+         VALUES (?, ?, ?, ?, 1, ?, ?, ?, NOW())
+         ON DUPLICATE KEY UPDATE 
+           template_code = VALUES(template_code),
+           show_notes = VALUES(show_notes),
+           one_label_per_product = VALUES(one_label_per_product),
+           version = VALUES(version),
+           is_active = 1,
+           updated_at = NOW()`;
+      const templateUpsertParams: (string | number | null)[] = [templateType, templateName || 'Default', businessId || null, templateCode, showNotesVal, oneLabelPerProductVal, newVersion];
+
+      await executeUpsert(templateUpsertSql, templateUpsertParams);
+      // VPS may have older schema without one_label_per_product; omit it in mirror write
+      const mirrorUpsertSql = `INSERT INTO receipt_templates (template_type, template_name, business_id, template_code, is_active, show_notes, version, updated_at)
          VALUES (?, ?, ?, ?, 1, ?, ?, NOW())
          ON DUPLICATE KEY UPDATE 
            template_code = VALUES(template_code),
@@ -342,10 +567,8 @@ export class ReceiptManagementService {
            version = VALUES(version),
            is_active = 1,
            updated_at = NOW()`;
-      const templateUpsertParams: (string | number | null)[] = [templateType, templateName || 'Default', businessId || null, templateCode, showNotesVal, newVersion];
-
-      await executeUpsert(templateUpsertSql, templateUpsertParams);
-      await executeOnMirror(templateUpsertSql, templateUpsertParams);
+      const mirrorUpsertParams: (string | number | null)[] = [templateType, templateName || 'Default', businessId || null, templateCode, showNotesVal, newVersion];
+      await executeOnMirror(mirrorUpsertSql, mirrorUpsertParams);
 
       console.log(`✅ Saved ${templateType} template "${templateName || 'Default'}" (version ${newVersion})${businessId ? ` for business ${businessId}` : ' (global)'}`);
       return true;

@@ -2220,12 +2220,13 @@ export default function PaymentModal({
             };
 
             // Print all labels in a single batch (use checker template when set in Settings → Template Struk → Template Label/Checker)
+            // Use current logged-in business (businessId) so the template matches what the user selected for this business; not the transaction's business.
             // When checker template uses {{items}}, backend prints one order-summary slip using orderContext; otherwise prints per-item labels.
             if (allLabels.length > 0 || (orderContextForChecker.itemsHtml && orderContextForChecker.orderTime)) {
               const batchResult = await window.electronAPI?.printLabelsBatch?.({
                 labels: allLabels,
                 printerType: 'labelPrinter',
-                business_id: transactionData.business_id,
+                business_id: businessId ?? transactionData.business_id,
                 orderContext: orderContextForChecker,
                 isOnlineOrder: isOnline && !!selectedOnlinePlatform
               });

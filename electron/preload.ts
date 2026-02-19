@@ -406,8 +406,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getReceiptTemplates: (templateType: 'receipt' | 'bill' | 'checker', businessId?: number) => ipcRenderer.invoke('get-receipt-templates', templateType, businessId),
   getReceiptTemplateById: (id: number) => ipcRenderer.invoke('get-receipt-template-by-id', id),
   setDefaultReceiptTemplate: (templateType: 'receipt' | 'bill', templateName: string, businessId?: number) => ipcRenderer.invoke('set-default-receipt-template', templateType, templateName, businessId),
-  saveReceiptTemplate: (templateType: 'receipt' | 'bill', templateCode: string, templateName?: string, businessId?: number, showNotes?: boolean) => ipcRenderer.invoke('save-receipt-template', templateType, templateCode, templateName, businessId, showNotes),
-  updateReceiptTemplate: (id: number, templateCode: string, templateName?: string | null, showNotes?: boolean) => ipcRenderer.invoke('update-receipt-template', id, templateCode, templateName, showNotes),
+  saveReceiptTemplate: (templateType: 'receipt' | 'bill' | 'checker', templateCode: string, templateName?: string, businessId?: number, showNotes?: boolean, oneLabelPerProduct?: boolean) => ipcRenderer.invoke('save-receipt-template', templateType, templateCode, templateName, businessId, showNotes, oneLabelPerProduct),
+  updateReceiptTemplate: (id: number, templateCode: string, templateName?: string | null, showNotes?: boolean, oneLabelPerProduct?: boolean) => ipcRenderer.invoke('update-receipt-template', id, templateCode, templateName, showNotes, oneLabelPerProduct),
+  uploadTemplateToVps: (id: number) => ipcRenderer.invoke('upload-template-to-vps', id),
+  downloadTemplateFromVps: (id: number) => ipcRenderer.invoke('download-template-from-vps', id),
   getReceiptSettings: (businessId?: number) => ipcRenderer.invoke('get-receipt-settings', businessId),
   saveReceiptSettings: (settings: {
     store_name?: string | null;

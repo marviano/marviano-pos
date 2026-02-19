@@ -44,7 +44,9 @@ export function formatPackageLineDisplay(productName: string, quantity: number):
   return `${quantity} ${t}`;
 }
 
-/** Flatten package selections to list of { product_name, quantity, note? } for display/print. */
+/** Flatten package selections to list of { product_name, quantity, note? } for display/print.
+ * Default items: quantity is per-package, so we multiply by packageQuantity.
+ * Flexible items: chosen[].quantity is already the total picked (user picks "X items" total), so we do NOT multiply. */
 export function getPackageBreakdownLines(selections: PackageSelection[], packageQuantity: number = 1): { product_name: string; quantity: number; note?: string }[] {
   const lines: { product_name: string; quantity: number; note?: string }[] = [];
   (selections || []).forEach(sel => {
@@ -52,14 +54,16 @@ export function getPackageBreakdownLines(selections: PackageSelection[], package
       lines.push({ product_name: sel.product_name, quantity: sel.quantity * packageQuantity, note: sel.note?.trim() || undefined });
     } else {
       (sel.chosen || []).forEach(c => {
-        if (c.quantity > 0) lines.push({ product_name: c.product_name, quantity: c.quantity * packageQuantity, note: c.note?.trim() || undefined });
+        if (c.quantity > 0) lines.push({ product_name: c.product_name, quantity: c.quantity, note: c.note?.trim() || undefined });
       });
     }
   });
   return lines;
 }
 
-/** Breakdown lines with product_id and optional note for display filtering by category (Kitchen/Barista). */
+/** Breakdown lines with product_id and optional note for display filtering by category (Kitchen/Barista).
+ * Default items: quantity is per-package, so we multiply by packageQuantity.
+ * Flexible items: chosen[].quantity is already the total picked, so we do NOT multiply. */
 export function getPackageBreakdownLinesWithProductId(
   selections: PackageSelection[],
   packageQuantity: number
@@ -79,7 +83,7 @@ export function getPackageBreakdownLinesWithProductId(
           lines.push({
             product_id: c.product_id,
             product_name: c.product_name,
-            quantity: c.quantity * packageQuantity,
+            quantity: c.quantity,
             note: c.note?.trim() || undefined,
           });
         }

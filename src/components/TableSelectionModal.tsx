@@ -870,6 +870,17 @@ export default function TableSelectionModal({
       };
       const finalPickupMethod = pickupMethod === 'take-away' ? 'Take Away' : 'Dine In';
       const orderTime = transactionData.created_at;
+      let labelDailyCounter = 1;
+      if (window.electronAPI?.getPrinterCounter && typeof businessId === 'number') {
+        try {
+          const counterResult = await window.electronAPI.getPrinterCounter('labelPrinter', businessId, true);
+          if (counterResult?.success === true && typeof counterResult.counter === 'number' && counterResult.counter > 0) {
+            labelDailyCounter = counterResult.counter;
+          }
+        } catch (e) {
+          console.warn('Label daily counter not available, using 1:', e);
+        }
+      }
       const newOrderLabels: Array<{
         printerType: string;
         counter: number;
@@ -907,7 +918,7 @@ export default function TableSelectionModal({
                   const totalLabels = customizationChunks.length;
                   newOrderLabels.push({
                     printerType: 'labelPrinter',
-                    counter: 1,
+                    counter: labelDailyCounter,
                     itemNumber: newOrderItemNumber,
                     totalItems: 0,
                     pickupMethod: finalPickupMethod,
@@ -939,7 +950,7 @@ export default function TableSelectionModal({
               const totalLabels = customizationChunks.length;
               newOrderLabels.push({
                 printerType: 'labelPrinter',
-                counter: 1,
+                counter: labelDailyCounter,
                 itemNumber: newOrderItemNumber,
                 totalItems: 0,
                 pickupMethod: finalPickupMethod,
@@ -1375,7 +1386,17 @@ export default function TableSelectionModal({
         labelContinuation?: string;
       }> = [];
       let currentItemNumber = 0;
-      const labelCounter = 1;
+      let labelCounter = 1;
+      if (window.electronAPI?.getPrinterCounter && typeof businessId === 'number') {
+        try {
+          const counterResult = await window.electronAPI.getPrinterCounter('labelPrinter', businessId, true);
+          if (counterResult?.success === true && typeof counterResult.counter === 'number' && counterResult.counter > 0) {
+            labelCounter = counterResult.counter;
+          }
+        } catch (e) {
+          console.warn('Label daily counter not available, using 1:', e);
+        }
+      }
       for (const item of itemsToSave) {
         const isBundle = item.bundleSelections && item.bundleSelections.length > 0;
         if (isBundle) {

@@ -21,6 +21,23 @@ function writeDebugLog(_data: string): void {
   // no-op
 }
 
+/** Append one NDJSON line to workspace debug-76ac0a.log for label-print debugging (session 76ac0a). */
+function writeLabelDebugLog(payload: Record<string, unknown>): void {
+  try {
+    const logPath = path.join(__dirname, '..', 'debug-76ac0a.log');
+    const line = JSON.stringify({ sessionId: '76ac0a', ...payload, timestamp: payload.timestamp ?? Date.now() }) + '\n';
+    fs.appendFileSync(logPath, line);
+  } catch {
+    // do not break app if log write fails
+  }
+}
+
+/** Extract @page rule snippet from HTML for debug (label height). */
+function getAtPageSnippet(html: string): string | null {
+  const m = html.match(/@page\s*\{[^}]*\}/);
+  return m ? m[0].replace(/\s+/g, ' ').trim() : null;
+}
+
 /** Write system_pos save failure to .cursor/system_pos_debug.log for debugging intermittent sync failures. */
 function writeSystemPosDebugLog(entry: { source: string; transactionId: string; reason: string; stack?: string }): void {
   try {
@@ -10922,10 +10939,10 @@ ipcMain.handle('get-receipt-templates', async (event, templateType: 'receipt' | 
 ipcMain.handle('get-receipt-template-by-id', async (event, id: number) => {
   try {
     const result = await receiptManagementService.getReceiptTemplateById(id);
-    return { success: true, templateCode: result.templateCode, showNotes: result.showNotes };
+    return { success: true, templateCode: result.templateCode, showNotes: result.showNotes, oneLabelPerProduct: result.oneLabelPerProduct };
   } catch (error) {
     console.error('Error getting receipt template by id:', error);
-    return { success: false, error: String(error), templateCode: null, showNotes: false };
+    return { success: false, error: String(error), templateCode: null, showNotes: false, oneLabelPerProduct: true };
   }
 });
 
@@ -10939,9 +10956,9 @@ ipcMain.handle('set-default-receipt-template', async (event, templateType: 'rece
   }
 });
 
-ipcMain.handle('save-receipt-template', async (event, templateType: 'receipt' | 'bill' | 'checker', templateCode: string, templateName?: string, businessId?: number, showNotes?: boolean) => {
+ipcMain.handle('save-receipt-template', async (event, templateType: 'receipt' | 'bill' | 'checker', templateCode: string, templateName?: string, businessId?: number, showNotes?: boolean, oneLabelPerProduct?: boolean) => {
   try {
-    const success = await receiptManagementService.saveReceiptTemplate(templateType, templateCode, templateName, businessId, showNotes);
+    const success = await receiptManagementService.saveReceiptTemplate(templateType, templateCode, templateName, businessId, showNotes, oneLabelPerProduct);
     return { success };
   } catch (error) {
     console.error('Error saving receipt template:', error);
@@ -10949,16 +10966,34 @@ ipcMain.handle('save-receipt-template', async (event, templateType: 'receipt' | 
   }
 });
 
-ipcMain.handle('update-receipt-template', async (event, id: number, templateCode: string, templateName?: string | null, showNotes?: boolean) => {
+ipcMain.handle('update-receipt-template', async (event, id: number, templateCode: string, templateName?: string | null, showNotes?: boolean, oneLabelPerProduct?: boolean) => {
   try {
     if (templateName !== undefined && templateName !== null && String(templateName).trim() === '') {
       templateName = undefined;
     }
-    const success = await receiptManagementService.updateReceiptTemplate(id, templateCode, templateName, showNotes);
+    const success = await receiptManagementService.updateReceiptTemplate(id, templateCode, templateName, showNotes, oneLabelPerProduct);
     return { success };
   } catch (error) {
     console.error('Error updating receipt template:', error);
     return { success: false, error: String(error) };
+  }
+});
+
+ipcMain.handle('upload-template-to-vps', async (event, id: number) => {
+  try {
+    return await receiptManagementService.uploadTemplateToVps(id);
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    return { success: false, message: msg || 'Gagal upload' };
+  }
+});
+
+ipcMain.handle('download-template-from-vps', async (event, id: number) => {
+  try {
+    return await receiptManagementService.downloadTemplateFromVps(id);
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    return { success: false, message: msg || 'Gagal download' };
   }
 });
 
@@ -11063,26 +11098,58 @@ async function executeLabelPrint(data: LabelPrintData): Promise<{ success: boole
 
     // Generate label HTML: use checker template if available (same template logic as receipt); showNotes controls customizations
     let htmlContent: string;
+    let templateCodeForLog = '';
     try {
       const checkerResult = await receiptManagementService.getReceiptTemplate('checker', data.business_id);
+      // #region agent log
+      const code = checkerResult.templateCode ?? '';
+      templateCodeForLog = code;
+      const codeLen = code.length;
+      const pageSize = code.includes('40mm') ? '40mm' : code.includes('80mm') ? '80mm' : 'other';
+      const h1Payload = { location: 'main.ts:label-print', message: 'which template used (single label)', data: { businessIdRequested: data.business_id, templateName: checkerResult.templateName ?? null, templateCodeLength: codeLen, pageSize, hasTemplateCode: !!(checkerResult.templateCode && checkerResult.templateCode.trim()) }, hypothesisId: 'H1' as const };
+      writeLabelDebugLog(h1Payload);
+      fetch('http://127.0.0.1:7495/ingest/20000880-6f22-4a8b-8a8e-250eeb7d84f4',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'76ac0a'},body:JSON.stringify({sessionId:'76ac0a',...h1Payload,timestamp:Date.now()})}).catch(()=>{});
+      // #endregion
       const dataCustomizations = typeof data.customizations === 'string' ? data.customizations : '';
       const hasCustomizations = (dataCustomizations || '').trim().length > 0;
       const stripCustomizations = !checkerResult.showNotes;
-      // #region agent log
-      fetch('http://127.0.0.1:7245/ingest/519de021-d49d-473f-a8a1-4215977c867a', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ location: 'main.ts:executeLabelPrint', message: 'label print showNotes branch', data: { business_id: data.business_id, checkerShowNotes: checkerResult.showNotes, hasCheckerTemplate: !!(checkerResult.templateCode && checkerResult.templateCode.trim()), dataHasCustomizations: hasCustomizations, stripCustomizations }, timestamp: Date.now(), hypothesisId: 'A' }) }).catch(() => { });
-      // #endregion
       if (checkerResult.templateCode && checkerResult.templateCode.trim()) {
         const labelData: LabelPrintData = checkerResult.showNotes ? data : { ...data, customizations: '', labelContinuation: '' };
         labelData.leftPadding = labelLeftPadding;
         labelData.rightPadding = labelRightPadding;
+        if (labelData.itemNumber == null || labelData.itemNumber === 0) labelData.itemNumber = 1;
+        if (labelData.totalItems == null || labelData.totalItems === 0) labelData.totalItems = 1;
         htmlContent = generateLabelHTMLFromTemplate(checkerResult.templateCode.trim(), labelData);
+        // #region agent log
+        const h2Payload = { location: 'main.ts:label-print', message: 'used DB template path', data: { htmlContentLength: htmlContent?.length ?? 0 }, hypothesisId: 'H2' as const };
+        writeLabelDebugLog(h2Payload);
+        fetch('http://127.0.0.1:7495/ingest/20000880-6f22-4a8b-8a8e-250eeb7d84f4',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'76ac0a'},body:JSON.stringify({sessionId:'76ac0a',...h2Payload,timestamp:Date.now()})}).catch(()=>{});
+        // #endregion
       } else {
         htmlContent = generateLabelHTML(data);
+        // #region agent log
+        const h4Payload = { location: 'main.ts:label-print', message: 'used fallback generateLabelHTML', data: { htmlContentLength: htmlContent?.length ?? 0 }, hypothesisId: 'H4' as const };
+        writeLabelDebugLog(h4Payload);
+        fetch('http://127.0.0.1:7495/ingest/20000880-6f22-4a8b-8a8e-250eeb7d84f4',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'76ac0a'},body:JSON.stringify({sessionId:'76ac0a',...h4Payload,timestamp:Date.now()})}).catch(()=>{});
+        // #endregion
       }
     } catch (e) {
       console.warn('⚠️ Checker template load failed, using built-in label HTML:', e);
       htmlContent = generateLabelHTML(data);
+      // #region agent log
+      const h4ErrPayload = { location: 'main.ts:label-print', message: 'checker load failed, fallback', data: { error: String(e), htmlContentLength: htmlContent?.length ?? 0 }, hypothesisId: 'H4' as const };
+      writeLabelDebugLog(h4ErrPayload);
+      fetch('http://127.0.0.1:7495/ingest/20000880-6f22-4a8b-8a8e-250eeb7d84f4',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'76ac0a'},body:JSON.stringify({sessionId:'76ac0a',...h4ErrPayload,timestamp:Date.now()})}).catch(()=>{});
+      // #endregion
     }
+
+    // #region agent log – label height: @page in template vs final HTML (debug-ba378a)
+    const atPageInTemplate = getAtPageSnippet(templateCodeForLog);
+    const atPageInFinal = getAtPageSnippet(htmlContent);
+    const pagePayload = { sessionId: 'ba378a', location: 'main.ts:label-print', message: 'label @page (single)', data: { atPageInTemplate, atPageInFinal, has30mmInTemplate: templateCodeForLog.includes('30mm'), hasAutoInTemplate: templateCodeForLog.includes('auto') }, hypothesisId: 'H-page', timestamp: Date.now() };
+    console.log('[LABEL HEIGHT DEBUG] single label @page in template:', atPageInTemplate, '| in final HTML:', atPageInFinal);
+    fetch('http://127.0.0.1:7495/ingest/20000880-6f22-4a8b-8a8e-250eeb7d84f4', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': 'ba378a' }, body: JSON.stringify(pagePayload) }).catch(() => {});
+    // #endregion
 
     await jobPrintWindow.loadURL(`data:text/html,${encodeURIComponent(htmlContent)}`);
 
@@ -11095,10 +11162,12 @@ async function executeLabelPrint(data: LabelPrintData): Promise<{ success: boole
             return;
           }
           const deviceName = await resolvePrintDeviceName(jobPrintWindow.webContents, printerName);
-          const printOptions: { silent: boolean; printBackground: boolean; deviceName?: string } = {
+          const is40x30Label = htmlContent.includes('40mm') && htmlContent.includes('30mm');
+          const printOptions: { silent: boolean; printBackground: boolean; deviceName?: string; pageSize?: { width: number; height: number } } = {
             silent: true,
             printBackground: false,
             ...(deviceName ? { deviceName } : {}),
+            ...(is40x30Label ? { pageSize: { width: 40000, height: 30000 } } : {}),
           };
           const numCopies = Math.max(1, Math.min(10, copies));
           let printedCount = 0;
@@ -11185,23 +11254,28 @@ async function executeLabelsBatchPrint(data: {
     );
 
     // Load checker template early to decide order-summary vs per-item mode
-    let checkerResult: { templateCode: string | null; showNotes: boolean } = { templateCode: null, showNotes: false };
+    let checkerResult: { templateCode: string | null; showNotes: boolean; templateName?: string | null; oneLabelPerProduct?: boolean } = { templateCode: null, showNotes: false, oneLabelPerProduct: true };
     try {
       checkerResult = await receiptManagementService.getReceiptTemplate('checker', businessId ?? undefined);
     } catch (_) {
       // ignore
     }
     const firstLabelCustomizations = data.labels?.[0] && typeof (data.labels[0] as { customizations?: string }).customizations === 'string' ? (data.labels[0] as { customizations: string }).customizations : '';
-    // #region agent log
+    // #region agent log – which template is used (for debug-76ac0a.log)
     const requestId = (data as any).requestId || 'NO-ID';
-    console.error(`🖨️ [BACKEND] Received printLabelsBatch. ID: ${requestId}. Table: ${data.orderContext?.tableName}. Time: ${data.orderContext?.orderTime}`);
-    fetch('http://127.0.0.1:7245/ingest/519de021-d49d-473f-a8a1-4215977c867a', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ location: 'main.ts:executeLabelsBatchPrint', message: 'batch label checker result', data: { requestId, businessId: businessId ?? null, checkerShowNotes: checkerResult.showNotes, hasCheckerTemplate: !!checkerResult.templateCode?.trim(), firstLabelCustomizationsLength: (firstLabelCustomizations || '').length }, timestamp: Date.now(), hypothesisId: 'A' }) }).catch(() => { });
+    const code = checkerResult.templateCode ?? '';
+    const pageSize = code.includes('40mm') ? '40mm' : code.includes('80mm') ? '80mm' : 'other';
+    const batchPayload = { location: 'main.ts:batch-label-print', message: 'which template used (batch)', data: { requestId, businessIdUsed: businessId ?? null, templateName: checkerResult.templateName ?? null, templateCodeLength: code.length, pageSize, hasCheckerTemplate: !!checkerResult.templateCode?.trim() }, hypothesisId: 'which' as const };
+    writeLabelDebugLog(batchPayload);
+    console.error(`🖨️ [BACKEND] Received printLabelsBatch. ID: ${requestId}. Table: ${data.orderContext?.tableName}. Time: ${data.orderContext?.orderTime}. Template: ${checkerResult.templateName ?? '(fallback)'} (${pageSize})`);
+    fetch('http://127.0.0.1:7245/ingest/519de021-d49d-473f-a8a1-4215977c867a', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ location: 'main.ts:executeLabelsBatchPrint', message: 'batch label checker result', data: { requestId, businessId: businessId ?? null, templateName: checkerResult.templateName, checkerShowNotes: checkerResult.showNotes, hasCheckerTemplate: !!checkerResult.templateCode?.trim(), pageSize, firstLabelCustomizationsLength: (firstLabelCustomizations || '').length }, timestamp: Date.now(), hypothesisId: 'A' }) }).catch(() => { });
     // #endregion
     const checkerTemplateCode = checkerResult.templateCode?.trim() ?? null;
     const templateUsesItems = checkerTemplateCode != null && (checkerTemplateCode.includes('{{items}}') || checkerTemplateCode.includes('{{itemsCategory1}}') || checkerTemplateCode.includes('{{itemsCategory2}}'));
     const hasOrderContextWithItems = hasOrderContext && (data.orderContext?.itemsHtml != null && String(data.orderContext.itemsHtml).trim() !== '');
-    // Prefer one order-summary slip when we have order context with items (avoids N per-item labels = "print once")
-    const useOrderSummarySlip = hasOrderContextWithItems && (templateUsesItems || true);
+    const oneLabelPerProduct = checkerResult.oneLabelPerProduct !== false;
+    // Use order-summary slip when template setting "1 label per product" is unchecked (oneLabelPerProduct === false) and we have order context. When checked, use per-item labels. If template has {{items}}, use it for the slip; otherwise use fallback slip template.
+    const useOrderSummarySlip = hasOrderContextWithItems && !oneLabelPerProduct;
     const slipTemplateCode = templateUsesItems && checkerTemplateCode
       ? checkerTemplateCode
       : hasOrderContextWithItems
@@ -11305,12 +11379,20 @@ async function executeLabelsBatchPrint(data: {
         fetch('http://127.0.0.1:7245/ingest/519de021-d49d-473f-a8a1-4215977c867a', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ location: 'main.ts:executeLabelsBatchPrint:1stPrintContent', message: '1st print content (order summary slip)', data: { firstPrintPath: true, orderDataSummary: { waiterName: orderData.waiterName, customerName: orderData.customerName, tableName: orderData.tableName, orderTime: orderData.orderTime, itemsHtmlLength: (orderData.items || '').length, itemsHtmlPreview: (orderData.items || '').substring(0, 500) }, htmlContentLength: htmlContent.length, htmlContentPreview: htmlContent.substring(0, 2500) }, timestamp: Date.now(), hypothesisId: '1stPrint' }) }).catch(() => { });
         // #endregion
       } else {
+        // Normalize itemNumber (1-based) and totalItems so counter shows e.g. 1/6, 2/6, ... on each label
+        const labelsCount = data.labels?.length ?? 0;
+        const labelsToPrint = (data.labels ?? []).map((label, index) => {
+          const L = label as Record<string, unknown>;
+          const itemNum = (typeof L.itemNumber === 'number' && !Number.isNaN(L.itemNumber) && L.itemNumber > 0) ? L.itemNumber : index + 1;
+          const total = (typeof L.totalItems === 'number' && !Number.isNaN(L.totalItems) && L.totalItems > 0) ? L.totalItems : labelsCount;
+          return { ...label, itemNumber: itemNum, totalItems: total };
+        });
         if (checkerTemplateCode) {
-          const fullHtmls = data.labels.map((label) => {
+          const fullHtmls = labelsToPrint.map((label) => {
             const base = checkerResult.showNotes ? label : { ...label, customizations: '', labelContinuation: '' };
-            // Ensure waiter/meja show on each per-item label when orderContext is provided (Kasir checker)
+            // Ensure waiter/meja and orderTime show on each per-item label when orderContext is provided (Kasir checker)
             const labelData: LabelPrintData = data.orderContext
-              ? { ...base, waiterName: data.orderContext.waiterName ?? base.waiterName ?? '', tableName: data.orderContext.tableName ?? base.tableName ?? '', customerName: data.orderContext.customerName ?? base.customerName ?? '' }
+              ? { ...base, waiterName: data.orderContext.waiterName ?? base.waiterName ?? '', tableName: data.orderContext.tableName ?? base.tableName ?? '', customerName: data.orderContext.customerName ?? base.customerName ?? '', orderTime: data.orderContext.orderTime ?? base.orderTime }
               : base;
             labelData.leftPadding = batchLeftPadding;
             labelData.rightPadding = batchRightPadding;
@@ -11318,7 +11400,7 @@ async function executeLabelsBatchPrint(data: {
           });
           htmlContent = mergeLabelHtmlsIntoOne(fullHtmls);
         } else {
-          htmlContent = generateMultipleLabelsHTML(data.labels);
+          htmlContent = generateMultipleLabelsHTML(labelsToPrint);
         }
         // #region agent log — debug what is printed when NOT order-summary slip (per-item or merged labels)
         const firstL = data.labels?.[0];
@@ -11333,6 +11415,15 @@ async function executeLabelsBatchPrint(data: {
       }
     }
 
+    // #region agent log – label height: @page in batch (debug-ba378a)
+    const batchTemplateCode = checkerTemplateCode ?? '';
+    const atPageBatchTemplate = getAtPageSnippet(batchTemplateCode);
+    const atPageBatchFinal = getAtPageSnippet(htmlContent);
+    const batchPagePayload = { sessionId: 'ba378a', location: 'main.ts:executeLabelsBatchPrint', message: 'label @page (batch)', data: { atPageInTemplate: atPageBatchTemplate, atPageInFinal: atPageBatchFinal, has30mmInTemplate: batchTemplateCode.includes('30mm'), hasAutoInTemplate: batchTemplateCode.includes('auto'), useOrderSummarySlip }, hypothesisId: 'H-page', timestamp: Date.now() };
+    console.log('[LABEL HEIGHT DEBUG] batch @page in template:', atPageBatchTemplate, '| in final HTML:', atPageBatchFinal);
+    fetch('http://127.0.0.1:7495/ingest/20000880-6f22-4a8b-8a8e-250eeb7d84f4', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': 'ba378a' }, body: JSON.stringify(batchPagePayload) }).catch(() => {});
+    // #endregion
+
     // --- 1st checker: load generated HTML into print window ---
     console.log(`📝 [BACKEND] Generated HTML for ID ${requestId} (first 100 chars): ${htmlContent.substring(0, 100)}...`);
     await jobPrintWindow.loadURL(`data:text/html,${encodeURIComponent(htmlContent)}`);
@@ -11346,10 +11437,12 @@ async function executeLabelsBatchPrint(data: {
             return;
           }
           const deviceName = await resolvePrintDeviceName(jobPrintWindow.webContents, printerName);
-          const printOptions: { silent: boolean; printBackground: boolean; deviceName?: string } = {
+          const is40x30LabelBatch = htmlContent.includes('40mm') && htmlContent.includes('30mm');
+          const printOptions: { silent: boolean; printBackground: boolean; deviceName?: string; pageSize?: { width: number; height: number } } = {
             silent: true,
             printBackground: false,
             ...(deviceName ? { deviceName } : {}),
+            ...(is40x30LabelBatch ? { pageSize: { width: 40000, height: 30000 } } : {}),
           };
 
           // Many label/thermal printers ignore the 'copies' option; print N times to get N physical copies
@@ -11682,7 +11775,7 @@ function generateTestLabelHTML(printerName: string): string {
 <head>
   <meta charset="UTF-8">
   <style>
-    @page { size: 40mm auto; margin: 0; }
+    @page { size: 40mm 30mm; margin: 0; }
     * { margin: 0; padding: 0; box-sizing: border-box; color: black; }
     body {
       font-family: 'Arial', 'Helvetica', sans-serif;
@@ -11757,10 +11850,11 @@ function generateLabelHTMLFromTemplate(templateCode: string, data: LabelPrintDat
   const counter = data.counter ?? 0;
   const itemNumber = data.itemNumber ?? 0;
   const totalItems = data.totalItems ?? 0;
-  const pickupMethod = data.pickupMethod || 'dine-in';
-  const pickupLabel = pickupMethod === 'take-away' ? 'TAKE AWAY' : 'DINE IN';
+  const pickupRaw = (data.pickupMethod || 'dine-in').toString().toLowerCase().trim();
+  const pickupLabel = (pickupRaw === 'take-away' || pickupRaw === 'take away' || pickupRaw.includes('take')) ? 'TAKE AWAY' : 'DINE IN';
   const productName = escapeLabelText(data.productName || '');
   const customizations = escapeLabelText(data.customizations || '');
+  // Use transaction created_at when provided (from orderContext/label), else current time
   const orderTime = data.orderTime ? formatDateTime(new Date(data.orderTime)) : formatDateTime(new Date());
   const labelContinuation = escapeLabelText(data.labelContinuation || '');
   const waiterName = escapeLabelText(data.waiterName || '');
@@ -11785,16 +11879,18 @@ function generateLabelHTMLFromTemplate(templateCode: string, data: LabelPrintDat
   } else {
     out = out.replace(/\{\{#ifItemsCategory2\}\}/g, '').replace(/\{\{\/ifItemsCategory2\}\}/g, '');
   }
+  const itemNumStr = String(itemNumber);
+  const totalStr = String(totalItems);
   out = out
     .replace(/\{\{leftPadding\}\}/g, leftPadding)
     .replace(/\{\{rightPadding\}\}/g, rightPadding)
     .replace(/\{\{counter\}\}/g, String(counter))
-    .replace(/\{\{itemNumber\}\}/g, String(itemNumber))
-    .replace(/\{\{totalItems\}\}/g, String(totalItems))
+    .replace(/\{\{\s*itemNumber\s*\}\}/gi, itemNumStr)
+    .replace(/\{\{\s*totalItems\s*\}\}/gi, totalStr)
     .replace(/\{\{pickupMethod\}\}/g, pickupLabel)
     .replace(/\{\{productName\}\}/g, productName)
     .replace(/\{\{customizations\}\}/g, customizations)
-    .replace(/\{\{orderTime\}\}/g, orderTime)
+    .replace(/\{\{\s*orderTime\s*\}\}/g, orderTime)
     .replace(/\{\{labelContinuation\}\}/g, labelContinuation)
     .replace(/\{\{waiterName\}\}/g, waiterName)
     .replace(/\{\{customerName\}\}/g, customerName)
@@ -11804,13 +11900,39 @@ function generateLabelHTMLFromTemplate(templateCode: string, data: LabelPrintDat
     .replace(/\{\{itemsCategory2\}\}/g, itemsHtmlCategory2)
     .replace(/\{\{category1Name\}\}/g, category1Name)
     .replace(/\{\{category2Name\}\}/g, category2Name);
-  // Prevent right-side cutoff: constrain width and wrap text (label/checker printers often 40mm)
+  // Ensure .time div always shows formatted orderTime (fixes templates with literal date or missing placeholder)
+  const timeDivRegex = /<div\s+class="time"[^>]*>[\s\S]*?<\/div>/gi;
+  out = out.replace(timeDivRegex, `<div class="time">${orderTime}</div>`);
+  const hasTimeInOutput = out.includes('class="time"');
+  // Only inject footer when template had no .time div (avoid duplicating datetime when template already has one)
+  if (!hasTimeInOutput) {
+    const footerBlock = `<div class="footer" style="margin-top:2mm;"><div class="time">${orderTime}</div></div>`;
+    if (out.includes('</body>')) {
+      out = out.replace('</body>', `${footerBlock}</body>`);
+    }
+  }
+  // is40mmLabel: template is for 40mm kitchen labels (@page size 40mm). When true we inject NO extra CSS so the printed result matches the saved template exactly (font, position, layout).
+  const is40mmLabel = out.includes('@page') && out.includes('40mm');
+  // Normalize 40mm label height: saved templates may have "40mm auto" (long page). Force 40mm × 30mm so print/PDF is fixed height (runtime evidence: DB template "Momoyo Label" had 40mm auto).
+  if (is40mmLabel && /40mm\s+auto/.test(out)) {
+    out = out.replace(/40mm\s+auto/g, '40mm 30mm');
+    console.log('[LABEL] Normalized @page to 40mm × 30mm (was 40mm auto)');
+  }
+  // Pin 40mm label content to top-left of page so PDF/print don't place it at bottom-right (avoids blank area when printing the PDF).
+  if (is40mmLabel && out.includes('</head>')) {
+    const topLeftStyle = '<style>/* label top-left */ html { height: 100%; margin: 0; } body { margin: 0 !important; position: relative !important; top: 0 !important; left: 0 !important; }</style>';
+    out = out.replace('</head>', `${topLeftStyle}</head>`);
+  }
+  // addedWrap: whether we injected "wrap" CSS (word-wrap/overflow-wrap, table fixed width) to prevent text cutoff on narrow printers. We skip this for 40mm labels so layout stays exactly as in the template.
+  const hasOverflowWrap = /\boverflow-wrap\s*:\s*break-word\b/.test(out) || out.includes('overflow-wrap:break-word');
   const wrapStyle = '<style>body{word-wrap:break-word;overflow-wrap:break-word;max-width:100%;box-sizing:border-box;}table{table-layout:fixed;width:100%;}td,th{word-wrap:break-word;overflow-wrap:break-word;}</style>';
-  if (out.includes('</head>') && !out.includes('overflow-wrap:break-word')) {
+  const addedWrap = out.includes('</head>') && !hasOverflowWrap && !is40mmLabel;
+  if (addedWrap) {
     out = out.replace('</head>', `${wrapStyle}</head>`);
   }
-  // Force all checker item lines: same alignment (no indent) and no extra space between lines
-  if (out.includes('</head>') && !out.includes('checker-item-line-align')) {
+  // addItemLineStyle: whether we injected CSS for ".item-line" (order-summary / multi-line checker layouts). We skip this for 40mm labels so the template is not modified.
+  const addItemLineStyle = out.includes('</head>') && !out.includes('checker-item-line-align') && !is40mmLabel;
+  if (addItemLineStyle) {
     const itemLineStyle = '<style>/* checker-item-line-align */.item-line, .item-line.package-subitem, tr.package-subitem td:first-child { padding-left: 0 !important; margin: 0 !important; padding-top: 0 !important; padding-bottom: 0 !important; line-height: 1.2 !important; }</style>';
     out = out.replace('</head>', `${itemLineStyle}</head>`);
   }
@@ -11823,7 +11945,9 @@ function mergeLabelHtmlsIntoOne(fullHtmls: string[]): string {
   if (fullHtmls.length === 1) return fullHtmls[0];
   const first = fullHtmls[0];
   const firstBodyMatch = first.match(/<body[^>]*>([\s\S]*)<\/body>/i);
-  const firstBody = firstBodyMatch ? firstBodyMatch[1] : '';
+  const firstBodyRaw = firstBodyMatch ? firstBodyMatch[1] : '';
+  // Wrap first label in .label-page too so it gets a page break (otherwise 1st and 2nd print on one physical label)
+  const firstBody = firstBodyRaw ? `<div class="label-page">${firstBodyRaw}</div>` : '';
   const restBodies = fullHtmls.slice(1).map((html) => {
     const m = html.match(/<body[^>]*>([\s\S]*)<\/body>/i);
     return m ? `<div class="label-page">${m[1]}</div>` : '';
@@ -11872,7 +11996,7 @@ function generateLabelHTML(data: LabelPrintData): string {
   <meta charset="UTF-8">
   <style>
     @page { 
-      size: 40mm auto; 
+      size: 40mm 30mm; 
       margin: 0;
     }
     * { 
@@ -11892,13 +12016,8 @@ function generateLabelHTML(data: LabelPrintData): string {
       word-wrap: break-word;
       overflow-wrap: break-word;
       color: black;
-      display: flex;
-      flex-direction: column;
-      height: 100%;
-      min-height: 100%;
     }
     .content {
-      flex: 1;
     }
     .row {
       display: table;
@@ -11941,8 +12060,7 @@ function generateLabelHTML(data: LabelPrintData): string {
       text-align: center;
     }
     .footer {
-      margin-top: auto;
-      padding-top: 2mm;
+      margin-top: 2mm;
     }
     .time {
       text-align: left;
@@ -12020,7 +12138,7 @@ function generateMultipleLabelsHTML(labels: LabelPrintData[]): string {
   <meta charset="UTF-8">
   <style>
     @page { 
-      size: 40mm auto; 
+      size: 40mm 30mm; 
       margin: 0;
     }
     * { 
@@ -12042,8 +12160,6 @@ function generateMultipleLabelsHTML(labels: LabelPrintData[]): string {
     }
     .label-page {
       padding: 3mm 0 3mm 3mm;
-      display: flex;
-      flex-direction: column;
       min-height: 30mm;
       page-break-after: always;
     }
@@ -12051,7 +12167,6 @@ function generateMultipleLabelsHTML(labels: LabelPrintData[]): string {
       page-break-after: auto;
     }
     .content {
-      flex: 1;
     }
     .row {
       display: table;
@@ -12094,8 +12209,7 @@ function generateMultipleLabelsHTML(labels: LabelPrintData[]): string {
       text-align: center;
     }
     .footer {
-      margin-top: auto;
-      padding-top: 2mm;
+      margin-top: 2mm;
     }
     .time {
       text-align: left;

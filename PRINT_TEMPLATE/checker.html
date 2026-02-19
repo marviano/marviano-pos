@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <style>
+    @page { 
+      size: 40mm 30mm; 
+      margin: 0;
+    }
+    * { 
+      margin: 0; 
+      padding: 0; 
+      box-sizing: border-box; 
+      color: black; 
+    }
+    body {
+      font-family: 'Arial', 'Helvetica', sans-serif;
+      width: 22ch;
+      max-width: 22ch;
+      font-size: 8pt;
+      font-weight: 600;
+      line-height: 1.4;
+      padding: 3mm 0 3mm 3mm;
+      word-wrap: break-word;
+      overflow-wrap: break-word;
+      color: black;
+      display: flex;
+      flex-direction: column;
+      height: 100%;
+      min-height: 100%;
+    }
+    .content {
+      flex: 1;
+    }
+    .row {
+      display: table;
+      width: calc(100% + 3mm);
+      table-layout: fixed;
+      margin-right: -3mm;
+    }
+    .row > div {
+      display: table-cell;
+    }
+    .counter {
+      font-size: 9pt;
+      font-weight: 700;
+    }
+    .pickup {
+      text-align: left;
+      font-size: 7pt;
+      font-weight: 700;
+      text-transform: uppercase;
+    }
+    .product {
+      text-align: left;
+      font-size: 7pt;
+      font-weight: 600;
+    }
+    .customizations {
+      text-align: left;
+      font-size: 7pt;
+      font-weight: 500;
+    }
+    .number {
+      font-size: 9pt;
+      font-weight: 700;
+      text-align: right;
+    }
+    .continuation {
+      font-size: 7pt;
+      font-weight: 600;
+      color: #666;
+      text-align: center;
+    }
+    .footer {
+      margin-top: auto;
+      padding-top: 2mm;
+    }
+    .time {
+      text-align: left;
+      font-size: 7pt;
+      font-weight: 500;
+    }
+  </style>
+</head>
+<body>
+  <div class="content">
+    <div class="row">
+      <div class="counter">{{counter}}</div>          
+      <div class="continuation">{{continuation}}</div>       
+      <div class="number">{{number}}</div>          
+    </div>
+    <div class="pickup">{{pickup}}</div>        
+    <div class="product">{{product}}</div>   
+    <div class="customizations">{{customizations}}</div>  
+  </div>
+  <div class="footer">
+    <div class="time">{{time}}</div>  
+  </div>
+</body>
+</html>

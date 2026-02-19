@@ -1,11 +1,11 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import { Save, FileText, Settings, Image, Phone, MapPin, Building2, Printer, Copy, X, Pencil, Eye } from 'lucide-react';
+import { Save, FileText, Settings, Image, Phone, MapPin, Building2, Printer, Copy, X, Pencil, Eye, CloudUpload, CloudDownload, Loader2 } from 'lucide-react';
 import { useAuth } from '@/hooks/useAuth';
 
-/** Preview: show placeholders as bold {{something}}, strip conditionals. */
-function renderReceiptPreview(code: string): string {
+/** Preview: show placeholders as bold {{something}}, strip conditionals. For checker type, scale down so label fits. */
+function renderReceiptPreview(code: string, templateType?: TemplateType): string {
   let html = code;
   // Fix CSS: replace padding placeholders in <style> with numbers so layout works (centering, etc.)
   html = html.replace(/(<style[^>]*>)([\s\S]*?)(<\/style>)/gi, (_: string, open: string, css: string, close: string) => {
@@ -24,8 +24,12 @@ function renderReceiptPreview(code: string): string {
   html = html.replace(/\{\{([^{}]+)\}\}/g, '<strong>{{$1}}</strong>');
   // Logo: wrap in .logo-container so it centers like real receipt (same structure as print)
   html = html.replace(/<strong>\{\{logo\}\}<\/strong>/g, '<div class="logo-container"><strong>{{logo}}</strong></div>');
-  // Center receipt in preview iframe (body is 42ch; iframe is wider — avoid left-aligned slip)
-  html = html.replace('</head>', '<style data-preview>body{margin-left:auto;margin-right:auto;}</style></head>');
+  // Preview-only style: center receipt; for checker/label scale down so small label doesn't appear huge
+  const previewStyle =
+    templateType === 'checker'
+      ? '<style data-preview>body{margin-left:auto;margin-right:auto;transform:scale(0.55);transform-origin:top center;}</style>'
+      : '<style data-preview>body{margin-left:auto;margin-right:auto;}</style>';
+  html = html.replace('</head>', previewStyle + '</head>');
   return html;
 }
 
@@ -54,7 +58,7 @@ const DEFAULT_CHECKER_TEMPLATE = `<!DOCTYPE html>
 <head>
   <meta charset="UTF-8">
   <style>
-    @page { size: 40mm auto; margin: 0; }
+    @page { size: 40mm 30mm; margin: 0; }
     * { margin: 0; padding: 0; box-sizing: border-box; color: black; }
     body {
       font-family: 'Arial', 'Helvetica', sans-serif;
@@ -67,12 +71,8 @@ const DEFAULT_CHECKER_TEMPLATE = `<!DOCTYPE html>
       word-wrap: break-word;
       overflow-wrap: break-word;
       color: black;
-      display: flex;
-      flex-direction: column;
-      height: 100%;
-      min-height: 100%;
     }
-    .content { flex: 1; }
+    .content { }
     .row { display: table; width: calc(100% + 3mm); table-layout: fixed; margin-right: -3mm; }
     .row > div { display: table-cell; }
     .counter { font-size: 9pt; font-weight: 700; }
@@ -81,7 +81,7 @@ const DEFAULT_CHECKER_TEMPLATE = `<!DOCTYPE html>
     .customizations { text-align: left; font-size: 7pt; font-weight: 500; }
     .number { font-size: 9pt; font-weight: 700; text-align: right; }
     .continuation { font-size: 7pt; font-weight: 600; color: #666; text-align: center; }
-    .footer { margin-top: auto; padding-top: 2mm; }
+    .footer { margin-top: 2mm; }
     .time { text-align: left; font-size: 7pt; font-weight: 500; }
   </style>
 </head>
@@ -111,6 +111,8 @@ interface EditTemplateModal {
   newName: string;
   setAsDefault: boolean;
   showNotes: boolean;
+  /** Checker only: true = one label per product unit, false = one combined kitchen order slip. */
+  oneLabelPerProduct: boolean;
   /** True if this template is the default (used for printing). */
   isDefault: boolean;
 }
@@ -165,7 +167,66 @@ export default function ReceiptTemplateSettings() {
   const [editModal, setEditModal] = useState<EditTemplateModal | null>(null);
   const [editModalLoading, setEditModalLoading] = useState(false);
 
+  // Per-template VPS sync (upload/download)
+  const [syncingCard, setSyncingCard] = useState<{ id: number; direction: 'upload' | 'download' } | null>(null);
+  const [cardSyncResults, setCardSyncResults] = useState<Record<number, { type: 'success' | 'skip' | 'error'; message: string } | null>>({});
+
   const businessId = user?.selectedBusinessId ?? undefined;
+
+  const clearCardResultAfterDelay = (templateId: number, delayMs: number) => {
+    const t = setTimeout(() => {
+      setCardSyncResults(prev => {
+        const next = { ...prev };
+        delete next[templateId];
+        return next;
+      });
+    }, delayMs);
+    return () => clearTimeout(t);
+  };
+
+  const handleUploadTemplate = async (id: number) => {
+    setSyncingCard({ id, direction: 'upload' });
+    setCardSyncResults(prev => ({ ...prev, [id]: null }));
+    try {
+      const result = await window.electronAPI?.uploadTemplateToVps?.(id);
+      if (!result) {
+        setCardSyncResults(prev => ({ ...prev, [id]: { type: 'error', message: 'VPS tidak tersedia' } }));
+        clearCardResultAfterDelay(id, 3000);
+        return;
+      }
+      const type = result.skipped ? 'skip' : result.success ? 'success' : 'error';
+      setCardSyncResults(prev => ({ ...prev, [id]: { type, message: result.message } }));
+      clearCardResultAfterDelay(id, 3000);
+      if (result.success && !result.skipped) await loadAvailableTemplates();
+    } catch (e) {
+      setCardSyncResults(prev => ({ ...prev, [id]: { type: 'error', message: (e as Error)?.message || 'Gagal upload' } }));
+      clearCardResultAfterDelay(id, 3000);
+    } finally {
+      setSyncingCard(null);
+    }
+  };
+
+  const handleDownloadTemplate = async (id: number) => {
+    setSyncingCard({ id, direction: 'download' });
+    setCardSyncResults(prev => ({ ...prev, [id]: null }));
+    try {
+      const result = await window.electronAPI?.downloadTemplateFromVps?.(id);
+      if (!result) {
+        setCardSyncResults(prev => ({ ...prev, [id]: { type: 'error', message: 'VPS tidak tersedia' } }));
+        clearCardResultAfterDelay(id, 3000);
+        return;
+      }
+      const type = result.skipped ? 'skip' : result.success ? 'success' : 'error';
+      setCardSyncResults(prev => ({ ...prev, [id]: { type, message: result.message } }));
+      clearCardResultAfterDelay(id, 3000);
+      if (result.success && !result.skipped) await loadAvailableTemplates();
+    } catch (e) {
+      setCardSyncResults(prev => ({ ...prev, [id]: { type: 'error', message: (e as Error)?.message || 'Gagal download' } }));
+      clearCardResultAfterDelay(id, 3000);
+    } finally {
+      setSyncingCard(null);
+    }
+  };
 
   // Load settings
   useEffect(() => {
@@ -309,6 +370,7 @@ export default function ReceiptTemplateSettings() {
         newName: mode === 'duplicate' ? `${template.name} (Salinan)` : template.name,
         setAsDefault: false,
         showNotes: result.showNotes ?? false,
+        oneLabelPerProduct: result.oneLabelPerProduct !== false,
         isDefault: template.is_default ?? false,
       });
     } catch (error) {
@@ -335,6 +397,7 @@ export default function ReceiptTemplateSettings() {
       newName: '',
       setAsDefault: false,
       showNotes: false,
+      oneLabelPerProduct: true,
       isDefault: false,
     });
   };
@@ -354,7 +417,7 @@ export default function ReceiptTemplateSettings() {
       setMessage(null);
       if (editModal.mode === 'edit') {
         const newName = editModal.newName.trim();
-        const result = await window.electronAPI?.updateReceiptTemplate?.(editModal.templateId, editModal.code, newName, editModal.showNotes);
+        const result = await window.electronAPI?.updateReceiptTemplate?.(editModal.templateId, editModal.code, newName, editModal.showNotes, editModal.oneLabelPerProduct);
         if (!result?.success) {
           setMessage({ type: 'error', text: result?.error || 'Gagal menyimpan perubahan' });
           return;
@@ -379,7 +442,8 @@ export default function ReceiptTemplateSettings() {
           editModal.code,
           editModal.newName.trim(),
           businessId,
-          editModal.showNotes
+          editModal.showNotes,
+          editModal.oneLabelPerProduct
         );
         if (!result?.success) {
           setMessage({ type: 'error', text: result?.error || 'Gagal menyimpan template' });
@@ -807,26 +871,68 @@ export default function ReceiptTemplateSettings() {
                         <div className="text-sm text-blue-600 mt-2">✓ Dipilih</div>
                       )}
                     </button>
-                    <div className="mt-3 flex gap-2">
+                    <div className="mt-3 flex flex-wrap gap-2">
                       <button
                         type="button"
                         onClick={() => handleEditTemplate('receipt', template)}
-                        disabled={saving || editModalLoading}
-                        className="flex-1 px-3 py-1.5 text-sm border border-gray-300 rounded-md hover:bg-gray-100 text-gray-700 flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
+                        disabled={saving || editModalLoading || (syncingCard?.id === template.id)}
+                        className="flex-1 min-w-0 px-3 py-1.5 text-sm border border-gray-300 rounded-md hover:bg-gray-100 text-gray-700 flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
                       >
-                        <Pencil className="w-4 h-4" />
+                        <Pencil className="w-4 h-4 shrink-0" />
                         Edit
                       </button>
                       <button
                         type="button"
                         onClick={() => handleDuplikatEdit('receipt', template)}
-                        disabled={saving || editModalLoading}
-                        className="flex-1 px-3 py-1.5 text-sm border border-gray-300 rounded-md hover:bg-gray-100 text-gray-700 flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
+                        disabled={saving || editModalLoading || (syncingCard?.id === template.id)}
+                        className="flex-1 min-w-0 px-3 py-1.5 text-sm border border-gray-300 rounded-md hover:bg-gray-100 text-gray-700 flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
                       >
-                        <Copy className="w-4 h-4" />
+                        <Copy className="w-4 h-4 shrink-0" />
                         Duplikat
                       </button>
+                      <button
+                        type="button"
+                        onClick={() => handleUploadTemplate(template.id)}
+                        disabled={saving || editModalLoading || (syncingCard?.id === template.id)}
+                        className="flex-1 min-w-0 px-3 py-1.5 text-sm border border-blue-200 rounded-md hover:bg-blue-50 text-blue-700 flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
+                      >
+                        {syncingCard?.id === template.id && syncingCard?.direction === 'upload' ? (
+                          <Loader2 className="w-4 h-4 shrink-0 animate-spin" />
+                        ) : (
+                          <CloudUpload className="w-4 h-4 shrink-0" />
+                        )}
+                        Upload
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleDownloadTemplate(template.id)}
+                        disabled={saving || editModalLoading || (syncingCard?.id === template.id)}
+                        className="flex-1 min-w-0 px-3 py-1.5 text-sm border border-green-200 rounded-md hover:bg-green-50 text-green-700 flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
+                      >
+                        {syncingCard?.id === template.id && syncingCard?.direction === 'download' ? (
+                          <Loader2 className="w-4 h-4 shrink-0 animate-spin" />
+                        ) : (
+                          <CloudDownload className="w-4 h-4 shrink-0" />
+                        )}
+                        Download
+                      </button>
                     </div>
+                    {cardSyncResults[template.id] && (
+                      <div
+                        className={`mt-2 text-xs px-2 py-1.5 rounded ${
+                          cardSyncResults[template.id]?.type === 'success'
+                            ? 'bg-green-100 text-green-800'
+                            : cardSyncResults[template.id]?.type === 'skip'
+                              ? 'bg-amber-100 text-amber-800'
+                              : 'bg-red-100 text-red-800'
+                        }`}
+                      >
+                        {cardSyncResults[template.id]?.type === 'success' && '✓ '}
+                        {cardSyncResults[template.id]?.type === 'skip' && '⚠ '}
+                        {cardSyncResults[template.id]?.type === 'error' && '✕ '}
+                        {cardSyncResults[template.id]?.message}
+                      </div>
+                    )}
                   </div>
                 ))}
                 {availableTemplates.receipt.length === 0 && (
@@ -894,26 +1000,68 @@ export default function ReceiptTemplateSettings() {
                         <div className="text-sm text-blue-600 mt-2">✓ Dipilih</div>
                       )}
                     </button>
-                    <div className="mt-3 flex gap-2">
+                    <div className="mt-3 flex flex-wrap gap-2">
                       <button
                         type="button"
                         onClick={() => handleEditTemplate('bill', template)}
-                        disabled={saving || editModalLoading}
-                        className="flex-1 px-3 py-1.5 text-sm border border-gray-300 rounded-md hover:bg-gray-100 text-gray-700 flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
+                        disabled={saving || editModalLoading || (syncingCard?.id === template.id)}
+                        className="flex-1 min-w-0 px-3 py-1.5 text-sm border border-gray-300 rounded-md hover:bg-gray-100 text-gray-700 flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
                       >
-                        <Pencil className="w-4 h-4" />
+                        <Pencil className="w-4 h-4 shrink-0" />
                         Edit
                       </button>
                       <button
                         type="button"
                         onClick={() => handleDuplikatEdit('bill', template)}
-                        disabled={saving || editModalLoading}
-                        className="flex-1 px-3 py-1.5 text-sm border border-gray-300 rounded-md hover:bg-gray-100 text-gray-700 flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
+                        disabled={saving || editModalLoading || (syncingCard?.id === template.id)}
+                        className="flex-1 min-w-0 px-3 py-1.5 text-sm border border-gray-300 rounded-md hover:bg-gray-100 text-gray-700 flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
                       >
-                        <Copy className="w-4 h-4" />
+                        <Copy className="w-4 h-4 shrink-0" />
                         Duplikat
                       </button>
+                      <button
+                        type="button"
+                        onClick={() => handleUploadTemplate(template.id)}
+                        disabled={saving || editModalLoading || (syncingCard?.id === template.id)}
+                        className="flex-1 min-w-0 px-3 py-1.5 text-sm border border-blue-200 rounded-md hover:bg-blue-50 text-blue-700 flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
+                      >
+                        {syncingCard?.id === template.id && syncingCard?.direction === 'upload' ? (
+                          <Loader2 className="w-4 h-4 shrink-0 animate-spin" />
+                        ) : (
+                          <CloudUpload className="w-4 h-4 shrink-0" />
+                        )}
+                        Upload
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleDownloadTemplate(template.id)}
+                        disabled={saving || editModalLoading || (syncingCard?.id === template.id)}
+                        className="flex-1 min-w-0 px-3 py-1.5 text-sm border border-green-200 rounded-md hover:bg-green-50 text-green-700 flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
+                      >
+                        {syncingCard?.id === template.id && syncingCard?.direction === 'download' ? (
+                          <Loader2 className="w-4 h-4 shrink-0 animate-spin" />
+                        ) : (
+                          <CloudDownload className="w-4 h-4 shrink-0" />
+                        )}
+                        Download
+                      </button>
                     </div>
+                    {cardSyncResults[template.id] && (
+                      <div
+                        className={`mt-2 text-xs px-2 py-1.5 rounded ${
+                          cardSyncResults[template.id]?.type === 'success'
+                            ? 'bg-green-100 text-green-800'
+                            : cardSyncResults[template.id]?.type === 'skip'
+                              ? 'bg-amber-100 text-amber-800'
+                              : 'bg-red-100 text-red-800'
+                        }`}
+                      >
+                        {cardSyncResults[template.id]?.type === 'success' && '✓ '}
+                        {cardSyncResults[template.id]?.type === 'skip' && '⚠ '}
+                        {cardSyncResults[template.id]?.type === 'error' && '✕ '}
+                        {cardSyncResults[template.id]?.message}
+                      </div>
+                    )}
                   </div>
                 ))}
                 {availableTemplates.bill.length === 0 && (
@@ -984,26 +1132,68 @@ export default function ReceiptTemplateSettings() {
                         <div className="text-sm text-blue-600 mt-2">✓ Dipilih</div>
                       )}
                     </button>
-                    <div className="mt-3 flex gap-2">
+                    <div className="mt-3 flex flex-wrap gap-2">
                       <button
                         type="button"
                         onClick={() => handleEditTemplate('checker', template)}
-                        disabled={saving || editModalLoading}
-                        className="flex-1 px-3 py-1.5 text-sm border border-gray-300 rounded-md hover:bg-gray-100 text-gray-700 flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
+                        disabled={saving || editModalLoading || (syncingCard?.id === template.id)}
+                        className="flex-1 min-w-0 px-3 py-1.5 text-sm border border-gray-300 rounded-md hover:bg-gray-100 text-gray-700 flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
                       >
-                        <Pencil className="w-4 h-4" />
+                        <Pencil className="w-4 h-4 shrink-0" />
                         Edit
                       </button>
                       <button
                         type="button"
                         onClick={() => handleDuplikatEdit('checker', template)}
-                        disabled={saving || editModalLoading}
-                        className="flex-1 px-3 py-1.5 text-sm border border-gray-300 rounded-md hover:bg-gray-100 text-gray-700 flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
+                        disabled={saving || editModalLoading || (syncingCard?.id === template.id)}
+                        className="flex-1 min-w-0 px-3 py-1.5 text-sm border border-gray-300 rounded-md hover:bg-gray-100 text-gray-700 flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
                       >
-                        <Copy className="w-4 h-4" />
+                        <Copy className="w-4 h-4 shrink-0" />
                         Duplikat
                       </button>
+                      <button
+                        type="button"
+                        onClick={() => handleUploadTemplate(template.id)}
+                        disabled={saving || editModalLoading || (syncingCard?.id === template.id)}
+                        className="flex-1 min-w-0 px-3 py-1.5 text-sm border border-blue-200 rounded-md hover:bg-blue-50 text-blue-700 flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
+                      >
+                        {syncingCard?.id === template.id && syncingCard?.direction === 'upload' ? (
+                          <Loader2 className="w-4 h-4 shrink-0 animate-spin" />
+                        ) : (
+                          <CloudUpload className="w-4 h-4 shrink-0" />
+                        )}
+                        Upload
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleDownloadTemplate(template.id)}
+                        disabled={saving || editModalLoading || (syncingCard?.id === template.id)}
+                        className="flex-1 min-w-0 px-3 py-1.5 text-sm border border-green-200 rounded-md hover:bg-green-50 text-green-700 flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
+                      >
+                        {syncingCard?.id === template.id && syncingCard?.direction === 'download' ? (
+                          <Loader2 className="w-4 h-4 shrink-0 animate-spin" />
+                        ) : (
+                          <CloudDownload className="w-4 h-4 shrink-0" />
+                        )}
+                        Download
+                      </button>
                     </div>
+                    {cardSyncResults[template.id] && (
+                      <div
+                        className={`mt-2 text-xs px-2 py-1.5 rounded ${
+                          cardSyncResults[template.id]?.type === 'success'
+                            ? 'bg-green-100 text-green-800'
+                            : cardSyncResults[template.id]?.type === 'skip'
+                              ? 'bg-amber-100 text-amber-800'
+                              : 'bg-red-100 text-red-800'
+                        }`}
+                      >
+                        {cardSyncResults[template.id]?.type === 'success' && '✓ '}
+                        {cardSyncResults[template.id]?.type === 'skip' && '⚠ '}
+                        {cardSyncResults[template.id]?.type === 'error' && '✕ '}
+                        {cardSyncResults[template.id]?.message}
+                      </div>
+                    )}
                   </div>
                 ))}
                 {availableTemplates.checker.length === 0 && (
@@ -1081,20 +1271,20 @@ export default function ReceiptTemplateSettings() {
                     <Eye className="w-4 h-4" />
                     Preview
                   </label>
-                  <div className="flex-1 min-h-[280px] max-h-[480px] border border-gray-300 rounded-md bg-gray-50 overflow-auto p-2">
+                  <div className="flex-1 min-h-[280px] max-h-[480px] border border-gray-300 rounded-md bg-gray-50 overflow-auto p-2 flex justify-center">
                     <iframe
                       title="Receipt preview"
                       srcDoc={(() => {
                         try {
-                          const raw = renderReceiptPreview(editModal.code || '');
+                          const raw = renderReceiptPreview(editModal.code || '', editModal.type);
                           if (!raw || !raw.trim()) return '<!DOCTYPE html><html><body><p class="text-gray-500 text-sm">Edit template untuk melihat preview.</p></body></html>';
                           return raw;
                         } catch {
                           return '<!DOCTYPE html><html><body><p class="text-red-600 text-sm">Error rendering preview.</p></body></html>';
                         }
                       })()}
-                      className="w-full min-h-[260px] border-0 bg-white max-w-[320px]"
-                      style={{ minHeight: '360px' }}
+                      className={`border-0 bg-white min-h-[260px] ${editModal.type === 'checker' ? 'w-[160px] max-w-[160px]' : 'w-full max-w-[320px]'}`}
+                      style={{ minHeight: editModal.type === 'checker' ? '240px' : '360px' }}
                       sandbox="allow-same-origin"
                     />
                   </div>
@@ -1109,6 +1299,20 @@ export default function ReceiptTemplateSettings() {
                 />
                 <span className="text-sm text-gray-700">Tampilkan catatan/kustomisasi di struk/bill</span>
               </label>
+              {editModal.type === 'checker' && (
+                <label className="flex items-center gap-2 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={editModal.oneLabelPerProduct}
+                    onChange={(e) => setEditModal(prev => prev ? { ...prev, oneLabelPerProduct: e.target.checked } : null)}
+                    className="rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                  />
+                  <span className="text-sm text-gray-700">1 Label for each product</span>
+                </label>
+              )}
+              {editModal.type === 'checker' && (
+                <p className="text-xs text-gray-500 ml-6 -mt-1">Centang = satu label per porsi; tidak centang = satu slip gabungan pesanan (semua item dalam satu cetakan).</p>
+              )}
               {editModal.mode === 'edit' && !editModal.isDefault && (
                 <p className="text-sm text-amber-700 bg-amber-50 border border-amber-200 rounded-md px-3 py-2">
                   Template ini <strong>bukan default</strong>. Cetak struk/bill menggunakan template default. Agar pengaturan &quot;Tampilkan catatan&quot; berlaku di cetakan, jadikan template ini sebagai default (pilih di daftar) atau edit template default.

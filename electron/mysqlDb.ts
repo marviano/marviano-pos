@@ -134,6 +134,29 @@ export async function executeOnMirror(
 }
 
 /**
+ * Execute a SELECT query on the VPS mirror pool. Returns typed rows.
+ * If the mirror pool is not configured (e.g. DB_VPS_HOST not set), throws Error('VPS_NOT_CONFIGURED').
+ * On query error, throws with the original error (caller handles it).
+ */
+export async function executeQueryOnMirror<T>(
+  sql: string,
+  params: (string | number | null | boolean)[] = []
+): Promise<T[]> {
+  const pool = getMirrorPool();
+  if (!pool) {
+    throw new Error('VPS_NOT_CONFIGURED');
+  }
+  try {
+    const [results] = await pool.execute(sql, params);
+    return results as T[];
+  } catch (error) {
+    console.error('❌ Mirror query error:', error);
+    console.error('SQL:', sql);
+    throw error;
+  }
+}
+
+/**
  * Convert Date, ISO string, or Unix timestamp to MySQL DATETIME format ('YYYY-MM-DD HH:MM:SS')
  * Explicitly converts to UTC+7 (WIB - Western Indonesian Time) to match VPS database timezone
  */

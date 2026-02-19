@@ -689,10 +689,12 @@ declare global {
       // Receipt Template and Settings Management
       getReceiptTemplate?: (templateType: 'receipt' | 'bill' | 'checker', businessId?: number) => Promise<{ success: boolean; template: string | null; error?: string }>;
       getReceiptTemplates?: (templateType: 'receipt' | 'bill' | 'checker', businessId?: number) => Promise<{ success: boolean; templates: Array<{ id: number; name: string; is_default: boolean }>; error?: string }>;
-      getReceiptTemplateById?: (id: number) => Promise<{ success: boolean; templateCode: string | null; showNotes?: boolean; error?: string }>;
+      getReceiptTemplateById?: (id: number) => Promise<{ success: boolean; templateCode: string | null; showNotes?: boolean; oneLabelPerProduct?: boolean; error?: string }>;
       setDefaultReceiptTemplate?: (templateType: 'receipt' | 'bill' | 'checker', templateName: string, businessId?: number) => Promise<{ success: boolean; error?: string }>;
-      saveReceiptTemplate?: (templateType: 'receipt' | 'bill' | 'checker', templateCode: string, templateName?: string, businessId?: number, showNotes?: boolean) => Promise<{ success: boolean; error?: string }>;
-      updateReceiptTemplate?: (id: number, templateCode: string, templateName?: string | null, showNotes?: boolean) => Promise<{ success: boolean; error?: string }>;
+      saveReceiptTemplate?: (templateType: 'receipt' | 'bill' | 'checker', templateCode: string, templateName?: string, businessId?: number, showNotes?: boolean, oneLabelPerProduct?: boolean) => Promise<{ success: boolean; error?: string }>;
+      updateReceiptTemplate?: (id: number, templateCode: string, templateName?: string | null, showNotes?: boolean, oneLabelPerProduct?: boolean) => Promise<{ success: boolean; error?: string }>;
+      uploadTemplateToVps?: (id: number) => Promise<{ success: boolean; skipped?: boolean; message: string }>;
+      downloadTemplateFromVps?: (id: number) => Promise<{ success: boolean; skipped?: boolean; message: string }>;
       getReceiptSettings?: (businessId?: number) => Promise<{
         success: boolean;
         settings: {

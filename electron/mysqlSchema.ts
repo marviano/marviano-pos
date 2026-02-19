@@ -730,6 +730,7 @@ export async function initializeMySQLSchema(): Promise<void> {
       is_active TINYINT(1) DEFAULT 1 COMMENT 'Whether this template is active',
       is_default TINYINT(1) DEFAULT 0 COMMENT 'Whether this template is the default/active template for its type',
       show_notes TINYINT(1) DEFAULT 0 COMMENT '1 = show item note/customization on print, 0 = hide',
+      one_label_per_product TINYINT(1) DEFAULT 1 COMMENT 'Checker only: 1 = one label per product unit, 0 = one combined kitchen order slip',
       version INT DEFAULT 1 COMMENT 'Template version number',
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
       updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
@@ -852,6 +853,21 @@ export async function initializeMySQLSchema(): Promise<void> {
         // ENUM already has checker or other non-null issue
       } else {
         console.warn('⚠️ receipt_templates checker ENUM migration:', err);
+      }
+    }
+
+    // One-time migration: add one_label_per_product to receipt_templates (checker: 1 = per unit, 0 = one slip)
+    try {
+      await pool.execute(
+        `ALTER TABLE receipt_templates ADD COLUMN one_label_per_product TINYINT(1) DEFAULT 1 COMMENT 'Checker only: 1 = one label per product unit, 0 = one combined kitchen order slip'`
+      );
+      console.log('✅ receipt_templates: added one_label_per_product column');
+    } catch (alterErr: unknown) {
+      const err = alterErr as { code?: string; errno?: number };
+      if (err.code === 'ER_DUP_FIELDNAME' || err.errno === 1060) {
+        // Column already exists
+      } else {
+        console.warn('⚠️ receipt_templates one_label_per_product migration:', err);
       }
     }
 
