@@ -307,7 +307,7 @@ class OfflineSyncService {
 
         // const targetBusinessId = Number(syncData.businessId ?? 14);
 
-          const totalSteps = 35; // Updated: added packageItems, packageItemProducts
+          const totalSteps = 34; // receipt_settings excluded from Download Master Data (user uses "Download Receipt Settings" in Template Struk)
           let completedSteps = 0;
           const advanceProgress = () => {
             completedSteps = Math.min(totalSteps, completedSteps + 1);
@@ -630,16 +630,8 @@ class OfflineSyncService {
           }
           advanceProgress();
 
-          // Receipt Settings
-          if (Array.isArray(data.receiptSettings) && data.receiptSettings.length > 0) {
-            const result = await (electronAPI.localDbUpsertReceiptSettings as (rows: unknown[]) => Promise<{ success: boolean; error?: string }>)?.(data.receiptSettings);
-            if (result && !result.success) {
-              const errMsg = result.error ?? 'Unknown error';
-              console.error('[OFFLINE SYNC] Receipt settings upsert failed:', errMsg);
-              throw new Error(`Gagal menyinkronkan pengaturan struk: ${errMsg}`);
-            }
-          }
-          advanceProgress();
+          // Receipt Settings: NOT downloaded in Download Master Data (user controls via "Download Receipt Settings" in Template Struk)
+          // advanceProgress();
 
           // Receipt Templates (download master data: upsert to primary MySQL)
           if (Array.isArray(data.receiptTemplates) && data.receiptTemplates.length > 0) {

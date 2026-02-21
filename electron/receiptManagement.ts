@@ -62,8 +62,8 @@ import { getDbConfig } from './configManager';
 function logDbOperation(operation: 'read' | 'save', table: string, detail?: string): void {
   try {
     const db = getDbConfig();
-    fetch('http://127.0.0.1:7242/ingest/7b565785-72b5-49f7-b2c0-57606ea0d0b5', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ location: 'receiptManagement.ts', message: `${operation} ${table}`, data: { operation, table, dbHost: db.host, dbName: db.database, detail }, timestamp: Date.now(), sessionId: 'debug-session', runId: 'run1', hypothesisId: 'H1' }) }).catch(() => {});
-  } catch (_) {}
+    fetch('http://127.0.0.1:7242/ingest/7b565785-72b5-49f7-b2c0-57606ea0d0b5', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ location: 'receiptManagement.ts', message: `${operation} ${table}`, data: { operation, table, dbHost: db.host, dbName: db.database, detail }, timestamp: Date.now(), sessionId: 'debug-session', runId: 'run1', hypothesisId: 'H1' }) }).catch(() => { });
+  } catch (_) { }
 }
 
 /**
@@ -162,7 +162,7 @@ export class ReceiptManagementService {
         if (businessTemplate?.template_code) {
           console.log(`✅ Found business-specific default ${templateType} template for business ${businessId}`);
           // #region agent log
-          fetch('http://127.0.0.1:7245/ingest/519de021-d49d-473f-a8a1-4215977c867a',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'receiptManagement.ts:getReceiptTemplate',message:'checker/receipt template result',data:{templateType,businessId,showNotes:businessTemplate.show_notes===1,hasTemplateCode:true,scope:'business',templateName:businessTemplate.template_name},timestamp:Date.now(),hypothesisId:'A'})}).catch(()=>{});
+          fetch('http://127.0.0.1:7245/ingest/519de021-d49d-473f-a8a1-4215977c867a', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ location: 'receiptManagement.ts:getReceiptTemplate', message: 'checker/receipt template result', data: { templateType, businessId, showNotes: businessTemplate.show_notes === 1, hasTemplateCode: true, scope: 'business', templateName: businessTemplate.template_name }, timestamp: Date.now(), hypothesisId: 'A' }) }).catch(() => { });
           // #endregion
           return {
             templateCode: businessTemplate.template_code,
@@ -182,7 +182,7 @@ export class ReceiptManagementService {
       if (globalTemplate?.template_code) {
         console.log(`✅ Found global default ${templateType} template`);
         // #region agent log
-        fetch('http://127.0.0.1:7245/ingest/519de021-d49d-473f-a8a1-4215977c867a',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'receiptManagement.ts:getReceiptTemplate',message:'checker/receipt template result',data:{templateType,businessId:businessId??null,showNotes:globalTemplate.show_notes===1,hasTemplateCode:true,scope:'global',templateName:globalTemplate.template_name},timestamp:Date.now(),hypothesisId:'B'})}).catch(()=>{});
+        fetch('http://127.0.0.1:7245/ingest/519de021-d49d-473f-a8a1-4215977c867a', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ location: 'receiptManagement.ts:getReceiptTemplate', message: 'checker/receipt template result', data: { templateType, businessId: businessId ?? null, showNotes: globalTemplate.show_notes === 1, hasTemplateCode: true, scope: 'global', templateName: globalTemplate.template_name }, timestamp: Date.now(), hypothesisId: 'B' }) }).catch(() => { });
         // #endregion
         return {
           templateCode: globalTemplate.template_code,
@@ -194,7 +194,7 @@ export class ReceiptManagementService {
 
       console.warn(`⚠️ No default ${templateType} template found in database`);
       // #region agent log
-      fetch('http://127.0.0.1:7245/ingest/519de021-d49d-473f-a8a1-4215977c867a',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'receiptManagement.ts:getReceiptTemplate',message:'no default template',data:{templateType,businessId:businessId??null,showNotes:false,hasTemplateCode:false},timestamp:Date.now(),hypothesisId:'D'})}).catch(()=>{});
+      fetch('http://127.0.0.1:7245/ingest/519de021-d49d-473f-a8a1-4215977c867a', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ location: 'receiptManagement.ts:getReceiptTemplate', message: 'no default template', data: { templateType, businessId: businessId ?? null, showNotes: false, hasTemplateCode: false }, timestamp: Date.now(), hypothesisId: 'D' }) }).catch(() => { });
       // #endregion
       // When no checker template is saved, use built-in label layout so labels still print with expected placeholders
       if (templateType === 'checker') {
@@ -245,7 +245,7 @@ export class ReceiptManagementService {
          ORDER BY is_default DESC, (business_id <=> ?) DESC, template_name ASC`,
         [templateType, businessId || null, businessId ?? null]
       );
-      
+
       return templates.map(t => ({
         id: t.id,
         name: t.template_name || 'Unnamed Template',
@@ -276,13 +276,10 @@ export class ReceiptManagementService {
     const paramsSetGlobal: (string | number | null)[] = [templateType, templateName];
     try {
       await executeUpdate(sqlUnset, paramsUnset);
-      await executeOnMirror(sqlUnset, paramsUnset);
 
       let result = await executeUpdate(sqlSet, paramsSet);
-      await executeOnMirror(sqlSet, paramsSet);
       if (result === 0 && businessId != null) {
         result = await executeUpdate(sqlSetGlobal, paramsSetGlobal);
-        await executeOnMirror(sqlSetGlobal, paramsSetGlobal);
       }
 
       if (result > 0) {
@@ -335,13 +332,12 @@ export class ReceiptManagementService {
           [id]
         );
         if (row) {
-          // VPS may have older schema without one_label_per_product; omit it for mirror write
-          const mirrorUpsertSql = `INSERT INTO receipt_templates (id, template_type, template_name, business_id, template_code, is_active, is_default, show_notes, version, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          // Exclude local-only columns from mirror write
+          const mirrorUpsertSql = `INSERT INTO receipt_templates (id, template_type, template_name, business_id, template_code, is_active, version, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON DUPLICATE KEY UPDATE
               template_code = VALUES(template_code),
               template_name = VALUES(template_name),
-              show_notes = VALUES(show_notes),
               version = VALUES(version),
               updated_at = VALUES(updated_at)`;
           const mirrorUpsertParams: (string | number | null)[] = [
@@ -351,15 +347,15 @@ export class ReceiptManagementService {
             row.business_id,
             row.template_code,
             row.is_active,
-            row.is_default,
-            row.show_notes,
             row.version,
             row.created_at,
             row.updated_at,
           ];
           await executeOnMirror(mirrorUpsertSql, mirrorUpsertParams);
         } else {
-          await executeOnMirror(sql, params);
+          // Mirror: only push template_code, template_name, updated_at (exclude show_notes, one_label_per_product)
+          const mirrorUpdateSql = `UPDATE receipt_templates SET template_code = ?, template_name = COALESCE(?, template_name), updated_at = NOW() WHERE id = ?`;
+          await executeOnMirror(mirrorUpdateSql, [templateCode, nameToSet, id]);
         }
         console.log(`✅ Updated receipt template id ${id}${nameToSet != null ? ` (name: ${nameToSet})` : ''}`);
         return true;
@@ -408,13 +404,12 @@ export class ReceiptManagementService {
       if (vpsRow && vpsUpdated >= localUpdated) {
         return { success: true, skipped: true, message: 'VPS sudah lebih baru, tidak ada perubahan' };
       }
-      // VPS may have older schema without one_label_per_product; omit it for mirror write
-      const mirrorUpsertSql = `INSERT INTO receipt_templates (id, template_type, template_name, business_id, template_code, is_active, is_default, show_notes, version, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      // Exclude local-only columns (is_default, show_notes, one_label_per_product) from sync to VPS
+      const mirrorUpsertSql = `INSERT INTO receipt_templates (id, template_type, template_name, business_id, template_code, is_active, version, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON DUPLICATE KEY UPDATE
           template_code = VALUES(template_code),
           template_name = VALUES(template_name),
-          show_notes = VALUES(show_notes),
           version = VALUES(version),
           updated_at = VALUES(updated_at)`;
       const mirrorUpsertParams: (string | number | null)[] = [
@@ -424,8 +419,6 @@ export class ReceiptManagementService {
         localRow.business_id,
         localRow.template_code,
         localRow.is_active,
-        localRow.is_default,
-        localRow.show_notes,
         localRow.version,
         localRow.created_at,
         localRow.updated_at,
@@ -477,8 +470,10 @@ export class ReceiptManagementService {
       if (localRow && localUpdated >= vpsUpdated) {
         return { success: true, skipped: true, message: 'Template lokal sudah lebih baru, tidak ada perubahan' };
       }
-      // Local DB has one_label_per_product; default to 1 when downloading from VPS (old schema)
+      // Local-only columns: do not overwrite is_default, show_notes, one_label_per_product from VPS (keep local preferences)
       const oneLabelPerProduct = 1;
+      const isDefault = 0;
+      const showNotes = 0;
       const upsertSql = `INSERT INTO receipt_templates (id, template_type, template_name, business_id, template_code, is_active, is_default, show_notes, one_label_per_product, version, created_at, updated_at)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON DUPLICATE KEY UPDATE
@@ -487,9 +482,6 @@ export class ReceiptManagementService {
           business_id = VALUES(business_id),
           template_code = VALUES(template_code),
           is_active = VALUES(is_active),
-          is_default = VALUES(is_default),
-          show_notes = VALUES(show_notes),
-          one_label_per_product = VALUES(one_label_per_product),
           version = VALUES(version),
           updated_at = VALUES(updated_at)`;
       const upsertParams: (string | number | null)[] = [
@@ -499,8 +491,8 @@ export class ReceiptManagementService {
         vpsRow.business_id,
         vpsRow.template_code,
         vpsRow.is_active,
-        vpsRow.is_default,
-        vpsRow.show_notes,
+        isDefault,
+        showNotes,
         oneLabelPerProduct,
         vpsRow.version,
         vpsRow.created_at,
@@ -679,13 +671,58 @@ export class ReceiptManagementService {
     ];
     try {
       await executeUpsert(receiptSettingsSql, receiptSettingsParams);
-      await executeOnMirror(receiptSettingsSql, receiptSettingsParams);
-
-      console.log(`✅ Saved receipt settings${businessId ? ` for business ${businessId}` : ' (global)'}`);
+      // VPS upload is separate: call uploadReceiptSettingsToVps() for explicit feedback
+      console.log(`✅ Saved receipt settings (local)${businessId ? ` for business ${businessId}` : ' (global)'}`);
       return true;
     } catch (error) {
       console.error(`❌ Error saving receipt settings:`, error);
       return false;
+    }
+  }
+
+  /**
+   * Upload current receipt_settings (for business or global) to VPS. Call after saveReceiptSettings for explicit sync.
+   */
+  async uploadReceiptSettingsToVps(businessId?: number): Promise<{ success: boolean; message: string }> {
+    try {
+      const settings = await this.getReceiptSettings(businessId);
+      if (!settings) {
+        return { success: false, message: 'Tidak ada pengaturan struk untuk di-upload' };
+      }
+      const receiptSettingsSql = `INSERT INTO receipt_settings (
+            business_id, store_name, address, phone_number,
+            contact_phone, logo_base64, footer_text, partnership_contact,
+            is_active, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, NOW())
+        ON DUPLICATE KEY UPDATE
+          store_name = VALUES(store_name),
+          address = VALUES(address),
+          phone_number = VALUES(phone_number),
+          contact_phone = VALUES(contact_phone),
+          logo_base64 = VALUES(logo_base64),
+          footer_text = VALUES(footer_text),
+          partnership_contact = VALUES(partnership_contact),
+          is_active = 1,
+          updated_at = NOW()`;
+      const receiptSettingsParams: (string | number | null)[] = [
+        businessId ?? settings.business_id ?? null,
+        settings.store_name || null,
+        settings.address || null,
+        settings.phone_number || null,
+        settings.contact_phone || null,
+        settings.logo_base64 || null,
+        settings.footer_text || null,
+        settings.partnership_contact || null,
+      ];
+      await executeOnMirror(receiptSettingsSql, receiptSettingsParams);
+      console.log(`✅ Uploaded receipt settings to VPS${businessId ? ` for business ${businessId}` : ' (global)'}`);
+      return { success: true, message: 'Pengaturan struk berhasil di-upload ke VPS' };
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      if (msg === 'VPS_NOT_CONFIGURED') {
+        return { success: false, message: 'VPS tidak terhubung' };
+      }
+      return { success: false, message: msg || 'Gagal upload pengaturan struk ke VPS' };
     }
   }
 

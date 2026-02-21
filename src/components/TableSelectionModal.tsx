@@ -5,6 +5,7 @@ import { X } from 'lucide-react';
 import { useAuth } from '@/hooks/useAuth';
 import { generateTransactionId, generateTransactionItemId } from '@/lib/uuid';
 import NewItemsConfirmationModal from './NewItemsConfirmationModal';
+import { appAlert } from '@/components/AppDialog';
 import { getPackageBreakdownLines, getPackageBreakdownLinesWithProductId, type PackageSelection } from './PackageSelectionModal';
 
 interface Room {
@@ -161,26 +162,26 @@ function buildCheckerRowsFromCartItems(cartItems: CartItem[], productsMap: Map<n
       item.packageSelections && item.packageSelections.length > 0
         ? item.packageSelections
         : (typeof rawPkgJson === 'string' && rawPkgJson.trim()
-            ? (() => {
-                try {
-                  const parsed = JSON.parse(rawPkgJson) as Array<Record<string, unknown> & { product_name?: string; quantity?: number; selection_type?: string; chosen?: unknown[] }>;
-                  if (!Array.isArray(parsed) || parsed.length === 0) return undefined;
-                  const normalized = parsed.map((sel, idx) => {
-                    if (sel.selection_type === 'default') return sel as PackageSelection;
-                    if (sel.selection_type === 'flexible' && Array.isArray(sel.chosen) && sel.chosen.length > 0) return sel as PackageSelection;
-                    const name = (sel.product_name ?? (sel as { nama?: string }).nama ?? '') as string;
-                    const qty = typeof sel.quantity === 'number' ? sel.quantity : 0;
-                    if (name || qty > 0) {
-                      return { package_item_id: idx, selection_type: 'default' as const, product_id: (sel.product_id as number) ?? 0, product_name: name, quantity: qty } as PackageSelection;
-                    }
-                    return sel as PackageSelection;
-                  });
-                  return normalized as PackageSelection[];
-                } catch {
-                  return undefined;
+          ? (() => {
+            try {
+              const parsed = JSON.parse(rawPkgJson) as Array<Record<string, unknown> & { product_name?: string; quantity?: number; selection_type?: string; chosen?: unknown[] }>;
+              if (!Array.isArray(parsed) || parsed.length === 0) return undefined;
+              const normalized = parsed.map((sel, idx) => {
+                if (sel.selection_type === 'default') return sel as PackageSelection;
+                if (sel.selection_type === 'flexible' && Array.isArray(sel.chosen) && sel.chosen.length > 0) return sel as PackageSelection;
+                const name = (sel.product_name ?? (sel as { nama?: string }).nama ?? '') as string;
+                const qty = typeof sel.quantity === 'number' ? sel.quantity : 0;
+                if (name || qty > 0) {
+                  return { package_item_id: idx, selection_type: 'default' as const, product_id: (sel.product_id as number) ?? 0, product_name: name, quantity: qty } as PackageSelection;
                 }
-              })()
-            : undefined);
+                return sel as PackageSelection;
+              });
+              return normalized as PackageSelection[];
+            } catch {
+              return undefined;
+            }
+          })()
+          : undefined);
 
     if (resolvedPackageSelections?.length) {
       const pkgLines = getPackageBreakdownLinesWithProductId(resolvedPackageSelections, item.quantity);
@@ -243,9 +244,9 @@ export default function TableSelectionModal({
   const [layoutElements, setLayoutElements] = useState<LayoutElement[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  
+
   const businessId = user?.selectedBusinessId;
-  
+
   if (!businessId) {
     return (
       <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
@@ -329,7 +330,7 @@ export default function TableSelectionModal({
     if (isOpen && businessId && businessId > 0) {
       fetchRooms();
       fetchPendingTransactions();
-      
+
       // If in "lihat" mode, automatically show confirmation for new items
       // Only check once when modal opens
       if (loadedTransactionInfo && !hasCheckedLihatMode.current) {
@@ -341,18 +342,18 @@ export default function TableSelectionModal({
             try {
               const electronAPI = getElectronAPI();
               if (!electronAPI) return;
-              
+
               const transactions = await electronAPI.localDbGetTransactions?.(businessId, 10000);
               const transactionsArray = Array.isArray(transactions) ? transactions as Record<string, unknown>[] : [];
-              const transaction = transactionsArray.find((tx) => 
+              const transaction = transactionsArray.find((tx) =>
                 tx.uuid_id === loadedTransactionInfo.transactionId || tx.id === loadedTransactionInfo.transactionId
               ) as Record<string, unknown> | undefined;
-              
+
               if (transaction) {
-                const tableId = typeof transaction.table_id === 'number' 
-                  ? transaction.table_id 
+                const tableId = typeof transaction.table_id === 'number'
+                  ? transaction.table_id
                   : (typeof transaction.table_id === 'string' ? parseInt(transaction.table_id, 10) : null);
-                
+
                 if (tableId) {
                   setNewItemsToSave(newItems);
                   setPendingTableId(tableId);
@@ -363,11 +364,11 @@ export default function TableSelectionModal({
               console.error('Error fetching transaction for table ID:', error);
             }
           };
-          
+
           fetchTableId();
         } else {
           // No new items to add, close modal and show message
-          alert('Tidak ada item baru untuk ditambahkan.');
+          appAlert('Tidak ada item baru untuk ditambahkan.');
           onClose();
         }
       }
@@ -467,11 +468,11 @@ export default function TableSelectionModal({
       }
 
       // Fetch all transactions and filter for pending ones with table_id
-      const allTransactions = await electronAPI.localDbGetTransactions(businessId, 10000);const pending = (Array.isArray(allTransactions) ? allTransactions : [])
+      const allTransactions = await electronAPI.localDbGetTransactions(businessId, 10000); const pending = (Array.isArray(allTransactions) ? allTransactions : [])
         .filter((tx: unknown) => {
           if (tx && typeof tx === 'object' && 'status' in tx && 'table_id' in tx) {
             const transaction = tx as { status: string; table_id: number | null; uuid_id?: string; id?: string };
-            const isPending = transaction.status === 'pending' && transaction.table_id !== null;return isPending;
+            const isPending = transaction.status === 'pending' && transaction.table_id !== null; return isPending;
           }
           return false;
         })
@@ -484,9 +485,10 @@ export default function TableSelectionModal({
             status: t.status,
             created_at: t.created_at || new Date().toISOString(),
           };
-        });setPendingTransactions(pending);
+        }); setPendingTransactions(pending);
     } catch (error) {
-      console.error('Error fetching pending transactions:', error);}
+      console.error('Error fetching pending transactions:', error);
+    }
   };
 
   const checkTableHasPendingOrder = (tableId: number): boolean => {
@@ -494,7 +496,7 @@ export default function TableSelectionModal({
   };
 
   const getPendingTransactionForTable = (tableId: number): PendingTransaction | null => {
-    const result = pendingTransactions.find(tx => tx.table_id === tableId) || null;return result;
+    const result = pendingTransactions.find(tx => tx.table_id === tableId) || null; return result;
   };
 
   const handleTableClick = async (tableId: number) => {
@@ -502,9 +504,9 @@ export default function TableSelectionModal({
     if (loadedTransactionInfo) {
       // Filter only new items (unlocked items)
       const newItems = cartItems.filter(item => !item.isLocked);
-      
+
       if (newItems.length === 0) {
-        alert('Tidak ada item baru untuk ditambahkan.');
+        appAlert('Tidak ada item baru untuk ditambahkan.');
         return;
       }
 
@@ -517,13 +519,13 @@ export default function TableSelectionModal({
 
     // Normal mode: check if table has pending order
     if (checkTableHasPendingOrder(tableId)) {
-      alert(`Meja ${tables.find(t => t.id === tableId)?.table_number || tableId} sudah memiliki pesanan aktif. Silakan pilih meja lain.`);
+      appAlert(`Meja ${tables.find(t => t.id === tableId)?.table_number || tableId} sudah memiliki pesanan aktif. Silakan pilih meja lain.`);
       return;
     }
 
     // Check if cart is empty
     if (cartItems.length === 0) {
-      alert('Keranjang kosong. Silakan tambahkan produk terlebih dahulu.');
+      appAlert('Keranjang kosong. Silakan tambahkan produk terlebih dahulu.');
       return;
     }
 
@@ -532,7 +534,7 @@ export default function TableSelectionModal({
 
   const savePendingTransaction = async (tableId: number | null) => {
     // #region agent log
-    fetch('http://127.0.0.1:7245/ingest/519de021-d49d-473f-a8a1-4215977c867a',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'TableSelectionModal.tsx:savePendingTransaction',message:'Simpan Order save started',data:{tableId,source:'Simpan Order'},timestamp:Date.now(),hypothesisId:'count'})}).catch(()=>{});
+    fetch('http://127.0.0.1:7245/ingest/519de021-d49d-473f-a8a1-4215977c867a', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ location: 'TableSelectionModal.tsx:savePendingTransaction', message: 'Simpan Order save started', data: { tableId, source: 'Simpan Order' }, timestamp: Date.now(), hypothesisId: 'count' }) }).catch(() => { });
     // #endregion
     setIsSaving(true);
     try {
@@ -544,7 +546,7 @@ export default function TableSelectionModal({
       // Generate transaction ID
       let transactionId = '';
       if (window.electronAPI?.generateNumericUuid) {
-        const uuidResult = await window.electronAPI.generateNumericUuid(businessId);if (uuidResult?.success && uuidResult?.uuid) {
+        const uuidResult = await window.electronAPI.generateNumericUuid(businessId); if (uuidResult?.success && uuidResult?.uuid) {
           transactionId = uuidResult.uuid;
         } else {
           transactionId = generateTransactionId();
@@ -708,7 +710,7 @@ export default function TableSelectionModal({
         // Find the corresponding saved transaction item by matching UUID (most reliable)
         // Fallback to product_id + transaction_id if UUID matching fails
         const itemUuid = transactionItemUuids[cartIndex];
-        const savedItem = savedItemsArray.find((item: Record<string, unknown>) => 
+        const savedItem = savedItemsArray.find((item: Record<string, unknown>) =>
           item.uuid_id === itemUuid || item.id === itemUuid
         ) as { id: number; uuid_id?: string } | undefined;
 
@@ -771,24 +773,25 @@ export default function TableSelectionModal({
         let savedCustomizationsArray: Array<Record<string, unknown>> = [];
         try {
           // Try both UUID and numeric ID
-          const numericTransactionId = (typeof savedTx.id === 'string' || typeof savedTx.id === 'number') ? savedTx.id : 
-                                       (typeof savedTx.transaction_id === 'string' || typeof savedTx.transaction_id === 'number') ? savedTx.transaction_id : null;
+          const numericTransactionId = (typeof savedTx.id === 'string' || typeof savedTx.id === 'number') ? savedTx.id :
+            (typeof savedTx.transaction_id === 'string' || typeof savedTx.transaction_id === 'number') ? savedTx.transaction_id : null;
           const uuidTransactionId = typeof savedTx.uuid_id === 'string' ? savedTx.uuid_id : transactionId;// Try UUID first (more reliable)
           let customizationsResult = await electronAPI.localDbGetTransactionItemCustomizationsNormalized?.(uuidTransactionId);
-          
+
           // If no results, try numeric ID
           if (!customizationsResult || !customizationsResult.customizations || customizationsResult.customizations.length === 0) {
             if (numericTransactionId) {
               customizationsResult = await electronAPI.localDbGetTransactionItemCustomizationsNormalized?.(String(numericTransactionId));
             }
           }
-          
+
           if (customizationsResult && customizationsResult.customizations && Array.isArray(customizationsResult.customizations)) {
             // Filter to only the transaction items we just saved
             const savedItemIds = new Set(savedItemsArray.map((item: Record<string, unknown>) => item.id));
-            savedCustomizationsArray = customizationsResult.customizations.filter((c: Record<string, unknown>) => 
+            savedCustomizationsArray = customizationsResult.customizations.filter((c: Record<string, unknown>) =>
               savedItemIds.has(c.transaction_item_id as number)
-            );} else {
+            );
+          } else {
             console.warn('⚠️ No customizations found in query result');
           }
         } catch (error) {
@@ -808,7 +811,7 @@ export default function TableSelectionModal({
         // Match saved customizations with our customization data
         for (const customization of customizationData) {
           // Find the saved customization that matches this one
-          const savedCustomization = savedCustomizationsArray.find((sc: Record<string, unknown>) => 
+          const savedCustomization = savedCustomizationsArray.find((sc: Record<string, unknown>) =>
             sc.transaction_item_id === customization.transaction_item_id &&
             sc.customization_type_id === customization.customization_type_id
           ) as { id: number } | undefined;
@@ -1041,8 +1044,8 @@ export default function TableSelectionModal({
           // #region agent log
           const requestId = `REQ-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
           console.log(`🖨️ [FRONTEND] Simpan Order requesting printLabelsBatch. ID: ${requestId}. Table: ${orderContextForChecker.tableName}. Time: ${orderContextForChecker.orderTime}`);
-          
-          fetch('http://127.0.0.1:7245/ingest/519de021-d49d-473f-a8a1-4215977c867a',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'TableSelectionModal.tsx:printLabelsBatch',message:'Simpan Order calling printLabelsBatch',data:{requestId,source:'Simpan Order',table:orderContextForChecker.tableName,time:orderContextForChecker.orderTime,labelsCount:newOrderLabels.length,hasChecker:!!(orderContextForChecker.itemsHtml&&orderContextForChecker.itemsHtml.trim())},timestamp:Date.now(),hypothesisId:'count'})}).catch(()=>{});
+
+          fetch('http://127.0.0.1:7245/ingest/519de021-d49d-473f-a8a1-4215977c867a', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ location: 'TableSelectionModal.tsx:printLabelsBatch', message: 'Simpan Order calling printLabelsBatch', data: { requestId, source: 'Simpan Order', table: orderContextForChecker.tableName, time: orderContextForChecker.orderTime, labelsCount: newOrderLabels.length, hasChecker: !!(orderContextForChecker.itemsHtml && orderContextForChecker.itemsHtml.trim()) }, timestamp: Date.now(), hypothesisId: 'count' }) }).catch(() => { });
           // #endregion
 
           // Mark checker as printed before starting print so PaymentModal won't print again (avoids double print)
@@ -1066,18 +1069,18 @@ export default function TableSelectionModal({
 
       // Refresh pending transactions list
       await fetchPendingTransactions();
-      
+
       // Dispatch custom event to immediately refresh pending orders count in POSLayout
       if (typeof window !== 'undefined') {
         window.dispatchEvent(new CustomEvent('pendingTransactionSaved'));
       }
-      
+
       // Call success callback and close modal
       onSuccess();
       onClose();
     } catch (error) {
       console.error('Error saving pending transaction:', error);
-      alert('Gagal menyimpan pesanan. Silakan coba lagi.');
+      appAlert('Gagal menyimpan pesanan. Silakan coba lagi.');
     } finally {
       setIsSaving(false);
     }
@@ -1096,7 +1099,7 @@ export default function TableSelectionModal({
       // Fetch existing transaction to update totals
       const transactions = await electronAPI.localDbGetTransactions?.(businessId, 10000);
       const transactionsArray = Array.isArray(transactions) ? transactions as Record<string, unknown>[] : [];
-      const existingTransaction = transactionsArray.find((tx) => 
+      const existingTransaction = transactionsArray.find((tx) =>
         tx.uuid_id === transactionId || tx.id === transactionId
       ) as Record<string, unknown> | undefined;
 
@@ -1119,11 +1122,11 @@ export default function TableSelectionModal({
       }, 0);
 
       // Update transaction totals
-      const existingTotal = typeof existingTransaction.total_amount === 'number' 
-        ? existingTransaction.total_amount 
+      const existingTotal = typeof existingTransaction.total_amount === 'number'
+        ? existingTransaction.total_amount
         : (typeof existingTransaction.total_amount === 'string' ? parseFloat(existingTransaction.total_amount) : 0);
-      const existingFinal = typeof existingTransaction.final_amount === 'number' 
-        ? existingTransaction.final_amount 
+      const existingFinal = typeof existingTransaction.final_amount === 'number'
+        ? existingTransaction.final_amount
         : (typeof existingTransaction.final_amount === 'string' ? parseFloat(existingTransaction.final_amount) : 0);
 
       const originalTxWaiterId = existingTransaction.waiter_id != null ? existingTransaction.waiter_id : null;
@@ -1183,7 +1186,7 @@ export default function TableSelectionModal({
       // Fetch saved transaction items to get their database IDs for saving customizations
       const savedTransactionItems = await electronAPI.localDbGetTransactionItems?.(transactionId);
       const savedItemsArray = Array.isArray(savedTransactionItems) ? savedTransactionItems as Record<string, unknown>[] : [];
-      
+
       console.log('🔍 [TableSelectionModal] Fetched saved items after adding new items:', {
         transactionId,
         savedItemsCount: savedItemsArray.length,
@@ -1212,7 +1215,7 @@ export default function TableSelectionModal({
       // Match saved transaction items with cart items and build customization data
       itemsToSave.forEach((cartItem, cartIndex) => {
         const itemUuid = transactionItemUuids[cartIndex];
-        const savedItem = savedItemsArray.find((item: Record<string, unknown>) => 
+        const savedItem = savedItemsArray.find((item: Record<string, unknown>) =>
           item.uuid_id === itemUuid || String(item.id) === String(itemUuid)
         ) as { id: number | string; uuid_id?: string } | undefined;
 
@@ -1220,10 +1223,10 @@ export default function TableSelectionModal({
           console.warn(`⚠️ Could not find saved transaction item for product ${cartItem.product.id}`, {
             itemUuid,
             savedItemsCount: savedItemsArray.length,
-            savedItemIds: savedItemsArray.map((item: Record<string, unknown>) => ({ 
-              id: item.id, 
+            savedItemIds: savedItemsArray.map((item: Record<string, unknown>) => ({
+              id: item.id,
               uuid_id: item.uuid_id,
-              product_id: item.product_id 
+              product_id: item.product_id
             })).slice(0, 5)
           });
           return;
@@ -1231,8 +1234,8 @@ export default function TableSelectionModal({
 
         // Get the numeric database ID (not UUID)
         // The database returns 'id' as numeric, but we need to ensure it's a number
-        const numericItemId = typeof savedItem.id === 'number' 
-          ? savedItem.id 
+        const numericItemId = typeof savedItem.id === 'number'
+          ? savedItem.id
           : (typeof savedItem.id === 'string' ? parseInt(savedItem.id, 10) : null);
 
         if (!numericItemId || numericItemId === 0 || isNaN(numericItemId)) {
@@ -1291,10 +1294,10 @@ export default function TableSelectionModal({
         let savedCustomizationsArray: Array<Record<string, unknown>> = [];
         try {
           const customizationsResult = await electronAPI.localDbGetTransactionItemCustomizationsNormalized?.(transactionId);
-          
+
           if (customizationsResult && customizationsResult.customizations && Array.isArray(customizationsResult.customizations)) {
             const savedItemIds = new Set(savedItemsArray.map((item: Record<string, unknown>) => item.id));
-            savedCustomizationsArray = customizationsResult.customizations.filter((c: Record<string, unknown>) => 
+            savedCustomizationsArray = customizationsResult.customizations.filter((c: Record<string, unknown>) =>
               savedItemIds.has(c.transaction_item_id as number)
             );
           }
@@ -1313,7 +1316,7 @@ export default function TableSelectionModal({
         }> = [];
 
         for (const customization of customizationData) {
-          const savedCustomization = savedCustomizationsArray.find((sc: Record<string, unknown>) => 
+          const savedCustomization = savedCustomizationsArray.find((sc: Record<string, unknown>) =>
             sc.transaction_item_id === customization.transaction_item_id &&
             sc.customization_type_id === customization.customization_type_id
           ) as { id: number } | undefined;
@@ -1548,7 +1551,7 @@ export default function TableSelectionModal({
 
       // Refresh pending transactions list
       await fetchPendingTransactions();
-      
+
       // Dispatch custom event to immediately refresh pending orders count in POSLayout
       if (typeof window !== 'undefined') {
         window.dispatchEvent(new CustomEvent('pendingTransactionSaved'));
@@ -1559,7 +1562,7 @@ export default function TableSelectionModal({
       onClose();
     } catch (error) {
       console.error('Error saving new items to existing transaction:', error);
-      alert('Gagal menyimpan item baru. Silakan coba lagi.');
+      appAlert('Gagal menyimpan item baru. Silakan coba lagi.');
     } finally {
       setIsSaving(false);
     }
@@ -1610,14 +1613,14 @@ export default function TableSelectionModal({
                   {rooms.map((room) => (
                     <button
                       key={room.id}
-                      onClick={() => {setSelectedRoom(room.id);
+                      onClick={() => {
+                        setSelectedRoom(room.id);
                       }}
                       disabled={isSaving}
-                      className={`px-3 py-1.5 text-sm rounded-md transition-colors disabled:opacity-50 whitespace-nowrap ${
-                        selectedRoom === room.id
+                      className={`px-3 py-1.5 text-sm rounded-md transition-colors disabled:opacity-50 whitespace-nowrap ${selectedRoom === room.id
                           ? 'bg-blue-600 text-white'
                           : 'bg-gray-200 text-gray-900 hover:bg-gray-300'
-                      }`}
+                        }`}
                     >
                       {room.name} ({room.table_count || 0})
                     </button>
@@ -1636,199 +1639,199 @@ export default function TableSelectionModal({
 
           {/* Content */}
           <div className="flex-1 overflow-hidden p-4">
-          {loading && (
-            <div className="flex items-center justify-center h-full">
-              <div className="text-gray-600">Memuat layout meja...</div>
-            </div>
-          )}
+            {loading && (
+              <div className="flex items-center justify-center h-full">
+                <div className="text-gray-600">Memuat layout meja...</div>
+              </div>
+            )}
 
-          {error && (
-            <div className="mb-4 p-3 bg-red-100 border border-red-400 text-red-700 rounded">
-              {error}
-            </div>
-          )}
+            {error && (
+              <div className="mb-4 p-3 bg-red-100 border border-red-400 text-red-700 rounded">
+                {error}
+              </div>
+            )}
 
-          {!loading && !error && (
-            <>
+            {!loading && !error && (
+              <>
 
-              {/* Canvas */}
-              {selectedRoom && (
-                <div 
-                  ref={canvasContainerRef}
-                  className="flex-1 min-h-0"
-                  style={{
-                    ...(rooms.find(r => r.id === selectedRoom)?.canvas_width && rooms.find(r => r.id === selectedRoom)?.canvas_height
-                      ? {
+                {/* Canvas */}
+                {selectedRoom && (
+                  <div
+                    ref={canvasContainerRef}
+                    className="flex-1 min-h-0"
+                    style={{
+                      ...(rooms.find(r => r.id === selectedRoom)?.canvas_width && rooms.find(r => r.id === selectedRoom)?.canvas_height
+                        ? {
                           // No constraints when explicit dimensions are set - let canvas be its natural size
                           minHeight: '400px',
                           overflow: 'visible'
                         }
-                      : {
+                        : {
                           // Responsive constraints for auto-calculated dimensions
                           minHeight: '400px',
                           maxHeight: 'calc(100vh - 200px)',
                           overflow: 'auto'
                         }
-                    )
-                  }}
-                >
-                  <div
-                    ref={canvasRef}
-                    className="relative bg-gray-100 rounded-lg border-2 border-gray-300 overflow-hidden"
-                    style={{
-                      width: canvasSize.width > 0 ? `${canvasSize.width}px` : '100%',
-                      height: canvasSize.height || 400,
-                      minHeight: '400px',
-                      // Only apply maxWidth/maxHeight constraints when canvas dimensions are not explicitly set
-                      ...(rooms.find(r => r.id === selectedRoom)?.canvas_width && rooms.find(r => r.id === selectedRoom)?.canvas_height
-                        ? {} // No max constraints when explicit dimensions are set
-                        : { maxWidth: '100%', maxHeight: '100%' } // Apply constraints for auto-calculated dimensions
-                      ),
-                      margin: '0 auto',
-                      backgroundImage: `
+                      )
+                    }}
+                  >
+                    <div
+                      ref={canvasRef}
+                      className="relative bg-gray-100 rounded-lg border-2 border-gray-300 overflow-hidden"
+                      style={{
+                        width: canvasSize.width > 0 ? `${canvasSize.width}px` : '100%',
+                        height: canvasSize.height || 400,
+                        minHeight: '400px',
+                        // Only apply maxWidth/maxHeight constraints when canvas dimensions are not explicitly set
+                        ...(rooms.find(r => r.id === selectedRoom)?.canvas_width && rooms.find(r => r.id === selectedRoom)?.canvas_height
+                          ? {} // No max constraints when explicit dimensions are set
+                          : { maxWidth: '100%', maxHeight: '100%' } // Apply constraints for auto-calculated dimensions
+                        ),
+                        margin: '0 auto',
+                        backgroundImage: `
                         linear-gradient(to right, rgba(0,0,0,0.05) 1px, transparent 1px),
                         linear-gradient(to bottom, rgba(0,0,0,0.05) 1px, transparent 1px)
                       `,
-                      backgroundSize: '20px 20px'
-                    }}
-                  >
-                    {/* Legend - Inside Canvas at Bottom Left */}
-                    <div className="absolute bottom-2 left-2 z-50 bg-white/95 backdrop-blur-sm rounded-lg shadow-md px-3 py-2 border border-gray-300">
-                      <div className="flex items-center gap-4 text-sm text-gray-700">
-                        <div className="flex items-center gap-2">
-                          <div className="w-4 h-4 rounded-full bg-blue-400 border-2 border-gray-800"></div>
-                          <span>Meja Tersedia</span>
-                        </div>
-                        <div className="flex items-center gap-2">
-                          <div className="w-4 h-4 rounded-full border-2 border-gray-800" style={{ backgroundColor: '#ef4444' }}></div>
-                          <span>Meja dengan Pesanan Aktif</span>
-                        </div>
-                        {isSaving && (
-                          <div className="text-blue-600 font-medium ml-2">Menyimpan pesanan...</div>
-                        )}
-                      </div>
-                    </div>
-
-                    {/* Layout Elements */}
-                    {(() => {
-                      const selectedRoomData = rooms.find(r => r.id === selectedRoom);
-                      const fontSizeMultiplier = selectedRoomData?.font_size_multiplier ?? 1.0;
-                      console.log('[TableSelectionModal] Font size multiplier:', fontSizeMultiplier, 'for room:', selectedRoom);
-                      return layoutElements.map((element) => {
-                        const posX = typeof element.position_x === 'string' ? parseFloat(element.position_x) : element.position_x;
-                        const posY = typeof element.position_y === 'string' ? parseFloat(element.position_y) : element.position_y;
-                        const widthPercent = typeof element.width === 'string' ? parseFloat(element.width) : element.width;
-                        const heightPercent = typeof element.height === 'string' ? parseFloat(element.height) : element.height;
-
-                        const pixelX = (posX / 100) * canvasSize.width;
-                        const pixelY = (posY / 100) * canvasSize.height;
-                        const pixelWidth = (widthPercent / 100) * canvasSize.width;
-                        const pixelHeight = (heightPercent / 100) * canvasSize.height;
-
-                        const minDimension = Math.min(pixelWidth, pixelHeight);
-                        const baseFontSize = Math.max(10, Math.min(20, minDimension * 0.3));
-                        const fontSize = baseFontSize * fontSizeMultiplier;
-
-                      const MIN_SIZE_PERCENT = 3;
-                      const minPixelSize = Math.min(
-                        (MIN_SIZE_PERCENT / 100) * canvasSize.width,
-                        (MIN_SIZE_PERCENT / 100) * canvasSize.height
-                      );
-
-                      return (
-                        <div
-                          key={`element-${element.id}`}
-                          style={{
-                            position: 'absolute',
-                            left: pixelX,
-                            top: pixelY,
-                            width: Math.max(pixelWidth, minPixelSize),
-                            height: Math.max(pixelHeight, minPixelSize),
-                          }}
-                          className="cursor-default"
-                        >
-                          <div
-                            className="w-full h-full flex items-center justify-center relative shadow-lg overflow-hidden"
-                            style={{
-                              backgroundColor: element.color,
-                              color: element.text_color,
-                              minWidth: '30px',
-                              minHeight: '30px',
-                            }}
-                          >
-                            <div
-                              className="font-bold whitespace-nowrap text-center px-2"
-                              style={{ fontSize: `${fontSize}px` }}
-                            >
-                              {element.label}
-                            </div>
+                        backgroundSize: '20px 20px'
+                      }}
+                    >
+                      {/* Legend - Inside Canvas at Bottom Left */}
+                      <div className="absolute bottom-2 left-2 z-50 bg-white/95 backdrop-blur-sm rounded-lg shadow-md px-3 py-2 border border-gray-300">
+                        <div className="flex items-center gap-4 text-sm text-gray-700">
+                          <div className="flex items-center gap-2">
+                            <div className="w-4 h-4 rounded-full bg-blue-400 border-2 border-gray-800"></div>
+                            <span>Meja Tersedia</span>
                           </div>
+                          <div className="flex items-center gap-2">
+                            <div className="w-4 h-4 rounded-full border-2 border-gray-800" style={{ backgroundColor: '#ef4444' }}></div>
+                            <span>Meja dengan Pesanan Aktif</span>
+                          </div>
+                          {isSaving && (
+                            <div className="text-blue-600 font-medium ml-2">Menyimpan pesanan...</div>
+                          )}
                         </div>
-                      );
-                      });
-                    })()}
+                      </div>
 
-                    {/* Tables */}
-                    {(() => {
-                      const selectedRoomData = rooms.find(r => r.id === selectedRoom);
-                      const fontSizeMultiplier = selectedRoomData?.font_size_multiplier ?? 1.0;
-                      console.log('[TableSelectionModal] Font size multiplier:', fontSizeMultiplier, 'for room:', selectedRoom);
-                      return tables.map((table) => {
-                        const posX = typeof table.position_x === 'string' ? parseFloat(table.position_x) : table.position_x;
-                        const posY = typeof table.position_y === 'string' ? parseFloat(table.position_y) : table.position_y;
-                        const widthPercent = typeof table.width === 'string' ? parseFloat(table.width) : table.width;
-                        const heightPercent = typeof table.height === 'string' ? parseFloat(table.height) : table.height;
+                      {/* Layout Elements */}
+                      {(() => {
+                        const selectedRoomData = rooms.find(r => r.id === selectedRoom);
+                        const fontSizeMultiplier = selectedRoomData?.font_size_multiplier ?? 1.0;
+                        console.log('[TableSelectionModal] Font size multiplier:', fontSizeMultiplier, 'for room:', selectedRoom);
+                        return layoutElements.map((element) => {
+                          const posX = typeof element.position_x === 'string' ? parseFloat(element.position_x) : element.position_x;
+                          const posY = typeof element.position_y === 'string' ? parseFloat(element.position_y) : element.position_y;
+                          const widthPercent = typeof element.width === 'string' ? parseFloat(element.width) : element.width;
+                          const heightPercent = typeof element.height === 'string' ? parseFloat(element.height) : element.height;
 
-                        const pixelX = (posX / 100) * canvasSize.width;
-                        const pixelY = (posY / 100) * canvasSize.height;
-                        const pixelWidth = (widthPercent / 100) * canvasSize.width;
-                        const pixelHeight = (heightPercent / 100) * canvasSize.height;
+                          const pixelX = (posX / 100) * canvasSize.width;
+                          const pixelY = (posY / 100) * canvasSize.height;
+                          const pixelWidth = (widthPercent / 100) * canvasSize.width;
+                          const pixelHeight = (heightPercent / 100) * canvasSize.height;
 
-                        const minDimension = Math.min(pixelWidth, pixelHeight);
-                        const baseFontSize = Math.max(7, Math.min(24, minDimension * 0.25));
-                        const fontSize = baseFontSize * fontSizeMultiplier;
-                        const smallFontSize = Math.max(6, fontSize * 0.7);
+                          const minDimension = Math.min(pixelWidth, pixelHeight);
+                          const baseFontSize = Math.max(10, Math.min(20, minDimension * 0.3));
+                          const fontSize = baseFontSize * fontSizeMultiplier;
 
-                      const MIN_SIZE_PERCENT = 4;
-                      const minPixelSize = Math.min(
-                        (MIN_SIZE_PERCENT / 100) * canvasSize.width,
-                        (MIN_SIZE_PERCENT / 100) * canvasSize.height
-                      );
+                          const MIN_SIZE_PERCENT = 3;
+                          const minPixelSize = Math.min(
+                            (MIN_SIZE_PERCENT / 100) * canvasSize.width,
+                            (MIN_SIZE_PERCENT / 100) * canvasSize.height
+                          );
 
-                      const hasPendingOrder = checkTableHasPendingOrder(table.id);
-                      const pendingTransaction = getPendingTransactionForTable(table.id);
-                      const orderCreatedAt = pendingTransaction?.created_at || null;return (
-                        <TableDisplay
-                          key={table.id}
-                          table={table}
-                          pixelX={pixelX}
-                          pixelY={pixelY}
-                          pixelWidth={Math.max(pixelWidth, minPixelSize)}
-                          pixelHeight={Math.max(pixelHeight, minPixelSize)}
-                          fontSize={fontSize}
-                          smallFontSize={smallFontSize}
-                          hasPendingOrder={hasPendingOrder}
-                          orderCreatedAt={orderCreatedAt}
-                          onClick={() => !isSaving && handleTableClick(table.id)}
-                        />
-                      );
-                      });
-                    })()}
+                          return (
+                            <div
+                              key={`element-${element.id}`}
+                              style={{
+                                position: 'absolute',
+                                left: pixelX,
+                                top: pixelY,
+                                width: Math.max(pixelWidth, minPixelSize),
+                                height: Math.max(pixelHeight, minPixelSize),
+                              }}
+                              className="cursor-default"
+                            >
+                              <div
+                                className="w-full h-full flex items-center justify-center relative shadow-lg overflow-hidden"
+                                style={{
+                                  backgroundColor: element.color,
+                                  color: element.text_color,
+                                  minWidth: '30px',
+                                  minHeight: '30px',
+                                }}
+                              >
+                                <div
+                                  className="font-bold whitespace-nowrap text-center px-2"
+                                  style={{ fontSize: `${fontSize}px` }}
+                                >
+                                  {element.label}
+                                </div>
+                              </div>
+                            </div>
+                          );
+                        });
+                      })()}
+
+                      {/* Tables */}
+                      {(() => {
+                        const selectedRoomData = rooms.find(r => r.id === selectedRoom);
+                        const fontSizeMultiplier = selectedRoomData?.font_size_multiplier ?? 1.0;
+                        console.log('[TableSelectionModal] Font size multiplier:', fontSizeMultiplier, 'for room:', selectedRoom);
+                        return tables.map((table) => {
+                          const posX = typeof table.position_x === 'string' ? parseFloat(table.position_x) : table.position_x;
+                          const posY = typeof table.position_y === 'string' ? parseFloat(table.position_y) : table.position_y;
+                          const widthPercent = typeof table.width === 'string' ? parseFloat(table.width) : table.width;
+                          const heightPercent = typeof table.height === 'string' ? parseFloat(table.height) : table.height;
+
+                          const pixelX = (posX / 100) * canvasSize.width;
+                          const pixelY = (posY / 100) * canvasSize.height;
+                          const pixelWidth = (widthPercent / 100) * canvasSize.width;
+                          const pixelHeight = (heightPercent / 100) * canvasSize.height;
+
+                          const minDimension = Math.min(pixelWidth, pixelHeight);
+                          const baseFontSize = Math.max(7, Math.min(24, minDimension * 0.25));
+                          const fontSize = baseFontSize * fontSizeMultiplier;
+                          const smallFontSize = Math.max(6, fontSize * 0.7);
+
+                          const MIN_SIZE_PERCENT = 4;
+                          const minPixelSize = Math.min(
+                            (MIN_SIZE_PERCENT / 100) * canvasSize.width,
+                            (MIN_SIZE_PERCENT / 100) * canvasSize.height
+                          );
+
+                          const hasPendingOrder = checkTableHasPendingOrder(table.id);
+                          const pendingTransaction = getPendingTransactionForTable(table.id);
+                          const orderCreatedAt = pendingTransaction?.created_at || null; return (
+                            <TableDisplay
+                              key={table.id}
+                              table={table}
+                              pixelX={pixelX}
+                              pixelY={pixelY}
+                              pixelWidth={Math.max(pixelWidth, minPixelSize)}
+                              pixelHeight={Math.max(pixelHeight, minPixelSize)}
+                              fontSize={fontSize}
+                              smallFontSize={smallFontSize}
+                              hasPendingOrder={hasPendingOrder}
+                              orderCreatedAt={orderCreatedAt}
+                              onClick={() => !isSaving && handleTableClick(table.id)}
+                            />
+                          );
+                        });
+                      })()}
+                    </div>
                   </div>
-                </div>
-              )}
+                )}
 
-              {!error && rooms.length === 0 && (
-                <div className="flex-1 flex items-center justify-center">
-                  <div className="text-center text-gray-600">
-                    <p>No rooms found for this business.</p>
-                    <p className="text-sm mt-2">Create rooms in Salespulse first.</p>
+                {!error && rooms.length === 0 && (
+                  <div className="flex-1 flex items-center justify-center">
+                    <div className="text-center text-gray-600">
+                      <p>No rooms found for this business.</p>
+                      <p className="text-sm mt-2">Create rooms in Salespulse first.</p>
+                    </div>
                   </div>
-                </div>
-              )}
-            </>
-          )}
-        </div>
+                )}
+              </>
+            )}
+          </div>
         </div>
       )}
 
@@ -1938,9 +1941,8 @@ function TableDisplay({
       }}
     >
       <div
-        className={`w-full h-full flex flex-col items-center justify-center relative overflow-hidden transition-all duration-200 ${
-          table.shape === 'circle' ? 'rounded-full' : 'rounded-lg'
-        } text-gray-900 border-2 border-gray-800 shadow-lg hover:shadow-2xl hover:border-yellow-400`}
+        className={`w-full h-full flex flex-col items-center justify-center relative overflow-hidden transition-all duration-200 ${table.shape === 'circle' ? 'rounded-full' : 'rounded-lg'
+          } text-gray-900 border-2 border-gray-800 shadow-lg hover:shadow-2xl hover:border-yellow-400`}
         style={{
           minWidth: '40px',
           minHeight: '40px',

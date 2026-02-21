@@ -252,6 +252,7 @@ declare global {
       localDbUpsertRestaurantLayoutElements?: (rows: unknown[]) => Promise<{ success: boolean }>;
 
       // Transaction operations
+      localDbGetTransactionByUuid?: (uuid: string) => Promise<unknown>;
       localDbGetTransactions?: (businessId?: number, limit?: number, options?: { todayOnly?: boolean }) => Promise<unknown[]>;
       localDbUpdateTransactionShift?: (transactionUuid: string, shiftUuid: string | null) => Promise<{ success: boolean; error?: string }>;
       localDbDeleteSingleTransactionPreview?: (transactionUuid: string) => Promise<{
@@ -380,6 +381,7 @@ declare global {
         permissions: string[];
       } | null>;
       checkOfflineDbExists?: () => Promise<{ exists: boolean; path?: string; error?: string }>;
+      localDbPing?: () => Promise<{ success: boolean; ms?: number; error?: string }>;
 
       // Supporting tables
       localDbUpsertSource?: (rows: unknown[]) => Promise<{ success: boolean }>;
@@ -722,6 +724,7 @@ declare global {
         footer_text?: string | null;
         partnership_contact?: string | null;
       }, businessId?: number) => Promise<{ success: boolean; error?: string }>;
+      uploadReceiptSettingsToVps?: (businessId?: number) => Promise<{ success: boolean; message: string }>;
     };
   }
 }

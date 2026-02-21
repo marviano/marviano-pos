@@ -6,6 +6,7 @@ import { useAuth } from '@/hooks/useAuth';
 import { isSuperAdmin } from '@/lib/auth';
 import { OrderTimer } from '@/contexts/DisplayTimerContext';
 import { getPackageBreakdownLines, getPackageBreakdownLinesWithProductId } from './PackageSelectionModal';
+import { appAlert } from '@/components/AppDialog';
 
 interface OrderItem {
   id: number;
@@ -591,7 +592,7 @@ export default function BaristaDisplay({ viewOnly = false, legacyCardLayout = fa
             const isFileProtocol = typeof window !== 'undefined' && window.location?.protocol === 'file:';
             const soundPath = isFileProtocol ? './blacksmith_refine.mp3' : '/blacksmith_refine.mp3';
             const resolvedUrl = typeof window !== 'undefined' ? new URL(soundPath, window.location.href).href : soundPath;
-            fetch('http://127.0.0.1:7245/ingest/519de021-d49d-473f-a8a1-4215977c867a',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'BaristaDisplay.tsx:sound',message:'New order sound attempt',data:{protocol:window?.location?.protocol,soundPath,resolvedUrl,newOrderCount:newOrderIds.length},timestamp:Date.now(),hypothesisId:'A'})}).catch(()=>{});
+            fetch('http://127.0.0.1:7245/ingest/519de021-d49d-473f-a8a1-4215977c867a', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ location: 'BaristaDisplay.tsx:sound', message: 'New order sound attempt', data: { protocol: window?.location?.protocol, soundPath, resolvedUrl, newOrderCount: newOrderIds.length }, timestamp: Date.now(), hypothesisId: 'A' }) }).catch(() => { });
             // #endregion
             if (!soundRef.current) {
               soundRef.current = new Audio(soundPath);
@@ -601,7 +602,7 @@ export default function BaristaDisplay({ viewOnly = false, legacyCardLayout = fa
             soundRef.current.currentTime = 0;
             soundRef.current.play().catch(error => {
               // #region agent log
-              fetch('http://127.0.0.1:7245/ingest/519de021-d49d-473f-a8a1-4215977c867a',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'BaristaDisplay.tsx:play',message:'Sound play failed',data:{error:String(error),name:(error as Error)?.name},timestamp:Date.now(),hypothesisId:'B'})}).catch(()=>{});
+              fetch('http://127.0.0.1:7245/ingest/519de021-d49d-473f-a8a1-4215977c867a', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ location: 'BaristaDisplay.tsx:play', message: 'Sound play failed', data: { error: String(error), name: (error as Error)?.name }, timestamp: Date.now(), hypothesisId: 'B' }) }).catch(() => { });
               // #endregion
               console.warn('Failed to play sound:', error);
             });
@@ -659,7 +660,7 @@ export default function BaristaDisplay({ viewOnly = false, legacyCardLayout = fa
   const handleMarkFinished = (item: GroupedOrderItem) => {
     const electronAPI = getElectronAPI();
     if (!electronAPI?.localDbGetTransactionItems || !electronAPI?.localDbUpsertTransactionItems) {
-      alert('Function not available');
+      appAlert('Function not available');
       return;
     }
     // Avoid double-submit (e.g. double-click): skip if already persisting this item
@@ -952,7 +953,7 @@ export default function BaristaDisplay({ viewOnly = false, legacyCardLayout = fa
       return;
     }
     if (!electronAPI?.localDbUpdatePackageLine) {
-      alert('Function not available');
+      appAlert('Function not available');
       return;
     }
     const newFinishedAt = line.finished_at ? null : new Date().toISOString();
@@ -1031,7 +1032,7 @@ export default function BaristaDisplay({ viewOnly = false, legacyCardLayout = fa
       const errMsg = error instanceof Error ? error.message : String(error);
       setPersistStatusMap((prev) => new Map(prev).set(item.uuid_id, { status: 'error', message: errMsg }));
       console.error('Failed to update package line:', error);
-      alert('Failed to update package line');
+      appAlert('Failed to update package line');
     }
   };
 

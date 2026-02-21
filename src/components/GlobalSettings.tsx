@@ -2,6 +2,7 @@
 
 import { useState, useEffect } from 'react';
 import { Printer, Tag, Power, Globe, ChevronRight, TestTube, CheckCircle, XCircle, AlertCircle } from 'lucide-react';
+import { appAlert } from '@/components/AppDialog';
 
 interface SystemPrinter {
   name: string;
@@ -269,7 +270,7 @@ export default function GlobalSettings() {
       }));
     } catch (error) {
       console.error('Error saving printer selections:', error);
-      alert('Error saving printer configurations. Please try again.');
+      appAlert('Error saving printer configurations. Please try again.');
     }
   };
 
@@ -336,7 +337,7 @@ export default function GlobalSettings() {
     const offset = printerType === 'receiptizePrinter' ? receiptizeOffset : labelOffset;
 
     if (!printerName) {
-      alert('Please select a printer first.');
+      appAlert('Please select a printer first.');
       return;
     }
 
@@ -359,11 +360,11 @@ export default function GlobalSettings() {
         const errorMsg = (rawResult && typeof rawResult === 'object' && 'error' in rawResult)
           ? String(rawResult.error)
           : 'Unknown error';
-        alert(`❌ Test print failed to ${printerName}\n\nError: ${errorMsg}`);
+        appAlert(`❌ Test print failed to ${printerName}\n\nError: ${errorMsg}`);
       }
     } catch (error) {
       console.error('Error testing printer:', error);
-      alert(`❌ Test print failed: ${error}`);
+      appAlert(`❌ Test print failed: ${error}`);
     } finally {
       setIsTesting(null);
     }

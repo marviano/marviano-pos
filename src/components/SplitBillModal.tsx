@@ -5,6 +5,7 @@ import { X, ChevronDown, ChevronUp, RotateCcw, Plus } from 'lucide-react';
 import { useAuth } from '@/hooks/useAuth';
 import { generateTransactionId } from '@/lib/uuid';
 import { getApiUrl } from '@/lib/api';
+import { appAlert } from '@/components/AppDialog';
 
 interface PendingTransaction {
   id: string;
@@ -63,18 +64,18 @@ export default function SplitBillModal({ isOpen, onClose, businessId, onRefresh 
   const [transactionItemsMap, setTransactionItemsMap] = useState<Map<string, TransactionItem[]>>(new Map());
   const [loadingTransactions, setLoadingTransactions] = useState(false);
   const [loadingItemsMap, setLoadingItemsMap] = useState<Map<string, boolean>>(new Map());
-  
+
   // Source transaction (Dari) - selected when user clicks "Pilih"
   const [sourceTransaction, setSourceTransaction] = useState<PendingTransaction | null>(null);
   const [sourceTransactionItems, setSourceTransactionItems] = useState<TransactionItem[]>([]);
   const [movedItemIds, setMovedItemIds] = useState<Set<number>>(new Set()); // Track items that have been moved
   const [movedItems, setMovedItems] = useState<TransactionItem[]>([]); // Track actual moved items with full data
-  
+
   // Destination transaction (Ke) - selected when user clicks a transaction
   const [destinationTransaction, setDestinationTransaction] = useState<PendingTransaction | null>(null);
   const [destinationTransactionItems, setDestinationTransactionItems] = useState<TransactionItem[]>([]);
   const [expandedDestinationTransactionId, setExpandedDestinationTransactionId] = useState<string | null>(null);
-  
+
   // New transaction creation (stored in state, not created until Save)
   const [newTransactionData, setNewTransactionData] = useState<{ tableId: number; customerName: string; tableNumber?: string } | null>(null);
   const [showTableSelection, setShowTableSelection] = useState(false);
@@ -125,7 +126,7 @@ export default function SplitBillModal({ isOpen, onClose, businessId, onRefresh 
       const tablesMap = new Map<number, { table_number: string; room_id: number }>();
       const roomsMap = new Map<number, string>();
       const employeesMap = new Map<number, string>();
-      
+
       // Fetch employees to get waiter names
       if (electronAPI.localDbGetEmployees) {
         try {
@@ -141,7 +142,7 @@ export default function SplitBillModal({ isOpen, onClose, businessId, onRefresh 
           console.warn('Failed to fetch employees:', error);
         }
       }
-      
+
       if (electronAPI.getRestaurantTables && electronAPI.getRestaurantRooms) {
         // Get all rooms first
         const rooms = await electronAPI.getRestaurantRooms(businessId);
@@ -236,7 +237,7 @@ export default function SplitBillModal({ isOpen, onClose, businessId, onRefresh 
     }
 
     setExpandedTransactionId(transactionId);
-    
+
     // If items already loaded, don't fetch again
     if (transactionItemsMap.has(transactionId)) {
       return;
@@ -244,7 +245,7 @@ export default function SplitBillModal({ isOpen, onClose, businessId, onRefresh 
 
     // Set loading state for this transaction
     setLoadingItemsMap(prev => new Map(prev).set(transactionId, true));
-    
+
     try {
       const electronAPI = getElectronAPI();
       if (!electronAPI?.localDbGetTransactionItems || !electronAPI?.localDbGetAllProducts || !electronAPI?.localDbGetTransactionItemCustomizationsNormalized) {
@@ -269,7 +270,7 @@ export default function SplitBillModal({ isOpen, onClose, businessId, onRefresh 
       // Create a map of transaction_item_id -> customizations
       const customizationsMap = new Map<number, Array<SelectedCustomization>>();
       const itemsByIdMap = new Map<number, Record<string, unknown>>();
-      
+
       activeItems.forEach((item: Record<string, unknown>) => {
         const id = typeof item.id === 'number' ? item.id : (typeof item.id === 'string' ? parseInt(item.id, 10) : null);
         if (id) {
@@ -279,8 +280,8 @@ export default function SplitBillModal({ isOpen, onClose, businessId, onRefresh 
 
       // Group customizations by transaction_item_id
       customizations.forEach((cust: Record<string, unknown>) => {
-        const itemId = typeof cust.transaction_item_id === 'number' 
-          ? cust.transaction_item_id 
+        const itemId = typeof cust.transaction_item_id === 'number'
+          ? cust.transaction_item_id
           : (typeof cust.transaction_item_id === 'string' ? parseInt(cust.transaction_item_id, 10) : null);
         if (!itemId || !itemsByIdMap.has(itemId)) return;
 
@@ -288,14 +289,14 @@ export default function SplitBillModal({ isOpen, onClose, businessId, onRefresh 
           customizationsMap.set(itemId, []);
         }
 
-        const options = customizationOptions.filter((opt: Record<string, unknown>) => 
+        const options = customizationOptions.filter((opt: Record<string, unknown>) =>
           opt.transaction_item_customization_id === cust.id
         ).map((opt: Record<string, unknown>) => {
-          const priceAdj = typeof opt.price_adjustment === 'number' 
-            ? opt.price_adjustment 
+          const priceAdj = typeof opt.price_adjustment === 'number'
+            ? opt.price_adjustment
             : (typeof opt.price_adjustment === 'string' ? parseFloat(String(opt.price_adjustment)) || 0 : 0);
-          const optionId = typeof opt.customization_option_id === 'number' 
-            ? opt.customization_option_id 
+          const optionId = typeof opt.customization_option_id === 'number'
+            ? opt.customization_option_id
             : (typeof opt.customization_option_id === 'string' ? parseInt(String(opt.customization_option_id), 10) : 0);
           const optionName = typeof opt.option_name === 'string' ? opt.option_name : String(opt.option_name || '');
           return {
@@ -305,10 +306,10 @@ export default function SplitBillModal({ isOpen, onClose, businessId, onRefresh 
           };
         });
 
-        const custTypeId = typeof cust.customization_type_id === 'number' 
-          ? cust.customization_type_id 
+        const custTypeId = typeof cust.customization_type_id === 'number'
+          ? cust.customization_type_id
           : (typeof cust.customization_type_id === 'string' ? parseInt(String(cust.customization_type_id), 10) : 0);
-        const existingCust = customizationsMap.get(itemId)!.find(c => 
+        const existingCust = customizationsMap.get(itemId)!.find(c =>
           c.customization_id === custTypeId
         );
 
@@ -328,7 +329,7 @@ export default function SplitBillModal({ isOpen, onClose, businessId, onRefresh 
       const allProducts = await electronAPI.localDbGetAllProducts();
       const productsArray = Array.isArray(allProducts) ? allProducts : [];
       const productsMap = new Map<number, { id: number; nama: string; harga_jual: number }>();
-      
+
       (productsArray as { id?: number | string; nama?: string; harga_jual?: number }[]).forEach((p) => {
         const id = typeof p.id === 'number' ? p.id : (typeof p.id === 'string' ? parseInt(p.id, 10) : null);
         if (id && typeof p.nama === 'string') {
@@ -342,18 +343,18 @@ export default function SplitBillModal({ isOpen, onClose, businessId, onRefresh 
 
       // Map items with product info and customizations
       const itemsWithProducts = activeItems.map((item: Record<string, unknown>) => {
-        const productId = typeof item.product_id === 'number' 
-          ? item.product_id 
+        const productId = typeof item.product_id === 'number'
+          ? item.product_id
           : (typeof item.product_id === 'string' ? parseInt(item.product_id, 10) : null);
         const product = productId ? productsMap.get(productId) : undefined;
         const itemId = typeof item.id === 'number' ? item.id : (typeof item.id === 'string' ? parseInt(item.id, 10) : null);
         const itemCustomizations = itemId ? (customizationsMap.get(itemId) || []) : [];
-        
+
         // Get unit_price - use from database, calculate from total_price if needed, or use product harga_jual
         const quantity = typeof item.quantity === 'number' ? item.quantity : 1;
         const dbUnitPrice = typeof item.unit_price === 'number' ? item.unit_price : 0;
         const dbTotalPrice = typeof item.total_price === 'number' ? item.total_price : 0;
-        
+
         // Calculate customization price first
         const customizationPrice = itemCustomizations.reduce((sum, customization) => {
           const optionTotal = customization.selected_options.reduce((optionSum, option) => {
@@ -361,7 +362,7 @@ export default function SplitBillModal({ isOpen, onClose, businessId, onRefresh 
           }, 0);
           return sum + optionTotal;
         }, 0);
-        
+
         // Determine unit_price: use DB value, or calculate from total_price, or use product price
         let unitPrice = dbUnitPrice;
         if (unitPrice === 0 || unitPrice === null) {
@@ -372,7 +373,7 @@ export default function SplitBillModal({ isOpen, onClose, businessId, onRefresh 
             unitPrice = product.harga_jual || 0;
           }
         }
-        
+
         // Calculate total_price with customizations
         const totalPrice = (unitPrice + customizationPrice) * quantity;
 
@@ -425,7 +426,7 @@ export default function SplitBillModal({ isOpen, onClose, businessId, onRefresh 
   const handlePindahItem = (item: TransactionItem) => {
     // Check if destination transaction or new transaction is selected
     if (!destinationTransaction && !newTransactionData) {
-      alert('Pilih transaksi "Ke" terlebih dahulu');
+      appAlert('Pilih transaksi "Ke" terlebih dahulu');
       return;
     }
 
@@ -439,17 +440,17 @@ export default function SplitBillModal({ isOpen, onClose, businessId, onRefresh 
 
     // Mark item as moved
     setMovedItemIds(prev => new Set(prev).add(item.id));
-    
+
     // Store the moved item with full data
     setMovedItems(prev => {
       const updated = [...prev, item];
       console.log('[SPLIT BILL] Updated movedItems:', updated.length, 'items');
       return updated;
     });
-    
+
     // Remove item from source transaction items
     setSourceTransactionItems(prev => prev.filter(i => i.id !== item.id));
-    
+
     // Add item to destination transaction items
     setDestinationTransactionItems(prev => [...prev, item]);
   };
@@ -479,7 +480,7 @@ export default function SplitBillModal({ isOpen, onClose, businessId, onRefresh 
     }
 
     setExpandedDestinationTransactionId(transactionId);
-    
+
     // If items already loaded in transactionItemsMap, don't fetch again
     if (transactionItemsMap.has(transactionId)) {
       return;
@@ -487,7 +488,7 @@ export default function SplitBillModal({ isOpen, onClose, businessId, onRefresh 
 
     // Set loading state for this transaction
     setLoadingItemsMap(prev => new Map(prev).set(transactionId, true));
-    
+
     try {
       const electronAPI = getElectronAPI();
       if (!electronAPI?.localDbGetTransactionItems || !electronAPI?.localDbGetAllProducts || !electronAPI?.localDbGetTransactionItemCustomizationsNormalized) {
@@ -512,7 +513,7 @@ export default function SplitBillModal({ isOpen, onClose, businessId, onRefresh 
       // Create a map of transaction_item_id -> customizations
       const customizationsMap = new Map<number, Array<SelectedCustomization>>();
       const itemsByIdMap = new Map<number, Record<string, unknown>>();
-      
+
       activeItems.forEach((item: Record<string, unknown>) => {
         const id = typeof item.id === 'number' ? item.id : (typeof item.id === 'string' ? parseInt(item.id, 10) : null);
         if (id) {
@@ -522,8 +523,8 @@ export default function SplitBillModal({ isOpen, onClose, businessId, onRefresh 
 
       // Group customizations by transaction_item_id
       customizations.forEach((cust: Record<string, unknown>) => {
-        const itemId = typeof cust.transaction_item_id === 'number' 
-          ? cust.transaction_item_id 
+        const itemId = typeof cust.transaction_item_id === 'number'
+          ? cust.transaction_item_id
           : (typeof cust.transaction_item_id === 'string' ? parseInt(cust.transaction_item_id, 10) : null);
         if (!itemId || !itemsByIdMap.has(itemId)) return;
 
@@ -531,14 +532,14 @@ export default function SplitBillModal({ isOpen, onClose, businessId, onRefresh 
           customizationsMap.set(itemId, []);
         }
 
-        const options = customizationOptions.filter((opt: Record<string, unknown>) => 
+        const options = customizationOptions.filter((opt: Record<string, unknown>) =>
           opt.transaction_item_customization_id === cust.id
         ).map((opt: Record<string, unknown>) => {
-          const priceAdj = typeof opt.price_adjustment === 'number' 
-            ? opt.price_adjustment 
+          const priceAdj = typeof opt.price_adjustment === 'number'
+            ? opt.price_adjustment
             : (typeof opt.price_adjustment === 'string' ? parseFloat(String(opt.price_adjustment)) || 0 : 0);
-          const optionId = typeof opt.customization_option_id === 'number' 
-            ? opt.customization_option_id 
+          const optionId = typeof opt.customization_option_id === 'number'
+            ? opt.customization_option_id
             : (typeof opt.customization_option_id === 'string' ? parseInt(String(opt.customization_option_id), 10) : 0);
           const optionName = typeof opt.option_name === 'string' ? opt.option_name : String(opt.option_name || '');
           return {
@@ -548,10 +549,10 @@ export default function SplitBillModal({ isOpen, onClose, businessId, onRefresh 
           };
         });
 
-        const custTypeId = typeof cust.customization_type_id === 'number' 
-          ? cust.customization_type_id 
+        const custTypeId = typeof cust.customization_type_id === 'number'
+          ? cust.customization_type_id
           : (typeof cust.customization_type_id === 'string' ? parseInt(String(cust.customization_type_id), 10) : 0);
-        const existingCust = customizationsMap.get(itemId)!.find(c => 
+        const existingCust = customizationsMap.get(itemId)!.find(c =>
           c.customization_id === custTypeId
         );
 
@@ -571,7 +572,7 @@ export default function SplitBillModal({ isOpen, onClose, businessId, onRefresh 
       const allProducts = await electronAPI.localDbGetAllProducts();
       const productsArray = Array.isArray(allProducts) ? allProducts : [];
       const productsMap = new Map<number, { id: number; nama: string; harga_jual: number }>();
-      
+
       (productsArray as { id?: number | string; nama?: string; harga_jual?: number }[]).forEach((p) => {
         const id = typeof p.id === 'number' ? p.id : (typeof p.id === 'string' ? parseInt(p.id, 10) : null);
         if (id && typeof p.nama === 'string') {
@@ -585,18 +586,18 @@ export default function SplitBillModal({ isOpen, onClose, businessId, onRefresh 
 
       // Map items with product info and customizations
       const itemsWithProducts = activeItems.map((item: Record<string, unknown>) => {
-        const productId = typeof item.product_id === 'number' 
-          ? item.product_id 
+        const productId = typeof item.product_id === 'number'
+          ? item.product_id
           : (typeof item.product_id === 'string' ? parseInt(item.product_id, 10) : null);
         const product = productId ? productsMap.get(productId) : undefined;
         const itemId = typeof item.id === 'number' ? item.id : (typeof item.id === 'string' ? parseInt(item.id, 10) : null);
         const itemCustomizations = itemId ? (customizationsMap.get(itemId) || []) : [];
-        
+
         // Get unit_price - use from database, calculate from total_price if needed, or use product harga_jual
         const quantity = typeof item.quantity === 'number' ? item.quantity : 1;
         const dbUnitPrice = typeof item.unit_price === 'number' ? item.unit_price : 0;
         const dbTotalPrice = typeof item.total_price === 'number' ? item.total_price : 0;
-        
+
         // Calculate customization price first
         const customizationPrice = itemCustomizations.reduce((sum, customization) => {
           const optionTotal = customization.selected_options.reduce((optionSum, option) => {
@@ -604,7 +605,7 @@ export default function SplitBillModal({ isOpen, onClose, businessId, onRefresh 
           }, 0);
           return sum + optionTotal;
         }, 0);
-        
+
         // Determine unit_price: use DB value, or calculate from total_price, or use product price
         let unitPrice = dbUnitPrice;
         if (unitPrice === 0 || unitPrice === null) {
@@ -615,7 +616,7 @@ export default function SplitBillModal({ isOpen, onClose, businessId, onRefresh 
             unitPrice = product.harga_jual || 0;
           }
         }
-        
+
         // Calculate total_price with customizations
         const totalPrice = (unitPrice + customizationPrice) * quantity;
 
@@ -724,14 +725,14 @@ export default function SplitBillModal({ isOpen, onClose, businessId, onRefresh 
       };
 
       await electronAPI.localDbUpsertTransactions?.([transactionData]);
-      
+
       // Refresh pending transactions
       await fetchPendingTransactions();
-      
+
       // Find and set the newly created transaction as destination
       const allTransactions = await electronAPI.localDbGetTransactions?.(businessId, 10000);
       const transactionsArray = Array.isArray(allTransactions) ? allTransactions : [];
-      const newTransaction = (transactionsArray as PendingTransaction[]).find((tx) => 
+      const newTransaction = (transactionsArray as PendingTransaction[]).find((tx) =>
         tx.uuid_id === transactionId || tx.id === transactionId
       );
 
@@ -744,7 +745,7 @@ export default function SplitBillModal({ isOpen, onClose, businessId, onRefresh 
       setShowTableSelection(false);
       setShowCustomerNameInput(false);
       setNewTransactionCustomerName('');
-      
+
       return { success: true, transactionId };
     } catch (error) {
       console.error('Error creating empty transaction:', error);
@@ -908,7 +909,7 @@ export default function SplitBillModal({ isOpen, onClose, businessId, onRefresh 
     // Check if table has pending order
     if (checkTableHasPendingOrder(tableId)) {
       const table = tables.find(t => t.id === tableId);
-      alert(`Meja ${table?.table_number || tableId} sudah memiliki pesanan aktif. Silakan pilih meja lain.`);
+      appAlert(`Meja ${table?.table_number || tableId} sudah memiliki pesanan aktif. Silakan pilih meja lain.`);
       return;
     }
 
@@ -919,12 +920,12 @@ export default function SplitBillModal({ isOpen, onClose, businessId, onRefresh 
       customerName: newTransactionCustomerName.trim(),
       tableNumber: table?.table_number,
     });
-    
+
     // Clear existing destination transaction if any
     setDestinationTransaction(null);
     setDestinationTransactionItems([]);
     setExpandedDestinationTransactionId(null);
-    
+
     // Close table selection modal
     setShowTableSelection(false);
     setShowCustomerNameInput(false);
@@ -934,7 +935,7 @@ export default function SplitBillModal({ isOpen, onClose, businessId, onRefresh 
   if (!isOpen) return null;
 
   return (
-    <div 
+    <div
       className="fixed inset-0 bg-black/20 backdrop-blur-sm flex items-center justify-center z-50"
       onClick={(e) => {
         // Close modal when clicking backdrop
@@ -943,7 +944,7 @@ export default function SplitBillModal({ isOpen, onClose, businessId, onRefresh 
         }
       }}
     >
-      <div 
+      <div
         className="bg-white rounded-lg shadow-xl w-[90vw] h-[80vh] flex flex-col"
         onClick={(e) => e.stopPropagation()}
       >
@@ -1003,15 +1004,14 @@ export default function SplitBillModal({ isOpen, onClose, businessId, onRefresh 
                       const itemPrice = item.unit_price + customizationPrice;
                       const itemTotal = itemPrice * item.quantity;
                       const isMoved = movedItemIds.has(item.id);
-                      
+
                       return (
                         <div
                           key={item.id}
-                          className={`p-4 rounded-xl border-2 transition-all duration-200 shadow-sm ${
-                            isMoved
+                          className={`p-4 rounded-xl border-2 transition-all duration-200 shadow-sm ${isMoved
                               ? 'border-gray-200 bg-gray-100 opacity-50'
                               : 'border-gray-200 bg-white hover:border-blue-300 hover:bg-gradient-to-br hover:from-blue-50/50 hover:to-indigo-50/50 hover:shadow-md'
-                          }`}
+                            }`}
                         >
                           <div className="flex items-start gap-3">
                             <div className="flex-1">
@@ -1065,11 +1065,10 @@ export default function SplitBillModal({ isOpen, onClose, businessId, onRefresh 
                               )}
                             </div>
                             <div className="flex flex-col items-end gap-2">
-                              <div className={`font-bold text-base px-3 py-1.5 rounded-lg ${
-                                isMoved 
-                                  ? 'bg-gray-300 text-gray-600' 
+                              <div className={`font-bold text-base px-3 py-1.5 rounded-lg ${isMoved
+                                  ? 'bg-gray-300 text-gray-600'
                                   : 'bg-gray-100 text-gray-900'
-                              }`}>
+                                }`}>
                                 {formatPrice(itemTotal)}
                               </div>
                               {!isMoved && (
@@ -1112,15 +1111,15 @@ export default function SplitBillModal({ isOpen, onClose, businessId, onRefresh 
                       const isLoading = loadingItemsMap.get(transaction.uuid_id) || false;
                       const itemCount = items.length;
                       const hasLoadedItems = transactionItemsMap.has(transaction.uuid_id);
-                      
+
                       // All cards use blue color scheme
-                      const colorVariant = { 
-                        bg: 'bg-gradient-to-br from-blue-50 to-indigo-50', 
-                        border: 'border-blue-300', 
-                        hover: 'hover:from-blue-100 hover:to-indigo-100', 
-                        accent: 'bg-blue-500' 
+                      const colorVariant = {
+                        bg: 'bg-gradient-to-br from-blue-50 to-indigo-50',
+                        border: 'border-blue-300',
+                        hover: 'hover:from-blue-100 hover:to-indigo-100',
+                        accent: 'bg-blue-500'
                       };
-                      
+
                       return (
                         <div
                           key={transaction.uuid_id}
@@ -1180,7 +1179,7 @@ export default function SplitBillModal({ isOpen, onClose, businessId, onRefresh 
                                     const customizationPrice = sumCustomizationPrice(item.customizations);
                                     const itemPrice = item.unit_price + customizationPrice;
                                     const itemTotal = itemPrice * item.quantity;
-                                    
+
                                     return (
                                       <div
                                         key={item.id}
@@ -1246,7 +1245,7 @@ export default function SplitBillModal({ isOpen, onClose, businessId, onRefresh 
                                       </div>
                                     );
                                   })}
-                                  
+
                                   {/* Pilih Button */}
                                   <div className="pt-3 border-t-2 border-white/50">
                                     <button
@@ -1325,7 +1324,7 @@ export default function SplitBillModal({ isOpen, onClose, businessId, onRefresh 
                       const customizationPrice = sumCustomizationPrice(item.customizations);
                       const itemPrice = item.unit_price + customizationPrice;
                       const itemTotal = itemPrice * item.quantity;
-                      
+
                       return (
                         <div
                           key={item.id}
@@ -1407,7 +1406,7 @@ export default function SplitBillModal({ isOpen, onClose, businessId, onRefresh 
                       const customizationPrice = sumCustomizationPrice(item.customizations);
                       const itemPrice = item.unit_price + customizationPrice;
                       const itemTotal = itemPrice * item.quantity;
-                      
+
                       return (
                         <div
                           key={item.id}
@@ -1536,184 +1535,184 @@ export default function SplitBillModal({ isOpen, onClose, businessId, onRefresh 
                     </div>
                   ) : (
                     <div className="space-y-3">
-                    {pendingTransactions.map((transaction) => {
-                      const displayName = transaction.customer_name || transaction.table_number || 'Tanpa nama';
-                      const isExpanded = expandedDestinationTransactionId === transaction.uuid_id;
-                      const isDisabled = sourceTransaction?.uuid_id === transaction.uuid_id;
-                      const items = transactionItemsMap.get(transaction.uuid_id) || [];
-                      const isLoading = loadingItemsMap.get(transaction.uuid_id) || false;
-                      const itemCount = items.length;
-                      const hasLoadedItems = transactionItemsMap.has(transaction.uuid_id);
-                      
-                      // All cards use blue color scheme
-                      const colorVariant = { 
-                        bg: 'bg-gradient-to-br from-blue-50 to-indigo-50', 
-                        border: 'border-blue-300', 
-                        hover: 'hover:from-blue-100 hover:to-indigo-100', 
-                        accent: 'bg-blue-500' 
-                      };
-                      
-                      return (
-                        <div
-                          key={transaction.uuid_id}
-                          className={`rounded-xl border-2 ${colorVariant.border} ${colorVariant.bg} overflow-hidden transition-all duration-200 shadow-md hover:shadow-lg ${isExpanded ? 'shadow-xl' : ''} ${isDisabled ? 'opacity-50 cursor-not-allowed' : ''}`}
-                        >
-                          {/* Transaction Header - Clickable */}
+                      {pendingTransactions.map((transaction) => {
+                        const displayName = transaction.customer_name || transaction.table_number || 'Tanpa nama';
+                        const isExpanded = expandedDestinationTransactionId === transaction.uuid_id;
+                        const isDisabled = sourceTransaction?.uuid_id === transaction.uuid_id;
+                        const items = transactionItemsMap.get(transaction.uuid_id) || [];
+                        const isLoading = loadingItemsMap.get(transaction.uuid_id) || false;
+                        const itemCount = items.length;
+                        const hasLoadedItems = transactionItemsMap.has(transaction.uuid_id);
+
+                        // All cards use blue color scheme
+                        const colorVariant = {
+                          bg: 'bg-gradient-to-br from-blue-50 to-indigo-50',
+                          border: 'border-blue-300',
+                          hover: 'hover:from-blue-100 hover:to-indigo-100',
+                          accent: 'bg-blue-500'
+                        };
+
+                        return (
                           <div
-                            onClick={() => !isDisabled && handleDestinationTransactionClick(transaction.uuid_id)}
-                            className={`p-4 transition-all duration-200 ${colorVariant.hover} ${isExpanded ? colorVariant.hover : ''} ${isDisabled ? 'cursor-not-allowed' : 'cursor-pointer'}`}
+                            key={transaction.uuid_id}
+                            className={`rounded-xl border-2 ${colorVariant.border} ${colorVariant.bg} overflow-hidden transition-all duration-200 shadow-md hover:shadow-lg ${isExpanded ? 'shadow-xl' : ''} ${isDisabled ? 'opacity-50 cursor-not-allowed' : ''}`}
                           >
-                            <div className="flex justify-between items-start">
-                              <div className="flex-1">
-                                <div className="flex items-center gap-2">
-                                  <div className={`w-1 h-8 ${colorVariant.accent} rounded-full`}></div>
-                                  <div>
-                                    <div className="font-semibold text-gray-900 text-base">
-                                      {displayName}
-                                      {isDisabled && (
-                                        <span className="ml-2 px-2 py-0.5 bg-red-100 text-red-700 rounded-full text-xs font-medium">
-                                          (Dari)
-                                        </span>
-                                      )}
-                                      {hasLoadedItems && itemCount > 0 && !isDisabled && (
-                                        <span className="ml-2 px-2 py-0.5 bg-white/70 rounded-full text-xs font-medium text-gray-700">
-                                          {itemCount} item{itemCount > 1 ? 's' : ''}
-                                        </span>
+                            {/* Transaction Header - Clickable */}
+                            <div
+                              onClick={() => !isDisabled && handleDestinationTransactionClick(transaction.uuid_id)}
+                              className={`p-4 transition-all duration-200 ${colorVariant.hover} ${isExpanded ? colorVariant.hover : ''} ${isDisabled ? 'cursor-not-allowed' : 'cursor-pointer'}`}
+                            >
+                              <div className="flex justify-between items-start">
+                                <div className="flex-1">
+                                  <div className="flex items-center gap-2">
+                                    <div className={`w-1 h-8 ${colorVariant.accent} rounded-full`}></div>
+                                    <div>
+                                      <div className="font-semibold text-gray-900 text-base">
+                                        {displayName}
+                                        {isDisabled && (
+                                          <span className="ml-2 px-2 py-0.5 bg-red-100 text-red-700 rounded-full text-xs font-medium">
+                                            (Dari)
+                                          </span>
+                                        )}
+                                        {hasLoadedItems && itemCount > 0 && !isDisabled && (
+                                          <span className="ml-2 px-2 py-0.5 bg-white/70 rounded-full text-xs font-medium text-gray-700">
+                                            {itemCount} item{itemCount > 1 ? 's' : ''}
+                                          </span>
+                                        )}
+                                      </div>
+                                      {transaction.table_number && transaction.customer_name && (
+                                        <div className="text-sm text-gray-600 mt-1 font-medium">{transaction.table_number}</div>
                                       )}
                                     </div>
-                                    {transaction.table_number && transaction.customer_name && (
-                                      <div className="text-sm text-gray-600 mt-1 font-medium">{transaction.table_number}</div>
+                                    {!isDisabled && (
+                                      isExpanded ? (
+                                        <ChevronUp className="w-5 h-5 text-gray-600 flex-shrink-0" />
+                                      ) : (
+                                        <ChevronDown className="w-5 h-5 text-gray-600 flex-shrink-0" />
+                                      )
                                     )}
                                   </div>
-                                  {!isDisabled && (
-                                    isExpanded ? (
-                                      <ChevronUp className="w-5 h-5 text-gray-600 flex-shrink-0" />
-                                    ) : (
-                                      <ChevronDown className="w-5 h-5 text-gray-600 flex-shrink-0" />
-                                    )
-                                  )}
                                 </div>
-                              </div>
-                              <div className="text-right ml-4">
-                                <div className={`px-3 py-1.5 ${colorVariant.accent} text-white font-bold text-lg shadow-sm`}>
-                                  {formatPrice(transaction.final_amount)}
+                                <div className="text-right ml-4">
+                                  <div className={`px-3 py-1.5 ${colorVariant.accent} text-white font-bold text-lg shadow-sm`}>
+                                    {formatPrice(transaction.final_amount)}
+                                  </div>
                                 </div>
                               </div>
                             </div>
-                          </div>
 
-                          {/* Expanded Items Section */}
-                          {isExpanded && !isDisabled && (
-                            <div className="border-t-2 border-white/50 bg-white/40 backdrop-blur-sm">
-                              {isLoading ? (
-                                <div className="p-4 text-center text-gray-600">
-                                  Memuat item...
-                                </div>
-                              ) : items.length === 0 ? (
-                                <div className="p-4 text-center text-gray-500">
-                                  Tidak ada item dalam transaksi ini
-                                </div>
-                              ) : (
-                                <div className="p-4 space-y-3">
-                                  {items.map((item) => {
-                                    const customizationPrice = sumCustomizationPrice(item.customizations);
-                                    const itemPrice = item.unit_price + customizationPrice;
-                                    const itemTotal = itemPrice * item.quantity;
-                                    
-                                    return (
-                                      <div
-                                        key={item.id}
-                                        className="p-3 rounded-lg border border-white/60 bg-white/90 backdrop-blur-sm shadow-sm hover:shadow-md transition-all hover:bg-white"
-                                      >
-                                        <div className="flex justify-between items-start">
-                                          <div className="flex-1">
-                                            <div className="font-semibold text-sm text-gray-900">
-                                              {item.product?.nama || `Product ${item.product_id}`}
-                                            </div>
-                                            <div className="text-xs text-gray-600 mt-1 font-medium">
-                                              {item.quantity}x {formatPrice(item.unit_price)}
-                                            </div>
+                            {/* Expanded Items Section */}
+                            {isExpanded && !isDisabled && (
+                              <div className="border-t-2 border-white/50 bg-white/40 backdrop-blur-sm">
+                                {isLoading ? (
+                                  <div className="p-4 text-center text-gray-600">
+                                    Memuat item...
+                                  </div>
+                                ) : items.length === 0 ? (
+                                  <div className="p-4 text-center text-gray-500">
+                                    Tidak ada item dalam transaksi ini
+                                  </div>
+                                ) : (
+                                  <div className="p-4 space-y-3">
+                                    {items.map((item) => {
+                                      const customizationPrice = sumCustomizationPrice(item.customizations);
+                                      const itemPrice = item.unit_price + customizationPrice;
+                                      const itemTotal = itemPrice * item.quantity;
 
-                                            {/* Customizations */}
-                                            {item.customizations && item.customizations.length > 0 && (
-                                              <div className="mt-2 space-y-1">
-                                                {item.customizations.map((customization) => (
-                                                  <div key={customization.customization_id} className="text-xs">
-                                                    <span className="text-gray-500">{customization.customization_name}:</span>
-                                                    <div className="ml-2 space-y-0.5">
-                                                      {customization.selected_options && customization.selected_options.length > 0 && (
-                                                        customization.selected_options.map((option) => (
-                                                          <div key={option.option_id} className="flex items-center justify-between">
-                                                            <span className="text-gray-600">� {option.option_name}</span>
-                                                            {option.price_adjustment !== 0 && (
-                                                              <span className={`text-xs ${option.price_adjustment > 0 ? 'text-green-600' : 'text-red-600'}`}>
-                                                                {option.price_adjustment > 0 ? '+' : ''}{formatPrice(option.price_adjustment)}
-                                                              </span>
-                                                            )}
-                                                          </div>
-                                                        ))
-                                                      )}
+                                      return (
+                                        <div
+                                          key={item.id}
+                                          className="p-3 rounded-lg border border-white/60 bg-white/90 backdrop-blur-sm shadow-sm hover:shadow-md transition-all hover:bg-white"
+                                        >
+                                          <div className="flex justify-between items-start">
+                                            <div className="flex-1">
+                                              <div className="font-semibold text-sm text-gray-900">
+                                                {item.product?.nama || `Product ${item.product_id}`}
+                                              </div>
+                                              <div className="text-xs text-gray-600 mt-1 font-medium">
+                                                {item.quantity}x {formatPrice(item.unit_price)}
+                                              </div>
+
+                                              {/* Customizations */}
+                                              {item.customizations && item.customizations.length > 0 && (
+                                                <div className="mt-2 space-y-1">
+                                                  {item.customizations.map((customization) => (
+                                                    <div key={customization.customization_id} className="text-xs">
+                                                      <span className="text-gray-500">{customization.customization_name}:</span>
+                                                      <div className="ml-2 space-y-0.5">
+                                                        {customization.selected_options && customization.selected_options.length > 0 && (
+                                                          customization.selected_options.map((option) => (
+                                                            <div key={option.option_id} className="flex items-center justify-between">
+                                                              <span className="text-gray-600">� {option.option_name}</span>
+                                                              {option.price_adjustment !== 0 && (
+                                                                <span className={`text-xs ${option.price_adjustment > 0 ? 'text-green-600' : 'text-red-600'}`}>
+                                                                  {option.price_adjustment > 0 ? '+' : ''}{formatPrice(option.price_adjustment)}
+                                                                </span>
+                                                              )}
+                                                            </div>
+                                                          ))
+                                                        )}
+                                                      </div>
                                                     </div>
-                                                  </div>
-                                                ))}
-                                              </div>
-                                            )}
-
-                                            {/* Custom Note */}
-                                            {item.custom_note && (
-                                              <div className="mt-1">
-                                                <div className="text-xs">
-                                                  <span className="text-gray-500">Note:</span>
-                                                  <span className="text-gray-700 ml-1 italic">&ldquo;{item.custom_note}&rdquo;</span>
+                                                  ))}
                                                 </div>
-                                              </div>
-                                            )}
+                                              )}
 
-                                            {/* Bundle Selections */}
-                                            {item.bundle_selections_json && (
-                                              <div className="mt-2 text-xs text-gray-500">
-                                                Bundle item (lihat detail)
+                                              {/* Custom Note */}
+                                              {item.custom_note && (
+                                                <div className="mt-1">
+                                                  <div className="text-xs">
+                                                    <span className="text-gray-500">Note:</span>
+                                                    <span className="text-gray-700 ml-1 italic">&ldquo;{item.custom_note}&rdquo;</span>
+                                                  </div>
+                                                </div>
+                                              )}
+
+                                              {/* Bundle Selections */}
+                                              {item.bundle_selections_json && (
+                                                <div className="mt-2 text-xs text-gray-500">
+                                                  Bundle item (lihat detail)
+                                                </div>
+                                              )}
+                                            </div>
+                                            <div className="text-right ml-4">
+                                              <div className="font-bold text-sm px-2 py-1 bg-white/80 rounded text-gray-900 shadow-sm">
+                                                {formatPrice(itemTotal)}
                                               </div>
-                                            )}
-                                          </div>
-                                          <div className="text-right ml-4">
-                                            <div className="font-bold text-sm px-2 py-1 bg-white/80 rounded text-gray-900 shadow-sm">
-                                              {formatPrice(itemTotal)}
                                             </div>
                                           </div>
                                         </div>
-                                      </div>
-                                    );
-                                  })}
-                                  
-                                  {/* Pilih Button */}
-                                  <div className="pt-3 border-t-2 border-white/50">
-                                    <button
-                                      onClick={(e) => {
-                                        e.stopPropagation();
-                                        const selectedTx = pendingTransactions.find(tx => tx.uuid_id === transaction.uuid_id);
-                                        if (selectedTx) {
-                                          // Use items from transactionItemsMap (already loaded)
-                                          const txItems = transactionItemsMap.get(transaction.uuid_id) || items;
-                                          setDestinationTransaction(selectedTx);
-                                          setDestinationTransactionItems(txItems);
-                                          setExpandedDestinationTransactionId(null);
-                                          // Clear new transaction data when selecting existing transaction
-                                          setNewTransactionData(null);
-                                        }
-                                      }}
-                                      className={`w-full px-4 py-3 ${colorVariant.accent} hover:opacity-90 text-white rounded-lg font-semibold transition-all shadow-xl hover:shadow-2xl transform hover:scale-[1.02]`}
-                                    >
-                                      Pilih
-                                    </button>
+                                      );
+                                    })}
+
+                                    {/* Pilih Button */}
+                                    <div className="pt-3 border-t-2 border-white/50">
+                                      <button
+                                        onClick={(e) => {
+                                          e.stopPropagation();
+                                          const selectedTx = pendingTransactions.find(tx => tx.uuid_id === transaction.uuid_id);
+                                          if (selectedTx) {
+                                            // Use items from transactionItemsMap (already loaded)
+                                            const txItems = transactionItemsMap.get(transaction.uuid_id) || items;
+                                            setDestinationTransaction(selectedTx);
+                                            setDestinationTransactionItems(txItems);
+                                            setExpandedDestinationTransactionId(null);
+                                            // Clear new transaction data when selecting existing transaction
+                                            setNewTransactionData(null);
+                                          }
+                                        }}
+                                        className={`w-full px-4 py-3 ${colorVariant.accent} hover:opacity-90 text-white rounded-lg font-semibold transition-all shadow-xl hover:shadow-2xl transform hover:scale-[1.02]`}
+                                      >
+                                        Pilih
+                                      </button>
+                                    </div>
                                   </div>
-                                </div>
-                              )}
-                            </div>
-                          )}
-                        </div>
-                      );
-                    })}
+                                )}
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })}
                     </div>
                   )}
                 </>
@@ -1732,7 +1731,7 @@ export default function SplitBillModal({ isOpen, onClose, businessId, onRefresh 
 
               // Check if we need to create a new transaction first
               let finalDestinationUuid = destinationTransaction?.uuid_id;
-              
+
               if (newTransactionData && !destinationTransaction) {
                 // Create new transaction first
                 try {
@@ -1809,20 +1808,20 @@ export default function SplitBillModal({ isOpen, onClose, businessId, onRefresh 
                   finalDestinationUuid = transactionId;
                 } catch (error) {
                   console.error('Error creating new transaction:', error);
-                  alert(`Error: ${error instanceof Error ? error.message : 'Gagal membuat transaksi baru'}`);
+                  appAlert(`Error: ${error instanceof Error ? error.message : 'Gagal membuat transaksi baru'}`);
                   return;
                 }
               }
 
               if (!finalDestinationUuid) {
-                alert('Error: Tidak ada transaksi tujuan yang dipilih');
+                appAlert('Error: Tidak ada transaksi tujuan yang dipilih');
                 return;
               }
 
               try {
                 const electronAPI = getElectronAPI();
                 if (!electronAPI?.localDbSplitBill) {
-                  alert('Error: Database API not available');
+                  appAlert('Error: Database API not available');
                   return;
                 }
 
@@ -1838,12 +1837,12 @@ export default function SplitBillModal({ isOpen, onClose, businessId, onRefresh 
                   try {
                     // Use the tracked moved items array (contains only items that were actually moved)
                     // Ensure it's always an array and has valid items
-                    const itemsToLog = Array.isArray(movedItems) ? movedItems.filter(item => 
-                      item && 
-                      typeof item.id === 'number' && 
+                    const itemsToLog = Array.isArray(movedItems) ? movedItems.filter(item =>
+                      item &&
+                      typeof item.id === 'number' &&
                       typeof item.product_id === 'number'
                     ) : [];
-                    
+
                     console.log('[SPLIT BILL] Preparing to log activity:', {
                       movedItemsStateLength: movedItems.length,
                       itemsToLogLength: itemsToLog.length,
@@ -1855,12 +1854,12 @@ export default function SplitBillModal({ isOpen, onClose, businessId, onRefresh 
                         quantity: item.quantity
                       }))
                     });
-                    
+
                     // Warn if no items to log
                     if (itemsToLog.length === 0) {
                       console.warn('[WARN] [SPLIT BILL] No items to log! movedItems state:', movedItems);
                     }
-                    
+
                     const itemNames = itemsToLog.map(item => {
                       const productName = item.product?.nama || `Product ${item.product_id}`;
                       const quantity = item.quantity > 1 ? `${item.quantity}x ` : '';
@@ -1890,12 +1889,12 @@ export default function SplitBillModal({ isOpen, onClose, businessId, onRefresh 
 
                     // Create activity log entry
                     const userId = user?.id ? parseInt(String(user.id)) : null;
-                    
+
                     // Parse source table and room
                     const sourceTableParts = (sourceTransaction.table_number || 'Take-away').split('/');
                     const sourceTableName = sourceTableParts[0] || 'Take-away';
                     const sourceRoomName = sourceTableParts[1] || null;
-                    
+
                     // Parse destination table and room
                     let destTableName: string | null = null;
                     let destRoomName: string | null = null;
@@ -1909,7 +1908,7 @@ export default function SplitBillModal({ isOpen, onClose, businessId, onRefresh 
                       destTableName = destTableParts[0] || null;
                       destRoomName = destTableParts[1] || null;
                     }
-                    
+
                     const detailsJson = {
                       message: logMessage,
                       source_transaction_uuid: sourceTransaction.uuid_id,
@@ -1965,7 +1964,7 @@ export default function SplitBillModal({ isOpen, onClose, businessId, onRefresh 
                           console.log('[LOG] [SPLIT BILL] Saving activity log to local database:', activityLogPayload);
 
                           const result = await electronAPI.localDbUpsertActivityLogs([activityLogPayload]);
-                          
+
                           if (result?.success) {
                             console.log('[OK] [SPLIT BILL] Activity log saved to local database successfully');
                           } else {
@@ -1986,7 +1985,7 @@ export default function SplitBillModal({ isOpen, onClose, businessId, onRefresh 
 
                   console.log('[SUCCESS] [SPLIT BILL] Split bill operation completed successfully');
 
-                  alert(`Berhasil memindahkan ${itemIdsArray.length} item ke transaksi tujuan`);
+                  appAlert(`Berhasil memindahkan ${itemIdsArray.length} item ke transaksi tujuan`);
 
                   // Close modal
                   onClose();
@@ -1999,19 +1998,18 @@ export default function SplitBillModal({ isOpen, onClose, businessId, onRefresh 
                     }, 500); // Small delay to ensure modal closes first
                   }
                 } else {
-                  alert(`Error: ${result.error || 'Gagal memindahkan item'}`);
+                  appAlert(`Error: ${result.error || 'Gagal memindahkan item'}`);
                 }
               } catch (error) {
                 console.error('Error splitting bill:', error);
-                alert(`Error: ${error instanceof Error ? error.message : 'Gagal memindahkan item'}`);
+                appAlert(`Error: ${error instanceof Error ? error.message : 'Gagal memindahkan item'}`);
               }
             }}
             disabled={movedItemIds.size === 0 || !sourceTransaction || (!destinationTransaction && !newTransactionData)}
-            className={`w-full px-6 py-3 rounded-lg font-semibold text-lg transition-all shadow-xl hover:shadow-2xl transform hover:scale-[1.01] ${
-              movedItemIds.size === 0 || !sourceTransaction || (!destinationTransaction && !newTransactionData)
+            className={`w-full px-6 py-3 rounded-lg font-semibold text-lg transition-all shadow-xl hover:shadow-2xl transform hover:scale-[1.01] ${movedItemIds.size === 0 || !sourceTransaction || (!destinationTransaction && !newTransactionData)
                 ? 'bg-gray-300 text-gray-500 cursor-not-allowed'
                 : 'bg-blue-500 hover:bg-blue-600 text-white'
-            }`}
+              }`}
           >
             Simpan
           </button>
@@ -2020,256 +2018,254 @@ export default function SplitBillModal({ isOpen, onClose, businessId, onRefresh 
 
       {/* Table Selection Modal for New Transaction */}
       {showTableSelection && (
-          <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-[60]">
-            <div className="bg-white rounded-lg shadow-xl w-screen h-screen flex flex-col">
-              {/* Header */}
-              <div className="flex items-center justify-between p-4 border-b">
-                <h2 className="text-xl font-bold text-gray-900">Pilih Meja untuk Transaksi Baru</h2>
-                <button
-                  onClick={() => {
-                    setShowTableSelection(false);
-                    setShowCustomerNameInput(false);
-                    setNewTransactionCustomerName('');
-                    setSelectedRoom(null);
-                    setTables([]);
-                  }}
-                  className="p-2 hover:bg-gray-100 rounded-lg transition-colors"
-                >
-                  <X className="w-5 h-5 text-gray-900" />
-                </button>
-              </div>
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-[60]">
+          <div className="bg-white rounded-lg shadow-xl w-screen h-screen flex flex-col">
+            {/* Header */}
+            <div className="flex items-center justify-between p-4 border-b">
+              <h2 className="text-xl font-bold text-gray-900">Pilih Meja untuk Transaksi Baru</h2>
+              <button
+                onClick={() => {
+                  setShowTableSelection(false);
+                  setShowCustomerNameInput(false);
+                  setNewTransactionCustomerName('');
+                  setSelectedRoom(null);
+                  setTables([]);
+                }}
+                className="p-2 hover:bg-gray-100 rounded-lg transition-colors"
+              >
+                <X className="w-5 h-5 text-gray-900" />
+              </button>
+            </div>
 
-              {/* Room Selector */}
-              {rooms.length > 0 && (
-                <div className="p-4 border-b flex gap-2 overflow-x-auto">
-                  {rooms.map((room) => (
-                    <button
-                      key={room.id}
-                      onClick={() => setSelectedRoom(room.id)}
-                      className={`px-3 py-1.5 text-sm rounded-md transition-colors whitespace-nowrap ${
-                        selectedRoom === room.id
-                          ? 'bg-blue-600 text-white'
-                          : 'bg-gray-200 text-gray-900 hover:bg-gray-300'
+            {/* Room Selector */}
+            {rooms.length > 0 && (
+              <div className="p-4 border-b flex gap-2 overflow-x-auto">
+                {rooms.map((room) => (
+                  <button
+                    key={room.id}
+                    onClick={() => setSelectedRoom(room.id)}
+                    className={`px-3 py-1.5 text-sm rounded-md transition-colors whitespace-nowrap ${selectedRoom === room.id
+                        ? 'bg-blue-600 text-white'
+                        : 'bg-gray-200 text-gray-900 hover:bg-gray-300'
                       }`}
-                    >
-                      {room.name}
-                    </button>
-                  ))}
-                </div>
-              )}
+                  >
+                    {room.name}
+                  </button>
+                ))}
+              </div>
+            )}
 
-              {/* Canvas */}
-              {selectedRoom && (
-                <div 
-                  ref={canvasContainerRef}
-                  className="flex-1 min-h-0"
-                  style={{
-                    ...(rooms.find(r => r.id === selectedRoom)?.canvas_width && rooms.find(r => r.id === selectedRoom)?.canvas_height
-                      ? {
-                          minHeight: '400px',
-                          overflow: 'visible'
-                        }
-                      : {
-                          minHeight: '400px',
-                          maxHeight: 'calc(100vh - 200px)',
-                          overflow: 'auto'
-                        }
-                    )
-                  }}
-                >
-                  <div
-                    ref={canvasRef}
-                    className="relative bg-gray-100 rounded-lg border-2 border-gray-300 overflow-hidden"
-                    style={{
-                      width: canvasSize.width > 0 ? `${canvasSize.width}px` : '100%',
-                      height: canvasSize.height || 400,
+            {/* Canvas */}
+            {selectedRoom && (
+              <div
+                ref={canvasContainerRef}
+                className="flex-1 min-h-0"
+                style={{
+                  ...(rooms.find(r => r.id === selectedRoom)?.canvas_width && rooms.find(r => r.id === selectedRoom)?.canvas_height
+                    ? {
                       minHeight: '400px',
-                      ...(rooms.find(r => r.id === selectedRoom)?.canvas_width && rooms.find(r => r.id === selectedRoom)?.canvas_height
-                        ? {}
-                        : { maxWidth: '100%', maxHeight: '100%' }
-                      ),
-                      margin: '0 auto',
-                      backgroundImage: `
+                      overflow: 'visible'
+                    }
+                    : {
+                      minHeight: '400px',
+                      maxHeight: 'calc(100vh - 200px)',
+                      overflow: 'auto'
+                    }
+                  )
+                }}
+              >
+                <div
+                  ref={canvasRef}
+                  className="relative bg-gray-100 rounded-lg border-2 border-gray-300 overflow-hidden"
+                  style={{
+                    width: canvasSize.width > 0 ? `${canvasSize.width}px` : '100%',
+                    height: canvasSize.height || 400,
+                    minHeight: '400px',
+                    ...(rooms.find(r => r.id === selectedRoom)?.canvas_width && rooms.find(r => r.id === selectedRoom)?.canvas_height
+                      ? {}
+                      : { maxWidth: '100%', maxHeight: '100%' }
+                    ),
+                    margin: '0 auto',
+                    backgroundImage: `
                         linear-gradient(to right, rgba(0,0,0,0.05) 1px, transparent 1px),
                         linear-gradient(to bottom, rgba(0,0,0,0.05) 1px, transparent 1px)
                       `,
-                      backgroundSize: '20px 20px'
-                    }}
-                  >
-                    {/* Legend - Inside Canvas at Bottom Left */}
-                    <div className="absolute bottom-2 left-2 z-50 bg-white/95 backdrop-blur-sm rounded-lg shadow-md px-3 py-2 border border-gray-300">
-                      <div className="flex items-center gap-4 text-sm text-gray-700">
-                        <div className="flex items-center gap-2">
-                          <div className="w-4 h-4 rounded-full bg-blue-400 border-2 border-gray-800"></div>
-                          <span>Meja Tersedia</span>
-                        </div>
-                        <div className="flex items-center gap-2">
-                          <div className="w-4 h-4 rounded-full border-2 border-gray-800" style={{ backgroundColor: '#ef4444' }}></div>
-                          <span>Meja dengan Pesanan Aktif</span>
-                        </div>
+                    backgroundSize: '20px 20px'
+                  }}
+                >
+                  {/* Legend - Inside Canvas at Bottom Left */}
+                  <div className="absolute bottom-2 left-2 z-50 bg-white/95 backdrop-blur-sm rounded-lg shadow-md px-3 py-2 border border-gray-300">
+                    <div className="flex items-center gap-4 text-sm text-gray-700">
+                      <div className="flex items-center gap-2">
+                        <div className="w-4 h-4 rounded-full bg-blue-400 border-2 border-gray-800"></div>
+                        <span>Meja Tersedia</span>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <div className="w-4 h-4 rounded-full border-2 border-gray-800" style={{ backgroundColor: '#ef4444' }}></div>
+                        <span>Meja dengan Pesanan Aktif</span>
                       </div>
                     </div>
+                  </div>
 
-                    {/* Layout Elements */}
-                    {(() => {
-                      const selectedRoomData = rooms.find(r => r.id === selectedRoom);
-                      const fontSizeMultiplier = selectedRoomData?.font_size_multiplier ?? 1.0;
-                      return layoutElements.map((element) => {
-                        const posX = typeof element.position_x === 'string' ? parseFloat(element.position_x) : element.position_x;
-                        const posY = typeof element.position_y === 'string' ? parseFloat(element.position_y) : element.position_y;
-                        const widthPercent = typeof element.width === 'string' ? parseFloat(element.width) : element.width;
-                        const heightPercent = typeof element.height === 'string' ? parseFloat(element.height) : element.height;
+                  {/* Layout Elements */}
+                  {(() => {
+                    const selectedRoomData = rooms.find(r => r.id === selectedRoom);
+                    const fontSizeMultiplier = selectedRoomData?.font_size_multiplier ?? 1.0;
+                    return layoutElements.map((element) => {
+                      const posX = typeof element.position_x === 'string' ? parseFloat(element.position_x) : element.position_x;
+                      const posY = typeof element.position_y === 'string' ? parseFloat(element.position_y) : element.position_y;
+                      const widthPercent = typeof element.width === 'string' ? parseFloat(element.width) : element.width;
+                      const heightPercent = typeof element.height === 'string' ? parseFloat(element.height) : element.height;
 
-                        const pixelX = (posX / 100) * canvasSize.width;
-                        const pixelY = (posY / 100) * canvasSize.height;
-                        const pixelWidth = (widthPercent / 100) * canvasSize.width;
-                        const pixelHeight = (heightPercent / 100) * canvasSize.height;
+                      const pixelX = (posX / 100) * canvasSize.width;
+                      const pixelY = (posY / 100) * canvasSize.height;
+                      const pixelWidth = (widthPercent / 100) * canvasSize.width;
+                      const pixelHeight = (heightPercent / 100) * canvasSize.height;
 
-                        const minDimension = Math.min(pixelWidth, pixelHeight);
-                        const baseFontSize = Math.max(10, Math.min(20, minDimension * 0.3));
-                        const fontSize = baseFontSize * fontSizeMultiplier;
+                      const minDimension = Math.min(pixelWidth, pixelHeight);
+                      const baseFontSize = Math.max(10, Math.min(20, minDimension * 0.3));
+                      const fontSize = baseFontSize * fontSizeMultiplier;
 
-                        const MIN_SIZE_PERCENT = 3;
-                        const minPixelSize = Math.min(
-                          (MIN_SIZE_PERCENT / 100) * canvasSize.width,
-                          (MIN_SIZE_PERCENT / 100) * canvasSize.height
-                        );
+                      const MIN_SIZE_PERCENT = 3;
+                      const minPixelSize = Math.min(
+                        (MIN_SIZE_PERCENT / 100) * canvasSize.width,
+                        (MIN_SIZE_PERCENT / 100) * canvasSize.height
+                      );
 
-                        return (
+                      return (
+                        <div
+                          key={`element-${element.id}`}
+                          style={{
+                            position: 'absolute',
+                            left: pixelX,
+                            top: pixelY,
+                            width: Math.max(pixelWidth, minPixelSize),
+                            height: Math.max(pixelHeight, minPixelSize),
+                          }}
+                          className="cursor-default"
+                        >
                           <div
-                            key={`element-${element.id}`}
+                            className="w-full h-full flex items-center justify-center relative shadow-lg overflow-hidden"
                             style={{
-                              position: 'absolute',
-                              left: pixelX,
-                              top: pixelY,
-                              width: Math.max(pixelWidth, minPixelSize),
-                              height: Math.max(pixelHeight, minPixelSize),
+                              backgroundColor: element.color,
+                              color: element.text_color,
+                              minWidth: '30px',
+                              minHeight: '30px',
                             }}
-                            className="cursor-default"
                           >
                             <div
-                              className="w-full h-full flex items-center justify-center relative shadow-lg overflow-hidden"
-                              style={{
-                                backgroundColor: element.color,
-                                color: element.text_color,
-                                minWidth: '30px',
-                                minHeight: '30px',
-                              }}
+                              className="font-bold whitespace-nowrap text-center px-2"
+                              style={{ fontSize: `${fontSize}px` }}
                             >
-                              <div
-                                className="font-bold whitespace-nowrap text-center px-2"
-                                style={{ fontSize: `${fontSize}px` }}
-                              >
-                                {element.label}
-                              </div>
+                              {element.label}
                             </div>
                           </div>
-                        );
-                      });
-                    })()}
+                        </div>
+                      );
+                    });
+                  })()}
 
-                    {/* Tables */}
-                    {(() => {
-                      const selectedRoomData = rooms.find(r => r.id === selectedRoom);
-                      const fontSizeMultiplier = selectedRoomData?.font_size_multiplier ?? 1.0;
-                      return tables.map((table) => {
-                        const posX = typeof table.position_x === 'string' ? parseFloat(table.position_x) : table.position_x;
-                        const posY = typeof table.position_y === 'string' ? parseFloat(table.position_y) : table.position_y;
-                        const widthPercent = typeof table.width === 'string' ? parseFloat(table.width) : table.width;
-                        const heightPercent = typeof table.height === 'string' ? parseFloat(table.height) : table.height;
+                  {/* Tables */}
+                  {(() => {
+                    const selectedRoomData = rooms.find(r => r.id === selectedRoom);
+                    const fontSizeMultiplier = selectedRoomData?.font_size_multiplier ?? 1.0;
+                    return tables.map((table) => {
+                      const posX = typeof table.position_x === 'string' ? parseFloat(table.position_x) : table.position_x;
+                      const posY = typeof table.position_y === 'string' ? parseFloat(table.position_y) : table.position_y;
+                      const widthPercent = typeof table.width === 'string' ? parseFloat(table.width) : table.width;
+                      const heightPercent = typeof table.height === 'string' ? parseFloat(table.height) : table.height;
 
-                        const pixelX = (posX / 100) * canvasSize.width;
-                        const pixelY = (posY / 100) * canvasSize.height;
-                        const pixelWidth = (widthPercent / 100) * canvasSize.width;
-                        const pixelHeight = (heightPercent / 100) * canvasSize.height;
+                      const pixelX = (posX / 100) * canvasSize.width;
+                      const pixelY = (posY / 100) * canvasSize.height;
+                      const pixelWidth = (widthPercent / 100) * canvasSize.width;
+                      const pixelHeight = (heightPercent / 100) * canvasSize.height;
 
-                        const minDimension = Math.min(pixelWidth, pixelHeight);
-                        const baseFontSize = Math.max(10, Math.min(24, minDimension * 0.25));
-                        const fontSize = baseFontSize * fontSizeMultiplier;
-                        const smallFontSize = Math.max(8, fontSize * 0.7);
+                      const minDimension = Math.min(pixelWidth, pixelHeight);
+                      const baseFontSize = Math.max(10, Math.min(24, minDimension * 0.25));
+                      const fontSize = baseFontSize * fontSizeMultiplier;
+                      const smallFontSize = Math.max(8, fontSize * 0.7);
 
-                        const MIN_SIZE_PERCENT = 4;
-                        const minPixelSize = Math.min(
-                          (MIN_SIZE_PERCENT / 100) * canvasSize.width,
-                          (MIN_SIZE_PERCENT / 100) * canvasSize.height
-                        );
+                      const MIN_SIZE_PERCENT = 4;
+                      const minPixelSize = Math.min(
+                        (MIN_SIZE_PERCENT / 100) * canvasSize.width,
+                        (MIN_SIZE_PERCENT / 100) * canvasSize.height
+                      );
 
-                        const hasPendingOrder = checkTableHasPendingOrder(table.id);
-                        const tableBgColor = hasPendingOrder ? '#ef4444' : '#60a5fa'; // red-500 if occupied, blue-400 if available
+                      const hasPendingOrder = checkTableHasPendingOrder(table.id);
+                      const tableBgColor = hasPendingOrder ? '#ef4444' : '#60a5fa'; // red-500 if occupied, blue-400 if available
 
-                        return (
+                      return (
+                        <div
+                          key={table.id}
+                          style={{
+                            position: 'absolute',
+                            left: pixelX,
+                            top: pixelY,
+                            width: Math.max(pixelWidth, minPixelSize),
+                            height: Math.max(pixelHeight, minPixelSize),
+                          }}
+                          className={`transition-all duration-200 ${hasPendingOrder ? 'cursor-not-allowed opacity-75' : 'cursor-pointer'}`}
+                          onClick={() => !hasPendingOrder && handleTableClickForNewTransaction(table.id)}
+                          onMouseEnter={(e) => {
+                            if (!hasPendingOrder) {
+                              e.currentTarget.style.transform = 'scale(1.05)';
+                              e.currentTarget.style.zIndex = '10';
+                            }
+                          }}
+                          onMouseLeave={(e) => {
+                            e.currentTarget.style.transform = 'scale(1)';
+                            e.currentTarget.style.zIndex = '1';
+                          }}
+                        >
                           <div
-                            key={table.id}
-                            style={{
-                              position: 'absolute',
-                              left: pixelX,
-                              top: pixelY,
-                              width: Math.max(pixelWidth, minPixelSize),
-                              height: Math.max(pixelHeight, minPixelSize),
-                            }}
-                            className={`transition-all duration-200 ${hasPendingOrder ? 'cursor-not-allowed opacity-75' : 'cursor-pointer'}`}
-                            onClick={() => !hasPendingOrder && handleTableClickForNewTransaction(table.id)}
-                            onMouseEnter={(e) => {
-                              if (!hasPendingOrder) {
-                                e.currentTarget.style.transform = 'scale(1.05)';
-                                e.currentTarget.style.zIndex = '10';
-                              }
-                            }}
-                            onMouseLeave={(e) => {
-                              e.currentTarget.style.transform = 'scale(1)';
-                              e.currentTarget.style.zIndex = '1';
-                            }}
-                          >
-                            <div
-                              className={`w-full h-full flex flex-col items-center justify-center relative overflow-hidden transition-all duration-200 ${
-                                table.shape === 'circle' ? 'rounded-full' : 'rounded-lg'
+                            className={`w-full h-full flex flex-col items-center justify-center relative overflow-hidden transition-all duration-200 ${table.shape === 'circle' ? 'rounded-full' : 'rounded-lg'
                               } text-gray-900 border-2 border-gray-800 shadow-lg ${hasPendingOrder ? '' : 'hover:shadow-2xl hover:border-yellow-400'}`}
-                              style={{
-                                minWidth: '40px',
-                                minHeight: '40px',
-                                backgroundColor: tableBgColor,
-                              }}
+                            style={{
+                              minWidth: '40px',
+                              minHeight: '40px',
+                              backgroundColor: tableBgColor,
+                            }}
+                          >
+                            {/* Table number */}
+                            <div
+                              className="font-bold whitespace-nowrap"
+                              style={{ fontSize: `${fontSize}px` }}
                             >
-                              {/* Table number */}
-                              <div
-                                className="font-bold whitespace-nowrap"
-                                style={{ fontSize: `${fontSize}px` }}
-                              >
-                                {table.table_number}
-                              </div>
+                              {table.table_number}
+                            </div>
 
-                              {/* Capacity */}
-                              <div
-                                className="opacity-75 whitespace-nowrap"
-                                style={{ fontSize: `${smallFontSize}px` }}
-                              >
-                                {table.capacity}p
-                              </div>
+                            {/* Capacity */}
+                            <div
+                              className="opacity-75 whitespace-nowrap"
+                              style={{ fontSize: `${smallFontSize}px` }}
+                            >
+                              {table.capacity}p
                             </div>
                           </div>
-                        );
-                      });
-                    })()}
-                  </div>
+                        </div>
+                      );
+                    });
+                  })()}
                 </div>
-              )}
+              </div>
+            )}
 
-              {!selectedRoom && loadingTables && (
-                <div className="flex items-center justify-center h-full">
-                  <div className="text-gray-600">Memuat layout meja...</div>
-                </div>
-              )}
+            {!selectedRoom && loadingTables && (
+              <div className="flex items-center justify-center h-full">
+                <div className="text-gray-600">Memuat layout meja...</div>
+              </div>
+            )}
 
-              {!selectedRoom && !loadingTables && rooms.length === 0 && (
-                <div className="flex items-center justify-center h-full">
-                  <div className="text-center text-gray-500">
-                    <p>Tidak ada ruangan tersedia</p>
-                  </div>
+            {!selectedRoom && !loadingTables && rooms.length === 0 && (
+              <div className="flex items-center justify-center h-full">
+                <div className="text-center text-gray-500">
+                  <p>Tidak ada ruangan tersedia</p>
                 </div>
-              )}
-            </div>
+              </div>
+            )}
           </div>
-        )}
+        </div>
+      )}
     </div>
   );
 }

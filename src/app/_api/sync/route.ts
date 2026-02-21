@@ -452,14 +452,14 @@ export async function GET(request: NextRequest) {
       counts.receiptSettings = 0;
     }
 
-    // Sync Receipt Templates (business-specific and global)
+    // Sync Receipt Templates (business-specific and global). Exclude local-only columns: is_default, show_notes, one_label_per_product
     try {
       const receiptTemplates = await queryVps<unknown[]>(`
         SELECT id, template_type, template_name, business_id, template_code,
-               is_active, is_default, COALESCE(show_notes, 0) AS show_notes, version, created_at, updated_at
+               is_active, version, created_at, updated_at
         FROM receipt_templates 
         WHERE is_active = 1 AND (business_id = ? OR business_id IS NULL)
-        ORDER BY template_type ASC, business_id ASC, is_default DESC, template_name ASC
+        ORDER BY template_type ASC, business_id ASC, template_name ASC
       `, [BUSINESS_ID] as (string | number)[]);
       syncResults.receiptTemplates = receiptTemplates;
       counts.receiptTemplates = receiptTemplates.length;

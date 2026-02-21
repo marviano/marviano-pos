@@ -3,6 +3,7 @@
 import { useState, useEffect, useCallback, useRef, useLayoutEffect } from 'react';
 import { createPortal } from 'react-dom';
 import { Edit, List, LayoutGrid, Printer, Scissors } from 'lucide-react';
+import { appAlert } from '@/components/AppDialog';
 import { formatPackageLineDisplay } from './PackageSelectionModal';
 import TableLayout from './TableLayout';
 import SplitBillModal from './SplitBillModal';
@@ -440,7 +441,7 @@ export default function ActiveOrdersTab({ businessId, isOpen, onLoadTransaction 
       const electronAPI = getElectronAPI();
 
       if (!electronAPI?.localDbGetTransactions || !electronAPI?.localDbGetTransactionItems || !electronAPI?.localDbGetTransactionItemCustomizationsNormalized) {
-        alert('Print Bill tidak tersedia. Pastikan aplikasi terhubung dengan database lokal.');
+        appAlert('Print Bill tidak tersedia. Pastikan aplikasi terhubung dengan database lokal.');
         return;
       }
 
@@ -456,7 +457,7 @@ export default function ActiveOrdersTab({ businessId, isOpen, onLoadTransaction 
       }) as Record<string, unknown> | undefined;
 
       if (!transaction) {
-        alert('Transaksi tidak ditemukan');
+        appAlert('Transaksi tidak ditemukan');
         return;
       }
 
@@ -465,7 +466,7 @@ export default function ActiveOrdersTab({ businessId, isOpen, onLoadTransaction 
       const itemsArray = Array.isArray(transactionItems) ? transactionItems : [];
 
       if (itemsArray.length === 0) {
-        alert('Tidak ada item dalam transaksi ini');
+        appAlert('Tidak ada item dalam transaksi ini');
         return;
       }
 
@@ -737,7 +738,7 @@ export default function ActiveOrdersTab({ businessId, isOpen, onLoadTransaction 
       setShowPrintBillModal(true);
     } catch (error) {
       console.error('Error preparing bill:', error);
-      alert('Terjadi kesalahan saat menyiapkan bill');
+      appAlert('Terjadi kesalahan saat menyiapkan bill');
     } finally {
       setPrintingBill(null);
     }
@@ -758,8 +759,8 @@ export default function ActiveOrdersTab({ businessId, isOpen, onLoadTransaction 
               onClick={() => setShowSplitBillModal(true)}
               disabled={!canAccessSplitBillButton}
               className={`px-[14px] py-[7px] text-sm rounded-lg transition-all flex items-center gap-1.5 font-medium shadow-lg active:scale-95 active:shadow-md focus:outline-none focus:ring-2 focus:ring-purple-500 focus:ring-offset-2 ${canAccessSplitBillButton
-                  ? 'bg-gradient-to-r from-purple-600 to-purple-700 text-white hover:shadow-xl hover:from-purple-700 hover:to-purple-800'
-                  : 'bg-gray-400 text-gray-200 cursor-not-allowed'
+                ? 'bg-gradient-to-r from-purple-600 to-purple-700 text-white hover:shadow-xl hover:from-purple-700 hover:to-purple-800'
+                : 'bg-gray-400 text-gray-200 cursor-not-allowed'
                 }`}
               title={!canAccessSplitBillButton ? 'Anda tidak memiliki izin untuk mengakses fitur Split Bill/Pindah Meja' : undefined}
             >
@@ -771,8 +772,8 @@ export default function ActiveOrdersTab({ businessId, isOpen, onLoadTransaction 
             <button
               onClick={() => setViewMode('list')}
               className={`px-4 py-2 rounded-md transition-colors flex items-center gap-2 ${viewMode === 'list'
-                  ? 'bg-blue-600 text-white'
-                  : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
+                ? 'bg-blue-600 text-white'
+                : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
                 }`}
             >
               <List className="w-4 h-4" />
@@ -781,8 +782,8 @@ export default function ActiveOrdersTab({ businessId, isOpen, onLoadTransaction 
             <button
               onClick={() => setViewMode('layout')}
               className={`px-4 py-2 rounded-md transition-colors flex items-center gap-2 ${viewMode === 'layout'
-                  ? 'bg-blue-600 text-white'
-                  : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
+                ? 'bg-blue-600 text-white'
+                : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
                 }`}
             >
               <LayoutGrid className="w-4 h-4" />

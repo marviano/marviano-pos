@@ -97,6 +97,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   localDbGetRolePermissions: (roleId: number) => ipcRenderer.invoke('localdb-get-role-permissions', roleId),
   localDbGetUserAuth: (email: string) => ipcRenderer.invoke('localdb-get-user-auth', email),
   checkOfflineDbExists: () => ipcRenderer.invoke('localdb-check-exists'),
+  localDbPing: () => ipcRenderer.invoke('localdb-ping'),
 
   // Supporting tables
   localDbUpsertSource: (rows: UnknownRecord[]) => ipcRenderer.invoke('localdb-upsert-source', rows),
@@ -160,6 +161,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.invoke('localdb-update-transaction-waiter', transactionId, waiterId),
   localDbGetTransactionCheckerPrinted: (transactionUuid: string) => ipcRenderer.invoke('localdb-get-transaction-checker-printed', transactionUuid),
   localDbSetTransactionCheckerPrinted: (transactionUuid: string) => ipcRenderer.invoke('localdb-set-transaction-checker-printed', transactionUuid),
+  localDbGetTransactionByUuid: (uuid: string) => ipcRenderer.invoke('localdb-get-transaction-by-uuid', uuid),
   localDbGetTransactions: (businessId?: number, limit?: number, options?: { todayOnly?: boolean }) =>
     ipcRenderer.invoke('localdb-get-transactions', businessId, limit, options),
   localDbUpdateTransactionShift: (transactionUuid: string, shiftUuid: string | null) => ipcRenderer.invoke('localdb-update-transaction-shift', transactionUuid, shiftUuid),
@@ -420,6 +422,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     footer_text?: string | null;
     partnership_contact?: string | null;
   }, businessId?: number) => ipcRenderer.invoke('save-receipt-settings', settings, businessId),
+  uploadReceiptSettingsToVps: (businessId?: number) => ipcRenderer.invoke('upload-receipt-settings-to-vps', businessId),
 
   // Activity Logs
   localDbUpsertActivityLogs: (rows: UnknownRecord[]) => ipcRenderer.invoke('localdb-upsert-activity-logs', rows),

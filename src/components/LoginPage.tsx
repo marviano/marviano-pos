@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { X, Eye, EyeOff, ChevronDown, Settings, Loader2, RefreshCw, ChevronLeft, CheckCircle2, XCircle, Download } from 'lucide-react';
 import { getApiUrl } from '@/lib/api';
 import { getMostRecentEmail, getSavedEmails } from '@/lib/savedLoginEmails';
+import { useAppDialog } from '@/components/AppDialog';
 
 interface LoginPageProps {
   onLogin?: (email: string, password: string) => void;
@@ -30,6 +31,7 @@ export default function LoginPage({
   syncProgress = null,
   refreshLoginLogoAt,
 }: LoginPageProps) {
+  const { showAlert, showConfirm } = useAppDialog();
   const [email, setEmail] = useState(() => getMostRecentEmail() ?? '');
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
@@ -146,7 +148,7 @@ export default function LoginPage({
     }
     setIsLoading(true);
     setError('');
-    
+
     try {
       if (onLogin) {
         await onLogin(email, password);
@@ -177,7 +179,7 @@ export default function LoginPage({
               backgroundImage: `url("data:image/svg+xml,%3Csvg width='60' height='60' viewBox='0 0 60 60' xmlns='http://www.w3.org/2000/svg'%3E%3Cg fill='none' fill-rule='evenodd'%3E%3Cg fill='%23ffffff' fill-opacity='0.1'%3E%3Ccircle cx='30' cy='30' r='4'/%3E%3C/g%3E%3C/g%3E%3C/svg%3E")`,
             }}></div>
           </div>
-          
+
           {/* Content */}
           <div className="relative z-10 h-full flex flex-col items-center justify-center text-white p-8">
             {/* Logo: cached business logo (offline-first) or inline placeholder */}
@@ -200,8 +202,8 @@ export default function LoginPage({
                 />
               )}
             </div>
-            
-            
+
+
             {/* App Details */}
             <div className="text-left space-y-2 text-sm">
               <div>ID: SN1744799170972_84956</div>
@@ -211,7 +213,7 @@ export default function LoginPage({
         </div>
 
         {/* Right Panel - Login Form */}
-        <div className="w-1/2 bg-white p-8 flex flex-col justify-center relative">
+        <div className={`w-1/2 bg-white p-8 flex flex-col ${isSettingsView ? 'justify-start' : 'justify-center'} relative`}>
           {/* Settings Toggle */}
           <div className="absolute top-4 right-12">
             {isSettingsView ? (
@@ -252,41 +254,21 @@ export default function LoginPage({
           )}
 
           {isSettingsView ? (
-            <div className="flex flex-col justify-between h-full space-y-3" style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}>
-              <div className="space-y-3 overflow-y-auto pr-2">
-                {/* Database & API Configuration */}
-                <div className="space-y-2 pt-2">
+            <div className="flex flex-col h-full overflow-hidden" style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}>
+              {/* Header space to avoid overlap with absolute buttons */}
+              <div className="h-6 flex-shrink-0" />
+
+              <div className="flex-1 overflow-y-auto pr-2 space-y-4">
+                {/* Database Configuration Section */}
+                <div className="space-y-3">
                   <div>
-                    <h3 className="text-xs font-semibold text-gray-700 mb-2">Database & API</h3>
-                    
+                    <h3 className="text-xs font-semibold text-gray-700 mb-2">Konfigurasi Database</h3>
+
                     {isLoadingConfig ? (
                       <div className="text-center py-2 text-xs text-gray-500">Memuat konfigurasi...</div>
                     ) : (
                       <div className="space-y-2">
-                        <div className="mb-4">
-                          <label className="block text-[10px] font-medium text-gray-700 mb-0.5">
-                            API URL
-                          </label>
-                          <input
-                            type="text"
-                            value={appConfig.apiUrl || ''}
-                            onChange={(e) => setAppConfig(prev => ({ ...prev, apiUrl: e.target.value }))}
-                            placeholder="http://192.168.1.100:3000 atau https://salespulse.cc"
-                            className="w-full px-2 py-1.5 text-xs border border-gray-300 rounded focus:ring-1 focus:ring-blue-500 focus:border-blue-500 text-gray-900 placeholder:opacity-50"
-                          />
-                        </div>
-                        
-                        {/* Current DB in use (so user sees what app actually uses) */}
-                        {effectiveDbConfig && (
-                          <div className="text-[10px] text-gray-600 bg-gray-50 border border-gray-200 rounded px-2 py-1.5 mb-2">
-                            <span className="font-medium text-gray-700">Database yang dipakai saat ini: </span>
-                            <span className="text-gray-800">{effectiveDbConfig.host}</span>
-                            <span className="text-gray-500"> / {effectiveDbConfig.database}</span>
-                            <span className="text-gray-500">
-                              {' '}({effectiveDbConfig.source === 'saved' ? 'dari pengaturan tersimpan' : effectiveDbConfig.source === 'env' ? 'dari .env' : 'default localhost'})
-                            </span>
-                          </div>
-                        )}
+
                         {/* Database Configuration Grid */}
                         <div className="relative border border-gray-300 rounded p-2.5 pt-3.5">
                           <div className="absolute -top-2 left-3 bg-white px-1.5">
@@ -309,7 +291,7 @@ export default function LoginPage({
                                 className="w-full px-2 py-1.5 text-xs border border-gray-300 rounded focus:ring-1 focus:ring-blue-500 focus:border-blue-500 text-gray-900 placeholder:opacity-50"
                               />
                             </div>
-                            
+
                             {/* Row 1: Port Database */}
                             <div>
                               <label className="block text-[9px] font-medium text-gray-700 mb-0.5">
@@ -327,7 +309,7 @@ export default function LoginPage({
                                 className="w-full px-2 py-1.5 text-xs border border-gray-300 rounded focus:ring-1 focus:ring-blue-500 focus:border-blue-500 text-gray-900 placeholder:opacity-50"
                               />
                             </div>
-                            
+
                             {/* Row 2: Nama Database */}
                             <div>
                               <label className="block text-[9px] font-medium text-gray-700 mb-0.5">
@@ -344,10 +326,10 @@ export default function LoginPage({
                                 className="w-full px-2 py-1.5 text-xs border border-gray-300 rounded focus:ring-1 focus:ring-blue-500 focus:border-blue-500 text-gray-900 placeholder:opacity-50"
                               />
                             </div>
-                            
+
                             {/* Row 2: Empty space for alignment */}
                             <div></div>
-                            
+
                             {/* Row 3: Username Database */}
                             <div>
                               <label className="block text-[9px] font-medium text-gray-700 mb-0.5">
@@ -364,7 +346,7 @@ export default function LoginPage({
                                 className="w-full px-2 py-1.5 text-xs border border-gray-300 rounded focus:ring-1 focus:ring-blue-500 focus:border-blue-500 text-gray-900 placeholder:opacity-50"
                               />
                             </div>
-                            
+
                             {/* Row 3: Password Database */}
                             <div>
                               <label className="block text-[9px] font-medium text-gray-700 mb-0.5">
@@ -383,14 +365,13 @@ export default function LoginPage({
                             </div>
                           </div>
                         </div>
-                        
+
                         {/* Connection Test Result */}
                         {connectionTestResult && (
-                          <div className={`p-2 rounded text-[10px] flex items-start gap-1.5 ${
-                            connectionTestResult.success 
-                              ? 'bg-green-50 border border-green-200 text-green-700' 
-                              : 'bg-red-50 border border-red-200 text-red-700'
-                          }`}>
+                          <div className={`p-2 rounded text-[10px] flex items-start gap-1.5 ${connectionTestResult.success
+                            ? 'bg-green-50 border border-green-200 text-green-700'
+                            : 'bg-red-50 border border-red-200 text-red-700'
+                            }`}>
                             {connectionTestResult.success ? (
                               <CheckCircle2 className="w-3 h-3 mt-0.5 flex-shrink-0" />
                             ) : (
@@ -408,33 +389,33 @@ export default function LoginPage({
                             </div>
                           </div>
                         )}
-                        
+
                         <div className="flex gap-1.5">
                           <button
                             type="button"
                             onClick={async () => {
                               // Check if we're in Electron and API is available
                               if (typeof window === 'undefined') {
-                                alert('Fitur ini hanya tersedia di Electron');
+                                showAlert('Fitur ini hanya tersedia di Electron');
                                 return;
                               }
-                              
+
                               if (!window.electronAPI) {
-                                alert('Electron API tidak tersedia. Pastikan aplikasi berjalan di Electron.');
+                                showAlert('Electron API tidak tersedia. Pastikan aplikasi berjalan di Electron.');
                                 console.error('window.electronAPI is not defined');
                                 return;
                               }
-                              
+
                               if (!window.electronAPI.testDbConnection) {
-                                alert('Fitur test koneksi database tidak tersedia. Pastikan aplikasi menggunakan versi terbaru.');
+                                showAlert('Fitur test koneksi database tidak tersedia. Pastikan aplikasi menggunakan versi terbaru.');
                                 console.error('window.electronAPI.testDbConnection is not defined');
                                 console.log('Available methods:', Object.keys(window.electronAPI || {}));
                                 return;
                               }
-                              
+
                               setIsTestingConnection(true);
                               setConnectionTestResult(null);
-                              
+
                               try {
                                 const result = await window.electronAPI.testDbConnection({
                                   serverHost: appConfig.serverHost,
@@ -443,7 +424,7 @@ export default function LoginPage({
                                   dbName: appConfig.dbName,
                                   dbPort: appConfig.dbPort,
                                 });
-                                
+
                                 setConnectionTestResult(result);
                               } catch (error) {
                                 console.error('Test connection error:', error);
@@ -471,24 +452,24 @@ export default function LoginPage({
                             type="button"
                             onClick={async () => {
                               if (typeof window === 'undefined' || !window.electronAPI?.resetAppConfig) {
-                                alert('Fitur ini hanya tersedia di Electron');
+                                showAlert('Fitur ini hanya tersedia di Electron');
                                 return;
                               }
-                              
-                              if (!confirm('Reset konfigurasi ke default (.env)? Semua pengaturan yang disimpan akan dihapus.')) {
+
+                              if (!(await showConfirm('Reset konfigurasi ke default (.env)? Semua pengaturan yang disimpan akan dihapus.'))) {
                                 return;
                               }
-                              
+
                               setIsSavingConfig(true);
                               try {
                                 const electronAPI = window.electronAPI;
                                 if (!electronAPI?.resetAppConfig || !electronAPI?.getAppConfig) {
-                                  alert('Electron API tidak tersedia');
+                                  showAlert('Electron API tidak tersedia');
                                   return;
                                 }
                                 const result = await electronAPI.resetAppConfig();
                                 if (result?.success) {
-                                  // Reload config and effective DB to show .env defaults
+                                  // Refresh configuration state after reset
                                   const [configResult, effectiveResult] = await Promise.all([
                                     electronAPI.getAppConfig(),
                                     electronAPI.getEffectiveDbConfig?.(),
@@ -502,13 +483,13 @@ export default function LoginPage({
                                       source: eff.source ?? 'default',
                                     });
                                   }
-                                  alert('Konfigurasi berhasil direset ke default (.env). Aplikasi perlu dimulai ulang untuk menerapkan perubahan.');
+                                  await showAlert('Konfigurasi berhasil direset ke default (.env). Aplikasi perlu dimulai ulang untuk menerapkan perubahan.');
                                 } else {
-                                  alert(`Gagal mereset konfigurasi: ${result?.error || 'Unknown error'}`);
+                                  await showAlert(`Gagal mereset konfigurasi: ${result?.error || 'Unknown error'}`);
                                 }
                               } catch (error) {
                                 console.error('Failed to reset app config:', error);
-                                alert(`Gagal mereset konfigurasi: ${error instanceof Error ? error.message : 'Unknown error'}`);
+                                await showAlert(`Gagal mereset konfigurasi: ${error instanceof Error ? error.message : 'Unknown error'}`);
                               } finally {
                                 setIsSavingConfig(false);
                               }
@@ -522,15 +503,15 @@ export default function LoginPage({
                             type="button"
                             onClick={async () => {
                               if (typeof window === 'undefined' || !window.electronAPI?.saveAppConfig) {
-                                alert('Fitur ini hanya tersedia di Electron');
+                                showAlert('Fitur ini hanya tersedia di Electron');
                                 return;
                               }
-                              
+
                               setIsSavingConfig(true);
                               try {
                                 const result = await window.electronAPI.saveAppConfig(appConfig);
                                 if (result?.success) {
-                                  // Refresh effective DB so "Database yang dipakai saat ini" updates
+                                  // Refresh effective DB state
                                   const effectiveResult = await window.electronAPI.getEffectiveDbConfig?.();
                                   if (effectiveResult?.success && typeof (effectiveResult as { host?: string }).host === 'string') {
                                     const eff = effectiveResult as unknown as { host: string; database?: string; source?: 'saved' | 'env' | 'default' };
@@ -540,7 +521,7 @@ export default function LoginPage({
                                       source: eff.source ?? 'default',
                                     });
                                   }
-                                  alert('Pengaturan database dan API berhasil disimpan! Aplikasi perlu dimulai ulang untuk menerapkan perubahan.');
+                                  await showAlert('Pengaturan database dan API berhasil disimpan! Aplikasi perlu dimulai ulang untuk menerapkan perubahan.');
                                   // Clear cached API URL to force reload
                                   if (typeof window !== 'undefined' && 'localStorage' in window) {
                                     // Trigger API URL cache refresh
@@ -548,11 +529,11 @@ export default function LoginPage({
                                     window.dispatchEvent(event);
                                   }
                                 } else {
-                                  alert(`Gagal menyimpan pengaturan: ${result?.error || 'Unknown error'}`);
+                                  await showAlert(`Gagal menyimpan pengaturan: ${result?.error || 'Unknown error'}`);
                                 }
                               } catch (error) {
                                 console.error('Failed to save app config:', error);
-                                alert(`Gagal menyimpan pengaturan: ${error instanceof Error ? error.message : 'Unknown error'}`);
+                                await showAlert(`Gagal menyimpan pengaturan: ${error instanceof Error ? error.message : 'Unknown error'}`);
                               } finally {
                                 setIsSavingConfig(false);
                               }
@@ -567,7 +548,7 @@ export default function LoginPage({
                     )}
                   </div>
                 </div>
-                
+
                 {/* Sync Settings */}
                 <div className="space-y-2 border-t border-gray-200 pt-2">
                   <div>
@@ -621,16 +602,44 @@ export default function LoginPage({
                     )}
                   </button>
                 </div>
+
+                {/* Other Settings Section */}
+                <div className="space-y-2 border-t border-gray-200 pt-2 pb-4">
+                  <div>
+                    <h3 className="text-xs font-semibold text-gray-700 mb-2">Lainnya</h3>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (typeof window !== 'undefined' && window.localStorage) {
+                        try {
+                          // 1. Clear last_business_id_for_login_logo
+                          localStorage.removeItem('last_business_id_for_login_logo');
+
+                          // 2. Clear selectedBusinessId from marviano_auth_state
+                          const authStateStr = localStorage.getItem('marviano_auth_state');
+                          if (authStateStr) {
+                            const authState = JSON.parse(authStateStr);
+                            if (authState.user) {
+                              authState.user.selectedBusinessId = null;
+                              localStorage.setItem('marviano_auth_state', JSON.stringify(authState));
+                            }
+                          }
+
+                          showAlert('Business selection cache cleared. Please re-login to select a business.');
+                        } catch (err) {
+                          console.error('Failed to clear business cache:', err);
+                          showAlert('Gagal menghapus cache bisnis.');
+                        }
+                      }
+                    }}
+                    className="w-full flex items-center justify-center gap-1.5 bg-gray-100 hover:bg-gray-200 text-gray-700 text-[10px] font-semibold px-2 py-1.5 rounded transition-colors"
+                    style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
+                  >
+                    Clear selected business
+                  </button>
+                </div>
               </div>
-              <button
-                type="button"
-                onClick={() => setIsSettingsView(false)}
-                className="text-[10px] text-gray-500 hover:text-gray-700 transition-colors"
-                style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
-                disabled={isSyncing}
-              >
-                Kembali ke Login
-              </button>
             </div>
           ) : (
             <form onSubmit={handleLogin} className="space-y-6">
@@ -766,4 +775,3 @@ export default function LoginPage({
     </div>
   );
 }
-

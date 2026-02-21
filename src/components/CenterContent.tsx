@@ -12,6 +12,7 @@ import PackageSelectionModal, { type PackageSelection, type PackageItemForPos, g
 import TableSelectionModal from './TableSelectionModal';
 import WaiterSelectionModal from './WaiterSelectionModal';
 import { offlineSyncService } from '@/lib/offlineSync';
+import { appAlert } from '@/components/AppDialog';
 import { getApiUrl } from '@/lib/api';
 import { useAuth } from '@/hooks/useAuth';
 import { generateUUID } from '@/lib/uuid';
@@ -584,7 +585,7 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
           setShowBundleModal(true);
         } catch (error) {
           console.error('❌ [BUNDLE] Error fetching bundle items:', error);
-          alert('Gagal memuat detail bundle. Silakan coba lagi.');
+          appAlert('Gagal memuat detail bundle. Silakan coba lagi.');
         }
       } else if (product.is_package === 1 || product.is_package === true) {
         // Package product: open package selection modal
@@ -597,14 +598,14 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
               setSelectedProduct(product);
               setShowPackageModal(true);
             } else {
-              alert('Paket ini belum memiliki item. Silakan atur di manage products.');
+              appAlert('Paket ini belum memiliki item. Silakan atur di manage products.');
             }
           } catch (e) {
             console.error('Error fetching package items:', e);
-            alert('Gagal memuat detail paket. Silakan coba lagi.');
+            appAlert('Gagal memuat detail paket. Silakan coba lagi.');
           }
         } else {
-          alert('Fitur paket tidak tersedia.');
+          appAlert('Fitur paket tidak tersedia.');
         }
       } else {
         // Regular product flow
@@ -1143,13 +1144,13 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
         try {
           await performLockedItemCancellation(item, action, user?.id || null, null);
         } catch (error) {
-          alert('Gagal memperbarui item. Silakan coba lagi.');
+          appAlert('Gagal memperbarui item. Silakan coba lagi.');
         }
         setPendingLockedItemAction(null);
         setPasswordInput('');
       }
     } else {
-      alert('Password salah. Silakan coba lagi.');
+      appAlert('Password salah. Silakan coba lagi.');
       setPasswordInput('');
     }
   };
@@ -1161,7 +1162,7 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
       try {
         await performLockedItemCancellation(item, action, user?.id || null, waiterId);
       } catch (error) {
-        alert('Gagal memperbarui item. Silakan coba lagi.');
+        appAlert('Gagal memperbarui item. Silakan coba lagi.');
       }
       setPendingLockedItemAction(null);
       setShowCancellationWaiterModal(false);
@@ -1244,7 +1245,7 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
                       }, 2000);
                     } catch (error) {
                       console.error('Failed to copy UUID:', error);
-                      alert('Gagal menyalin UUID. Silakan salin manual: ' + loadedTransactionInfo.transactionId);
+                      appAlert('Gagal menyalin UUID. Silakan salin manual: ' + loadedTransactionInfo.transactionId);
                     }
                   }}
                   className="px-2 py-1 text-xs text-gray-700 hover:bg-yellow-200 rounded transition-colors border border-yellow-300 hover:border-yellow-400"

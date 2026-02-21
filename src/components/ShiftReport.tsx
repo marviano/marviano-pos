@@ -1,12 +1,13 @@
 'use client';
 
 import { useState, useEffect, useCallback, Fragment } from 'react';
-import { 
-  Calendar, 
-  User, 
-  ChevronRight, 
+import { appAlert } from '@/components/AppDialog';
+import {
+  Calendar,
+  User,
+  ChevronRight,
   ChevronDown,
-  ArrowLeft, 
+  ArrowLeft,
   Printer,
   Wallet,
   Package,
@@ -153,15 +154,15 @@ export default function ShiftReport() {
   const { user } = useAuth();
   const [viewMode, setViewMode] = useState<'list' | 'detail'>('list');
   const [selectedShift, setSelectedShift] = useState<Shift | null>(null);
-  
+
   // Filters
   const [shifts, setShifts] = useState<Shift[]>([]);
   const [users, setUsers] = useState<UserOption[]>([]);
   const [selectedUserId, setSelectedUserId] = useState<string>('all');
   const [startDate, setStartDate] = useState<string>('');
-  
+
   const businessId = user?.selectedBusinessId;
-  
+
   if (!businessId) {
     return (
       <div className="p-4 bg-red-50 border border-red-200 rounded-lg">
@@ -170,7 +171,7 @@ export default function ShiftReport() {
     );
   }
   const [endDate, setEndDate] = useState<string>('');
-  
+
   // Stats state for detail view
   const [statistics, setStatistics] = useState<ShiftStatistics | null>(null);
   const [paymentBreakdown, setPaymentBreakdown] = useState<PaymentBreakdown[]>([]);
@@ -191,12 +192,12 @@ export default function ShiftReport() {
       }
     };
     loadUsers();
-    
+
     // Set default date range (Last 7 days)
     const end = new Date();
     const start = new Date();
     start.setDate(start.getDate() - 7);
-    
+
     setEndDate(end.toISOString().split('T')[0]); // YYYY-MM-DD
     setStartDate(start.toISOString().split('T')[0]); // YYYY-MM-DD
   }, []);
@@ -211,15 +212,15 @@ export default function ShiftReport() {
         if (selectedUserId !== 'all') filters.userId = parseInt(selectedUserId);
         if (startDate) filters.startDate = `${startDate}T00:00:00`;
         if (endDate) filters.endDate = `${endDate}T23:59:59`;
-        
+
         const result = await electronAPI.localDbGetShifts(filters);
         // Handle both old return (array) and new return (object)
         if (Array.isArray(result)) {
-            setShifts(result as Shift[]);
+          setShifts(result as Shift[]);
         } else if (result && typeof result === 'object' && 'shifts' in result) {
-            setShifts(result.shifts as Shift[]);
+          setShifts(result.shifts as Shift[]);
         } else {
-            setShifts([]);
+          setShifts([]);
         }
       }
     } catch (error) {
@@ -253,7 +254,7 @@ export default function ShiftReport() {
         electronAPI.localDbGetCashSummary?.(shiftOwnerId, shiftStart, shiftEnd, businessId),
         electronAPI.localDbGetProductSales?.(shiftOwnerId, shiftStart, shiftEnd, businessId),
         electronAPI.localDbGetPackageSalesBreakdown?.(shiftOwnerId, shiftStart, shiftEnd, businessId)
-      ]);if (statsResult.status === 'fulfilled' && statsResult.value) setStatistics(statsResult.value);
+      ]); if (statsResult.status === 'fulfilled' && statsResult.value) setStatistics(statsResult.value);
       if (breakdownResult.status === 'fulfilled' && breakdownResult.value) setPaymentBreakdown(breakdownResult.value);
       if (category2Result.status === 'fulfilled' && category2Result.value) setCategory2Breakdown(category2Result.value);
       if (cashResult.status === 'fulfilled' && cashResult.value) setCashSummary(cashResult.value);
@@ -266,7 +267,7 @@ export default function ShiftReport() {
       } else {
         setPackageSalesBreakdown([]);
       }
-      
+
       setSelectedShift(shift);
       setViewMode('detail');
     } catch (error) {
@@ -278,7 +279,7 @@ export default function ShiftReport() {
 
   const handlePrintReport = async () => {
     if (!selectedShift || !statistics || !cashSummary) return;
-    
+
     const electronAPI = getElectronAPI();
     if (electronAPI?.printShiftBreakdown) {
       try {
@@ -320,7 +321,8 @@ export default function ShiftReport() {
           packageSalesBreakdown,
           customizationSales: customizationSales,
           paymentBreakdown,
-          category2Breakdown: (() => {return category2Breakdown;
+          category2Breakdown: (() => {
+            return category2Breakdown;
           })(),
           cashSummary: {
             cash_shift: cashSummary.cash_shift,
@@ -341,7 +343,7 @@ export default function ShiftReport() {
         });
       } catch (error) {
         console.error('Print error:', error);
-        alert('Gagal mencetak laporan');
+        appAlert('Gagal mencetak laporan');
       }
     }
   };
@@ -381,7 +383,7 @@ export default function ShiftReport() {
         {/* Detail Header */}
         <div className="bg-white border-b border-gray-200 px-6 py-4 flex items-center justify-between shadow-sm">
           <div className="flex items-center space-x-4">
-            <button 
+            <button
               onClick={() => setViewMode('list')}
               className="p-2 hover:bg-gray-100 rounded-full transition-colors"
             >
@@ -412,9 +414,8 @@ export default function ShiftReport() {
               <div className="text-sm font-medium text-gray-900 mb-1">Shift Info</div>
               <div className="flex items-center justify-between mb-2">
                 <span className="text-gray-900">Status</span>
-                <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${
-                  selectedShift.status === 'active' ? 'bg-green-100 text-green-800' : 'bg-gray-100 text-gray-800'
-                }`}>
+                <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${selectedShift.status === 'active' ? 'bg-green-100 text-green-800' : 'bg-gray-100 text-gray-800'
+                  }`}>
                   {selectedShift.status === 'active' ? 'Active' : 'Closed'}
                 </span>
               </div>
@@ -489,13 +490,12 @@ export default function ShiftReport() {
                 <div className="flex justify-between items-center border-t pt-2">
                   <span className="text-gray-900 font-medium">Selisih</span>
                   <span
-                    className={`text-sm font-semibold ${
-                      kasSelisihLabel === 'plus'
+                    className={`text-sm font-semibold ${kasSelisihLabel === 'plus'
                         ? 'text-green-600'
                         : kasSelisihLabel === 'minus'
                           ? 'text-red-600'
                           : 'text-gray-900'
-                    }`}
+                      }`}
                   >
                     {kasSelisih !== null ? formatRupiah(kasSelisih) : '-'}
                   </span>
@@ -545,13 +545,12 @@ export default function ShiftReport() {
               <div>
                 <p className="text-gray-500">Selisih</p>
                 <p
-                  className={`font-semibold ${
-                    kasSelisihLabel === 'plus'
+                  className={`font-semibold ${kasSelisihLabel === 'plus'
                       ? 'text-green-600'
                       : kasSelisihLabel === 'minus'
                         ? 'text-red-600'
                         : 'text-gray-900'
-                  }`}
+                    }`}
                 >
                   {kasSelisih !== null ? formatRupiah(kasSelisih) : '-'}
                 </p>
@@ -827,8 +826,8 @@ export default function ShiftReport() {
             <tbody className="divide-y divide-gray-100">
               {shifts.length > 0 ? (
                 shifts.map((shift) => (
-                  <tr 
-                    key={shift.uuid_id} 
+                  <tr
+                    key={shift.uuid_id}
                     onClick={() => loadShiftDetails(shift)}
                     className="hover:bg-blue-50 cursor-pointer transition-colors group"
                   >
@@ -851,11 +850,10 @@ export default function ShiftReport() {
                       </div>
                     </td>
                     <td className="px-6 py-4">
-                      <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${
-                        shift.status === 'active' 
-                          ? 'bg-green-100 text-green-800' 
+                      <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${shift.status === 'active'
+                          ? 'bg-green-100 text-green-800'
                           : 'bg-gray-100 text-gray-800'
-                      }`}>
+                        }`}>
                         {shift.status === 'active' ? 'Active' : 'Closed'}
                       </span>
                     </td>

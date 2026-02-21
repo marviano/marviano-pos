@@ -8,6 +8,7 @@
  */
 
 import { useState, useEffect, useCallback, useRef, useLayoutEffect } from 'react';
+import { appAlert } from '@/components/AppDialog';
 import { createPortal } from 'react-dom';
 import {
   Calendar,
@@ -648,7 +649,7 @@ export default function TransactionsReport() {
       }) => Promise<{ success: boolean; error?: string }>
     };
     if (!electronAPI?.printTransactionsReport) {
-      alert('Print tidak tersedia. Pastikan aplikasi berjalan di Electron.');
+      appAlert('Print tidak tersedia. Pastikan aplikasi berjalan di Electron.');
       return;
     }
     const rows = filteredTransactions.map(tx => {
@@ -684,10 +685,10 @@ export default function TransactionsReport() {
         dateRangeEnd: endDate,
         transactions: rows,
       });
-      if (!result?.success && result?.error) alert(result.error);
+      if (!result?.success && result?.error) appAlert(result.error);
     } catch (err) {
       console.error('Print error:', err);
-      alert('Gagal mencetak laporan');
+      appAlert('Gagal mencetak laporan');
     }
   };
 

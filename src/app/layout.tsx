@@ -3,6 +3,7 @@ import "./globals.css";
 import WindowFocusHandler from "@/components/WindowFocusHandler";
 import ServiceWorkerErrorHandler from "@/components/ServiceWorkerErrorHandler";
 import DisableHMR from "@/components/DisableHMR";
+import { AppDialogProvider } from "@/components/AppDialog";
 
 export const metadata: Metadata = {
   title: "POS",
@@ -22,7 +23,9 @@ export default function RootLayout({
         <WindowFocusHandler />
         <ServiceWorkerErrorHandler />
         <DisableHMR />
-        {children}
+        <AppDialogProvider>
+          {children}
+        </AppDialogProvider>
       </body>
     </html>
   );

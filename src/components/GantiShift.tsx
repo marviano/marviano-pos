@@ -20,6 +20,7 @@ import {
 import { useAuth } from '@/hooks/useAuth';
 import { isSuperAdmin } from '@/lib/auth';
 import { generateUUID } from '@/lib/uuid';
+import { appConfirm } from '@/components/AppDialog';
 
 const PLATFORM_LABELS: Record<string, string> = {
   offline: 'Offline',
@@ -333,7 +334,7 @@ export default function GantiShift() {
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [isLoadingInitial, setIsLoadingInitial] = useState(true);
   const [isLoadingTabData, setIsLoadingTabData] = useState(false);
-  
+
   // Get business ID from logged-in user
   const businessId = user?.selectedBusinessId;
 
@@ -410,9 +411,9 @@ export default function GantiShift() {
     productSales.forEach((product) => {
       // Group key: product_id + transaction_type
       const groupKey = `${product.product_id}-${product.transaction_type}`;
-      
-      const unitPrice = product.total_quantity > 0 
-        ? product.base_subtotal / product.total_quantity 
+
+      const unitPrice = product.total_quantity > 0
+        ? product.base_subtotal / product.total_quantity
         : 0;
 
       const existing = groupMap.get(groupKey);
@@ -444,7 +445,7 @@ export default function GantiShift() {
     });
 
     // Convert to array and sort by product_name
-    return Array.from(groupMap.values()).sort((a, b) => 
+    return Array.from(groupMap.values()).sort((a, b) =>
       a.product_name.localeCompare(b.product_name)
     );
   }, [productSales]);
@@ -461,12 +462,12 @@ export default function GantiShift() {
     total_base_subtotal: number;
     is_bundle_item: boolean;
   };
-  
+
   // Type guard to check if product is grouped
   const isGroupedProduct = (p: ProductSale | GroupedProductType): p is GroupedProductType => {
     return 'platforms' in p && Array.isArray((p as GroupedProductType).platforms);
   };
-  
+
   const displayProductSales: (ProductSale | GroupedProductType)[] = groupProducts ? groupedProductSales : productSales;
 
   /** Barang Terjual: total qty and amount by platform (from productSales, excludes bundle).
@@ -508,8 +509,8 @@ export default function GantiShift() {
 
     products.forEach((product) => {
       const groupKey = `${product.product_id}-${product.transaction_type}`;
-      const unitPrice = product.total_quantity > 0 
-        ? product.base_subtotal / product.total_quantity 
+      const unitPrice = product.total_quantity > 0
+        ? product.base_subtotal / product.total_quantity
         : 0;
 
       const existing = groupMap.get(groupKey);
@@ -1183,12 +1184,12 @@ export default function GantiShift() {
           : Promise.resolve<PackageSalesBreakdown[]>([]),
         electronAPI.localDbGetShiftRefunds
           ? electronAPI.localDbGetShiftRefunds({
-              userId: shiftOwnerId,
-              businessId: businessId,
-              shiftUuid: activeShift.uuid_id,
-              shiftStart: activeShift.shift_start,
-              shiftEnd: activeShift.shift_end
-            })
+            userId: shiftOwnerId,
+            businessId: businessId,
+            shiftUuid: activeShift.uuid_id,
+            shiftStart: activeShift.shift_start,
+            shiftEnd: activeShift.shift_end
+          })
           : Promise.resolve<RefundDetail[]>([]),
         electronAPI.localDbGetVoucherBreakdown
           ? electronAPI.localDbGetVoucherBreakdown(null, activeShift.shift_start, activeShift.shift_end, businessId, activeShift.uuid_id)
@@ -1240,7 +1241,7 @@ export default function GantiShift() {
       setCustomizationSales(productSalesData.customizations || []);
       const vb = voucherBreakdownResult.status === 'fulfilled' ? (voucherBreakdownResult.value as VoucherBreakdown) : {};
       setVoucherBreakdown(vb ?? {});
-      
+
       // Recalculate Category I and Category II totals using base_subtotal (without customizations)
       if (productSalesData.products && productSalesData.products.length > 0) {
         recalculateCategory1Breakdown(productSalesData.products, category1BreakdownData, businessId);
@@ -1249,7 +1250,7 @@ export default function GantiShift() {
         setRecalculatedCategory1Breakdown(category1BreakdownData);
         setRecalculatedCategory2Breakdown(category2BreakdownData);
       }
-      
+
       const refundsData = refundsResult.status === 'fulfilled' ? (refundsResult.value as RefundDetail[]) : [];
       setRefunds(refundsData);
       const cancelledItemsData = cancelledItemsResult.status === 'fulfilled' ? (cancelledItemsResult.value as CancelledItemDetail[]) : [];
@@ -1280,7 +1281,7 @@ export default function GantiShift() {
       const allItems = electronAPI.localDbGetTransactionItems
         ? await electronAPI.localDbGetTransactionItems(refund.transaction_uuid)
         : [];
-      
+
       // Filter out cancelled items - they should not be included in refund calculations
       const items = (allItems as Array<Record<string, unknown>>).filter((item: Record<string, unknown>) => {
         const productionStatus = typeof item.production_status === 'string' ? item.production_status : null;
@@ -1290,8 +1291,8 @@ export default function GantiShift() {
       // Map items - customizations are already attached by localDbGetTransactionItems
       const itemsWithCustomizations = (items as Array<Record<string, unknown>>).map((item: Record<string, unknown>) => {
         // Handle customizations - they're already in the item object
-        const customizations = Array.isArray(item.customizations) 
-          ? item.customizations 
+        const customizations = Array.isArray(item.customizations)
+          ? item.customizations
           : (item.customizations ? [item.customizations] : []);
 
         return {
@@ -1357,7 +1358,7 @@ export default function GantiShift() {
 
       try {
         const refundsRequestPayload = electronAPI.localDbGetShiftRefunds
-        ? {
+          ? {
             userId: userId ?? 0,
             businessId: reportBusinessId ?? 0,
             shiftUuid: shiftUuid ?? undefined,
@@ -1365,9 +1366,9 @@ export default function GantiShift() {
             shiftStart: start,
             shiftEnd: end ?? undefined
           }
-        : null;
+          : null;
 
-      const [statsResult, breakdownResult, category1BreakdownResult, category2BreakdownResult, cashResult, productSalesResult, packageSalesResult, voucherBreakdownResult, refundsResult, cancelledItemsResult] = await Promise.allSettled([
+        const [statsResult, breakdownResult, category1BreakdownResult, category2BreakdownResult, cashResult, productSalesResult, packageSalesResult, voucherBreakdownResult, refundsResult, cancelledItemsResult] = await Promise.allSettled([
           electronAPI.localDbGetShiftStatistics
             ? electronAPI.localDbGetShiftStatistics(userId, start, end, reportBusinessId, shiftUuid ?? undefined, dayShiftUuids.length > 0 ? dayShiftUuids : undefined)
             : Promise.resolve(defaultStats),
@@ -1438,7 +1439,7 @@ export default function GantiShift() {
               return null;
             }
           });
-          
+
           const shiftStatsResults = await Promise.all(shiftStatsPromises);
           const summedDiscount = shiftStatsResults.reduce((sum, stats) => {
             return sum + (stats?.total_discount ?? 0);
@@ -1883,23 +1884,23 @@ export default function GantiShift() {
       if (printWholeDaySelected) {
         try {
           console.log('📊 [PRINT WHOLE DAY] Starting...');
-          
+
           // Use selectedDate in historical view, otherwise today (same as "All Day" tab)
           const dateStr = (viewMode === 'historical' && selectedDate)
             ? selectedDate
             : new Date().toISOString().split('T')[0];
           const dayBounds = getGmt7DayBounds(dateStr);
-          
+
           if (!dayBounds) {
             throw new Error('Failed to calculate day bounds for print');
           }
-          
+
           console.log('   Day range:', dayBounds.dayStartUtc, 'to', dayBounds.dayEndUtc, viewMode === 'historical' ? '(historical)' : '(today)');
 
           // Get shifts for the day (same as display)
           const electronAPIForShifts = getElectronAPI();
           let dayShiftsForReport: Shift[] = [];
-          
+
           if (electronAPIForShifts?.localDbGetShifts) {
             const shiftsResult = await electronAPIForShifts.localDbGetShifts({
               businessId: businessId,
@@ -1922,7 +1923,7 @@ export default function GantiShift() {
             orders: dayReportData.statistics.order_count,
             total: dayReportData.statistics.total_amount,
             products: dayReportData.productSales.length
-          });          const dayCash = dayReportData.cashSummary;
+          }); const dayCash = dayReportData.cashSummary;
           const dayCashSales = dayCash.cash_shift_sales ?? dayCash.cash_shift ?? 0;
           // Whole-day: use cash_whole_day_refunds for correct Grand Total calculation (matches print handler)
           const dayCashRefunds = dayCash.cash_whole_day_refunds ?? dayCash.cash_shift_refunds ?? 0;
@@ -1948,7 +1949,7 @@ export default function GantiShift() {
           }
 
           // Group products and recalculate Category I & II for print
-          const productsForPrint = groupProducts 
+          const productsForPrint = groupProducts
             ? groupProductSalesForPrint(dayReportData.productSales)
             : dayReportData.productSales;
           const recalculatedCategory1 = await recalculateCategory1ForPrint(
@@ -2061,7 +2062,7 @@ export default function GantiShift() {
           }
 
           // Group products and recalculate Category I & II for print
-          const productsForPrint = groupProducts 
+          const productsForPrint = groupProducts
             ? groupProductSalesForPrint(shiftReportData.productSales)
             : shiftReportData.productSales;
           const recalculatedCategory1 = await recalculateCategory1ForPrint(
@@ -2088,9 +2089,9 @@ export default function GantiShift() {
             modal_awal: shift.modal_awal,
             statistics: shiftReportData.statistics,
             gross_total_omset: shiftGrossOmset,
-        refunds: shiftReportData.refunds ?? [],
-        cancelledItems: shiftReportData.cancelledItems ?? [],
-        productSales: productsForPrint,
+            refunds: shiftReportData.refunds ?? [],
+            cancelledItems: shiftReportData.cancelledItems ?? [],
+            productSales: productsForPrint,
             packageSalesBreakdown: shiftReportData.packageSalesBreakdown ?? [],
             customizationSales: shiftReportData.customizationSales,
             paymentBreakdown: shiftReportData.paymentBreakdown.map(p => ({
@@ -2193,7 +2194,7 @@ export default function GantiShift() {
       const totalCashInCashierCustom = customKasExpected;
 
       // Group products and recalculate Category I & II for print
-      const productsForPrint = groupProducts 
+      const productsForPrint = groupProducts
         ? groupProductSalesForPrint(reportData.productSales)
         : reportData.productSales;
       const recalculatedCategory1 = await recalculateCategory1ForPrint(
@@ -2292,7 +2293,7 @@ export default function GantiShift() {
           ? selectedDate
           : new Date().toISOString().split('T')[0];
         const dayBounds = getGmt7DayBounds(dateStr);
-        
+
         if (!dayBounds) {
           console.error('[All Day Tab] Failed to calculate day bounds');
           if (isNewTab) setIsLoadingTabData(false);
@@ -2396,7 +2397,7 @@ export default function GantiShift() {
       return;
     }
 
-    const confirmed = window.confirm(
+    const confirmed = await appConfirm(
       `Migrasikan ${todayTransactionsInfo.count} transaksi hari ini ke shift ini?\n\n` +
       `Shift start akan diubah dari ${formatDateTime(activeShift.shift_start)} menjadi ${formatDateTime(todayTransactionsInfo.earliestTime)}.\n\n` +
       `Transaksi yang sudah ada akan otomatis termasuk dalam statistik shift.`
@@ -2527,7 +2528,7 @@ export default function GantiShift() {
               <span>Pengaturan</span>
             </button>
           </div>
-          
+
           {/* Right Side - Control Panel */}
           <div className="flex items-center gap-3 flex-wrap">
             {/* Date Picker Section */}
@@ -2903,757 +2904,757 @@ export default function GantiShift() {
               {/* RINGKASAN (Final Summary) */}
               {!isLoadingTabData && (
                 <>
-              <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-6">
-                <h2 className="text-xl font-semibold text-gray-800 mb-3 text-center">RINGKASAN</h2>
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                  {/* Left Column - Transaction Summary */}
-                  <div className="space-y-0">
-                    <h3 className="text-xs font-semibold text-gray-700 mb-2 pb-1 border-b border-gray-300">Transaksi</h3>
-                    {/* Total Omset (gross: before refund & discount) */}
-                    <div className="rounded-lg bg-amber-50 border border-amber-200/60 mb-2 px-3 py-2">
-                      <div className="flex items-center py-1">
-                        <span className="text-sm font-semibold text-amber-900">Total Omset <span className="text-xs font-normal text-amber-700/80">(sebelum refund & diskon)</span>:</span>
-                        <span className="flex-grow border-b border-dotted border-amber-300 mx-2"></span>
-                        <span className="text-sm font-bold text-amber-900">{formatRupiah(grossTotalOmset)}</span>
-                      </div>
-                      {/* Refund - own row with distinct color */}
-                      <div className="flex items-center py-1 mt-1 rounded px-2 bg-red-50 border border-red-200/60">
-                        <span className="text-xs font-semibold text-red-800">Refund:</span>
-                        <span className="flex-grow border-b border-dotted border-red-200 mx-2"></span>
-                        <span className="text-xs font-bold text-red-700">-{formatRupiah(totalRefundsActive)}</span>
-                      </div>
-                      {/* Item Dibatalkan - centralised deduction (alongside Refund, Diskon Voucher) */}
-                      {totalCancelledAmount > 0 && (
-                        <div className="flex items-center py-1 mt-1 rounded px-2 bg-red-50/80 border border-red-200/60">
-                          <span className="text-xs font-semibold text-red-800">Item Dibatalkan:</span>
-                          <span className="flex-grow border-b border-dotted border-red-200 mx-2"></span>
-                          <span className="text-xs font-bold text-red-700">-{formatRupiah(totalCancelledAmount)}</span>
-                        </div>
-                      )}
-                      {/* Diskon Voucher - own row with distinct color; breakdown indented below */}
-                      <div className="rounded px-2 py-1 mt-0.5 bg-green-50 border border-green-200/60">
-                        <div className="flex items-center py-0.5">
-                          <span className="text-xs font-semibold text-green-800">Diskon Voucher:</span>
-                          <span className="flex-grow border-b border-dotted border-green-200 mx-2"></span>
-                          <span className="text-xs font-bold text-green-700">
-                            {effectiveTotalDiscount > 0 ? `-${formatRupiah(effectiveTotalDiscount)}` : formatRupiah(0)}
-                          </span>
-                        </div>
-                        {VOUCHER_BREAKDOWN_ORDER.map(({ key, label }) => {
-                          const e = voucherBreakdown[key];
-                          if (!e || e.count <= 0) return null;
-                          return (
-                            <div key={key} className="flex items-center py-0.5 pl-4">
-                              <span className="text-xs text-gray-600">{label} ({e.count}):</span>
-                              <span className="flex-grow border-b border-dotted border-gray-200 mx-2"></span>
-                              <span className="text-xs font-semibold text-green-600">-{formatRupiah(e.total)}</span>
+                  <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-6">
+                    <h2 className="text-xl font-semibold text-gray-800 mb-3 text-center">RINGKASAN</h2>
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                      {/* Left Column - Transaction Summary */}
+                      <div className="space-y-0">
+                        <h3 className="text-xs font-semibold text-gray-700 mb-2 pb-1 border-b border-gray-300">Transaksi</h3>
+                        {/* Total Omset (gross: before refund & discount) */}
+                        <div className="rounded-lg bg-amber-50 border border-amber-200/60 mb-2 px-3 py-2">
+                          <div className="flex items-center py-1">
+                            <span className="text-sm font-semibold text-amber-900">Total Omset <span className="text-xs font-normal text-amber-700/80">(sebelum refund & diskon)</span>:</span>
+                            <span className="flex-grow border-b border-dotted border-amber-300 mx-2"></span>
+                            <span className="text-sm font-bold text-amber-900">{formatRupiah(grossTotalOmset)}</span>
+                          </div>
+                          {/* Refund - own row with distinct color */}
+                          <div className="flex items-center py-1 mt-1 rounded px-2 bg-red-50 border border-red-200/60">
+                            <span className="text-xs font-semibold text-red-800">Refund:</span>
+                            <span className="flex-grow border-b border-dotted border-red-200 mx-2"></span>
+                            <span className="text-xs font-bold text-red-700">-{formatRupiah(totalRefundsActive)}</span>
+                          </div>
+                          {/* Item Dibatalkan - centralised deduction (alongside Refund, Diskon Voucher) */}
+                          {totalCancelledAmount > 0 && (
+                            <div className="flex items-center py-1 mt-1 rounded px-2 bg-red-50/80 border border-red-200/60">
+                              <span className="text-xs font-semibold text-red-800">Item Dibatalkan:</span>
+                              <span className="flex-grow border-b border-dotted border-red-200 mx-2"></span>
+                              <span className="text-xs font-bold text-red-700">-{formatRupiah(totalCancelledAmount)}</span>
                             </div>
-                          );
-                        })}
-                      </div>
-                      {/* Grand total = Total Omset - Refund - Total Item Dibatalkan - Diskon Voucher */}
-                      <div className="flex items-center py-1.5 mt-1 rounded px-2 bg-gray-100 border border-gray-200">
-                        <span className="text-xs font-bold text-gray-800">Grand Total:</span>
-                        <span className="flex-grow border-b border-dotted border-gray-300 mx-2"></span>
-                        <span className="text-sm font-bold text-gray-900">
-                          {formatRupiah(Math.max(0, grossTotalOmset - (Number(totalRefundsActive) || 0) - totalCancelledAmount - effectiveTotalDiscount))}
-                        </span>
-                      </div>
-                    </div>
-                    {/* Total Topping - only show when > 0 */}
-                    {totalToppingRevenue > 0 && (
-                      <div className="flex items-center py-2 px-2 -mx-2 rounded-lg bg-blue-50 border border-blue-200/60 mb-2">
-                        <span className="text-sm font-semibold text-blue-800">Total Topping:</span>
-                        <span className="flex-grow border-b border-dotted border-blue-300 mx-2"></span>
-                        <span className="text-sm font-bold text-blue-900">{formatRupiah(totalToppingRevenue)}</span>
-                      </div>
-                    )}
-                  </div>
-
-                  {/* Right Column - Cash Summary */}
-                  <div className="space-y-0">
-                    <h3 className="text-xs font-semibold text-gray-700 mb-2 pb-1 border-b border-gray-300">Kas</h3>
-                    <div className="flex items-center py-0.5">
-                      <span className="text-xs text-gray-700">Kas Mulai:</span>
-                      <span className="flex-grow border-b border-dotted border-gray-300 mx-2"></span>
-                      <span className="text-xs font-semibold text-gray-900">{formatRupiah(kasMulaiActive)}</span>
-                    </div>
-                    <div className="flex items-center py-0.5">
-                      <span className="text-xs text-gray-700">Cash Sales:</span>
-                      <span className="flex-grow border-b border-dotted border-gray-300 mx-2"></span>
-                      <span className="text-xs font-semibold text-gray-900">{formatRupiah(cashShiftSales)}</span>
-                    </div>
-                    <div className="flex items-center py-0.5">
-                      <span className="text-xs text-gray-700">Total Refunds:</span>
-                      <span className="flex-grow border-b border-dotted border-gray-300 mx-2"></span>
-                      <span className="text-xs font-semibold text-red-600">-{formatRupiah(totalRefundsActive)}</span>
-                    </div>
-                    <div className="flex items-center py-0.5">
-                      <span className="text-xs font-semibold text-gray-800">Kas Diharapkan:</span>
-                      <span className="flex-grow border-b border-dotted border-gray-300 mx-2"></span>
-                      <span className="text-xs font-bold text-purple-700">{formatRupiah(kasExpectedActive)}</span>
-                    </div>
-                    <div className="border-t border-gray-300 my-1.5" />
-                    <div className="flex items-center py-0.5">
-                      <span className="text-xs text-gray-700">Jumlah Pesanan:</span>
-                      <span className="flex-grow border-b border-dotted border-gray-300 mx-2"></span>
-                      <span className="text-xs font-semibold text-gray-900">{statistics.order_count} transaksi</span>
-                    </div>
-                    <div className="flex items-center py-0.5">
-                      <span className="text-xs text-gray-700">Jumlah CU:</span>
-                      <span className="flex-grow border-b border-dotted border-gray-300 mx-2"></span>
-                      <span className="text-xs font-semibold text-gray-900">{statistics.total_cu ?? 0}</span>
-                    </div>
-                    {kasAkhirActive !== null && (
-                      <>
-                        <div className="flex items-center py-0.5">
-                          <span className="text-xs text-gray-700">Kas Akhir:</span>
-                          <span className="flex-grow border-b border-dotted border-gray-300 mx-2"></span>
-                          <span className="text-xs font-semibold text-gray-900">{formatRupiah(kasAkhirActive)}</span>
-                        </div>
-                        <div className="flex items-center py-0.5">
-                          <span className="text-xs text-gray-700">Selisih Kas:</span>
-                          <span className="flex-grow border-b border-dotted border-gray-300 mx-2"></span>
-                          <span className={`text-xs font-semibold ${kasSelisihLabelValue === 'balanced' ? 'text-green-600' :
-                            kasSelisihLabelValue === 'plus' ? 'text-blue-600' : 'text-red-600'
-                            }`}>
-                            {kasSelisihValue !== null ? (
-                              kasSelisihValue > 0 ? `+${formatRupiah(kasSelisihValue)}` : formatRupiah(kasSelisihValue)
-                            ) : '-'}
-                            {kasSelisihLabelValue && ` (${kasSelisihLabelValue === 'balanced' ? 'Balanced' :
-                              kasSelisihLabelValue === 'plus' ? 'Plus' : 'Minus'
-                              })`}
-                          </span>
-                        </div>
-                      </>
-                    )}
-                  </div>
-                </div>
-              </div>
-
-              {/* REFUND SECTION */}
-              {refunds.length > 0 && (
-                <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-4">
-                  <h2 className="text-base font-semibold text-gray-800 mb-3 text-center">REFUND</h2>
-                  <div className="overflow-x-auto">
-                    <table className="w-full text-xs">
-                      <thead>
-                        <tr className="border-b-2 border-gray-300 bg-gray-50">
-                          <th className="px-2 py-2 text-left font-semibold text-gray-700">Transaction ID</th>
-                          <th className="px-2 py-2 text-left font-semibold text-gray-700">Method</th>
-                          <th className="px-2 py-2 text-right font-semibold text-gray-700">Total</th>
-                          <th className="px-2 py-2 text-right font-semibold text-gray-700">Refund Amount</th>
-                          <th className="px-2 py-2 text-left font-semibold text-gray-700">Alasan</th>
-                          <th className="px-2 py-2 text-left font-semibold text-gray-700">Refund Time</th>
-                          <th className="px-2 py-2 text-left font-semibold text-gray-700">Issuer</th>
-                          <th className="px-2 py-2 text-left font-semibold text-gray-700">Waiter</th>
-                          <th className="px-2 py-2 text-left font-semibold text-gray-700">Nama Pelanggan</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {refunds.map((refund, idx) => {
-                          const refundDate = new Date(refund.refunded_at);
-                          const formatDateTime = (date: Date) => {
-                            return date.toLocaleString('id-ID', {
-                              year: 'numeric',
-                              month: '2-digit',
-                              day: '2-digit',
-                              hour: '2-digit',
-                              minute: '2-digit',
-                              second: '2-digit',
-                              hour12: false,
-                              timeZone: 'Asia/Jakarta'
-                            });
-                          };
-
-                          return (
-                            <tr 
-                              key={refund.refund_uuid || idx} 
-                              className="border-b border-gray-200 hover:bg-gray-50 cursor-pointer"
-                              onClick={() => handleRefundClick(refund)}
-                            >
-                              <td className="px-2 py-2 text-gray-900 font-mono text-[10px]">
-                                {refund.transaction_uuid_id || refund.transaction_uuid}
-                              </td>
-                              <td className="px-2 py-2 text-gray-700">
-                                {formatPlatformLabel(refund.payment_method || 'offline')}
-                              </td>
-                              <td className="px-2 py-2 text-right text-gray-900">
-                                {formatRupiah(Number(refund.final_amount || 0))}
-                              </td>
-                              <td className="px-2 py-2 text-right text-red-600 font-semibold">
-                                -{formatRupiah(Number(refund.refund_amount || 0))}
-                              </td>
-                              <td className="px-2 py-2 text-black">
-                                {refund.reason || '-'}
-                              </td>
-                              <td className="px-2 py-2 text-gray-600">
-                                {formatDateTime(refundDate)}
-                              </td>
-                              <td className="px-2 py-2 text-gray-600">
-                                {refund.issuer_email || '-'}
-                              </td>
-                              <td className="px-2 py-2 text-gray-600">
-                                {refund.waiter_name || '-'}
-                              </td>
-                              <td className="px-2 py-2 text-gray-600">
-                                {refund.customer_name || '-'}
-                              </td>
-                            </tr>
-                          );
-                        })}
-                      </tbody>
-                    </table>
-                  </div>
-                </div>
-              )}
-
-              {/* ITEM DIBATALKAN - Cancelled items with who cancelled (user/waiter) */}
-              {cancelledItems.length > 0 && (
-                <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-4">
-                  <h2 className="text-base font-semibold text-gray-800 mb-3 text-center">ITEM DIBATALKAN</h2>
-                  <div className="overflow-x-auto">
-                    <table className="w-full text-xs">
-                      <thead>
-                        <tr className="border-b-2 border-gray-300 bg-gray-50">
-                          <th className="px-2 py-2 text-left font-semibold text-gray-700">Waktu Pembatalan</th>
-                          <th className="px-2 py-2 text-left font-semibold text-gray-700">Item</th>
-                          <th className="px-2 py-2 text-right font-semibold text-gray-700">Jumlah</th>
-                          <th className="px-2 py-2 text-right font-semibold text-gray-700">Harga</th>
-                          <th className="px-2 py-2 text-left font-semibold text-gray-700">Transaksi</th>
-                          <th className="px-2 py-2 text-left font-semibold text-gray-700">Pelanggan</th>
-                          <th className="px-2 py-2 text-left font-semibold text-gray-700">Dibatalkan Oleh</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {cancelledItems.map((item, idx) => {
-                          const cancelledDate = new Date(item.cancelled_at);
-                          const formatDateTime = (d: Date) =>
-                            d.toLocaleString('id-ID', {
-                              year: 'numeric',
-                              month: '2-digit',
-                              day: '2-digit',
-                              hour: '2-digit',
-                              minute: '2-digit',
-                              second: '2-digit',
-                              hour12: false,
-                              timeZone: 'Asia/Jakarta'
-                            });
-                          const cancelledByDisplay = (() => {
-                            const userName = item.cancelled_by_user_name && item.cancelled_by_user_name !== 'Tidak diketahui' ? item.cancelled_by_user_name : null;
-                            const waiterName = item.cancelled_by_waiter_name && item.cancelled_by_waiter_name !== 'Tidak diketahui' ? item.cancelled_by_waiter_name : null;
-                            if (userName && waiterName && waiterName !== userName)
-                              return `${userName} / Waiters ${waiterName}`;
-                            if (userName) return userName;
-                            if (waiterName) return `Waiters ${waiterName}`;
-                            return '-';
-                          })();
-                          return (
-                            <tr key={`${item.receipt_number}-${item.product_name}-${item.cancelled_at}-${idx}`} className="border-b border-gray-200 hover:bg-gray-50">
-                              <td className="px-2 py-2 text-gray-600">{formatDateTime(cancelledDate)}</td>
-                              <td className="px-2 py-2 text-gray-900">{item.product_name}</td>
-                              <td className="px-2 py-2 text-right text-gray-900">{item.quantity}x</td>
-                              <td className="px-2 py-2 text-right text-gray-900">{formatRupiah(Number(item.total_price || 0))}</td>
-                              <td className="px-2 py-2 text-gray-700 font-mono text-[10px]">#{item.receipt_number || '-'}</td>
-                              <td className="px-2 py-2 text-gray-600">{item.customer_name || 'Guest'}</td>
-                              <td className="px-2 py-2 text-gray-800">{cancelledByDisplay}</td>
-                            </tr>
-                          );
-                        })}
-                        <tr className="border-t-2 border-gray-300 bg-gray-100">
-                          <td className="py-1 px-2 font-bold text-gray-900">TOTAL</td>
-                          <td className="py-1 px-2"></td>
-                          <td className="py-1 px-2 text-right font-bold text-gray-900">
-                            {cancelledItems.reduce((s, i) => s + i.quantity, 0)}x
-                          </td>
-                          <td className="py-1 px-2 text-right font-bold text-gray-900">
-                            {formatRupiah(totalCancelledAmount)}
-                          </td>
-                          <td colSpan={3} className="py-1 px-2"></td>
-                        </tr>
-                      </tbody>
-                    </table>
-                  </div>
-                </div>
-              )}
-
-              {/* Refund Transaction Detail Modal */}
-              {selectedRefundTransaction && (
-                <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50" onClick={() => setSelectedRefundTransaction(null)}>
-                  <div className="bg-white rounded-lg shadow-xl max-w-2xl w-full mx-4 max-h-[90vh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
-                    <div className="p-6">
-                      <div className="flex justify-between items-center mb-4">
-                        <h2 className="text-lg font-semibold text-gray-800">Transaction Details</h2>
-                        <button
-                          onClick={() => setSelectedRefundTransaction(null)}
-                          className="text-gray-400 hover:text-gray-600"
-                        >
-                          <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-                          </svg>
-                        </button>
-                      </div>
-
-                      <div className="mb-4 space-y-2 text-sm">
-                        <div className="flex justify-between">
-                          <span className="text-black font-medium">Transaction ID:</span>
-                          <span className="font-mono text-xs text-black">{selectedRefundTransaction.refund.transaction_uuid_id || selectedRefundTransaction.refund.transaction_uuid}</span>
-                        </div>
-                        <div className="flex justify-between">
-                          <span className="text-black font-medium">Created By:</span>
-                          <span className="text-black">{selectedRefundTransaction.userName || 'Unknown'}</span>
-                        </div>
-                        <div className="flex justify-between">
-                          <span className="text-black font-medium">Payment Method:</span>
-                          <span className="text-black">{formatPlatformLabel(selectedRefundTransaction.refund.payment_method || 'offline')}</span>
-                        </div>
-                        <div className="flex justify-between">
-                          <span className="text-black font-medium">Total Amount:</span>
-                          <span className="font-semibold text-black">{formatRupiah(Number(selectedRefundTransaction.refund.final_amount || 0))}</span>
-                        </div>
-                        <div className="flex justify-between">
-                          <span className="text-black font-medium">Refund Amount:</span>
-                          <span className="font-semibold text-red-600">-{formatRupiah(Number(selectedRefundTransaction.refund.refund_amount || 0))}</span>
-                        </div>
-                        <div className="flex justify-between">
-                          <span className="text-black font-medium">Alasan:</span>
-                          <span className="text-black">{selectedRefundTransaction.refund.reason || '-'}</span>
-                        </div>
-                        <div className="flex justify-between">
-                          <span className="text-black font-medium">Catatan:</span>
-                          <span className="text-black">{selectedRefundTransaction.refund.note || '-'}</span>
-                        </div>
-                        <div className="flex justify-between">
-                          <span className="text-black font-medium">Refund Date:</span>
-                          <span className="text-black">{new Date(selectedRefundTransaction.refund.refunded_at).toLocaleString('id-ID', {
-                            year: 'numeric',
-                            month: '2-digit',
-                            day: '2-digit',
-                            hour: '2-digit',
-                            minute: '2-digit',
-                            second: '2-digit',
-                            hour12: false,
-                            timeZone: 'Asia/Jakarta'
-                          })}</span>
-                        </div>
-                        <div className="flex justify-between">
-                          <span className="text-black font-medium">Issuer:</span>
-                          <span className="text-black">{selectedRefundTransaction.refund.issuer_email || '-'}</span>
-                        </div>
-                        <div className="flex justify-between">
-                          <span className="text-black font-medium">Waiter:</span>
-                          <span className="text-black">{selectedRefundTransaction.refund.waiter_name || '-'}</span>
-                        </div>
-                        <div className="flex justify-between">
-                          <span className="text-black font-medium">Nama Pelanggan:</span>
-                          <span className="text-black">{selectedRefundTransaction.refund.customer_name || '-'}</span>
-                        </div>
-                      </div>
-
-                      <div className="border-t pt-4">
-                        <h3 className="text-sm font-semibold text-black mb-3">Items</h3>
-                        <div className="space-y-3">
-                          {selectedRefundTransaction.items.map((item, itemIdx) => (
-                            <div key={item.id || itemIdx} className="border-b pb-3 last:border-b-0">
-                              <div className="flex justify-between items-start mb-1">
-                                <div className="flex-1">
-                                  <span className="font-medium text-black">{item.product_name}</span>
-                                  <span className="text-black ml-2">x{item.quantity}</span>
-                                </div>
-                                <span className="font-semibold text-black">{formatRupiah(item.total_price)}</span>
-                              </div>
-                              {item.customizations && item.customizations.length > 0 && (
-                                <div className="ml-4 mt-1 space-y-1">
-                                  {item.customizations.map((cust, custIdx) => (
-                                    <div key={custIdx} className="text-xs text-black">
-                                      <span className="font-medium">{cust.customization_name || 'Customization'}:</span>
-                                      <span className="ml-1">
-                                        {cust.selected_options.map(opt => opt.option_name).join(', ')}
-                                        {cust.selected_options.some(opt => opt.price_adjustment !== 0) && (
-                                          <span className="text-black ml-1">
-                                            ({cust.selected_options
-                                              .filter(opt => opt.price_adjustment !== 0)
-                                              .map(opt => `${opt.price_adjustment > 0 ? '+' : ''}${formatRupiah(opt.price_adjustment)}`)
-                                              .join(', ')})
-                                          </span>
-                                        )}
-                                      </span>
-                                    </div>
-                                  ))}
-                                </div>
-                              )}
-                              {item.custom_note && (
-                                <div className="ml-4 mt-1 text-xs text-black italic">
-                                  Note: {item.custom_note}
-                                </div>
-                              )}
+                          )}
+                          {/* Diskon Voucher - own row with distinct color; breakdown indented below */}
+                          <div className="rounded px-2 py-1 mt-0.5 bg-green-50 border border-green-200/60">
+                            <div className="flex items-center py-0.5">
+                              <span className="text-xs font-semibold text-green-800">Diskon Voucher:</span>
+                              <span className="flex-grow border-b border-dotted border-green-200 mx-2"></span>
+                              <span className="text-xs font-bold text-green-700">
+                                {effectiveTotalDiscount > 0 ? `-${formatRupiah(effectiveTotalDiscount)}` : formatRupiah(0)}
+                              </span>
                             </div>
-                          ))}
+                            {VOUCHER_BREAKDOWN_ORDER.map(({ key, label }) => {
+                              const e = voucherBreakdown[key];
+                              if (!e || e.count <= 0) return null;
+                              return (
+                                <div key={key} className="flex items-center py-0.5 pl-4">
+                                  <span className="text-xs text-gray-600">{label} ({e.count}):</span>
+                                  <span className="flex-grow border-b border-dotted border-gray-200 mx-2"></span>
+                                  <span className="text-xs font-semibold text-green-600">-{formatRupiah(e.total)}</span>
+                                </div>
+                              );
+                            })}
+                          </div>
+                          {/* Grand total = Total Omset - Refund - Total Item Dibatalkan - Diskon Voucher */}
+                          <div className="flex items-center py-1.5 mt-1 rounded px-2 bg-gray-100 border border-gray-200">
+                            <span className="text-xs font-bold text-gray-800">Grand Total:</span>
+                            <span className="flex-grow border-b border-dotted border-gray-300 mx-2"></span>
+                            <span className="text-sm font-bold text-gray-900">
+                              {formatRupiah(Math.max(0, grossTotalOmset - (Number(totalRefundsActive) || 0) - totalCancelledAmount - effectiveTotalDiscount))}
+                            </span>
+                          </div>
                         </div>
+                        {/* Total Topping - only show when > 0 */}
+                        {totalToppingRevenue > 0 && (
+                          <div className="flex items-center py-2 px-2 -mx-2 rounded-lg bg-blue-50 border border-blue-200/60 mb-2">
+                            <span className="text-sm font-semibold text-blue-800">Total Topping:</span>
+                            <span className="flex-grow border-b border-dotted border-blue-300 mx-2"></span>
+                            <span className="text-sm font-bold text-blue-900">{formatRupiah(totalToppingRevenue)}</span>
+                          </div>
+                        )}
                       </div>
 
-                      {selectedRefundTransaction.note && (
-                        <div className="border-t pt-4 mt-4">
-                          <h3 className="text-sm font-semibold text-black mb-2">Transaction Note</h3>
-                          <p className="text-sm text-black">{selectedRefundTransaction.note}</p>
+                      {/* Right Column - Cash Summary */}
+                      <div className="space-y-0">
+                        <h3 className="text-xs font-semibold text-gray-700 mb-2 pb-1 border-b border-gray-300">Kas</h3>
+                        <div className="flex items-center py-0.5">
+                          <span className="text-xs text-gray-700">Kas Mulai:</span>
+                          <span className="flex-grow border-b border-dotted border-gray-300 mx-2"></span>
+                          <span className="text-xs font-semibold text-gray-900">{formatRupiah(kasMulaiActive)}</span>
                         </div>
-                      )}
+                        <div className="flex items-center py-0.5">
+                          <span className="text-xs text-gray-700">Cash Sales:</span>
+                          <span className="flex-grow border-b border-dotted border-gray-300 mx-2"></span>
+                          <span className="text-xs font-semibold text-gray-900">{formatRupiah(cashShiftSales)}</span>
+                        </div>
+                        <div className="flex items-center py-0.5">
+                          <span className="text-xs text-gray-700">Total Refunds:</span>
+                          <span className="flex-grow border-b border-dotted border-gray-300 mx-2"></span>
+                          <span className="text-xs font-semibold text-red-600">-{formatRupiah(totalRefundsActive)}</span>
+                        </div>
+                        <div className="flex items-center py-0.5">
+                          <span className="text-xs font-semibold text-gray-800">Kas Diharapkan:</span>
+                          <span className="flex-grow border-b border-dotted border-gray-300 mx-2"></span>
+                          <span className="text-xs font-bold text-purple-700">{formatRupiah(kasExpectedActive)}</span>
+                        </div>
+                        <div className="border-t border-gray-300 my-1.5" />
+                        <div className="flex items-center py-0.5">
+                          <span className="text-xs text-gray-700">Jumlah Pesanan:</span>
+                          <span className="flex-grow border-b border-dotted border-gray-300 mx-2"></span>
+                          <span className="text-xs font-semibold text-gray-900">{statistics.order_count} transaksi</span>
+                        </div>
+                        <div className="flex items-center py-0.5">
+                          <span className="text-xs text-gray-700">Jumlah CU:</span>
+                          <span className="flex-grow border-b border-dotted border-gray-300 mx-2"></span>
+                          <span className="text-xs font-semibold text-gray-900">{statistics.total_cu ?? 0}</span>
+                        </div>
+                        {kasAkhirActive !== null && (
+                          <>
+                            <div className="flex items-center py-0.5">
+                              <span className="text-xs text-gray-700">Kas Akhir:</span>
+                              <span className="flex-grow border-b border-dotted border-gray-300 mx-2"></span>
+                              <span className="text-xs font-semibold text-gray-900">{formatRupiah(kasAkhirActive)}</span>
+                            </div>
+                            <div className="flex items-center py-0.5">
+                              <span className="text-xs text-gray-700">Selisih Kas:</span>
+                              <span className="flex-grow border-b border-dotted border-gray-300 mx-2"></span>
+                              <span className={`text-xs font-semibold ${kasSelisihLabelValue === 'balanced' ? 'text-green-600' :
+                                kasSelisihLabelValue === 'plus' ? 'text-blue-600' : 'text-red-600'
+                                }`}>
+                                {kasSelisihValue !== null ? (
+                                  kasSelisihValue > 0 ? `+${formatRupiah(kasSelisihValue)}` : formatRupiah(kasSelisihValue)
+                                ) : '-'}
+                                {kasSelisihLabelValue && ` (${kasSelisihLabelValue === 'balanced' ? 'Balanced' :
+                                  kasSelisihLabelValue === 'plus' ? 'Plus' : 'Minus'
+                                  })`}
+                              </span>
+                            </div>
+                          </>
+                        )}
+                      </div>
                     </div>
                   </div>
-                </div>
-              )}
 
-              {/* Payment Method Breakdown */}
-              <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-4">
-                <h2 className="text-base font-semibold text-gray-800 mb-2 text-center">PAYMENT METHOD</h2>
-                <div className="overflow-x-auto">
-                  <table className="w-full text-xs">
-                    <thead>
-                      <tr className="border-b-2 border-gray-300">
-                        <th className="text-left py-1 px-2 font-semibold text-gray-700">Payment Method</th>
-                        <th className="text-right py-1 px-2 font-semibold text-gray-700">Count</th>
-                        <th className="text-right py-1 px-2 font-semibold text-gray-700">Total</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {paymentBreakdown.length > 0 ? (
-                        <>
-                          {paymentBreakdown.map((item, idx) => (
-                            <tr key={idx} className="border-b border-gray-100 hover:bg-gray-50">
-                              <td className="py-1 px-2 text-gray-900 font-medium">{item.payment_method_name || item.payment_method_code}</td>
-                              <td className="py-1 px-2 text-right font-medium text-gray-900">{Number(item.transaction_count || 0)}</td>
-                              <td className="py-1 px-2 text-right font-semibold text-gray-900">{formatRupiah(Number(item.total_amount || 0))}</td>
+                  {/* REFUND SECTION */}
+                  {refunds.length > 0 && (
+                    <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-4">
+                      <h2 className="text-base font-semibold text-gray-800 mb-3 text-center">REFUND</h2>
+                      <div className="overflow-x-auto">
+                        <table className="w-full text-xs">
+                          <thead>
+                            <tr className="border-b-2 border-gray-300 bg-gray-50">
+                              <th className="px-2 py-2 text-left font-semibold text-gray-700">Transaction ID</th>
+                              <th className="px-2 py-2 text-left font-semibold text-gray-700">Method</th>
+                              <th className="px-2 py-2 text-right font-semibold text-gray-700">Total</th>
+                              <th className="px-2 py-2 text-right font-semibold text-gray-700">Refund Amount</th>
+                              <th className="px-2 py-2 text-left font-semibold text-gray-700">Alasan</th>
+                              <th className="px-2 py-2 text-left font-semibold text-gray-700">Refund Time</th>
+                              <th className="px-2 py-2 text-left font-semibold text-gray-700">Issuer</th>
+                              <th className="px-2 py-2 text-left font-semibold text-gray-700">Waiter</th>
+                              <th className="px-2 py-2 text-left font-semibold text-gray-700">Nama Pelanggan</th>
                             </tr>
-                          ))}
-                          <tr className="border-t-2 border-gray-300 bg-gray-100">
-                            <td className="py-1 px-2 font-bold text-gray-900">TOTAL</td>
-                            <td className="py-1 px-2 text-right font-bold text-gray-900">{totalPaymentCount}</td>
-                            <td className="py-1 px-2 text-right font-bold text-gray-900">
-                              {formatRupiah(totalPaymentAmount)}
-                            </td>
-                          </tr>
-                        </>
-                      ) : (
-                        <tr>
-                          <td colSpan={3} className="py-4 text-center text-gray-500 text-xs">
-                            Belum ada transaksi
-                          </td>
-                        </tr>
-                      )}
-                    </tbody>
-                  </table>
-                </div>
-              </div>
+                          </thead>
+                          <tbody>
+                            {refunds.map((refund, idx) => {
+                              const refundDate = new Date(refund.refunded_at);
+                              const formatDateTime = (date: Date) => {
+                                return date.toLocaleString('id-ID', {
+                                  year: 'numeric',
+                                  month: '2-digit',
+                                  day: '2-digit',
+                                  hour: '2-digit',
+                                  minute: '2-digit',
+                                  second: '2-digit',
+                                  hour12: false,
+                                  timeZone: 'Asia/Jakarta'
+                                });
+                              };
 
-              {/* CATEGORY I */}
-              <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-4">
-                <h2 className="text-base font-semibold text-gray-800 mb-2 text-center">CATEGORY I</h2>
-                <div className="overflow-x-auto">
-                  <table className="w-full text-xs">
-                    <thead>
-                      <tr className="border-b-2 border-gray-300">
-                        <th className="text-left py-1 px-2 font-semibold text-gray-700">Category I</th>
-                        <th className="text-right py-1 px-2 font-semibold text-gray-700">Quantity</th>
-                        <th className="text-right py-1 px-2 font-semibold text-gray-700">Total</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {(() => {
-                        const displayData = recalculatedCategory1Breakdown.length > 0
-                          ? recalculatedCategory1Breakdown
-                          : (productSales.length > 0 ? [] : category1Breakdown);
-                        return displayData.length > 0 ? (
-                          <>
-                            {displayData.map((item, idx) => (
-                              <tr key={idx} className="border-b border-gray-100 hover:bg-gray-50">
-                                <td className="py-1 px-2 text-gray-900 font-medium">{item.category1_name}</td>
-                                <td className="py-1 px-2 text-right font-medium text-gray-900">{item.total_quantity}</td>
-                                <td className="py-1 px-2 text-right font-semibold text-gray-900">{formatRupiah(item.total_amount)}</td>
-                              </tr>
-                            ))}
-                            <tr className="border-t-2 border-gray-300 bg-gray-100">
-                              <td className="py-1 px-2 font-bold text-gray-900">TOTAL</td>
-                              <td className="py-1 px-2 text-right font-bold text-gray-900">
-                                {displayData.reduce((sum, item) => sum + item.total_quantity, 0)}
-                              </td>
-                              <td className="py-1 px-2 text-right font-bold text-gray-900">
-                                {formatRupiah(displayData.reduce((sum, item) => sum + item.total_amount, 0))}
-                              </td>
-                            </tr>
-                          </>
-                        ) : (
-                          <tr>
-                            <td colSpan={3} className="py-4 text-center text-gray-500">
-                              {productSales.length > 0 ? 'Menghitung...' : 'Tidak ada Category I'}
-                            </td>
-                          </tr>
-                        );
-                      })()}
-                    </tbody>
-                  </table>
-                </div>
-              </div>
-
-              {/* CATEGORY II */}
-              <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-4">
-                <h2 className="text-base font-semibold text-gray-800 mb-2 text-center">CATEGORY II</h2>
-                <div className="overflow-x-auto">
-                  <table className="w-full text-xs">
-                    <thead>
-                      <tr className="border-b-2 border-gray-300">
-                        <th className="text-left py-1 px-2 font-semibold text-gray-700">Category II</th>
-                        <th className="text-right py-1 px-2 font-semibold text-gray-700">Quantity</th>
-                        <th className="text-right py-1 px-2 font-semibold text-gray-700">Total</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {(() => {
-                        // Always prefer recalculated data (with base_subtotal) if it exists
-                        // Only fall back to original category2Breakdown if recalculation hasn't run yet
-                        const displayData = recalculatedCategory2Breakdown.length > 0 
-                          ? recalculatedCategory2Breakdown 
-                          : (productSales.length > 0 ? [] : category2Breakdown); // If we have productSales but no recalculated data, show empty (recalculation in progress or failed)
-                        
-                        return displayData.length > 0 ? (
-                          <>
-                            {displayData.map((item, idx) => (
-                              <tr key={idx} className="border-b border-gray-100 hover:bg-gray-50">
-                                <td className="py-1 px-2 text-gray-900 font-medium">{item.category2_name}</td>
-                                <td className="py-1 px-2 text-right font-medium text-gray-900">{item.total_quantity}</td>
-                                <td className="py-1 px-2 text-right font-semibold text-gray-900">{formatRupiah(item.total_amount)}</td>
-                              </tr>
-                            ))}
-                            <tr className="border-t-2 border-gray-300 bg-gray-100">
-                              <td className="py-1 px-2 font-bold text-gray-900">TOTAL</td>
-                              <td className="py-1 px-2 text-right font-bold text-gray-900">
-                                {displayData.reduce((sum, item) => sum + item.total_quantity, 0)}
-                              </td>
-                              <td className="py-1 px-2 text-right font-bold text-gray-900">
-                                {formatRupiah(displayData.reduce((sum, item) => sum + item.total_amount, 0))}
-                              </td>
-                            </tr>
-                          </>
-                        ) : (
-                          <tr>
-                            <td colSpan={3} className="py-4 text-center text-gray-500">
-                              {productSales.length > 0 ? 'Menghitung...' : 'Tidak ada Category II'}
-                            </td>
-                          </tr>
-                        );
-                      })()}
-                    </tbody>
-                  </table>
-                </div>
-              </div>
-
-              {/* PAKET */}
-              <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-4">
-                <h2 className="text-base font-semibold text-gray-800 mb-2 text-center">PAKET</h2>
-                <div className="overflow-x-auto">
-                  <table className="w-full text-xs">
-                    <thead>
-                      <tr className="border-b-2 border-gray-300">
-                        <th className="text-left py-1 px-2 font-semibold text-gray-700">Paket</th>
-                        <th className="text-right py-1 px-2 font-semibold text-gray-700">Qty</th>
-                        <th className="text-right py-1 px-2 font-semibold text-gray-700">Unit Price</th>
-                        <th className="text-right py-1 px-2 font-semibold text-gray-700">Subtotal</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {packageSalesBreakdown.length > 0 ? (
-                        <>
-                          {packageSalesBreakdown.map((pkg) => (
-                            <Fragment key={`pkg-${pkg.package_product_id}`}>
-                              <tr className="border-b border-gray-200 hover:bg-gray-50">
-                                <td className="py-1 px-2 font-medium text-gray-900">{pkg.package_product_name}</td>
-                                <td className="py-1 px-2 text-right font-medium text-gray-900">{pkg.total_quantity}</td>
-                                <td className="py-1 px-2 text-right font-medium text-gray-900">
-                                  {formatRupiah(pkg.base_unit_price || (pkg.total_quantity > 0 ? pkg.total_amount / pkg.total_quantity : 0))}
-                                </td>
-                                <td className="py-1 px-2 text-right font-semibold text-gray-900">{formatRupiah(pkg.total_amount)}</td>
-                              </tr>
-                              {(pkg.lines || []).length > 0 ? (
-                                pkg.lines.map((line) => (
-                                  <tr key={`pkg-${pkg.package_product_id}-line-${line.product_id}`} className="border-b border-gray-100 hover:bg-gray-50">
-                                    <td className="py-1 px-2 text-gray-700">
-                                      <div className="pl-4 text-[10px]">• {line.product_name}</div>
-                                    </td>
-                                    <td className="py-1 px-2 text-right text-[10px] text-gray-700">{line.total_quantity}</td>
-                                    <td className="py-1 px-2 text-right text-[10px] text-gray-400">-</td>
-                                    <td className="py-1 px-2 text-right text-[10px] text-gray-400">-</td>
-                                  </tr>
-                                ))
-                              ) : (
-                                <tr className="border-b border-gray-100">
-                                  <td colSpan={4} className="py-2 px-2 text-center text-gray-500 text-[10px]">
-                                    Tidak ada data isi paket
+                              return (
+                                <tr
+                                  key={refund.refund_uuid || idx}
+                                  className="border-b border-gray-200 hover:bg-gray-50 cursor-pointer"
+                                  onClick={() => handleRefundClick(refund)}
+                                >
+                                  <td className="px-2 py-2 text-gray-900 font-mono text-[10px]">
+                                    {refund.transaction_uuid_id || refund.transaction_uuid}
+                                  </td>
+                                  <td className="px-2 py-2 text-gray-700">
+                                    {formatPlatformLabel(refund.payment_method || 'offline')}
+                                  </td>
+                                  <td className="px-2 py-2 text-right text-gray-900">
+                                    {formatRupiah(Number(refund.final_amount || 0))}
+                                  </td>
+                                  <td className="px-2 py-2 text-right text-red-600 font-semibold">
+                                    -{formatRupiah(Number(refund.refund_amount || 0))}
+                                  </td>
+                                  <td className="px-2 py-2 text-black">
+                                    {refund.reason || '-'}
+                                  </td>
+                                  <td className="px-2 py-2 text-gray-600">
+                                    {formatDateTime(refundDate)}
+                                  </td>
+                                  <td className="px-2 py-2 text-gray-600">
+                                    {refund.issuer_email || '-'}
+                                  </td>
+                                  <td className="px-2 py-2 text-gray-600">
+                                    {refund.waiter_name || '-'}
+                                  </td>
+                                  <td className="px-2 py-2 text-gray-600">
+                                    {refund.customer_name || '-'}
                                   </td>
                                 </tr>
-                              )}
-                            </Fragment>
-                          ))}
-                          <tr className="border-t-2 border-gray-300 bg-gray-100">
-                            <td className="py-1 px-2 font-bold text-gray-900">TOTAL</td>
-                            <td className="py-1 px-2 text-right font-bold text-gray-900">
-                              {packageSalesBreakdown.reduce((sum, p) => sum + Number(p.total_quantity || 0), 0)}
-                            </td>
-                            <td className="py-1 px-2 text-right font-bold text-gray-900">-</td>
-                            <td className="py-1 px-2 text-right font-bold text-gray-900">
-                              {formatRupiah(packageSalesBreakdown.reduce((sum, p) => sum + Number(p.total_amount || 0), 0))}
-                            </td>
-                          </tr>
-                        </>
-                      ) : (
-                        <tr>
-                          <td colSpan={4} className="py-4 text-center text-gray-500">
-                            Tidak ada paket terjual
-                          </td>
-                        </tr>
-                      )}
-                    </tbody>
-                  </table>
-                </div>
-              </div>
+                              );
+                            })}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  )}
 
-              {/* BARANG TERJUAL - below Category II */}
-              <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-4">
-                <h2 className="text-base font-semibold text-gray-800 mb-2 text-center">BARANG TERJUAL</h2>
-                <div className="overflow-x-auto">
-                  <table className="w-full text-xs">
-                    <thead>
-                      <tr className="border-b-2 border-gray-300">
-                        <th className="text-left py-1 px-2 font-semibold text-gray-700">Product</th>
-                        <th className="text-right py-1 px-2 font-semibold text-gray-700">Qty</th>
-                        <th className="text-right py-1 px-2 font-semibold text-gray-700">Unit Price</th>
-                        <th className="text-right py-1 px-2 font-semibold text-gray-700">Subtotal</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {displayProductSales.length > 0 ? (
-                        <>
-                          {displayProductSales.map((product, idx) => {
-                            const isGrouped = isGroupedProduct(product);
-                            const platformsStr = isGrouped
-                              ? product.platforms
-                                  .map((p: string) => formatPlatformLabel(p))
-                                  .sort()
-                                  .join(', ')
-                              : formatPlatformLabel(product.platform || 'offline');
-                            const unitPricesStr = isGrouped
-                              ? product.unitPrices
-                                  .sort((a: number, b: number) => a - b)
-                                  .map((price: number) => formatRupiah(price))
-                                  .join(', ')
-                              : formatRupiah(product.base_unit_price || (product.total_quantity > 0 ? product.base_subtotal / product.total_quantity : 0));
-                            return (
-                              <tr key={`${product.product_id}-${product.transaction_type}-${idx}`} className="border-b border-gray-200 hover:bg-gray-50">
-                                <td className="py-1 px-2 font-medium">
-                                  <div className="text-gray-900">
-                                    {product.is_bundle_item && <span className="text-[10px] font-semibold text-purple-600">[Bundle] </span>}
-                                    {product.product_name}
+                  {/* ITEM DIBATALKAN - Cancelled items with who cancelled (user/waiter) */}
+                  {cancelledItems.length > 0 && (
+                    <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-4">
+                      <h2 className="text-base font-semibold text-gray-800 mb-3 text-center">ITEM DIBATALKAN</h2>
+                      <div className="overflow-x-auto">
+                        <table className="w-full text-xs">
+                          <thead>
+                            <tr className="border-b-2 border-gray-300 bg-gray-50">
+                              <th className="px-2 py-2 text-left font-semibold text-gray-700">Waktu Pembatalan</th>
+                              <th className="px-2 py-2 text-left font-semibold text-gray-700">Item</th>
+                              <th className="px-2 py-2 text-right font-semibold text-gray-700">Jumlah</th>
+                              <th className="px-2 py-2 text-right font-semibold text-gray-700">Harga</th>
+                              <th className="px-2 py-2 text-left font-semibold text-gray-700">Transaksi</th>
+                              <th className="px-2 py-2 text-left font-semibold text-gray-700">Pelanggan</th>
+                              <th className="px-2 py-2 text-left font-semibold text-gray-700">Dibatalkan Oleh</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {cancelledItems.map((item, idx) => {
+                              const cancelledDate = new Date(item.cancelled_at);
+                              const formatDateTime = (d: Date) =>
+                                d.toLocaleString('id-ID', {
+                                  year: 'numeric',
+                                  month: '2-digit',
+                                  day: '2-digit',
+                                  hour: '2-digit',
+                                  minute: '2-digit',
+                                  second: '2-digit',
+                                  hour12: false,
+                                  timeZone: 'Asia/Jakarta'
+                                });
+                              const cancelledByDisplay = (() => {
+                                const userName = item.cancelled_by_user_name && item.cancelled_by_user_name !== 'Tidak diketahui' ? item.cancelled_by_user_name : null;
+                                const waiterName = item.cancelled_by_waiter_name && item.cancelled_by_waiter_name !== 'Tidak diketahui' ? item.cancelled_by_waiter_name : null;
+                                if (userName && waiterName && waiterName !== userName)
+                                  return `${userName} / Waiters ${waiterName}`;
+                                if (userName) return userName;
+                                if (waiterName) return `Waiters ${waiterName}`;
+                                return '-';
+                              })();
+                              return (
+                                <tr key={`${item.receipt_number}-${item.product_name}-${item.cancelled_at}-${idx}`} className="border-b border-gray-200 hover:bg-gray-50">
+                                  <td className="px-2 py-2 text-gray-600">{formatDateTime(cancelledDate)}</td>
+                                  <td className="px-2 py-2 text-gray-900">{item.product_name}</td>
+                                  <td className="px-2 py-2 text-right text-gray-900">{item.quantity}x</td>
+                                  <td className="px-2 py-2 text-right text-gray-900">{formatRupiah(Number(item.total_price || 0))}</td>
+                                  <td className="px-2 py-2 text-gray-700 font-mono text-[10px]">#{item.receipt_number || '-'}</td>
+                                  <td className="px-2 py-2 text-gray-600">{item.customer_name || 'Guest'}</td>
+                                  <td className="px-2 py-2 text-gray-800">{cancelledByDisplay}</td>
+                                </tr>
+                              );
+                            })}
+                            <tr className="border-t-2 border-gray-300 bg-gray-100">
+                              <td className="py-1 px-2 font-bold text-gray-900">TOTAL</td>
+                              <td className="py-1 px-2"></td>
+                              <td className="py-1 px-2 text-right font-bold text-gray-900">
+                                {cancelledItems.reduce((s, i) => s + i.quantity, 0)}x
+                              </td>
+                              <td className="py-1 px-2 text-right font-bold text-gray-900">
+                                {formatRupiah(totalCancelledAmount)}
+                              </td>
+                              <td colSpan={3} className="py-1 px-2"></td>
+                            </tr>
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Refund Transaction Detail Modal */}
+                  {selectedRefundTransaction && (
+                    <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50" onClick={() => setSelectedRefundTransaction(null)}>
+                      <div className="bg-white rounded-lg shadow-xl max-w-2xl w-full mx-4 max-h-[90vh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
+                        <div className="p-6">
+                          <div className="flex justify-between items-center mb-4">
+                            <h2 className="text-lg font-semibold text-gray-800">Transaction Details</h2>
+                            <button
+                              onClick={() => setSelectedRefundTransaction(null)}
+                              className="text-gray-400 hover:text-gray-600"
+                            >
+                              <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                              </svg>
+                            </button>
+                          </div>
+
+                          <div className="mb-4 space-y-2 text-sm">
+                            <div className="flex justify-between">
+                              <span className="text-black font-medium">Transaction ID:</span>
+                              <span className="font-mono text-xs text-black">{selectedRefundTransaction.refund.transaction_uuid_id || selectedRefundTransaction.refund.transaction_uuid}</span>
+                            </div>
+                            <div className="flex justify-between">
+                              <span className="text-black font-medium">Created By:</span>
+                              <span className="text-black">{selectedRefundTransaction.userName || 'Unknown'}</span>
+                            </div>
+                            <div className="flex justify-between">
+                              <span className="text-black font-medium">Payment Method:</span>
+                              <span className="text-black">{formatPlatformLabel(selectedRefundTransaction.refund.payment_method || 'offline')}</span>
+                            </div>
+                            <div className="flex justify-between">
+                              <span className="text-black font-medium">Total Amount:</span>
+                              <span className="font-semibold text-black">{formatRupiah(Number(selectedRefundTransaction.refund.final_amount || 0))}</span>
+                            </div>
+                            <div className="flex justify-between">
+                              <span className="text-black font-medium">Refund Amount:</span>
+                              <span className="font-semibold text-red-600">-{formatRupiah(Number(selectedRefundTransaction.refund.refund_amount || 0))}</span>
+                            </div>
+                            <div className="flex justify-between">
+                              <span className="text-black font-medium">Alasan:</span>
+                              <span className="text-black">{selectedRefundTransaction.refund.reason || '-'}</span>
+                            </div>
+                            <div className="flex justify-between">
+                              <span className="text-black font-medium">Catatan:</span>
+                              <span className="text-black">{selectedRefundTransaction.refund.note || '-'}</span>
+                            </div>
+                            <div className="flex justify-between">
+                              <span className="text-black font-medium">Refund Date:</span>
+                              <span className="text-black">{new Date(selectedRefundTransaction.refund.refunded_at).toLocaleString('id-ID', {
+                                year: 'numeric',
+                                month: '2-digit',
+                                day: '2-digit',
+                                hour: '2-digit',
+                                minute: '2-digit',
+                                second: '2-digit',
+                                hour12: false,
+                                timeZone: 'Asia/Jakarta'
+                              })}</span>
+                            </div>
+                            <div className="flex justify-between">
+                              <span className="text-black font-medium">Issuer:</span>
+                              <span className="text-black">{selectedRefundTransaction.refund.issuer_email || '-'}</span>
+                            </div>
+                            <div className="flex justify-between">
+                              <span className="text-black font-medium">Waiter:</span>
+                              <span className="text-black">{selectedRefundTransaction.refund.waiter_name || '-'}</span>
+                            </div>
+                            <div className="flex justify-between">
+                              <span className="text-black font-medium">Nama Pelanggan:</span>
+                              <span className="text-black">{selectedRefundTransaction.refund.customer_name || '-'}</span>
+                            </div>
+                          </div>
+
+                          <div className="border-t pt-4">
+                            <h3 className="text-sm font-semibold text-black mb-3">Items</h3>
+                            <div className="space-y-3">
+                              {selectedRefundTransaction.items.map((item, itemIdx) => (
+                                <div key={item.id || itemIdx} className="border-b pb-3 last:border-b-0">
+                                  <div className="flex justify-between items-start mb-1">
+                                    <div className="flex-1">
+                                      <span className="font-medium text-black">{item.product_name}</span>
+                                      <span className="text-black ml-2">x{item.quantity}</span>
+                                    </div>
+                                    <span className="font-semibold text-black">{formatRupiah(item.total_price)}</span>
                                   </div>
-                                  <div className="text-[10px] text-gray-600">
-                                    {product.transaction_type === 'drinks' ? 'Drinks' : 'Bakery'}
-                                    {' · '}
-                                    {platformsStr}
-                                  </div>
+                                  {item.customizations && item.customizations.length > 0 && (
+                                    <div className="ml-4 mt-1 space-y-1">
+                                      {item.customizations.map((cust, custIdx) => (
+                                        <div key={custIdx} className="text-xs text-black">
+                                          <span className="font-medium">{cust.customization_name || 'Customization'}:</span>
+                                          <span className="ml-1">
+                                            {cust.selected_options.map(opt => opt.option_name).join(', ')}
+                                            {cust.selected_options.some(opt => opt.price_adjustment !== 0) && (
+                                              <span className="text-black ml-1">
+                                                ({cust.selected_options
+                                                  .filter(opt => opt.price_adjustment !== 0)
+                                                  .map(opt => `${opt.price_adjustment > 0 ? '+' : ''}${formatRupiah(opt.price_adjustment)}`)
+                                                  .join(', ')})
+                                              </span>
+                                            )}
+                                          </span>
+                                        </div>
+                                      ))}
+                                    </div>
+                                  )}
+                                  {item.custom_note && (
+                                    <div className="ml-4 mt-1 text-xs text-black italic">
+                                      Note: {item.custom_note}
+                                    </div>
+                                  )}
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+
+                          {selectedRefundTransaction.note && (
+                            <div className="border-t pt-4 mt-4">
+                              <h3 className="text-sm font-semibold text-black mb-2">Transaction Note</h3>
+                              <p className="text-sm text-black">{selectedRefundTransaction.note}</p>
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Payment Method Breakdown */}
+                  <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-4">
+                    <h2 className="text-base font-semibold text-gray-800 mb-2 text-center">PAYMENT METHOD</h2>
+                    <div className="overflow-x-auto">
+                      <table className="w-full text-xs">
+                        <thead>
+                          <tr className="border-b-2 border-gray-300">
+                            <th className="text-left py-1 px-2 font-semibold text-gray-700">Payment Method</th>
+                            <th className="text-right py-1 px-2 font-semibold text-gray-700">Count</th>
+                            <th className="text-right py-1 px-2 font-semibold text-gray-700">Total</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {paymentBreakdown.length > 0 ? (
+                            <>
+                              {paymentBreakdown.map((item, idx) => (
+                                <tr key={idx} className="border-b border-gray-100 hover:bg-gray-50">
+                                  <td className="py-1 px-2 text-gray-900 font-medium">{item.payment_method_name || item.payment_method_code}</td>
+                                  <td className="py-1 px-2 text-right font-medium text-gray-900">{Number(item.transaction_count || 0)}</td>
+                                  <td className="py-1 px-2 text-right font-semibold text-gray-900">{formatRupiah(Number(item.total_amount || 0))}</td>
+                                </tr>
+                              ))}
+                              <tr className="border-t-2 border-gray-300 bg-gray-100">
+                                <td className="py-1 px-2 font-bold text-gray-900">TOTAL</td>
+                                <td className="py-1 px-2 text-right font-bold text-gray-900">{totalPaymentCount}</td>
+                                <td className="py-1 px-2 text-right font-bold text-gray-900">
+                                  {formatRupiah(totalPaymentAmount)}
                                 </td>
-                                <td className="py-1 px-2 text-right font-medium text-gray-900">{product.total_quantity}</td>
-                                <td className="py-1 px-2 text-right font-medium">
-                                  {product.is_bundle_item ? <span className="text-gray-700">-</span> : <span className="text-gray-900">{unitPricesStr || '-'}</span>}
-                                </td>
-                                <td className="py-1 px-2 text-right font-semibold">
-                                  {product.is_bundle_item ? <span className="text-gray-700">-</span> : <span className="text-gray-900">{formatRupiah(isGrouped ? product.total_base_subtotal : product.base_subtotal)}</span>}
+                              </tr>
+                            </>
+                          ) : (
+                            <tr>
+                              <td colSpan={3} className="py-4 text-center text-gray-500 text-xs">
+                                Belum ada transaksi
+                              </td>
+                            </tr>
+                          )}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+
+                  {/* CATEGORY I */}
+                  <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-4">
+                    <h2 className="text-base font-semibold text-gray-800 mb-2 text-center">CATEGORY I</h2>
+                    <div className="overflow-x-auto">
+                      <table className="w-full text-xs">
+                        <thead>
+                          <tr className="border-b-2 border-gray-300">
+                            <th className="text-left py-1 px-2 font-semibold text-gray-700">Category I</th>
+                            <th className="text-right py-1 px-2 font-semibold text-gray-700">Quantity</th>
+                            <th className="text-right py-1 px-2 font-semibold text-gray-700">Total</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {(() => {
+                            const displayData = recalculatedCategory1Breakdown.length > 0
+                              ? recalculatedCategory1Breakdown
+                              : (productSales.length > 0 ? [] : category1Breakdown);
+                            return displayData.length > 0 ? (
+                              <>
+                                {displayData.map((item, idx) => (
+                                  <tr key={idx} className="border-b border-gray-100 hover:bg-gray-50">
+                                    <td className="py-1 px-2 text-gray-900 font-medium">{item.category1_name}</td>
+                                    <td className="py-1 px-2 text-right font-medium text-gray-900">{item.total_quantity}</td>
+                                    <td className="py-1 px-2 text-right font-semibold text-gray-900">{formatRupiah(item.total_amount)}</td>
+                                  </tr>
+                                ))}
+                                <tr className="border-t-2 border-gray-300 bg-gray-100">
+                                  <td className="py-1 px-2 font-bold text-gray-900">TOTAL</td>
+                                  <td className="py-1 px-2 text-right font-bold text-gray-900">
+                                    {displayData.reduce((sum, item) => sum + item.total_quantity, 0)}
+                                  </td>
+                                  <td className="py-1 px-2 text-right font-bold text-gray-900">
+                                    {formatRupiah(displayData.reduce((sum, item) => sum + item.total_amount, 0))}
+                                  </td>
+                                </tr>
+                              </>
+                            ) : (
+                              <tr>
+                                <td colSpan={3} className="py-4 text-center text-gray-500">
+                                  {productSales.length > 0 ? 'Menghitung...' : 'Tidak ada Category I'}
                                 </td>
                               </tr>
                             );
-                          })}
-                          <tr className="border-t-2 border-gray-300 bg-gray-100">
-                            <td className="py-1 px-2 font-bold text-gray-900">TOTAL</td>
-                            <td className="py-1 px-2 text-right font-bold text-gray-900">
-                              {displayProductSales.reduce((sum, p) => sum + p.total_quantity, 0)}
-                            </td>
-                            <td className="py-1 px-2 text-right font-bold text-gray-900">-</td>
-                            <td className="py-1 px-2 text-right font-bold text-gray-900">
-                              {formatRupiah(displayProductSales.reduce((sum, p) => {
-                                const baseSubtotal = isGroupedProduct(p) ? p.total_base_subtotal : p.base_subtotal;
-                                return sum + baseSubtotal;
-                              }, 0))}
-                            </td>
-                          </tr>
-                          {barangTerjualByPlatform.map(({ label, qty, amount }) => (
-                            <tr key={label} className="border-b border-gray-100">
-                              <td className="py-0.5 px-2 pl-4 text-gray-600 text-xs">{label}</td>
-                              <td className="py-0.5 px-2 text-right text-gray-600 text-xs">{qty}</td>
-                              <td className="py-0.5 px-2 text-right text-gray-400">-</td>
-                              <td className="py-0.5 px-2 text-right font-medium text-gray-800 text-xs">{formatRupiah(amount)}</td>
-                            </tr>
-                          ))}
-                        </>
-                      ) : (
-                        <tr>
-                          <td colSpan={4} className="py-4 text-center text-gray-500 text-xs">
-                            Belum ada produk yang terjual
-                          </td>
-                        </tr>
-                      )}
-                    </tbody>
-                  </table>
-                </div>
-              </div>
+                          })()}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
 
-              {/* TOPPING SALES BREAKDOWN - only when total > 0 */}
-              {totalToppingRevenue > 0 && (
-              <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-4">
-                <h2 className="text-base font-semibold text-gray-800 mb-2 text-center">TOPPING SALES BREAKDOWN</h2>
-                <div className="overflow-x-auto">
-                  <table className="w-full text-xs">
-                    <thead>
-                      <tr className="border-b-2 border-gray-300">
-                        <th className="text-left py-1 px-2 font-semibold text-gray-700">Customization</th>
-                        <th className="text-right py-1 px-2 font-semibold text-gray-700">Qty</th>
-                        <th className="text-right py-1 px-2 font-semibold text-gray-700">Revenue</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {customizationSales.length > 0 ? (
-                        <>
-                          {customizationSales.map((item, idx) => (
-                            <tr key={idx} className="border-b border-gray-200 hover:bg-gray-50">
-                              <td className="py-1 px-2">
-                                <div className="font-medium text-gray-900">{item.option_name}</div>
-                                <div className="text-[10px] text-gray-600">{item.customization_name}</div>
-                              </td>
-                              <td className="py-1 px-2 text-right font-medium text-gray-900">{item.total_quantity}</td>
-                              <td className="py-1 px-2 text-right font-semibold text-gray-900">{formatRupiah(item.total_revenue)}</td>
-                            </tr>
-                          ))}
-                          <tr className="border-t-2 border-gray-300 bg-gray-100">
-                            <td className="py-1 px-2 font-bold text-gray-900">TOTAL</td>
-                            <td className="py-1 px-2 text-right font-bold text-gray-900">
-                              {customizationSales.reduce((sum, item) => sum + item.total_quantity, 0)}
-                            </td>
-                            <td className="py-1 px-2 text-right font-bold text-gray-900">
-                              {formatRupiah(customizationSales.reduce((sum, item) => sum + item.total_revenue, 0))}
-                            </td>
+                  {/* CATEGORY II */}
+                  <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-4">
+                    <h2 className="text-base font-semibold text-gray-800 mb-2 text-center">CATEGORY II</h2>
+                    <div className="overflow-x-auto">
+                      <table className="w-full text-xs">
+                        <thead>
+                          <tr className="border-b-2 border-gray-300">
+                            <th className="text-left py-1 px-2 font-semibold text-gray-700">Category II</th>
+                            <th className="text-right py-1 px-2 font-semibold text-gray-700">Quantity</th>
+                            <th className="text-right py-1 px-2 font-semibold text-gray-700">Total</th>
                           </tr>
-                        </>
-                      ) : (
-                        <tr>
-                          <td colSpan={3} className="py-4 text-center text-gray-500">
-                            Belum ada kustomisasi terjual
-                          </td>
-                        </tr>
-                      )}
-                    </tbody>
-                  </table>
-                </div>
-              </div>
+                        </thead>
+                        <tbody>
+                          {(() => {
+                            // Always prefer recalculated data (with base_subtotal) if it exists
+                            // Only fall back to original category2Breakdown if recalculation hasn't run yet
+                            const displayData = recalculatedCategory2Breakdown.length > 0
+                              ? recalculatedCategory2Breakdown
+                              : (productSales.length > 0 ? [] : category2Breakdown); // If we have productSales but no recalculated data, show empty (recalculation in progress or failed)
+
+                            return displayData.length > 0 ? (
+                              <>
+                                {displayData.map((item, idx) => (
+                                  <tr key={idx} className="border-b border-gray-100 hover:bg-gray-50">
+                                    <td className="py-1 px-2 text-gray-900 font-medium">{item.category2_name}</td>
+                                    <td className="py-1 px-2 text-right font-medium text-gray-900">{item.total_quantity}</td>
+                                    <td className="py-1 px-2 text-right font-semibold text-gray-900">{formatRupiah(item.total_amount)}</td>
+                                  </tr>
+                                ))}
+                                <tr className="border-t-2 border-gray-300 bg-gray-100">
+                                  <td className="py-1 px-2 font-bold text-gray-900">TOTAL</td>
+                                  <td className="py-1 px-2 text-right font-bold text-gray-900">
+                                    {displayData.reduce((sum, item) => sum + item.total_quantity, 0)}
+                                  </td>
+                                  <td className="py-1 px-2 text-right font-bold text-gray-900">
+                                    {formatRupiah(displayData.reduce((sum, item) => sum + item.total_amount, 0))}
+                                  </td>
+                                </tr>
+                              </>
+                            ) : (
+                              <tr>
+                                <td colSpan={3} className="py-4 text-center text-gray-500">
+                                  {productSales.length > 0 ? 'Menghitung...' : 'Tidak ada Category II'}
+                                </td>
+                              </tr>
+                            );
+                          })()}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+
+                  {/* PAKET */}
+                  <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-4">
+                    <h2 className="text-base font-semibold text-gray-800 mb-2 text-center">PAKET</h2>
+                    <div className="overflow-x-auto">
+                      <table className="w-full text-xs">
+                        <thead>
+                          <tr className="border-b-2 border-gray-300">
+                            <th className="text-left py-1 px-2 font-semibold text-gray-700">Paket</th>
+                            <th className="text-right py-1 px-2 font-semibold text-gray-700">Qty</th>
+                            <th className="text-right py-1 px-2 font-semibold text-gray-700">Unit Price</th>
+                            <th className="text-right py-1 px-2 font-semibold text-gray-700">Subtotal</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {packageSalesBreakdown.length > 0 ? (
+                            <>
+                              {packageSalesBreakdown.map((pkg) => (
+                                <Fragment key={`pkg-${pkg.package_product_id}`}>
+                                  <tr className="border-b border-gray-200 hover:bg-gray-50">
+                                    <td className="py-1 px-2 font-medium text-gray-900">{pkg.package_product_name}</td>
+                                    <td className="py-1 px-2 text-right font-medium text-gray-900">{pkg.total_quantity}</td>
+                                    <td className="py-1 px-2 text-right font-medium text-gray-900">
+                                      {formatRupiah(pkg.base_unit_price || (pkg.total_quantity > 0 ? pkg.total_amount / pkg.total_quantity : 0))}
+                                    </td>
+                                    <td className="py-1 px-2 text-right font-semibold text-gray-900">{formatRupiah(pkg.total_amount)}</td>
+                                  </tr>
+                                  {(pkg.lines || []).length > 0 ? (
+                                    pkg.lines.map((line) => (
+                                      <tr key={`pkg-${pkg.package_product_id}-line-${line.product_id}`} className="border-b border-gray-100 hover:bg-gray-50">
+                                        <td className="py-1 px-2 text-gray-700">
+                                          <div className="pl-4 text-[10px]">• {line.product_name}</div>
+                                        </td>
+                                        <td className="py-1 px-2 text-right text-[10px] text-gray-700">{line.total_quantity}</td>
+                                        <td className="py-1 px-2 text-right text-[10px] text-gray-400">-</td>
+                                        <td className="py-1 px-2 text-right text-[10px] text-gray-400">-</td>
+                                      </tr>
+                                    ))
+                                  ) : (
+                                    <tr className="border-b border-gray-100">
+                                      <td colSpan={4} className="py-2 px-2 text-center text-gray-500 text-[10px]">
+                                        Tidak ada data isi paket
+                                      </td>
+                                    </tr>
+                                  )}
+                                </Fragment>
+                              ))}
+                              <tr className="border-t-2 border-gray-300 bg-gray-100">
+                                <td className="py-1 px-2 font-bold text-gray-900">TOTAL</td>
+                                <td className="py-1 px-2 text-right font-bold text-gray-900">
+                                  {packageSalesBreakdown.reduce((sum, p) => sum + Number(p.total_quantity || 0), 0)}
+                                </td>
+                                <td className="py-1 px-2 text-right font-bold text-gray-900">-</td>
+                                <td className="py-1 px-2 text-right font-bold text-gray-900">
+                                  {formatRupiah(packageSalesBreakdown.reduce((sum, p) => sum + Number(p.total_amount || 0), 0))}
+                                </td>
+                              </tr>
+                            </>
+                          ) : (
+                            <tr>
+                              <td colSpan={4} className="py-4 text-center text-gray-500">
+                                Tidak ada paket terjual
+                              </td>
+                            </tr>
+                          )}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+
+                  {/* BARANG TERJUAL - below Category II */}
+                  <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-4">
+                    <h2 className="text-base font-semibold text-gray-800 mb-2 text-center">BARANG TERJUAL</h2>
+                    <div className="overflow-x-auto">
+                      <table className="w-full text-xs">
+                        <thead>
+                          <tr className="border-b-2 border-gray-300">
+                            <th className="text-left py-1 px-2 font-semibold text-gray-700">Product</th>
+                            <th className="text-right py-1 px-2 font-semibold text-gray-700">Qty</th>
+                            <th className="text-right py-1 px-2 font-semibold text-gray-700">Unit Price</th>
+                            <th className="text-right py-1 px-2 font-semibold text-gray-700">Subtotal</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {displayProductSales.length > 0 ? (
+                            <>
+                              {displayProductSales.map((product, idx) => {
+                                const isGrouped = isGroupedProduct(product);
+                                const platformsStr = isGrouped
+                                  ? product.platforms
+                                    .map((p: string) => formatPlatformLabel(p))
+                                    .sort()
+                                    .join(', ')
+                                  : formatPlatformLabel(product.platform || 'offline');
+                                const unitPricesStr = isGrouped
+                                  ? product.unitPrices
+                                    .sort((a: number, b: number) => a - b)
+                                    .map((price: number) => formatRupiah(price))
+                                    .join(', ')
+                                  : formatRupiah(product.base_unit_price || (product.total_quantity > 0 ? product.base_subtotal / product.total_quantity : 0));
+                                return (
+                                  <tr key={`${product.product_id}-${product.transaction_type}-${idx}`} className="border-b border-gray-200 hover:bg-gray-50">
+                                    <td className="py-1 px-2 font-medium">
+                                      <div className="text-gray-900">
+                                        {product.is_bundle_item && <span className="text-[10px] font-semibold text-purple-600">[Bundle] </span>}
+                                        {product.product_name}
+                                      </div>
+                                      <div className="text-[10px] text-gray-600">
+                                        {product.transaction_type === 'drinks' ? 'Drinks' : 'Bakery'}
+                                        {' · '}
+                                        {platformsStr}
+                                      </div>
+                                    </td>
+                                    <td className="py-1 px-2 text-right font-medium text-gray-900">{product.total_quantity}</td>
+                                    <td className="py-1 px-2 text-right font-medium">
+                                      {product.is_bundle_item ? <span className="text-gray-700">-</span> : <span className="text-gray-900">{unitPricesStr || '-'}</span>}
+                                    </td>
+                                    <td className="py-1 px-2 text-right font-semibold">
+                                      {product.is_bundle_item ? <span className="text-gray-700">-</span> : <span className="text-gray-900">{formatRupiah(isGrouped ? product.total_base_subtotal : product.base_subtotal)}</span>}
+                                    </td>
+                                  </tr>
+                                );
+                              })}
+                              <tr className="border-t-2 border-gray-300 bg-gray-100">
+                                <td className="py-1 px-2 font-bold text-gray-900">TOTAL</td>
+                                <td className="py-1 px-2 text-right font-bold text-gray-900">
+                                  {displayProductSales.reduce((sum, p) => sum + p.total_quantity, 0)}
+                                </td>
+                                <td className="py-1 px-2 text-right font-bold text-gray-900">-</td>
+                                <td className="py-1 px-2 text-right font-bold text-gray-900">
+                                  {formatRupiah(displayProductSales.reduce((sum, p) => {
+                                    const baseSubtotal = isGroupedProduct(p) ? p.total_base_subtotal : p.base_subtotal;
+                                    return sum + baseSubtotal;
+                                  }, 0))}
+                                </td>
+                              </tr>
+                              {barangTerjualByPlatform.map(({ label, qty, amount }) => (
+                                <tr key={label} className="border-b border-gray-100">
+                                  <td className="py-0.5 px-2 pl-4 text-gray-600 text-xs">{label}</td>
+                                  <td className="py-0.5 px-2 text-right text-gray-600 text-xs">{qty}</td>
+                                  <td className="py-0.5 px-2 text-right text-gray-400">-</td>
+                                  <td className="py-0.5 px-2 text-right font-medium text-gray-800 text-xs">{formatRupiah(amount)}</td>
+                                </tr>
+                              ))}
+                            </>
+                          ) : (
+                            <tr>
+                              <td colSpan={4} className="py-4 text-center text-gray-500 text-xs">
+                                Belum ada produk yang terjual
+                              </td>
+                            </tr>
+                          )}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+
+                  {/* TOPPING SALES BREAKDOWN - only when total > 0 */}
+                  {totalToppingRevenue > 0 && (
+                    <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-4">
+                      <h2 className="text-base font-semibold text-gray-800 mb-2 text-center">TOPPING SALES BREAKDOWN</h2>
+                      <div className="overflow-x-auto">
+                        <table className="w-full text-xs">
+                          <thead>
+                            <tr className="border-b-2 border-gray-300">
+                              <th className="text-left py-1 px-2 font-semibold text-gray-700">Customization</th>
+                              <th className="text-right py-1 px-2 font-semibold text-gray-700">Qty</th>
+                              <th className="text-right py-1 px-2 font-semibold text-gray-700">Revenue</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {customizationSales.length > 0 ? (
+                              <>
+                                {customizationSales.map((item, idx) => (
+                                  <tr key={idx} className="border-b border-gray-200 hover:bg-gray-50">
+                                    <td className="py-1 px-2">
+                                      <div className="font-medium text-gray-900">{item.option_name}</div>
+                                      <div className="text-[10px] text-gray-600">{item.customization_name}</div>
+                                    </td>
+                                    <td className="py-1 px-2 text-right font-medium text-gray-900">{item.total_quantity}</td>
+                                    <td className="py-1 px-2 text-right font-semibold text-gray-900">{formatRupiah(item.total_revenue)}</td>
+                                  </tr>
+                                ))}
+                                <tr className="border-t-2 border-gray-300 bg-gray-100">
+                                  <td className="py-1 px-2 font-bold text-gray-900">TOTAL</td>
+                                  <td className="py-1 px-2 text-right font-bold text-gray-900">
+                                    {customizationSales.reduce((sum, item) => sum + item.total_quantity, 0)}
+                                  </td>
+                                  <td className="py-1 px-2 text-right font-bold text-gray-900">
+                                    {formatRupiah(customizationSales.reduce((sum, item) => sum + item.total_revenue, 0))}
+                                  </td>
+                                </tr>
+                              </>
+                            ) : (
+                              <tr>
+                                <td colSpan={3} className="py-4 text-center text-gray-500">
+                                  Belum ada kustomisasi terjual
+                                </td>
+                              </tr>
+                            )}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  )}
+                </>
               )}
             </>
           )}
-                </>
-              )}
         </div>
       )}
 
@@ -3737,11 +3738,10 @@ export default function GantiShift() {
                   <ChevronDown className="w-5 h-5 text-gray-600" />
                 )}
               </button>
-              
+
               <div
-                className={`overflow-hidden transition-all duration-300 ease-in-out ${
-                  showPrintOptions ? 'max-h-96 opacity-100' : 'max-h-0 opacity-0'
-                }`}
+                className={`overflow-hidden transition-all duration-300 ease-in-out ${showPrintOptions ? 'max-h-96 opacity-100' : 'max-h-0 opacity-0'
+                  }`}
               >
                 <div className="p-4 space-y-3 bg-white border-t border-gray-200">
                   {/* Ringkasan Only Toggle */}
@@ -3771,22 +3771,20 @@ export default function GantiShift() {
                           className="sr-only"
                         />
                         <div
-                          className={`absolute inset-0 rounded-full transition-colors duration-200 ease-in-out ${
-                            ringkasanOnly ? 'bg-blue-600' : 'bg-gray-300'
-                          }`}
+                          className={`absolute inset-0 rounded-full transition-colors duration-200 ease-in-out ${ringkasanOnly ? 'bg-blue-600' : 'bg-gray-300'
+                            }`}
                         >
                           <div
-                            className={`absolute top-1 left-1 w-6 h-6 bg-white rounded-full shadow-md transform transition-transform duration-200 ease-in-out ${
-                              ringkasanOnly ? 'translate-x-6' : 'translate-x-0'
-                            }`}
+                            className={`absolute top-1 left-1 w-6 h-6 bg-white rounded-full shadow-md transform transition-transform duration-200 ease-in-out ${ringkasanOnly ? 'translate-x-6' : 'translate-x-0'
+                              }`}
                           />
                         </div>
                       </div>
                     </label>
                   </div>
-                  
+
                   <p className="text-sm text-gray-600 mb-3">Pilih bagian yang ingin dicetak:</p>
-                  
+
                   <label className={`flex items-center justify-between cursor-pointer p-2 rounded hover:bg-gray-50 ${ringkasanOnly ? 'opacity-50' : ''}`}>
                     <span className="text-sm font-medium text-gray-700">RINGKASAN</span>
                     <input
@@ -3962,11 +3960,10 @@ export default function GantiShift() {
                   <ChevronDown className="w-5 h-5 text-gray-600" />
                 )}
               </button>
-              
+
               <div
-                className={`overflow-hidden transition-all duration-300 ease-in-out ${
-                  showPrintOptions ? 'max-h-96 opacity-100' : 'max-h-0 opacity-0'
-                }`}
+                className={`overflow-hidden transition-all duration-300 ease-in-out ${showPrintOptions ? 'max-h-96 opacity-100' : 'max-h-0 opacity-0'
+                  }`}
               >
                 <div className="p-4 space-y-3 bg-white border-t border-gray-200">
                   {/* Ringkasan Only Toggle */}
@@ -3996,22 +3993,20 @@ export default function GantiShift() {
                           className="sr-only"
                         />
                         <div
-                          className={`absolute inset-0 rounded-full transition-colors duration-200 ease-in-out ${
-                            ringkasanOnly ? 'bg-blue-600' : 'bg-gray-300'
-                          }`}
+                          className={`absolute inset-0 rounded-full transition-colors duration-200 ease-in-out ${ringkasanOnly ? 'bg-blue-600' : 'bg-gray-300'
+                            }`}
                         >
                           <div
-                            className={`absolute top-1 left-1 w-6 h-6 bg-white rounded-full shadow-md transform transition-transform duration-200 ease-in-out ${
-                              ringkasanOnly ? 'translate-x-6' : 'translate-x-0'
-                            }`}
+                            className={`absolute top-1 left-1 w-6 h-6 bg-white rounded-full shadow-md transform transition-transform duration-200 ease-in-out ${ringkasanOnly ? 'translate-x-6' : 'translate-x-0'
+                              }`}
                           />
                         </div>
                       </div>
                     </label>
                   </div>
-                  
+
                   <p className="text-sm text-gray-600 mb-3">Pilih bagian yang ingin dicetak:</p>
-                  
+
                   <label className={`flex items-center justify-between cursor-pointer p-2 rounded hover:bg-gray-50 ${ringkasanOnly ? 'opacity-50' : ''}`}>
                     <span className="text-sm font-medium text-gray-700">RINGKASAN</span>
                     <input
@@ -4356,7 +4351,7 @@ export default function GantiShift() {
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
           <div className="bg-white rounded-lg shadow-xl max-w-md w-full p-6 animate-in zoom-in">
             <h3 className="text-xl font-bold text-gray-800 mb-4">Pengaturan Laporan Shift</h3>
-            
+
             <div className="space-y-4 mb-6">
               {/* Group Products Setting */}
               <div className="flex items-center justify-between p-4 border border-gray-200 rounded-lg">
@@ -4376,14 +4371,12 @@ export default function GantiShift() {
                     className="sr-only"
                   />
                   <div
-                    className={`absolute inset-0 rounded-full transition-colors duration-200 ease-in-out ${
-                      groupProducts ? 'bg-blue-600' : 'bg-gray-300'
-                    }`}
+                    className={`absolute inset-0 rounded-full transition-colors duration-200 ease-in-out ${groupProducts ? 'bg-blue-600' : 'bg-gray-300'
+                      }`}
                   >
                     <div
-                      className={`absolute top-1 left-1 w-6 h-6 bg-white rounded-full shadow-md transform transition-transform duration-200 ease-in-out ${
-                        groupProducts ? 'translate-x-6' : 'translate-x-0'
-                      }`}
+                      className={`absolute top-1 left-1 w-6 h-6 bg-white rounded-full shadow-md transform transition-transform duration-200 ease-in-out ${groupProducts ? 'translate-x-6' : 'translate-x-0'
+                        }`}
                     />
                   </div>
                 </div>

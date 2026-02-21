@@ -7,6 +7,7 @@ import { Clock, CreditCard, RefreshCw, Search, Filter, ChevronUp, ChevronDown, C
 import TransactionDetailModal, { TransactionDetail, TransactionRefund } from './TransactionDetailModal';
 import Printer1ToPrinter2Manager from './Printer1ToPrinter2Manager';
 import { useAuth } from '@/hooks/useAuth';
+import { appAlert } from '@/components/AppDialog';
 import { hasPermission } from '@/lib/permissions';
 import { isSuperAdmin } from '@/lib/auth';
 
@@ -664,7 +665,7 @@ export default function TransactionList({ businessId, onLoadTransaction }: Trans
     } catch (error) {
       console.error('Failed to copy UUID:', error);
       // Show error to user
-      alert('Gagal menyalin UUID. Silakan salin manual: ' + uuid);
+      appAlert('Gagal menyalin UUID. Silakan salin manual: ' + uuid);
     }
   };
 

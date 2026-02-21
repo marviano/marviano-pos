@@ -4264,6 +4264,30 @@ function createWindows(): void {
     }
   });
 
+  ipcMain.handle('localdb-ping', async () => {
+    try {
+      const start = Date.now();
+      await executeQueryOne<{ 1: number }>('SELECT 1');
+      return { success: true, ms: Date.now() - start };
+    } catch (e) {
+      return { success: false, error: (e as Error)?.message || String(e) };
+    }
+  });
+
+  ipcMain.handle('localdb-get-transaction-by-uuid', async (event, uuid: string) => {
+    try {
+      const dbStart = Date.now();
+      const rows = await executeQuery(
+        'SELECT *, COALESCE(uuid_id, id) as id FROM transactions WHERE uuid_id = ? LIMIT 1',
+        [uuid]
+      );
+      return rows[0] || null;
+    } catch (err) {
+      console.error('localdb-get-transaction-by-uuid error:', err);
+      return null;
+    }
+  });
+
   ipcMain.handle('localdb-get-transactions', async (event, businessId?: number, limit?: number, options?: { todayOnly?: boolean }) => {
     try {
       const todayOnly = options?.todayOnly === true;
@@ -5406,7 +5430,7 @@ function createWindows(): void {
                   }
                 }
               }
-            } catch (_) {}
+            } catch (_) { }
           }
           linesWithNotes = lines.map((l, i) => ({
             ...l,
@@ -8998,8 +9022,10 @@ function createWindows(): void {
         const businessId = getNumber('business_id');
         const templateCode = getString('template_code');
         const isActive = getBoolean('is_active') !== null ? (getBoolean('is_active') ? 1 : 0) : 1;
+        // Local-only columns: not sent by sync API; use defaults on INSERT, do not overwrite on UPDATE
         const isDefault = getBoolean('is_default') !== null ? (getBoolean('is_default') ? 1 : 0) : 0;
-        const showNotes = getNumber('show_notes') ?? getBoolean('show_notes') ? 1 : 0;
+        const showNotes = getNumber('show_notes') ?? (getBoolean('show_notes') ? 1 : 0);
+        const oneLabelPerProduct = getNumber('one_label_per_product') ?? (getBoolean('one_label_per_product') !== false ? 1 : 0);
         const version = getNumber('version') ?? 1;
         const createdDate = getDate('created_at');
         const createdAt = createdDate ? toMySQLTimestamp(createdDate as string | number | Date) : toMySQLTimestamp(new Date());
@@ -9008,18 +9034,16 @@ function createWindows(): void {
         return {
           sql: `INSERT INTO receipt_templates (
             id, template_type, template_name, business_id, template_code,
-            is_active, is_default, show_notes, version, created_at, updated_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            is_active, is_default, show_notes, one_label_per_product, version, created_at, updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
           ON DUPLICATE KEY UPDATE
             template_type=VALUES(template_type),
             template_name=VALUES(template_name),
             template_code=VALUES(template_code),
             is_active=VALUES(is_active),
-            is_default=VALUES(is_default),
-            show_notes=VALUES(show_notes),
             version=VALUES(version),
             updated_at=VALUES(updated_at)`,
-          params: [id, templateType, templateName, businessId, templateCode, isActive, isDefault, showNotes, version, createdAt, updatedAt]
+          params: [id, templateType, templateName, businessId, templateCode, isActive, isDefault, showNotes, oneLabelPerProduct, version, createdAt, updatedAt]
         };
       });
       await executeTransaction(queries);
@@ -11025,6 +11049,15 @@ ipcMain.handle('save-receipt-settings', async (event, settings: {
   }
 });
 
+ipcMain.handle('upload-receipt-settings-to-vps', async (event, businessId?: number) => {
+  try {
+    return await receiptManagementService.uploadReceiptSettingsToVps(businessId);
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    return { success: false, message: msg || 'Gagal upload pengaturan struk ke VPS' };
+  }
+});
+
 // Execute single label print (used by queue)
 async function executeLabelPrint(data: LabelPrintData): Promise<{ success: boolean; error?: string }> {
   try {
@@ -11108,7 +11141,7 @@ async function executeLabelPrint(data: LabelPrintData): Promise<{ success: boole
       const pageSize = code.includes('40mm') ? '40mm' : code.includes('80mm') ? '80mm' : 'other';
       const h1Payload = { location: 'main.ts:label-print', message: 'which template used (single label)', data: { businessIdRequested: data.business_id, templateName: checkerResult.templateName ?? null, templateCodeLength: codeLen, pageSize, hasTemplateCode: !!(checkerResult.templateCode && checkerResult.templateCode.trim()) }, hypothesisId: 'H1' as const };
       writeLabelDebugLog(h1Payload);
-      fetch('http://127.0.0.1:7495/ingest/20000880-6f22-4a8b-8a8e-250eeb7d84f4',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'76ac0a'},body:JSON.stringify({sessionId:'76ac0a',...h1Payload,timestamp:Date.now()})}).catch(()=>{});
+      fetch('http://127.0.0.1:7495/ingest/20000880-6f22-4a8b-8a8e-250eeb7d84f4', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': '76ac0a' }, body: JSON.stringify({ sessionId: '76ac0a', ...h1Payload, timestamp: Date.now() }) }).catch(() => { });
       // #endregion
       const dataCustomizations = typeof data.customizations === 'string' ? data.customizations : '';
       const hasCustomizations = (dataCustomizations || '').trim().length > 0;
@@ -11123,14 +11156,14 @@ async function executeLabelPrint(data: LabelPrintData): Promise<{ success: boole
         // #region agent log
         const h2Payload = { location: 'main.ts:label-print', message: 'used DB template path', data: { htmlContentLength: htmlContent?.length ?? 0 }, hypothesisId: 'H2' as const };
         writeLabelDebugLog(h2Payload);
-        fetch('http://127.0.0.1:7495/ingest/20000880-6f22-4a8b-8a8e-250eeb7d84f4',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'76ac0a'},body:JSON.stringify({sessionId:'76ac0a',...h2Payload,timestamp:Date.now()})}).catch(()=>{});
+        fetch('http://127.0.0.1:7495/ingest/20000880-6f22-4a8b-8a8e-250eeb7d84f4', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': '76ac0a' }, body: JSON.stringify({ sessionId: '76ac0a', ...h2Payload, timestamp: Date.now() }) }).catch(() => { });
         // #endregion
       } else {
         htmlContent = generateLabelHTML(data);
         // #region agent log
         const h4Payload = { location: 'main.ts:label-print', message: 'used fallback generateLabelHTML', data: { htmlContentLength: htmlContent?.length ?? 0 }, hypothesisId: 'H4' as const };
         writeLabelDebugLog(h4Payload);
-        fetch('http://127.0.0.1:7495/ingest/20000880-6f22-4a8b-8a8e-250eeb7d84f4',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'76ac0a'},body:JSON.stringify({sessionId:'76ac0a',...h4Payload,timestamp:Date.now()})}).catch(()=>{});
+        fetch('http://127.0.0.1:7495/ingest/20000880-6f22-4a8b-8a8e-250eeb7d84f4', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': '76ac0a' }, body: JSON.stringify({ sessionId: '76ac0a', ...h4Payload, timestamp: Date.now() }) }).catch(() => { });
         // #endregion
       }
     } catch (e) {
@@ -11139,7 +11172,7 @@ async function executeLabelPrint(data: LabelPrintData): Promise<{ success: boole
       // #region agent log
       const h4ErrPayload = { location: 'main.ts:label-print', message: 'checker load failed, fallback', data: { error: String(e), htmlContentLength: htmlContent?.length ?? 0 }, hypothesisId: 'H4' as const };
       writeLabelDebugLog(h4ErrPayload);
-      fetch('http://127.0.0.1:7495/ingest/20000880-6f22-4a8b-8a8e-250eeb7d84f4',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'76ac0a'},body:JSON.stringify({sessionId:'76ac0a',...h4ErrPayload,timestamp:Date.now()})}).catch(()=>{});
+      fetch('http://127.0.0.1:7495/ingest/20000880-6f22-4a8b-8a8e-250eeb7d84f4', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': '76ac0a' }, body: JSON.stringify({ sessionId: '76ac0a', ...h4ErrPayload, timestamp: Date.now() }) }).catch(() => { });
       // #endregion
     }
 
@@ -11148,7 +11181,7 @@ async function executeLabelPrint(data: LabelPrintData): Promise<{ success: boole
     const atPageInFinal = getAtPageSnippet(htmlContent);
     const pagePayload = { sessionId: 'ba378a', location: 'main.ts:label-print', message: 'label @page (single)', data: { atPageInTemplate, atPageInFinal, has30mmInTemplate: templateCodeForLog.includes('30mm'), hasAutoInTemplate: templateCodeForLog.includes('auto') }, hypothesisId: 'H-page', timestamp: Date.now() };
     console.log('[LABEL HEIGHT DEBUG] single label @page in template:', atPageInTemplate, '| in final HTML:', atPageInFinal);
-    fetch('http://127.0.0.1:7495/ingest/20000880-6f22-4a8b-8a8e-250eeb7d84f4', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': 'ba378a' }, body: JSON.stringify(pagePayload) }).catch(() => {});
+    fetch('http://127.0.0.1:7495/ingest/20000880-6f22-4a8b-8a8e-250eeb7d84f4', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': 'ba378a' }, body: JSON.stringify(pagePayload) }).catch(() => { });
     // #endregion
 
     await jobPrintWindow.loadURL(`data:text/html,${encodeURIComponent(htmlContent)}`);
@@ -11421,7 +11454,7 @@ async function executeLabelsBatchPrint(data: {
     const atPageBatchFinal = getAtPageSnippet(htmlContent);
     const batchPagePayload = { sessionId: 'ba378a', location: 'main.ts:executeLabelsBatchPrint', message: 'label @page (batch)', data: { atPageInTemplate: atPageBatchTemplate, atPageInFinal: atPageBatchFinal, has30mmInTemplate: batchTemplateCode.includes('30mm'), hasAutoInTemplate: batchTemplateCode.includes('auto'), useOrderSummarySlip }, hypothesisId: 'H-page', timestamp: Date.now() };
     console.log('[LABEL HEIGHT DEBUG] batch @page in template:', atPageBatchTemplate, '| in final HTML:', atPageBatchFinal);
-    fetch('http://127.0.0.1:7495/ingest/20000880-6f22-4a8b-8a8e-250eeb7d84f4', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': 'ba378a' }, body: JSON.stringify(batchPagePayload) }).catch(() => {});
+    fetch('http://127.0.0.1:7495/ingest/20000880-6f22-4a8b-8a8e-250eeb7d84f4', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': 'ba378a' }, body: JSON.stringify(batchPagePayload) }).catch(() => { });
     // #endregion
 
     // --- 1st checker: load generated HTML into print window ---
@@ -13088,7 +13121,7 @@ function generateShiftBreakdownHTML(
           </div>
           <div class="summary-line summary-line-highlight">
             <span class="summary-label">Grand Total:</span>
-            <span class="summary-value">${formatIntegerId(Math.max(0, (grossTotalOmset || 0) - totalRefundsForGrandTotal - totalCancelledItemsAmount - effectiveTotalDiscount))}</span>
+            <span class="summary-value">${formatIntegerId(Math.max(0, Number(report.statistics.total_amount ?? 0)))}</span>
           </div>
         </div>
         ${totalCustomizationRevenue > 0 ? `
