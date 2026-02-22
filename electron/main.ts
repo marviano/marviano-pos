@@ -8659,32 +8659,10 @@ function createWindows(): void {
         return customizationTotal * unitQuantity || 0;
       };
 
-      // Helper function to determine platform from unit price
+      // Helper: determine platform from payment method code (authoritative; avoids misattribution when platforms share the same price)
       const determinePlatform = (row: TransactionItemRow): string => {
-        const unitPrice = Number(row.unit_price || 0);
-
-        // Compare unit price with platform-specific prices
-        // Allow small tolerance for floating point comparison (0.01)
-        const tolerance = 0.01;
-
-        if (row.harga_gofood && Math.abs(unitPrice - Number(row.harga_gofood)) < tolerance) {
-          return 'gofood';
-        }
-        if (row.harga_grabfood && Math.abs(unitPrice - Number(row.harga_grabfood)) < tolerance) {
-          return 'grabfood';
-        }
-        if (row.harga_shopeefood && Math.abs(unitPrice - Number(row.harga_shopeefood)) < tolerance) {
-          return 'shopeefood';
-        }
-        if (row.harga_qpon && Math.abs(unitPrice - Number(row.harga_qpon)) < tolerance) {
-          return 'qpon';
-        }
-        if (row.harga_tiktok && Math.abs(unitPrice - Number(row.harga_tiktok)) < tolerance) {
-          return 'tiktok';
-        }
-
-        // Default to offline
-        return 'offline';
+        const rawPlatform = (row.payment_method_code || row.payment_method || '').toString().toLowerCase();
+        return rawPlatform && !OFFLINE_METHODS.has(rawPlatform) ? rawPlatform : 'offline';
       };
 
       for (const row of rows) {
@@ -8708,7 +8686,7 @@ function createWindows(): void {
         const netTotalPrice = totalPrice * allocatedRatio;
         const netCustomizationSubtotal = customizationSubtotal * allocatedRatio;
 
-        // Determine platform based on product price, not payment method
+        // Determine platform from payment method code (canonical at transaction time)
         const platformCode = determinePlatform(row);
         const transactionType = row.transaction_type || 'drinks';
         // Include unit_price in the key to split products with different prices into separate rows
@@ -11256,13 +11234,17 @@ type OrderContextForChecker = {
   category2Name?: string;
 };
 
-/** Minimal template used when checker template has no {{items}} but we have orderContext (print one slip with notes). */
+/** Minimal template used when checker template has no {{items}}/{{categoriesSections}} but we have orderContext (print one slip with notes). Uses {{categoriesSections}} so slip shows items grouped by category (e.g. MAKANAN / MINUMAN), not a table. */
 const FALLBACK_ORDER_SUMMARY_CHECKER_TEMPLATE = `<!DOCTYPE html>
-<html><head><meta charset="UTF-8"><style>@page{size:80mm auto;margin:0;}*{margin:0;padding:0;box-sizing:border-box;}body{font-family:Arial,sans-serif;width:42ch;font-size:9pt;padding:2mm 7mm;}table{width:100%;border-collapse:collapse;}td,th{padding:0.5mm 0;}tr.package-subitem td{font-size:8pt;padding-left:3mm;}</style></head><body>
-<div style="font-weight:700;margin-bottom:1mm;">Pelanggan: {{customerName}}</div>
-<div style="font-weight:700;margin-bottom:1mm;">Meja: {{tableName}}</div>
-<div style="font-size:8pt;margin-bottom:2mm;">{{orderTime}}</div>
-<table><tr><th style="text-align:left;">Item</th><th style="text-align:right;">Harga</th><th style="text-align:right;">Jml</th><th style="text-align:right;">Subtotal</th></tr>{{items}}</table>
+<html><head><meta charset="UTF-8"><style>@page{size:80mm auto;margin:0;}*{margin:0;padding:0;box-sizing:border-box;}body{font-family:Arial,sans-serif;width:42ch;font-size:9pt;padding:2mm {{rightPadding}}mm 2mm {{leftPadding}}mm;word-wrap:break-word;overflow-wrap:break-word;}.dashed-line{border-top:1px dashed #000;margin:1.5mm 0;}.info-line{display:flex;justify-content:space-between;margin-bottom:0.5mm;}.info-label{font-size:9pt;}.info-value{font-size:9pt;font-weight:700;}.category-section{margin:1.5mm 0;}.category-title{font-size:9pt;font-weight:700;margin-bottom:0.5mm;}.item-line{font-size:9pt;margin:0.5mm 0;}</style></head><body>
+<div class="dashed-line"></div>
+<div class="info-line"><span class="info-label">Waiter:</span><span class="info-value">{{waiterName}}</span></div>
+<div class="info-line"><span class="info-label">Pelanggan:</span><span class="info-value">{{customerName}}</span></div>
+<div class="info-line"><span class="info-label">Meja:</span><span class="info-value">{{tableName}}</span></div>
+<div class="info-line"><span class="info-label">Waktu Pesanan:</span><span class="info-value"><span class="time">{{orderTime}}</span></span></div>
+<div class="dashed-line"></div>
+{{categoriesSections}}
+<div class="dashed-line"></div>
 </body></html>`;
 
 async function executeLabelsBatchPrint(data: {
@@ -11304,8 +11286,12 @@ async function executeLabelsBatchPrint(data: {
     fetch('http://127.0.0.1:7245/ingest/519de021-d49d-473f-a8a1-4215977c867a', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ location: 'main.ts:executeLabelsBatchPrint', message: 'batch label checker result', data: { requestId, businessId: businessId ?? null, templateName: checkerResult.templateName, checkerShowNotes: checkerResult.showNotes, hasCheckerTemplate: !!checkerResult.templateCode?.trim(), pageSize, firstLabelCustomizationsLength: (firstLabelCustomizations || '').length }, timestamp: Date.now(), hypothesisId: 'A' }) }).catch(() => { });
     // #endregion
     const checkerTemplateCode = checkerResult.templateCode?.trim() ?? null;
-    const templateUsesItems = checkerTemplateCode != null && (checkerTemplateCode.includes('{{items}}') || checkerTemplateCode.includes('{{itemsCategory1}}') || checkerTemplateCode.includes('{{itemsCategory2}}'));
-    const hasOrderContextWithItems = hasOrderContext && (data.orderContext?.itemsHtml != null && String(data.orderContext.itemsHtml).trim() !== '');
+    const templateUsesItems = checkerTemplateCode != null && (checkerTemplateCode.includes('{{items}}') || checkerTemplateCode.includes('{{itemsCategory1}}') || checkerTemplateCode.includes('{{itemsCategory2}}') || checkerTemplateCode.includes('{{categoriesSections}}'));
+    const hasOrderContextWithItems = hasOrderContext && (
+      (data.orderContext?.itemsHtml != null && String(data.orderContext.itemsHtml).trim() !== '') ||
+      (data.orderContext?.itemsHtmlCategory1 != null && String(data.orderContext.itemsHtmlCategory1).trim() !== '') ||
+      (data.orderContext?.itemsHtmlCategory2 != null && String(data.orderContext.itemsHtmlCategory2).trim() !== '')
+    );
     const oneLabelPerProduct = checkerResult.oneLabelPerProduct !== false;
     // Use order-summary slip when template setting "1 label per product" is unchecked (oneLabelPerProduct === false) and we have order context. When checked, use per-item labels. If template has {{items}}, use it for the slip; otherwise use fallback slip template.
     const useOrderSummarySlip = hasOrderContextWithItems && !oneLabelPerProduct;
@@ -11906,6 +11892,16 @@ function generateLabelHTMLFromTemplate(templateCode: string, data: LabelPrintDat
     (itemsHtmlCategory2 || '').trim().length > 0 &&
     category2NameRaw !== '' &&
     category2NameRaw.toLowerCase() !== 'kategori 2';
+  // Build {{categoriesSections}}: category blocks (MAKANAN: - item, MINUMAN: - item) for slip pesanan template
+  const categorySectionBlock = (name: string, sectionHtml: string) =>
+    (sectionHtml || '').trim() ? `<div class="category-section"><div class="category-title">${name}:</div>${sectionHtml}</div>` : '';
+  let categoriesSections =
+    categorySectionBlock(category1Name, itemsHtmlCategory1) +
+    (hasItemsCategory2 ? categorySectionBlock(category2Name, itemsHtmlCategory2) : '');
+  // When no category HTML was sent but table HTML (itemsHtml) exists, show it under one "Pesanan" section so slip is not blank
+  if (!categoriesSections.trim() && (itemsHtml || '').trim()) {
+    categoriesSections = categorySectionBlock('Pesanan', itemsHtml);
+  }
   let out = templateCode;
   if (!hasItemsCategory2) {
     out = out.replace(/\{\{#ifItemsCategory2\}\}[\s\S]*?\{\{\/ifItemsCategory2\}\}/g, '');
@@ -11932,18 +11928,12 @@ function generateLabelHTMLFromTemplate(templateCode: string, data: LabelPrintDat
     .replace(/\{\{itemsCategory1\}\}/g, itemsHtmlCategory1)
     .replace(/\{\{itemsCategory2\}\}/g, itemsHtmlCategory2)
     .replace(/\{\{category1Name\}\}/g, category1Name)
-    .replace(/\{\{category2Name\}\}/g, category2Name);
+    .replace(/\{\{category2Name\}\}/g, category2Name)
+    .replace(/\{\{categoriesSections\}\}/g, categoriesSections);
   // Ensure .time div always shows formatted orderTime (fixes templates with literal date or missing placeholder)
   const timeDivRegex = /<div\s+class="time"[^>]*>[\s\S]*?<\/div>/gi;
   out = out.replace(timeDivRegex, `<div class="time">${orderTime}</div>`);
-  const hasTimeInOutput = out.includes('class="time"');
-  // Only inject footer when template had no .time div (avoid duplicating datetime when template already has one)
-  if (!hasTimeInOutput) {
-    const footerBlock = `<div class="footer" style="margin-top:2mm;"><div class="time">${orderTime}</div></div>`;
-    if (out.includes('</body>')) {
-      out = out.replace('</body>', `${footerBlock}</body>`);
-    }
-  }
+  // Do not inject a footer with date/time: let the template control layout. Templates that want time at bottom use {{orderTime}} or a .time div.
   // is40mmLabel: template is for 40mm kitchen labels (@page size 40mm). When true we inject NO extra CSS so the printed result matches the saved template exactly (font, position, layout).
   const is40mmLabel = out.includes('@page') && out.includes('40mm');
   // Normalize 40mm label height: saved templates may have "40mm auto" (long page). Force 40mm × 30mm so print/PDF is fixed height (runtime evidence: DB template "Momoyo Label" had 40mm auto).
@@ -12636,8 +12626,14 @@ function generateReceiptHTML(data: ReceiptPrintData, businessName: string, optio
 
 // Generate shift breakdown report HTML for printing
 function generateShiftBreakdownHTML(
-  shiftData: PrintableShiftReportSection & { businessName?: string; wholeDayReport?: PrintableShiftReportSection | null; sectionOptions?: { ringkasan?: boolean; barangTerjual?: boolean; paymentMethod?: boolean; categoryI?: boolean; categoryII?: boolean; paket?: boolean; toppingSales?: boolean; itemDibatalkan?: boolean } }
+  shiftData: PrintableShiftReportSection & { businessName?: string; wholeDayReport?: PrintableShiftReportSection | null; sectionOptions?: { ringkasan?: boolean; barangTerjual?: boolean; paymentMethod?: boolean; categoryI?: boolean; categoryII?: boolean; paket?: boolean; toppingSales?: boolean; itemDibatalkan?: boolean }; marginAdjustMm?: number }
 ): string {
+  const basePaddingMm = 3;
+  const marginAdjust = shiftData.marginAdjustMm ?? 0;
+  const clamped = Math.max(-5, Math.min(5, marginAdjust));
+  const leftPaddingMm = (basePaddingMm - clamped).toFixed(2);
+  const rightPaddingMm = (basePaddingMm + clamped).toFixed(2);
+
   const formatDateTime = (dateString: string): string => {
     const date = new Date(dateString);
     const gmt7Date = new Date(date.getTime() + (7 * 60 * 60 * 1000));
@@ -12772,44 +12768,61 @@ function generateShiftBreakdownHTML(
       return 0;
     });
 
-    const productRows = sortedProducts.map(product => {
-      try {
-        const quantity = product.total_quantity || 0;
-        const baseSubtotal = product.base_subtotal ?? (product.total_subtotal - product.customization_subtotal);
-        // Always calculate unit price from baseSubtotal/quantity (excludes customizations)
-        const unitPrice = quantity > 0 ? baseSubtotal / quantity : 0;
-        const platformLabel = formatPlatformLabel(product.platform);
-        const transactionLabel = formatTransactionLabel(product.transaction_type);
-        const isBundleItem = Boolean(product.is_bundle_item);
+    const PLATFORM_LABELS_BT: Record<string, string> = { offline: 'Offline', gofood: 'GoFood', grabfood: 'GrabFood', shopeefood: 'ShopeeFood', qpon: 'Qpon', tiktok: 'TikTok' };
+    const PLATFORM_ORDER_BT = ['offline', 'gofood', 'grabfood', 'shopeefood', 'qpon', 'tiktok'];
 
-        // Validate numeric values
-        if (isNaN(quantity) || isNaN(baseSubtotal) || isNaN(unitPrice)) {
-          console.error(`❌ [HTML GEN] Invalid numbers in product: ${product.product_name}`, {
-            quantity, baseSubtotal, unitPrice
-          });
-        }
-
-        if (isBundleItem) {
-          console.log(`[SHIFT PRINT] Displaying bundle item: ${product.product_name}, is_bundle_item: ${product.is_bundle_item}`);
-        }
-        const productNameDisplay = isBundleItem
-          ? `<span style="font-size: 4.8pt;">(Bundle)</span> ${product.product_name}`
-          : product.product_name;
-        return `
+    // Group products by platform for BARANG TERJUAL (platform header + product rows + subtotal per platform)
+    const productByPlatform = new Map<string, typeof sortedProducts>();
+    for (const p of sortedProducts) {
+      const raw = p.platform;
+      const key = typeof raw === 'string' ? raw : (Array.isArray(raw) && raw[0] ? String(raw[0]) : 'offline');
+      const platformKey = String(key || 'offline').toLowerCase();
+      const normalizedKey = PLATFORM_LABELS_BT[platformKey] ? platformKey : 'offline';
+      const list = productByPlatform.get(normalizedKey) || [];
+      list.push(p);
+      productByPlatform.set(normalizedKey, list);
+    }
+    const platformKeysWithSales = [...PLATFORM_ORDER_BT.filter((key) => (productByPlatform.get(key)?.length ?? 0) > 0)];
+    productByPlatform.forEach((_, key) => { if (!PLATFORM_ORDER_BT.includes(key)) platformKeysWithSales.push(key); });
+    const barangTerjualGroupedRows = platformKeysWithSales.flatMap((platformKey) => {
+      const items = productByPlatform.get(platformKey) || [];
+      const label = PLATFORM_LABELS_BT[platformKey] ?? formatPlatformLabel(platformKey);
+      let subQty = 0;
+      let subAmount = 0;
+      const rows = items.map(product => {
+        try {
+          const quantity = product.total_quantity || 0;
+          const baseSubtotal = product.base_subtotal ?? (product.total_subtotal - product.customization_subtotal);
+          const unitPrice = quantity > 0 ? baseSubtotal / quantity : 0;
+          const transactionLabel = formatTransactionLabel(product.transaction_type);
+          const isBundleItem = Boolean(product.is_bundle_item);
+          subQty += quantity;
+          if (!isBundleItem) subAmount += baseSubtotal;
+          if (isNaN(quantity) || isNaN(baseSubtotal) || isNaN(unitPrice)) {
+            console.error(`❌ [HTML GEN] Invalid numbers in product: ${product.product_name}`, { quantity, baseSubtotal, unitPrice });
+          }
+          const productNameDisplay = isBundleItem
+            ? `<span style="font-size: 4.8pt;">(Bundle)</span> ${product.product_name}`
+            : product.product_name;
+          return `
       <tr>
-        <td style="text-align: left; padding: 0.3mm 0;">
+        <td style="width: 52%; text-align: left; padding: 0.3mm 0;">
           <div>${productNameDisplay}</div>
-          <div style="font-size: 7pt; color: #555;">${transactionLabel} · ${platformLabel}</div>
+          <div style="font-size: 7pt; color: #555;">${transactionLabel}</div>
         </td>
-        <td style="text-align: left; padding: 0.3mm 0;">${quantity}</td>
-        <td style="text-align: left; padding: 0.3mm 0; font-size: 6pt;">${isBundleItem ? '-' : (isNaN(unitPrice) ? '0' : formatIntegerId(unitPrice))}</td>
-        <td style="text-align: right; padding: 0.3mm 0;">${isBundleItem ? '-' : (isNaN(baseSubtotal) ? '0' : formatIntegerId(baseSubtotal))}</td>
+        <td style="width: 12%; text-align: left; padding: 0.3mm 0; font-variant-numeric: tabular-nums;">${quantity}</td>
+        <td style="width: 18%; text-align: left; padding: 0.3mm 0; font-size: 6pt; font-variant-numeric: tabular-nums;">${isBundleItem ? '-' : (isNaN(unitPrice) ? '0' : formatIntegerId(unitPrice))}</td>
+        <td style="width: 18%; text-align: right; padding: 0.3mm 0; font-variant-numeric: tabular-nums;">${isBundleItem ? '-' : (isNaN(baseSubtotal) ? '0' : formatIntegerId(baseSubtotal))}</td>
       </tr>
       `;
-      } catch (productError) {
-        console.error(`❌ [HTML GEN] Error processing product:`, product, productError);
-        return `<tr><td colspan="4">Error processing product: ${product?.product_name || 'Unknown'}</td></tr>`;
-      }
+        } catch (productError) {
+          console.error(`❌ [HTML GEN] Error processing product:`, product, productError);
+          return `<tr><td colspan="4">Error processing product: ${product?.product_name || 'Unknown'}</td></tr>`;
+        }
+      }).join('');
+      const subtotalRow = `<tr style="background: #f0f0f0;"><td style="width: 52%; padding: 0.3mm 0; font-size: 7pt; font-weight: 600;">Subtotal</td><td style="width: 12%; text-align: left; font-size: 7pt; padding: 0.3mm 0; font-variant-numeric: tabular-nums;">${subQty}</td><td style="width: 18%; text-align: left; font-size: 6pt; padding: 0.3mm 0;">-</td><td style="width: 18%; text-align: right; font-size: 7pt; padding: 0.3mm 0; font-variant-numeric: tabular-nums;">${formatIntegerId(Math.round(subAmount))}</td></tr>`;
+      const headerRow = `<tr style="background: #e0e0e0;"><td colspan="4" style="padding: 0.5mm 0; font-size: 8pt; font-weight: 700;">${label}</td></tr>`;
+      return `<tr><td colspan="4" style="padding: 0; border: 1px solid #999;"><table style="width: 100%; border-collapse: collapse; table-layout: fixed;"><colgroup><col style="width: 52%;"><col style="width: 12%;"><col style="width: 18%;"><col style="width: 18%;"></colgroup><tbody>` + headerRow + rows + subtotalRow + `</tbody></table></td></tr>`;
     }).join('');
 
     const regularProducts = report.productSales.filter((p) => !p.is_bundle_item);
@@ -12818,31 +12831,6 @@ function generateShiftBreakdownHTML(
       const baseSubtotal = p.base_subtotal ?? (Number(p.total_subtotal || 0) - Number(p.customization_subtotal || 0));
       return sum + Number(baseSubtotal || 0);
     }, 0);
-
-    const PLATFORM_LABELS_BT: Record<string, string> = { offline: 'Offline', gofood: 'GoFood', grabfood: 'GrabFood', shopeefood: 'ShopeeFood', qpon: 'Qpon', tiktok: 'TikTok' };
-    const PLATFORM_ORDER_BT = ['offline', 'gofood', 'grabfood', 'shopeefood', 'qpon', 'tiktok'];
-    const productPlatformCount = new Map<string, number>();
-    const productPlatformAmount = new Map<string, number>();
-    const safeProducts = Array.isArray(regularProducts) ? regularProducts.filter((p) => p != null) : [];
-    safeProducts.forEach((p: { platform?: string | string[]; total_quantity?: number; base_subtotal?: number; total_subtotal?: number; customization_subtotal?: number; total_base_subtotal?: number }) => {
-      const platformRaw = p.platform;
-      const code = typeof platformRaw === 'string' ? platformRaw : (Array.isArray(platformRaw) && platformRaw[0] ? String(platformRaw[0]) : 'offline');
-      const platformKey = String(code || 'offline').toLowerCase();
-      const platform = PLATFORM_LABELS_BT[platformKey] ? platformKey : 'offline';
-      const qty = Number(p.total_quantity ?? 0) || 0;
-      const baseSub = p.base_subtotal ?? p.total_base_subtotal;
-      const calc = baseSub != null ? Number(baseSub) : (Number(p.total_subtotal ?? 0) - Number(p.customization_subtotal ?? 0));
-      const amount = Number.isFinite(calc) ? calc : 0;
-      productPlatformCount.set(platform, (productPlatformCount.get(platform) ?? 0) + qty);
-      productPlatformAmount.set(platform, (productPlatformAmount.get(platform) ?? 0) + amount);
-    });
-    const productPlatformBreakdownRows = PLATFORM_ORDER_BT.filter((key) => (productPlatformCount.get(key) ?? 0) > 0).map((key) => {
-      const qty = productPlatformCount.get(key) ?? 0;
-      const amount = productPlatformAmount.get(key) ?? 0;
-      const label = PLATFORM_LABELS_BT[key];
-      const amountStr = Number.isFinite(amount) ? formatIntegerId(Math.round(amount)) : '0';
-      return `<tr><td style="padding-left: 2mm; font-size: 7pt;">${label}</td><td style="text-align: left; font-size: 7pt;">${qty}</td><td style="text-align: left; font-size: 6pt;">-</td><td class="right" style="font-size: 7pt;">${amountStr}</td></tr>`;
-    }).join('');
 
     const customizationRows = report.customizationSales.map(item => {
       try {
@@ -12861,8 +12849,8 @@ function generateShiftBreakdownHTML(
           <div>${item.option_name || 'Unknown'}</div>
           <div style="font-size: 7pt; color: #555;">${item.customization_name || 'N/A'}</div>
         </td>
-        <td style="text-align: left; padding: 0.3mm 0;">${isNaN(quantity) ? '0' : quantity}</td>
-        <td style="text-align: right; padding: 0.3mm 0;">${isNaN(revenue) ? '0' : formatIntegerId(Math.round(revenue))}</td>
+        <td class="right" style="padding: 0.3mm 0;">${isNaN(quantity) ? '0' : quantity}</td>
+        <td class="right" style="padding: 0.3mm 0;">${isNaN(revenue) ? '0' : formatIntegerId(Math.round(revenue))}</td>
       </tr>
     `;
       } catch (customizationError) {
@@ -12932,9 +12920,9 @@ function generateShiftBreakdownHTML(
         const header = `
       <tr>
         <td style="text-align: left; padding: 0.3mm 0;">${pkg.package_product_name || 'Unknown Paket'}</td>
-        <td style="text-align: left; padding: 0.3mm 0;">${qty}</td>
-        <td style="text-align: right; padding: 0.3mm 0;">${formatIntegerId(unitPrice)}</td>
-        <td style="text-align: right; padding: 0.3mm 0;">${formatIntegerId(amount)}</td>
+        <td class="right" style="padding: 0.3mm 0;">${qty}</td>
+        <td class="right" style="padding: 0.3mm 0;">${formatIntegerId(unitPrice)}</td>
+        <td class="right" style="padding: 0.3mm 0;">${formatIntegerId(amount)}</td>
       </tr>
         `;
         const lines = Array.isArray(pkg.lines)
@@ -13124,12 +13112,6 @@ function generateShiftBreakdownHTML(
             <span class="summary-value">${formatIntegerId(Math.max(0, Number(report.statistics.total_amount ?? 0)))}</span>
           </div>
         </div>
-        ${totalCustomizationRevenue > 0 ? `
-        <div class="summary-line summary-line-highlight-topping">
-          <span class="summary-label">Total Topping:</span>
-          <span class="summary-value">${formatIntegerId(totalCustomizationRevenue)}</span>
-        </div>
-        ` : ''}
         <div class="summary-subtitle">Kas</div>
         <div class="summary-line">
           <span class="summary-label">Kas Mulai:</span>
@@ -13265,16 +13247,16 @@ function generateShiftBreakdownHTML(
         <thead>
           <tr>
             <th>Paket</th>
-            <th style="text-align: left;">Qty</th>
-            <th class="right">Unit Price</th>
-            <th class="right">Subtotal</th>
+            <th class="right" style="width: 12%;">Qty</th>
+            <th class="right" style="width: 18%;">Unit Price</th>
+            <th class="right" style="width: 18%;">Subtotal</th>
           </tr>
         </thead>
         <tbody>
           ${packageRows || '<tr><td colSpan="4" style="text-align: center;">Tidak ada paket terjual</td></tr>'}
           <tr class="total-row">
             <td>TOTAL</td>
-            <td style="text-align: left;">${totalPackageQty}</td>
+            <td class="right">${totalPackageQty}</td>
             <td class="right">-</td>
             <td class="right">${formatIntegerId(Math.round(totalPackageAmount))}</td>
           </tr>
@@ -13286,24 +13268,24 @@ function generateShiftBreakdownHTML(
 
       ${sectionOptions.barangTerjual === true ? `
       <div class="section-title">BARANG TERJUAL</div>
-      <table>
+      <table style="table-layout: fixed; width: 100%;">
+        <colgroup><col style="width: 52%;"><col style="width: 12%;"><col style="width: 18%;"><col style="width: 18%;"></colgroup>
         <thead>
           <tr>
-            <th>Product</th>
-            <th style="text-align: left;">Qty</th>
-            <th style="text-align: left; font-size: 6pt;">Unit Price</th>
-            <th class="right">Subtotal</th>
+            <th style="width: 52%; text-align: left;">Product</th>
+            <th style="width: 12%; text-align: left;">Qty</th>
+            <th style="width: 18%; text-align: left;">@</th>
+            <th class="right" style="width: 18%;">Subtotal</th>
           </tr>
         </thead>
         <tbody>
-          ${productRows || '<tr><td colSpan="4" style="text-align: center;">Tidak ada produk</td></tr>'}
+          ${barangTerjualGroupedRows || '<tr><td colSpan="4" style="text-align: center;">Tidak ada produk</td></tr>'}
           <tr class="total-row">
-            <td>TOTAL</td>
-            <td style="text-align: left;">${totalProductQty}</td>
-            <td style="text-align: left; font-size: 6pt;">-</td>
-            <td class="right">${formatIntegerId(Math.round(totalProductBaseSubtotal))}</td>
+            <td style="width: 52%; font-weight: 600;">TOTAL</td>
+            <td style="width: 12%; text-align: left; font-variant-numeric: tabular-nums;">${totalProductQty}</td>
+            <td style="width: 18%; text-align: left;">-</td>
+            <td class="right" style="width: 18%; font-variant-numeric: tabular-nums;">${formatIntegerId(Math.round(totalProductBaseSubtotal))}</td>
           </tr>
-          ${productPlatformBreakdownRows}
         </tbody>
       </table>
 
@@ -13316,15 +13298,15 @@ function generateShiftBreakdownHTML(
         <thead>
           <tr>
             <th>Customization</th>
-            <th style="text-align: left;">Qty</th>
-            <th class="right">Revenue</th>
+            <th class="right" style="width: 15%;">Qty</th>
+            <th class="right" style="width: 22%;">Revenue</th>
           </tr>
         </thead>
         <tbody>
           ${customizationRows || '<tr><td colSpan="3" style="text-align: center;">Tidak ada kustomisasi</td></tr>'}
           <tr class="total-row">
             <td>TOTAL</td>
-            <td style="text-align: left;">${totalCustomizationUnits}</td>
+            <td class="right">${totalCustomizationUnits}</td>
             <td class="right">${formatIntegerId(Math.round(totalCustomizationRevenue))}</td>
           </tr>
         </tbody>
@@ -13428,7 +13410,7 @@ function generateShiftBreakdownHTML(
       font-size: 9pt;
       font-weight: 500;
       line-height: 1.2;
-      padding: 2mm 7mm;
+      padding: 2mm ${rightPaddingMm}mm 2mm ${leftPaddingMm}mm;
       word-wrap: break-word;
       overflow-wrap: break-word;
     }
@@ -13700,6 +13682,7 @@ ipcMain.handle('print-shift-breakdown', async (event, data: PrintableShiftReport
     console.log('   - Printer Type:', data.printerType);
 
     let printerName: string | null = null;
+    let shiftMarginAdjustMm: number | undefined;
     const printerType = data.printerType || 'receiptPrinter';
 
     console.log('🔍 [SHIFT PRINT] Looking up printer config for type:', printerType);
@@ -13722,6 +13705,16 @@ ipcMain.handle('print-shift-breakdown', async (event, data: PrintableShiftReport
       if (config && config.system_printer_name) {
         printerName = config.system_printer_name.trim();
         console.log('✅ [SHIFT PRINT] Found printer config:', printerName);
+
+        if (config.extra_settings) {
+          try {
+            const extra = (typeof config.extra_settings === 'string' ? JSON.parse(config.extra_settings) : config.extra_settings) as { marginAdjustMm?: number };
+            if (typeof extra.marginAdjustMm === 'number' && !Number.isNaN(extra.marginAdjustMm)) {
+              shiftMarginAdjustMm = extra.marginAdjustMm;
+              console.log('🎚️ [SHIFT PRINT] Using marginAdjustMm from printer setup:', shiftMarginAdjustMm);
+            }
+          } catch (_) { /* ignore */ }
+        }
 
         // Validate printer name is not empty after trim
         if (!printerName || printerName.length === 0) {
@@ -13873,7 +13866,8 @@ ipcMain.handle('print-shift-breakdown', async (event, data: PrintableShiftReport
         cashSummary: data.cashSummary,
         wholeDayReport: data.wholeDayReport || null,
         businessName,
-        sectionOptions: data.sectionOptions
+        sectionOptions: data.sectionOptions,
+        marginAdjustMm: shiftMarginAdjustMm
       });
       console.log('✅ [SHIFT PRINT] HTML generation successful');
     } catch (htmlError) {

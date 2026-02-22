@@ -2917,58 +2917,50 @@ export default function GantiShift() {
                             <span className="flex-grow border-b border-dotted border-amber-300 mx-2"></span>
                             <span className="text-sm font-bold text-amber-900">{formatRupiah(grossTotalOmset)}</span>
                           </div>
-                          {/* Refund - own row with distinct color */}
-                          <div className="flex items-center py-1 mt-1 rounded px-2 bg-red-50 border border-red-200/60">
-                            <span className="text-xs font-semibold text-red-800">Refund:</span>
-                            <span className="flex-grow border-b border-dotted border-red-200 mx-2"></span>
-                            <span className="text-xs font-bold text-red-700">-{formatRupiah(totalRefundsActive)}</span>
-                          </div>
-                          {/* Item Dibatalkan - centralised deduction (alongside Refund, Diskon Voucher) */}
-                          {totalCancelledAmount > 0 && (
-                            <div className="flex items-center py-1 mt-1 rounded px-2 bg-red-50/80 border border-red-200/60">
+                        </div>
+                        {/* Refund - own box with red border */}
+                        <div className="flex items-center py-1.5 rounded-lg px-3 mb-2 bg-red-50 border border-red-200">
+                          <span className="text-xs font-semibold text-red-800">Refund:</span>
+                          <span className="flex-grow border-b border-dotted border-red-200 mx-2"></span>
+                          <span className="text-xs font-bold text-red-700">-{formatRupiah(totalRefundsActive)}</span>
+                        </div>
+                        {/* Item Dibatalkan - centralised deduction (alongside Refund, Diskon Voucher) */}
+                        {totalCancelledAmount > 0 && (
+                          <div className="flex items-center py-1 mt-0 rounded px-2 bg-red-50/80 border border-red-200/60 mb-2">
                               <span className="text-xs font-semibold text-red-800">Item Dibatalkan:</span>
                               <span className="flex-grow border-b border-dotted border-red-200 mx-2"></span>
                               <span className="text-xs font-bold text-red-700">-{formatRupiah(totalCancelledAmount)}</span>
                             </div>
                           )}
-                          {/* Diskon Voucher - own row with distinct color; breakdown indented below */}
-                          <div className="rounded px-2 py-1 mt-0.5 bg-green-50 border border-green-200/60">
-                            <div className="flex items-center py-0.5">
-                              <span className="text-xs font-semibold text-green-800">Diskon Voucher:</span>
-                              <span className="flex-grow border-b border-dotted border-green-200 mx-2"></span>
-                              <span className="text-xs font-bold text-green-700">
-                                {effectiveTotalDiscount > 0 ? `-${formatRupiah(effectiveTotalDiscount)}` : formatRupiah(0)}
-                              </span>
-                            </div>
-                            {VOUCHER_BREAKDOWN_ORDER.map(({ key, label }) => {
-                              const e = voucherBreakdown[key];
-                              if (!e || e.count <= 0) return null;
-                              return (
-                                <div key={key} className="flex items-center py-0.5 pl-4">
-                                  <span className="text-xs text-gray-600">{label} ({e.count}):</span>
-                                  <span className="flex-grow border-b border-dotted border-gray-200 mx-2"></span>
-                                  <span className="text-xs font-semibold text-green-600">-{formatRupiah(e.total)}</span>
-                                </div>
-                              );
-                            })}
-                          </div>
-                          {/* Grand total = Total Omset - Refund - Total Item Dibatalkan - Diskon Voucher */}
-                          <div className="flex items-center py-1.5 mt-1 rounded px-2 bg-gray-100 border border-gray-200">
-                            <span className="text-xs font-bold text-gray-800">Grand Total:</span>
-                            <span className="flex-grow border-b border-dotted border-gray-300 mx-2"></span>
-                            <span className="text-sm font-bold text-gray-900">
-                              {formatRupiah(Math.max(0, grossTotalOmset - (Number(totalRefundsActive) || 0) - totalCancelledAmount - effectiveTotalDiscount))}
+                        {/* Diskon Voucher - own box with green border */}
+                        <div className="rounded-lg px-3 py-1.5 mb-2 bg-green-50 border border-green-200/60">
+                          <div className="flex items-center py-0.5">
+                            <span className="text-xs font-semibold text-green-800">Diskon Voucher:</span>
+                            <span className="flex-grow border-b border-dotted border-green-200 mx-2"></span>
+                            <span className="text-xs font-bold text-green-700">
+                              {effectiveTotalDiscount > 0 ? `-${formatRupiah(effectiveTotalDiscount)}` : formatRupiah(0)}
                             </span>
                           </div>
+                          {VOUCHER_BREAKDOWN_ORDER.map(({ key, label }) => {
+                            const e = voucherBreakdown[key];
+                            if (!e || e.count <= 0) return null;
+                            return (
+                              <div key={key} className="flex items-center py-0.5 pl-4">
+                                <span className="text-xs text-gray-600">{label} ({e.count}):</span>
+                                <span className="flex-grow border-b border-dotted border-gray-200 mx-2"></span>
+                                <span className="text-xs font-semibold text-green-600">-{formatRupiah(e.total)}</span>
+                              </div>
+                            );
+                          })}
                         </div>
-                        {/* Total Topping - only show when > 0 */}
-                        {totalToppingRevenue > 0 && (
-                          <div className="flex items-center py-2 px-2 -mx-2 rounded-lg bg-blue-50 border border-blue-200/60 mb-2">
-                            <span className="text-sm font-semibold text-blue-800">Total Topping:</span>
-                            <span className="flex-grow border-b border-dotted border-blue-300 mx-2"></span>
-                            <span className="text-sm font-bold text-blue-900">{formatRupiah(totalToppingRevenue)}</span>
-                          </div>
-                        )}
+                        {/* Grand total = Total Omset - Refund - Total Item Dibatalkan - Diskon Voucher */}
+                        <div className="flex items-center py-1.5 rounded-lg px-3 bg-gray-100 border border-gray-200">
+                          <span className="text-xs font-bold text-gray-800">Grand Total:</span>
+                          <span className="flex-grow border-b border-dotted border-gray-300 mx-2"></span>
+                          <span className="text-sm font-bold text-gray-900">
+                            {formatRupiah(Math.max(0, grossTotalOmset - (Number(totalRefundsActive) || 0) - totalCancelledAmount - effectiveTotalDiscount))}
+                          </span>
+                        </div>
                       </div>
 
                       {/* Right Column - Cash Summary */}

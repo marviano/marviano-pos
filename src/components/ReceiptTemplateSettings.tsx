@@ -1190,8 +1190,11 @@ export default function ReceiptTemplateSettings() {
                 </button>
               </div>
             </div>
+            <p className="text-sm text-gray-600 mb-2">
+              Placeholder (per label): <code className="bg-gray-100 px-1 rounded">{'{{counter}}'}</code>, <code className="bg-gray-100 px-1 rounded">{'{{itemNumber}}'}</code>, <code className="bg-gray-100 px-1 rounded">{'{{totalItems}}'}</code>, <code className="bg-gray-100 px-1 rounded">{'{{pickupMethod}}'}</code>, <code className="bg-gray-100 px-1 rounded">{'{{productName}}'}</code>, <code className="bg-gray-100 px-1 rounded">{'{{customizations}}'}</code>, <code className="bg-gray-100 px-1 rounded">{'{{orderTime}}'}</code>, <code className="bg-gray-100 px-1 rounded">{'{{labelContinuation}}'}</code>.
+            </p>
             <p className="text-sm text-gray-600 mb-4">
-              Placeholder: <code className="bg-gray-100 px-1 rounded">{'{{counter}}'}</code>, <code className="bg-gray-100 px-1 rounded">{'{{itemNumber}}'}</code>, <code className="bg-gray-100 px-1 rounded">{'{{totalItems}}'}</code>, <code className="bg-gray-100 px-1 rounded">{'{{pickupMethod}}'}</code>, <code className="bg-gray-100 px-1 rounded">{'{{productName}}'}</code>, <code className="bg-gray-100 px-1 rounded">{'{{customizations}}'}</code>, <code className="bg-gray-100 px-1 rounded">{'{{orderTime}}'}</code>, <code className="bg-gray-100 px-1 rounded">{'{{labelContinuation}}'}</code>.
+              Slip pesanan (satu struk gabungan): <code className="bg-gray-100 px-1 rounded">{'{{waiterName}}'}</code>, <code className="bg-gray-100 px-1 rounded">{'{{customerName}}'}</code>, <code className="bg-gray-100 px-1 rounded">{'{{tableName}}'}</code>, <code className="bg-gray-100 px-1 rounded">{'{{orderTime}}'}</code>, <code className="bg-gray-100 px-1 rounded">{'{{categoriesSections}}'}</code> (group by kategori), <code className="bg-gray-100 px-1 rounded">{'{{items}}'}</code> (tabel), <code className="bg-gray-100 px-1 rounded">{'{{leftPadding}}'}</code>, <code className="bg-gray-100 px-1 rounded">{'{{rightPadding}}'}</code>.
             </p>
             {loading ? (
               <div className="text-center py-8 text-gray-500">Memuat template...</div>
