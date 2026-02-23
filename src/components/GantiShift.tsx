@@ -2438,6 +2438,9 @@ export default function GantiShift() {
   };
 
   // Cash reconciliation helpers - based on active tab
+  // Selisih Kas formula (must match backend end-shift and get-cash-summary):
+  //   Kas Expected = Modal Awal + Penjualan Tunai (net of cancelled) - Refund Tunai
+  //   Selisih = Kas Akhir - Kas Expected (plus = surplus, minus = shortfall)
   // Convert string values to numbers (MySQL returns decimal as strings)
   const cashShiftSales = Number(cashSummary.cash_shift_sales ?? cashSummary.cash_shift ?? 0) || 0;
   const cashShiftRefunds = Number(cashSummary.cash_shift_refunds ?? 0) || 0;
@@ -2460,6 +2463,7 @@ export default function GantiShift() {
     kasAkhirActive = displayShift?.kas_akhir !== null && displayShift?.kas_akhir !== undefined ? Number(displayShift.kas_akhir) : null;
 
     if (kasAkhirActive !== null) {
+      // Same formula as backend: Kas Expected = Modal Awal + cash sales (net) - refunds; Selisih = Kas Akhir - Kas Expected
       const kasExpectedForShift = kasMulaiActive + cashShiftSales - cashShiftRefunds;
       const delta = Number((kasAkhirActive - kasExpectedForShift).toFixed(2));
       if (Math.abs(delta) < 0.01) {

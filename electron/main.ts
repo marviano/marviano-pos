@@ -7250,15 +7250,28 @@ function createWindows(): void {
       const cashMethod = await executeQueryOne<{ id: number }>('SELECT id FROM payment_methods WHERE code = ? LIMIT 1', ['cash']);
       const cashMethodId = cashMethod?.id || 1;
 
+      // Selisih Kas formula (aligned with Ganti Shift page and get-cash-summary):
+      // - Kas Expected = Modal Awal + Penjualan Tunai (net of cancelled items) - Refund Tunai
+      // - Selisih = Kas Akhir - Kas Expected (plus = surplus, minus = shortfall, balanced ≈ 0)
+      // Cash sales must match get-cash-summary: exclude cancelled item amounts so stored values match report.
       const shiftSalesResult = await executeQueryOne<{ cash_total: number }>(`
-        SELECT COALESCE(SUM(t.final_amount), 0) as cash_total
+        SELECT COALESCE(SUM(t.final_amount - COALESCE(cancelled.total_cancelled, 0)), 0) as cash_total
         FROM transactions t
-        WHERE business_id = ?
-          AND user_id = ?
-          AND created_at >= ?
-          AND created_at <= ?
-          AND payment_method_id = ?
-          AND status = 'completed'
+        LEFT JOIN (
+          SELECT 
+            transaction_id, 
+            uuid_transaction_id,
+            SUM(total_price) as total_cancelled
+          FROM transaction_items
+          WHERE production_status = 'cancelled'
+          GROUP BY uuid_transaction_id, transaction_id
+        ) cancelled ON (t.uuid_id = cancelled.uuid_transaction_id OR t.id = cancelled.transaction_id)
+        WHERE t.business_id = ?
+          AND t.user_id = ?
+          AND t.created_at >= ?
+          AND t.created_at <= ?
+          AND t.payment_method_id = ?
+          AND t.status = 'completed'
       `, [
         shiftRow.business_id,
         shiftRow.user_id,
@@ -7547,7 +7560,7 @@ function createWindows(): void {
     }
   });
 
-  // Get payment method breakdown
+  // Get payment method breakdown (gross: total_amount, no deduction for cancelled or refunds).
   // When shiftUuids (non-empty): all transactions bound to any of those shifts (whole day). When shiftUuid: single shift (all users). Else: userId + time.
   ipcMain.handle('localdb-get-payment-breakdown', async (event, userId: number | null, shiftStart: string, shiftEnd: string | null, businessId: number | null = null, shiftUuid: string | null = null, shiftUuids?: string[]) => {
     try {
@@ -7555,18 +7568,17 @@ function createWindows(): void {
         return [];
       }
 
-      // Payment breakdown: gross amount per method (minus refund only). Item dibatalkan deduction is centralised in Ringkasan.
-      const onlyTxWithItems = ' AND t.id IN (SELECT transaction_id FROM transaction_items GROUP BY transaction_id HAVING COALESCE(SUM(total_price), 0) > 0)';
+      const amountExpr = 'COALESCE(SUM(t.total_amount), 0)';
       if (shiftUuids && shiftUuids.length > 0) {
         const query = `
           SELECT 
             COALESCE(pm.name, 'Unknown') as payment_method_name,
             COALESCE(pm.code, 'unknown') as payment_method_code,
             COUNT(t.id) as transaction_count,
-            COALESCE(SUM(GREATEST(0, t.total_amount - COALESCE(t.refund_total, 0))), 0) as total_amount
+            ${amountExpr} as total_amount
           FROM transactions t
           LEFT JOIN payment_methods pm ON t.payment_method_id = pm.id
-          WHERE t.business_id = ? AND t.shift_uuid IN (${shiftUuids.map(() => '?').join(',')}) AND t.status = 'completed' AND t.refund_status != 'full'${onlyTxWithItems}
+          WHERE t.business_id = ? AND t.shift_uuid IN (${shiftUuids.map(() => '?').join(',')}) AND t.status = 'completed'
           GROUP BY t.payment_method_id, pm.name, pm.code ORDER BY transaction_count DESC
         `;
         const results = await executeQuery(query, [businessId, ...shiftUuids]);
@@ -7579,10 +7591,10 @@ function createWindows(): void {
             COALESCE(pm.name, 'Unknown') as payment_method_name,
             COALESCE(pm.code, 'unknown') as payment_method_code,
             COUNT(t.id) as transaction_count,
-            COALESCE(SUM(GREATEST(0, t.total_amount - COALESCE(t.refund_total, 0))), 0) as total_amount
+            ${amountExpr} as total_amount
           FROM transactions t
           LEFT JOIN payment_methods pm ON t.payment_method_id = pm.id
-          WHERE t.business_id = ? AND t.shift_uuid = ? AND t.status = 'completed' AND t.refund_status != 'full'${onlyTxWithItems}
+          WHERE t.business_id = ? AND t.shift_uuid = ? AND t.status = 'completed'
           GROUP BY t.payment_method_id, pm.name, pm.code ORDER BY transaction_count DESC
         `;
         const results = await executeQuery(query, [businessId, shiftUuid]);
@@ -7598,14 +7610,12 @@ function createWindows(): void {
           COALESCE(pm.name, 'Unknown') as payment_method_name,
           COALESCE(pm.code, 'unknown') as payment_method_code,
           COUNT(t.id) as transaction_count,
-          COALESCE(SUM(GREATEST(0, t.total_amount - COALESCE(t.refund_total, 0))), 0) as total_amount
+          ${amountExpr} as total_amount
         FROM transactions t
         LEFT JOIN payment_methods pm ON t.payment_method_id = pm.id
         WHERE t.business_id = ?
         AND t.created_at >= ?
         AND t.status = 'completed'
-        AND t.refund_status != 'full'
-        ${onlyTxWithItems}
       `;
       const params: (string | number | null | boolean)[] = [businessId, shiftStartMySQL];
 
@@ -7629,7 +7639,7 @@ function createWindows(): void {
     }
   });
 
-  // Get Category I breakdown: only product's category1 (no category2). Refund (full & partial) excluded from amount.
+  // Get Category I breakdown: gross (total_amount), no deduction for cancelled or refunds; matches Payment Method base.
   // When shiftUuids (non-empty): filter by t.shift_uuid IN (...). When shiftUuid: filter by t.shift_uuid = ?. Else: userId + time.
   ipcMain.handle('localdb-get-category1-breakdown', async (event, userId: number | null, shiftStart: string, shiftEnd: string | null, businessId: number | null = null, shiftUuid?: string | null, shiftUuids?: string[]) => {
     try {
@@ -7644,28 +7654,17 @@ function createWindows(): void {
           COALESCE(c1.id, 0) as category1_id,
           COALESCE(SUM(ti.quantity), 0) as total_quantity,
           COALESCE(SUM(
-            ti.total_price / NULLIF((SELECT COALESCE(SUM(ti2.total_price), 0) FROM transaction_items ti2 WHERE ti2.transaction_id = ti.transaction_id AND (ti2.production_status IS NULL OR ti2.production_status != 'cancelled')), 0)
-            * COALESCE(GREATEST(0, (t.total_amount - COALESCE(cancelled.total_cancelled, 0)) - COALESCE(t.refund_total, 0)), 0)
+            ti.total_price / NULLIF((SELECT COALESCE(SUM(ti2.total_price), 0) FROM transaction_items ti2 WHERE ti2.transaction_id = ti.transaction_id), 0)
+            * COALESCE(t.total_amount, 0)
           ), 0) as total_amount
         FROM transaction_items ti
         INNER JOIN transactions t ON ti.transaction_id = t.id
         INNER JOIN products p ON ti.product_id = p.id
         LEFT JOIN category1 c1 ON p.category1_id = c1.id
-        LEFT JOIN (
-            SELECT 
-              transaction_id, 
-              uuid_transaction_id,
-              SUM(total_price) as total_cancelled
-            FROM transaction_items
-            WHERE production_status = 'cancelled'
-            GROUP BY uuid_transaction_id, transaction_id
-          ) cancelled ON (t.uuid_id = cancelled.uuid_transaction_id OR t.id = cancelled.transaction_id)
         WHERE t.business_id = ?
         AND t.status = 'completed'
-        AND t.refund_status != 'full'
         AND p.category1_id IS NOT NULL
         AND c1.id IS NOT NULL
-        AND (ti.production_status IS NULL OR ti.production_status != 'cancelled')
       `;
       const params: (string | number | null | boolean)[] = [businessId];
       if (shiftUuids && shiftUuids.length > 0) {
@@ -7695,7 +7694,7 @@ function createWindows(): void {
     }
   });
 
-  // Get Category II breakdown: only product's category2 that belongs to this business (category2_businesses). Refund (full & partial) excluded from amount.
+  // Get Category II breakdown: only product's category2 that belongs to this business (category2_businesses). Gross amount only; no deduction for refund or cancelled.
   // When shiftUuids (non-empty): filter by t.shift_uuid IN (...). When shiftUuid: filter by t.shift_uuid = ?. Else: userId + time.
   ipcMain.handle('localdb-get-category2-breakdown', async (event, userId: number | null, shiftStart: string, shiftEnd: string | null, businessId: number | null = null, shiftUuid?: string | null, shiftUuids?: string[]) => {
     try {
@@ -7711,29 +7710,18 @@ function createWindows(): void {
           COALESCE(c2.id, 0) as category2_id,
           COALESCE(SUM(ti.quantity), 0) as total_quantity,
           COALESCE(SUM(
-            ti.total_price / NULLIF((SELECT COALESCE(SUM(ti2.total_price), 0) FROM transaction_items ti2 WHERE ti2.transaction_id = ti.transaction_id AND (ti2.production_status IS NULL OR ti2.production_status != 'cancelled')), 0)
-            * COALESCE(GREATEST(0, (t.total_amount - COALESCE(cancelled.total_cancelled, 0)) - COALESCE(t.refund_total, 0)), 0)
+            ti.total_price / NULLIF((SELECT COALESCE(SUM(ti2.total_price), 0) FROM transaction_items ti2 WHERE ti2.transaction_id = ti.transaction_id), 0)
+            * COALESCE(t.total_amount, 0)
           ), 0) as total_amount
         FROM transaction_items ti
         INNER JOIN transactions t ON ti.transaction_id = t.id
         INNER JOIN products p ON ti.product_id = p.id
         INNER JOIN category2_businesses cb ON cb.category2_id = p.category2_id AND cb.business_id = t.business_id
         LEFT JOIN category2 c2 ON p.category2_id = c2.id
-        LEFT JOIN (
-            SELECT 
-              transaction_id, 
-              uuid_transaction_id,
-              SUM(total_price) as total_cancelled
-            FROM transaction_items
-            WHERE production_status = 'cancelled'
-            GROUP BY uuid_transaction_id, transaction_id
-          ) cancelled ON (t.uuid_id = cancelled.uuid_transaction_id OR t.id = cancelled.transaction_id)
         WHERE t.business_id = ?
         AND t.status = 'completed'
-        AND t.refund_status != 'full'
         AND p.category2_id IS NOT NULL
         AND c2.id IS NOT NULL
-        AND (ti.production_status IS NULL OR ti.production_status != 'cancelled')
       `;
       const params: (string | number | null | boolean)[] = [businessId];
 
@@ -7778,18 +7766,10 @@ function createWindows(): void {
         return { cash_shift: 0, cash_whole_day: 0 };
       }
 
+      // Cash sales: gross (total_amount) so Ringkasan Cash Sales matches Payment Method Cash.
       let shiftQuery = `
-        SELECT COALESCE(SUM(t.final_amount - COALESCE(cancelled.total_cancelled, 0)), 0) as cash_total
+        SELECT COALESCE(SUM(t.total_amount), 0) as cash_total
         FROM transactions t
-        LEFT JOIN (
-          SELECT 
-            transaction_id, 
-            uuid_transaction_id,
-            SUM(total_price) as total_cancelled
-          FROM transaction_items
-          WHERE production_status = 'cancelled'
-          GROUP BY uuid_transaction_id, transaction_id
-        ) cancelled ON (t.uuid_id = cancelled.uuid_transaction_id OR t.id = cancelled.transaction_id)
         WHERE t.business_id = ?
         AND t.payment_method_id = ?
         AND t.status = 'completed'
@@ -7844,17 +7824,8 @@ function createWindows(): void {
         const dayEnd = new Date(dayEndGMT7.getTime() - gmt7Offset);
 
         wholeDayResult = await executeQueryOne<{ cash_total: number }>(`
-          SELECT COALESCE(SUM(t.final_amount - COALESCE(cancelled.total_cancelled, 0)), 0) as cash_total
+          SELECT COALESCE(SUM(t.total_amount), 0) as cash_total
           FROM transactions t
-          LEFT JOIN (
-            SELECT 
-              transaction_id, 
-              uuid_transaction_id,
-              SUM(total_price) as total_cancelled
-            FROM transaction_items
-            WHERE production_status = 'cancelled'
-            GROUP BY uuid_transaction_id, transaction_id
-          ) cancelled ON (t.uuid_id = cancelled.uuid_transaction_id OR t.id = cancelled.transaction_id)
           WHERE t.business_id = ?
           AND t.created_at >= ?
           AND t.created_at <= ?
@@ -8277,16 +8248,14 @@ function createWindows(): void {
             p.nama as package_product_name,
             ti.quantity as package_qty,
             ti.total_price as package_total_price,
-            COALESCE(GREATEST(0, (t.total_amount - COALESCE(t.refund_total, 0))), 0) as tx_total_amount,
-            (SELECT COALESCE(SUM(ti2.total_price), 0) FROM transaction_items ti2 WHERE ti2.transaction_id = ti.transaction_id AND (ti2.production_status IS NULL OR ti2.production_status != 'cancelled')) as tx_items_total
+            COALESCE(t.total_amount, 0) as tx_total_amount,
+            (SELECT COALESCE(SUM(ti2.total_price), 0) FROM transaction_items ti2 WHERE ti2.transaction_id = ti.transaction_id) as tx_items_total
           FROM transaction_items ti
           INNER JOIN transactions t ON ti.transaction_id = t.id
           INNER JOIN products p ON ti.product_id = p.id
           WHERE t.business_id = ?
             AND t.status = 'completed'
-            AND t.refund_status != 'full'
             AND p.category1_id = 14
-            AND (ti.production_status IS NULL OR ti.production_status != 'cancelled')
         `;
         const params: (string | number | null | boolean)[] = [businessId];
 
@@ -8482,15 +8451,13 @@ function createWindows(): void {
           COALESCE(t.refund_total, 0) as refund_total,
           t.final_amount,
           t.total_amount,
-          (SELECT COALESCE(SUM(ti2.total_price), 0) FROM transaction_items ti2 WHERE ti2.transaction_id = ti.transaction_id AND (ti2.production_status IS NULL OR ti2.production_status != 'cancelled')) as tx_items_total
+          (SELECT COALESCE(SUM(ti2.total_price), 0) FROM transaction_items ti2 WHERE ti2.transaction_id = ti.transaction_id) as tx_items_total
         FROM transaction_items ti
         INNER JOIN transactions t ON ti.transaction_id = t.id
         LEFT JOIN payment_methods pm ON t.payment_method_id = pm.id
         INNER JOIN products p ON ti.product_id = p.id
         WHERE t.business_id = ?
         AND t.status = 'completed'
-        AND t.refund_status != 'full'
-        AND (ti.production_status IS NULL OR ti.production_status != 'cancelled')
       `;
       const params: (string | number | null | boolean)[] = [businessId];
 
@@ -8676,12 +8643,10 @@ function createWindows(): void {
           baseSubtotal = 0;
         }
 
-        // Allocate net transaction amount (gross - refund) to items proportionally
+        // Allocate gross transaction amount to items proportionally (no deduction for refund or cancelled)
         const totalAmountTx = Number(row.total_amount ?? 0);
-        const refundTotal = Number(row.refund_total ?? 0);
-        const netAmountTx = Math.max(0, totalAmountTx - refundTotal);
         const txItemsTotal = Number(row.tx_items_total ?? 0);
-        const allocatedRatio = txItemsTotal > 0 ? netAmountTx / txItemsTotal : 0;
+        const allocatedRatio = txItemsTotal > 0 ? totalAmountTx / txItemsTotal : 0;
         const netBaseSubtotal = baseSubtotal * allocatedRatio;
         const netTotalPrice = totalPrice * allocatedRatio;
         const netCustomizationSubtotal = customizationSubtotal * allocatedRatio;
@@ -12970,6 +12935,7 @@ function generateShiftBreakdownHTML(
     const cashNetShift = Number(cashSummaryData.cash_shift) || (cashShiftSales - cashShiftRefunds);
     const cashNetWholeDay = Number(cashSummaryData.cash_whole_day) || (cashWholeDaySales - cashWholeDayRefunds);
     // Ensure all values are numbers and handle NaN
+    // Selisih Kas: Kas Expected = Modal Awal + Penjualan Tunai (net) - Refund Tunai; Selisih = Kas Akhir - Kas Expected
     const kasMulaiSummary = Number(cashSummaryData.kas_mulai ?? report.modal_awal ?? 0) || 0;
     const kasExpectedSummary = Number(cashSummaryData.kas_expected) || (kasMulaiSummary + cashShiftSales - cashShiftRefunds);
     // Coerce to number: IPC/JSON can send kas_akhir/kas_selisih as string from DB
@@ -14767,10 +14733,22 @@ ipcMain.handle('localdb-delete-transactions-by-role', async () => {
       params: [...transactionIds]
     });
 
-    // 4. transaction_refunds (transaction_uuid)
+    // 4. transaction_refunds (by transaction_uuid: refunds on deleted transactions)
     queries.push({
       sql: `DELETE FROM transaction_refunds WHERE transaction_uuid IN (${uuidPlaceholders})`,
       params: [...transactionUuids]
+    });
+
+    // 4b. transaction_refunds (by refunded_by: refunds made by test user or NULL, even if transaction is not deleted)
+    let refundByRoleClause = 'WHERE refunded_by IS NULL';
+    const refundByRoleParams: (string | number)[] = [];
+    if (targetUserIds.length > 0) {
+      refundByRoleClause += ` OR refunded_by IN (${targetUserIds.map(() => '?').join(',')})`;
+      refundByRoleParams.push(...targetUserIds);
+    }
+    queries.push({
+      sql: `DELETE FROM transaction_refunds ${refundByRoleClause}`,
+      params: refundByRoleParams
     });
 
     // 5. printer1_audit_log (transaction_id = uuid_id)
