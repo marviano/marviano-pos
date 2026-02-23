@@ -426,7 +426,7 @@ export default function GantiShift() {
         if (unitPrice > 0 && !existing.unitPrices.some(p => Math.abs(p - unitPrice) < 0.01)) {
           existing.unitPrices.push(unitPrice);
         }
-        // Sum quantities and subtotals
+        // Sum quantities and subtotals (tanpa topping)
         existing.total_quantity += product.total_quantity;
         existing.total_base_subtotal += product.base_subtotal;
       } else {
@@ -470,9 +470,7 @@ export default function GantiShift() {
 
   const displayProductSales: (ProductSale | GroupedProductType)[] = groupProducts ? groupedProductSales : productSales;
 
-  /** Barang Terjual: total qty and amount by platform (from productSales, excludes bundle).
-   * Amounts are gross (from line item total_price), not reduced by transaction-level discount/voucher.
-   * Fully refunded transactions are excluded by the backend; partial refunds are still included in full. */
+  /** Barang Terjual: total qty and amount by platform (from productSales, excludes bundle). Tanpa topping. */
   const barangTerjualByPlatform = useMemo(() => {
     const countMap = new Map<string, number>();
     const amountMap = new Map<string, number>();
@@ -920,6 +918,12 @@ export default function GantiShift() {
           total_amount: data.total_amount
         }))
         .sort((a, b) => a.category1_name.localeCompare(b.category1_name));
+      // #region agent log
+      const sumBase = products.filter(p => !p.is_bundle_item).reduce((s, p) => s + (Number(p.base_subtotal) || 0), 0);
+      const sumTotal = products.filter(p => !p.is_bundle_item).reduce((s, p) => s + (Number(p.total_subtotal) || Number(p.base_subtotal) + Number(p.customization_subtotal) || 0), 0);
+      const recalcTotal = recalculated.reduce((s, c) => s + (Number(c.total_amount) || 0), 0);
+      fetch('http://127.0.0.1:7495/ingest/20000880-6f22-4a8b-8a8e-250eeb7d84f4', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': 'ada822' }, body: JSON.stringify({ sessionId: 'ada822', hypothesisId: 'H_frontend_recalc', location: 'GantiShift.tsx:recalculateCategory1', message: 'Frontend Category I recalc', data: { sumBase, sumTotal, recalcTotal }, timestamp: Date.now() }) }).catch(() => {});
+      // #endregion
       setRecalculatedCategory1Breakdown(recalculated);
     } catch (error) {
       console.error('[Category I Recalc] Error:', error);
@@ -954,7 +958,7 @@ export default function GantiShift() {
         category2NameToIdMap.set(cat.category2_name, cat.category2_id);
       });
 
-      // Group productSales by category2_name and sum base_subtotal (without customizations)
+      // Group productSales by category2_name and sum base_subtotal (tanpa topping)
       const category2Map = new Map<string, { category2_id: number; category2_name: string; total_quantity: number; total_amount: number }>();
 
       products.forEach((product) => {
@@ -969,13 +973,13 @@ export default function GantiShift() {
         const existing = category2Map.get(category2Name);
         if (existing) {
           existing.total_quantity += product.total_quantity;
-          existing.total_amount += product.base_subtotal; // Use base_subtotal (without customizations)
+          existing.total_amount += product.base_subtotal;
         } else {
           category2Map.set(category2Name, {
             category2_id: category2Id,
             category2_name: category2Name,
             total_quantity: product.total_quantity,
-            total_amount: product.base_subtotal // Use base_subtotal (without customizations)
+            total_amount: product.base_subtotal
           });
         }
       });
@@ -1234,6 +1238,11 @@ export default function GantiShift() {
       setPaymentBreakdown(breakdown);
       setCategory1Breakdown(category1BreakdownData);
       setCategory2Breakdown(category2BreakdownData);
+      // #region agent log
+      const cashRow = breakdown.find((p: { payment_method_code?: string }) => (p.payment_method_code || '').toLowerCase() === 'cash');
+      const paymentTotal = breakdown.reduce((s: number, p: { total_amount?: number }) => s + (Number(p?.total_amount) || 0), 0);
+      fetch('http://127.0.0.1:7495/ingest/20000880-6f22-4a8b-8a8e-250eeb7d84f4', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': 'ada822' }, body: JSON.stringify({ sessionId: 'ada822', hypothesisId: 'H_payment_totals', location: 'GantiShift.tsx:loadStatistics', message: 'Payment breakdown totals', data: { cashTotal: cashRow?.total_amount ?? 0, paymentTotal }, timestamp: Date.now() }) }).catch(() => {});
+      // #endregion
       // Do not overwrite cashSummary: RINGKASAN uses loadTabData as source of truth.
       // loadStatistics overwriting it caused Cash (Hari) to flip (e.g. 92k -> 0) after a few seconds.
       setProductSales(productSalesData.products || []);
@@ -2463,8 +2472,8 @@ export default function GantiShift() {
     kasAkhirActive = displayShift?.kas_akhir !== null && displayShift?.kas_akhir !== undefined ? Number(displayShift.kas_akhir) : null;
 
     if (kasAkhirActive !== null) {
-      // Same formula as backend: Kas Expected = Modal Awal + cash sales (net) - refunds; Selisih = Kas Akhir - Kas Expected
-      const kasExpectedForShift = kasMulaiActive + cashShiftSales - cashShiftRefunds;
+      // Kas Diharapkan = Kas Mulai + Cash Sales; Selisih = Kas Akhir - Kas Diharapkan
+      const kasExpectedForShift = kasMulaiActive + cashShiftSales;
       const delta = Number((kasAkhirActive - kasExpectedForShift).toFixed(2));
       if (Math.abs(delta) < 0.01) {
         kasSelisihValue = 0;
@@ -2481,7 +2490,7 @@ export default function GantiShift() {
 
   // Ensure all values are numbers for calculation
   const kasMulaiActiveNum = Number(kasMulaiActive) || 0;
-  const kasExpectedActive = kasMulaiActiveNum + cashShiftSales - cashShiftRefunds;
+  const kasExpectedActive = kasMulaiActiveNum + cashShiftSales;
   const kasExpectedDisplay = activeShift ? kasExpectedActive : 0;
 
   // Calculate total payment method count and total amount (use Number() – API may return strings)
@@ -2981,11 +2990,6 @@ export default function GantiShift() {
                           <span className="text-xs font-semibold text-gray-900">{formatRupiah(cashShiftSales)}</span>
                         </div>
                         <div className="flex items-center py-0.5">
-                          <span className="text-xs text-gray-700">Total Refunds:</span>
-                          <span className="flex-grow border-b border-dotted border-gray-300 mx-2"></span>
-                          <span className="text-xs font-semibold text-red-600">-{formatRupiah(totalRefundsActive)}</span>
-                        </div>
-                        <div className="flex items-center py-0.5">
                           <span className="text-xs font-semibold text-gray-800">Kas Diharapkan:</span>
                           <span className="flex-grow border-b border-dotted border-gray-300 mx-2"></span>
                           <span className="text-xs font-bold text-purple-700">{formatRupiah(kasExpectedActive)}</span>
@@ -3344,7 +3348,8 @@ export default function GantiShift() {
 
                   {/* CATEGORY I */}
                   <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-4">
-                    <h2 className="text-base font-semibold text-gray-800 mb-2 text-center">CATEGORY I</h2>
+                    <h2 className={`text-base font-semibold text-gray-800 text-center ${totalToppingRevenue > 0 ? 'mb-0.5' : 'mb-2'}`}>CATEGORY I</h2>
+                    {totalToppingRevenue > 0 && <p className="text-xs text-gray-500 mb-2 text-center">(tanpa topping)</p>}
                     <div className="overflow-x-auto">
                       <table className="w-full text-xs">
                         <thead>
@@ -3393,7 +3398,8 @@ export default function GantiShift() {
 
                   {/* CATEGORY II */}
                   <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-4">
-                    <h2 className="text-base font-semibold text-gray-800 mb-2 text-center">CATEGORY II</h2>
+                    <h2 className={`text-base font-semibold text-gray-800 text-center ${totalToppingRevenue > 0 ? 'mb-0.5' : 'mb-2'}`}>CATEGORY II</h2>
+                    {totalToppingRevenue > 0 && <p className="text-xs text-gray-500 mb-2 text-center">(tanpa topping)</p>}
                     <div className="overflow-x-auto">
                       <table className="w-full text-xs">
                         <thead>
@@ -3445,7 +3451,8 @@ export default function GantiShift() {
 
                   {/* PAKET */}
                   <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-4">
-                    <h2 className="text-base font-semibold text-gray-800 mb-2 text-center">PAKET</h2>
+                    <h2 className={`text-base font-semibold text-gray-800 text-center ${totalToppingRevenue > 0 ? 'mb-0.5' : 'mb-2'}`}>PAKET</h2>
+                    {totalToppingRevenue > 0 && <p className="text-xs text-gray-500 mb-2 text-center">(tanpa topping)</p>}
                     <div className="overflow-x-auto">
                       <table className="w-full text-xs">
                         <thead>
@@ -3514,7 +3521,8 @@ export default function GantiShift() {
 
                   {/* BARANG TERJUAL - below Category II */}
                   <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-4">
-                    <h2 className="text-base font-semibold text-gray-800 mb-2 text-center">BARANG TERJUAL</h2>
+                    <h2 className={`text-base font-semibold text-gray-800 text-center ${totalToppingRevenue > 0 ? 'mb-0.5' : 'mb-2'}`}>BARANG TERJUAL</h2>
+                    {totalToppingRevenue > 0 && <p className="text-xs text-gray-500 mb-2 text-center">(tanpa topping)</p>}
                     <div className="overflow-x-auto">
                       <table className="w-full text-xs">
                         <thead>
@@ -3573,7 +3581,7 @@ export default function GantiShift() {
                                 <td className="py-1 px-2 text-right font-bold text-gray-900">-</td>
                                 <td className="py-1 px-2 text-right font-bold text-gray-900">
                                   {formatRupiah(displayProductSales.reduce((sum, p) => {
-                                    const baseSubtotal = isGroupedProduct(p) ? p.total_base_subtotal : p.base_subtotal;
+                                    const baseSubtotal = isGroupedProduct(p) ? (p as GroupedProductType).total_base_subtotal : (p as ProductSale).base_subtotal;
                                     return sum + baseSubtotal;
                                   }, 0))}
                                 </td>

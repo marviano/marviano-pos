@@ -32,6 +32,18 @@ function writeLabelDebugLog(payload: Record<string, unknown>): void {
   }
 }
 
+// #region agent log
+function debugSessionLog(payload: { sessionId: string; hypothesisId?: string; location: string; message: string; data?: Record<string, unknown> }): void {
+  try {
+    const logPath = path.join(__dirname, '..', 'debug-ada822.log');
+    const line = JSON.stringify({ ...payload, timestamp: Date.now() }) + '\n';
+    fs.appendFileSync(logPath, line);
+  } catch {
+    // do not break app if log write fails
+  }
+}
+// #endregion
+
 /** Extract @page rule snippet from HTML for debug (label height). */
 function getAtPageSnippet(html: string): string | null {
   const m = html.match(/@page\s*\{[^}]*\}/);
@@ -6448,6 +6460,7 @@ function createWindows(): void {
   });
 
   // Get cancelled items for shift (for Ganti Shift report). Same filters as other shift handlers.
+  // Shows cancelled items for all transaction statuses (pending/completed) so Simpan Order cancellations are visible.
   // Returns: product_name, quantity, unit_price, total_price, cancelled_at, cancelled_by_user_name, cancelled_by_waiter_name, transaction info.
   ipcMain.handle('localdb-get-shift-cancelled-items', async (event, userId: number | null, shiftStart: string, shiftEnd: string | null, businessId: number | null = null, shiftUuid?: string | null, shiftUuids?: string[]) => {
     try {
@@ -6479,7 +6492,6 @@ function createWindows(): void {
         LEFT JOIN users u ON COALESCE(ti.cancelled_by_user_id, t.user_id) = u.id
         LEFT JOIN employees e ON ti.cancelled_by_waiter_id = e.id
         WHERE t.business_id = ?
-        AND t.status = 'completed'
         AND ti.production_status = 'cancelled'
       `;
       const params: (string | number | null | boolean)[] = [businessId];
@@ -7639,7 +7651,7 @@ function createWindows(): void {
     }
   });
 
-  // Get Category I breakdown: gross (total_amount), no deduction for cancelled or refunds; matches Payment Method base.
+  // Get Category I breakdown: gross (total_amount), excludes cancelled items; matches Payment Method base.
   // When shiftUuids (non-empty): filter by t.shift_uuid IN (...). When shiftUuid: filter by t.shift_uuid = ?. Else: userId + time.
   ipcMain.handle('localdb-get-category1-breakdown', async (event, userId: number | null, shiftStart: string, shiftEnd: string | null, businessId: number | null = null, shiftUuid?: string | null, shiftUuids?: string[]) => {
     try {
@@ -7654,7 +7666,7 @@ function createWindows(): void {
           COALESCE(c1.id, 0) as category1_id,
           COALESCE(SUM(ti.quantity), 0) as total_quantity,
           COALESCE(SUM(
-            ti.total_price / NULLIF((SELECT COALESCE(SUM(ti2.total_price), 0) FROM transaction_items ti2 WHERE ti2.transaction_id = ti.transaction_id), 0)
+            ti.total_price / NULLIF((SELECT COALESCE(SUM(ti2.total_price), 0) FROM transaction_items ti2 WHERE ti2.transaction_id = ti.transaction_id AND (ti2.production_status IS NULL OR ti2.production_status != 'cancelled')), 0)
             * COALESCE(t.total_amount, 0)
           ), 0) as total_amount
         FROM transaction_items ti
@@ -7663,6 +7675,7 @@ function createWindows(): void {
         LEFT JOIN category1 c1 ON p.category1_id = c1.id
         WHERE t.business_id = ?
         AND t.status = 'completed'
+        AND (ti.production_status IS NULL OR ti.production_status != 'cancelled')
         AND p.category1_id IS NOT NULL
         AND c1.id IS NOT NULL
       `;
@@ -7694,7 +7707,7 @@ function createWindows(): void {
     }
   });
 
-  // Get Category II breakdown: only product's category2 that belongs to this business (category2_businesses). Gross amount only; no deduction for refund or cancelled.
+  // Get Category II breakdown: only product's category2 that belongs to this business (category2_businesses). Gross amount only; excludes cancelled items.
   // When shiftUuids (non-empty): filter by t.shift_uuid IN (...). When shiftUuid: filter by t.shift_uuid = ?. Else: userId + time.
   ipcMain.handle('localdb-get-category2-breakdown', async (event, userId: number | null, shiftStart: string, shiftEnd: string | null, businessId: number | null = null, shiftUuid?: string | null, shiftUuids?: string[]) => {
     try {
@@ -7710,7 +7723,7 @@ function createWindows(): void {
           COALESCE(c2.id, 0) as category2_id,
           COALESCE(SUM(ti.quantity), 0) as total_quantity,
           COALESCE(SUM(
-            ti.total_price / NULLIF((SELECT COALESCE(SUM(ti2.total_price), 0) FROM transaction_items ti2 WHERE ti2.transaction_id = ti.transaction_id), 0)
+            ti.total_price / NULLIF((SELECT COALESCE(SUM(ti2.total_price), 0) FROM transaction_items ti2 WHERE ti2.transaction_id = ti.transaction_id AND (ti2.production_status IS NULL OR ti2.production_status != 'cancelled')), 0)
             * COALESCE(t.total_amount, 0)
           ), 0) as total_amount
         FROM transaction_items ti
@@ -7720,6 +7733,7 @@ function createWindows(): void {
         LEFT JOIN category2 c2 ON p.category2_id = c2.id
         WHERE t.business_id = ?
         AND t.status = 'completed'
+        AND (ti.production_status IS NULL OR ti.production_status != 'cancelled')
         AND p.category2_id IS NOT NULL
         AND c2.id IS NOT NULL
       `;
@@ -8249,12 +8263,13 @@ function createWindows(): void {
             ti.quantity as package_qty,
             ti.total_price as package_total_price,
             COALESCE(t.total_amount, 0) as tx_total_amount,
-            (SELECT COALESCE(SUM(ti2.total_price), 0) FROM transaction_items ti2 WHERE ti2.transaction_id = ti.transaction_id) as tx_items_total
+            (SELECT COALESCE(SUM(ti2.total_price), 0) FROM transaction_items ti2 WHERE ti2.transaction_id = ti.transaction_id AND (ti2.production_status IS NULL OR ti2.production_status != 'cancelled')) as tx_items_total
           FROM transaction_items ti
           INNER JOIN transactions t ON ti.transaction_id = t.id
           INNER JOIN products p ON ti.product_id = p.id
           WHERE t.business_id = ?
             AND t.status = 'completed'
+            AND (ti.production_status IS NULL OR ti.production_status != 'cancelled')
             AND p.category1_id = 14
         `;
         const params: (string | number | null | boolean)[] = [businessId];
@@ -8419,7 +8434,7 @@ function createWindows(): void {
     }
   );
 
-  // Get product sales breakdown for shift. Allocate net amount (gross - refund) to items proportionally. Refund (full & partial) excluded.
+  // Get product sales breakdown for shift. Excludes cancelled items. Allocates gross transaction amount across non-cancelled items only (matches Payment Method).
   // When shiftUuids (non-empty): filter by t.shift_uuid IN (...). When shiftUuid: filter by t.shift_uuid = ?. Else: userId + time.
   ipcMain.handle('localdb-get-product-sales', async (event, userId: number | null, shiftStart: string, shiftEnd: string | null, businessId: number | null = null, shiftUuid?: string | null, shiftUuids?: string[]) => {
     try {
@@ -8451,13 +8466,14 @@ function createWindows(): void {
           COALESCE(t.refund_total, 0) as refund_total,
           t.final_amount,
           t.total_amount,
-          (SELECT COALESCE(SUM(ti2.total_price), 0) FROM transaction_items ti2 WHERE ti2.transaction_id = ti.transaction_id) as tx_items_total
+          (SELECT COALESCE(SUM(ti2.total_price), 0) FROM transaction_items ti2 WHERE ti2.transaction_id = ti.transaction_id AND (ti2.production_status IS NULL OR ti2.production_status != 'cancelled')) as tx_items_total
         FROM transaction_items ti
         INNER JOIN transactions t ON ti.transaction_id = t.id
         LEFT JOIN payment_methods pm ON t.payment_method_id = pm.id
         INNER JOIN products p ON ti.product_id = p.id
         WHERE t.business_id = ?
         AND t.status = 'completed'
+        AND (ti.production_status IS NULL OR ti.production_status != 'cancelled')
       `;
       const params: (string | number | null | boolean)[] = [businessId];
 
@@ -8643,7 +8659,7 @@ function createWindows(): void {
           baseSubtotal = 0;
         }
 
-        // Allocate gross transaction amount to items proportionally (no deduction for refund or cancelled)
+        // Allocate gross transaction amount across non-cancelled items only (cancelled items excluded above)
         const totalAmountTx = Number(row.total_amount ?? 0);
         const txItemsTotal = Number(row.tx_items_total ?? 0);
         const allocatedRatio = txItemsTotal > 0 ? totalAmountTx / txItemsTotal : 0;
@@ -8723,6 +8739,12 @@ function createWindows(): void {
         }
         return a.product_name.localeCompare(b.product_name);
       });
+
+      // #region agent log
+      const sumBase = allProducts.reduce((s, p) => s + (Number(p.base_subtotal) || 0), 0);
+      const sumTotal = allProducts.reduce((s, p) => s + (Number((p as { total_subtotal?: number }).total_subtotal) || 0), 0);
+      debugSessionLog({ sessionId: 'ada822', hypothesisId: 'H_backend_totals', location: 'main.ts:product-sales', message: 'Backend product sales totals', data: { sumBase, sumTotal, productCount: allProducts.length } });
+      // #endregion
 
       return {
         products: allProducts,
