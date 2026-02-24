@@ -10,6 +10,7 @@ import PrintBillModal, { type PrintBillModalData } from './PrintBillModal';
 import { useAuth } from '@/hooks/useAuth';
 import { hasPermission } from '@/lib/permissions';
 import { isSuperAdmin } from '@/lib/auth';
+import { useDisplayTimer } from '@/contexts/DisplayTimerContext';
 
 interface PendingTransaction {
   id: string;
@@ -39,11 +40,27 @@ interface ActiveOrdersTabProps {
 
 const getElectronAPI = () => (typeof window !== 'undefined' ? window.electronAPI : undefined);
 
+/** Renders elapsed time since createdAt; only this small component re-renders every second, not the whole list. */
+function ElapsedTimer({ createdAt, className }: { createdAt: string; className?: string }) {
+  useDisplayTimer();
+  const created = new Date(createdAt);
+  const diffMs = Date.now() - created.getTime();
+  const totalSeconds = Math.floor(diffMs / 1000);
+  const totalMinutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  const hours = Math.floor(totalMinutes / 60);
+  const mins = totalMinutes % 60;
+  const text =
+    totalMinutes >= 60
+      ? `${hours} ${hours === 1 ? 'hr' : 'hrs'} ${mins} ${mins === 1 ? 'min' : 'mins'}`
+      : `${totalMinutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
+  return <span className={className}>{text}</span>;
+}
+
 export default function ActiveOrdersTab({ businessId, isOpen, onLoadTransaction }: ActiveOrdersTabProps) {
   const [pendingTransactions, setPendingTransactions] = useState<PendingTransaction[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [currentTime, setCurrentTime] = useState(new Date());
   const [viewMode, setViewMode] = useState<'list' | 'layout'>('list');
   const [printingBill, setPrintingBill] = useState<string | null>(null);
   const [showSplitBillModal, setShowSplitBillModal] = useState(false);
@@ -94,8 +111,8 @@ export default function ActiveOrdersTab({ businessId, isOpen, onLoadTransaction 
         return;
       }
 
-      // Fetch all transactions and filter for pending ones
-      const allTransactions = await electronAPI.localDbGetTransactions(businessId, 10000);
+      // Fetch today's transactions only and filter for pending ones
+      const allTransactions = await electronAPI.localDbGetTransactions(businessId, 10000, { todayOnly: true });
       const transactionsArray = Array.isArray(allTransactions) ? allTransactions : [];
 
       // Fetch tables and rooms to get table numbers and room names
@@ -377,34 +394,6 @@ export default function ActiveOrdersTab({ businessId, isOpen, onLoadTransaction 
     }
   }, [isOpen, fetchPendingTransactions]);
 
-  // Update timer display every second
-  useEffect(() => {
-    if (isOpen && pendingTransactions.length > 0) {
-      const interval = setInterval(() => {
-        setCurrentTime(new Date());
-      }, 1000);
-      return () => clearInterval(interval);
-    }
-  }, [isOpen, pendingTransactions.length]);
-
-  const formatTimer = (createdAt: string): string => {
-    const created = new Date(createdAt);
-    const diffMs = currentTime.getTime() - created.getTime();
-
-    const totalSeconds = Math.floor(diffMs / 1000);
-    const totalMinutes = Math.floor(totalSeconds / 60);
-    const seconds = totalSeconds % 60;
-
-    if (totalMinutes >= 60) {
-      const hours = Math.floor(totalMinutes / 60);
-      const mins = totalMinutes % 60;
-      const hr = hours === 1 ? 'hr' : 'hrs';
-      const min = mins === 1 ? 'min' : 'mins';
-      return `${hours} ${hr} ${mins} ${min}`;
-    }
-    return `${totalMinutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
-  };
-
   const formatPrice = (price: number): string => {
     // Round to integer and format with Indonesian locale (dots as thousand separators, no decimals)
     const roundedPrice = Math.round(price);
@@ -444,8 +433,8 @@ export default function ActiveOrdersTab({ businessId, isOpen, onLoadTransaction 
         return;
       }
 
-      // Fetch transaction data
-      const allTransactions = await electronAPI.localDbGetTransactions(businessId, 10000);
+      // Fetch transaction data (today only)
+      const allTransactions = await electronAPI.localDbGetTransactions(businessId, 10000, { todayOnly: true });
       const transactionsArray = Array.isArray(allTransactions) ? allTransactions : [];
       const transaction = transactionsArray.find((tx: unknown) => {
         if (tx && typeof tx === 'object') {
@@ -927,9 +916,10 @@ export default function ActiveOrdersTab({ businessId, isOpen, onLoadTransaction 
                             </span>
                           </td>
                           <td className="px-2 py-3 whitespace-nowrap">
-                            <span className="text-xs font-mono text-gray-900">
-                              {formatTimer(transaction.created_at)}
-                            </span>
+                            <ElapsedTimer
+                              createdAt={transaction.created_at}
+                              className="text-xs font-mono text-gray-900"
+                            />
                           </td>
                           <td className="px-2 py-3 whitespace-nowrap">
                             <span className="text-[10px] text-gray-600 font-mono truncate block max-w-[140px]" title={transaction.uuid_id}>

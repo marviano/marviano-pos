@@ -205,6 +205,8 @@ type LabelPrintData = {
   category1Name?: string;
   /** Section header for category 2 (e.g. Minuman). */
   category2Name?: string;
+  /** All Category 1 sections for checker (when template uses {{categoriesSections}}). */
+  categories?: Array<{ categoryName: string; itemsHtml: string }>;
   /** Padding for 80mm checker template (same as receipt). Replaces {{leftPadding}}/{{rightPadding}} in template. */
   leftPadding?: string;
   rightPadding?: string;
@@ -11221,6 +11223,8 @@ type OrderContextForChecker = {
   itemsHtmlCategory2?: string;
   category1Name?: string;
   category2Name?: string;
+  /** All Category 1 sections (for template placeholder {{categoriesSections}}). */
+  categories?: Array<{ categoryName: string; itemsHtml: string }>;
 };
 
 /** Minimal template used when checker template has no {{items}} but we have orderContext (print one slip with notes). */
@@ -11250,7 +11254,8 @@ async function executeLabelsBatchPrint(data: {
       data.orderContext.orderTime != null ||
       (data.orderContext.itemsHtml != null && data.orderContext.itemsHtml !== '') ||
       (data.orderContext.itemsHtmlCategory1 != null && data.orderContext.itemsHtmlCategory1 !== '') ||
-      (data.orderContext.itemsHtmlCategory2 != null && data.orderContext.itemsHtmlCategory2 !== '')
+      (data.orderContext.itemsHtmlCategory2 != null && data.orderContext.itemsHtmlCategory2 !== '') ||
+      (Array.isArray(data.orderContext.categories) && data.orderContext.categories.length > 0)
     );
 
     // Load checker template early to decide order-summary vs per-item mode
@@ -11271,7 +11276,7 @@ async function executeLabelsBatchPrint(data: {
     fetch('http://127.0.0.1:7245/ingest/519de021-d49d-473f-a8a1-4215977c867a', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ location: 'main.ts:executeLabelsBatchPrint', message: 'batch label checker result', data: { requestId, businessId: businessId ?? null, templateName: checkerResult.templateName, checkerShowNotes: checkerResult.showNotes, hasCheckerTemplate: !!checkerResult.templateCode?.trim(), pageSize, firstLabelCustomizationsLength: (firstLabelCustomizations || '').length }, timestamp: Date.now(), hypothesisId: 'A' }) }).catch(() => { });
     // #endregion
     const checkerTemplateCode = checkerResult.templateCode?.trim() ?? null;
-    const templateUsesItems = checkerTemplateCode != null && (checkerTemplateCode.includes('{{items}}') || checkerTemplateCode.includes('{{itemsCategory1}}') || checkerTemplateCode.includes('{{itemsCategory2}}'));
+    const templateUsesItems = checkerTemplateCode != null && (checkerTemplateCode.includes('{{items}}') || checkerTemplateCode.includes('{{itemsCategory1}}') || checkerTemplateCode.includes('{{itemsCategory2}}') || checkerTemplateCode.includes('{{categoriesSections}}'));
     const hasOrderContextWithItems = hasOrderContext && (data.orderContext?.itemsHtml != null && String(data.orderContext.itemsHtml).trim() !== '');
     const oneLabelPerProduct = checkerResult.oneLabelPerProduct !== false;
     // Use order-summary slip when template setting "1 label per product" is unchecked (oneLabelPerProduct === false) and we have order context. When checked, use per-item labels. If template has {{items}}, use it for the slip; otherwise use fallback slip template.
@@ -11371,6 +11376,7 @@ async function executeLabelsBatchPrint(data: {
           itemsCategory2: data.orderContext.itemsHtmlCategory2 ?? '',
           category1Name: data.orderContext.category1Name ?? '',
           category2Name: data.orderContext.category2Name ?? '',
+          categories: data.orderContext.categories,
           leftPadding: batchLeftPadding,
           rightPadding: batchRightPadding,
         };
@@ -11879,6 +11885,17 @@ function generateLabelHTMLFromTemplate(templateCode: string, data: LabelPrintDat
   } else {
     out = out.replace(/\{\{#ifItemsCategory2\}\}/g, '').replace(/\{\{\/ifItemsCategory2\}\}/g, '');
   }
+  // Build {{categoriesSections}}: all Category 1 sections (dashed-line between sections only; no extra dash before first so layout matches original).
+  const categories = Array.isArray(data.categories) ? data.categories : [];
+  const categoriesSectionsHtml =
+    categories.length > 0
+      ? categories
+          .map((c, i) => {
+            const sectionHtml = `<div class="category-section">\n    <div class="category-title">${escapeLabelText((c.categoryName || 'Kategori').trim() || 'Kategori')}:</div>\n    ${typeof c.itemsHtml === 'string' ? c.itemsHtml : ''}\n  </div>`;
+            return i === 0 ? sectionHtml : `<div class="dashed-line"></div>\n  ${sectionHtml}`;
+          })
+          .join('\n  ')
+      : `${(itemsHtmlCategory1 || '').trim() ? `<div class="category-section">\n    <div class="category-title">${category1Name}:</div>\n    ${itemsHtmlCategory1}\n  </div>` : ''}${hasItemsCategory2 ? `\n  <div class="dashed-line"></div>\n  <div class="category-section">\n    <div class="category-title">${category2Name}:</div>\n    ${itemsHtmlCategory2}\n  </div>` : ''}`;
   const itemNumStr = String(itemNumber);
   const totalStr = String(totalItems);
   out = out
@@ -11896,16 +11913,24 @@ function generateLabelHTMLFromTemplate(templateCode: string, data: LabelPrintDat
     .replace(/\{\{customerName\}\}/g, customerName)
     .replace(/\{\{tableName\}\}/g, tableName)
     .replace(/\{\{items\}\}/g, itemsHtml)
+    .replace(/\{\{categoriesSections\}\}/g, categoriesSectionsHtml)
     .replace(/\{\{itemsCategory1\}\}/g, itemsHtmlCategory1)
     .replace(/\{\{itemsCategory2\}\}/g, itemsHtmlCategory2)
     .replace(/\{\{category1Name\}\}/g, category1Name)
     .replace(/\{\{category2Name\}\}/g, category2Name);
-  // Ensure .time div always shows formatted orderTime (fixes templates with literal date or missing placeholder)
+  // Order-summary checker slip: do not show datetime at bottom (user requested). Per-item labels still show time.
+  const isOrderSummarySlip =
+    ((data.items != null && String(data.items).trim() !== '') || (Array.isArray(data.categories) && data.categories.length > 0)) &&
+    !(data.productName != null && String(data.productName).trim() !== '');
   const timeDivRegex = /<div\s+class="time"[^>]*>[\s\S]*?<\/div>/gi;
-  out = out.replace(timeDivRegex, `<div class="time">${orderTime}</div>`);
+  if (isOrderSummarySlip) {
+    out = out.replace(timeDivRegex, '');
+  } else {
+    out = out.replace(timeDivRegex, `<div class="time">${orderTime}</div>`);
+  }
   const hasTimeInOutput = out.includes('class="time"');
-  // Only inject footer when template had no .time div (avoid duplicating datetime when template already has one)
-  if (!hasTimeInOutput) {
+  // Only inject footer when template had no .time div; never inject for checker order-summary slip
+  if (!hasTimeInOutput && !isOrderSummarySlip) {
     const footerBlock = `<div class="footer" style="margin-top:2mm;"><div class="time">${orderTime}</div></div>`;
     if (out.includes('</body>')) {
       out = out.replace('</body>', `${footerBlock}</body>`);

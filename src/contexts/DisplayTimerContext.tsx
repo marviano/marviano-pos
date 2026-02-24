@@ -27,7 +27,7 @@ if (typeof window !== 'undefined') {
   }, 1000);
 }
 
-function useDisplayTimer() {
+export function useDisplayTimer() {
   return useSyncExternalStore(subscribe, getSnapshot, getServerSnapshot);
 }
 

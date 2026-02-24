@@ -753,7 +753,8 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
     return () => clearInterval(interval);
   }, [showWaiterNoShiftMessage, businessId, user.id]);
 
-  // Fetch pending orders count when on Kasir page
+  // Fetch pending orders count when on Kasir page — today only, limit 1000 (badge caps at 99+)
+  const PENDING_COUNT_LIMIT = 1000;
   useEffect(() => {
     if (!businessId) return;
     if (activeMenuItem === 'Kasir') {
@@ -761,7 +762,7 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
         try {
           const electronAPI = getElectronAPI();
           if (electronAPI?.localDbGetTransactions) {
-            const allTransactions = await electronAPI.localDbGetTransactions(businessId, 10000);
+            const allTransactions = await electronAPI.localDbGetTransactions(businessId, PENDING_COUNT_LIMIT, { todayOnly: true });
             const transactionsArray = Array.isArray(allTransactions) ? allTransactions : [];
             const pendingCount = transactionsArray.filter((tx: unknown) => {
               if (tx && typeof tx === 'object' && 'status' in tx) {
@@ -770,7 +771,7 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
               }
               return false;
             }).length;
-            setPendingOrdersCount(pendingCount);
+            setPendingOrdersCount(pendingCount >= PENDING_COUNT_LIMIT ? 100 : pendingCount);
           }
         } catch (error) {
           console.error('❌ Error fetching pending orders count:', error);

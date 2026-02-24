@@ -97,7 +97,7 @@ declare global {
         printerName?: string;
         printerType?: string;
         business_id?: number;
-        orderContext?: { waiterName?: string; customerName?: string; tableName?: string; orderTime?: string; itemsHtml?: string; itemsHtmlCategory1?: string; itemsHtmlCategory2?: string; category1Name?: string; category2Name?: string };
+        orderContext?: { waiterName?: string; customerName?: string; tableName?: string; orderTime?: string; itemsHtml?: string; itemsHtmlCategory1?: string; itemsHtmlCategory2?: string; category1Name?: string; category2Name?: string; categories?: Array<{ categoryName: string; itemsHtml: string }> };
         isOnlineOrder?: boolean;
       }) => Promise<{ success: boolean; error?: string }>;
       openCashDrawer: () => Promise<unknown>;

@@ -2192,21 +2192,26 @@ export default function PaymentModal({
             }
             const sortedKeys = Array.from(byCategory.keys()).filter(k => !k.startsWith('_id_')).sort();
             const otherKeys = Array.from(byCategory.keys()).filter(k => k.startsWith('_id_'));
-            const [firstKey, secondKey] = sortedKeys.length >= 2
-              ? [sortedKeys[0], sortedKeys[1]]
-              : sortedKeys.length === 1
-                ? [sortedKeys[0], otherKeys[0] ?? '']
-                : [otherKeys[0] ?? '', otherKeys[1] ?? ''];
-            const cat1Items = (firstKey ? byCategory.get(firstKey) : []) ?? [];
-            const cat2Items = (secondKey ? byCategory.get(secondKey) : []) ?? [];
-            const category1Name = ((cat1Items[0]?.category1_name ?? firstKey.replace(/^_id_/, '')) || 'Kategori 1').trim() || 'Kategori 1';
-            const category2Name = ((cat2Items[0]?.category1_name ?? secondKey.replace(/^_id_/, '')) || '').trim() || '';
+            const allCategoryKeys = [...sortedKeys, ...otherKeys].filter((k) => {
+              const items = byCategory.get(k) ?? [];
+              if (items.length === 0) return false;
+              const allPackageMain = items.every((ri) => ((ri.category1_name ?? '').trim() === ''));
+              return !allPackageMain;
+            });
             const lineHtml = (ri: ReceiptItem) =>
               isPackageSubRow(ri)
                 ? `<div class="item-line package-subitem">${itemCellContent({ ...ri, name: ri.name.trim() })}</div>`
                 : `<div class="item-line">${ri.quantity}x ${itemCellContent(ri)}</div>`;
-            const itemsCategory1 = cat1Items.map(lineHtml).join('');
-            const itemsCategory2 = cat2Items.map(lineHtml).join('');
+            const categories = allCategoryKeys.map((catKey) => {
+              const items = byCategory.get(catKey) ?? [];
+              const categoryName = ((items[0]?.category1_name ?? catKey.replace(/^_id_/, '')) || 'Kategori').trim() || 'Kategori';
+              const itemsHtml = items.map(lineHtml).join('');
+              return { categoryName, itemsHtml };
+            });
+            const category1Name = categories[0]?.categoryName ?? 'Kategori 1';
+            const category2Name = (categories[1]?.categoryName ?? '').trim() || '';
+            const itemsCategory1 = categories[0]?.itemsHtml ?? '';
+            const itemsCategory2 = categories[1]?.itemsHtml ?? '';
             const orderContextForChecker = {
               waiterName: waiterNameForChecker,
               customerName: String(loadedTransactionInfo?.customerName ?? (localTransactionData as Record<string, unknown>)?.customer_name ?? ''),
@@ -2217,6 +2222,7 @@ export default function PaymentModal({
               itemsHtmlCategory2: itemsCategory2,
               category1Name,
               category2Name,
+              categories,
             };
 
             // Print all labels in a single batch (use checker template when set in Settings → Template Struk → Template Label/Checker)

@@ -641,14 +641,9 @@ class OfflineSyncService {
           }
           advanceProgress();
 
-          // Receipt Templates (download master data: upsert to primary MySQL)
+          // Receipt Templates: do not auto-download from salespulse (local-only; use Settings → Template Struk → Download per template if needed)
           if (Array.isArray(data.receiptTemplates) && data.receiptTemplates.length > 0) {
-            const result = await (electronAPI.localDbUpsertReceiptTemplates as (rows: unknown[]) => Promise<{ success: boolean; error?: string }>)?.(data.receiptTemplates);
-            if (result && !result.success) {
-              const errMsg = result.error ?? 'Unknown error';
-              console.error('[OFFLINE SYNC] Receipt templates upsert failed:', errMsg);
-              throw new Error(`Gagal menyinkronkan template struk: ${errMsg}`);
-            }
+            // Skip applying receiptTemplates so sync does not overwrite local templates with salespulse
           }
           advanceProgress();
 

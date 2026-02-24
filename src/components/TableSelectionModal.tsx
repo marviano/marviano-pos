@@ -1016,14 +1016,23 @@ export default function TableSelectionModal({
       }
       const sortedKeys = Array.from(byCategory.keys()).filter(k => k !== '_other').sort();
       const otherKeys = Array.from(byCategory.keys()).filter(k => k === '_other');
-      const [firstKey, secondKey] = sortedKeys.length >= 2 ? [sortedKeys[0], sortedKeys[1]] : sortedKeys.length === 1 ? [sortedKeys[0], otherKeys[0] ?? '_other'] : [otherKeys[0] ?? '_other', otherKeys[1] ?? '_other'];
-      const cat1Rows = (firstKey ? byCategory.get(firstKey) : []) ?? [];
-      const cat2Rows = (secondKey ? byCategory.get(secondKey) : []) ?? [];
+      const allCategoryKeys = [...sortedKeys, ...otherKeys].filter((k) => {
+        const rows = byCategory.get(k) ?? [];
+        if (rows.length === 0) return false;
+        const allPackageMain = rows.every((r) => (r.category1_name ?? '').trim() === '');
+        return !allPackageMain;
+      });
+      const categories = allCategoryKeys.map((key) => {
+        const rows = byCategory.get(key) ?? [];
+        const categoryName = (rows[0]?.category1_name ?? key.replace(/^_id_/, '')) || 'Kategori';
+        const itemsHtml = rows.map(lineForCheckerRow).join('');
+        return { categoryName, itemsHtml };
+      });
       const orderContextRows = checkerRows.map(rowForCheckerRow).join('');
-      const orderContextRowsCategory1 = cat1Rows.map(lineForCheckerRow).join('');
-      const orderContextRowsCategory2 = cat2Rows.map(lineForCheckerRow).join('');
-      const category1Name = (cat1Rows[0]?.category1_name ?? firstKey.replace(/^_id_/, '')) || 'Kategori 1';
-      const category2Name = (cat2Rows[0]?.category1_name ?? secondKey.replace(/^_id_/, '')) || '';
+      const orderContextRowsCategory1 = categories[0]?.itemsHtml ?? '';
+      const orderContextRowsCategory2 = categories[1]?.itemsHtml ?? '';
+      const category1Name = categories[0]?.categoryName ?? 'Kategori 1';
+      const category2Name = categories[1]?.categoryName ?? '';
       const orderContextForChecker = {
         waiterName: waiterNameForChecker,
         customerName: customerName.trim() || '',
@@ -1034,6 +1043,7 @@ export default function TableSelectionModal({
         itemsHtmlCategory2: orderContextRowsCategory2,
         category1Name,
         category2Name,
+        categories,
       };
 
       if ((newOrderLabels.length > 0 || orderContextForChecker.itemsHtml) && window.electronAPI?.printLabelsBatch) {
@@ -1504,14 +1514,23 @@ export default function TableSelectionModal({
       }
       const sortedKeysNew = Array.from(byCategoryNew.keys()).filter(k => k !== '_other').sort();
       const otherKeysNew = Array.from(byCategoryNew.keys()).filter(k => k === '_other');
-      const [firstKeyNew, secondKeyNew] = sortedKeysNew.length >= 2 ? [sortedKeysNew[0], sortedKeysNew[1]] : sortedKeysNew.length === 1 ? [sortedKeysNew[0], otherKeysNew[0] ?? '_other'] : [otherKeysNew[0] ?? '_other', otherKeysNew[1] ?? '_other'];
-      const cat1New = (firstKeyNew ? byCategoryNew.get(firstKeyNew) : []) ?? [];
-      const cat2New = (secondKeyNew ? byCategoryNew.get(secondKeyNew) : []) ?? [];
+      const allCategoryKeysNew = [...sortedKeysNew, ...otherKeysNew].filter((k) => {
+        const rows = byCategoryNew.get(k) ?? [];
+        if (rows.length === 0) return false;
+        const allPackageMain = rows.every((r) => (r.category1_name ?? '').trim() === '');
+        return !allPackageMain;
+      });
+      const categoriesNew = allCategoryKeysNew.map((key) => {
+        const rows = byCategoryNew.get(key) ?? [];
+        const categoryName = (rows[0]?.category1_name ?? key.replace(/^_id_/, '')) || 'Kategori';
+        const itemsHtml = rows.map(lineForNewCheckerRow).join('');
+        return { categoryName, itemsHtml };
+      });
       const newItemsRows = newCheckerRows.map(rowForNewCheckerRow).join('');
-      const newItemsRowsCategory1 = cat1New.map(lineForNewCheckerRow).join('');
-      const newItemsRowsCategory2 = cat2New.map(lineForNewCheckerRow).join('');
-      const category1NameNew = (cat1New[0]?.category1_name ?? firstKeyNew.replace(/^_id_/, '')) || 'Kategori 1';
-      const category2NameNew = (cat2New[0]?.category1_name ?? secondKeyNew.replace(/^_id_/, '')) || '';
+      const newItemsRowsCategory1 = categoriesNew[0]?.itemsHtml ?? '';
+      const newItemsRowsCategory2 = categoriesNew[1]?.itemsHtml ?? '';
+      const category1NameNew = categoriesNew[0]?.categoryName ?? 'Kategori 1';
+      const category2NameNew = categoriesNew[1]?.categoryName ?? '';
       const orderContextForNewItems = {
         waiterName: loadedTransactionInfo?.waiterName ?? '',
         customerName: loadedTransactionInfo?.customerName ?? '',
@@ -1522,6 +1541,7 @@ export default function TableSelectionModal({
         itemsHtmlCategory2: newItemsRowsCategory2,
         category1Name: category1NameNew,
         category2Name: category2NameNew,
+        categories: categoriesNew,
       };
 
       if ((allLabels.length > 0 || orderContextForNewItems.itemsHtml) && window.electronAPI?.printLabelsBatch) {

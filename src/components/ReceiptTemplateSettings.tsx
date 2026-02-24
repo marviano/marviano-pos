@@ -170,6 +170,7 @@ export default function ReceiptTemplateSettings() {
   // Per-template VPS sync (upload/download)
   const [syncingCard, setSyncingCard] = useState<{ id: number; direction: 'upload' | 'download' } | null>(null);
   const [cardSyncResults, setCardSyncResults] = useState<Record<number, { type: 'success' | 'skip' | 'error'; message: string } | null>>({});
+  const [downloadingAllReceipt, setDownloadingAllReceipt] = useState(false);
 
   const businessId = user?.selectedBusinessId ?? undefined;
 
@@ -225,6 +226,19 @@ export default function ReceiptTemplateSettings() {
       clearCardResultAfterDelay(id, 3000);
     } finally {
       setSyncingCard(null);
+    }
+  };
+
+  const handleDownloadAllReceiptFromVps = async () => {
+    if (availableTemplates.receipt.length === 0) return;
+    setDownloadingAllReceipt(true);
+    try {
+      for (const template of availableTemplates.receipt) {
+        await window.electronAPI?.downloadTemplateFromVps?.(template.id);
+      }
+      await loadAvailableTemplates();
+    } finally {
+      setDownloadingAllReceipt(false);
     }
   };
 
@@ -824,6 +838,19 @@ export default function ReceiptTemplateSettings() {
             <div className="flex items-center justify-between mb-4 flex-wrap gap-2">
               <h3 className="text-lg font-semibold text-gray-900">Pilih Template Struk (Receipt)</h3>
               <div className="flex gap-2">
+                <button
+                  type="button"
+                  onClick={handleDownloadAllReceiptFromVps}
+                  disabled={saving || editModalLoading || loading || availableTemplates.receipt.length === 0 || downloadingAllReceipt}
+                  className="px-4 py-2 border border-green-200 bg-white text-green-700 rounded-md hover:bg-green-50 disabled:bg-gray-100 disabled:text-gray-400 disabled:cursor-not-allowed flex items-center gap-2"
+                >
+                  {downloadingAllReceipt ? (
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                  ) : (
+                    <CloudDownload className="w-4 h-4" />
+                  )}
+                  Download dari VPS
+                </button>
                 <button
                   type="button"
                   onClick={() => openCreateTemplate('receipt')}

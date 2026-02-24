@@ -316,51 +316,7 @@ export class ReceiptManagementService {
     try {
       const result = await executeUpdate(sql, params);
       if (result > 0) {
-        // Mirror: use upsert so row is created on VPS if missing (UPDATE alone affects 0 rows when id doesn't exist there)
-        const row = await executeQueryOne<{
-          id: number;
-          template_type: string;
-          template_name: string | null;
-          business_id: number | null;
-          template_code: string;
-          is_active: number;
-          is_default: number;
-          show_notes: number;
-          one_label_per_product: number;
-          version: number;
-          created_at: string;
-          updated_at: string;
-        }>(
-          `SELECT id, template_type, template_name, business_id, template_code, is_active, is_default, COALESCE(show_notes, 0) AS show_notes, COALESCE(one_label_per_product, 1) AS one_label_per_product, version, created_at, updated_at FROM receipt_templates WHERE id = ? AND is_active = 1 LIMIT 1`,
-          [id]
-        );
-        if (row) {
-          // VPS may have older schema without one_label_per_product; omit it for mirror write
-          const mirrorUpsertSql = `INSERT INTO receipt_templates (id, template_type, template_name, business_id, template_code, is_active, is_default, show_notes, version, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON DUPLICATE KEY UPDATE
-              template_code = VALUES(template_code),
-              template_name = VALUES(template_name),
-              show_notes = VALUES(show_notes),
-              version = VALUES(version),
-              updated_at = VALUES(updated_at)`;
-          const mirrorUpsertParams: (string | number | null)[] = [
-            row.id,
-            row.template_type,
-            row.template_name ?? null,
-            row.business_id,
-            row.template_code,
-            row.is_active,
-            row.is_default,
-            row.show_notes,
-            row.version,
-            row.created_at,
-            row.updated_at,
-          ];
-          await executeOnMirror(mirrorUpsertSql, mirrorUpsertParams);
-        } else {
-          await executeOnMirror(sql, params);
-        }
+        // Do not upsert to salespulse.cc when updating from Settings → Template Struk (local only).
         console.log(`✅ Updated receipt template id ${id}${nameToSet != null ? ` (name: ${nameToSet})` : ''}`);
         return true;
       }
@@ -372,7 +328,7 @@ export class ReceiptManagementService {
   }
 
   /**
-   * Upload a single template to VPS (local → VPS). Newest wins; if VPS is same or newer, skips.
+   * Upload a single template to VPS (local → VPS). Always overwrites VPS with local content (no updated_at restriction).
    */
   async uploadTemplateToVps(id: number): Promise<TemplateSyncResult> {
     try {
@@ -397,16 +353,6 @@ export class ReceiptManagementService {
       );
       if (!localRow) {
         return { success: false, message: 'Template tidak ditemukan' };
-      }
-      const vpsRows = await executeQueryOnMirror<{ updated_at: string }>(
-        'SELECT updated_at FROM receipt_templates WHERE id = ? LIMIT 1',
-        [id]
-      );
-      const vpsRow = vpsRows[0];
-      const localUpdated = localRow.updated_at ? String(localRow.updated_at).replace('T', ' ').slice(0, 19) : '';
-      const vpsUpdated = vpsRow?.updated_at ? String(vpsRow.updated_at).replace('T', ' ').slice(0, 19) : '';
-      if (vpsRow && vpsUpdated >= localUpdated) {
-        return { success: true, skipped: true, message: 'VPS sudah lebih baru, tidak ada perubahan' };
       }
       // VPS may have older schema without one_label_per_product; omit it for mirror write
       const mirrorUpsertSql = `INSERT INTO receipt_templates (id, template_type, template_name, business_id, template_code, is_active, is_default, show_notes, version, created_at, updated_at)
@@ -558,17 +504,7 @@ export class ReceiptManagementService {
       const templateUpsertParams: (string | number | null)[] = [templateType, templateName || 'Default', businessId || null, templateCode, showNotesVal, oneLabelPerProductVal, newVersion];
 
       await executeUpsert(templateUpsertSql, templateUpsertParams);
-      // VPS may have older schema without one_label_per_product; omit it in mirror write
-      const mirrorUpsertSql = `INSERT INTO receipt_templates (template_type, template_name, business_id, template_code, is_active, show_notes, version, updated_at)
-         VALUES (?, ?, ?, ?, 1, ?, ?, NOW())
-         ON DUPLICATE KEY UPDATE 
-           template_code = VALUES(template_code),
-           show_notes = VALUES(show_notes),
-           version = VALUES(version),
-           is_active = 1,
-           updated_at = NOW()`;
-      const mirrorUpsertParams: (string | number | null)[] = [templateType, templateName || 'Default', businessId || null, templateCode, showNotesVal, newVersion];
-      await executeOnMirror(mirrorUpsertSql, mirrorUpsertParams);
+      // Do not upsert to salespulse.cc when saving from Settings → Template Struk (local only).
 
       console.log(`✅ Saved ${templateType} template "${templateName || 'Default'}" (version ${newVersion})${businessId ? ` for business ${businessId}` : ' (global)'}`);
       return true;
