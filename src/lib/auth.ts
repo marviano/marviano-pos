@@ -204,6 +204,62 @@ class AuthManager {
     }
   }
 
+  /** Offline-first: try local MySQL first. Returns user + _businesses for selection flow, or null to fall back to online. */
+  private async tryLocalFirstLogin(
+    email: string,
+    password: string
+  ): Promise<(User & { _businesses?: unknown[]; _isSuperAdmin?: boolean; _isOfflineMode?: boolean }) | null> {
+    if (typeof window === 'undefined' || !window.electronAPI?.localDbGetUserAuth) {
+      return null;
+    }
+
+    const offlineUser = await window.electronAPI.localDbGetUserAuth(email);
+    if (!offlineUser?.password) {
+      return null;
+    }
+
+    const passwordMatches = await bcrypt.compare(password, offlineUser.password);
+    if (!passwordMatches) {
+      return null;
+    }
+
+    const sanitizedUser = this.sanitizeUser({
+      id: offlineUser.id,
+      email: offlineUser.email,
+      username: offlineUser.email,
+      name: offlineUser.name,
+      role: offlineUser.role_name,
+      role_name: offlineUser.role_name,
+      organization_id: offlineUser.organization_id,
+      role_id: offlineUser.role_id,
+      permissions: offlineUser.permissions,
+    });
+    if (!sanitizedUser) {
+      return null;
+    }
+
+    let businesses: unknown[] = [];
+    if (window.electronAPI.localDbGetBusinesses) {
+      const rows = await window.electronAPI.localDbGetBusinesses();
+      type BusinessRow = { id?: number; name?: string; permission_name?: string };
+      businesses = Array.isArray(rows)
+        ? (rows as BusinessRow[]).map((r) => ({
+            id: Number(r?.id ?? 0),
+            name: String(r?.name ?? ''),
+            permission_name: String(r?.permission_name ?? 'pos'),
+          }))
+        : [];
+    }
+
+    console.log('🔍 [AUTH] Local login successful, returning user + businesses for selection');
+    return {
+      ...sanitizedUser,
+      _businesses: businesses,
+      _isSuperAdmin: false,
+      _isOfflineMode: true,
+    };
+  }
+
   private async tryOfflineLogin(email: string, password: string): Promise<User> {
     if (typeof window === 'undefined' || !window.electronAPI?.localDbGetUserAuth) {
       throw new Error('Offline login is not available on this platform');
@@ -250,61 +306,45 @@ class AuthManager {
   }
 
   async login(email: string, password: string): Promise<User> {
-    console.log('🔍 [AUTH] Starting login process...');
+    console.log('🔍 [AUTH] Starting login process (offline-first)...');
     try {
-      // Determine API URL and ensure no trailing spaces
-      const loginUrl = getApiUrl('/api/auth/login');
-
-      console.log('🔍 [AUTH] Login URL:', loginUrl);
-
-      let response: Response | null = null;
-      let data: Record<string, unknown> | null = null;
-
-      try {
-        response = await fetch(loginUrl, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({ email, password }),
-        });
-        console.log('🔍 [AUTH] API response status:', response.status);
-        data = await response.json() as Record<string, unknown>;
-        console.log('🔍 [AUTH] API response data:', data);
-      } catch (networkError: unknown) {
-        console.warn('⚠️ [AUTH] Online login failed, attempting offline fallback...', networkError);
-        return this.tryOfflineLogin(email, password);
+      // Offline-first: try local MySQL first; no network required when user is synced locally
+      const localResult = await this.tryLocalFirstLogin(email, password);
+      if (localResult != null) {
+        return localResult;
       }
+
+      // User not in local DB or password mismatch: fall back to online API
+      const loginUrl = getApiUrl('/api/auth/login');
+      console.log('🔍 [AUTH] Local user not found or password mismatch, trying online API...');
+
+      const response = await fetch(loginUrl, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ email, password }),
+      });
+      const data = (await response.json()) as Record<string, unknown>;
 
       if (!response.ok) {
         const errorMessage = typeof data?.error === 'string' ? data.error : 'Login failed';
-
-        if (response.status >= 500) {
-          console.warn('⚠️ [AUTH] Server error during login, attempting offline fallback...');
-          try {
-            return await this.tryOfflineLogin(email, password);
-          } catch (offlineError) {
-            console.error('❌ [AUTH] Offline fallback failed:', offlineError);
-            throw new Error(errorMessage);
-          }
-        }
-
         throw new Error(errorMessage);
       }
 
       if (data?.success && data.user) {
-        console.log('🔍 [AUTH] Login successful, returning user data...');
+        console.log('🔍 [AUTH] Online login successful, returning user data...');
         const userData = data.user as Record<string, unknown>;
         const sanitizedUser = this.sanitizeUser({
           ...userData,
-          role_name: (typeof userData.role_name === 'string' ? userData.role_name : null) ?? (typeof userData.role === 'string' ? userData.role : null),
+          role_name:
+            (typeof userData.role_name === 'string' ? userData.role_name : null) ??
+            (typeof userData.role === 'string' ? userData.role : null),
         });
         if (!sanitizedUser) {
           throw new Error('Invalid user payload received');
         }
 
-
-        // Return user data with businesses for selection (don't set authenticated yet)
         interface UserWithBusinesses extends User {
           _businesses?: unknown[];
           _isSuperAdmin?: boolean;
@@ -323,26 +363,28 @@ class AuthManager {
     }
   }
 
-  async completeLogin(user: User & { _businesses?: unknown[]; _isSuperAdmin?: boolean }, selectedBusinessId: number | null): Promise<User> {
+  async completeLogin(
+    user: User & { _businesses?: unknown[]; _isSuperAdmin?: boolean; _isOfflineMode?: boolean },
+    selectedBusinessId: number | null
+  ): Promise<User> {
     console.log('🔍 [AUTH] Completing login with business selection...');
-    
+
     // Remove temporary properties
     interface UserWithTempProps extends User {
       _businesses?: unknown[];
       _isSuperAdmin?: boolean;
+      _isOfflineMode?: boolean;
     }
-    const { _businesses, _isSuperAdmin, ...cleanUser } = user as UserWithTempProps;
-    // These variables are intentionally unused - they're being destructured out
+    const { _businesses, _isSuperAdmin, _isOfflineMode, ...cleanUser } = user as UserWithTempProps;
     void _businesses;
     void _isSuperAdmin;
-    
-    // Set selected business
+
     const userWithBusiness: User = {
       ...cleanUser,
       selectedBusinessId,
     };
 
-    this.setAuthenticatedUser(userWithBusiness, false);
+    this.setAuthenticatedUser(userWithBusiness, _isOfflineMode ?? false);
     addSavedEmail(userWithBusiness.email);
     await this.notifyElectronLoginSuccess();
     console.log('🔍 [AUTH] Login process completed successfully');

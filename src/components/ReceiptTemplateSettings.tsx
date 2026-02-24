@@ -3,6 +3,8 @@
 import { useState, useEffect } from 'react';
 import { Save, FileText, Settings, Image, Phone, MapPin, Building2, Printer, Copy, X, Pencil, Eye, CloudUpload, CloudDownload, Loader2 } from 'lucide-react';
 import { useAuth } from '@/hooks/useAuth';
+import { useAppDialog } from '@/components/AppDialog';
+import { getApiUrl, cleanUrl } from '@/lib/api';
 
 /** Preview: show placeholders as bold {{something}}, strip conditionals. For checker type, scale down so label fits. */
 function renderReceiptPreview(code: string, templateType?: TemplateType): string {
@@ -134,9 +136,11 @@ interface ReceiptSettings {
 
 export default function ReceiptTemplateSettings() {
   const { user } = useAuth();
+  const { showConfirm } = useAppDialog();
   const [activeTab, setActiveTab] = useState<'settings' | 'receipt' | 'bill' | 'checker'>('settings');
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [downloadingReceiptSettings, setDownloadingReceiptSettings] = useState(false);
   const [message, setMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
 
   // Settings state
@@ -324,16 +328,74 @@ export default function ReceiptTemplateSettings() {
       setSaving(true);
       setMessage(null);
       const result = await window.electronAPI?.saveReceiptSettings?.(settings, businessId);
-      if (result?.success) {
-        setMessage({ type: 'success', text: 'Pengaturan berhasil disimpan' });
+      if (!result?.success) {
+        setMessage({ type: 'error', text: result?.error || 'Gagal menyimpan pengaturan (lokal)' });
+        setSaving(false);
+        return;
+      }
+      setMessage({ type: 'success', text: 'Pengaturan disimpan (lokal). Mengupload ke VPS...' });
+      const vpsResult = await window.electronAPI?.uploadReceiptSettingsToVps?.(businessId);
+      if (vpsResult?.success) {
+        setMessage({ type: 'success', text: 'Pengaturan berhasil disimpan (lokal & VPS).' });
       } else {
-        setMessage({ type: 'error', text: result?.error || 'Gagal menyimpan pengaturan' });
+        setMessage({ type: 'error', text: `Pengaturan disimpan (lokal). Upload VPS gagal: ${vpsResult?.message ?? 'tidak diketahui'}.` });
       }
     } catch (error) {
       console.error('Error saving settings:', error);
       setMessage({ type: 'error', text: 'Gagal menyimpan pengaturan' });
     } finally {
       setSaving(false);
+    }
+  };
+
+  const handleDownloadReceiptSettings = async () => {
+    if (businessId == null || businessId === undefined) {
+      setMessage({ type: 'error', text: 'Pilih bisnis terlebih dahulu' });
+      return;
+    }
+    const confirmed = await showConfirm(
+      'Download pengaturan struk dari VPS akan menimpa pengaturan lokal untuk bisnis ini. Lanjutkan?'
+    );
+    if (!confirmed) return;
+    try {
+      setDownloadingReceiptSettings(true);
+      setMessage(null);
+      const url = cleanUrl(getApiUrl(`/api/sync/receipt-settings?business_id=${businessId}`));
+      const res = await fetch(url);
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.success) {
+        setMessage({ type: 'error', text: data?.message || data?.error || `Gagal mengambil data (${res.status})` });
+        setDownloadingReceiptSettings(false);
+        return;
+      }
+      const rows = Array.isArray(data.data) ? data.data : [];
+      const result = await window.electronAPI?.localDbUpsertReceiptSettings?.(rows);
+      if (result?.success) {
+        setMessage({ type: 'success', text: 'Pengaturan struk berhasil didownload dari VPS.' });
+        await loadSettings();
+        // Ensure form is filled from downloaded data (in case getReceiptSettings returns different shape or timing)
+        const row = rows.find((r: Record<string, unknown>) => (r.business_id === businessId || (businessId && r.business_id === Number(businessId)))) ?? rows.find((r: Record<string, unknown>) => r.business_id == null) ?? rows[0];
+        if (row && typeof row === 'object') {
+          const r = row as Record<string, unknown>;
+          const getStr = (k: string) => (typeof r[k] === 'string' ? r[k] as string : r[k] != null ? String(r[k]) : '') || '';
+          setSettings({
+            store_name: getStr('store_name'),
+            address: getStr('address'),
+            phone_number: getStr('phone_number'),
+            contact_phone: getStr('contact_phone'),
+            logo_base64: getStr('logo_base64'),
+            footer_text: getStr('footer_text'),
+            partnership_contact: getStr('partnership_contact'),
+          });
+        }
+      } else {
+        setMessage({ type: 'error', text: result?.error || 'Gagal menyimpan pengaturan ke database lokal' });
+      }
+    } catch (error) {
+      console.error('Error downloading receipt settings:', error);
+      setMessage({ type: 'error', text: (error as Error)?.message || 'Gagal download pengaturan struk dari VPS' });
+    } finally {
+      setDownloadingReceiptSettings(false);
     }
   };
 
@@ -818,7 +880,20 @@ export default function ReceiptTemplateSettings() {
             </div>
           </div>
 
-          <div className="flex justify-end">
+          <div className="flex justify-end gap-3 flex-wrap">
+            <button
+              type="button"
+              onClick={handleDownloadReceiptSettings}
+              disabled={downloadingReceiptSettings || saving || businessId == null}
+              className="px-6 py-2 border border-green-600 text-green-700 rounded-md hover:bg-green-50 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
+            >
+              {downloadingReceiptSettings ? (
+                <Loader2 className="w-4 h-4 animate-spin" />
+              ) : (
+                <CloudDownload className="w-4 h-4" />
+              )}
+              {downloadingReceiptSettings ? 'Mendownload...' : 'Download Receipt Settings dari VPS'}
+            </button>
             <button
               onClick={handleSaveSettings}
               disabled={saving}
@@ -870,6 +945,9 @@ export default function ReceiptTemplateSettings() {
                 </button>
               </div>
             </div>
+            <p className="text-sm text-gray-600 mb-4">
+              Placeholder: <code className="bg-gray-100 px-1 rounded">{'{{businessName}}'}</code>, <code className="bg-gray-100 px-1 rounded">{'{{address}}'}</code>, <code className="bg-gray-100 px-1 rounded">{'{{contactPhone}}'}</code>, <code className="bg-gray-100 px-1 rounded">{'{{logo}}'}</code>, <code className="bg-gray-100 px-1 rounded">{'{{items}}'}</code>, <code className="bg-gray-100 px-1 rounded">{'{{total}}'}</code>, <code className="bg-gray-100 px-1 rounded">{'{{footerText}}'}</code>, <code className="bg-gray-100 px-1 rounded">{'{{paymentMethod}}'}</code>, <code className="bg-gray-100 px-1 rounded">{'{{amountReceived}}'}</code>, <code className="bg-gray-100 px-1 rounded">{'{{change}}'}</code>, <code className="bg-gray-100 px-1 rounded">{'{{receiptNumber}}'}</code>, <code className="bg-gray-100 px-1 rounded">{'{{cashier}}'}</code>.
+            </p>
             {loading ? (
               <div className="text-center py-8 text-gray-500">Memuat template...</div>
             ) : (
@@ -877,7 +955,7 @@ export default function ReceiptTemplateSettings() {
                 {availableTemplates.receipt.map((template) => (
                   <div
                     key={template.id}
-                    className={`p-4 border-2 rounded-lg transition-all ${
+                    className={`p-4 border-2 rounded-lg transition-all flex flex-col min-h-[160px] ${
                       selectedReceiptTemplateId === template.id
                         ? 'border-blue-500 bg-blue-50'
                         : 'border-gray-200 hover:border-gray-300 hover:bg-gray-50'
@@ -898,50 +976,54 @@ export default function ReceiptTemplateSettings() {
                         <div className="text-sm text-blue-600 mt-2">✓ Dipilih</div>
                       )}
                     </button>
-                    <div className="mt-3 flex flex-wrap gap-2">
+                    <div className="mt-auto pt-3 flex flex-wrap gap-2 justify-start">
                       <button
                         type="button"
                         onClick={() => handleEditTemplate('receipt', template)}
                         disabled={saving || editModalLoading || (syncingCard?.id === template.id)}
-                        className="flex-1 min-w-0 px-3 py-1.5 text-sm border border-gray-300 rounded-md hover:bg-gray-100 text-gray-700 flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
+                        className="p-2 text-sm border border-gray-300 rounded-md hover:bg-gray-100 text-gray-700 flex items-center justify-center disabled:opacity-50 disabled:cursor-not-allowed"
+                        aria-label="Edit"
+                        title="Edit"
                       >
                         <Pencil className="w-4 h-4 shrink-0" />
-                        Edit
                       </button>
                       <button
                         type="button"
                         onClick={() => handleDuplikatEdit('receipt', template)}
                         disabled={saving || editModalLoading || (syncingCard?.id === template.id)}
-                        className="flex-1 min-w-0 px-3 py-1.5 text-sm border border-gray-300 rounded-md hover:bg-gray-100 text-gray-700 flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
+                        className="p-2 text-sm border border-gray-300 rounded-md hover:bg-gray-100 text-gray-700 flex items-center justify-center disabled:opacity-50 disabled:cursor-not-allowed"
+                        aria-label="Duplikat"
+                        title="Duplikat"
                       >
                         <Copy className="w-4 h-4 shrink-0" />
-                        Duplikat
                       </button>
                       <button
                         type="button"
                         onClick={() => handleUploadTemplate(template.id)}
                         disabled={saving || editModalLoading || (syncingCard?.id === template.id)}
-                        className="flex-1 min-w-0 px-3 py-1.5 text-sm border border-blue-200 rounded-md hover:bg-blue-50 text-blue-700 flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
+                        className="p-2 text-sm border border-blue-200 rounded-md hover:bg-blue-50 text-blue-700 flex items-center justify-center disabled:opacity-50 disabled:cursor-not-allowed"
+                        aria-label="Upload"
+                        title="Upload ke VPS"
                       >
                         {syncingCard?.id === template.id && syncingCard?.direction === 'upload' ? (
                           <Loader2 className="w-4 h-4 shrink-0 animate-spin" />
                         ) : (
                           <CloudUpload className="w-4 h-4 shrink-0" />
                         )}
-                        Upload
                       </button>
                       <button
                         type="button"
                         onClick={() => handleDownloadTemplate(template.id)}
                         disabled={saving || editModalLoading || (syncingCard?.id === template.id)}
-                        className="flex-1 min-w-0 px-3 py-1.5 text-sm border border-green-200 rounded-md hover:bg-green-50 text-green-700 flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
+                        className="p-2 text-sm border border-green-200 rounded-md hover:bg-green-50 text-green-700 flex items-center justify-center disabled:opacity-50 disabled:cursor-not-allowed"
+                        aria-label="Download"
+                        title="Download dari VPS"
                       >
                         {syncingCard?.id === template.id && syncingCard?.direction === 'download' ? (
                           <Loader2 className="w-4 h-4 shrink-0 animate-spin" />
                         ) : (
                           <CloudDownload className="w-4 h-4 shrink-0" />
                         )}
-                        Download
                       </button>
                     </div>
                     {cardSyncResults[template.id] && (
@@ -999,6 +1081,9 @@ export default function ReceiptTemplateSettings() {
                 </button>
               </div>
             </div>
+            <p className="text-sm text-gray-600 mb-4">
+              Placeholder: <code className="bg-gray-100 px-1 rounded">{'{{businessName}}'}</code>, <code className="bg-gray-100 px-1 rounded">{'{{address}}'}</code>, <code className="bg-gray-100 px-1 rounded">{'{{contactPhone}}'}</code>, <code className="bg-gray-100 px-1 rounded">{'{{logo}}'}</code>, <code className="bg-gray-100 px-1 rounded">{'{{items}}'}</code>, <code className="bg-gray-100 px-1 rounded">{'{{total}}'}</code>, <code className="bg-gray-100 px-1 rounded">{'{{footerText}}'}</code>, <code className="bg-gray-100 px-1 rounded">{'{{receiptNumber}}'}</code>, <code className="bg-gray-100 px-1 rounded">{'{{cashier}}'}</code>.
+            </p>
             {loading ? (
               <div className="text-center py-8 text-gray-500">Memuat template...</div>
             ) : (
@@ -1006,7 +1091,7 @@ export default function ReceiptTemplateSettings() {
                 {availableTemplates.bill.map((template) => (
                   <div
                     key={template.id}
-                    className={`p-4 border-2 rounded-lg transition-all ${
+                    className={`p-4 border-2 rounded-lg transition-all flex flex-col min-h-[160px] ${
                       selectedBillTemplateId === template.id
                         ? 'border-blue-500 bg-blue-50'
                         : 'border-gray-200 hover:border-gray-300 hover:bg-gray-50'
@@ -1027,50 +1112,54 @@ export default function ReceiptTemplateSettings() {
                         <div className="text-sm text-blue-600 mt-2">✓ Dipilih</div>
                       )}
                     </button>
-                    <div className="mt-3 flex flex-wrap gap-2">
+                    <div className="mt-auto pt-3 flex flex-wrap gap-2 justify-start">
                       <button
                         type="button"
                         onClick={() => handleEditTemplate('bill', template)}
                         disabled={saving || editModalLoading || (syncingCard?.id === template.id)}
-                        className="flex-1 min-w-0 px-3 py-1.5 text-sm border border-gray-300 rounded-md hover:bg-gray-100 text-gray-700 flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
+                        className="p-2 text-sm border border-gray-300 rounded-md hover:bg-gray-100 text-gray-700 flex items-center justify-center disabled:opacity-50 disabled:cursor-not-allowed"
+                        aria-label="Edit"
+                        title="Edit"
                       >
                         <Pencil className="w-4 h-4 shrink-0" />
-                        Edit
                       </button>
                       <button
                         type="button"
                         onClick={() => handleDuplikatEdit('bill', template)}
                         disabled={saving || editModalLoading || (syncingCard?.id === template.id)}
-                        className="flex-1 min-w-0 px-3 py-1.5 text-sm border border-gray-300 rounded-md hover:bg-gray-100 text-gray-700 flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
+                        className="p-2 text-sm border border-gray-300 rounded-md hover:bg-gray-100 text-gray-700 flex items-center justify-center disabled:opacity-50 disabled:cursor-not-allowed"
+                        aria-label="Duplikat"
+                        title="Duplikat"
                       >
                         <Copy className="w-4 h-4 shrink-0" />
-                        Duplikat
                       </button>
                       <button
                         type="button"
                         onClick={() => handleUploadTemplate(template.id)}
                         disabled={saving || editModalLoading || (syncingCard?.id === template.id)}
-                        className="flex-1 min-w-0 px-3 py-1.5 text-sm border border-blue-200 rounded-md hover:bg-blue-50 text-blue-700 flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
+                        className="p-2 text-sm border border-blue-200 rounded-md hover:bg-blue-50 text-blue-700 flex items-center justify-center disabled:opacity-50 disabled:cursor-not-allowed"
+                        aria-label="Upload"
+                        title="Upload ke VPS"
                       >
                         {syncingCard?.id === template.id && syncingCard?.direction === 'upload' ? (
                           <Loader2 className="w-4 h-4 shrink-0 animate-spin" />
                         ) : (
                           <CloudUpload className="w-4 h-4 shrink-0" />
                         )}
-                        Upload
                       </button>
                       <button
                         type="button"
                         onClick={() => handleDownloadTemplate(template.id)}
                         disabled={saving || editModalLoading || (syncingCard?.id === template.id)}
-                        className="flex-1 min-w-0 px-3 py-1.5 text-sm border border-green-200 rounded-md hover:bg-green-50 text-green-700 flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
+                        className="p-2 text-sm border border-green-200 rounded-md hover:bg-green-50 text-green-700 flex items-center justify-center disabled:opacity-50 disabled:cursor-not-allowed"
+                        aria-label="Download"
+                        title="Download dari VPS"
                       >
                         {syncingCard?.id === template.id && syncingCard?.direction === 'download' ? (
                           <Loader2 className="w-4 h-4 shrink-0 animate-spin" />
                         ) : (
                           <CloudDownload className="w-4 h-4 shrink-0" />
                         )}
-                        Download
                       </button>
                     </div>
                     {cardSyncResults[template.id] && (
@@ -1128,8 +1217,11 @@ export default function ReceiptTemplateSettings() {
                 </button>
               </div>
             </div>
+            <p className="text-sm text-gray-600 mb-2">
+              Placeholder (per label): <code className="bg-gray-100 px-1 rounded">{'{{counter}}'}</code>, <code className="bg-gray-100 px-1 rounded">{'{{itemNumber}}'}</code>, <code className="bg-gray-100 px-1 rounded">{'{{totalItems}}'}</code>, <code className="bg-gray-100 px-1 rounded">{'{{pickupMethod}}'}</code>, <code className="bg-gray-100 px-1 rounded">{'{{productName}}'}</code>, <code className="bg-gray-100 px-1 rounded">{'{{customizations}}'}</code>, <code className="bg-gray-100 px-1 rounded">{'{{orderTime}}'}</code>, <code className="bg-gray-100 px-1 rounded">{'{{labelContinuation}}'}</code>.
+            </p>
             <p className="text-sm text-gray-600 mb-4">
-              Template ini dipakai untuk label/checker yang dicetak saat transaksi atau saat menambah item di Active Order (Lihat). Placeholder: <code className="bg-gray-100 px-1 rounded">{'{{counter}}'}</code>, <code className="bg-gray-100 px-1 rounded">{'{{itemNumber}}'}</code>, <code className="bg-gray-100 px-1 rounded">{'{{totalItems}}'}</code>, <code className="bg-gray-100 px-1 rounded">{'{{pickupMethod}}'}</code>, <code className="bg-gray-100 px-1 rounded">{'{{productName}}'}</code>, <code className="bg-gray-100 px-1 rounded">{'{{customizations}}'}</code>, <code className="bg-gray-100 px-1 rounded">{'{{orderTime}}'}</code>, <code className="bg-gray-100 px-1 rounded">{'{{labelContinuation}}'}</code>.
+              Slip pesanan (satu struk gabungan): <code className="bg-gray-100 px-1 rounded">{'{{waiterName}}'}</code>, <code className="bg-gray-100 px-1 rounded">{'{{customerName}}'}</code>, <code className="bg-gray-100 px-1 rounded">{'{{tableName}}'}</code>, <code className="bg-gray-100 px-1 rounded">{'{{orderTime}}'}</code>, <code className="bg-gray-100 px-1 rounded">{'{{categoriesSections}}'}</code> (group by kategori), <code className="bg-gray-100 px-1 rounded">{'{{items}}'}</code> (tabel), <code className="bg-gray-100 px-1 rounded">{'{{leftPadding}}'}</code>, <code className="bg-gray-100 px-1 rounded">{'{{rightPadding}}'}</code>.
             </p>
             {loading ? (
               <div className="text-center py-8 text-gray-500">Memuat template...</div>
@@ -1138,7 +1230,7 @@ export default function ReceiptTemplateSettings() {
                 {availableTemplates.checker.map((template) => (
                   <div
                     key={template.id}
-                    className={`p-4 border-2 rounded-lg transition-all ${
+                    className={`p-4 border-2 rounded-lg transition-all flex flex-col min-h-[160px] ${
                       selectedCheckerTemplateId === template.id
                         ? 'border-blue-500 bg-blue-50'
                         : 'border-gray-200 hover:border-gray-300 hover:bg-gray-50'
@@ -1159,50 +1251,54 @@ export default function ReceiptTemplateSettings() {
                         <div className="text-sm text-blue-600 mt-2">✓ Dipilih</div>
                       )}
                     </button>
-                    <div className="mt-3 flex flex-wrap gap-2">
+                    <div className="mt-auto pt-3 flex flex-wrap gap-2 justify-start">
                       <button
                         type="button"
                         onClick={() => handleEditTemplate('checker', template)}
                         disabled={saving || editModalLoading || (syncingCard?.id === template.id)}
-                        className="flex-1 min-w-0 px-3 py-1.5 text-sm border border-gray-300 rounded-md hover:bg-gray-100 text-gray-700 flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
+                        className="p-2 text-sm border border-gray-300 rounded-md hover:bg-gray-100 text-gray-700 flex items-center justify-center disabled:opacity-50 disabled:cursor-not-allowed"
+                        aria-label="Edit"
+                        title="Edit"
                       >
                         <Pencil className="w-4 h-4 shrink-0" />
-                        Edit
                       </button>
                       <button
                         type="button"
                         onClick={() => handleDuplikatEdit('checker', template)}
                         disabled={saving || editModalLoading || (syncingCard?.id === template.id)}
-                        className="flex-1 min-w-0 px-3 py-1.5 text-sm border border-gray-300 rounded-md hover:bg-gray-100 text-gray-700 flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
+                        className="p-2 text-sm border border-gray-300 rounded-md hover:bg-gray-100 text-gray-700 flex items-center justify-center disabled:opacity-50 disabled:cursor-not-allowed"
+                        aria-label="Duplikat"
+                        title="Duplikat"
                       >
                         <Copy className="w-4 h-4 shrink-0" />
-                        Duplikat
                       </button>
                       <button
                         type="button"
                         onClick={() => handleUploadTemplate(template.id)}
                         disabled={saving || editModalLoading || (syncingCard?.id === template.id)}
-                        className="flex-1 min-w-0 px-3 py-1.5 text-sm border border-blue-200 rounded-md hover:bg-blue-50 text-blue-700 flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
+                        className="p-2 text-sm border border-blue-200 rounded-md hover:bg-blue-50 text-blue-700 flex items-center justify-center disabled:opacity-50 disabled:cursor-not-allowed"
+                        aria-label="Upload"
+                        title="Upload ke VPS"
                       >
                         {syncingCard?.id === template.id && syncingCard?.direction === 'upload' ? (
                           <Loader2 className="w-4 h-4 shrink-0 animate-spin" />
                         ) : (
                           <CloudUpload className="w-4 h-4 shrink-0" />
                         )}
-                        Upload
                       </button>
                       <button
                         type="button"
                         onClick={() => handleDownloadTemplate(template.id)}
                         disabled={saving || editModalLoading || (syncingCard?.id === template.id)}
-                        className="flex-1 min-w-0 px-3 py-1.5 text-sm border border-green-200 rounded-md hover:bg-green-50 text-green-700 flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
+                        className="p-2 text-sm border border-green-200 rounded-md hover:bg-green-50 text-green-700 flex items-center justify-center disabled:opacity-50 disabled:cursor-not-allowed"
+                        aria-label="Download"
+                        title="Download dari VPS"
                       >
                         {syncingCard?.id === template.id && syncingCard?.direction === 'download' ? (
                           <Loader2 className="w-4 h-4 shrink-0 animate-spin" />
                         ) : (
                           <CloudDownload className="w-4 h-4 shrink-0" />
                         )}
-                        Download
                       </button>
                     </div>
                     {cardSyncResults[template.id] && (

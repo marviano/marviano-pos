@@ -2,6 +2,7 @@
 
 import { useState, useEffect } from 'react';
 import { X } from 'lucide-react';
+import { appAlert } from '@/components/AppDialog';
 
 type PromotionSelection = 'none' | 'percent_10' | 'percent_15' | 'percent_20' | 'percent_25' | 'percent_30' | 'percent_35' | 'percent_50' | 'custom' | 'free';
 
@@ -110,7 +111,7 @@ export default function PrintBillModal({ isOpen, onClose, data, onPrinted }: Pri
     if (!data) return;
     const api = getElectronAPI();
     if (!api?.localDbUpdateTransactionVoucher || !api?.printReceipt) {
-      alert('Print Bill tidak tersedia. Pastikan aplikasi terhubung dengan database lokal.');
+      appAlert('Print Bill tidak tersedia. Pastikan aplikasi terhubung dengan database lokal.');
       return;
     }
 
@@ -130,7 +131,7 @@ export default function PrintBillModal({ isOpen, onClose, data, onPrinted }: Pri
         final_amount: finalTotal,
       });
       if (updateRes && !(updateRes as { success?: boolean }).success) {
-        alert(`Gagal menyimpan diskon: ${(updateRes as { error?: string }).error || 'Unknown error'}`);
+        appAlert(`Gagal menyimpan diskon: ${(updateRes as { error?: string }).error || 'Unknown error'}`);
         return;
       }
 
@@ -155,14 +156,14 @@ export default function PrintBillModal({ isOpen, onClose, data, onPrinted }: Pri
 
       const printResult = await api.printReceipt(printData);
       if (printResult && typeof printResult === 'object' && 'success' in printResult && !(printResult as { success: boolean }).success) {
-        alert(`Gagal mencetak bill: ${(printResult as { error?: string }).error || 'Unknown error'}`);
+        appAlert(`Gagal mencetak bill: ${(printResult as { error?: string }).error || 'Unknown error'}`);
         return;
       }
       onPrinted?.();
       onClose();
     } catch (e) {
       console.error('PrintBillModal print error:', e);
-      alert('Terjadi kesalahan saat mencetak bill');
+      appAlert('Terjadi kesalahan saat mencetak bill');
     } finally {
       setIsPrinting(false);
     }

@@ -172,13 +172,14 @@ export default function SplitBillReport() {
             parsedDetails = { moved_items: [] };
           }
 
+          const normalizedCreatedAt = typeof log.created_at === 'string' ? log.created_at : (typeof log.created_at === 'number' ? new Date(log.created_at).toISOString() : (log.created_at && typeof (log.created_at as Date).toISOString === 'function' ? (log.created_at as Date).toISOString() : new Date().toISOString()));
           return {
             id: typeof log.id === 'number' ? log.id : 0,
             user_id: typeof log.user_id === 'number' ? log.user_id : 0,
             action: typeof log.action === 'string' ? log.action : '',
             business_id: typeof log.business_id === 'number' ? log.business_id : null,
             details: typeof log.details === 'string' ? log.details : '',
-            created_at: typeof log.created_at === 'string' ? log.created_at : new Date().toISOString(),
+            created_at: normalizedCreatedAt,
             parsed_details: parsedDetails,
           } as SplitBillLog;
         });
@@ -360,12 +361,12 @@ export default function SplitBillReport() {
             </div>
           </div>
 
-          {/* Clear Filters */}
-          {(fromDate || toDate || selectedWaiter !== 'all') && (
+          {/* Clear Filters — reset date to today (UTC+7), waiter to all */}
+          {(fromDate !== getTodayUTC7() || toDate !== getTodayUTC7() || selectedWaiter !== 'all') && (
             <button
               onClick={() => {
-                setFromDate('');
-                setToDate('');
+                setFromDate(getTodayUTC7());
+                setToDate(getTodayUTC7());
                 setSelectedWaiter('all');
               }}
               className="mt-4 px-4 py-2 text-sm text-gray-600 hover:text-gray-800 underline"

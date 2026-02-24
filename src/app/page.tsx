@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { useAuth } from '@/hooks/useAuth';
+import { useAppDialog } from '@/components/AppDialog';
 import { isSuperAdmin } from '@/lib/auth';
 import POSLayout from '@/components/POSLayout';
 import OfflineStatus from '@/components/OfflineStatus';
@@ -15,6 +16,7 @@ import { offlineSyncService } from '@/lib/offlineSync';
 export default function Home() {
   const router = useRouter();
   const { isAuthenticated, user, logout } = useAuth();
+  const { showAlert } = useAppDialog();
   const [isClient, setIsClient] = useState(false);
   const [databaseStatus, setDatabaseStatus] = useState<string>('Checking...');
   const [isSyncing, setIsSyncing] = useState(false);
@@ -411,7 +413,7 @@ export default function Home() {
               if (window.electronAPI) {
                 const result = await window.electronAPI.createCustomerDisplay() as { message?: string };
                 console.log('Customer display result:', result);
-                alert(result.message || 'Customer display created');
+                showAlert(result.message || 'Customer display created');
               }
             }}
             className="flex items-center justify-center w-[22px] h-[22px]"

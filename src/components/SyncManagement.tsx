@@ -23,6 +23,7 @@ import { offlineSyncService } from '@/lib/offlineSync';
 import { smartSyncService } from '@/lib/smartSync';
 import { getApiUrl } from '@/lib/api';
 import { useAuth } from '@/hooks/useAuth';
+import { appAlert, appConfirm } from '@/components/AppDialog';
 import { getAutoSyncEnabled, setAutoSyncEnabled, onAutoSyncSettingChanged } from '@/lib/autoSyncSettings';
 
 type UnknownRecord = Record<string, unknown>;
@@ -625,13 +626,13 @@ export default function SyncManagement() {
       `• Jika transaksi ini belum ada di server, data akan hilang selamanya\n\n` +
       `Apakah Anda yakin ingin melanjutkan?`;
 
-    if (!window.confirm(confirmMessage)) {
+    if (!(await appConfirm(confirmMessage))) {
       addLog('info', 'Penghapusan data offline dibatalkan');
       return;
     }
 
     // Second confirmation
-    const secondConfirm = window.confirm(
+    const secondConfirm = await appConfirm(
       '⚠️ KONFIRMASI FINAL ⚠️\n\n' +
       `Anda akan menghapus ${offlineTransactions.length} transaksi offline.\n\n` +
       '⚠️ PERINGATAN: Tindakan ini TIDAK DAPAT DIBATALKAN!\n\n' +
@@ -650,7 +651,7 @@ export default function SyncManagement() {
 
     if (!electronAPI?.localDbDeleteUnsyncedTransactions) {
       addLog('error', 'Fitur penghapusan tidak tersedia. Silakan restart aplikasi untuk memuat perubahan terbaru.');
-      alert('⚠️ Fitur penghapusan tidak tersedia.\n\nSilakan restart aplikasi Electron untuk memuat perubahan terbaru.');
+      appAlert('⚠️ Fitur penghapusan tidak tersedia.\n\nSilakan restart aplikasi Electron untuk memuat perubahan terbaru.');
       return;
     }
 
@@ -666,17 +667,17 @@ export default function SyncManagement() {
         // Reload the list
         await loadOfflineTransactions();
         await fetchTransactionCounts();
-        alert(`✅ Berhasil menghapus ${deletedCount} transaksi offline`);
+        appAlert(`✅ Berhasil menghapus ${deletedCount} transaksi offline`);
       } else {
         const errorMsg = result?.error || 'Unknown error';
         addLog('error', `Gagal menghapus: ${errorMsg}`);
-        alert(`❌ Gagal menghapus: ${errorMsg}`);
+        appAlert(`❌ Gagal menghapus: ${errorMsg}`);
       }
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : 'Unknown error';
       console.error('[DELETE] Error:', error);
       addLog('error', `Error menghapus transaksi offline: ${errorMessage}`);
-      alert(`❌ Error: ${errorMessage}`);
+      appAlert(`❌ Error: ${errorMessage}`);
     }
   }, [offlineTransactions.length, businessId, addLog, loadOfflineTransactions, fetchTransactionCounts]);
 
@@ -888,7 +889,7 @@ export default function SyncManagement() {
       `dan tidak akan muncul lagi di "Data Offline yang Akan Diunggah".\n\n` +
       `Apakah Anda yakin ingin melanjutkan?`;
 
-    if (!window.confirm(confirmMessage)) {
+    if (!(await appConfirm(confirmMessage))) {
       addLog('info', 'Update status dibatalkan');
       return;
     }
@@ -910,7 +911,7 @@ export default function SyncManagement() {
       await loadOfflineTransactions();
       await fetchTransactionCounts();
 
-      alert(`✅ Berhasil mengupdate status ${transactionsToUpdate.length} transaksi`);
+      appAlert(`✅ Berhasil mengupdate status ${transactionsToUpdate.length} transaksi`);
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : 'Unknown error';
       addLog('error', `Gagal mengupdate status: ${errorMessage}`);
@@ -1375,7 +1376,7 @@ export default function SyncManagement() {
       `• Proses ini mungkin memakan waktu lama tergantung jumlah transaksi\n\n` +
       `Apakah Anda yakin ingin melanjutkan?`;
 
-    if (!window.confirm(confirmMessage)) {
+    if (!(await appConfirm(confirmMessage))) {
       addLog('info', 'Re-sync dibatalkan');
       return;
     }
@@ -1668,7 +1669,7 @@ export default function SyncManagement() {
 
   // Cleanup test transactions (hardcoded: marviano.austin@gmail.com OR user_id IS NULL)
   const cleanupTestTransactions = async () => {
-    const confirmed = window.confirm(
+    const confirmed = await appConfirm(
       `⚠️ WARNING: This will PERMANENTLY DELETE ALL transactions from all 2 databases:\n\n` +
       `1. Local MySQL (local POS)\n` +
       `2. SalesPulse MySQL (online)\n\n` +

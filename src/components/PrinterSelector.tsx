@@ -3,6 +3,7 @@
 import { useState, useEffect } from 'react';
 import { Printer, Save, TestTube, CheckCircle, XCircle, AlertCircle } from 'lucide-react';
 import { useAuth } from '@/hooks/useAuth';
+import { appAlert } from '@/components/AppDialog';
 
 interface SystemPrinter {
   name: string;
@@ -117,12 +118,12 @@ export default function PrinterSelector() {
         let labelPrinterNonOfflineValue = 1;
         let singlePrinterModeValue = false;
         let printer2AuditLogChanceValue: number | null = null;
-        
+
         configs.forEach((config: PrinterConfigRow) => {
           if (!config) {
             return;
           }
-          
+
           // Handle singlePrinterMode config (doesn't require system_printer_name)
           if (config.printer_type === 'singlePrinterMode') {
             if (config.extra_settings) {
@@ -157,7 +158,7 @@ export default function PrinterSelector() {
             }
             return;
           }
-          
+
           if (typeof config.system_printer_name !== 'string') {
             return;
           }
@@ -216,7 +217,7 @@ export default function PrinterSelector() {
               console.error('Failed to parse extra_settings for printer config:', parseError);
             }
           }
-          
+
           switch (config.printer_type) {
             case 'receiptPrinter':
               selections.receiptPrinter = config.system_printer_name;
@@ -235,7 +236,7 @@ export default function PrinterSelector() {
               break;
           }
         });
-        
+
         setSinglePrinterMode(singlePrinterModeValue);
         setPrinter2AuditLogChance(printer2AuditLogChanceValue);
 
@@ -246,7 +247,7 @@ export default function PrinterSelector() {
         setLabelPrinterNonOfflineCopies(labelPrinterNonOfflineValue);
         return;
       }
-      
+
       // Fallback to localStorage
       const saved = localStorage.getItem('printer-selections');
       if (saved) {
@@ -266,7 +267,7 @@ export default function PrinterSelector() {
           console.error('Failed to parse printer-margin-offsets from localStorage:', marginError);
         }
       }
-      
+
       // Load singlePrinterMode from localStorage as fallback
       const savedSinglePrinterMode = localStorage.getItem('single-printer-mode');
       if (savedSinglePrinterMode !== null) {
@@ -284,7 +285,7 @@ export default function PrinterSelector() {
   const saveSelections = async (selections: PrinterSelection) => {
     setIsSaving(true);
     setSaveStatus('idle');
-    
+
     try {
       // Save to database
       const savePromises = [];
@@ -313,25 +314,25 @@ export default function PrinterSelector() {
         }
         return settings;
       };
-      
+
       if (selections.receiptPrinter) {
         savePromises.push(
           window.electronAPI?.localDbSavePrinterConfig?.('receiptPrinter', selections.receiptPrinter, buildExtraSettings('receiptPrinter'))
         );
       }
-      
+
       if (selections.labelPrinter) {
         savePromises.push(
           window.electronAPI?.localDbSavePrinterConfig?.('labelPrinter', selections.labelPrinter, buildExtraSettings('labelPrinter'))
         );
       }
-      
+
       if (selections.receiptizePrinter) {
         savePromises.push(
           window.electronAPI?.localDbSavePrinterConfig?.('receiptizePrinter', selections.receiptizePrinter, buildExtraSettings('receiptizePrinter'))
         );
       }
-      
+
       // Save singlePrinterMode setting with printer2AuditLogChance
       const singlePrinterModeSettings: { enabled: boolean; printer2AuditLogChance?: number | null } = {
         enabled: singlePrinterMode
@@ -342,13 +343,13 @@ export default function PrinterSelector() {
       savePromises.push(
         window.electronAPI?.localDbSavePrinterConfig?.('singlePrinterMode', 'enabled', singlePrinterModeSettings)
       );
-      
+
       const results = await Promise.all(savePromises);
       const hasError = results.some(result => !result?.success);
-      
+
       if (hasError) {
         setSaveStatus('error');
-        alert('Some printer configurations could not be saved. Please try again.');
+        appAlert('Some printer configurations could not be saved. Please try again.');
       } else {
         setSaveStatus('success');
         // Also save to localStorage as backup
@@ -356,14 +357,14 @@ export default function PrinterSelector() {
         localStorage.setItem('printer-margin-offsets', JSON.stringify(marginOffsets));
         localStorage.setItem('single-printer-mode', String(singlePrinterMode));
       }
-      
+
       // Reset success status after 3 seconds
       setTimeout(() => setSaveStatus('idle'), 3000);
-      
+
     } catch (error) {
       console.error('Error saving printer selections:', error);
       setSaveStatus('error');
-      alert('Error saving printer configurations. Please try again.');
+      appAlert('Error saving printer configurations. Please try again.');
     } finally {
       setIsSaving(false);
     }
@@ -375,12 +376,12 @@ export default function PrinterSelector() {
     try {
       // Check if we're running in Electron
       if (!window.electronAPI?.listPrinters) {
-        alert('This feature requires the Electron app. Please run the app from the desktop shortcut, not in the browser.');
+        appAlert('This feature requires the Electron app. Please run the app from the desktop shortcut, not in the browser.');
         return;
       }
 
-    const result = await window.electronAPI.listPrinters();
-    if (result && result.success) {
+      const result = await window.electronAPI.listPrinters();
+      if (result && result.success) {
         const mapped: SystemPrinter[] = (result.printers || [])
           .map((printer: ElectronPrinter) => {
             if (!printer || typeof printer.name !== 'string') {
@@ -396,9 +397,9 @@ export default function PrinterSelector() {
           })
           .filter((printer): printer is SystemPrinter => Boolean(printer));
         setSystemPrinters(mapped);
-        
+
         if (mapped.length === 0) {
-          alert(`No printers detected by Windows. 
+          appAlert(`No printers detected by Windows. 
 
 Troubleshooting steps:
 1. Go to Windows Settings → Devices → Printers & scanners
@@ -409,9 +410,9 @@ Troubleshooting steps:
         } else {
           console.log(`✅ Found ${mapped.length} printer(s):`, mapped.map(p => p.displayName));
         }
-    } else {
-      console.error('Failed to list printers:', result);
-      alert(`Unable to list printers. Error: ${result instanceof Error ? result.message : 'Unknown error'}
+      } else {
+        console.error('Failed to list printers:', result);
+        appAlert(`Unable to list printers. Error: ${result instanceof Error ? result.message : 'Unknown error'}
 
 Please try:
 1. Restart the app completely
@@ -420,7 +421,7 @@ Please try:
       }
     } catch (error) {
       console.error('Error scanning for printers:', error);
-      alert(`Error scanning for printers: ${error}
+      appAlert(`Error scanning for printers: ${error}
 
 Please try:
 1. Restart the app completely
@@ -476,29 +477,29 @@ Please try:
     saveSelections(selectedPrinters);
   };
 
-interface PrintReceiptResult {
-  success?: boolean;
-  error?: string;
-}
+  interface PrintReceiptResult {
+    success?: boolean;
+    error?: string;
+  }
 
-const isPrintReceiptResult = (value: unknown): value is PrintReceiptResult => {
-  if (!value || typeof value !== 'object') {
-    return false;
-  }
-  const record = value as Record<string, unknown>;
-  if ('success' in record && typeof record.success !== 'boolean') {
-    return false;
-  }
-  if ('error' in record && typeof record.error !== 'string') {
-    return false;
-  }
-  return true;
-};
+  const isPrintReceiptResult = (value: unknown): value is PrintReceiptResult => {
+    if (!value || typeof value !== 'object') {
+      return false;
+    }
+    const record = value as Record<string, unknown>;
+    if ('success' in record && typeof record.success !== 'boolean') {
+      return false;
+    }
+    if ('error' in record && typeof record.error !== 'string') {
+      return false;
+    }
+    return true;
+  };
 
-const testPrinter = async (printerType: keyof PrinterSelection) => {
+  const testPrinter = async (printerType: keyof PrinterSelection) => {
     const printerName = selectedPrinters[printerType];
     if (!printerName) {
-      alert('Please select a printer first.');
+      appAlert('Please select a printer first.');
       return;
     }
 
@@ -561,7 +562,7 @@ const testPrinter = async (printerType: keyof PrinterSelection) => {
           }
         } else {
           hasError = true;
-          alert(`❌ Test print failed to ${printerName}${copiesCount > 1 ? ` (copy ${copy}/${copiesCount})` : ''}\n\nError: ${result?.error || 'Unknown error'}\n\nTroubleshooting:\n1. Make sure printer is connected and powered on\n2. Check Windows printer settings\n3. Try printing from another app first\n4. Restart the app and try again`);
+          appAlert(`❌ Test print failed to ${printerName}${copiesCount > 1 ? ` (copy ${copy}/${copiesCount})` : ''}\n\nError: ${result?.error || 'Unknown error'}\n\nTroubleshooting:\n1. Make sure printer is connected and powered on\n2. Check Windows printer settings\n3. Try printing from another app first\n4. Restart the app and try again`);
           break;
         }
       }
@@ -570,7 +571,7 @@ const testPrinter = async (printerType: keyof PrinterSelection) => {
       }
     } catch (error) {
       console.error('Error testing printer:', error);
-      alert(`❌ Test print failed: ${error}\n\nPlease check:\n1. Printer is connected and powered on\n2. Printer drivers are installed correctly\n3. Try printing from another app first\n4. Restart the app and try again`);
+      appAlert(`❌ Test print failed: ${error}\n\nPlease check:\n1. Printer is connected and powered on\n2. Printer drivers are installed correctly\n3. Try printing from another app first\n4. Restart the app and try again`);
     } finally {
       setIsTesting(null);
     }
@@ -580,12 +581,12 @@ const testPrinter = async (printerType: keyof PrinterSelection) => {
     if (!printerName) {
       return <XCircle className="w-4 h-4 text-gray-400" />;
     }
-    
+
     const printer = systemPrinters.find(p => p.name === printerName);
     if (!printer) {
       return <AlertCircle className="w-4 h-4 text-yellow-500" />;
     }
-    
+
     switch (printer.status) {
       case 'idle':
         return <CheckCircle className="w-4 h-4 text-green-500" />;
@@ -958,7 +959,7 @@ const testPrinter = async (printerType: keyof PrinterSelection) => {
           <div className="flex-1">
             <h3 className="text-lg font-semibold text-gray-800 mb-2">Single Printer Mode</h3>
             <p className="text-sm text-gray-600">
-              When enabled, all transactions will be printed on Printer 1 only, regardless of which side of the confirmation button is clicked. 
+              When enabled, all transactions will be printed on Printer 1 only, regardless of which side of the confirmation button is clicked.
               The receipt will show Printer 1's daily counter, but the database will still track the original printer assignment.
             </p>
           </div>
@@ -978,7 +979,7 @@ const testPrinter = async (printerType: keyof PrinterSelection) => {
             <div className="w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-blue-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-600"></div>
           </label>
         </div>
-        
+
         {/* Randomize Printer 1 and Printer 2 Audit Log Database Saving */}
         {singlePrinterMode && (
           <div className="mt-4 pt-4 border-t border-gray-200">
@@ -986,7 +987,7 @@ const testPrinter = async (printerType: keyof PrinterSelection) => {
               <div className="flex-1">
                 <h4 className="text-sm font-semibold text-gray-800 mb-1">Randomize Printer 1 and Printer 2 Audit Log Database Saving</h4>
                 <p className="text-xs text-gray-600">
-                  When enabled, transactions will randomly be saved to Printer 1 or Printer 2 audit log based on the percentage below. 
+                  When enabled, transactions will randomly be saved to Printer 1 or Printer 2 audit log based on the percentage below.
                   Leave empty or set to 0 to disable randomization (default behavior).
                 </p>
               </div>

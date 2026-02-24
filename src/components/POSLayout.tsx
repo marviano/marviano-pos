@@ -21,6 +21,7 @@ import { useAuth } from '@/hooks/useAuth';
 import { isSuperAdmin } from '@/lib/auth';
 import { hasPermission } from '@/lib/permissions';
 import { ClipboardList, FilePlus, ChevronRight, Store, Globe } from 'lucide-react';
+import { appAlert, appConfirm } from '@/components/AppDialog';
 
 type LocalCategory = {
   jenis: string;
@@ -148,7 +149,7 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
   const canAccessTemplateStruk = isAdmin || permissions.includes('access_templatestruk');
 
   // Helper function to check and prompt for unsaved changes
-  const checkUnsavedChanges = (): boolean => {
+  const checkUnsavedChanges = async (): Promise<boolean> => {
     if (hasUnsavedChanges) {
       // Show different message based on whether we're in "lihat" mode
       let message = 'Ada perubahan yang belum disimpan pada cart, apakah anda yakin untuk berpindah halaman?';
@@ -157,7 +158,7 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
       } else if (loadedTransactionInfo) {
         message = 'Ada perubahan pada orderan pelanggan. Apakah anda yakin untuk berpindah halaman sebelum simpan pesanan?';
       }
-      const confirmed = window.confirm(message);
+      const confirmed = await appConfirm(message);
       if (!confirmed) {
         return false; // User cancelled, don't proceed
       }
@@ -167,9 +168,9 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
   };
 
   // Wrapper for setActiveMenuItem with unsaved changes check
-  const setActiveMenuItemWithCheck = (item: string) => {
+  const setActiveMenuItemWithCheck = async (item: string) => {
     // If trying to change page and there are unsaved changes, show confirmation
-    if (activeMenuItem !== item && activeMenuItem === 'Kasir' && !checkUnsavedChanges()) {
+    if (activeMenuItem !== item && activeMenuItem === 'Kasir' && !(await checkUnsavedChanges())) {
       return; // Don't change page if user cancels
     }
     const setter = externalSetActiveMenuItem ?? setInternalActiveMenuItem;
@@ -196,11 +197,11 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
         electronAPI.createBaristaKitchenWindow()
           .then((result) => {
             if (result?.success === false) {
-              alert(`Failed to open Barista & Kitchen window: ${result.error || 'Unknown error'}`);
+              appAlert(`Failed to open Barista & Kitchen window: ${result.error || 'Unknown error'}`);
             }
           })
           .catch((error) => {
-            alert(`Error opening window: ${error instanceof Error ? error.message : String(error)}`);
+            appAlert(`Error opening window: ${error instanceof Error ? error.message : String(error)}`);
           });
       }
     } else if (activeMenuItem === 'Kitchen') {
@@ -209,11 +210,11 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
         electronAPI.createKitchenWindow()
           .then((result) => {
             if (result?.success === false) {
-              alert(`Failed to open Kitchen window: ${result.error || 'Unknown error'}`);
+              appAlert(`Failed to open Kitchen window: ${result.error || 'Unknown error'}`);
             }
           })
           .catch((error) => {
-            alert(`Error opening window: ${error instanceof Error ? error.message : String(error)}`);
+            appAlert(`Error opening window: ${error instanceof Error ? error.message : String(error)}`);
           });
       }
     } else if (activeMenuItem === 'Barista') {
@@ -222,11 +223,11 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
         electronAPI.createBaristaWindow()
           .then((result) => {
             if (result?.success === false) {
-              alert(`Failed to open Barista window: ${result.error || 'Unknown error'}`);
+              appAlert(`Failed to open Barista window: ${result.error || 'Unknown error'}`);
             }
           })
           .catch((error) => {
-            alert(`Error opening window: ${error instanceof Error ? error.message : String(error)}`);
+            appAlert(`Error opening window: ${error instanceof Error ? error.message : String(error)}`);
           });
       }
     }
@@ -809,7 +810,7 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
       const electronAPI = getElectronAPI();
       if (!electronAPI) {
         console.error('❌ Electron API not available');
-        alert('Electron API tidak tersedia');
+        await appAlert('Electron API tidak tersedia');
         return;
       }
 
@@ -818,7 +819,7 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
       const transactionsArray = Array.isArray(transactions) ? transactions as Record<string, unknown>[] : []; const transaction = transactionsArray.find((tx) =>
         tx.uuid_id === transactionId || tx.id === transactionId
       ) as Record<string, unknown> | undefined; if (!transaction) {
-        alert('Transaksi tidak ditemukan');
+        await appAlert('Transaksi tidak ditemukan');
         return;
       }
 
@@ -863,7 +864,7 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
       console.log('📦 Transaction items fetched:', itemsArray.length);
 
       if (itemsArray.length === 0) {
-        alert('Tidak ada item dalam transaksi ini');
+        await appAlert('Tidak ada item dalam transaksi ini');
         return;
       }
 
@@ -1060,19 +1061,19 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
           })()
           : undefined);
         const itemPackageSelectionsFinal = itemPackageSelections && Array.isArray(itemPackageSelections) ? itemPackageSelections : (pkgLinesForItem && pkgLinesForItem.length > 0
-            ? pkgLinesForItem.map((line, index) => {
-              const p = productsMap.get(line.product_id);
-              const productName = (p && typeof (p as { nama?: string }).nama === 'string') ? (p as { nama: string }).nama : 'Unknown Product';
-              return {
-                package_item_id: index,
-                selection_type: 'default' as const,
-                product_id: line.product_id,
-                product_name: productName,
-                quantity: line.quantity,
-                ...(line.note != null && String(line.note).trim() ? { note: String(line.note).trim() } : {}),
-              };
-            })
-            : undefined);
+          ? pkgLinesForItem.map((line, index) => {
+            const p = productsMap.get(line.product_id);
+            const productName = (p && typeof (p as { nama?: string }).nama === 'string') ? (p as { nama: string }).nama : 'Unknown Product';
+            return {
+              package_item_id: index,
+              selection_type: 'default' as const,
+              product_id: line.product_id,
+              product_name: productName,
+              quantity: line.quantity,
+              ...(line.note != null && String(line.note).trim() ? { note: String(line.note).trim() } : {}),
+            };
+          })
+          : undefined);
         const transactionTableId = typeof transaction.table_id === 'number' ? transaction.table_id : (typeof transaction.table_id === 'string' ? parseInt(transaction.table_id, 10) : null);
 
         // Check if item should be locked
@@ -1194,7 +1195,7 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
       console.log(`✅ Loaded ${cartItems.length} items from transaction ${transactionId} into cart`);
     } catch (error) {
       console.error('Error loading transaction into cart:', error);
-      alert('Gagal memuat transaksi ke keranjang. Silakan coba lagi.');
+      await appAlert('Gagal memuat transaksi ke keranjang. Silakan coba lagi.');
     }
   };
 

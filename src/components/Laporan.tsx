@@ -7,6 +7,7 @@ import TransactionsReport from './TransactionsReport';
 import CancelledItemsReport from './CancelledItemsReport';
 import SplitBillReport from './SplitBillReport';
 import WaitersReport from './WaitersReport';
+import ProductSalesReport from './ProductSalesReport';
 
 export default function Laporan() {
   const [activeTab, setActiveTab] = useState('shift');
@@ -17,6 +18,8 @@ export default function Laporan() {
         return <ShiftReport />;
       case 'transactions':
         return <TransactionsReport />;
+      case 'sales':
+        return <ProductSalesReport />;
       case 'cancelled':
         return <CancelledItemsReport />;
       case 'splitbill':
@@ -61,6 +64,17 @@ export default function Laporan() {
             <span>Semua Transaksi</span>
           </button>
           <button
+            onClick={() => setActiveTab('sales')}
+            className={`flex items-center space-x-2 px-4 py-3 text-sm font-medium transition-colors border-b-2 -mb-px ${
+              activeTab === 'sales'
+                ? 'border-blue-600 text-blue-600 bg-white'
+                : 'border-transparent text-gray-600 hover:text-gray-900 hover:border-gray-300'
+            }`}
+          >
+            <FileText className="w-4 h-4" />
+            <span>Penjualan Produk</span>
+          </button>
+          <button
             onClick={() => setActiveTab('cancelled')}
             className={`flex items-center space-x-2 px-4 py-3 text-sm font-medium transition-colors border-b-2 -mb-px ${
               activeTab === 'cancelled'
@@ -69,7 +83,7 @@ export default function Laporan() {
             }`}
           >
             <XCircle className="w-4 h-4" />
-            <span>Item Dibatalkan</span>
+            <span>Pembatalan</span>
           </button>
           <button
             onClick={() => setActiveTab('splitbill')}
@@ -92,13 +106,6 @@ export default function Laporan() {
           >
             <Users className="w-4 h-4" />
             <span>Waiters</span>
-          </button>
-          <button
-            disabled
-            className="flex items-center space-x-2 px-4 py-3 text-sm font-medium border-b-2 -mb-px border-transparent text-gray-400 cursor-not-allowed bg-gray-50/50"
-          >
-            <FileText className="w-4 h-4" />
-            <span>Laporan Penjualan (Coming Soon)</span>
           </button>
         </div>
       </div>

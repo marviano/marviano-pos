@@ -17,7 +17,7 @@ interface Business {
 
 export default function Login() {
   const router = useRouter();
-  const { isAuthenticated, user, login, loginOffline, logout } = useAuth();
+  const { isAuthenticated, user, login, logout } = useAuth();
   const [isClient, setIsClient] = useState(false);
   const [isSyncing, setIsSyncing] = useState(false);
   const [syncStatus, setSyncStatus] = useState<string | null>(null);
@@ -180,15 +180,16 @@ export default function Login() {
         throw new Error('Anda tidak terdaftar di bisnis manapun. Hubungi administrator untuk mendapatkan akses POS.');
       }
 
-      // 2+ businesses: show business selection (same for super admin and others)
-      if (effectiveBusinesses.length > 1) {
-        setPendingLogin({
-          user: loginResult,
-          businesses: effectiveBusinesses,
-          isSuperAdmin,
-        });
-      } else {
-        const selectedBusinessId = effectiveBusinesses[0].id;
+      // Automatic business selection: use the only business, or the last-used one if it's in the list
+      const lastBusinessIdRaw = typeof window !== 'undefined' ? localStorage.getItem('last_business_id_for_login_logo') : null;
+      const lastBusinessId = lastBusinessIdRaw != null && lastBusinessIdRaw !== '' ? Number(lastBusinessIdRaw) : null;
+      const lastBusinessInList = lastBusinessId != null && Number.isFinite(lastBusinessId) && effectiveBusinesses.some((b) => b.id === lastBusinessId);
+
+      const singleBusiness = effectiveBusinesses.length === 1;
+      const multiWithValidLast = effectiveBusinesses.length > 1 && lastBusinessInList;
+
+      if (singleBusiness || multiWithValidLast) {
+        const selectedBusinessId = singleBusiness ? effectiveBusinesses[0].id : lastBusinessId!;
         if (typeof window !== 'undefined') {
           localStorage.setItem('last_business_id_for_login_logo', String(selectedBusinessId));
           if (window.electronAPI?.cacheBusinessLogoForLogin) {
@@ -197,6 +198,13 @@ export default function Login() {
           }
         }
         await authManager.completeLogin(loginResult as User & { _businesses?: unknown[]; _isSuperAdmin?: boolean }, selectedBusinessId);
+      } else {
+        // 2+ businesses and no valid last selection: show business selection
+        setPendingLogin({
+          user: loginResult,
+          businesses: effectiveBusinesses,
+          isSuperAdmin,
+        });
       }
     } catch (error) {
       console.error('Login failed:', error);
@@ -224,20 +232,6 @@ export default function Login() {
       console.error('Failed to complete login:', error);
       setSyncError('Gagal menyelesaikan login. Silakan coba lagi.');
       setPendingLogin(null);
-    }
-  };
-
-  const handleOfflineLogin = async () => {
-    if (isSyncing) {
-      console.warn('Offline login diblokir saat sinkronisasi berjalan.');
-      return;
-    }
-
-    try {
-      await loginOffline();
-      // Router will handle redirect via useEffect
-    } catch (error) {
-      console.error('Offline login failed:', error);
     }
   };
 
@@ -320,13 +314,11 @@ export default function Login() {
     <div className="w-full h-screen bg-gray-900 overflow-hidden">
       <LoginPage
         onLogin={handleLogin}
-        onOfflineLogin={handleOfflineLogin}
         onClose={handleClose}
         isSyncing={isSyncing}
         syncStatus={effectiveSyncStatus}
         syncError={syncError}
         onSyncRequest={async () => { await handleFullSync('manual'); }}
-        hasOfflineDb={true}
         syncProgress={syncProgress}
         refreshLoginLogoAt={loginLogoRefreshAt}
       />

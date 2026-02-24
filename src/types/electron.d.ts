@@ -252,6 +252,7 @@ declare global {
       localDbUpsertRestaurantLayoutElements?: (rows: unknown[]) => Promise<{ success: boolean }>;
 
       // Transaction operations
+      localDbGetTransactionByUuid?: (uuid: string) => Promise<unknown>;
       localDbGetTransactions?: (businessId?: number, limit?: number, options?: { todayOnly?: boolean }) => Promise<unknown[]>;
       localDbUpdateTransactionShift?: (transactionUuid: string, shiftUuid: string | null) => Promise<{ success: boolean; error?: string }>;
       localDbDeleteSingleTransactionPreview?: (transactionUuid: string) => Promise<{
@@ -265,6 +266,7 @@ declare global {
       localDbUpsertTransactions?: (rows: unknown[]) => Promise<unknown>;
       localDbUpdateTransactionVoucher?: (transactionId: string, payload: { voucher_discount: number; voucher_type: string; voucher_value: number | null; voucher_label: string | null; final_amount: number }) => Promise<{ success: boolean; error?: string }>;
       localDbUpdateTransactionWaiter?: (transactionId: string, waiterId: number | null) => Promise<{ success: boolean; error?: string }>;
+      localDbUpdateTransactionUser?: (transactionId: string, userId: number, useSystemPos?: boolean) => Promise<{ success: boolean; error?: string }>;
       localDbGetTransactionCheckerPrinted?: (transactionUuid: string) => Promise<{ success: boolean; checker_printed: boolean }>;
       localDbSetTransactionCheckerPrinted?: (transactionUuid: string) => Promise<{ success: boolean }>;
       localDbGetTransactionItems?: (transactionId?: number | string) => Promise<unknown[]>;
@@ -380,6 +382,7 @@ declare global {
         permissions: string[];
       } | null>;
       checkOfflineDbExists?: () => Promise<{ exists: boolean; path?: string; error?: string }>;
+      localDbPing?: () => Promise<{ success: boolean; ms?: number; error?: string }>;
 
       // Supporting tables
       localDbUpsertSource?: (rows: unknown[]) => Promise<{ success: boolean }>;
@@ -722,6 +725,7 @@ declare global {
         footer_text?: string | null;
         partnership_contact?: string | null;
       }, businessId?: number) => Promise<{ success: boolean; error?: string }>;
+      uploadReceiptSettingsToVps?: (businessId?: number) => Promise<{ success: boolean; message: string }>;
     };
   }
 }

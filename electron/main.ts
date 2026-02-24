@@ -32,6 +32,18 @@ function writeLabelDebugLog(payload: Record<string, unknown>): void {
   }
 }
 
+// #region agent log
+function debugSessionLog(payload: { sessionId: string; hypothesisId?: string; location: string; message: string; data?: Record<string, unknown> }): void {
+  try {
+    const logPath = path.join(__dirname, '..', 'debug-ada822.log');
+    const line = JSON.stringify({ ...payload, timestamp: Date.now() }) + '\n';
+    fs.appendFileSync(logPath, line);
+  } catch {
+    // do not break app if log write fails
+  }
+}
+// #endregion
+
 /** Extract @page rule snippet from HTML for debug (label height). */
 function getAtPageSnippet(html: string): string | null {
   const m = html.match(/@page\s*\{[^}]*\}/);
@@ -205,8 +217,6 @@ type LabelPrintData = {
   category1Name?: string;
   /** Section header for category 2 (e.g. Minuman). */
   category2Name?: string;
-  /** All Category 1 sections for checker (when template uses {{categoriesSections}}). */
-  categories?: Array<{ categoryName: string; itemsHtml: string }>;
   /** Padding for 80mm checker template (same as receipt). Replaces {{leftPadding}}/{{rightPadding}} in template. */
   leftPadding?: string;
   rightPadding?: string;
@@ -4189,6 +4199,32 @@ function createWindows(): void {
     }
   });
 
+  ipcMain.handle('localdb-update-transaction-user', async (_event, transactionId: string, userId: number, useSystemPos?: boolean) => {
+    try {
+      if (!transactionId || typeof transactionId !== 'string') {
+        return { success: false, error: 'transactionId required' };
+      }
+      if (userId == null || typeof userId !== 'number' || isNaN(userId)) {
+        return { success: false, error: 'userId required (number)' };
+      }
+      if (useSystemPos) {
+        await executeSystemPosUpdate(
+          'UPDATE transactions SET user_id = ?, updated_at = NOW() WHERE uuid_id = ?',
+          [userId, transactionId]
+        );
+      } else {
+        await executeUpdate(
+          'UPDATE transactions SET user_id = ?, updated_at = NOW() WHERE uuid_id = ?',
+          [userId, transactionId]
+        );
+      }
+      return { success: true };
+    } catch (err) {
+      console.error('localdb-update-transaction-user error:', err);
+      return { success: false, error: err instanceof Error ? err.message : 'Unknown error' };
+    }
+  });
+
   /** Ensure checker_printed column exists (for DBs created before this column). */
   async function ensureCheckerPrintedColumn(): Promise<void> {
     try {
@@ -4263,6 +4299,30 @@ function createWindows(): void {
     } catch (err) {
       console.error('localdb-set-transaction-checker-printed error:', err);
       return { success: false };
+    }
+  });
+
+  ipcMain.handle('localdb-ping', async () => {
+    try {
+      const start = Date.now();
+      await executeQueryOne<{ 1: number }>('SELECT 1');
+      return { success: true, ms: Date.now() - start };
+    } catch (e) {
+      return { success: false, error: (e as Error)?.message || String(e) };
+    }
+  });
+
+  ipcMain.handle('localdb-get-transaction-by-uuid', async (event, uuid: string) => {
+    try {
+      const dbStart = Date.now();
+      const rows = await executeQuery(
+        'SELECT *, COALESCE(uuid_id, id) as id FROM transactions WHERE uuid_id = ? LIMIT 1',
+        [uuid]
+      );
+      return rows[0] || null;
+    } catch (err) {
+      console.error('localdb-get-transaction-by-uuid error:', err);
+      return null;
     }
   });
 
@@ -5408,7 +5468,7 @@ function createWindows(): void {
                   }
                 }
               }
-            } catch (_) {}
+            } catch (_) { }
           }
           linesWithNotes = lines.map((l, i) => ({
             ...l,
@@ -6426,6 +6486,7 @@ function createWindows(): void {
   });
 
   // Get cancelled items for shift (for Ganti Shift report). Same filters as other shift handlers.
+  // Shows cancelled items for all transaction statuses (pending/completed) so Simpan Order cancellations are visible.
   // Returns: product_name, quantity, unit_price, total_price, cancelled_at, cancelled_by_user_name, cancelled_by_waiter_name, transaction info.
   ipcMain.handle('localdb-get-shift-cancelled-items', async (event, userId: number | null, shiftStart: string, shiftEnd: string | null, businessId: number | null = null, shiftUuid?: string | null, shiftUuids?: string[]) => {
     try {
@@ -6457,7 +6518,6 @@ function createWindows(): void {
         LEFT JOIN users u ON COALESCE(ti.cancelled_by_user_id, t.user_id) = u.id
         LEFT JOIN employees e ON ti.cancelled_by_waiter_id = e.id
         WHERE t.business_id = ?
-        AND t.status = 'completed'
         AND ti.production_status = 'cancelled'
       `;
       const params: (string | number | null | boolean)[] = [businessId];
@@ -7228,15 +7288,28 @@ function createWindows(): void {
       const cashMethod = await executeQueryOne<{ id: number }>('SELECT id FROM payment_methods WHERE code = ? LIMIT 1', ['cash']);
       const cashMethodId = cashMethod?.id || 1;
 
+      // Selisih Kas formula (aligned with Ganti Shift page and get-cash-summary):
+      // - Kas Expected = Modal Awal + Penjualan Tunai (net of cancelled items) - Refund Tunai
+      // - Selisih = Kas Akhir - Kas Expected (plus = surplus, minus = shortfall, balanced ≈ 0)
+      // Cash sales must match get-cash-summary: exclude cancelled item amounts so stored values match report.
       const shiftSalesResult = await executeQueryOne<{ cash_total: number }>(`
-        SELECT COALESCE(SUM(t.final_amount), 0) as cash_total
+        SELECT COALESCE(SUM(t.final_amount - COALESCE(cancelled.total_cancelled, 0)), 0) as cash_total
         FROM transactions t
-        WHERE business_id = ?
-          AND user_id = ?
-          AND created_at >= ?
-          AND created_at <= ?
-          AND payment_method_id = ?
-          AND status = 'completed'
+        LEFT JOIN (
+          SELECT 
+            transaction_id, 
+            uuid_transaction_id,
+            SUM(total_price) as total_cancelled
+          FROM transaction_items
+          WHERE production_status = 'cancelled'
+          GROUP BY uuid_transaction_id, transaction_id
+        ) cancelled ON (t.uuid_id = cancelled.uuid_transaction_id OR t.id = cancelled.transaction_id)
+        WHERE t.business_id = ?
+          AND t.user_id = ?
+          AND t.created_at >= ?
+          AND t.created_at <= ?
+          AND t.payment_method_id = ?
+          AND t.status = 'completed'
       `, [
         shiftRow.business_id,
         shiftRow.user_id,
@@ -7525,7 +7598,7 @@ function createWindows(): void {
     }
   });
 
-  // Get payment method breakdown
+  // Get payment method breakdown (gross: total_amount, no deduction for cancelled or refunds).
   // When shiftUuids (non-empty): all transactions bound to any of those shifts (whole day). When shiftUuid: single shift (all users). Else: userId + time.
   ipcMain.handle('localdb-get-payment-breakdown', async (event, userId: number | null, shiftStart: string, shiftEnd: string | null, businessId: number | null = null, shiftUuid: string | null = null, shiftUuids?: string[]) => {
     try {
@@ -7533,18 +7606,17 @@ function createWindows(): void {
         return [];
       }
 
-      // Payment breakdown: gross amount per method (minus refund only). Item dibatalkan deduction is centralised in Ringkasan.
-      const onlyTxWithItems = ' AND t.id IN (SELECT transaction_id FROM transaction_items GROUP BY transaction_id HAVING COALESCE(SUM(total_price), 0) > 0)';
+      const amountExpr = 'COALESCE(SUM(t.total_amount), 0)';
       if (shiftUuids && shiftUuids.length > 0) {
         const query = `
           SELECT 
             COALESCE(pm.name, 'Unknown') as payment_method_name,
             COALESCE(pm.code, 'unknown') as payment_method_code,
             COUNT(t.id) as transaction_count,
-            COALESCE(SUM(GREATEST(0, t.total_amount - COALESCE(t.refund_total, 0))), 0) as total_amount
+            ${amountExpr} as total_amount
           FROM transactions t
           LEFT JOIN payment_methods pm ON t.payment_method_id = pm.id
-          WHERE t.business_id = ? AND t.shift_uuid IN (${shiftUuids.map(() => '?').join(',')}) AND t.status = 'completed' AND t.refund_status != 'full'${onlyTxWithItems}
+          WHERE t.business_id = ? AND t.shift_uuid IN (${shiftUuids.map(() => '?').join(',')}) AND t.status = 'completed'
           GROUP BY t.payment_method_id, pm.name, pm.code ORDER BY transaction_count DESC
         `;
         const results = await executeQuery(query, [businessId, ...shiftUuids]);
@@ -7557,10 +7629,10 @@ function createWindows(): void {
             COALESCE(pm.name, 'Unknown') as payment_method_name,
             COALESCE(pm.code, 'unknown') as payment_method_code,
             COUNT(t.id) as transaction_count,
-            COALESCE(SUM(GREATEST(0, t.total_amount - COALESCE(t.refund_total, 0))), 0) as total_amount
+            ${amountExpr} as total_amount
           FROM transactions t
           LEFT JOIN payment_methods pm ON t.payment_method_id = pm.id
-          WHERE t.business_id = ? AND t.shift_uuid = ? AND t.status = 'completed' AND t.refund_status != 'full'${onlyTxWithItems}
+          WHERE t.business_id = ? AND t.shift_uuid = ? AND t.status = 'completed'
           GROUP BY t.payment_method_id, pm.name, pm.code ORDER BY transaction_count DESC
         `;
         const results = await executeQuery(query, [businessId, shiftUuid]);
@@ -7576,14 +7648,12 @@ function createWindows(): void {
           COALESCE(pm.name, 'Unknown') as payment_method_name,
           COALESCE(pm.code, 'unknown') as payment_method_code,
           COUNT(t.id) as transaction_count,
-          COALESCE(SUM(GREATEST(0, t.total_amount - COALESCE(t.refund_total, 0))), 0) as total_amount
+          ${amountExpr} as total_amount
         FROM transactions t
         LEFT JOIN payment_methods pm ON t.payment_method_id = pm.id
         WHERE t.business_id = ?
         AND t.created_at >= ?
         AND t.status = 'completed'
-        AND t.refund_status != 'full'
-        ${onlyTxWithItems}
       `;
       const params: (string | number | null | boolean)[] = [businessId, shiftStartMySQL];
 
@@ -7607,7 +7677,7 @@ function createWindows(): void {
     }
   });
 
-  // Get Category I breakdown: only product's category1 (no category2). Refund (full & partial) excluded from amount.
+  // Get Category I breakdown: gross (total_amount), excludes cancelled items; matches Payment Method base.
   // When shiftUuids (non-empty): filter by t.shift_uuid IN (...). When shiftUuid: filter by t.shift_uuid = ?. Else: userId + time.
   ipcMain.handle('localdb-get-category1-breakdown', async (event, userId: number | null, shiftStart: string, shiftEnd: string | null, businessId: number | null = null, shiftUuid?: string | null, shiftUuids?: string[]) => {
     try {
@@ -7623,27 +7693,17 @@ function createWindows(): void {
           COALESCE(SUM(ti.quantity), 0) as total_quantity,
           COALESCE(SUM(
             ti.total_price / NULLIF((SELECT COALESCE(SUM(ti2.total_price), 0) FROM transaction_items ti2 WHERE ti2.transaction_id = ti.transaction_id AND (ti2.production_status IS NULL OR ti2.production_status != 'cancelled')), 0)
-            * COALESCE(GREATEST(0, (t.total_amount - COALESCE(cancelled.total_cancelled, 0)) - COALESCE(t.refund_total, 0)), 0)
+            * COALESCE(t.total_amount, 0)
           ), 0) as total_amount
         FROM transaction_items ti
         INNER JOIN transactions t ON ti.transaction_id = t.id
         INNER JOIN products p ON ti.product_id = p.id
         LEFT JOIN category1 c1 ON p.category1_id = c1.id
-        LEFT JOIN (
-            SELECT 
-              transaction_id, 
-              uuid_transaction_id,
-              SUM(total_price) as total_cancelled
-            FROM transaction_items
-            WHERE production_status = 'cancelled'
-            GROUP BY uuid_transaction_id, transaction_id
-          ) cancelled ON (t.uuid_id = cancelled.uuid_transaction_id OR t.id = cancelled.transaction_id)
         WHERE t.business_id = ?
         AND t.status = 'completed'
-        AND t.refund_status != 'full'
+        AND (ti.production_status IS NULL OR ti.production_status != 'cancelled')
         AND p.category1_id IS NOT NULL
         AND c1.id IS NOT NULL
-        AND (ti.production_status IS NULL OR ti.production_status != 'cancelled')
       `;
       const params: (string | number | null | boolean)[] = [businessId];
       if (shiftUuids && shiftUuids.length > 0) {
@@ -7673,7 +7733,7 @@ function createWindows(): void {
     }
   });
 
-  // Get Category II breakdown: only product's category2 that belongs to this business (category2_businesses). Refund (full & partial) excluded from amount.
+  // Get Category II breakdown: only product's category2 that belongs to this business (category2_businesses). Gross amount only; excludes cancelled items.
   // When shiftUuids (non-empty): filter by t.shift_uuid IN (...). When shiftUuid: filter by t.shift_uuid = ?. Else: userId + time.
   ipcMain.handle('localdb-get-category2-breakdown', async (event, userId: number | null, shiftStart: string, shiftEnd: string | null, businessId: number | null = null, shiftUuid?: string | null, shiftUuids?: string[]) => {
     try {
@@ -7690,28 +7750,18 @@ function createWindows(): void {
           COALESCE(SUM(ti.quantity), 0) as total_quantity,
           COALESCE(SUM(
             ti.total_price / NULLIF((SELECT COALESCE(SUM(ti2.total_price), 0) FROM transaction_items ti2 WHERE ti2.transaction_id = ti.transaction_id AND (ti2.production_status IS NULL OR ti2.production_status != 'cancelled')), 0)
-            * COALESCE(GREATEST(0, (t.total_amount - COALESCE(cancelled.total_cancelled, 0)) - COALESCE(t.refund_total, 0)), 0)
+            * COALESCE(t.total_amount, 0)
           ), 0) as total_amount
         FROM transaction_items ti
         INNER JOIN transactions t ON ti.transaction_id = t.id
         INNER JOIN products p ON ti.product_id = p.id
         INNER JOIN category2_businesses cb ON cb.category2_id = p.category2_id AND cb.business_id = t.business_id
         LEFT JOIN category2 c2 ON p.category2_id = c2.id
-        LEFT JOIN (
-            SELECT 
-              transaction_id, 
-              uuid_transaction_id,
-              SUM(total_price) as total_cancelled
-            FROM transaction_items
-            WHERE production_status = 'cancelled'
-            GROUP BY uuid_transaction_id, transaction_id
-          ) cancelled ON (t.uuid_id = cancelled.uuid_transaction_id OR t.id = cancelled.transaction_id)
         WHERE t.business_id = ?
         AND t.status = 'completed'
-        AND t.refund_status != 'full'
+        AND (ti.production_status IS NULL OR ti.production_status != 'cancelled')
         AND p.category2_id IS NOT NULL
         AND c2.id IS NOT NULL
-        AND (ti.production_status IS NULL OR ti.production_status != 'cancelled')
       `;
       const params: (string | number | null | boolean)[] = [businessId];
 
@@ -7756,18 +7806,10 @@ function createWindows(): void {
         return { cash_shift: 0, cash_whole_day: 0 };
       }
 
+      // Cash sales: gross (total_amount) so Ringkasan Cash Sales matches Payment Method Cash.
       let shiftQuery = `
-        SELECT COALESCE(SUM(t.final_amount - COALESCE(cancelled.total_cancelled, 0)), 0) as cash_total
+        SELECT COALESCE(SUM(t.total_amount), 0) as cash_total
         FROM transactions t
-        LEFT JOIN (
-          SELECT 
-            transaction_id, 
-            uuid_transaction_id,
-            SUM(total_price) as total_cancelled
-          FROM transaction_items
-          WHERE production_status = 'cancelled'
-          GROUP BY uuid_transaction_id, transaction_id
-        ) cancelled ON (t.uuid_id = cancelled.uuid_transaction_id OR t.id = cancelled.transaction_id)
         WHERE t.business_id = ?
         AND t.payment_method_id = ?
         AND t.status = 'completed'
@@ -7822,17 +7864,8 @@ function createWindows(): void {
         const dayEnd = new Date(dayEndGMT7.getTime() - gmt7Offset);
 
         wholeDayResult = await executeQueryOne<{ cash_total: number }>(`
-          SELECT COALESCE(SUM(t.final_amount - COALESCE(cancelled.total_cancelled, 0)), 0) as cash_total
+          SELECT COALESCE(SUM(t.total_amount), 0) as cash_total
           FROM transactions t
-          LEFT JOIN (
-            SELECT 
-              transaction_id, 
-              uuid_transaction_id,
-              SUM(total_price) as total_cancelled
-            FROM transaction_items
-            WHERE production_status = 'cancelled'
-            GROUP BY uuid_transaction_id, transaction_id
-          ) cancelled ON (t.uuid_id = cancelled.uuid_transaction_id OR t.id = cancelled.transaction_id)
           WHERE t.business_id = ?
           AND t.created_at >= ?
           AND t.created_at <= ?
@@ -8255,16 +8288,15 @@ function createWindows(): void {
             p.nama as package_product_name,
             ti.quantity as package_qty,
             ti.total_price as package_total_price,
-            COALESCE(GREATEST(0, (t.total_amount - COALESCE(t.refund_total, 0))), 0) as tx_total_amount,
+            COALESCE(t.total_amount, 0) as tx_total_amount,
             (SELECT COALESCE(SUM(ti2.total_price), 0) FROM transaction_items ti2 WHERE ti2.transaction_id = ti.transaction_id AND (ti2.production_status IS NULL OR ti2.production_status != 'cancelled')) as tx_items_total
           FROM transaction_items ti
           INNER JOIN transactions t ON ti.transaction_id = t.id
           INNER JOIN products p ON ti.product_id = p.id
           WHERE t.business_id = ?
             AND t.status = 'completed'
-            AND t.refund_status != 'full'
-            AND p.category1_id = 14
             AND (ti.production_status IS NULL OR ti.production_status != 'cancelled')
+            AND p.category1_id = 14
         `;
         const params: (string | number | null | boolean)[] = [businessId];
 
@@ -8428,7 +8460,7 @@ function createWindows(): void {
     }
   );
 
-  // Get product sales breakdown for shift. Allocate net amount (gross - refund) to items proportionally. Refund (full & partial) excluded.
+  // Get product sales breakdown for shift. Excludes cancelled items. Allocates gross transaction amount across non-cancelled items only (matches Payment Method).
   // When shiftUuids (non-empty): filter by t.shift_uuid IN (...). When shiftUuid: filter by t.shift_uuid = ?. Else: userId + time.
   ipcMain.handle('localdb-get-product-sales', async (event, userId: number | null, shiftStart: string, shiftEnd: string | null, businessId: number | null = null, shiftUuid?: string | null, shiftUuids?: string[]) => {
     try {
@@ -8467,7 +8499,6 @@ function createWindows(): void {
         INNER JOIN products p ON ti.product_id = p.id
         WHERE t.business_id = ?
         AND t.status = 'completed'
-        AND t.refund_status != 'full'
         AND (ti.production_status IS NULL OR ti.production_status != 'cancelled')
       `;
       const params: (string | number | null | boolean)[] = [businessId];
@@ -8637,32 +8668,10 @@ function createWindows(): void {
         return customizationTotal * unitQuantity || 0;
       };
 
-      // Helper function to determine platform from unit price
+      // Helper: determine platform from payment method code (authoritative; avoids misattribution when platforms share the same price)
       const determinePlatform = (row: TransactionItemRow): string => {
-        const unitPrice = Number(row.unit_price || 0);
-
-        // Compare unit price with platform-specific prices
-        // Allow small tolerance for floating point comparison (0.01)
-        const tolerance = 0.01;
-
-        if (row.harga_gofood && Math.abs(unitPrice - Number(row.harga_gofood)) < tolerance) {
-          return 'gofood';
-        }
-        if (row.harga_grabfood && Math.abs(unitPrice - Number(row.harga_grabfood)) < tolerance) {
-          return 'grabfood';
-        }
-        if (row.harga_shopeefood && Math.abs(unitPrice - Number(row.harga_shopeefood)) < tolerance) {
-          return 'shopeefood';
-        }
-        if (row.harga_qpon && Math.abs(unitPrice - Number(row.harga_qpon)) < tolerance) {
-          return 'qpon';
-        }
-        if (row.harga_tiktok && Math.abs(unitPrice - Number(row.harga_tiktok)) < tolerance) {
-          return 'tiktok';
-        }
-
-        // Default to offline
-        return 'offline';
+        const rawPlatform = (row.payment_method_code || row.payment_method || '').toString().toLowerCase();
+        return rawPlatform && !OFFLINE_METHODS.has(rawPlatform) ? rawPlatform : 'offline';
       };
 
       for (const row of rows) {
@@ -8676,17 +8685,15 @@ function createWindows(): void {
           baseSubtotal = 0;
         }
 
-        // Allocate net transaction amount (gross - refund) to items proportionally
+        // Allocate gross transaction amount across non-cancelled items only (cancelled items excluded above)
         const totalAmountTx = Number(row.total_amount ?? 0);
-        const refundTotal = Number(row.refund_total ?? 0);
-        const netAmountTx = Math.max(0, totalAmountTx - refundTotal);
         const txItemsTotal = Number(row.tx_items_total ?? 0);
-        const allocatedRatio = txItemsTotal > 0 ? netAmountTx / txItemsTotal : 0;
+        const allocatedRatio = txItemsTotal > 0 ? totalAmountTx / txItemsTotal : 0;
         const netBaseSubtotal = baseSubtotal * allocatedRatio;
         const netTotalPrice = totalPrice * allocatedRatio;
         const netCustomizationSubtotal = customizationSubtotal * allocatedRatio;
 
-        // Determine platform based on product price, not payment method
+        // Determine platform from payment method code (canonical at transaction time)
         const platformCode = determinePlatform(row);
         const transactionType = row.transaction_type || 'drinks';
         // Include unit_price in the key to split products with different prices into separate rows
@@ -8758,6 +8765,12 @@ function createWindows(): void {
         }
         return a.product_name.localeCompare(b.product_name);
       });
+
+      // #region agent log
+      const sumBase = allProducts.reduce((s, p) => s + (Number(p.base_subtotal) || 0), 0);
+      const sumTotal = allProducts.reduce((s, p) => s + (Number((p as { total_subtotal?: number }).total_subtotal) || 0), 0);
+      debugSessionLog({ sessionId: 'ada822', hypothesisId: 'H_backend_totals', location: 'main.ts:product-sales', message: 'Backend product sales totals', data: { sumBase, sumTotal, productCount: allProducts.length } });
+      // #endregion
 
       return {
         products: allProducts,
@@ -9000,8 +9013,10 @@ function createWindows(): void {
         const businessId = getNumber('business_id');
         const templateCode = getString('template_code');
         const isActive = getBoolean('is_active') !== null ? (getBoolean('is_active') ? 1 : 0) : 1;
+        // Local-only columns: not sent by sync API; use defaults on INSERT, do not overwrite on UPDATE
         const isDefault = getBoolean('is_default') !== null ? (getBoolean('is_default') ? 1 : 0) : 0;
-        const showNotes = getNumber('show_notes') ?? getBoolean('show_notes') ? 1 : 0;
+        const showNotes = getNumber('show_notes') ?? (getBoolean('show_notes') ? 1 : 0);
+        const oneLabelPerProduct = getNumber('one_label_per_product') ?? (getBoolean('one_label_per_product') !== false ? 1 : 0);
         const version = getNumber('version') ?? 1;
         const createdDate = getDate('created_at');
         const createdAt = createdDate ? toMySQLTimestamp(createdDate as string | number | Date) : toMySQLTimestamp(new Date());
@@ -9010,18 +9025,16 @@ function createWindows(): void {
         return {
           sql: `INSERT INTO receipt_templates (
             id, template_type, template_name, business_id, template_code,
-            is_active, is_default, show_notes, version, created_at, updated_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            is_active, is_default, show_notes, one_label_per_product, version, created_at, updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
           ON DUPLICATE KEY UPDATE
             template_type=VALUES(template_type),
             template_name=VALUES(template_name),
             template_code=VALUES(template_code),
             is_active=VALUES(is_active),
-            is_default=VALUES(is_default),
-            show_notes=VALUES(show_notes),
             version=VALUES(version),
             updated_at=VALUES(updated_at)`,
-          params: [id, templateType, templateName, businessId, templateCode, isActive, isDefault, showNotes, version, createdAt, updatedAt]
+          params: [id, templateType, templateName, businessId, templateCode, isActive, isDefault, showNotes, oneLabelPerProduct, version, createdAt, updatedAt]
         };
       });
       await executeTransaction(queries);
@@ -11027,6 +11040,15 @@ ipcMain.handle('save-receipt-settings', async (event, settings: {
   }
 });
 
+ipcMain.handle('upload-receipt-settings-to-vps', async (event, businessId?: number) => {
+  try {
+    return await receiptManagementService.uploadReceiptSettingsToVps(businessId);
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    return { success: false, message: msg || 'Gagal upload pengaturan struk ke VPS' };
+  }
+});
+
 // Execute single label print (used by queue)
 async function executeLabelPrint(data: LabelPrintData): Promise<{ success: boolean; error?: string }> {
   try {
@@ -11110,7 +11132,7 @@ async function executeLabelPrint(data: LabelPrintData): Promise<{ success: boole
       const pageSize = code.includes('40mm') ? '40mm' : code.includes('80mm') ? '80mm' : 'other';
       const h1Payload = { location: 'main.ts:label-print', message: 'which template used (single label)', data: { businessIdRequested: data.business_id, templateName: checkerResult.templateName ?? null, templateCodeLength: codeLen, pageSize, hasTemplateCode: !!(checkerResult.templateCode && checkerResult.templateCode.trim()) }, hypothesisId: 'H1' as const };
       writeLabelDebugLog(h1Payload);
-      fetch('http://127.0.0.1:7495/ingest/20000880-6f22-4a8b-8a8e-250eeb7d84f4',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'76ac0a'},body:JSON.stringify({sessionId:'76ac0a',...h1Payload,timestamp:Date.now()})}).catch(()=>{});
+      fetch('http://127.0.0.1:7495/ingest/20000880-6f22-4a8b-8a8e-250eeb7d84f4', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': '76ac0a' }, body: JSON.stringify({ sessionId: '76ac0a', ...h1Payload, timestamp: Date.now() }) }).catch(() => { });
       // #endregion
       const dataCustomizations = typeof data.customizations === 'string' ? data.customizations : '';
       const hasCustomizations = (dataCustomizations || '').trim().length > 0;
@@ -11125,14 +11147,14 @@ async function executeLabelPrint(data: LabelPrintData): Promise<{ success: boole
         // #region agent log
         const h2Payload = { location: 'main.ts:label-print', message: 'used DB template path', data: { htmlContentLength: htmlContent?.length ?? 0 }, hypothesisId: 'H2' as const };
         writeLabelDebugLog(h2Payload);
-        fetch('http://127.0.0.1:7495/ingest/20000880-6f22-4a8b-8a8e-250eeb7d84f4',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'76ac0a'},body:JSON.stringify({sessionId:'76ac0a',...h2Payload,timestamp:Date.now()})}).catch(()=>{});
+        fetch('http://127.0.0.1:7495/ingest/20000880-6f22-4a8b-8a8e-250eeb7d84f4', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': '76ac0a' }, body: JSON.stringify({ sessionId: '76ac0a', ...h2Payload, timestamp: Date.now() }) }).catch(() => { });
         // #endregion
       } else {
         htmlContent = generateLabelHTML(data);
         // #region agent log
         const h4Payload = { location: 'main.ts:label-print', message: 'used fallback generateLabelHTML', data: { htmlContentLength: htmlContent?.length ?? 0 }, hypothesisId: 'H4' as const };
         writeLabelDebugLog(h4Payload);
-        fetch('http://127.0.0.1:7495/ingest/20000880-6f22-4a8b-8a8e-250eeb7d84f4',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'76ac0a'},body:JSON.stringify({sessionId:'76ac0a',...h4Payload,timestamp:Date.now()})}).catch(()=>{});
+        fetch('http://127.0.0.1:7495/ingest/20000880-6f22-4a8b-8a8e-250eeb7d84f4', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': '76ac0a' }, body: JSON.stringify({ sessionId: '76ac0a', ...h4Payload, timestamp: Date.now() }) }).catch(() => { });
         // #endregion
       }
     } catch (e) {
@@ -11141,7 +11163,7 @@ async function executeLabelPrint(data: LabelPrintData): Promise<{ success: boole
       // #region agent log
       const h4ErrPayload = { location: 'main.ts:label-print', message: 'checker load failed, fallback', data: { error: String(e), htmlContentLength: htmlContent?.length ?? 0 }, hypothesisId: 'H4' as const };
       writeLabelDebugLog(h4ErrPayload);
-      fetch('http://127.0.0.1:7495/ingest/20000880-6f22-4a8b-8a8e-250eeb7d84f4',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'76ac0a'},body:JSON.stringify({sessionId:'76ac0a',...h4ErrPayload,timestamp:Date.now()})}).catch(()=>{});
+      fetch('http://127.0.0.1:7495/ingest/20000880-6f22-4a8b-8a8e-250eeb7d84f4', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': '76ac0a' }, body: JSON.stringify({ sessionId: '76ac0a', ...h4ErrPayload, timestamp: Date.now() }) }).catch(() => { });
       // #endregion
     }
 
@@ -11150,7 +11172,7 @@ async function executeLabelPrint(data: LabelPrintData): Promise<{ success: boole
     const atPageInFinal = getAtPageSnippet(htmlContent);
     const pagePayload = { sessionId: 'ba378a', location: 'main.ts:label-print', message: 'label @page (single)', data: { atPageInTemplate, atPageInFinal, has30mmInTemplate: templateCodeForLog.includes('30mm'), hasAutoInTemplate: templateCodeForLog.includes('auto') }, hypothesisId: 'H-page', timestamp: Date.now() };
     console.log('[LABEL HEIGHT DEBUG] single label @page in template:', atPageInTemplate, '| in final HTML:', atPageInFinal);
-    fetch('http://127.0.0.1:7495/ingest/20000880-6f22-4a8b-8a8e-250eeb7d84f4', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': 'ba378a' }, body: JSON.stringify(pagePayload) }).catch(() => {});
+    fetch('http://127.0.0.1:7495/ingest/20000880-6f22-4a8b-8a8e-250eeb7d84f4', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': 'ba378a' }, body: JSON.stringify(pagePayload) }).catch(() => { });
     // #endregion
 
     await jobPrintWindow.loadURL(`data:text/html,${encodeURIComponent(htmlContent)}`);
@@ -11223,17 +11245,19 @@ type OrderContextForChecker = {
   itemsHtmlCategory2?: string;
   category1Name?: string;
   category2Name?: string;
-  /** All Category 1 sections (for template placeholder {{categoriesSections}}). */
-  categories?: Array<{ categoryName: string; itemsHtml: string }>;
 };
 
-/** Minimal template used when checker template has no {{items}} but we have orderContext (print one slip with notes). */
+/** Minimal template used when checker template has no {{items}}/{{categoriesSections}} but we have orderContext (print one slip with notes). Uses {{categoriesSections}} so slip shows items grouped by category (e.g. MAKANAN / MINUMAN), not a table. */
 const FALLBACK_ORDER_SUMMARY_CHECKER_TEMPLATE = `<!DOCTYPE html>
-<html><head><meta charset="UTF-8"><style>@page{size:80mm auto;margin:0;}*{margin:0;padding:0;box-sizing:border-box;}body{font-family:Arial,sans-serif;width:42ch;font-size:9pt;padding:2mm 7mm;}table{width:100%;border-collapse:collapse;}td,th{padding:0.5mm 0;}tr.package-subitem td{font-size:8pt;padding-left:3mm;}</style></head><body>
-<div style="font-weight:700;margin-bottom:1mm;">Pelanggan: {{customerName}}</div>
-<div style="font-weight:700;margin-bottom:1mm;">Meja: {{tableName}}</div>
-<div style="font-size:8pt;margin-bottom:2mm;">{{orderTime}}</div>
-<table><tr><th style="text-align:left;">Item</th><th style="text-align:right;">Harga</th><th style="text-align:right;">Jml</th><th style="text-align:right;">Subtotal</th></tr>{{items}}</table>
+<html><head><meta charset="UTF-8"><style>@page{size:80mm auto;margin:0;}*{margin:0;padding:0;box-sizing:border-box;}body{font-family:Arial,sans-serif;width:42ch;font-size:9pt;padding:2mm {{rightPadding}}mm 2mm {{leftPadding}}mm;word-wrap:break-word;overflow-wrap:break-word;}.dashed-line{border-top:1px dashed #000;margin:1.5mm 0;}.info-line{display:flex;justify-content:space-between;margin-bottom:0.5mm;}.info-label{font-size:9pt;}.info-value{font-size:9pt;font-weight:700;}.category-section{margin:1.5mm 0;}.category-title{font-size:9pt;font-weight:700;margin-bottom:0.5mm;}.item-line{font-size:9pt;margin:0.5mm 0;}</style></head><body>
+<div class="dashed-line"></div>
+<div class="info-line"><span class="info-label">Waiter:</span><span class="info-value">{{waiterName}}</span></div>
+<div class="info-line"><span class="info-label">Pelanggan:</span><span class="info-value">{{customerName}}</span></div>
+<div class="info-line"><span class="info-label">Meja:</span><span class="info-value">{{tableName}}</span></div>
+<div class="info-line"><span class="info-label">Waktu Pesanan:</span><span class="info-value"><span class="time">{{orderTime}}</span></span></div>
+<div class="dashed-line"></div>
+{{categoriesSections}}
+<div class="dashed-line"></div>
 </body></html>`;
 
 async function executeLabelsBatchPrint(data: {
@@ -11254,8 +11278,7 @@ async function executeLabelsBatchPrint(data: {
       data.orderContext.orderTime != null ||
       (data.orderContext.itemsHtml != null && data.orderContext.itemsHtml !== '') ||
       (data.orderContext.itemsHtmlCategory1 != null && data.orderContext.itemsHtmlCategory1 !== '') ||
-      (data.orderContext.itemsHtmlCategory2 != null && data.orderContext.itemsHtmlCategory2 !== '') ||
-      (Array.isArray(data.orderContext.categories) && data.orderContext.categories.length > 0)
+      (data.orderContext.itemsHtmlCategory2 != null && data.orderContext.itemsHtmlCategory2 !== '')
     );
 
     // Load checker template early to decide order-summary vs per-item mode
@@ -11277,7 +11300,11 @@ async function executeLabelsBatchPrint(data: {
     // #endregion
     const checkerTemplateCode = checkerResult.templateCode?.trim() ?? null;
     const templateUsesItems = checkerTemplateCode != null && (checkerTemplateCode.includes('{{items}}') || checkerTemplateCode.includes('{{itemsCategory1}}') || checkerTemplateCode.includes('{{itemsCategory2}}') || checkerTemplateCode.includes('{{categoriesSections}}'));
-    const hasOrderContextWithItems = hasOrderContext && (data.orderContext?.itemsHtml != null && String(data.orderContext.itemsHtml).trim() !== '');
+    const hasOrderContextWithItems = hasOrderContext && (
+      (data.orderContext?.itemsHtml != null && String(data.orderContext.itemsHtml).trim() !== '') ||
+      (data.orderContext?.itemsHtmlCategory1 != null && String(data.orderContext.itemsHtmlCategory1).trim() !== '') ||
+      (data.orderContext?.itemsHtmlCategory2 != null && String(data.orderContext.itemsHtmlCategory2).trim() !== '')
+    );
     const oneLabelPerProduct = checkerResult.oneLabelPerProduct !== false;
     // Use order-summary slip when template setting "1 label per product" is unchecked (oneLabelPerProduct === false) and we have order context. When checked, use per-item labels. If template has {{items}}, use it for the slip; otherwise use fallback slip template.
     const useOrderSummarySlip = hasOrderContextWithItems && !oneLabelPerProduct;
@@ -11376,7 +11403,6 @@ async function executeLabelsBatchPrint(data: {
           itemsCategory2: data.orderContext.itemsHtmlCategory2 ?? '',
           category1Name: data.orderContext.category1Name ?? '',
           category2Name: data.orderContext.category2Name ?? '',
-          categories: data.orderContext.categories,
           leftPadding: batchLeftPadding,
           rightPadding: batchRightPadding,
         };
@@ -11427,7 +11453,7 @@ async function executeLabelsBatchPrint(data: {
     const atPageBatchFinal = getAtPageSnippet(htmlContent);
     const batchPagePayload = { sessionId: 'ba378a', location: 'main.ts:executeLabelsBatchPrint', message: 'label @page (batch)', data: { atPageInTemplate: atPageBatchTemplate, atPageInFinal: atPageBatchFinal, has30mmInTemplate: batchTemplateCode.includes('30mm'), hasAutoInTemplate: batchTemplateCode.includes('auto'), useOrderSummarySlip }, hypothesisId: 'H-page', timestamp: Date.now() };
     console.log('[LABEL HEIGHT DEBUG] batch @page in template:', atPageBatchTemplate, '| in final HTML:', atPageBatchFinal);
-    fetch('http://127.0.0.1:7495/ingest/20000880-6f22-4a8b-8a8e-250eeb7d84f4', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': 'ba378a' }, body: JSON.stringify(batchPagePayload) }).catch(() => {});
+    fetch('http://127.0.0.1:7495/ingest/20000880-6f22-4a8b-8a8e-250eeb7d84f4', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': 'ba378a' }, body: JSON.stringify(batchPagePayload) }).catch(() => { });
     // #endregion
 
     // --- 1st checker: load generated HTML into print window ---
@@ -11879,23 +11905,22 @@ function generateLabelHTMLFromTemplate(templateCode: string, data: LabelPrintDat
     (itemsHtmlCategory2 || '').trim().length > 0 &&
     category2NameRaw !== '' &&
     category2NameRaw.toLowerCase() !== 'kategori 2';
+  // Build {{categoriesSections}}: category blocks (MAKANAN: - item, MINUMAN: - item) for slip pesanan template
+  const categorySectionBlock = (name: string, sectionHtml: string) =>
+    (sectionHtml || '').trim() ? `<div class="category-section"><div class="category-title">${name}:</div>${sectionHtml}</div>` : '';
+  let categoriesSections =
+    categorySectionBlock(category1Name, itemsHtmlCategory1) +
+    (hasItemsCategory2 ? categorySectionBlock(category2Name, itemsHtmlCategory2) : '');
+  // When no category HTML was sent but table HTML (itemsHtml) exists, show it under one "Pesanan" section so slip is not blank
+  if (!categoriesSections.trim() && (itemsHtml || '').trim()) {
+    categoriesSections = categorySectionBlock('Pesanan', itemsHtml);
+  }
   let out = templateCode;
   if (!hasItemsCategory2) {
     out = out.replace(/\{\{#ifItemsCategory2\}\}[\s\S]*?\{\{\/ifItemsCategory2\}\}/g, '');
   } else {
     out = out.replace(/\{\{#ifItemsCategory2\}\}/g, '').replace(/\{\{\/ifItemsCategory2\}\}/g, '');
   }
-  // Build {{categoriesSections}}: all Category 1 sections (dashed-line between sections only; no extra dash before first so layout matches original).
-  const categories = Array.isArray(data.categories) ? data.categories : [];
-  const categoriesSectionsHtml =
-    categories.length > 0
-      ? categories
-          .map((c, i) => {
-            const sectionHtml = `<div class="category-section">\n    <div class="category-title">${escapeLabelText((c.categoryName || 'Kategori').trim() || 'Kategori')}:</div>\n    ${typeof c.itemsHtml === 'string' ? c.itemsHtml : ''}\n  </div>`;
-            return i === 0 ? sectionHtml : `<div class="dashed-line"></div>\n  ${sectionHtml}`;
-          })
-          .join('\n  ')
-      : `${(itemsHtmlCategory1 || '').trim() ? `<div class="category-section">\n    <div class="category-title">${category1Name}:</div>\n    ${itemsHtmlCategory1}\n  </div>` : ''}${hasItemsCategory2 ? `\n  <div class="dashed-line"></div>\n  <div class="category-section">\n    <div class="category-title">${category2Name}:</div>\n    ${itemsHtmlCategory2}\n  </div>` : ''}`;
   const itemNumStr = String(itemNumber);
   const totalStr = String(totalItems);
   out = out
@@ -11913,29 +11938,15 @@ function generateLabelHTMLFromTemplate(templateCode: string, data: LabelPrintDat
     .replace(/\{\{customerName\}\}/g, customerName)
     .replace(/\{\{tableName\}\}/g, tableName)
     .replace(/\{\{items\}\}/g, itemsHtml)
-    .replace(/\{\{categoriesSections\}\}/g, categoriesSectionsHtml)
     .replace(/\{\{itemsCategory1\}\}/g, itemsHtmlCategory1)
     .replace(/\{\{itemsCategory2\}\}/g, itemsHtmlCategory2)
     .replace(/\{\{category1Name\}\}/g, category1Name)
-    .replace(/\{\{category2Name\}\}/g, category2Name);
-  // Order-summary checker slip: do not show datetime at bottom (user requested). Per-item labels still show time.
-  const isOrderSummarySlip =
-    ((data.items != null && String(data.items).trim() !== '') || (Array.isArray(data.categories) && data.categories.length > 0)) &&
-    !(data.productName != null && String(data.productName).trim() !== '');
+    .replace(/\{\{category2Name\}\}/g, category2Name)
+    .replace(/\{\{categoriesSections\}\}/g, categoriesSections);
+  // Ensure .time div always shows formatted orderTime (fixes templates with literal date or missing placeholder)
   const timeDivRegex = /<div\s+class="time"[^>]*>[\s\S]*?<\/div>/gi;
-  if (isOrderSummarySlip) {
-    out = out.replace(timeDivRegex, '');
-  } else {
-    out = out.replace(timeDivRegex, `<div class="time">${orderTime}</div>`);
-  }
-  const hasTimeInOutput = out.includes('class="time"');
-  // Only inject footer when template had no .time div; never inject for checker order-summary slip
-  if (!hasTimeInOutput && !isOrderSummarySlip) {
-    const footerBlock = `<div class="footer" style="margin-top:2mm;"><div class="time">${orderTime}</div></div>`;
-    if (out.includes('</body>')) {
-      out = out.replace('</body>', `${footerBlock}</body>`);
-    }
-  }
+  out = out.replace(timeDivRegex, `<div class="time">${orderTime}</div>`);
+  // Do not inject a footer with date/time: let the template control layout. Templates that want time at bottom use {{orderTime}} or a .time div.
   // is40mmLabel: template is for 40mm kitchen labels (@page size 40mm). When true we inject NO extra CSS so the printed result matches the saved template exactly (font, position, layout).
   const is40mmLabel = out.includes('@page') && out.includes('40mm');
   // Normalize 40mm label height: saved templates may have "40mm auto" (long page). Force 40mm × 30mm so print/PDF is fixed height (runtime evidence: DB template "Momoyo Label" had 40mm auto).
@@ -12628,8 +12639,14 @@ function generateReceiptHTML(data: ReceiptPrintData, businessName: string, optio
 
 // Generate shift breakdown report HTML for printing
 function generateShiftBreakdownHTML(
-  shiftData: PrintableShiftReportSection & { businessName?: string; wholeDayReport?: PrintableShiftReportSection | null; sectionOptions?: { ringkasan?: boolean; barangTerjual?: boolean; paymentMethod?: boolean; categoryI?: boolean; categoryII?: boolean; paket?: boolean; toppingSales?: boolean; itemDibatalkan?: boolean } }
+  shiftData: PrintableShiftReportSection & { businessName?: string; wholeDayReport?: PrintableShiftReportSection | null; sectionOptions?: { ringkasan?: boolean; barangTerjual?: boolean; paymentMethod?: boolean; categoryI?: boolean; categoryII?: boolean; paket?: boolean; toppingSales?: boolean; itemDibatalkan?: boolean }; marginAdjustMm?: number }
 ): string {
+  const basePaddingMm = 3;
+  const marginAdjust = shiftData.marginAdjustMm ?? 0;
+  const clamped = Math.max(-5, Math.min(5, marginAdjust));
+  const leftPaddingMm = (basePaddingMm - clamped).toFixed(2);
+  const rightPaddingMm = (basePaddingMm + clamped).toFixed(2);
+
   const formatDateTime = (dateString: string): string => {
     const date = new Date(dateString);
     const gmt7Date = new Date(date.getTime() + (7 * 60 * 60 * 1000));
@@ -12764,44 +12781,61 @@ function generateShiftBreakdownHTML(
       return 0;
     });
 
-    const productRows = sortedProducts.map(product => {
-      try {
-        const quantity = product.total_quantity || 0;
-        const baseSubtotal = product.base_subtotal ?? (product.total_subtotal - product.customization_subtotal);
-        // Always calculate unit price from baseSubtotal/quantity (excludes customizations)
-        const unitPrice = quantity > 0 ? baseSubtotal / quantity : 0;
-        const platformLabel = formatPlatformLabel(product.platform);
-        const transactionLabel = formatTransactionLabel(product.transaction_type);
-        const isBundleItem = Boolean(product.is_bundle_item);
+    const PLATFORM_LABELS_BT: Record<string, string> = { offline: 'Offline', gofood: 'GoFood', grabfood: 'GrabFood', shopeefood: 'ShopeeFood', qpon: 'Qpon', tiktok: 'TikTok' };
+    const PLATFORM_ORDER_BT = ['offline', 'gofood', 'grabfood', 'shopeefood', 'qpon', 'tiktok'];
 
-        // Validate numeric values
-        if (isNaN(quantity) || isNaN(baseSubtotal) || isNaN(unitPrice)) {
-          console.error(`❌ [HTML GEN] Invalid numbers in product: ${product.product_name}`, {
-            quantity, baseSubtotal, unitPrice
-          });
-        }
-
-        if (isBundleItem) {
-          console.log(`[SHIFT PRINT] Displaying bundle item: ${product.product_name}, is_bundle_item: ${product.is_bundle_item}`);
-        }
-        const productNameDisplay = isBundleItem
-          ? `<span style="font-size: 4.8pt;">(Bundle)</span> ${product.product_name}`
-          : product.product_name;
-        return `
+    // Group products by platform for BARANG TERJUAL (platform header + product rows + subtotal per platform)
+    const productByPlatform = new Map<string, typeof sortedProducts>();
+    for (const p of sortedProducts) {
+      const raw = p.platform;
+      const key = typeof raw === 'string' ? raw : (Array.isArray(raw) && raw[0] ? String(raw[0]) : 'offline');
+      const platformKey = String(key || 'offline').toLowerCase();
+      const normalizedKey = PLATFORM_LABELS_BT[platformKey] ? platformKey : 'offline';
+      const list = productByPlatform.get(normalizedKey) || [];
+      list.push(p);
+      productByPlatform.set(normalizedKey, list);
+    }
+    const platformKeysWithSales = [...PLATFORM_ORDER_BT.filter((key) => (productByPlatform.get(key)?.length ?? 0) > 0)];
+    productByPlatform.forEach((_, key) => { if (!PLATFORM_ORDER_BT.includes(key)) platformKeysWithSales.push(key); });
+    const barangTerjualGroupedRows = platformKeysWithSales.flatMap((platformKey) => {
+      const items = productByPlatform.get(platformKey) || [];
+      const label = PLATFORM_LABELS_BT[platformKey] ?? formatPlatformLabel(platformKey);
+      let subQty = 0;
+      let subAmount = 0;
+      const rows = items.map(product => {
+        try {
+          const quantity = product.total_quantity || 0;
+          const baseSubtotal = product.base_subtotal ?? (product.total_subtotal - product.customization_subtotal);
+          const unitPrice = quantity > 0 ? baseSubtotal / quantity : 0;
+          const transactionLabel = formatTransactionLabel(product.transaction_type);
+          const isBundleItem = Boolean(product.is_bundle_item);
+          subQty += quantity;
+          if (!isBundleItem) subAmount += baseSubtotal;
+          if (isNaN(quantity) || isNaN(baseSubtotal) || isNaN(unitPrice)) {
+            console.error(`❌ [HTML GEN] Invalid numbers in product: ${product.product_name}`, { quantity, baseSubtotal, unitPrice });
+          }
+          const productNameDisplay = isBundleItem
+            ? `<span style="font-size: 4.8pt;">(Bundle)</span> ${product.product_name}`
+            : product.product_name;
+          return `
       <tr>
-        <td style="text-align: left; padding: 0.3mm 0;">
+        <td style="width: 52%; text-align: left; padding: 0.3mm 0;">
           <div>${productNameDisplay}</div>
-          <div style="font-size: 7pt; color: #555;">${transactionLabel} · ${platformLabel}</div>
+          <div style="font-size: 7pt; color: #555;">${transactionLabel}</div>
         </td>
-        <td style="text-align: left; padding: 0.3mm 0;">${quantity}</td>
-        <td style="text-align: left; padding: 0.3mm 0; font-size: 6pt;">${isBundleItem ? '-' : (isNaN(unitPrice) ? '0' : formatIntegerId(unitPrice))}</td>
-        <td style="text-align: right; padding: 0.3mm 0;">${isBundleItem ? '-' : (isNaN(baseSubtotal) ? '0' : formatIntegerId(baseSubtotal))}</td>
+        <td style="width: 12%; text-align: left; padding: 0.3mm 0; font-variant-numeric: tabular-nums;">${quantity}</td>
+        <td style="width: 18%; text-align: left; padding: 0.3mm 0; font-size: 6pt; font-variant-numeric: tabular-nums;">${isBundleItem ? '-' : (isNaN(unitPrice) ? '0' : formatIntegerId(unitPrice))}</td>
+        <td style="width: 18%; text-align: right; padding: 0.3mm 0; font-variant-numeric: tabular-nums;">${isBundleItem ? '-' : (isNaN(baseSubtotal) ? '0' : formatIntegerId(baseSubtotal))}</td>
       </tr>
       `;
-      } catch (productError) {
-        console.error(`❌ [HTML GEN] Error processing product:`, product, productError);
-        return `<tr><td colspan="4">Error processing product: ${product?.product_name || 'Unknown'}</td></tr>`;
-      }
+        } catch (productError) {
+          console.error(`❌ [HTML GEN] Error processing product:`, product, productError);
+          return `<tr><td colspan="4">Error processing product: ${product?.product_name || 'Unknown'}</td></tr>`;
+        }
+      }).join('');
+      const subtotalRow = `<tr style="background: #f0f0f0;"><td style="width: 52%; padding: 0.3mm 0; font-size: 7pt; font-weight: 600;">Subtotal</td><td style="width: 12%; text-align: left; font-size: 7pt; padding: 0.3mm 0; font-variant-numeric: tabular-nums;">${subQty}</td><td style="width: 18%; text-align: left; font-size: 6pt; padding: 0.3mm 0;">-</td><td style="width: 18%; text-align: right; font-size: 7pt; padding: 0.3mm 0; font-variant-numeric: tabular-nums;">${formatIntegerId(Math.round(subAmount))}</td></tr>`;
+      const headerRow = `<tr style="background: #e0e0e0;"><td colspan="4" style="padding: 0.5mm 0; font-size: 8pt; font-weight: 700;">${label}</td></tr>`;
+      return `<tr><td colspan="4" style="padding: 0; border: 1px solid #999;"><table style="width: 100%; border-collapse: collapse; table-layout: fixed;"><colgroup><col style="width: 52%;"><col style="width: 12%;"><col style="width: 18%;"><col style="width: 18%;"></colgroup><tbody>` + headerRow + rows + subtotalRow + `</tbody></table></td></tr>`;
     }).join('');
 
     const regularProducts = report.productSales.filter((p) => !p.is_bundle_item);
@@ -12810,31 +12844,6 @@ function generateShiftBreakdownHTML(
       const baseSubtotal = p.base_subtotal ?? (Number(p.total_subtotal || 0) - Number(p.customization_subtotal || 0));
       return sum + Number(baseSubtotal || 0);
     }, 0);
-
-    const PLATFORM_LABELS_BT: Record<string, string> = { offline: 'Offline', gofood: 'GoFood', grabfood: 'GrabFood', shopeefood: 'ShopeeFood', qpon: 'Qpon', tiktok: 'TikTok' };
-    const PLATFORM_ORDER_BT = ['offline', 'gofood', 'grabfood', 'shopeefood', 'qpon', 'tiktok'];
-    const productPlatformCount = new Map<string, number>();
-    const productPlatformAmount = new Map<string, number>();
-    const safeProducts = Array.isArray(regularProducts) ? regularProducts.filter((p) => p != null) : [];
-    safeProducts.forEach((p: { platform?: string | string[]; total_quantity?: number; base_subtotal?: number; total_subtotal?: number; customization_subtotal?: number; total_base_subtotal?: number }) => {
-      const platformRaw = p.platform;
-      const code = typeof platformRaw === 'string' ? platformRaw : (Array.isArray(platformRaw) && platformRaw[0] ? String(platformRaw[0]) : 'offline');
-      const platformKey = String(code || 'offline').toLowerCase();
-      const platform = PLATFORM_LABELS_BT[platformKey] ? platformKey : 'offline';
-      const qty = Number(p.total_quantity ?? 0) || 0;
-      const baseSub = p.base_subtotal ?? p.total_base_subtotal;
-      const calc = baseSub != null ? Number(baseSub) : (Number(p.total_subtotal ?? 0) - Number(p.customization_subtotal ?? 0));
-      const amount = Number.isFinite(calc) ? calc : 0;
-      productPlatformCount.set(platform, (productPlatformCount.get(platform) ?? 0) + qty);
-      productPlatformAmount.set(platform, (productPlatformAmount.get(platform) ?? 0) + amount);
-    });
-    const productPlatformBreakdownRows = PLATFORM_ORDER_BT.filter((key) => (productPlatformCount.get(key) ?? 0) > 0).map((key) => {
-      const qty = productPlatformCount.get(key) ?? 0;
-      const amount = productPlatformAmount.get(key) ?? 0;
-      const label = PLATFORM_LABELS_BT[key];
-      const amountStr = Number.isFinite(amount) ? formatIntegerId(Math.round(amount)) : '0';
-      return `<tr><td style="padding-left: 2mm; font-size: 7pt;">${label}</td><td style="text-align: left; font-size: 7pt;">${qty}</td><td style="text-align: left; font-size: 6pt;">-</td><td class="right" style="font-size: 7pt;">${amountStr}</td></tr>`;
-    }).join('');
 
     const customizationRows = report.customizationSales.map(item => {
       try {
@@ -12853,8 +12862,8 @@ function generateShiftBreakdownHTML(
           <div>${item.option_name || 'Unknown'}</div>
           <div style="font-size: 7pt; color: #555;">${item.customization_name || 'N/A'}</div>
         </td>
-        <td style="text-align: left; padding: 0.3mm 0;">${isNaN(quantity) ? '0' : quantity}</td>
-        <td style="text-align: right; padding: 0.3mm 0;">${isNaN(revenue) ? '0' : formatIntegerId(Math.round(revenue))}</td>
+        <td class="right" style="padding: 0.3mm 0;">${isNaN(quantity) ? '0' : quantity}</td>
+        <td class="right" style="padding: 0.3mm 0;">${isNaN(revenue) ? '0' : formatIntegerId(Math.round(revenue))}</td>
       </tr>
     `;
       } catch (customizationError) {
@@ -12924,9 +12933,9 @@ function generateShiftBreakdownHTML(
         const header = `
       <tr>
         <td style="text-align: left; padding: 0.3mm 0;">${pkg.package_product_name || 'Unknown Paket'}</td>
-        <td style="text-align: left; padding: 0.3mm 0;">${qty}</td>
-        <td style="text-align: right; padding: 0.3mm 0;">${formatIntegerId(unitPrice)}</td>
-        <td style="text-align: right; padding: 0.3mm 0;">${formatIntegerId(amount)}</td>
+        <td class="right" style="padding: 0.3mm 0;">${qty}</td>
+        <td class="right" style="padding: 0.3mm 0;">${formatIntegerId(unitPrice)}</td>
+        <td class="right" style="padding: 0.3mm 0;">${formatIntegerId(amount)}</td>
       </tr>
         `;
         const lines = Array.isArray(pkg.lines)
@@ -12974,6 +12983,7 @@ function generateShiftBreakdownHTML(
     const cashNetShift = Number(cashSummaryData.cash_shift) || (cashShiftSales - cashShiftRefunds);
     const cashNetWholeDay = Number(cashSummaryData.cash_whole_day) || (cashWholeDaySales - cashWholeDayRefunds);
     // Ensure all values are numbers and handle NaN
+    // Selisih Kas: Kas Expected = Modal Awal + Penjualan Tunai (net) - Refund Tunai; Selisih = Kas Akhir - Kas Expected
     const kasMulaiSummary = Number(cashSummaryData.kas_mulai ?? report.modal_awal ?? 0) || 0;
     const kasExpectedSummary = Number(cashSummaryData.kas_expected) || (kasMulaiSummary + cashShiftSales - cashShiftRefunds);
     // Coerce to number: IPC/JSON can send kas_akhir/kas_selisih as string from DB
@@ -13113,15 +13123,9 @@ function generateShiftBreakdownHTML(
           </div>
           <div class="summary-line summary-line-highlight">
             <span class="summary-label">Grand Total:</span>
-            <span class="summary-value">${formatIntegerId(Math.max(0, (grossTotalOmset || 0) - totalRefundsForGrandTotal - totalCancelledItemsAmount - effectiveTotalDiscount))}</span>
+            <span class="summary-value">${formatIntegerId(Math.max(0, Number(report.statistics.total_amount ?? 0)))}</span>
           </div>
         </div>
-        ${totalCustomizationRevenue > 0 ? `
-        <div class="summary-line summary-line-highlight-topping">
-          <span class="summary-label">Total Topping:</span>
-          <span class="summary-value">${formatIntegerId(totalCustomizationRevenue)}</span>
-        </div>
-        ` : ''}
         <div class="summary-subtitle">Kas</div>
         <div class="summary-line">
           <span class="summary-label">Kas Mulai:</span>
@@ -13257,16 +13261,16 @@ function generateShiftBreakdownHTML(
         <thead>
           <tr>
             <th>Paket</th>
-            <th style="text-align: left;">Qty</th>
-            <th class="right">Unit Price</th>
-            <th class="right">Subtotal</th>
+            <th class="right" style="width: 12%;">Qty</th>
+            <th class="right" style="width: 18%;">Unit Price</th>
+            <th class="right" style="width: 18%;">Subtotal</th>
           </tr>
         </thead>
         <tbody>
           ${packageRows || '<tr><td colSpan="4" style="text-align: center;">Tidak ada paket terjual</td></tr>'}
           <tr class="total-row">
             <td>TOTAL</td>
-            <td style="text-align: left;">${totalPackageQty}</td>
+            <td class="right">${totalPackageQty}</td>
             <td class="right">-</td>
             <td class="right">${formatIntegerId(Math.round(totalPackageAmount))}</td>
           </tr>
@@ -13278,24 +13282,24 @@ function generateShiftBreakdownHTML(
 
       ${sectionOptions.barangTerjual === true ? `
       <div class="section-title">BARANG TERJUAL</div>
-      <table>
+      <table style="table-layout: fixed; width: 100%;">
+        <colgroup><col style="width: 52%;"><col style="width: 12%;"><col style="width: 18%;"><col style="width: 18%;"></colgroup>
         <thead>
           <tr>
-            <th>Product</th>
-            <th style="text-align: left;">Qty</th>
-            <th style="text-align: left; font-size: 6pt;">Unit Price</th>
-            <th class="right">Subtotal</th>
+            <th style="width: 52%; text-align: left;">Product</th>
+            <th style="width: 12%; text-align: left;">Qty</th>
+            <th style="width: 18%; text-align: left;">@</th>
+            <th class="right" style="width: 18%;">Subtotal</th>
           </tr>
         </thead>
         <tbody>
-          ${productRows || '<tr><td colSpan="4" style="text-align: center;">Tidak ada produk</td></tr>'}
+          ${barangTerjualGroupedRows || '<tr><td colSpan="4" style="text-align: center;">Tidak ada produk</td></tr>'}
           <tr class="total-row">
-            <td>TOTAL</td>
-            <td style="text-align: left;">${totalProductQty}</td>
-            <td style="text-align: left; font-size: 6pt;">-</td>
-            <td class="right">${formatIntegerId(Math.round(totalProductBaseSubtotal))}</td>
+            <td style="width: 52%; font-weight: 600;">TOTAL</td>
+            <td style="width: 12%; text-align: left; font-variant-numeric: tabular-nums;">${totalProductQty}</td>
+            <td style="width: 18%; text-align: left;">-</td>
+            <td class="right" style="width: 18%; font-variant-numeric: tabular-nums;">${formatIntegerId(Math.round(totalProductBaseSubtotal))}</td>
           </tr>
-          ${productPlatformBreakdownRows}
         </tbody>
       </table>
 
@@ -13308,15 +13312,15 @@ function generateShiftBreakdownHTML(
         <thead>
           <tr>
             <th>Customization</th>
-            <th style="text-align: left;">Qty</th>
-            <th class="right">Revenue</th>
+            <th class="right" style="width: 15%;">Qty</th>
+            <th class="right" style="width: 22%;">Revenue</th>
           </tr>
         </thead>
         <tbody>
           ${customizationRows || '<tr><td colSpan="3" style="text-align: center;">Tidak ada kustomisasi</td></tr>'}
           <tr class="total-row">
             <td>TOTAL</td>
-            <td style="text-align: left;">${totalCustomizationUnits}</td>
+            <td class="right">${totalCustomizationUnits}</td>
             <td class="right">${formatIntegerId(Math.round(totalCustomizationRevenue))}</td>
           </tr>
         </tbody>
@@ -13420,7 +13424,7 @@ function generateShiftBreakdownHTML(
       font-size: 9pt;
       font-weight: 500;
       line-height: 1.2;
-      padding: 2mm 7mm;
+      padding: 2mm ${rightPaddingMm}mm 2mm ${leftPaddingMm}mm;
       word-wrap: break-word;
       overflow-wrap: break-word;
     }
@@ -13692,6 +13696,7 @@ ipcMain.handle('print-shift-breakdown', async (event, data: PrintableShiftReport
     console.log('   - Printer Type:', data.printerType);
 
     let printerName: string | null = null;
+    let shiftMarginAdjustMm: number | undefined;
     const printerType = data.printerType || 'receiptPrinter';
 
     console.log('🔍 [SHIFT PRINT] Looking up printer config for type:', printerType);
@@ -13714,6 +13719,16 @@ ipcMain.handle('print-shift-breakdown', async (event, data: PrintableShiftReport
       if (config && config.system_printer_name) {
         printerName = config.system_printer_name.trim();
         console.log('✅ [SHIFT PRINT] Found printer config:', printerName);
+
+        if (config.extra_settings) {
+          try {
+            const extra = (typeof config.extra_settings === 'string' ? JSON.parse(config.extra_settings) : config.extra_settings) as { marginAdjustMm?: number };
+            if (typeof extra.marginAdjustMm === 'number' && !Number.isNaN(extra.marginAdjustMm)) {
+              shiftMarginAdjustMm = extra.marginAdjustMm;
+              console.log('🎚️ [SHIFT PRINT] Using marginAdjustMm from printer setup:', shiftMarginAdjustMm);
+            }
+          } catch (_) { /* ignore */ }
+        }
 
         // Validate printer name is not empty after trim
         if (!printerName || printerName.length === 0) {
@@ -13865,7 +13880,8 @@ ipcMain.handle('print-shift-breakdown', async (event, data: PrintableShiftReport
         cashSummary: data.cashSummary,
         wholeDayReport: data.wholeDayReport || null,
         businessName,
-        sectionOptions: data.sectionOptions
+        sectionOptions: data.sectionOptions,
+        marginAdjustMm: shiftMarginAdjustMm
       });
       console.log('✅ [SHIFT PRINT] HTML generation successful');
     } catch (htmlError) {
@@ -14765,10 +14781,22 @@ ipcMain.handle('localdb-delete-transactions-by-role', async () => {
       params: [...transactionIds]
     });
 
-    // 4. transaction_refunds (transaction_uuid)
+    // 4. transaction_refunds (by transaction_uuid: refunds on deleted transactions)
     queries.push({
       sql: `DELETE FROM transaction_refunds WHERE transaction_uuid IN (${uuidPlaceholders})`,
       params: [...transactionUuids]
+    });
+
+    // 4b. transaction_refunds (by refunded_by: refunds made by test user or NULL, even if transaction is not deleted)
+    let refundByRoleClause = 'WHERE refunded_by IS NULL';
+    const refundByRoleParams: (string | number)[] = [];
+    if (targetUserIds.length > 0) {
+      refundByRoleClause += ` OR refunded_by IN (${targetUserIds.map(() => '?').join(',')})`;
+      refundByRoleParams.push(...targetUserIds);
+    }
+    queries.push({
+      sql: `DELETE FROM transaction_refunds ${refundByRoleClause}`,
+      params: refundByRoleParams
     });
 
     // 5. printer1_audit_log (transaction_id = uuid_id)

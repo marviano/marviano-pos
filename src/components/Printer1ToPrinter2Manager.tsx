@@ -5,6 +5,7 @@ import { useAuth } from '@/hooks/useAuth';
 import { hasPermission } from '@/lib/permissions';
 import { isSuperAdmin } from '@/lib/auth';
 import { X, RefreshCw, ArrowRight, AlertCircle, ChevronUp, ChevronDown } from 'lucide-react';
+import { appAlert } from '@/components/AppDialog';
 
 interface Printer1Audit {
   transaction_id: string;
@@ -151,7 +152,7 @@ const getPaymentMethodColor = (transaction: Transaction | string) => {
 const getPlatformInfo = (transaction: Transaction): { label: string; color: string; isOnline: boolean } => {
   const code = getPaymentMethodCode(transaction);
   const isOnline = ['gofood', 'grabfood', 'shopeefood', 'tiktok'].includes(code);
-  
+
   if (isOnline) {
     const platformLabels: { [key: string]: string } = {
       'gofood': 'GoFood',
@@ -171,7 +172,7 @@ const getPlatformInfo = (transaction: Transaction): { label: string; color: stri
       isOnline: true
     };
   }
-  
+
   return {
     label: 'Offline',
     color: 'bg-gray-100 text-gray-800',
@@ -301,7 +302,7 @@ export default function Printer1ToPrinter2Manager({ onClose }: { onClose: () => 
     });
 
     const result: TransactionWithAudit[] = [];
-    
+
     if (activeTab === 'printer1') {
       printer1AuditLogs.forEach(audit => {
         const tx = txMap.get(audit.transaction_id);
@@ -423,7 +424,7 @@ export default function Printer1ToPrinter2Manager({ onClose }: { onClose: () => 
     const electronAPI = typeof window !== 'undefined' ? (window as { electronAPI?: ElectronAPI }).electronAPI : undefined;
 
     if (!electronAPI?.moveTransactionToPrinter2) {
-      alert('Error: Move functionality not available. Please ensure you are running the Electron app.');
+      appAlert('Error: Move functionality not available. Please ensure you are running the Electron app.');
       return;
     }
 
@@ -435,14 +436,14 @@ export default function Printer1ToPrinter2Manager({ onClose }: { onClose: () => 
 
       if (result.success) {
         await loadData();
-        alert(`✅ Transaction ${transactionToMove.id} successfully moved to Printer 2 audit log.`);
+        appAlert(`✅ Transaction ${transactionToMove.id} successfully moved to Printer 2 audit log.`);
       } else {
-        alert(`❌ Failed to move transaction: ${result.error || 'Unknown error'}`);
+        appAlert(`❌ Failed to move transaction: ${result.error || 'Unknown error'}`);
       }
     } catch (e) {
       const errorMessage = e instanceof Error ? e.message : String(e);
       console.error('❌ Error moving transaction:', e);
-      alert(`❌ Error moving transaction: ${errorMessage}`);
+      appAlert(`❌ Error moving transaction: ${errorMessage}`);
     } finally {
       setMovingTransactionId(null);
       setTransactionToMove(null);
@@ -511,21 +512,19 @@ export default function Printer1ToPrinter2Manager({ onClose }: { onClose: () => 
         <div className="flex border-b border-gray-200 bg-white">
           <button
             onClick={() => setActiveTab('printer1')}
-            className={`px-6 py-3 font-medium text-sm transition-colors ${
-              activeTab === 'printer1'
+            className={`px-6 py-3 font-medium text-sm transition-colors ${activeTab === 'printer1'
                 ? 'text-blue-600 border-b-2 border-blue-600 bg-blue-50'
                 : 'text-gray-600 hover:text-gray-900 hover:bg-gray-50'
-            }`}
+              }`}
           >
             Printer 1 ({printer1AuditLogs.length})
           </button>
           <button
             onClick={() => setActiveTab('printer2')}
-            className={`px-6 py-3 font-medium text-sm transition-colors ${
-              activeTab === 'printer2'
+            className={`px-6 py-3 font-medium text-sm transition-colors ${activeTab === 'printer2'
                 ? 'text-green-600 border-b-2 border-green-600 bg-green-50'
                 : 'text-gray-600 hover:text-gray-900 hover:bg-gray-50'
-            }`}
+              }`}
           >
             Printer 2 ({printer2AuditLogs.length})
           </button>
@@ -774,11 +773,11 @@ export default function Printer1ToPrinter2Manager({ onClose }: { onClose: () => 
                         <td className="px-4 py-4 whitespace-nowrap">
                           {(() => {
                             const refundAmount = transaction.refund_total !== null && transaction.refund_total !== undefined
-                              ? (typeof transaction.refund_total === 'number' 
-                                  ? transaction.refund_total 
-                                  : parseFloat(String(transaction.refund_total)))
+                              ? (typeof transaction.refund_total === 'number'
+                                ? transaction.refund_total
+                                : parseFloat(String(transaction.refund_total)))
                               : 0;
-                            
+
                             if (refundAmount > 0) {
                               return (
                                 <div className="flex flex-col">
@@ -787,8 +786,8 @@ export default function Printer1ToPrinter2Manager({ onClose }: { onClose: () => 
                                   </span>
                                   {transaction.refund_status && (
                                     <span className={`text-[10px] font-medium ${transaction.refund_status === 'full'
-                                        ? 'text-red-600'
-                                        : 'text-orange-600'
+                                      ? 'text-red-600'
+                                      : 'text-orange-600'
                                       }`}>
                                       {transaction.refund_status === 'full' ? 'Full' : 'Partial'}
                                     </span>
@@ -814,7 +813,7 @@ export default function Printer1ToPrinter2Manager({ onClose }: { onClose: () => 
                             }
                             const waiter = employees.get(transaction.waiter_id)!;
                             const color = waiter.color;
-                            
+
                             if (color) {
                               return (
                                 <span
@@ -825,7 +824,7 @@ export default function Printer1ToPrinter2Manager({ onClose }: { onClose: () => 
                                 </span>
                               );
                             }
-                            
+
                             return <span className="text-xs text-gray-900">{waiter.name}</span>;
                           })()}
                         </td>

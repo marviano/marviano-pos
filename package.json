@@ -25,7 +25,8 @@
     "dotenv": "^16.4.5",
     "mysql2": "^3.15.3",
     "node-thermal-printer": "^4.4.5",
-    "ws": "^8.18.3"
+    "ws": "^8.18.3",
+    "xlsx": "^0.18.5"
   },
   "devDependencies": {
     "@electron/rebuild": "^4.0.1",
@@ -50,7 +51,7 @@
     "react-dom": "19.1.0",
     "tailwindcss": "^4",
     "typescript": "^5",
-    "wait-on": "^9.0.1"
+    "wait-on": "^9.0.4"
   },
   "build": {
     "appId": "com.pos.app",

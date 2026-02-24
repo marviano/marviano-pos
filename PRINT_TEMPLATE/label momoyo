@@ -1,0 +1,109 @@
+
+<html>
+<head>
+  <meta charset="UTF-8">
+  <style>
+    @page { 
+      size: 40mm 30mm; 
+      margin: 0;
+    }
+    * { 
+      margin: 0; 
+      padding: 0; 
+      box-sizing: border-box; 
+      color: black; 
+    }
+    html {
+      height: 100%;
+      margin: 0;
+    }
+    body {
+      font-family: 'Arial', 'Helvetica', sans-serif;
+      width: 100%;
+      max-width: 100%;
+      min-height: 100%;
+      font-size: 8pt;
+      font-weight: 600;
+      line-height: 1.4;
+      padding: 3mm 2mm 3mm 3mm;
+      word-wrap: break-word;
+      overflow-wrap: break-word;
+      color: black;
+      display: flex;
+      flex-direction: column;
+      height: 100%;
+      margin: 0;
+      position: relative;
+      top: 0;
+      left: 0;
+    }
+    .content {
+      flex: 1;
+    }
+    .row {
+      display: table;
+      width: 100%;
+      table-layout: fixed;
+    }
+    .row > div {
+      display: table-cell;
+    }
+    .counter {
+      font-size: 9pt;
+      font-weight: 700;
+    }
+    .pickup {
+      text-align: left;
+      font-size: 7pt;
+      font-weight: 700;
+      text-transform: uppercase;
+    }
+    .product {
+      text-align: left;
+      font-size: 7pt;
+      font-weight: 600;
+    }
+    .customizations {
+      text-align: left;
+      font-size: 7pt;
+      font-weight: 500;
+    }
+    .number {
+      font-size: 9pt;
+      font-weight: 700;
+      text-align: right;
+    }
+    .footer {
+      margin-top: auto;
+      padding-top: 2mm;
+    }
+    .time {
+      text-align: left;
+      font-size: 7pt;
+      font-weight: 600;
+      color: black;
+    }
+    /* One label per physical sheet when "1 label per product" is on */
+    .label-sheet {
+      page-break-after: always;
+      break-after: page;
+    }
+  </style>
+</head>
+<body>
+  <div class="label-sheet">
+  <div class="content">
+    <div class="row">
+      <div class="counter">{{counter}}</div>
+      <div class="number">{{itemNumber}}/{{totalItems}}</div>
+    </div>
+    <div class="pickup">{{pickupMethod}}</div>        
+    <div class="product">{{productName}}</div>   
+    <div class="customizations">{{customizations}}</div>  
+  </div>
+  <div class="footer">
+    <div class="time">{{orderTime}}</div>  
+  </div>
+  </div>
+</body>
+</html>

@@ -15,10 +15,6 @@ export function useAuth() {
     return authManager.login(email, password);
   };
 
-  const loginOffline = async () => {
-    return authManager.loginOffline();
-  };
-
   const logout = (options?: { redirect?: boolean }) => {
     authManager.logout(options);
   };
@@ -26,7 +22,6 @@ export function useAuth() {
   return {
     ...authState,
     login,
-    loginOffline,
     logout,
   };
 }
