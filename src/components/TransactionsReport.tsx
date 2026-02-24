@@ -286,16 +286,11 @@ export default function TransactionsReport() {
     };
     loadUsers();
 
-    // Set default date range (Last 30 days) in GMT+7
+    // Set default date range to today (UTC+7)
     const gmt7Offset = 7 * 60 * 60 * 1000;
     const now = new Date();
     const nowGmt7 = new Date(now.getTime() + gmt7Offset);
 
-    const end = new Date(nowGmt7);
-    const start = new Date(nowGmt7);
-    start.setUTCDate(start.getUTCDate() - 30);
-
-    // Format as YYYY-MM-DD for date inputs
     const formatDateInput = (date: Date) => {
       const year = date.getUTCFullYear();
       const month = String(date.getUTCMonth() + 1).padStart(2, '0');
@@ -303,8 +298,9 @@ export default function TransactionsReport() {
       return `${year}-${month}-${day}`;
     };
 
-    setEndDate(formatDateInput(end));
-    setStartDate(formatDateInput(start));
+    const todayStr = formatDateInput(nowGmt7);
+    setStartDate(todayStr);
+    setEndDate(todayStr);
   }, [businessId]);
 
   // Load employees for Waiter column
@@ -784,7 +780,7 @@ export default function TransactionsReport() {
                       onChange={(e) => setSelectedUserId(e.target.value)}
                       className="w-full pl-6 pr-6 py-1.5 border border-gray-300 rounded text-xs focus:ring-2 focus:ring-blue-500 focus:border-blue-500 appearance-none bg-white text-gray-900"
                     >
-                      <option value="all">All</option>
+                      <option value="all">All Users</option>
                       {users.map(user => (
                         <option key={user.user_id} value={user.user_id}>{user.user_name}</option>
                       ))}
@@ -801,7 +797,7 @@ export default function TransactionsReport() {
                       onChange={(e) => setSelectedPaymentMethod(e.target.value)}
                       className="w-full pl-6 pr-6 py-1.5 border border-gray-300 rounded text-xs focus:ring-2 focus:ring-blue-500 focus:border-blue-500 appearance-none bg-white text-gray-900"
                     >
-                      <option value="all">Payment</option>
+                      <option value="all">All Payment</option>
                       {paymentMethods.map(method => (
                         <option key={method} value={method}>{formatPaymentMethod(method)}</option>
                       ))}
@@ -816,7 +812,7 @@ export default function TransactionsReport() {
                     onChange={(e) => setSelectedStatus(e.target.value)}
                     className="w-full px-2 py-1.5 border border-gray-300 rounded text-xs focus:ring-2 focus:ring-blue-500 focus:border-blue-500 bg-white text-gray-900"
                   >
-                    <option value="all">All</option>
+                    <option value="all">All Status</option>
                     <option value="completed">Completed</option>
                     <option value="pending">Pending</option>
                     <option value="cancelled">Cancelled</option>
@@ -843,13 +839,11 @@ export default function TransactionsReport() {
                     const gmt7Offset = 7 * 60 * 60 * 1000;
                     const now = new Date();
                     const nowGmt7 = new Date(now.getTime() + gmt7Offset);
-                    const end = new Date(nowGmt7);
-                    const start = new Date(nowGmt7);
-                    start.setUTCDate(start.getUTCDate() - 30);
                     const formatDateInput = (d: Date) =>
                       `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}-${String(d.getUTCDate()).padStart(2, '0')}`;
-                    setEndDate(formatDateInput(end));
-                    setStartDate(formatDateInput(start));
+                    const todayStr = formatDateInput(nowGmt7);
+                    setStartDate(todayStr);
+                    setEndDate(todayStr);
                   }}
                   className="flex items-center gap-1.5 px-2.5 py-1.5 text-xs bg-gray-200 hover:bg-gray-300 text-gray-700 rounded transition-colors flex-shrink-0"
                 >

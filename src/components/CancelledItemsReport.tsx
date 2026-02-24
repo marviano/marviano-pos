@@ -1,7 +1,18 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import { XCircle, Calendar, User, Package, Receipt, Users } from 'lucide-react';
+import { useAuth } from '@/hooks/useAuth';
+
+function getTodayUTC7(): string {
+  const now = new Date();
+  const utc7Offset = 7 * 60 * 60 * 1000;
+  const utc7Time = new Date(now.getTime() + utc7Offset);
+  const year = utc7Time.getUTCFullYear();
+  const month = String(utc7Time.getUTCMonth() + 1).padStart(2, '0');
+  const day = String(utc7Time.getUTCDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
 
 interface CancelledItem {
   id: number;
@@ -24,7 +35,7 @@ interface CancelledItem {
 }
 
 interface ElectronAPI {
-  localDbGetTransactions?: (businessId: number, limit: number) => Promise<unknown[]>;
+  localDbGetTransactions?: (businessId?: number, limit?: number, options?: { todayOnly?: boolean }) => Promise<unknown[]>;
   localDbGetTransactionItems?: (transactionId: string) => Promise<unknown[]>;
   localDbGetAllProducts?: () => Promise<unknown[]>;
   localDbGetUsers?: () => Promise<unknown[]>;
@@ -67,9 +78,23 @@ const formatRupiah = (amount: number): string => {
 };
 
 export default function CancelledItemsReport() {
+  const { user } = useAuth();
+  const businessId = user?.selectedBusinessId ?? undefined;
   const [cancelledItems, setCancelledItems] = useState<CancelledItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [startDate, setStartDate] = useState<string>(getTodayUTC7);
+  const [endDate, setEndDate] = useState<string>(getTodayUTC7);
+
+  const filteredByDate = useMemo(() => {
+    if (!startDate && !endDate) return cancelledItems;
+    return cancelledItems.filter((item) => {
+      const itemDate = item.cancelled_at.slice(0, 10);
+      if (startDate && itemDate < startDate) return false;
+      if (endDate && itemDate > endDate) return false;
+      return true;
+    });
+  }, [cancelledItems, startDate, endDate]);
 
   useEffect(() => {
     fetchCancelledItems();
@@ -134,7 +159,8 @@ export default function CancelledItemsReport() {
       }
 
       // Get all transactions to map transaction info
-      const allTransactions = await electronAPI.localDbGetTransactions?.(0, 100000);
+      const todayOnly = Boolean(businessId && startDate === getTodayUTC7() && endDate === getTodayUTC7());
+      const allTransactions = await electronAPI.localDbGetTransactions?.(businessId ?? 0, 100000, todayOnly ? { todayOnly: true } : undefined);
       const transactionsArray = Array.isArray(allTransactions) ? allTransactions as Record<string, unknown>[] : [];
       const transactionsMap = new Map<string, Record<string, unknown>>();
       transactionsArray.forEach((tx) => {
@@ -353,17 +379,37 @@ export default function CancelledItemsReport() {
   return (
     <div className="flex-1 overflow-auto p-6">
       <div className="bg-white rounded-lg shadow-sm border border-gray-200">
-        <div className="px-6 py-4 border-b border-gray-200">
+        <div className="px-6 py-4 border-b border-gray-200 flex flex-wrap items-center gap-4">
           <h2 className="text-xl font-bold text-gray-900 flex items-center gap-2">
             <XCircle className="w-5 h-5 text-red-500" />
-            Item Dibatalkan
+            Pembatalan
           </h2>
-          <p className="text-sm text-gray-600 mt-1">
-            Total: {cancelledItems.length} item
+          <div className="flex items-center gap-2 border border-gray-300 rounded-lg bg-gray-50/50 overflow-hidden">
+            <span className="flex items-center gap-1.5 pl-3 pr-2 py-2 text-sm text-gray-600">
+              <Calendar className="w-4 h-4 text-gray-400" />
+              <span>Dari</span>
+            </span>
+            <input
+              type="date"
+              value={startDate}
+              onChange={(e) => setStartDate(e.target.value)}
+              className="bg-transparent border-0 py-2 pr-3 pl-1 text-sm text-black focus:ring-0 focus:outline-none min-w-0 [color-scheme:light]"
+            />
+            <span className="text-gray-300 select-none">|</span>
+            <span className="pl-2 pr-1 py-2 text-sm text-gray-600">Sampai</span>
+            <input
+              type="date"
+              value={endDate}
+              onChange={(e) => setEndDate(e.target.value)}
+              className="bg-transparent border-0 py-2 pl-1 pr-3 text-sm text-black focus:ring-0 focus:outline-none min-w-0 [color-scheme:light]"
+            />
+          </div>
+          <p className="text-sm text-gray-600">
+            Total: {filteredByDate.length} item
           </p>
         </div>
 
-        {cancelledItems.length === 0 ? (
+        {filteredByDate.length === 0 ? (
           <div className="p-12 text-center">
             <XCircle className="w-16 h-16 text-gray-300 mx-auto mb-4" />
             <p className="text-gray-500 text-lg">Tidak ada item yang dibatalkan</p>
@@ -397,7 +443,7 @@ export default function CancelledItemsReport() {
                 </tr>
               </thead>
               <tbody className="bg-white divide-y divide-gray-200">
-                {cancelledItems.map((item) => (
+                {filteredByDate.map((item) => (
                   <tr key={item.uuid_id} className="hover:bg-gray-50">
                     <td className="px-6 py-4 whitespace-nowrap">
                       <div className="flex items-center text-sm text-gray-900">

@@ -1714,72 +1714,79 @@ export default function TransactionList({ businessId, onLoadTransaction }: Trans
 
         {/* Summary Cards */}
         <div className="grid grid-cols-1 md:grid-cols-6 gap-4 mb-1 flex-shrink-0">
-          {/* Payment Methods Card */}
-          <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-4 md:col-span-3">
+          {/* Payment Methods Card — 3-column table (Method | Count | Amount) to avoid horizontal overflow with wide Rupiah amounts */}
+          <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-4 md:col-span-3 min-w-0">
             <div className="flex items-center gap-2 mb-3">
               <div className="w-3 h-3 bg-blue-500 rounded-full"></div>
               <h3 className="font-semibold text-gray-900 text-sm">Metode Pembayaran</h3>
             </div>
-            <div className="grid grid-cols-4 gap-x-3 gap-y-1.5 text-xs">
-              {/* Column 1 */}
-              <div className="space-y-1.5">
-                <div className="flex justify-between items-baseline gap-1">
-                  <span className="text-gray-600">Cash</span>
-                  <span className="font-medium text-gray-900 text-right tabular-nums shrink-0">{paymentMethodCounts.cash} · {formatPrice(paymentMethodTotals.cash)}</span>
-                </div>
-                <div className="flex justify-between items-baseline gap-1">
-                  <span className="text-gray-600">Debit</span>
-                  <span className="font-medium text-gray-900 text-right tabular-nums shrink-0">{paymentMethodCounts.debit} · {formatPrice(paymentMethodTotals.debit)}</span>
-                </div>
-                <div className="flex justify-between items-baseline gap-1">
-                  <span className="text-gray-600">QR</span>
-                  <span className="font-medium text-gray-900 text-right tabular-nums shrink-0">{paymentMethodCounts.qr} · {formatPrice(paymentMethodTotals.qr)}</span>
-                </div>
-              </div>
-
-              {/* Column 2 */}
-              <div className="space-y-1.5">
-                <div className="flex justify-between items-baseline gap-1">
-                  <span className="text-gray-600">E-Wallet</span>
-                  <span className="font-medium text-gray-900 text-right tabular-nums shrink-0">{paymentMethodCounts.ewallet} · {formatPrice(paymentMethodTotals.ewallet)}</span>
-                </div>
-                <div className="flex justify-between items-baseline gap-1">
-                  <span className="text-gray-600">CL</span>
-                  <span className="font-medium text-gray-900 text-right tabular-nums shrink-0">{paymentMethodCounts.cl} · {formatPrice(paymentMethodTotals.cl)}</span>
-                </div>
-                <div className="flex justify-between items-baseline gap-1">
-                  <span className="text-gray-600">GoFood</span>
-                  <span className="font-medium text-gray-900 text-right tabular-nums shrink-0">{paymentMethodCounts.gofood} · {formatPrice(paymentMethodTotals.gofood)}</span>
-                </div>
-              </div>
-
-              {/* Column 3 */}
-              <div className="space-y-1.5">
-                <div className="flex justify-between items-baseline gap-1">
-                  <span className="text-gray-600">GrabFood</span>
-                  <span className="font-medium text-gray-900 text-right tabular-nums shrink-0">{paymentMethodCounts.grabfood} · {formatPrice(paymentMethodTotals.grabfood)}</span>
-                </div>
-                <div className="flex justify-between items-baseline gap-1">
-                  <span className="text-gray-600">ShopeeFood</span>
-                  <span className="font-medium text-gray-900 text-right tabular-nums shrink-0">{paymentMethodCounts.shopeefood} · {formatPrice(paymentMethodTotals.shopeefood)}</span>
-                </div>
-              </div>
-
-              {/* Column 4 */}
-              <div className="space-y-1.5">
-                <div className="flex justify-between items-baseline gap-1">
-                  <span className="text-gray-600">TikTok</span>
-                  <span className="font-medium text-gray-900 text-right tabular-nums shrink-0">{paymentMethodCounts.tiktok} · {formatPrice(paymentMethodTotals.tiktok)}</span>
-                </div>
-                <div className="flex justify-between items-baseline gap-1">
-                  <span className="text-gray-600">Qpon</span>
-                  <span className="font-medium text-gray-900 text-right tabular-nums shrink-0">{paymentMethodCounts.qpon} · {formatPrice(paymentMethodTotals.qpon)}</span>
-                </div>
-                <div className="flex justify-between items-baseline gap-1">
-                  <span className="text-gray-600">Voucher</span>
-                  <span className="font-medium text-gray-900 text-right tabular-nums shrink-0">{paymentMethodCounts.voucher} · {formatPrice(paymentMethodTotals.voucher)}</span>
-                </div>
-              </div>
+            <div className="min-w-0 overflow-x-auto">
+              <table className="w-full text-xs border-collapse">
+                <thead>
+                  <tr className="border-b border-gray-200">
+                    <th className="text-left py-1 pr-2 font-medium text-gray-600">Metode</th>
+                    <th className="text-right py-1 px-2 font-medium text-gray-600 whitespace-nowrap">Jumlah</th>
+                    <th className="text-right py-1 pl-2 font-medium text-gray-600 tabular-nums">Total</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr className="border-b border-gray-100">
+                    <td className="py-1 pr-2 text-gray-600">Cash</td>
+                    <td className="py-1 px-2 text-right tabular-nums font-medium text-gray-900">{paymentMethodCounts.cash}</td>
+                    <td className="py-1 pl-2 text-right tabular-nums font-medium text-gray-900">{formatPrice(paymentMethodTotals.cash)}</td>
+                  </tr>
+                  <tr className="border-b border-gray-100">
+                    <td className="py-1 pr-2 text-gray-600">Debit</td>
+                    <td className="py-1 px-2 text-right tabular-nums font-medium text-gray-900">{paymentMethodCounts.debit}</td>
+                    <td className="py-1 pl-2 text-right tabular-nums font-medium text-gray-900">{formatPrice(paymentMethodTotals.debit)}</td>
+                  </tr>
+                  <tr className="border-b border-gray-100">
+                    <td className="py-1 pr-2 text-gray-600">QR</td>
+                    <td className="py-1 px-2 text-right tabular-nums font-medium text-gray-900">{paymentMethodCounts.qr}</td>
+                    <td className="py-1 pl-2 text-right tabular-nums font-medium text-gray-900">{formatPrice(paymentMethodTotals.qr)}</td>
+                  </tr>
+                  <tr className="border-b border-gray-100">
+                    <td className="py-1 pr-2 text-gray-600">E-Wallet</td>
+                    <td className="py-1 px-2 text-right tabular-nums font-medium text-gray-900">{paymentMethodCounts.ewallet}</td>
+                    <td className="py-1 pl-2 text-right tabular-nums font-medium text-gray-900">{formatPrice(paymentMethodTotals.ewallet)}</td>
+                  </tr>
+                  <tr className="border-b border-gray-100">
+                    <td className="py-1 pr-2 text-gray-600">CL</td>
+                    <td className="py-1 px-2 text-right tabular-nums font-medium text-gray-900">{paymentMethodCounts.cl}</td>
+                    <td className="py-1 pl-2 text-right tabular-nums font-medium text-gray-900">{formatPrice(paymentMethodTotals.cl)}</td>
+                  </tr>
+                  <tr className="border-b border-gray-100">
+                    <td className="py-1 pr-2 text-gray-600">GoFood</td>
+                    <td className="py-1 px-2 text-right tabular-nums font-medium text-gray-900">{paymentMethodCounts.gofood}</td>
+                    <td className="py-1 pl-2 text-right tabular-nums font-medium text-gray-900">{formatPrice(paymentMethodTotals.gofood)}</td>
+                  </tr>
+                  <tr className="border-b border-gray-100">
+                    <td className="py-1 pr-2 text-gray-600">GrabFood</td>
+                    <td className="py-1 px-2 text-right tabular-nums font-medium text-gray-900">{paymentMethodCounts.grabfood}</td>
+                    <td className="py-1 pl-2 text-right tabular-nums font-medium text-gray-900">{formatPrice(paymentMethodTotals.grabfood)}</td>
+                  </tr>
+                  <tr className="border-b border-gray-100">
+                    <td className="py-1 pr-2 text-gray-600">ShopeeFood</td>
+                    <td className="py-1 px-2 text-right tabular-nums font-medium text-gray-900">{paymentMethodCounts.shopeefood}</td>
+                    <td className="py-1 pl-2 text-right tabular-nums font-medium text-gray-900">{formatPrice(paymentMethodTotals.shopeefood)}</td>
+                  </tr>
+                  <tr className="border-b border-gray-100">
+                    <td className="py-1 pr-2 text-gray-600">TikTok</td>
+                    <td className="py-1 px-2 text-right tabular-nums font-medium text-gray-900">{paymentMethodCounts.tiktok}</td>
+                    <td className="py-1 pl-2 text-right tabular-nums font-medium text-gray-900">{formatPrice(paymentMethodTotals.tiktok)}</td>
+                  </tr>
+                  <tr className="border-b border-gray-100">
+                    <td className="py-1 pr-2 text-gray-600">Qpon</td>
+                    <td className="py-1 px-2 text-right tabular-nums font-medium text-gray-900">{paymentMethodCounts.qpon}</td>
+                    <td className="py-1 pl-2 text-right tabular-nums font-medium text-gray-900">{formatPrice(paymentMethodTotals.qpon)}</td>
+                  </tr>
+                  <tr className="border-b border-gray-100">
+                    <td className="py-1 pr-2 text-gray-600">Voucher</td>
+                    <td className="py-1 px-2 text-right tabular-nums font-medium text-gray-900">{paymentMethodCounts.voucher}</td>
+                    <td className="py-1 pl-2 text-right tabular-nums font-medium text-gray-900">{formatPrice(paymentMethodTotals.voucher)}</td>
+                  </tr>
+                </tbody>
+              </table>
             </div>
           </div>
 
