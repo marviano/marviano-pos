@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useCallback, useRef, useLayoutEffect } from 'react';
+import { useState, useEffect, useCallback, useRef, useLayoutEffect, useMemo } from 'react';
 import { createPortal } from 'react-dom';
 import { useRouter } from 'next/navigation';
 import { Clock, CreditCard, RefreshCw, Search, Filter, ChevronUp, ChevronDown, ChevronRight, Wifi, WifiOff, Calendar, X, Trash2, Columns } from 'lucide-react';
@@ -222,6 +222,7 @@ interface ElectronAPI {
   localDbGetShifts?: (filters?: { businessId?: number; startDate?: string; endDate?: string; limit?: number }) => Promise<{ shifts: Array<{ uuid_id?: string; shift_start?: string; user_name?: string }> }>;
   localDbGetActiveShift?: (userId: number, businessId?: number) => Promise<{ shift?: { uuid_id?: string; shift_start?: string } | null }>;
   localDbUpdateTransactionShift?: (transactionUuid: string, shiftUuid: string | null) => Promise<{ success: boolean; error?: string }>;
+  localDbUpdateTransactionUser?: (transactionId: string, userId: number, useSystemPos?: boolean) => Promise<{ success: boolean; error?: string }>;
   localDbDeleteSingleTransactionPreview?: (transactionUuid: string) => Promise<{
     success: boolean;
     error?: string;
@@ -318,6 +319,24 @@ export default function TransactionList({ businessId, onLoadTransaction }: Trans
   const [columnVisibility, setColumnVisibility] = useState<Record<string, boolean>>(loadColumnVisibility);
   const [showColumnPicker, setShowColumnPicker] = useState(false);
   const columnPickerRef = useRef<HTMLDivElement>(null);
+  const [usersList, setUsersList] = useState<ElectronUser[]>([]);
+  const [openKasirFor, setOpenKasirFor] = useState<string | null>(null);
+  const [savingKasirFor, setSavingKasirFor] = useState<string | null>(null);
+  const kasirDropdownRef = useRef<HTMLDivElement>(null);
+  const kasirTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const [kasirDropdownPos, setKasirDropdownPos] = useState<{ top: number; left: number } | null>(null);
+  /** Employees with user_id and business_id for filtering Kasir dropdown by selected business */
+  const [employeesWithBusiness, setEmployeesWithBusiness] = useState<Array<{ user_id: number | null; business_id: number }>>([]);
+
+  /** Users that are employees for the selected business only (for Ganti Kasir dropdown) */
+  const kasirOptionsForBusiness = useMemo(() => {
+    const allowedUserIds = new Set(
+      employeesWithBusiness
+        .filter((e) => e.business_id === effectiveBusinessId && e.user_id != null)
+        .map((e) => e.user_id as number)
+    );
+    return usersList.filter((u) => allowedUserIds.has(u.id));
+  }, [usersList, employeesWithBusiness, effectiveBusinessId]);
 
   // Persist column visibility to localStorage when it changes
   useEffect(() => {
@@ -340,6 +359,32 @@ export default function TransactionList({ businessId, onLoadTransaction }: Trans
     document.addEventListener('mousedown', handleClick);
     return () => document.removeEventListener('mousedown', handleClick);
   }, [showColumnPicker]);
+
+  // Position Kasir dropdown and close on click outside
+  useLayoutEffect(() => {
+    if (openKasirFor === null) {
+      setKasirDropdownPos(null);
+      return;
+    }
+    const el = kasirTriggerRef.current;
+    if (!el) return;
+    const rect = el.getBoundingClientRect();
+    setKasirDropdownPos({
+      top: rect.bottom + 4,
+      left: rect.left + rect.width / 2,
+    });
+  }, [openKasirFor]);
+
+  useEffect(() => {
+    if (openKasirFor === null) return;
+    const handleClick = (e: MouseEvent) => {
+      const target = e.target as Node;
+      if (kasirTriggerRef.current?.contains(target) || kasirDropdownRef.current?.contains(target)) return;
+      setOpenKasirFor(null);
+    };
+    document.addEventListener('mousedown', handleClick);
+    return () => document.removeEventListener('mousedown', handleClick);
+  }, [openKasirFor]);
 
   // Get today's date in UTC+7 timezone
   // Import from shared utility for consistency
@@ -369,6 +414,7 @@ export default function TransactionList({ businessId, onLoadTransaction }: Trans
   const canAccessPrinterManager = isSuperAdmin(user) || hasPermission(user, 'access_printer1printer2manager');
   const canBindToShift = isSuperAdmin(user);
   const canDeleteTransaction = isSuperAdmin(user);
+  const canChangeTransactionUser = isSuperAdmin(user) || hasPermission(user, 'daftartransaksi.changekasir');
 
   const visibleColumns = TRANSACTION_COLUMNS.filter((c) => {
     if (columnVisibility[c.key] === false) return false;
@@ -809,6 +855,7 @@ export default function TransactionList({ businessId, onLoadTransaction }: Trans
       const businesses: ElectronBusiness[] = useSystemPos && electronAPI.localDbGetSystemPosBusinesses
         ? await electronAPI.localDbGetSystemPosBusinesses()
         : await electronAPI.localDbGetBusinesses();
+      setUsersList(users);
 
       // Filter by date range - need to convert to local date for accurate filtering
       // This ensures we only show transactions within the selected date range
@@ -1154,6 +1201,30 @@ export default function TransactionList({ businessId, onLoadTransaction }: Trans
     }
   };
 
+  const handleSelectKasir = async (transactionId: string, userId: number) => {
+    const electronAPI = (typeof window !== 'undefined' ? (window as { electronAPI?: ElectronAPI }).electronAPI : undefined);
+    if (!electronAPI?.localDbUpdateTransactionUser) return;
+    setSavingKasirFor(transactionId);
+    try {
+      const result = await electronAPI.localDbUpdateTransactionUser(transactionId, userId, isSystemPosMode);
+      if (result?.success) {
+        const newName = usersList.find((u) => u.id === userId)?.name || 'Unknown';
+        setTransactions((prev) =>
+          prev.map((tx) =>
+            tx.id === transactionId ? { ...tx, user_id: userId, user_name: newName } : tx
+          )
+        );
+        setOpenKasirFor(null);
+      } else {
+        appAlert(result?.error || 'Gagal mengubah Kasir');
+      }
+    } catch (err) {
+      appAlert(err instanceof Error ? err.message : 'Gagal mengubah Kasir');
+    } finally {
+      setSavingKasirFor(null);
+    }
+  };
+
   // Fetch employees to get waiter names
   useEffect(() => {
     const fetchEmployees = async () => {
@@ -1168,6 +1239,11 @@ export default function TransactionList({ businessId, onLoadTransaction }: Trans
           : (electronAPI.localDbGetEmployees ? await electronAPI.localDbGetEmployees() : []);
 
         const employeesArray = Array.isArray(allEmployees) ? allEmployees : [];
+        const withBusiness = (employeesArray as Array<{ user_id?: number | null; business_id?: number }>).map((emp) => ({
+          user_id: emp.user_id ?? null,
+          business_id: typeof emp.business_id === 'number' ? emp.business_id : 0,
+        }));
+        setEmployeesWithBusiness(withBusiness);
         const map = new Map<number, { name: string; color: string | null }>();
         employeesArray.forEach((emp: { id?: number | string; nama_karyawan?: string; color?: string | null }) => {
           const empId = typeof emp.id === 'number' ? emp.id : (typeof emp.id === 'string' ? parseInt(emp.id, 10) : null);
@@ -1532,11 +1608,14 @@ export default function TransactionList({ businessId, onLoadTransaction }: Trans
       return 0;
     });
 
-  // Calculate totals
-  const totalRevenue = filteredTransactions.reduce((sum, t) => {
-    const amount = typeof t.final_amount === 'string' ? parseFloat(t.final_amount) : t.final_amount;
-    return sum + (isNaN(amount) ? 0 : amount);
-  }, 0); const totalRefund = filteredTransactions.reduce((sum, t) => {
+  // Calculate totals — Gross = sum of all transactions currently shown (mode 1: Printer 2 audit log only; mode 2: all), excluding cancelled
+  const totalRevenue = filteredTransactions
+    .filter(t => (t.status || '').toLowerCase() !== 'cancelled')
+    .reduce((sum, t) => {
+      const amount = typeof t.final_amount === 'string' ? parseFloat(t.final_amount) : t.final_amount;
+      return sum + (isNaN(amount) ? 0 : amount);
+    }, 0);
+  const totalRefund = filteredTransactions.reduce((sum, t) => {
     const amount = typeof t.refund_total === 'string' ? parseFloat(t.refund_total) : (t.refund_total || 0);
     return sum + (isNaN(amount) ? 0 : amount);
   }, 0);
@@ -1712,144 +1791,155 @@ export default function TransactionList({ businessId, onLoadTransaction }: Trans
           )}
         </div>
 
-        {/* Summary Cards */}
-        <div className="grid grid-cols-1 md:grid-cols-6 gap-4 mb-1 flex-shrink-0">
-          {/* Payment Methods Card — 3-column table (Method | Count | Amount) to avoid horizontal overflow with wide Rupiah amounts */}
-          <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-4 md:col-span-3 min-w-0">
-            <div className="flex items-center gap-2 mb-3">
+        {/* Summary Cards — 4 cols: Metode Pembayaran (2), Pengambilan+Voucher stacked (1), Grand Total (1) */}
+        <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-1 flex-shrink-0">
+          {/* Payment Methods Card — fixed height, scrollable table; narrower width (col-span-2) */}
+          <div className="bg-white shadow-sm border border-gray-200 pl-4 pt-4 pb-4 pr-0 md:col-span-2 min-w-0 flex flex-col h-[10.5rem]">
+            <div className="flex items-center gap-2 mb-2 flex-shrink-0 pr-4">
               <div className="w-3 h-3 bg-blue-500 rounded-full"></div>
               <h3 className="font-semibold text-gray-900 text-sm">Metode Pembayaran</h3>
             </div>
-            <div className="min-w-0 overflow-x-auto">
-              <table className="w-full text-xs border-collapse">
+            <div
+              className="min-h-0 min-w-0 flex-1 overflow-y-auto overflow-x-hidden flex flex-col"
+              style={{ scrollbarGutter: 'stable' }}
+            >
+              <table className="text-xs border-collapse w-full min-w-0" style={{ tableLayout: 'fixed' }}>
+                <colgroup>
+                  <col style={{ width: '5.5rem', minWidth: '5.5rem' }} />
+                  <col style={{ width: '3rem', minWidth: '3rem' }} />
+                  <col />
+                </colgroup>
                 <thead>
                   <tr className="border-b border-gray-200">
-                    <th className="text-left py-1 pr-2 font-medium text-gray-600">Metode</th>
-                    <th className="text-right py-1 px-2 font-medium text-gray-600 whitespace-nowrap">Jumlah</th>
-                    <th className="text-right py-1 pl-2 font-medium text-gray-600 tabular-nums">Total</th>
+                    <th className="text-left py-0.5 pr-2 font-medium text-gray-600 truncate">Metode</th>
+                    <th className="text-right py-0.5 px-2 font-medium text-gray-600 whitespace-nowrap">Jumlah</th>
+                    <th className="text-left py-0.5 pl-2 pr-1 font-medium text-gray-600 tabular-nums">Total</th>
                   </tr>
                 </thead>
                 <tbody>
                   <tr className="border-b border-gray-100">
-                    <td className="py-1 pr-2 text-gray-600">Cash</td>
-                    <td className="py-1 px-2 text-right tabular-nums font-medium text-gray-900">{paymentMethodCounts.cash}</td>
-                    <td className="py-1 pl-2 text-right tabular-nums font-medium text-gray-900">{formatPrice(paymentMethodTotals.cash)}</td>
+                    <td className="py-0.5 pr-2 text-gray-600 truncate">Cash</td>
+                    <td className="py-0.5 px-2 text-right tabular-nums font-medium text-gray-900">{paymentMethodCounts.cash}</td>
+                    <td className="py-0.5 pl-2 pr-1 text-left tabular-nums font-medium text-gray-900">{formatPrice(paymentMethodTotals.cash)}</td>
                   </tr>
                   <tr className="border-b border-gray-100">
-                    <td className="py-1 pr-2 text-gray-600">Debit</td>
-                    <td className="py-1 px-2 text-right tabular-nums font-medium text-gray-900">{paymentMethodCounts.debit}</td>
-                    <td className="py-1 pl-2 text-right tabular-nums font-medium text-gray-900">{formatPrice(paymentMethodTotals.debit)}</td>
+                    <td className="py-0.5 pr-2 text-gray-600 truncate">Debit</td>
+                    <td className="py-0.5 px-2 text-right tabular-nums font-medium text-gray-900">{paymentMethodCounts.debit}</td>
+                    <td className="py-0.5 pl-2 pr-1 text-left tabular-nums font-medium text-gray-900">{formatPrice(paymentMethodTotals.debit)}</td>
                   </tr>
                   <tr className="border-b border-gray-100">
-                    <td className="py-1 pr-2 text-gray-600">QR</td>
-                    <td className="py-1 px-2 text-right tabular-nums font-medium text-gray-900">{paymentMethodCounts.qr}</td>
-                    <td className="py-1 pl-2 text-right tabular-nums font-medium text-gray-900">{formatPrice(paymentMethodTotals.qr)}</td>
+                    <td className="py-0.5 pr-2 text-gray-600 truncate">QR</td>
+                    <td className="py-0.5 px-2 text-right tabular-nums font-medium text-gray-900">{paymentMethodCounts.qr}</td>
+                    <td className="py-0.5 pl-2 pr-1 text-left tabular-nums font-medium text-gray-900">{formatPrice(paymentMethodTotals.qr)}</td>
                   </tr>
                   <tr className="border-b border-gray-100">
-                    <td className="py-1 pr-2 text-gray-600">E-Wallet</td>
-                    <td className="py-1 px-2 text-right tabular-nums font-medium text-gray-900">{paymentMethodCounts.ewallet}</td>
-                    <td className="py-1 pl-2 text-right tabular-nums font-medium text-gray-900">{formatPrice(paymentMethodTotals.ewallet)}</td>
+                    <td className="py-0.5 pr-2 text-gray-600 truncate">E-Wallet</td>
+                    <td className="py-0.5 px-2 text-right tabular-nums font-medium text-gray-900">{paymentMethodCounts.ewallet}</td>
+                    <td className="py-0.5 pl-2 pr-1 text-left tabular-nums font-medium text-gray-900">{formatPrice(paymentMethodTotals.ewallet)}</td>
                   </tr>
                   <tr className="border-b border-gray-100">
-                    <td className="py-1 pr-2 text-gray-600">CL</td>
-                    <td className="py-1 px-2 text-right tabular-nums font-medium text-gray-900">{paymentMethodCounts.cl}</td>
-                    <td className="py-1 pl-2 text-right tabular-nums font-medium text-gray-900">{formatPrice(paymentMethodTotals.cl)}</td>
+                    <td className="py-0.5 pr-2 text-gray-600 truncate">CL</td>
+                    <td className="py-0.5 px-2 text-right tabular-nums font-medium text-gray-900">{paymentMethodCounts.cl}</td>
+                    <td className="py-0.5 pl-2 pr-1 text-left tabular-nums font-medium text-gray-900">{formatPrice(paymentMethodTotals.cl)}</td>
                   </tr>
                   <tr className="border-b border-gray-100">
-                    <td className="py-1 pr-2 text-gray-600">GoFood</td>
-                    <td className="py-1 px-2 text-right tabular-nums font-medium text-gray-900">{paymentMethodCounts.gofood}</td>
-                    <td className="py-1 pl-2 text-right tabular-nums font-medium text-gray-900">{formatPrice(paymentMethodTotals.gofood)}</td>
+                    <td className="py-0.5 pr-2 text-gray-600 truncate">GoFood</td>
+                    <td className="py-0.5 px-2 text-right tabular-nums font-medium text-gray-900">{paymentMethodCounts.gofood}</td>
+                    <td className="py-0.5 pl-2 pr-1 text-left tabular-nums font-medium text-gray-900">{formatPrice(paymentMethodTotals.gofood)}</td>
                   </tr>
                   <tr className="border-b border-gray-100">
-                    <td className="py-1 pr-2 text-gray-600">GrabFood</td>
-                    <td className="py-1 px-2 text-right tabular-nums font-medium text-gray-900">{paymentMethodCounts.grabfood}</td>
-                    <td className="py-1 pl-2 text-right tabular-nums font-medium text-gray-900">{formatPrice(paymentMethodTotals.grabfood)}</td>
+                    <td className="py-0.5 pr-2 text-gray-600 truncate">GrabFood</td>
+                    <td className="py-0.5 px-2 text-right tabular-nums font-medium text-gray-900">{paymentMethodCounts.grabfood}</td>
+                    <td className="py-0.5 pl-2 pr-1 text-left tabular-nums font-medium text-gray-900">{formatPrice(paymentMethodTotals.grabfood)}</td>
                   </tr>
                   <tr className="border-b border-gray-100">
-                    <td className="py-1 pr-2 text-gray-600">ShopeeFood</td>
-                    <td className="py-1 px-2 text-right tabular-nums font-medium text-gray-900">{paymentMethodCounts.shopeefood}</td>
-                    <td className="py-1 pl-2 text-right tabular-nums font-medium text-gray-900">{formatPrice(paymentMethodTotals.shopeefood)}</td>
+                    <td className="py-0.5 pr-2 text-gray-600 truncate">ShopeeFood</td>
+                    <td className="py-0.5 px-2 text-right tabular-nums font-medium text-gray-900">{paymentMethodCounts.shopeefood}</td>
+                    <td className="py-0.5 pl-2 pr-1 text-left tabular-nums font-medium text-gray-900">{formatPrice(paymentMethodTotals.shopeefood)}</td>
                   </tr>
                   <tr className="border-b border-gray-100">
-                    <td className="py-1 pr-2 text-gray-600">TikTok</td>
-                    <td className="py-1 px-2 text-right tabular-nums font-medium text-gray-900">{paymentMethodCounts.tiktok}</td>
-                    <td className="py-1 pl-2 text-right tabular-nums font-medium text-gray-900">{formatPrice(paymentMethodTotals.tiktok)}</td>
+                    <td className="py-0.5 pr-2 text-gray-600 truncate">TikTok</td>
+                    <td className="py-0.5 px-2 text-right tabular-nums font-medium text-gray-900">{paymentMethodCounts.tiktok}</td>
+                    <td className="py-0.5 pl-2 pr-1 text-left tabular-nums font-medium text-gray-900">{formatPrice(paymentMethodTotals.tiktok)}</td>
                   </tr>
                   <tr className="border-b border-gray-100">
-                    <td className="py-1 pr-2 text-gray-600">Qpon</td>
-                    <td className="py-1 px-2 text-right tabular-nums font-medium text-gray-900">{paymentMethodCounts.qpon}</td>
-                    <td className="py-1 pl-2 text-right tabular-nums font-medium text-gray-900">{formatPrice(paymentMethodTotals.qpon)}</td>
+                    <td className="py-0.5 pr-2 text-gray-600 truncate">Qpon</td>
+                    <td className="py-0.5 px-2 text-right tabular-nums font-medium text-gray-900">{paymentMethodCounts.qpon}</td>
+                    <td className="py-0.5 pl-2 pr-1 text-left tabular-nums font-medium text-gray-900">{formatPrice(paymentMethodTotals.qpon)}</td>
                   </tr>
                   <tr className="border-b border-gray-100">
-                    <td className="py-1 pr-2 text-gray-600">Voucher</td>
-                    <td className="py-1 px-2 text-right tabular-nums font-medium text-gray-900">{paymentMethodCounts.voucher}</td>
-                    <td className="py-1 pl-2 text-right tabular-nums font-medium text-gray-900">{formatPrice(paymentMethodTotals.voucher)}</td>
+                    <td className="py-0.5 pr-2 text-gray-600 truncate">Voucher</td>
+                    <td className="py-0.5 px-2 text-right tabular-nums font-medium text-gray-900">{paymentMethodCounts.voucher}</td>
+                    <td className="py-0.5 pl-2 pr-1 text-left tabular-nums font-medium text-gray-900">{formatPrice(paymentMethodTotals.voucher)}</td>
                   </tr>
                 </tbody>
               </table>
             </div>
           </div>
 
-          {/* Pickup Methods Card */}
-          <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-4">
-            <div className="flex items-center gap-2 mb-3">
-              <div className="w-3 h-3 bg-green-500 rounded-full"></div>
-              <h3 className="font-semibold text-gray-900 text-sm">Metode Pengambilan</h3>
-            </div>
-            <div className="space-y-2">
-              <div className="flex justify-between">
-                <span className="text-xs text-gray-600">Dine In</span>
-                <span className="text-xs font-medium text-gray-900">{dineInCount}</span>
+          {/* One column: Metode Pengambilan above, Voucher below — same total height as Grand Total (10.5rem) on desktop */}
+          <div className="flex flex-col gap-4 md:col-span-1 md:h-[10.5rem]">
+            {/* Pickup Methods Card — compact: smaller font, no line spacing */}
+            <div className="bg-white shadow-sm border border-gray-200 p-3 md:flex-1 md:min-h-0 flex flex-col">
+              <div className="flex items-center gap-1.5 mb-1">
+                <div className="w-2.5 h-2.5 bg-green-500 rounded-full"></div>
+                <h3 className="font-semibold text-gray-900 text-xs leading-tight">Metode Pengambilan</h3>
               </div>
-              <div className="flex justify-between">
-                <span className="text-xs text-gray-600">Take Away</span>
-                <span className="text-xs font-medium text-gray-900">{takeAwayCount}</span>
+              <div className="space-y-0 pb-2">
+                <div className="flex justify-between text-[10px] leading-tight">
+                  <span className="text-gray-600">Dine In</span>
+                  <span className="font-medium text-gray-900">{dineInCount}</span>
+                </div>
+                <div className="flex justify-between text-[10px] leading-tight">
+                  <span className="text-gray-600">Take Away</span>
+                  <span className="font-medium text-gray-900">{takeAwayCount}</span>
+                </div>
               </div>
             </div>
-          </div>
 
-          {/* Voucher Card */}
-          <div
-            className="bg-white rounded-lg shadow-sm border border-gray-200 p-4"
-            onClick={(() => {
-              let clicks = 0;
-              let last = 0;
-              return () => {
-                const now = Date.now();
-                if (now - last > 3000) {
-                  clicks = 0;
-                }
-                clicks += 1;
-                last = now;
-                if (clicks >= 5) {
-                  clicks = 0;
-                  last = 0;
-                  if (process.env.NODE_ENV === 'development') {
-                    // In development, use Next.js router for reliable navigation
-                    router.push('/logs/printing');
-                  } else {
-                    // In production (Electron file://), use window.location
-                    window.location.href = 'logs/printing.html';
+            {/* Voucher Card — compact: smaller font, no line spacing */}
+            <div
+              className="bg-white shadow-sm border border-gray-200 p-3 md:flex-1 md:min-h-0 flex flex-col"
+              onClick={(() => {
+                let clicks = 0;
+                let last = 0;
+                return () => {
+                  const now = Date.now();
+                  if (now - last > 3000) {
+                    clicks = 0;
                   }
-                }
-              };
-            })()}
-            role="button"
-            aria-label="Voucher Card"
-            title="Voucher"
-          >
-            <div className="flex items-center gap-2 mb-3">
-              <div className="w-3 h-3 bg-yellow-500 rounded-full"></div>
-              <h3 className="font-semibold text-gray-900 text-sm">Voucher</h3>
-            </div>
-            <div className="space-y-2">
-              <div className="flex justify-between">
-                <span className="text-xs text-gray-600">Jumlah Voucher</span>
-                <span className="text-xs font-medium text-gray-900">{voucherCount}</span>
+                  clicks += 1;
+                  last = now;
+                  if (clicks >= 5) {
+                    clicks = 0;
+                    last = 0;
+                    if (process.env.NODE_ENV === 'development') {
+                      // In development, use Next.js router for reliable navigation
+                      router.push('/logs/printing');
+                    } else {
+                      // In production (Electron file://), use window.location
+                      window.location.href = 'logs/printing.html';
+                    }
+                  }
+                };
+              })()}
+              role="button"
+              aria-label="Voucher Card"
+              title="Voucher"
+            >
+              <div className="flex items-center gap-1.5 mb-1">
+                <div className="w-2.5 h-2.5 bg-yellow-500 rounded-full"></div>
+                <h3 className="font-semibold text-gray-900 text-xs leading-tight">Voucher</h3>
               </div>
-              <div className="flex justify-between">
-                <span className="text-xs text-gray-600">Total Diskon</span>
-                <span className="text-xs font-medium text-green-700">{formatPrice(totalVoucherDiscount)}</span>
+              <div className="space-y-0 pb-2">
+                <div className="flex justify-between text-[10px] leading-tight">
+                  <span className="text-gray-600">Jumlah Voucher</span>
+                  <span className="font-medium text-gray-900">{voucherCount}</span>
+                </div>
+                <div className="flex justify-between text-[10px] leading-tight">
+                  <span className="text-gray-600">Total Diskon</span>
+                  <span className="font-medium text-green-700">{formatPrice(totalVoucherDiscount)}</span>
+                </div>
               </div>
             </div>
           </div>
@@ -2287,7 +2377,45 @@ export default function TransactionList({ businessId, onLoadTransaction }: Trans
                                 </div>
                               );
                             })()}
-                            {col.key === 'user_name' && <span className="text-xs text-gray-900 truncate block" title={transaction.user_name || 'Unknown'}>{transaction.user_name || 'Unknown'}</span>}
+                            {col.key === 'user_name' && (
+                              <div className="flex flex-col items-center gap-0.5">
+                                <span className="text-xs text-gray-900 truncate block" title={transaction.user_name || 'Unknown'}>{transaction.user_name || 'Unknown'}</span>
+                                {canChangeTransactionUser && (
+                                  <>
+                                    <button
+                                      ref={openKasirFor === transaction.id ? kasirTriggerRef : undefined}
+                                      type="button"
+                                      onClick={(e) => { e.stopPropagation(); setOpenKasirFor((id) => (id === transaction.id ? null : transaction.id)); }}
+                                      disabled={savingKasirFor === transaction.id}
+                                      className="text-[10px] text-blue-600 hover:text-blue-800 hover:underline disabled:opacity-50"
+                                    >
+                                      {savingKasirFor === transaction.id ? '...' : 'Ubah'}
+                                    </button>
+                                    {openKasirFor === transaction.id && kasirDropdownPos && typeof document !== 'undefined' && createPortal(
+                                      <div
+                                        ref={kasirDropdownRef}
+                                        className="fixed z-[9999] min-w-[140px] max-h-[200px] overflow-y-auto rounded-lg border border-gray-200 bg-white py-2 shadow-lg"
+                                        style={{ top: kasirDropdownPos.top, left: kasirDropdownPos.left, transform: 'translateX(-50%)' }}
+                                      >
+                                        <div className="px-3 py-1 text-xs font-semibold text-gray-500 uppercase">Ganti Kasir</div>
+                                        {kasirOptionsForBusiness.map((u) => (
+                                          <button
+                                            key={u.id}
+                                            type="button"
+                                            onClick={(e) => { e.stopPropagation(); handleSelectKasir(transaction.id, u.id); }}
+                                            className="block w-full px-3 py-2 text-left text-sm text-gray-900 hover:bg-gray-100"
+                                          >
+                                            {u.name}
+                                          </button>
+                                        ))}
+                                        {kasirOptionsForBusiness.length === 0 && <div className="px-3 py-2 text-sm text-gray-500">Tidak ada user</div>}
+                                      </div>,
+                                      document.body
+                                    )}
+                                  </>
+                                )}
+                              </div>
+                            )}
                             {col.key === 'shift' && (
                               <div className="flex flex-col items-center gap-0.5">
                                 <span className="text-xs text-gray-700" title={transaction.shift_uuid ?? undefined}>{transaction.shift_uuid ? (shiftLabelByUuid[transaction.shift_uuid]?.cellLabel ?? 'Shift') : '-'}</span>
@@ -2528,15 +2656,15 @@ function GrandTotalCard({ totalRevenue, totalRefund, totalCustomerUnit, totalTra
 
   return (
     <div
-      className="bg-white rounded-lg shadow-sm border border-gray-200 p-4 md:col-span-1 cursor-pointer hover:bg-gray-50 transition-colors"
+      className="bg-white shadow-sm border border-gray-200 p-4 md:col-span-1 cursor-pointer hover:bg-gray-50 transition-colors h-[10.5rem] flex flex-col"
       onClick={onFiveClick}
       title="Click 5 times to toggle R/RR badge display"
     >
-      <div className="flex items-center gap-2 mb-3">
+      <div className="flex items-center gap-2 mb-2">
         <div className="w-3 h-3 bg-purple-500 rounded-full"></div>
         <h3 className="font-semibold text-gray-900 text-sm">Grand Total</h3>
       </div>
-      <div className="space-y-1.5">
+      <div className="space-y-0.5">
         <div className="flex justify-between text-xs">
           <span className="text-gray-600">Gross:</span>
           <span className="font-medium text-gray-900">{formatPrice(totalRevenue)}</span>
@@ -2547,11 +2675,11 @@ function GrandTotalCard({ totalRevenue, totalRefund, totalCustomerUnit, totalTra
             <span className="font-medium text-red-600">-{formatPrice(totalRefund)}</span>
           </div>
         )}
-        <div className="flex justify-between text-sm border-t pt-1.5">
+        <div className="flex justify-between text-sm border-t pt-1">
           <span className="font-semibold text-gray-900">Net:</span>
           <span className="font-bold text-gray-900">{formatPrice(netRevenue)}</span>
         </div>
-        <div className="flex justify-between text-xs pt-1 border-t">
+        <div className="flex justify-between text-xs pt-0.5 border-t">
           <span className="text-gray-600">Txs/CU:</span>
           <span className="font-semibold text-gray-900">{totalTransactionCount}/{totalCustomerUnit}</span>
         </div>

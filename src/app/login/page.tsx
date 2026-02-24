@@ -17,7 +17,7 @@ interface Business {
 
 export default function Login() {
   const router = useRouter();
-  const { isAuthenticated, user, login, loginOffline, logout } = useAuth();
+  const { isAuthenticated, user, login, logout } = useAuth();
   const [isClient, setIsClient] = useState(false);
   const [isSyncing, setIsSyncing] = useState(false);
   const [syncStatus, setSyncStatus] = useState<string | null>(null);
@@ -235,20 +235,6 @@ export default function Login() {
     }
   };
 
-  const handleOfflineLogin = async () => {
-    if (isSyncing) {
-      console.warn('Offline login diblokir saat sinkronisasi berjalan.');
-      return;
-    }
-
-    try {
-      await loginOffline();
-      // Router will handle redirect via useEffect
-    } catch (error) {
-      console.error('Offline login failed:', error);
-    }
-  };
-
   const handleClose = () => {
     // Handle close action - exit the application
     console.log('Login closed');
@@ -328,13 +314,11 @@ export default function Login() {
     <div className="w-full h-screen bg-gray-900 overflow-hidden">
       <LoginPage
         onLogin={handleLogin}
-        onOfflineLogin={handleOfflineLogin}
         onClose={handleClose}
         isSyncing={isSyncing}
         syncStatus={effectiveSyncStatus}
         syncError={syncError}
         onSyncRequest={async () => { await handleFullSync('manual'); }}
-        hasOfflineDb={true}
         syncProgress={syncProgress}
         refreshLoginLogoAt={loginLogoRefreshAt}
       />

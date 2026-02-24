@@ -8,26 +8,22 @@ import { useAppDialog } from '@/components/AppDialog';
 
 interface LoginPageProps {
   onLogin?: (email: string, password: string) => void;
-  onOfflineLogin?: () => void;
   onClose?: () => void;
   onSyncRequest?: () => Promise<void> | void;
   isSyncing?: boolean;
   syncStatus?: string | null;
   syncError?: string | null;
-  hasOfflineDb?: boolean;
   syncProgress?: number | null;
   refreshLoginLogoAt?: number;
 }
 
 export default function LoginPage({
   onLogin,
-  onOfflineLogin,
   onClose,
   onSyncRequest,
   isSyncing = false,
   syncStatus = null,
   syncError = null,
-  hasOfflineDb = true,
   syncProgress = null,
   refreshLoginLogoAt,
 }: LoginPageProps) {
@@ -159,12 +155,6 @@ export default function LoginPage({
       setError(error instanceof Error ? error.message : 'Login failed');
     } finally {
       setIsLoading(false);
-    }
-  };
-
-  const handleOfflineLogin = () => {
-    if (onOfflineLogin) {
-      onOfflineLogin();
     }
   };
 
@@ -742,7 +732,7 @@ export default function LoginPage({
                 </div>
               )}
 
-              {/* Login Button */}
+              {/* Login Button (handles both local and online login transparently) */}
               <button
                 type="submit"
                 disabled={isLoading || isSyncing}
@@ -755,18 +745,6 @@ export default function LoginPage({
                   'Masuk'
                 )}
               </button>
-
-              {hasOfflineDb && onOfflineLogin && (
-                <button
-                  type="button"
-                  onClick={handleOfflineLogin}
-                  disabled={isLoading || isSyncing}
-                  className="w-full border border-gray-300 text-gray-700 hover:bg-gray-50 font-semibold py-3 px-4 rounded-lg transition-colors"
-                  style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
-                >
-                  Masuk Offline
-                </button>
-              )}
 
             </form>
           )}

@@ -266,6 +266,7 @@ declare global {
       localDbUpsertTransactions?: (rows: unknown[]) => Promise<unknown>;
       localDbUpdateTransactionVoucher?: (transactionId: string, payload: { voucher_discount: number; voucher_type: string; voucher_value: number | null; voucher_label: string | null; final_amount: number }) => Promise<{ success: boolean; error?: string }>;
       localDbUpdateTransactionWaiter?: (transactionId: string, waiterId: number | null) => Promise<{ success: boolean; error?: string }>;
+      localDbUpdateTransactionUser?: (transactionId: string, userId: number, useSystemPos?: boolean) => Promise<{ success: boolean; error?: string }>;
       localDbGetTransactionCheckerPrinted?: (transactionUuid: string) => Promise<{ success: boolean; checker_printed: boolean }>;
       localDbSetTransactionCheckerPrinted?: (transactionUuid: string) => Promise<{ success: boolean }>;
       localDbGetTransactionItems?: (transactionId?: number | string) => Promise<unknown[]>;

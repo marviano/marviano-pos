@@ -4199,6 +4199,32 @@ function createWindows(): void {
     }
   });
 
+  ipcMain.handle('localdb-update-transaction-user', async (_event, transactionId: string, userId: number, useSystemPos?: boolean) => {
+    try {
+      if (!transactionId || typeof transactionId !== 'string') {
+        return { success: false, error: 'transactionId required' };
+      }
+      if (userId == null || typeof userId !== 'number' || isNaN(userId)) {
+        return { success: false, error: 'userId required (number)' };
+      }
+      if (useSystemPos) {
+        await executeSystemPosUpdate(
+          'UPDATE transactions SET user_id = ?, updated_at = NOW() WHERE uuid_id = ?',
+          [userId, transactionId]
+        );
+      } else {
+        await executeUpdate(
+          'UPDATE transactions SET user_id = ?, updated_at = NOW() WHERE uuid_id = ?',
+          [userId, transactionId]
+        );
+      }
+      return { success: true };
+    } catch (err) {
+      console.error('localdb-update-transaction-user error:', err);
+      return { success: false, error: err instanceof Error ? err.message : 'Unknown error' };
+    }
+  });
+
   /** Ensure checker_printed column exists (for DBs created before this column). */
   async function ensureCheckerPrintedColumn(): Promise<void> {
     try {

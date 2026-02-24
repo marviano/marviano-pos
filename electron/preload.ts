@@ -159,6 +159,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.invoke('localdb-update-transaction-voucher', transactionId, payload),
   localDbUpdateTransactionWaiter: (transactionId: string, waiterId: number | null) =>
     ipcRenderer.invoke('localdb-update-transaction-waiter', transactionId, waiterId),
+  localDbUpdateTransactionUser: (transactionId: string, userId: number, useSystemPos?: boolean) =>
+    ipcRenderer.invoke('localdb-update-transaction-user', transactionId, userId, useSystemPos),
   localDbGetTransactionCheckerPrinted: (transactionUuid: string) => ipcRenderer.invoke('localdb-get-transaction-checker-printed', transactionUuid),
   localDbSetTransactionCheckerPrinted: (transactionUuid: string) => ipcRenderer.invoke('localdb-set-transaction-checker-printed', transactionUuid),
   localDbGetTransactionByUuid: (uuid: string) => ipcRenderer.invoke('localdb-get-transaction-by-uuid', uuid),

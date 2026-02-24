@@ -268,6 +268,9 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
   // Take away / Dine in for Simpan Order (synced from loadedTransactionInfo when in lihat mode)
   const [orderPickupMethod, setOrderPickupMethod] = useState<'dine-in' | 'take-away'>('dine-in');
 
+  // Category search (filters within current product list; "Pencarian berdasar kategori aktif")
+  const [categorySearchQuery, setCategorySearchQuery] = useState('');
+
   // Column count state - load from localStorage, default to 5
   const [columnCount, setColumnCount] = useState<number>(() => {
     if (typeof window !== 'undefined') {
@@ -1735,27 +1738,48 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
             </div>
           </div>
 
-          {/* Search Bar */}
-          {setSearchQuery && (
-            <div className="relative flex-1 max-w-xs">
+          {/* Search Bars: category search first, then global (equal width) */}
+          <div className="grid grid-cols-2 gap-2 flex-1 min-w-0 max-w-2xl">
+            {/* Pencarian berdasar kategori aktif */}
+            <div className="relative min-w-0">
               <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 w-4 h-4 text-gray-400" />
               <input
                 type="text"
-                value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
-                placeholder="Cari produk atau harga..."
+                value={categorySearchQuery}
+                onChange={(e) => setCategorySearchQuery(e.target.value)}
+                placeholder="Pencarian berdasar kategori aktif"
                 className="pl-10 pr-10 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 text-sm w-full text-black placeholder:text-gray-400"
               />
-              {searchQuery && (
+              {categorySearchQuery && (
                 <button
-                  onClick={() => setSearchQuery('')}
+                  onClick={() => setCategorySearchQuery('')}
                   className="absolute right-2 top-1/2 transform -translate-y-1/2 text-gray-400 hover:text-gray-600"
                 >
                   <X className="w-4 h-4" />
                 </button>
               )}
             </div>
-          )}
+            {setSearchQuery && (
+              <div className="relative min-w-0">
+                <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 w-4 h-4 text-gray-400" />
+                <input
+                  type="text"
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
+                  placeholder="Pencarian Global"
+                  className="pl-10 pr-10 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 text-sm w-full text-black placeholder:text-gray-400"
+                />
+                {searchQuery && (
+                  <button
+                    onClick={() => setSearchQuery('')}
+                    className="absolute right-2 top-1/2 transform -translate-y-1/2 text-gray-400 hover:text-gray-600"
+                  >
+                    <X className="w-4 h-4" />
+                  </button>
+                )}
+              </div>
+            )}
+          </div>
         </div>
 
         {/* Loading Overlay for Category Switching */}
@@ -1800,8 +1824,26 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
                 return !isPriceNull(p);
               });
 
+              // Filter by category search first (Pencarian berdasar kategori aktif)
+              if (categorySearchQuery.trim()) {
+                const catQuery = categorySearchQuery.trim().toLowerCase();
+                const catNumericQuery = catQuery.replace(/[^\d]/g, '');
+                const catIsNumeric = catNumericQuery.length > 0;
 
-              // Then filter by search query if provided
+                filteredProducts = filteredProducts.filter((product) => {
+                  const nameMatch = product.nama.toLowerCase().includes(catQuery);
+                  let priceMatch = false;
+                  if (catIsNumeric) {
+                    const productPrice = effectiveProductPrice(product);
+                    if (productPrice !== null) {
+                      priceMatch = productPrice.toString().includes(catNumericQuery);
+                    }
+                  }
+                  return nameMatch || priceMatch;
+                });
+              }
+
+              // Then filter by global search query if provided
               if (searchQuery.trim()) {
                 const query = searchQuery.trim().toLowerCase();
                 const numericQuery = query.replace(/[^\d]/g, ''); // Extract only digits
@@ -1826,11 +1868,12 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
                 });
               }
 
+              const hasSearchFilter = searchQuery.trim() || categorySearchQuery.trim();
               if (filteredProducts.length === 0 && !isLoadingProducts) {
                 return (
                   <div className={`${gridStyles.colSpan} flex items-center justify-center h-32`}>
                     <p className="text-gray-500">
-                      {searchQuery.trim()
+                      {hasSearchFilter
                         ? 'No products found matching your search'
                         : isOnline && selectedOnlinePlatform
                           ? `No products available for ${PLATFORM_LABELS[selectedOnlinePlatform]}`
