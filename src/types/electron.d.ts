@@ -533,15 +533,19 @@ declare global {
         earliestTime: string | null;
       }>;
       localDbUpdateShiftStart?: (shiftId: number, newStartTime: string) => Promise<{ success: boolean; error?: string }>;
+      localDbGetRefundTotal?: (businessId: number | null, shiftStart: string, shiftEnd: string | null) => Promise<number>;
       localDbGetProductSales?: (userId: number | null, shiftStart: string, shiftEnd: string | null, businessId?: number, shiftUuid?: string | null, shiftUuids?: string[]) => Promise<{
         products: Array<{
           product_id: number;
           product_name: string;
           product_code: string;
+          category1_id: number | null;
+          category1_name: string;
           platform: string;
           transaction_type: string;
           total_quantity: number;
           total_subtotal: number;
+          total_subtotal_after_refund?: number;
           customization_subtotal: number;
           base_subtotal: number;
           base_unit_price: number;

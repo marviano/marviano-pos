@@ -299,6 +299,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   localDbUpsertShifts: (rows: UnknownRecord[]) => ipcRenderer.invoke('localdb-upsert-shifts', rows),
   localDbCheckTodayTransactions: (userId: number, shiftStart: string, businessId?: number) => ipcRenderer.invoke('localdb-check-today-transactions', userId, shiftStart, businessId),
   localDbUpdateShiftStart: (shiftId: number, newStartTime: string) => ipcRenderer.invoke('localdb-update-shift-start', shiftId, newStartTime),
+  localDbGetRefundTotal: (businessId: number | null, shiftStart: string, shiftEnd: string | null) => ipcRenderer.invoke('localdb-get-refund-total', businessId, shiftStart, shiftEnd),
   localDbGetProductSales: (userId: number | null, shiftStart: string, shiftEnd: string | null, businessId?: number, shiftUuid?: string | null, shiftUuids?: string[]) => ipcRenderer.invoke('localdb-get-product-sales', userId, shiftStart, shiftEnd, businessId, shiftUuid, shiftUuids),
   localDbGetPackageSalesBreakdown: (userId: number | null, shiftStart: string, shiftEnd: string | null, businessId?: number, shiftUuid?: string | null, shiftUuids?: string[]) =>
     ipcRenderer.invoke('localdb-get-package-sales-breakdown', userId, shiftStart, shiftEnd, businessId, shiftUuid, shiftUuids),
