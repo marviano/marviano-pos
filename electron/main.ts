@@ -492,6 +492,8 @@ type TransactionItemRow = {
   product_id: number;
   product_name: string;
   product_code: string;
+  category1_id?: number | null;
+  category1_name?: string | null;
   quantity: number;
   unit_price: number;
   total_price: number;
@@ -4343,8 +4345,8 @@ function createWindows(): void {
       let query = `
         SELECT 
           t.*,
-          t.final_amount,
-          t.total_amount,
+          GREATEST(0, (t.total_amount - COALESCE(cancelled.total_cancelled, 0))) as total_amount,
+          GREATEST(0, (t.final_amount - COALESCE(cancelled.total_cancelled, 0))) as final_amount,
           COALESCE(t.uuid_id, t.id) as id,
           CASE 
             WHEN t.created_at IS NOT NULL THEN
@@ -4358,8 +4360,7 @@ function createWindows(): void {
             NULLIF(t.refund_total, 0),
             COALESCE(refund_summary.total_refund, 0)
           ) as refund_total,
-          -- Always recalculate refund_status based on total refund amount vs final_amount
-          -- This ensures correct status even if database has incorrect values
+          -- Always recalculate refund_status based on total refund amount vs final_amount (net of cancelled)
           CASE 
             WHEN COALESCE(refund_summary.total_refund, t.refund_total, 0) > 0 THEN
               CASE 
@@ -6171,9 +6172,8 @@ function createWindows(): void {
       let query = `
         SELECT
           t.*,
-
-          t.final_amount,
-          t.total_amount,
+          GREATEST(0, (t.total_amount - COALESCE(cancelled.total_cancelled, 0))) as total_amount,
+          GREATEST(0, (t.final_amount - COALESCE(cancelled.total_cancelled, 0))) as final_amount,
           t.id,
           t.receipt_number,
           COALESCE(
@@ -6183,7 +6183,7 @@ function createWindows(): void {
           CASE 
             WHEN COALESCE(refund_summary.total_refund, t.refund_total, 0) > 0 THEN
               CASE 
-                WHEN COALESCE(refund_summary.total_refund, t.refund_total, 0) >= (t.final_amount - 0.01) THEN 'full'
+                WHEN COALESCE(refund_summary.total_refund, t.refund_total, 0) >= ((t.final_amount - COALESCE(cancelled.total_cancelled, 0)) - 0.01) THEN 'full'
                 ELSE 'partial'
               END
             ELSE 'none'
@@ -7598,7 +7598,7 @@ function createWindows(): void {
     }
   });
 
-  // Get payment method breakdown (gross: total_amount, no deduction for cancelled or refunds).
+  // Get payment method breakdown (net: final_amount per transaction, after discounts; excludes cancelled/refunded logic is via status = 'completed').
   // When shiftUuids (non-empty): all transactions bound to any of those shifts (whole day). When shiftUuid: single shift (all users). Else: userId + time.
   ipcMain.handle('localdb-get-payment-breakdown', async (event, userId: number | null, shiftStart: string, shiftEnd: string | null, businessId: number | null = null, shiftUuid: string | null = null, shiftUuids?: string[]) => {
     try {
@@ -7606,7 +7606,7 @@ function createWindows(): void {
         return [];
       }
 
-      const amountExpr = 'COALESCE(SUM(t.total_amount), 0)';
+      const amountExpr = 'COALESCE(SUM(t.final_amount), 0)';
       if (shiftUuids && shiftUuids.length > 0) {
         const query = `
           SELECT 
@@ -8460,6 +8460,45 @@ function createWindows(): void {
     }
   );
 
+  // Get total refund for date range (for Laporan Penjualan Produk). Count all refunds: partial and full; use GREATEST so we never undercount (e.g. multiple partials in transaction_refunds).
+  ipcMain.handle('localdb-get-refund-total', async (event, businessId: number | null, shiftStart: string, shiftEnd: string | null) => {
+    try {
+      if (businessId == null) return 0;
+      const shiftStartMySQL = toMySQLDateTime(shiftStart);
+      const shiftEndMySQL = shiftEnd ? toMySQLDateTime(shiftEnd) : null;
+      let query = `
+        SELECT COALESCE(SUM(
+          GREATEST(COALESCE(t.refund_total, 0), COALESCE(refund_summary.total_refund, 0))
+        ), 0) as refund_total
+        FROM transactions t
+        LEFT JOIN (
+          SELECT transaction_uuid, SUM(refund_amount) as total_refund
+          FROM transaction_refunds
+          WHERE status IN ('pending', 'completed')
+          GROUP BY transaction_uuid
+        ) refund_summary ON t.uuid_id = refund_summary.transaction_uuid
+        WHERE t.business_id = ? AND t.status != 'archived'
+        AND t.created_at >= ?
+      `;
+      const params: (string | number | null)[] = [businessId, shiftStartMySQL];
+      if (shiftEndMySQL) {
+        query += ' AND t.created_at <= ?';
+        params.push(shiftEndMySQL);
+      }
+      const row = await executeQueryOne<{ refund_total: number }>(query, params);
+      const returned = Number(row?.refund_total ?? 0);
+      // #region agent log
+      if (typeof fetch === 'function') {
+        fetch('http://127.0.0.1:7495/ingest/20000880-6f22-4a8b-8a8e-250eeb7d84f4', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': 'e9ccad' }, body: JSON.stringify({ sessionId: 'e9ccad', location: 'main.ts:localdb-get-refund-total', message: 'refund query result', data: { businessId, shiftStart, shiftEnd, shiftStartMySQL, shiftEndMySQL, returned }, timestamp: Date.now(), hypothesisId: 'R3', runId: 'refund-debug' }) }).catch(() => {});
+      }
+      // #endregion
+      return returned;
+    } catch (err) {
+      console.error('localdb-get-refund-total error:', err);
+      return 0;
+    }
+  });
+
   // Get product sales breakdown for shift. Excludes cancelled items. Allocates gross transaction amount across non-cancelled items only (matches Payment Method).
   // When shiftUuids (non-empty): filter by t.shift_uuid IN (...). When shiftUuid: filter by t.shift_uuid = ?. Else: userId + time.
   ipcMain.handle('localdb-get-product-sales', async (event, userId: number | null, shiftStart: string, shiftEnd: string | null, businessId: number | null = null, shiftUuid?: string | null, shiftUuids?: string[]) => {
@@ -8476,6 +8515,8 @@ function createWindows(): void {
           p.id as product_id,
           p.nama as product_name,
           p.menu_code as product_code,
+          p.category1_id as category1_id,
+          c1.name as category1_name,
           ti.quantity,
           ti.unit_price,
           ti.total_price,
@@ -8497,6 +8538,7 @@ function createWindows(): void {
         INNER JOIN transactions t ON ti.transaction_id = t.id
         LEFT JOIN payment_methods pm ON t.payment_method_id = pm.id
         INNER JOIN products p ON ti.product_id = p.id
+        LEFT JOIN category1 c1 ON p.category1_id = c1.id
         WHERE t.business_id = ?
         AND t.status = 'completed'
         AND (ti.production_status IS NULL OR ti.production_status != 'cancelled')
@@ -8528,10 +8570,13 @@ function createWindows(): void {
         product_id: number;
         product_name: string;
         product_code: string;
+        category1_id: number | null;
+        category1_name: string;
         platform: string;
         transaction_type: string;
         total_quantity: number;
         total_subtotal: number;
+        total_subtotal_after_refund: number;
         customization_subtotal: number;
         base_subtotal: number;
         unit_price: number; // Store the unit price to split by price differences
@@ -8619,10 +8664,13 @@ function createWindows(): void {
                     product_id: Number(selectedProduct.product.id),
                     product_name: selectedProduct.product.nama || 'Unknown Product',
                     product_code: '',
+                    category1_id: null,
+                    category1_name: 'Tanpa Kategori',
                     platform: bundlePlatform,
                     transaction_type: transactionType,
                     total_quantity: totalQty,
                     total_subtotal: 0,
+                    total_subtotal_after_refund: 0,
                     customization_subtotal: 0,
                     base_subtotal: 0,
                     unit_price: 0, // Bundle items don't have individual prices
@@ -8687,10 +8735,13 @@ function createWindows(): void {
 
         // Allocate gross transaction amount across non-cancelled items only (cancelled items excluded above)
         const totalAmountTx = Number(row.total_amount ?? 0);
+        const finalAmountTx = Number(row.final_amount ?? row.total_amount ?? 0);
         const txItemsTotal = Number(row.tx_items_total ?? 0);
         const allocatedRatio = txItemsTotal > 0 ? totalAmountTx / txItemsTotal : 0;
+        const allocatedRatioAfterRefund = txItemsTotal > 0 ? finalAmountTx / txItemsTotal : 0;
         const netBaseSubtotal = baseSubtotal * allocatedRatio;
         const netTotalPrice = totalPrice * allocatedRatio;
+        const netTotalPriceAfterRefund = totalPrice * allocatedRatioAfterRefund;
         const netCustomizationSubtotal = customizationSubtotal * allocatedRatio;
 
         // Determine platform from payment method code (canonical at transaction time)
@@ -8704,17 +8755,23 @@ function createWindows(): void {
         if (existing) {
           existing.total_quantity += quantity;
           existing.total_subtotal += netTotalPrice;
+          existing.total_subtotal_after_refund += netTotalPriceAfterRefund;
           existing.customization_subtotal += netCustomizationSubtotal;
           existing.base_subtotal += netBaseSubtotal;
         } else {
+          const cat1Id = row.category1_id != null ? Number(row.category1_id) : null;
+          const cat1Name = row.category1_name != null && String(row.category1_name).trim() !== '' ? String(row.category1_name) : 'Tanpa Kategori';
           aggregate.set(key, {
             product_id: Number(row.product_id),
             product_name: row.product_name,
             product_code: row.product_code,
+            category1_id: cat1Id,
+            category1_name: cat1Name,
             platform: platformCode,
             transaction_type: transactionType,
             total_quantity: quantity,
             total_subtotal: netTotalPrice,
+            total_subtotal_after_refund: netTotalPriceAfterRefund,
             customization_subtotal: netCustomizationSubtotal,
             base_subtotal: netBaseSubtotal,
             unit_price: unitPrice,
