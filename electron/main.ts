@@ -217,6 +217,8 @@ type LabelPrintData = {
   category1Name?: string;
   /** Section header for category 2 (e.g. Minuman). */
   category2Name?: string;
+  /** All category sections for checker slip (overrides itemsCategory1/2 when present). */
+  categories?: Array<{ categoryName: string; itemsHtml: string }>;
   /** Padding for 80mm checker template (same as receipt). Replaces {{leftPadding}}/{{rightPadding}} in template. */
   leftPadding?: string;
   rightPadding?: string;
@@ -11245,6 +11247,8 @@ type OrderContextForChecker = {
   itemsHtmlCategory2?: string;
   category1Name?: string;
   category2Name?: string;
+  /** All category sections; when present, checker uses these so 3+ categories (e.g. Makanan, Minuman, Dessert) all show. */
+  categories?: Array<{ categoryName: string; itemsHtml: string }>;
 };
 
 /** Minimal template used when checker template has no {{items}}/{{categoriesSections}} but we have orderContext (print one slip with notes). Uses {{categoriesSections}} so slip shows items grouped by category (e.g. MAKANAN / MINUMAN), not a table. */
@@ -11403,6 +11407,7 @@ async function executeLabelsBatchPrint(data: {
           itemsCategory2: data.orderContext.itemsHtmlCategory2 ?? '',
           category1Name: data.orderContext.category1Name ?? '',
           category2Name: data.orderContext.category2Name ?? '',
+          categories: data.orderContext.categories?.length ? data.orderContext.categories : undefined,
           leftPadding: batchLeftPadding,
           rightPadding: batchRightPadding,
         };
@@ -11905,12 +11910,20 @@ function generateLabelHTMLFromTemplate(templateCode: string, data: LabelPrintDat
     (itemsHtmlCategory2 || '').trim().length > 0 &&
     category2NameRaw !== '' &&
     category2NameRaw.toLowerCase() !== 'kategori 2';
-  // Build {{categoriesSections}}: category blocks (MAKANAN: - item, MINUMAN: - item) for slip pesanan template
+  // Build {{categoriesSections}}: category blocks (MAKANAN, MINUMAN, Dessert, etc.). Use full categories array when present so 3+ categories all show on checker.
   const categorySectionBlock = (name: string, sectionHtml: string) =>
     (sectionHtml || '').trim() ? `<div class="category-section"><div class="category-title">${name}:</div>${sectionHtml}</div>` : '';
-  let categoriesSections =
-    categorySectionBlock(category1Name, itemsHtmlCategory1) +
-    (hasItemsCategory2 ? categorySectionBlock(category2Name, itemsHtmlCategory2) : '');
+  const categoriesArray = data.categories && data.categories.length > 0 ? data.categories : null;
+  let categoriesSections: string;
+  if (categoriesArray) {
+    categoriesSections = categoriesArray
+      .map((c) => categorySectionBlock(escapeLabelText((c.categoryName || '').trim() || 'Kategori'), c.itemsHtml || ''))
+      .join('');
+  } else {
+    categoriesSections =
+      categorySectionBlock(category1Name, itemsHtmlCategory1) +
+      (hasItemsCategory2 ? categorySectionBlock(category2Name, itemsHtmlCategory2) : '');
+  }
   // When no category HTML was sent but table HTML (itemsHtml) exists, show it under one "Pesanan" section so slip is not blank
   if (!categoriesSections.trim() && (itemsHtml || '').trim()) {
     categoriesSections = categorySectionBlock('Pesanan', itemsHtml);
