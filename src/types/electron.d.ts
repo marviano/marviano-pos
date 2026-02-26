@@ -319,6 +319,7 @@ declare global {
       localDbApplyTransactionRefund?: (payload: unknown) => Promise<{ success: boolean; error?: string }>;
       localDbGetUnsyncedTransactions?: (businessId?: number) => Promise<unknown[]>;
       localDbGetAllTransactions?: (businessId?: number, from?: string, to?: string) => Promise<unknown[]>;
+      localDbGetTransactionsMatchData?: (businessId?: number, from?: string, to?: string) => Promise<unknown[]>;
       localDbDeleteUnsyncedTransactions?: (businessId?: number) => Promise<{ success: boolean; deletedCount?: number; error?: string }>;
       localDbMarkTransactionsSynced?: (transactionIds: string[]) => Promise<unknown>;
       localDbResetTransactionSync?: (transactionId: string | number) => Promise<{ success: boolean; error?: string; affectedRows?: number }>;

@@ -297,6 +297,13 @@ export default function SyncManagement() {
   const [copiedSqlPreview, setCopiedSqlPreview] = useState<string | null>(null);
   const [isResyncing, setIsResyncing] = useState(false);
   const [resyncProgress, setResyncProgress] = useState<{ current: number; total: number; transactionId: string | number; status: string } | null>(null);
+  const [isMatchChecking, setIsMatchChecking] = useState(false);
+  const [matchCheckResult, setMatchCheckResult] = useState<{
+    onlyInLocal: string[];
+    onlyOnServer: string[];
+    matching: number;
+    mismatches: Array<{ uuid: string; fields: string[] }>;
+  } | null>(null);
   const logsEndRef = useRef<HTMLDivElement>(null);
   const gatePasswordInputRef = useRef<HTMLInputElement>(null);
   // const activePasswordInputRef = useRef<HTMLInputElement>(null);
@@ -1312,6 +1319,11 @@ export default function SyncManagement() {
                       transactionUpdate: undefined, // Do NOT use server transaction data
                     });
                   }
+                  // Re-queue transaction so it is re-upserted to Salespulse with updated refund_total/refund_status
+                  const txUuid = (result.refund as UnknownRecord)?.transaction_uuid as string | undefined;
+                  if (txUuid && electronAPI.localDbResetTransactionSync) {
+                    await electronAPI.localDbResetTransactionSync(txUuid);
+                  }
 
                   // Mark as synced
                   if (electronAPI.localDbMarkRefundSynced) {
@@ -1421,6 +1433,119 @@ export default function SyncManagement() {
       setResyncProgress(null);
     }
   }, [businessId, addLog, loadOfflineTransactions, fetchTransactionCounts, resyncFrom, resyncTo]);
+
+  // Verifikasi data: compare transactions between db_host (marviano_pos) and salespulse.cc (same detail as Daftar Transaksi showAllTransactions)
+  const handleMatchCheck = useCallback(async () => {
+    if (!businessId) {
+      addLog('warning', 'Pilih bisnis terlebih dahulu');
+      return;
+    }
+    const fromDate = resyncFrom || undefined;
+    const toDate = resyncTo || undefined;
+    if (!fromDate || !toDate) {
+      addLog('warning', 'Pilih rentang tanggal (Dari dan Sampai) untuk verifikasi');
+      return;
+    }
+
+    const electronAPI = getElectronAPI();
+    if (!electronAPI?.localDbGetTransactionsMatchData) {
+      addLog('error', 'Fitur verifikasi data tidak tersedia (database offline)');
+      return;
+    }
+
+    setIsMatchChecking(true);
+    setMatchCheckResult(null);
+    addLog('info', 'Memeriksa kecocokan data Pictos vs salespulse.cc...');
+
+    try {
+      const fromIso = normalizeDateInput(resyncFrom, false) ?? resyncFrom;
+      const toIso = normalizeDateInput(resyncTo, true) ?? resyncTo;
+
+      const [localData, serverRes] = await Promise.all([
+        electronAPI.localDbGetTransactionsMatchData(businessId, fromIso, toIso) as Promise<UnknownRecord[]>,
+        fetch(getApiUrl(`/api/transactions/match-check?business_id=${businessId}&from_date=${encodeURIComponent(fromDate)}&to_date=${encodeURIComponent(toDate)}&limit=50000`))
+      ]);
+
+      if (!serverRes.ok) {
+        const errText = await serverRes.text();
+        addLog('error', `Gagal mengambil data dari salespulse.cc: ${serverRes.status} ${errText}`);
+        setIsMatchChecking(false);
+        return;
+      }
+
+      const serverJson = await serverRes.json();
+      const serverData: UnknownRecord[] = Array.isArray(serverJson?.transactions) ? serverJson.transactions : [];
+
+      const localIds = new Set((localData || []).map((t: UnknownRecord) => String(t.uuid_id ?? t.id)));
+      const serverIds = new Set(serverData.map((t: UnknownRecord) => String(t.uuid_id ?? t.id)));
+
+      const onlyInLocal = [...localIds].filter(id => !serverIds.has(id));
+      const onlyOnServer = [...serverIds].filter(id => !localIds.has(id));
+      const commonIds = [...localIds].filter(id => serverIds.has(id));
+
+      const localByUuid = new Map<string, UnknownRecord>();
+      (localData || []).forEach((t: UnknownRecord) => {
+        const u = String(t.uuid_id ?? t.id);
+        localByUuid.set(u, t);
+      });
+      const serverByUuid = new Map<string, UnknownRecord>();
+      serverData.forEach((t: UnknownRecord) => {
+        const u = String(t.uuid_id ?? t.id);
+        serverByUuid.set(u, t);
+      });
+
+      const txFields = [
+        'total_amount', 'final_amount', 'refund_total', 'voucher_discount', 'status',
+        'payment_method_id', 'pickup_method', 'customer_name', 'waiter_id', 'user_id', 'shift_uuid',
+        'created_at', 'updated_at', 'paid_at'
+      ];
+
+      const mismatches: Array<{ uuid: string; fields: string[] }> = [];
+      for (const uuid of commonIds) {
+        const localTx = localByUuid.get(uuid);
+        const serverTx = serverByUuid.get(uuid);
+        if (!localTx || !serverTx) continue;
+
+        const diffFields: string[] = [];
+        for (const key of txFields) {
+          const l = (localTx as Record<string, unknown>)[key];
+          const s = (serverTx as Record<string, unknown>)[key];
+          const lv = l == null ? '' : (typeof l === 'number' ? l : String(l));
+          const sv = s == null ? '' : (typeof s === 'number' ? s : String(s));
+          if (lv !== sv) diffFields.push(key);
+        }
+
+        const localItems = Array.isArray(localTx.items) ? localTx.items : [];
+        const serverItems = Array.isArray(serverTx.items) ? serverTx.items : [];
+        if (localItems.length !== serverItems.length) diffFields.push('items_count');
+
+        const localRefund = Number((localTx as Record<string, unknown>).refund_total_from_refunds ?? (localTx as Record<string, unknown>).refund_total ?? 0);
+        const serverRefund = Number((serverTx as Record<string, unknown>).refund_total_from_refunds ?? (serverTx as Record<string, unknown>).refund_total ?? 0);
+        if (Math.abs(localRefund - serverRefund) > 0.01) diffFields.push('refund_total');
+
+        if (diffFields.length > 0) mismatches.push({ uuid, fields: diffFields });
+      }
+
+      const matching = commonIds.length - mismatches.length;
+      setMatchCheckResult({
+        onlyInLocal,
+        onlyOnServer,
+        matching,
+        mismatches
+      });
+
+      if (onlyInLocal.length === 0 && onlyOnServer.length === 0 && mismatches.length === 0) {
+        addLog('success', 'Data match 1:1 (Pictos = salespulse.cc)');
+      } else {
+        addLog('info', `Verifikasi selesai: ${onlyInLocal.length} hanya di Pictos, ${onlyOnServer.length} hanya di salespulse.cc, ${matching} sama, ${mismatches.length} beda field`);
+      }
+    } catch (error) {
+      addLog('error', `Verifikasi gagal: ${error instanceof Error ? error.message : String(error)}`);
+      setMatchCheckResult(null);
+    } finally {
+      setIsMatchChecking(false);
+    }
+  }, [businessId, addLog, resyncFrom, resyncTo]);
 
   // Download master data from server
   const handleFullSyncClick = useCallback(async () => {
@@ -2278,7 +2403,7 @@ WHERE ${baseWhere};`;
               </div>
 
               {/* Re-sync Transaction Controls */}
-              <div className="flex gap-2 items-stretch bg-gray-50 p-1.5 rounded-xl border border-gray-200 h-24">
+              <div className="flex gap-2 items-stretch bg-gray-50 p-1.5 rounded-xl border border-gray-200 min-h-[10rem]">
                 <div className="flex flex-col justify-center gap-1.5 px-0.5">
                   <div className="flex flex-col gap-0.5">
                     <label className="text-[9px] text-gray-500 font-semibold uppercase tracking-wider">Dari</label>
@@ -2334,8 +2459,94 @@ WHERE ${baseWhere};`;
                       </>
                     )}
                   </button>
+                  <button
+                    type="button"
+                    onClick={handleMatchCheck}
+                    disabled={syncStatus.syncInProgress || isResyncing || isMatchChecking || !resyncFrom || !resyncTo}
+                    className={`
+                      flex-1 w-24 flex flex-col items-center justify-center gap-0.5 py-1 px-1 rounded-lg font-medium transition-all text-[10px] shrink-0 shadow-sm
+                      ${isMatchChecking || !resyncFrom || !resyncTo
+                        ? 'bg-gray-300 text-gray-500 cursor-not-allowed'
+                        : 'bg-blue-600 hover:bg-blue-700 text-white'
+                      }
+                    `}
+                    title="Bandingkan data transaksi Pictos vs salespulse.cc (sama detail dengan Daftar Transaksi)"
+                  >
+                    {isMatchChecking ? (
+                      <>
+                        <Loader2 className="w-4 h-4 animate-spin shrink-0" />
+                        <span className="font-semibold text-[9px]">Memeriksa...</span>
+                      </>
+                    ) : (
+                      <>
+                        <CheckCircle className="w-4 h-4 shrink-0" />
+                        <span className="font-bold text-[9px] leading-tight">Verifikasi data</span>
+                      </>
+                    )}
+                  </button>
                 </div>
               </div>
+
+              {/* Modal: Match check result */}
+              {matchCheckResult && (
+                <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50" onClick={() => setMatchCheckResult(null)} role="dialog" aria-modal="true" aria-labelledby="match-check-title">
+                  <div className="bg-white rounded-xl shadow-xl max-w-lg w-full max-h-[85vh] flex flex-col" onClick={e => e.stopPropagation()}>
+                    <div className="flex items-center justify-between p-4 border-b border-gray-200">
+                      <h2 id="match-check-title" className="font-semibold text-gray-900 text-lg">Verifikasi data (Pictos vs salespulse.cc)</h2>
+                      <button type="button" onClick={() => setMatchCheckResult(null)} className="p-2 rounded hover:bg-gray-100 text-gray-600" aria-label="Tutup">
+                        <X className="w-5 h-5" />
+                      </button>
+                    </div>
+                    <div className="overflow-auto flex-1 p-4 text-sm space-y-4">
+                      {matchCheckResult.onlyInLocal.length === 0 && matchCheckResult.onlyOnServer.length === 0 && matchCheckResult.mismatches.length === 0 ? (
+                        <p className="text-green-700 font-medium flex items-center gap-2">
+                          <CheckCircle className="w-5 h-5 shrink-0" />
+                          Data match 1:1 (sama detail seperti Daftar Transaksi)
+                        </p>
+                      ) : (
+                        <>
+                          <p className="text-gray-700">
+                            <span className="font-medium">Hanya di Pictos (db_host):</span> {matchCheckResult.onlyInLocal.length} transaksi
+                            {matchCheckResult.onlyInLocal.length > 0 && matchCheckResult.onlyInLocal.length <= 10 && (
+                              <span className="block mt-1 text-xs text-gray-500 font-mono truncate">{matchCheckResult.onlyInLocal.join(', ')}</span>
+                            )}
+                            {matchCheckResult.onlyInLocal.length > 10 && (
+                              <span className="block mt-1 text-xs text-gray-500">(10 pertama: {matchCheckResult.onlyInLocal.slice(0, 10).join(', ')})</span>
+                            )}
+                          </p>
+                          <p className="text-gray-700">
+                            <span className="font-medium">Hanya di salespulse.cc:</span> {matchCheckResult.onlyOnServer.length} transaksi
+                            {matchCheckResult.onlyOnServer.length > 0 && matchCheckResult.onlyOnServer.length <= 10 && (
+                              <span className="block mt-1 text-xs text-gray-500 font-mono truncate">{matchCheckResult.onlyOnServer.join(', ')}</span>
+                            )}
+                            {matchCheckResult.onlyOnServer.length > 10 && (
+                              <span className="block mt-1 text-xs text-gray-500">(10 pertama: {matchCheckResult.onlyOnServer.slice(0, 10).join(', ')})</span>
+                            )}
+                          </p>
+                          <p className="text-gray-700">
+                            <span className="font-medium">Sama (match):</span> {matchCheckResult.matching} transaksi
+                          </p>
+                          {matchCheckResult.mismatches.length > 0 && (
+                            <p className="text-gray-700">
+                              <span className="font-medium">Beda field (uuid):</span> {matchCheckResult.mismatches.length} transaksi
+                              <ul className="mt-2 list-disc list-inside text-xs text-gray-600 space-y-1 max-h-40 overflow-auto">
+                                {matchCheckResult.mismatches.slice(0, 20).map((m, i) => (
+                                  <li key={i} className="truncate" title={m.uuid}>
+                                    {m.uuid}: {m.fields.join(', ')}
+                                  </li>
+                                ))}
+                                {matchCheckResult.mismatches.length > 20 && (
+                                  <li className="text-gray-500">... dan {matchCheckResult.mismatches.length - 20} lainnya</li>
+                                )}
+                              </ul>
+                            </p>
+                          )}
+                        </>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              )}
 
               {/* System POS (Printer 2) Upsert Controls */}
               {isElectron && getElectronAPI()?.getSystemPosResyncPreview && (

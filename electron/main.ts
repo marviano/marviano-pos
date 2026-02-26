@@ -4889,6 +4889,129 @@ function createWindows(): void {
     }
   });
 
+  // Get transactions with items and refund summary for 1:1 match check (same detail as Daftar Transaksi showAllTransactions)
+  ipcMain.handle('localdb-get-transactions-match-data', async (event, businessId?: number, from?: string, to?: string) => {
+    try {
+      let query = `SELECT t.* FROM transactions t WHERE 1=1`;
+      const params: (string | number | null)[] = [];
+
+      if (businessId) {
+        query += ' AND t.business_id = ?';
+        params.push(businessId);
+      }
+
+      const ensureIsoString = (value?: string | null): string | null => {
+        if (!value) return null;
+        const date = new Date(value);
+        if (Number.isNaN(date.getTime())) return null;
+        return date.toISOString();
+      };
+
+      const startIso = ensureIsoString(from);
+      const endIso = ensureIsoString(to);
+
+      if (startIso) {
+        query += ' AND t.created_at >= ?';
+        params.push(toMySQLDateTime(startIso));
+      }
+      if (endIso) {
+        query += ' AND t.created_at <= ?';
+        params.push(toMySQLDateTime(endIso));
+      }
+
+      query += ' ORDER BY t.created_at ASC';
+
+      const transactions = await executeQuery(query, params) as any[];
+
+      if (!Array.isArray(transactions) || transactions.length === 0) {
+        return [];
+      }
+
+      const uuidIds = transactions.map(t => t.uuid_id || t.id).filter(Boolean);
+      const placeholders = uuidIds.map(() => '?').join(',');
+
+      const itemsRows = await executeQuery(
+        `SELECT id, uuid_id, transaction_id, uuid_transaction_id, product_id, quantity, unit_price, total_price,
+         custom_note, bundle_selections_json, waiter_id,
+         production_status, production_started_at, production_finished_at,
+         cancelled_by_user_id, cancelled_by_waiter_id, cancelled_at, created_at
+         FROM transaction_items WHERE uuid_transaction_id IN (${placeholders}) ORDER BY uuid_transaction_id, id ASC`,
+        uuidIds
+      ) as any[];
+
+      const itemsByTx = new Map<string, any[]>();
+      for (const row of itemsRows || []) {
+        const txUuid = row.uuid_transaction_id;
+        if (!itemsByTx.has(txUuid)) itemsByTx.set(txUuid, []);
+        itemsByTx.get(txUuid)!.push(row);
+      }
+
+      const refundRows = await executeQuery(
+        `SELECT transaction_uuid, SUM(refund_amount) as refund_total, COUNT(*) as refund_count
+         FROM transaction_refunds
+         WHERE transaction_uuid IN (${placeholders}) AND status IN ('pending', 'completed')
+         GROUP BY transaction_uuid`,
+        uuidIds
+      ) as any[];
+
+      const refundByTx = new Map<string, { refund_total: number; refund_count: number }>();
+      for (const row of refundRows || []) {
+        refundByTx.set(row.transaction_uuid, {
+          refund_total: Number(row.refund_total) || 0,
+          refund_count: Number(row.refund_count) || 0
+        });
+      }
+
+      return transactions.map(t => {
+        const txId = t.uuid_id || t.id;
+        const items = itemsByTx.get(txId) || [];
+        const refund = refundByTx.get(txId);
+        const refundTotalFromRefunds = refund ? refund.refund_total : 0;
+        const refundCount = refund ? refund.refund_count : 0;
+
+        return {
+          id: txId,
+          uuid_id: txId,
+          business_id: t.business_id,
+          user_id: t.user_id,
+          waiter_id: t.waiter_id ?? null,
+          payment_method: t.payment_method ?? null,
+          payment_method_id: t.payment_method_id ?? null,
+          pickup_method: t.pickup_method ?? null,
+          total_amount: t.total_amount != null ? Number(t.total_amount) : null,
+          voucher_discount: t.voucher_discount != null ? Number(t.voucher_discount) : 0,
+          voucher_type: t.voucher_type ?? null,
+          voucher_value: t.voucher_value != null ? Number(t.voucher_value) : null,
+          voucher_label: t.voucher_label ?? null,
+          final_amount: t.final_amount != null ? Number(t.final_amount) : null,
+          amount_received: t.amount_received != null ? Number(t.amount_received) : null,
+          change_amount: t.change_amount != null ? Number(t.change_amount) : null,
+          contact_id: t.contact_id ?? null,
+          customer_name: t.customer_name ?? null,
+          customer_unit: t.customer_unit != null ? Number(t.customer_unit) : null,
+          note: t.note ?? null,
+          receipt_number: t.receipt_number ?? null,
+          transaction_type: t.transaction_type ?? null,
+          status: t.status ?? null,
+          created_at: t.created_at,
+          updated_at: t.updated_at ?? null,
+          paid_at: t.paid_at ?? null,
+          shift_uuid: t.shift_uuid ?? null,
+          refund_total: t.refund_total != null ? Number(t.refund_total) : refundTotalFromRefunds,
+          refund_status: t.refund_status ?? null,
+          last_refunded_at: t.last_refunded_at ?? null,
+          table_id: t.table_id ?? null,
+          items,
+          refund_total_from_refunds: refundTotalFromRefunds,
+          refund_count: refundCount
+        };
+      });
+    } catch (error) {
+      console.error('Error getting transactions match data:', error);
+      return [];
+    }
+  });
+
   // Delete unsynced transactions (data offline yang akan diunggah)
   ipcMain.handle('localdb-delete-unsynced-transactions', async (event, businessId?: number) => {
     try {
@@ -5142,6 +5265,23 @@ function createWindows(): void {
 
       // Insert all transaction items first
       if (queries.length > 0) { await executeTransaction(queries); }
+
+      // Re-queue transactions that had an item cancelled so they are re-upserted to Salespulse
+      const cancelledTransactionUuids = new Set<string>();
+      for (const r of rows) {
+        const productionStatus = typeof (r as Record<string, unknown>).production_status === 'string'
+          ? (r as Record<string, unknown>).production_status
+          : ((r as Record<string, unknown>).production_status != null ? String((r as Record<string, unknown>).production_status) : null);
+        const cancelledAtVal = (r as Record<string, unknown>).cancelled_at;
+        const hasCancelledAt = cancelledAtVal != null && cancelledAtVal !== '';
+        if (productionStatus === 'cancelled' || hasCancelledAt) {
+          const uuid = (r as Record<string, unknown>).uuid_transaction_id ?? (r as Record<string, unknown>).transaction_id;
+          if (uuid != null && uuid !== '') cancelledTransactionUuids.add(String(uuid));
+        }
+      }
+      for (const txUuid of cancelledTransactionUuids) {
+        await executeUpdate('UPDATE transactions SET synced_at = NULL, sync_status = ? WHERE uuid_id = ?', ['pending', txUuid]);
+      }
 
       // Save package line items to transaction_item_package_lines (normalized table)
       // When an item already has package lines in DB (e.g. order was saved then paid), preserve them

@@ -419,8 +419,9 @@ class SmartSyncService {
         if (!transactionData.id) {
           console.warn(`⚠️ [SMART SYNC] Transaction missing required field: id`);
           const electronAPI = typeof window !== 'undefined' ? (window as { electronAPI?: UnknownRecord }).electronAPI : undefined;
-          if (electronAPI?.localDbMarkTransactionFailed && transaction.id) {
-            await (electronAPI.localDbMarkTransactionFailed as (id: string) => Promise<void>)(String(transaction.id));
+          const txUuidForMark = (transaction as UnknownRecord).uuid_id ?? transaction.id;
+          if (electronAPI?.localDbMarkTransactionFailed && txUuidForMark) {
+            await (electronAPI.localDbMarkTransactionFailed as (id: string) => Promise<void>)(String(txUuidForMark));
           }
           skippedCount++;
           if (onProgress) onProgress(transaction, 'skipped: missing id');
@@ -431,8 +432,9 @@ class SmartSyncService {
         if (!transactionData.business_id) {
           console.warn(`⚠️ [SMART SYNC] Transaction ${transaction.id} missing required field: business_id`);
           const electronAPI = typeof window !== 'undefined' ? (window as { electronAPI?: UnknownRecord }).electronAPI : undefined;
-          if (electronAPI?.localDbMarkTransactionFailed) {
-            await (electronAPI.localDbMarkTransactionFailed as (id: string) => Promise<void>)(String(transaction.id));
+          const txUuidForMark = (transaction as UnknownRecord).uuid_id ?? transaction.id;
+          if (electronAPI?.localDbMarkTransactionFailed && txUuidForMark) {
+            await (electronAPI.localDbMarkTransactionFailed as (id: string) => Promise<void>)(String(txUuidForMark));
           }
           skippedCount++;
           if (onProgress) onProgress(transaction, 'skipped: missing business_id');
@@ -446,8 +448,9 @@ class SmartSyncService {
         if (missingFields.length > 0) {
           console.warn(`⚠️ [SMART SYNC] Transaction ${transaction.id} missing required fields: ${missingFields.join(', ')}`);
           const electronAPI = typeof window !== 'undefined' ? (window as { electronAPI?: UnknownRecord }).electronAPI : undefined;
-          if (electronAPI?.localDbMarkTransactionFailed) {
-            await (electronAPI.localDbMarkTransactionFailed as (id: string) => Promise<void>)(String(transaction.id));
+          const txUuidForMark = (transaction as UnknownRecord).uuid_id ?? transaction.id;
+          if (electronAPI?.localDbMarkTransactionFailed && txUuidForMark) {
+            await (electronAPI.localDbMarkTransactionFailed as (id: string) => Promise<void>)(String(txUuidForMark));
           }
           skippedCount++;
           if (onProgress) onProgress(transaction, `skipped: missing fields (${missingFields.join(', ')})`);
@@ -522,8 +525,9 @@ class SmartSyncService {
         if (fieldValidation.length > 0) {
           console.warn(`⚠️ [SMART SYNC] Transaction ${transaction.id} missing required fields: ${fieldValidation.join(', ')}`);
           const electronAPI = typeof window !== 'undefined' ? (window as { electronAPI?: UnknownRecord }).electronAPI : undefined;
-          if (electronAPI?.localDbMarkTransactionFailed) {
-            await (electronAPI.localDbMarkTransactionFailed as (id: string) => Promise<void>)(String(transaction.id));
+          const txUuidForMark = (transaction as UnknownRecord).uuid_id ?? transaction.id;
+          if (electronAPI?.localDbMarkTransactionFailed && txUuidForMark) {
+            await (electronAPI.localDbMarkTransactionFailed as (id: string) => Promise<void>)(String(txUuidForMark));
           }
           skippedCount++;
           if (onProgress) onProgress(transaction, `skipped: missing fields (${fieldValidation.join(', ')})`);
@@ -1011,11 +1015,12 @@ class SmartSyncService {
           transactionId: transaction.id
         });
 
-        // Mark as failed (will retry later)
+        // Mark as failed (will retry later) - use uuid_id so main process UPDATE matches the row
         const electronAPI = typeof window !== 'undefined' ? (window as { electronAPI?: UnknownRecord }).electronAPI : undefined;
-        if (electronAPI?.localDbMarkTransactionFailed && transaction.id) {
+        const txUuidForFailed = transactionData.uuid_id || transactionData.id || transaction.id;
+        if (electronAPI?.localDbMarkTransactionFailed && txUuidForFailed) {
           try {
-            await (electronAPI.localDbMarkTransactionFailed as (id: string) => Promise<void>)(String(transaction.id));
+            await (electronAPI.localDbMarkTransactionFailed as (id: string) => Promise<void>)(String(txUuidForFailed));
             console.log(`⚠️ [SMART SYNC] Marked transaction ${transaction.id} as failed for retry`);
           } catch (markError) {
             console.error(`❌ [SMART SYNC] Failed to mark transaction ${transaction.id} as failed:`, {
@@ -1636,6 +1641,10 @@ class SmartSyncService {
                 status: undefined
               }
             });
+            // Re-queue transaction so it is re-upserted to Salespulse with updated refund_total/refund_status
+            if (transactionUuid && electronAPI.localDbResetTransactionSync) {
+              await (electronAPI.localDbResetTransactionSync as (id: string) => Promise<{ success?: boolean }>)(transactionUuid);
+            }
           }
 
           await (electronAPI.localDbMarkRefundSynced as (id: number) => Promise<{ success: boolean }>)(refund.id);
