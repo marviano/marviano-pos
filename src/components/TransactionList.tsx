@@ -1789,16 +1789,6 @@ export default function TransactionList({ businessId, onLoadTransaction }: Trans
   const sumTotalAmount = filteredTransactions
     .filter((t) => (t.status || '').toLowerCase() !== 'cancelled')
     .reduce((sum, t) => sum + parseNum(t.total_amount), 0);
-  // #region agent log
-  const usingReportTotals = reportTotals != null;
-  const grossFromList = grossCompleted;
-  const netFromList = netCompleted;
-  const sumFinalFromFiltered = filteredTransactions.filter((t) => (t.status || '').toLowerCase() !== 'cancelled').reduce((s, t) => s + parseNum(t.final_amount), 0);
-  const sumFinalFromAll = transactions.filter((t) => (t.status || '').toLowerCase() !== 'cancelled').reduce((s, t) => s + parseNum(t.final_amount), 0);
-  if (typeof fetch === 'function' && (filteredTransactions.length > 0 || baseTransactions.length > 0)) {
-    fetch('http://127.0.0.1:7242/ingest/ede2961e-f205-45b6-9c27-3e60ff143b09', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': 'a09730' }, body: JSON.stringify({ sessionId: 'a09730', location: 'TransactionList.tsx:grandTotalSource', message: 'Grand total mode vs source', data: { isSystemPosMode, showAllTransactions, usingReportTotals, receiptizePrintedIdsSize: receiptizePrintedIds.size, transactionsLen: transactions.length, baseCount: baseTransactions.length, filteredCount: filteredTransactions.length, grossFromList, netFromList, sumFinalFromFiltered, sumFinalFromAll, reportGross: reportTotals?.gross, reportNet: reportTotals?.net }, timestamp: Date.now(), hypothesisId: 'H1', runId: 'daftar-grand-total' }) }).catch(() => {});
-  }
-  // #endregion
   const totalRefund = filteredTransactions.reduce((sum, t) => sum + parseNum(t.refund_total), 0);
   const totalVoucherDiscount = filteredTransactions.reduce((sum, t) => sum + parseNum(t.voucher_discount), 0);
   // Txs/CU follow current mode: use the same list as Grand Total (filteredTransactions = visible rows).
@@ -1854,6 +1844,22 @@ export default function TransactionList({ businessId, onLoadTransaction }: Trans
     if (!isNaN(vd) && vd > 0) voucherCount += 1;
   });
 
+  // #region agent log — log per-row checksums to find which rows have different values
+  const debugChecksumsLogKeyRef = useRef<string>('');
+  useEffect(() => {
+    if (!showAllTransactions || isLoading) return;
+    const parseNum = (v: unknown) => (typeof v === 'number' && !isNaN(v) ? v : typeof v === 'string' ? (parseFloat(v) || 0) : 0);
+    const rows = completedTransactions.map((t) => ({
+      id: t.id,
+      c: `${(t.payment_method || '').toLowerCase()}|${(t.pickup_method || '').toLowerCase()}|${parseNum(t.total_amount)}|${parseNum(t.final_amount)}|${parseNum(t.refund_total)}`,
+    }));
+    const key = `${effectiveBusinessId}|${fromDate}|${toDate}|${rows.length}`;
+    if (key === debugChecksumsLogKeyRef.current && rows.length > 0) return;
+    debugChecksumsLogKeyRef.current = key;
+    fetch('http://127.0.0.1:7495/ingest/20000880-6f22-4a8b-8a8e-250eeb7d84f4', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': '14f9d6' }, body: JSON.stringify({ sessionId: '14f9d6', location: 'TransactionList.tsx:rowChecksums', message: 'Per-row checksums for diff', data: { source: 'marviano-pos', fromDate, toDate, effectiveBusinessId, count: rows.length, rows }, timestamp: Date.now(), hypothesisId: 'H4' }) }).catch(() => {});
+  }, [showAllTransactions, isLoading, fromDate, toDate, effectiveBusinessId, completedTransactions]);
+  // #endregion
+
   if (isLoading) {
     return (
       <div className="flex-1 flex items-center justify-center bg-white">
@@ -1887,7 +1893,7 @@ export default function TransactionList({ businessId, onLoadTransaction }: Trans
         {/* Header */}
         <div className="mb-6 flex items-center justify-between">
           <h1
-            className="text-2xl font-bold text-gray-800 cursor-pointer select-none"
+            className="text-lg font-bold text-gray-800 cursor-pointer select-none"
             onClick={() => {
               if (!canAccessPrinterManager) return;
 
@@ -1952,8 +1958,8 @@ export default function TransactionList({ businessId, onLoadTransaction }: Trans
           )}
         </div>
 
-        {/* Summary Cards — custom 4-track grid: Metode 25% narrower so Grand Total fits on 1366x768; all cards same height */}
-        <div className="grid grid-cols-1 md:grid-cols-[2.25fr_1fr_0.807fr_0.807fr] md:auto-rows-[10.5rem] gap-4 mb-1 flex-shrink-0">
+        {/* Summary Cards — custom 4-track grid: Metode 25% narrower; Ringkasan 75%, Grand Total gets 25% of Ringkasan width; all cards same height */}
+        <div className="grid grid-cols-1 md:grid-cols-[2.25fr_0.75fr_0.807fr_1.057fr] md:auto-rows-[10.5rem] gap-4 mb-1 flex-shrink-0">
           {/* Payment Methods Card — first track (2.25fr, was 3fr) */}
           <div className="bg-white shadow-sm border border-gray-200 pl-4 pt-4 pb-4 pr-2 md:col-span-1 min-w-0 flex flex-col min-h-[10.5rem] md:h-full md:min-h-0">
             <div className="flex items-center gap-2 mb-2 flex-shrink-0 pr-2">

@@ -8528,7 +8528,7 @@ function createWindows(): void {
           WHERE status IN ('pending', 'completed')
           GROUP BY transaction_uuid
         ) refund_summary ON t.uuid_id = refund_summary.transaction_uuid
-        WHERE t.business_id = ? AND t.status != 'archived'
+        WHERE t.business_id = ? AND t.status = 'completed'
         AND t.created_at >= ?
       `;
       const params: (string | number | null)[] = [businessId, shiftStartMySQL];
@@ -8537,13 +8537,7 @@ function createWindows(): void {
         params.push(shiftEndMySQL);
       }
       const row = await executeQueryOne<{ refund_total: number }>(query, params);
-      const returned = Number(row?.refund_total ?? 0);
-      // #region agent log
-      if (typeof fetch === 'function') {
-        fetch('http://127.0.0.1:7495/ingest/20000880-6f22-4a8b-8a8e-250eeb7d84f4', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': 'e9ccad' }, body: JSON.stringify({ sessionId: 'e9ccad', location: 'main.ts:localdb-get-refund-total', message: 'refund query result', data: { businessId, shiftStart, shiftEnd, shiftStartMySQL, shiftEndMySQL, returned }, timestamp: Date.now(), hypothesisId: 'R3', runId: 'refund-debug' }) }).catch(() => {});
-      }
-      // #endregion
-      return returned;
+      return Number(row?.refund_total ?? 0);
     } catch (err) {
       console.error('localdb-get-refund-total error:', err);
       return 0;
@@ -8873,12 +8867,6 @@ function createWindows(): void {
         }
         return a.product_name.localeCompare(b.product_name);
       });
-
-      // #region agent log
-      const sumBase = allProducts.reduce((s, p) => s + (Number(p.base_subtotal) || 0), 0);
-      const sumTotal = allProducts.reduce((s, p) => s + (Number((p as { total_subtotal?: number }).total_subtotal) || 0), 0);
-      debugSessionLog({ sessionId: 'ada822', hypothesisId: 'H_backend_totals', location: 'main.ts:product-sales', message: 'Backend product sales totals', data: { sumBase, sumTotal, productCount: allProducts.length } });
-      // #endregion
 
       return {
         products: allProducts,
@@ -12934,16 +12922,16 @@ function generateShiftBreakdownHTML(
             console.error(`❌ [HTML GEN] Invalid numbers in product: ${product.product_name}`, { quantity, baseSubtotal, unitPrice });
           }
           const productNameDisplay = isBundleItem
-            ? `<span style="font-size: 4.8pt;">(Bundle)</span> ${product.product_name}`
+            ? `<span style="font-size: 3.8pt;">(Bundle)</span> ${product.product_name}`
             : product.product_name;
           return `
       <tr>
         <td style="width: 52%; text-align: left; padding: 0.3mm 0;">
           <div>${productNameDisplay}</div>
-          <div style="font-size: 7pt; color: #555;">${transactionLabel}</div>
+          <div style="font-size: 6pt; color: #555;">${transactionLabel}</div>
         </td>
         <td style="width: 12%; text-align: left; padding: 0.3mm 0; font-variant-numeric: tabular-nums;">${quantity}</td>
-        <td style="width: 18%; text-align: left; padding: 0.3mm 0; font-size: 6pt; font-variant-numeric: tabular-nums;">${isBundleItem ? '-' : (isNaN(unitPrice) ? '0' : formatIntegerId(unitPrice))}</td>
+        <td style="width: 18%; text-align: left; padding: 0.3mm 0; font-size: 5pt; font-variant-numeric: tabular-nums;">${isBundleItem ? '-' : (isNaN(unitPrice) ? '0' : formatIntegerId(unitPrice))}</td>
         <td style="width: 18%; text-align: right; padding: 0.3mm 0; font-variant-numeric: tabular-nums;">${isBundleItem ? '-' : (isNaN(baseSubtotal) ? '0' : formatIntegerId(baseSubtotal))}</td>
       </tr>
       `;
@@ -12952,9 +12940,9 @@ function generateShiftBreakdownHTML(
           return `<tr><td colspan="4">Error processing product: ${product?.product_name || 'Unknown'}</td></tr>`;
         }
       }).join('');
-      const subtotalRow = `<tr style="background: #f0f0f0;"><td style="width: 52%; padding: 0.3mm 0; font-size: 7pt; font-weight: 600;">Subtotal</td><td style="width: 12%; text-align: left; font-size: 7pt; padding: 0.3mm 0; font-variant-numeric: tabular-nums;">${subQty}</td><td style="width: 18%; text-align: left; font-size: 6pt; padding: 0.3mm 0;">-</td><td style="width: 18%; text-align: right; font-size: 7pt; padding: 0.3mm 0; font-variant-numeric: tabular-nums;">${formatIntegerId(Math.round(subAmount))}</td></tr>`;
-      const headerRow = `<tr style="background: #e0e0e0;"><td colspan="4" style="padding: 0.5mm 0; font-size: 8pt; font-weight: 700;">${label}</td></tr>`;
-      return `<tr><td colspan="4" style="padding: 0; border: 1px solid #999;"><table style="width: 100%; border-collapse: collapse; table-layout: fixed;"><colgroup><col style="width: 52%;"><col style="width: 12%;"><col style="width: 18%;"><col style="width: 18%;"></colgroup><tbody>` + headerRow + rows + subtotalRow + `</tbody></table></td></tr>`;
+      const subtotalRow = `<tr style="background: #f0f0f0;"><td style="width: 52%; padding: 0.3mm 0; font-size: 6pt; font-weight: 600;">Subtotal</td><td style="width: 12%; text-align: left; font-size: 6pt; padding: 0.3mm 0; font-variant-numeric: tabular-nums;">${subQty}</td><td style="width: 18%; text-align: left; font-size: 5pt; padding: 0.3mm 0;">-</td><td style="width: 18%; text-align: right; font-size: 6pt; padding: 0.3mm 0; font-variant-numeric: tabular-nums;">${formatIntegerId(Math.round(subAmount))}</td></tr>`;
+      const headerRow = `<tr style="background: #e0e0e0;"><td colspan="4" style="padding: 0.5mm 0; font-size: 7pt; font-weight: 700;">${label}</td></tr>`;
+      return `<tr><td colspan="4" style="padding: 0;"><table style="width: 100%; border-collapse: collapse; table-layout: fixed;"><colgroup><col style="width: 52%;"><col style="width: 12%;"><col style="width: 18%;"><col style="width: 18%;"></colgroup><tbody>` + headerRow + rows + subtotalRow + `</tbody></table></td></tr>`;
     }).join('');
 
     const regularProducts = report.productSales.filter((p) => !p.is_bundle_item);
@@ -12979,7 +12967,7 @@ function generateShiftBreakdownHTML(
       <tr>
         <td style="text-align: left; padding: 0.3mm 0;">
           <div>${item.option_name || 'Unknown'}</div>
-          <div style="font-size: 7pt; color: #555;">${item.customization_name || 'N/A'}</div>
+          <div style="font-size: 6pt; color: #555;">${item.customization_name || 'N/A'}</div>
         </td>
         <td class="right" style="padding: 0.3mm 0;">${isNaN(quantity) ? '0' : quantity}</td>
         <td class="right" style="padding: 0.3mm 0;">${isNaN(revenue) ? '0' : formatIntegerId(Math.round(revenue))}</td>
@@ -13062,7 +13050,7 @@ function generateShiftBreakdownHTML(
             .filter((l) => l && Number(l.total_quantity || 0) > 0)
             .map((line) => {
               const lineText = formatPackageLineDisplay(String(line.product_name || ''), Number(line.total_quantity || 0));
-              return `<tr><td colspan="4" style="text-align: left; padding: 0.2mm 0 0.2mm 2mm; font-size: 7pt; color: #555;">• ${lineText}</td></tr>`;
+              return `<tr><td colspan="4" style="text-align: left; padding: 0.2mm 0 0.2mm 2mm; font-size: 6pt; color: #555;">• ${lineText}</td></tr>`;
             })
             .join('')
           : '';
@@ -13101,9 +13089,9 @@ function generateShiftBreakdownHTML(
     const cashNetShift = Number(cashSummaryData.cash_shift) || (cashShiftSales - cashShiftRefunds);
     const cashNetWholeDay = Number(cashSummaryData.cash_whole_day) || (cashWholeDaySales - cashWholeDayRefunds);
     // Ensure all values are numbers and handle NaN
-    // Selisih Kas: Kas Expected = Modal Awal + Penjualan Tunai (net) - Refund Tunai; Selisih = Kas Akhir - Kas Expected
+    // Selisih Kas (same as screen): Kas Expected = Modal Awal + Penjualan Tunai; Selisih = Kas Akhir - Kas Expected
     const kasMulaiSummary = Number(cashSummaryData.kas_mulai ?? report.modal_awal ?? 0) || 0;
-    const kasExpectedSummary = Number(cashSummaryData.kas_expected) || (kasMulaiSummary + cashShiftSales - cashShiftRefunds);
+    const kasExpectedSummary = Number(cashSummaryData.kas_expected) || (kasMulaiSummary + cashShiftSales);
     // Coerce to number: IPC/JSON can send kas_akhir/kas_selisih as string from DB
     const kasAkhirNum = cashSummaryData.kas_akhir != null && String(cashSummaryData.kas_akhir) !== '' ? Number(cashSummaryData.kas_akhir) : NaN;
     const kasAkhirSummary = Number.isFinite(kasAkhirNum) ? kasAkhirNum : null;
@@ -13154,7 +13142,7 @@ function generateShiftBreakdownHTML(
       const issuer = (r.issuer_email || '-').replace(/</g, '&lt;').replace(/>/g, '&gt;');
       const waiter = (r.waiter_name || '-').replace(/</g, '&lt;').replace(/>/g, '&gt;');
       const customer = (r.customer_name || '-').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-      return `<tr><td style="font-size: 7pt;">${txId}</td><td style="font-size: 7pt;">${method}</td><td class="right" style="font-size: 7pt;">${total}</td><td class="right" style="font-size: 7pt; color: #991b1b;">-${refundAmt}</td><td style="font-size: 7pt;">${reason}</td><td style="font-size: 7pt;">${refundTime}</td><td style="font-size: 7pt;">${issuer}</td><td style="font-size: 7pt;">${waiter}</td><td style="font-size: 7pt;">${customer}</td></tr>`;
+      return `<tr><td style="font-size: 6pt;">${txId}</td><td style="font-size: 6pt;">${method}</td><td class="right" style="font-size: 6pt;">${total}</td><td class="right" style="font-size: 6pt; color: #991b1b;">-${refundAmt}</td><td style="font-size: 6pt;">${reason}</td><td style="font-size: 6pt;">${refundTime}</td><td style="font-size: 6pt;">${issuer}</td><td style="font-size: 6pt;">${waiter}</td><td style="font-size: 6pt;">${customer}</td></tr>`;
     }).join('');
 
     const cancelledItemsRows = cancelledItemsList.map((item: { product_name: string; quantity: number; total_price: number; cancelled_at: string; cancelled_by_user_name: string; cancelled_by_waiter_name: string; receipt_number?: string | null; customer_name?: string | null }) => {
@@ -13173,7 +13161,7 @@ function generateShiftBreakdownHTML(
       const customer = (item.customer_name || 'Guest').replace(/</g, '&lt;').replace(/>/g, '&gt;');
       const productName = (item.product_name || '-').replace(/</g, '&lt;').replace(/>/g, '&gt;');
       const cancelledBy = cancelledByDisplay.replace(/</g, '&lt;').replace(/>/g, '&gt;');
-      return `<tr><td style="font-size: 7pt;">${cancelledTime}</td><td style="font-size: 7pt;">${productName}</td><td class="right" style="font-size: 7pt;">${item.quantity}x</td><td class="right" style="font-size: 7pt;">${priceStr}</td><td style="font-size: 7pt;">#${receipt}</td><td style="font-size: 7pt;">${customer}</td><td style="font-size: 7pt;">${cancelledBy}</td></tr>`;
+      return `<tr><td style="font-size: 6pt;">${cancelledTime}</td><td style="font-size: 6pt;">${productName}</td><td class="right" style="font-size: 6pt;">${item.quantity}x</td><td class="right" style="font-size: 6pt;">${priceStr}</td><td style="font-size: 6pt;">#${receipt}</td><td style="font-size: 6pt;">${customer}</td><td style="font-size: 6pt;">${cancelledBy}</td></tr>`;
     }).join('');
 
     return `
@@ -13275,22 +13263,22 @@ function generateShiftBreakdownHTML(
       <table>
         <thead>
           <tr>
-            <th style="font-size: 7pt;">Waktu Pembatalan</th>
-            <th style="font-size: 7pt;">Item</th>
-            <th class="right" style="font-size: 7pt;">Jumlah</th>
-            <th class="right" style="font-size: 7pt;">Harga</th>
-            <th style="font-size: 7pt;">Transaksi</th>
-            <th style="font-size: 7pt;">Pelanggan</th>
-            <th style="font-size: 7pt;">Dibatalkan Oleh</th>
+            <th style="font-size: 6pt;">Waktu Pembatalan</th>
+            <th style="font-size: 6pt;">Item</th>
+            <th class="right" style="font-size: 6pt;">Jumlah</th>
+            <th class="right" style="font-size: 6pt;">Harga</th>
+            <th style="font-size: 6pt;">Transaksi</th>
+            <th style="font-size: 6pt;">Pelanggan</th>
+            <th style="font-size: 6pt;">Dibatalkan Oleh</th>
           </tr>
         </thead>
         <tbody>
           ${cancelledItemsRows}
           <tr class="total-row">
-            <td style="font-size: 7pt;">TOTAL</td>
+            <td style="font-size: 6pt;">TOTAL</td>
             <td></td>
-            <td class="right" style="font-size: 7pt;">${cancelledItemsList.reduce((s: number, i: { quantity?: number }) => s + Number(i.quantity || 0), 0)}x</td>
-            <td class="right" style="font-size: 7pt;">${formatIntegerId(Math.round(totalCancelledItemsAmount))}</td>
+            <td class="right" style="font-size: 6pt;">${cancelledItemsList.reduce((s: number, i: { quantity?: number }) => s + Number(i.quantity || 0), 0)}x</td>
+            <td class="right" style="font-size: 6pt;">${formatIntegerId(Math.round(totalCancelledItemsAmount))}</td>
             <td colspan="3"></td>
           </tr>
         </tbody>
@@ -13447,15 +13435,15 @@ function generateShiftBreakdownHTML(
       <table>
         <thead>
           <tr>
-            <th style="font-size: 7pt;">Transaction ID</th>
-            <th style="font-size: 7pt;">Method</th>
-            <th class="right" style="font-size: 7pt;">Total</th>
-            <th class="right" style="font-size: 7pt;">Refund Amount</th>
-            <th style="font-size: 7pt;">Alasan</th>
-            <th style="font-size: 7pt;">Refund Time</th>
-            <th style="font-size: 7pt;">Issuer</th>
-            <th style="font-size: 7pt;">Waiter</th>
-            <th style="font-size: 7pt;">Nama Pelanggan</th>
+            <th style="font-size: 6pt;">Transaction ID</th>
+            <th style="font-size: 6pt;">Method</th>
+            <th class="right" style="font-size: 6pt;">Total</th>
+            <th class="right" style="font-size: 6pt;">Refund Amount</th>
+            <th style="font-size: 6pt;">Alasan</th>
+            <th style="font-size: 6pt;">Refund Time</th>
+            <th style="font-size: 6pt;">Issuer</th>
+            <th style="font-size: 6pt;">Waiter</th>
+            <th style="font-size: 6pt;">Nama Pelanggan</th>
           </tr>
         </thead>
         <tbody>
@@ -13534,10 +13522,10 @@ function generateShiftBreakdownHTML(
       font-family: 'Arial', 'Helvetica', sans-serif;
       width: 42ch;
       max-width: 42ch;
-      font-size: 9pt;
+      font-size: 8pt;
       font-weight: 500;
       line-height: 1.2;
-      padding: 2mm ${rightPaddingMm}mm 2mm ${leftPaddingMm}mm;
+      padding: 2mm 0 2mm 0;
       word-wrap: break-word;
       overflow-wrap: break-word;
     }
@@ -13551,12 +13539,12 @@ function generateShiftBreakdownHTML(
       margin-bottom: 2mm;
     }
     .title {
-      font-size: 11pt;
+      font-size: 10pt;
       font-weight: 700;
       margin-bottom: 0.5mm;
     }
     .business-name {
-      font-size: 10pt;
+      font-size: 9pt;
       font-weight: 600;
       margin-bottom: 0mm;
     }
@@ -13568,7 +13556,7 @@ function generateShiftBreakdownHTML(
       display: flex;
       justify-content: space-between;
       margin-bottom: 0.5mm;
-      font-size: 8pt;
+      font-size: 7pt;
     }
     .info-label {
       font-weight: 500;
@@ -13577,14 +13565,14 @@ function generateShiftBreakdownHTML(
       font-weight: 700;
     }
     .section-title {
-      font-size: 9pt;
+      font-size: 8pt;
       font-weight: 700;
       margin: 1.5mm 0 1mm 0;
       text-align: center;
       text-decoration: underline;
     }
     .summary-subtitle {
-      font-size: 8pt;
+      font-size: 7pt;
       font-weight: 700;
       color: #374151;
       margin: 1mm 0 0.5mm 0;
@@ -13592,7 +13580,7 @@ function generateShiftBreakdownHTML(
       border-bottom: 1px solid #9ca3af;
     }
     .barang-terjual-note {
-      font-size: 7pt;
+      font-size: 6pt;
       color: #6b7280;
       margin-bottom: 1mm;
       font-style: italic;
@@ -13601,14 +13589,13 @@ function generateShiftBreakdownHTML(
       width: 100%;
       border-collapse: collapse;
       margin: 1mm 0;
-      font-size: 8pt;
+      font-size: 7pt;
     }
     th {
       text-align: left;
       font-weight: 700;
-      border-bottom: 1px solid #000;
       padding: 0.5mm 0;
-      font-size: 8pt;
+      font-size: 7pt;
     }
     th.right, td.right {
       text-align: right;
@@ -13618,13 +13605,12 @@ function generateShiftBreakdownHTML(
       font-weight: 500;
     }
     .total-row {
-      border-top: 2px solid #000;
       font-weight: 700;
       background-color: #f0f0f0;
     }
     .summary {
       margin-top: 1.5mm;
-      font-size: 8pt;
+      font-size: 7pt;
     }
     .summary-line {
       display: flex;
@@ -13639,7 +13625,7 @@ function generateShiftBreakdownHTML(
     }
     .summary-line-highlight {
       font-weight: 700;
-      font-size: 9pt;
+      font-size: 8pt;
       background: #fef3c7;
       padding: 1.2mm 1mm;
       margin: 0 0 1mm 0;
@@ -13650,7 +13636,7 @@ function generateShiftBreakdownHTML(
     }
     .summary-line-highlight-voucher {
       font-weight: 700;
-      font-size: 9pt;
+      font-size: 8pt;
       background: #dcfce7;
       padding: 1.2mm 1mm;
       margin: 0 0 1mm 0;
@@ -13661,7 +13647,7 @@ function generateShiftBreakdownHTML(
     }
     .summary-line-highlight-topping {
       font-weight: 700;
-      font-size: 9pt;
+      font-size: 8pt;
       background: #dbeafe;
       padding: 1.2mm 1mm;
       margin: 0 0 1mm 0;

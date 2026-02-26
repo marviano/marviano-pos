@@ -637,6 +637,14 @@ class SmartSyncService {
                       ? item.production_finished_at.replace('T', ' ').slice(0, 19)
                       : item.production_finished_at
                   ) : null,
+                  // Item-level cancellation (audit)
+                  cancelled_by_user_id: item.cancelled_by_user_id as number | null | undefined,
+                  cancelled_by_waiter_id: item.cancelled_by_waiter_id as number | null | undefined,
+                  cancelled_at: item.cancelled_at ? (
+                    typeof item.cancelled_at === 'string'
+                      ? item.cancelled_at.replace('T', ' ').slice(0, 19)
+                      : item.cancelled_at
+                  ) : null,
                 };
 
                 // Add created_at if it exists (convert to MySQL format)
@@ -707,6 +715,39 @@ class SmartSyncService {
           } catch (error) {
             console.warn(`⚠️ [SMART SYNC] Failed to fetch transaction items or normalized customizations for transaction ${transactionData.id}:`, error);
             // Continue with items from JSON blob if fetch fails - backward compatibility
+          }
+        }
+
+        // Fetch transaction_refunds so full refund history is upserted to salespulse in one payload
+        const refundsElectronAPI = typeof window !== 'undefined' ? (window as { electronAPI?: UnknownRecord }).electronAPI : undefined;
+        if (refundsElectronAPI?.localDbGetTransactionRefunds && transactionData.id) {
+          try {
+            const rawRefunds = await (refundsElectronAPI.localDbGetTransactionRefunds as (transactionUuid: string) => Promise<Array<UnknownRecord>>)(String(transactionData.id));
+            if (Array.isArray(rawRefunds) && rawRefunds.length > 0) {
+              transactionData.transaction_refunds = rawRefunds.map((r: UnknownRecord) => {
+                const cleaned = cleanRefundForMySQL(r);
+                return {
+                  uuid_id: cleaned.uuid_id ?? cleaned.id,
+                  transaction_uuid: cleaned.transaction_uuid ?? transactionData.uuid_id ?? transactionData.id,
+                  business_id: cleaned.business_id ?? transactionData.business_id,
+                  shift_uuid: cleaned.shift_uuid ?? transactionData.shift_uuid ?? null,
+                  refunded_by: cleaned.refunded_by,
+                  refund_amount: cleaned.refund_amount,
+                  cash_delta: cleaned.cash_delta ?? 0,
+                  payment_method_id: cleaned.payment_method_id,
+                  reason: cleaned.reason ?? null,
+                  note: cleaned.note ?? null,
+                  refund_type: cleaned.refund_type ?? 'full',
+                  status: cleaned.status ?? 'completed',
+                  refunded_at: cleaned.refunded_at,
+                  created_at: cleaned.created_at ?? cleaned.refunded_at,
+                  updated_at: cleaned.updated_at ?? cleaned.refunded_at ?? cleaned.created_at,
+                };
+              });
+              console.log(`✅ [SMART SYNC] Added ${transactionData.transaction_refunds.length} refund(s) to transaction ${transactionData.id} payload`);
+            }
+          } catch (error) {
+            console.warn(`⚠️ [SMART SYNC] Failed to fetch transaction refunds for transaction ${transactionData.id}:`, error);
           }
         }
 

@@ -7,10 +7,12 @@
  */
 
 import { useState, useEffect, useCallback, useMemo } from 'react';
-import { Calendar, Download, RefreshCw } from 'lucide-react';
+import { Calendar, FileText, Download, RefreshCw } from 'lucide-react';
 import { useAuth } from '@/hooks/useAuth';
 import { appAlert } from '@/components/AppDialog';
 import * as XLSX from 'xlsx';
+import { jsPDF } from 'jspdf';
+import autoTable from 'jspdf-autotable';
 
 // Raw product sale row from localDbGetProductSales (per product per platform)
 interface ProductSaleRow {
@@ -69,7 +71,18 @@ const formatRupiah = (amount: number): string => {
   }).format(amount);
 };
 
+
 const getElectronAPI = () => (typeof window !== 'undefined' ? window.electronAPI : undefined);
+
+/** Load image from data URI and return natural dimensions (pixels). */
+function getImageDimensions(dataUri: string): Promise<{ width: number; height: number }> {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => resolve({ width: img.naturalWidth, height: img.naturalHeight });
+    img.onerror = () => reject(new Error('Failed to load image'));
+    img.src = dataUri;
+  });
+}
 
 function getTodayUTC7(): string {
   const now = new Date();
@@ -241,11 +254,6 @@ export default function ProductSalesReport() {
       }
       const startDateTime = `${startDate}T00:00:00`;
       const endDateTime = `${endDate}T23:59:59`;
-      // #region agent log
-      if (typeof fetch === 'function') {
-        fetch('http://127.0.0.1:7495/ingest/20000880-6f22-4a8b-8a8e-250eeb7d84f4', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': 'e9ccad' }, body: JSON.stringify({ sessionId: 'e9ccad', location: 'ProductSalesReport.tsx:fetchReport', message: 'before refund call', data: { hasRefundApi: !!api.localDbGetRefundTotal, businessId, startDateTime, endDateTime }, timestamp: Date.now(), hypothesisId: 'R1', runId: 'refund-debug' }) }).catch(() => {});
-      }
-      // #endregion
       const [result, refundTotal] = await Promise.all([
         api.localDbGetProductSales(null, startDateTime, endDateTime, businessId),
         api.localDbGetRefundTotal?.(businessId, startDateTime, endDateTime) ?? Promise.resolve(0),
@@ -254,11 +262,6 @@ export default function ProductSalesReport() {
       setRawProducts(list);
       const refundValue = typeof refundTotal === 'number' ? refundTotal : 0;
       setTotalRefundOmset(refundValue);
-      // #region agent log
-      if (typeof fetch === 'function') {
-        fetch('http://127.0.0.1:7495/ingest/20000880-6f22-4a8b-8a8e-250eeb7d84f4', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': 'e9ccad' }, body: JSON.stringify({ sessionId: 'e9ccad', location: 'ProductSalesReport.tsx:fetchReport', message: 'after refund call', data: { refundTotalRaw: refundTotal, typeofRefundTotal: typeof refundTotal, refundValueSet: refundValue }, timestamp: Date.now(), hypothesisId: 'R2', runId: 'refund-debug' }) }).catch(() => {});
-      }
-      // #endregion
     } catch (e) {
       console.error('Product sales fetch error:', e);
       appAlert('Gagal memuat laporan penjualan.');
@@ -303,49 +306,24 @@ export default function ProductSalesReport() {
       return;
     }
     try {
-      const headers = ['No', 'Produk', 'Total Qty', 'Total Revenue'];
+      const headers = ['No', 'Produk', 'Qty', 'Revenue'];
       orderedPlatforms.forEach((p) => headers.push(formatPlatformLabel(p)));
 
       const wb = XLSX.utils.book_new();
 
-      if (groupByCategory1) {
-        const groups = groupAggregatesByCategory1(aggregates);
-        for (const group of groups) {
-          const rows = group.rows.map((row, idx) => {
-            const r: (string | number)[] = [
-              idx + 1,
-              row.product_name,
-              row.total_quantity,
-              row.total_revenue,
-            ];
-            orderedPlatforms.forEach((platform) => {
-              r.push(row.platform_revenue[platform] ?? 0);
-            });
-            return r;
-          });
-          const wsData = [headers, ...rows];
-          const ws = XLSX.utils.aoa_to_sheet(wsData);
-          const colWidths = [
-            { wch: 5 },
-            { wch: 30 },
-            { wch: 10 },
-            { wch: 16 },
-            ...orderedPlatforms.map(() => ({ wch: 10 })),
-          ];
-          ws['!cols'] = colWidths;
-          const sheetName = group.category1_name.slice(0, 31);
-          XLSX.utils.book_append_sheet(wb, ws, sheetName);
-        }
-      } else {
-        const rows = aggregates.map((row, idx) => {
+      // Always export by Kategori 1: one sheet per category (same as on-screen grouped view)
+      // Numbers exported as rounded integers (no decimals), e.g. 1000000
+      const groups = groupAggregatesByCategory1(aggregates);
+      for (const group of groups) {
+        const rows = group.rows.map((row, idx) => {
           const r: (string | number)[] = [
             idx + 1,
             row.product_name,
-            row.total_quantity,
-            row.total_revenue,
+            Math.round(Number(row.total_quantity) || 0),
+            Math.round(Number(row.total_revenue) || 0),
           ];
           orderedPlatforms.forEach((platform) => {
-            r.push(row.platform_revenue[platform] ?? 0);
+            r.push(Math.round(Number(row.platform_revenue[platform]) || 0));
           });
           return r;
         });
@@ -359,7 +337,8 @@ export default function ProductSalesReport() {
           ...orderedPlatforms.map(() => ({ wch: 10 })),
         ];
         ws['!cols'] = colWidths;
-        XLSX.utils.book_append_sheet(wb, ws, 'Laporan Penjualan');
+        const sheetName = group.category1_name.slice(0, 31);
+        XLSX.utils.book_append_sheet(wb, ws, sheetName);
       }
 
       const fileName = `Laporan_Penjualan_${startDate}_${endDate}.xlsx`;
@@ -368,7 +347,165 @@ export default function ProductSalesReport() {
       console.error('Export error:', e);
       appAlert('Gagal mengekspor ke Excel.');
     }
-  }, [aggregates, orderedPlatforms, startDate, endDate, groupByCategory1]);
+  }, [aggregates, orderedPlatforms, startDate, endDate]);
+
+  const handleExportPdf = useCallback(async () => {
+    if (aggregates.length === 0) {
+      appAlert('Tidak ada data untuk diekspor.');
+      return;
+    }
+    try {
+      const doc = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
+      const margin = 14;
+      const pageWidth = 210; // A4 width in mm
+      let y = margin;
+
+      // Title
+      doc.setFontSize(18);
+      doc.setFont('helvetica', 'bold');
+      doc.text('Laporan Penjualan Produk', pageWidth / 2, y, { align: 'center' });
+      y += 4;
+
+      // Business logo (same source as receipt): scale by height only, preserve aspect ratio and resolution
+      const api = getElectronAPI();
+      if (businessId && api?.getReceiptSettings) {
+        try {
+          const result = await api.getReceiptSettings(businessId);
+          const logoBase64 = result?.settings?.logo_base64?.trim();
+          if (logoBase64) {
+            const dims = await getImageDimensions(logoBase64);
+            const targetHeightMm = 14;
+            const targetWidthMm = targetHeightMm * (dims.width / dims.height);
+            const logoX = (pageWidth - targetWidthMm) / 2;
+            const format = /data:image\/jpe?g/i.test(logoBase64) ? 'JPEG' : 'PNG';
+            doc.addImage(logoBase64, format, logoX, y, targetWidthMm, targetHeightMm);
+            y += targetHeightMm + 4;
+          }
+        } catch {
+          // ignore logo fetch error
+        }
+      }
+
+      doc.setFontSize(10);
+      doc.setFont('helvetica', 'normal');
+      doc.setTextColor(80, 80, 80);
+      doc.text(`Periode: ${startDate} s/d ${endDate}`, pageWidth / 2, y, { align: 'center' });
+      doc.setTextColor(0, 0, 0);
+      y += 14;
+
+      const tableTheme = {
+        headStyles: { fillColor: [41, 128, 185] as [number, number, number], textColor: 255, fontStyle: 'bold' as const, fontSize: 9 },
+        bodyStyles: { fontSize: 8, textColor: [40, 40, 40] as [number, number, number] },
+        alternateRowStyles: { fillColor: [245, 245, 245] as [number, number, number] },
+        margin: { left: margin, right: margin },
+        tableLineColor: [220, 220, 220] as [number, number, number],
+        tableLineWidth: 0.2,
+      };
+
+      // Summary: two tables side by side
+      const summaryStartY = y;
+      const colWidth = (pageWidth - margin * 2) / 2;
+      autoTable(doc, {
+        startY: summaryStartY,
+        head: [['Platform', 'Omset']],
+        body: orderedPlatforms.map((p) => [formatPlatformLabel(p), formatRupiah(mainPlatformRevenue[p] ?? 0)]),
+        theme: 'striped',
+        ...tableTheme,
+        tableWidth: colWidth - 8,
+        columnStyles: { 0: { cellWidth: (colWidth - 8) * 0.4 }, 1: { cellWidth: (colWidth - 8) * 0.6, halign: 'right' } },
+      });
+      const afterPlatform = (doc as { lastAutoTable?: { finalY: number } }).lastAutoTable?.finalY ?? summaryStartY;
+
+      const netOmset = Math.max(0, totalOmsetAfterRefund - totalRefundOmset);
+      autoTable(doc, {
+        startY: summaryStartY,
+        head: [['Ringkasan', 'Jumlah']],
+        body: [
+          ['Gross', formatRupiah(totalOmsetAll)],
+          ['Discount', totalDiscountOmset > 0 ? `-${formatRupiah(totalDiscountOmset)}` : formatRupiah(0)],
+          ['Refund', totalRefundOmset > 0 ? `-${formatRupiah(totalRefundOmset)}` : formatRupiah(0)],
+        ],
+        foot: [['Net', formatRupiah(netOmset)]],
+        theme: 'striped',
+        ...tableTheme,
+        margin: { left: margin + colWidth + 4, right: margin },
+        footStyles: { fontStyle: 'bold' },
+        tableWidth: colWidth - 8,
+        columnStyles: { 0: { cellWidth: (colWidth - 8) * 0.45 }, 1: { cellWidth: (colWidth - 8) * 0.55, halign: 'left' } },
+      });
+      const afterRingkasan = (doc as { lastAutoTable?: { finalY: number } }).lastAutoTable?.finalY ?? summaryStartY;
+      y = Math.max(afterPlatform, afterRingkasan) + 12;
+
+      // Detail by category
+      const groups = groupAggregatesByCategory1(aggregates);
+      const detailHead = ['No', 'Produk', 'Qty', 'Revenue', ...orderedPlatforms.map((p) => formatPlatformLabel(p))];
+
+      for (const group of groups) {
+        const groupRevenue = group.rows.reduce((sum, r) => sum + r.total_revenue, 0);
+        if (y > 260) {
+          doc.addPage();
+          y = margin;
+        }
+        doc.setFontSize(11);
+        doc.setFont('helvetica', 'bold');
+        doc.setTextColor(50, 50, 50);
+        doc.text(group.category1_name, margin, y);
+        doc.setFontSize(9);
+        doc.text(`Total Omset: ${formatRupiah(groupRevenue)}`, pageWidth - margin, y, { align: 'right' });
+        doc.setFont('helvetica', 'normal');
+        doc.setTextColor(0, 0, 0);
+        y += 6;
+
+        const body = group.rows.map((row, idx) => [
+          String(idx + 1),
+          row.product_name,
+          String(row.total_quantity),
+          formatRupiah(row.total_revenue),
+          ...orderedPlatforms.map((platform) =>
+            (row.platform_revenue[platform] ?? 0) > 0 ? formatRupiah(row.platform_revenue[platform]) : '-'
+          ),
+        ]);
+        const contentWidth = pageWidth - margin * 2;
+        const numPlatformCols = orderedPlatforms.length;
+        const fixedWidth = 8 + 42 + 14 + 24;
+        const platformColWidth = (contentWidth - fixedWidth) / Math.max(1, numPlatformCols);
+        autoTable(doc, {
+          startY: y,
+          head: [detailHead],
+          body,
+          theme: 'striped',
+          ...tableTheme,
+          tableWidth: contentWidth,
+          columnStyles: {
+            0: { cellWidth: 8, halign: 'center' },
+            1: { cellWidth: 42, overflow: 'ellipsize' },
+            2: { cellWidth: 14, halign: 'left' },
+            3: { cellWidth: 24, halign: 'left' },
+            ...Object.fromEntries(orderedPlatforms.map((_, i) => [String(4 + i), { cellWidth: platformColWidth, halign: 'left' }])),
+          },
+          showHead: 'everyPage',
+        });
+        y = (doc as { lastAutoTable?: { finalY: number } }).lastAutoTable?.finalY ?? y;
+        y += 10;
+      }
+
+      doc.save(`Laporan_Penjualan_${startDate}_${endDate}.pdf`);
+    } catch (e) {
+      console.error('PDF export error:', e);
+      appAlert('Gagal mengekspor ke PDF.');
+    }
+  }, [
+    businessId,
+    aggregates,
+    orderedPlatforms,
+    startDate,
+    endDate,
+    mainPlatformRevenue,
+    totalOmsetAll,
+    totalOmsetAfterRefund,
+    totalRefundOmset,
+    totalDiscountOmset,
+  ]);
 
   if (!businessId) {
     return (
@@ -451,6 +588,14 @@ export default function ProductSalesReport() {
         >
           <Download className="w-4 h-4" />
           <span>Export Sheet</span>
+        </button>
+        <button
+          onClick={handleExportPdf}
+          disabled={loading || aggregates.length === 0}
+          className="flex items-center gap-2 px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 disabled:opacity-50 disabled:cursor-not-allowed"
+        >
+          <FileText className="w-4 h-4" />
+          <span>Export PDF</span>
         </button>
         <label className="flex items-center gap-2 cursor-pointer select-none">
           <span className="text-sm text-gray-600">Kelompokkan per Kategori 1</span>
@@ -550,10 +695,10 @@ export default function ProductSalesReport() {
                           <tr className="bg-gray-50 border-b border-gray-200">
                             <th className="text-left py-3 px-4 font-semibold text-gray-700 w-12">No</th>
                             <th className="text-left py-3 px-4 font-semibold text-gray-700">Produk</th>
-                            <th className="text-right py-3 px-4 font-semibold text-gray-700">Total Qty</th>
-                            <th className="text-right py-3 px-4 font-semibold text-gray-700">Total Revenue</th>
+                            <th className="text-left py-3 px-4 font-semibold text-gray-700">Qty</th>
+                            <th className="text-left py-3 px-4 font-semibold text-gray-700">Revenue</th>
                             {orderedPlatforms.map((p) => (
-                              <th key={p} className="text-right py-3 px-4 font-semibold text-gray-700">
+                              <th key={p} className="text-left py-3 px-4 font-semibold text-gray-700">
                                 {formatPlatformLabel(p)}
                               </th>
                             ))}
@@ -564,10 +709,10 @@ export default function ProductSalesReport() {
                             <tr key={row.product_id} className="border-b border-gray-100 hover:bg-gray-50">
                               <td className="py-2 px-4 text-gray-600">{idx + 1}</td>
                               <td className="py-2 px-4 font-medium text-gray-900">{row.product_name}</td>
-                              <td className="py-2 px-4 text-right font-medium text-gray-900">{row.total_quantity}</td>
-                              <td className="py-2 px-4 text-right text-gray-900">{formatRupiah(row.total_revenue)}</td>
+                              <td className="py-2 px-4 text-left font-medium text-gray-900">{row.total_quantity}</td>
+                              <td className="py-2 px-4 text-left text-gray-900">{formatRupiah(row.total_revenue)}</td>
                               {orderedPlatforms.map((platform) => (
-                                <td key={platform} className="py-2 px-4 text-right text-gray-600">
+                                <td key={platform} className="py-2 px-4 text-left text-gray-600">
                                   {(row.platform_revenue[platform] ?? 0) > 0
                                     ? formatRupiah(row.platform_revenue[platform])
                                     : '-'}
@@ -587,10 +732,10 @@ export default function ProductSalesReport() {
                   <tr className="bg-gray-50 border-b border-gray-200">
                     <th className="text-left py-3 px-4 font-semibold text-gray-700 w-12">No</th>
                     <th className="text-left py-3 px-4 font-semibold text-gray-700">Produk</th>
-                    <th className="text-right py-3 px-4 font-semibold text-gray-700">Total Qty</th>
-                    <th className="text-right py-3 px-4 font-semibold text-gray-700">Total Revenue</th>
+                    <th className="text-left py-3 px-4 font-semibold text-gray-700">Qty</th>
+                    <th className="text-left py-3 px-4 font-semibold text-gray-700">Revenue</th>
                     {orderedPlatforms.map((p) => (
-                      <th key={p} className="text-right py-3 px-4 font-semibold text-gray-700">
+                      <th key={p} className="text-left py-3 px-4 font-semibold text-gray-700">
                         {formatPlatformLabel(p)}
                       </th>
                     ))}
@@ -601,10 +746,10 @@ export default function ProductSalesReport() {
                     <tr key={row.product_id} className="border-b border-gray-100 hover:bg-gray-50">
                       <td className="py-2 px-4 text-gray-600">{idx + 1}</td>
                       <td className="py-2 px-4 font-medium text-gray-900">{row.product_name}</td>
-                      <td className="py-2 px-4 text-right font-medium text-gray-900">{row.total_quantity}</td>
-                      <td className="py-2 px-4 text-right text-gray-900">{formatRupiah(row.total_revenue)}</td>
+                      <td className="py-2 px-4 text-left font-medium text-gray-900">{row.total_quantity}</td>
+                      <td className="py-2 px-4 text-left text-gray-900">{formatRupiah(row.total_revenue)}</td>
                       {orderedPlatforms.map((platform) => (
-                        <td key={platform} className="py-2 px-4 text-right text-gray-600">
+                        <td key={platform} className="py-2 px-4 text-left text-gray-600">
                           {(row.platform_revenue[platform] ?? 0) > 0
                             ? formatRupiah(row.platform_revenue[platform])
                             : '-'}

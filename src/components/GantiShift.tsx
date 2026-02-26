@@ -1944,15 +1944,16 @@ export default function GantiShift() {
             modalAwalWholeDay = dayShiftsForReport[0].modal_awal || 0;
           }
 
-          // For whole-day print: use last shift that has kas_akhir so print matches app (app shows one shift's Kas Akhir/Selisih on all-day tab)
+          // For whole-day print: Kas Diharapkan = Kas Mulai + Cash Sales (same as screen; no minus refund)
+          const wholeDayKasExpected = modalAwalWholeDay + dayCashSales;
           const lastShiftWithKas = dayShiftsForReport.length > 0
             ? [...dayShiftsForReport].reverse().find((s) => s.kas_akhir != null && s.kas_akhir !== undefined) ?? null
             : null;
           const wholeDayKasAkhir = lastShiftWithKas != null ? Number(lastShiftWithKas.kas_akhir) : null;
-          let wholeDayKasSelisih: number | null = lastShiftWithKas != null && lastShiftWithKas.kas_selisih != null ? Number(lastShiftWithKas.kas_selisih) : null;
-          let wholeDayKasSelisihLabel = lastShiftWithKas?.kas_selisih_label ?? null;
-          if (wholeDayKasSelisih == null && lastShiftWithKas != null && lastShiftWithKas.kas_akhir != null && lastShiftWithKas.kas_expected != null) {
-            const computed = Math.round(Number((Number(lastShiftWithKas.kas_akhir) - Number(lastShiftWithKas.kas_expected)).toFixed(2)));
+          let wholeDayKasSelisih: number | null = null;
+          let wholeDayKasSelisihLabel: 'balanced' | 'plus' | 'minus' | null = null;
+          if (wholeDayKasAkhir != null) {
+            const computed = Math.round(Number((wholeDayKasAkhir - wholeDayKasExpected).toFixed(2)));
             wholeDayKasSelisih = computed;
             wholeDayKasSelisihLabel = Math.abs(computed) < 1 ? 'balanced' : (computed > 0 ? 'plus' : 'minus');
           }
@@ -2004,9 +2005,9 @@ export default function GantiShift() {
               cash_whole_day: dayCash.cash_whole_day ?? 0,
               cash_whole_day_sales: dayCash.cash_whole_day_sales ?? dayCash.cash_whole_day ?? 0,
               cash_whole_day_refunds: dayCash.cash_whole_day_refunds ?? 0,
-              total_cash_in_cashier: modalAwalWholeDay + dayCashSales - dayCashRefunds,
+              total_cash_in_cashier: wholeDayKasExpected,
               kas_mulai: modalAwalWholeDay,
-              kas_expected: modalAwalWholeDay + dayCashSales - dayCashRefunds,
+              kas_expected: wholeDayKasExpected,
               kas_akhir: wholeDayKasAkhir,
               kas_selisih: wholeDayKasSelisih,
               kas_selisih_label: wholeDayKasSelisihLabel
@@ -2059,7 +2060,8 @@ export default function GantiShift() {
           const shiftCash = shiftReportData.cashSummary;
           const shiftCashSales = shiftCash.cash_shift_sales ?? shiftCash.cash_shift ?? 0;
           const shiftCashRefunds = shiftCash.cash_shift_refunds ?? 0;
-          const shiftKasExpected = shift.modal_awal + shiftCashSales - shiftCashRefunds;
+          // Kas Diharapkan = Kas Mulai + Cash Sales (same as screen; no minus refund)
+          const shiftKasExpected = Number(shift.modal_awal ?? 0) + shiftCashSales;
           // If shift has kas_akhir but kas_selisih not set, compute so print shows same as app
           let printKasSelisih = shift.kas_selisih ?? null;
           let printKasSelisihLabel = shift.kas_selisih_label ?? null;
