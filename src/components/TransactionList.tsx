@@ -249,6 +249,33 @@ interface ElectronAPI {
     receipt_number?: string | null;
     customer_name?: string | null;
   }>>;
+  localDbGetRefundTotal?: (businessId: number | null, shiftStart: string, shiftEnd: string | null) => Promise<number>;
+  localDbGetProductSales?: (userId: number | null, shiftStart: string, shiftEnd: string | null, businessId?: number, shiftUuid?: string | null, shiftUuids?: string[]) => Promise<{
+    products: Array<{
+      product_id: number;
+      product_name: string;
+      product_code: string;
+      category1_id: number | null;
+      category1_name: string;
+      platform: string;
+      transaction_type: string;
+      total_quantity: number;
+      total_subtotal: number;
+      total_subtotal_after_refund?: number;
+      customization_subtotal: number;
+      base_subtotal: number;
+      base_unit_price: number;
+      is_bundle_item?: boolean;
+    }>;
+    customizations: Array<{
+      option_id: number;
+      option_name: string;
+      customization_id: number;
+      customization_name: string;
+      total_quantity: number;
+      total_revenue: number;
+    }>;
+  }>;
 }
 
 export default function TransactionList({ businessId, onLoadTransaction }: TransactionListProps) {
@@ -272,7 +299,7 @@ export default function TransactionList({ businessId, onLoadTransaction }: Trans
     net: number;
   } | null>(null);
 
-  // Cancelled items (for "Item Dibatalkan" card + modal)
+  // Cancelled items (for "Item Dibatalkan" card + modal). API returns uuid_transaction_id/transaction_id for mode filtering.
   type CancelledItemRow = {
     product_name: string;
     quantity: number;
@@ -283,6 +310,8 @@ export default function TransactionList({ businessId, onLoadTransaction }: Trans
     cancelled_by_waiter_name: string;
     receipt_number?: string | null;
     customer_name?: string | null;
+    uuid_transaction_id?: string | null;
+    transaction_id?: number | string | null;
   };
   const [cancelledItems, setCancelledItems] = useState<CancelledItemRow[]>([]);
   const [showCancelledModal, setShowCancelledModal] = useState(false);
@@ -1101,10 +1130,16 @@ export default function TransactionList({ businessId, onLoadTransaction }: Trans
     }
   }, [isSystemPosMode, fromDate, toDate, effectiveBusinessId, fetchReceiptizePrintedIds, fetchReceiptPrintedIds, canViewUserDataOnly, canViewAllData, canViewPastData, user]);
 
-  // Fetch report totals (same as Penjualan Produk) so Grand Total card matches that tab
+  // Fetch report totals (same as Penjualan Produk) so Grand Total card matches that tab.
+  // Only use report totals in System POS mode; in Offline/default mode use list-derived totals (filtered by current mode).
   useEffect(() => {
-    if (isSystemPosMode || !effectiveBusinessId || !fromDate || !toDate) {
+    if (!isSystemPosMode || !effectiveBusinessId || !fromDate || !toDate) {
       setReportTotals(null);
+      // #region agent log
+      if (typeof fetch === 'function') {
+        fetch('http://127.0.0.1:7242/ingest/ede2961e-f205-45b6-9c27-3e60ff143b09', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': 'a09730' }, body: JSON.stringify({ sessionId: 'a09730', location: 'TransactionList.tsx:reportTotalsEffect', message: 'reportTotals cleared', data: { isSystemPosMode, reason: !isSystemPosMode ? 'offline' : 'missing deps' }, timestamp: Date.now(), hypothesisId: 'H1' }) }).catch(() => {});
+      }
+      // #endregion
       return;
     }
     const electronAPI = (typeof window !== 'undefined' ? (window as { electronAPI?: ElectronAPI }).electronAPI : undefined);
@@ -1131,6 +1166,11 @@ export default function TransactionList({ businessId, onLoadTransaction }: Trans
         const refund = typeof refundTotal === 'number' ? refundTotal : 0;
         const net = Math.max(0, afterRefund - refund);
         setReportTotals({ gross, discount, refund, net });
+        // #region agent log
+        if (typeof fetch === 'function') {
+          fetch('http://127.0.0.1:7242/ingest/ede2961e-f205-45b6-9c27-3e60ff143b09', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': 'a09730' }, body: JSON.stringify({ sessionId: 'a09730', location: 'TransactionList.tsx:reportTotalsSet', message: 'reportTotals set from API', data: { isSystemPosMode, gross, net, refund }, timestamp: Date.now(), hypothesisId: 'H1' }) }).catch(() => {});
+        }
+        // #endregion
       })
       .catch(() => {
         if (!cancelled) setReportTotals(null);
@@ -1611,6 +1651,15 @@ export default function TransactionList({ businessId, onLoadTransaction }: Trans
     baseTransactions = [];
   }
 
+  // Item Dibatalkan: follow current mode (Printer 2 only vs all), same as Grand Total / Txs
+  const displayedCancelledItems = (() => {
+    if (showAllTransactions || isSystemPosMode) return cancelledItems;
+    return cancelledItems.filter((item) => {
+      const txId = item.uuid_transaction_id ?? (item.transaction_id != null ? String(item.transaction_id) : null);
+      return txId != null && receiptizePrintedIds.has(txId);
+    });
+  })();
+
   // Creation-order rank (1-based) for default receiptize view: # = 1,2,3... by created_at asc.
   // Only used when !showAllTransactions; view-all keeps daily counter.
   const creationOrderRank: Record<string, number> = (() => {
@@ -1741,39 +1790,26 @@ export default function TransactionList({ businessId, onLoadTransaction }: Trans
     .filter((t) => (t.status || '').toLowerCase() !== 'cancelled')
     .reduce((sum, t) => sum + parseNum(t.total_amount), 0);
   // #region agent log
+  const usingReportTotals = reportTotals != null;
+  const grossFromList = grossCompleted;
+  const netFromList = netCompleted;
+  const sumFinalFromFiltered = filteredTransactions.filter((t) => (t.status || '').toLowerCase() !== 'cancelled').reduce((s, t) => s + parseNum(t.final_amount), 0);
+  const sumFinalFromAll = transactions.filter((t) => (t.status || '').toLowerCase() !== 'cancelled').reduce((s, t) => s + parseNum(t.final_amount), 0);
   if (typeof fetch === 'function' && (filteredTransactions.length > 0 || baseTransactions.length > 0)) {
-    const voucherSum = filteredTransactions.reduce((s, t) => s + parseNum(t.voucher_discount), 0);
-    fetch('http://127.0.0.1:7495/ingest/20000880-6f22-4a8b-8a8e-250eeb7d84f4', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': 'e9ccad' }, body: JSON.stringify({ sessionId: 'e9ccad', location: 'TransactionList.tsx:totals', message: 'Daftar Transaksi Gross vs total_amount', data: { totalRevenue, sumTotalAmount, voucherDiscountSum: voucherSum, filteredCount: filteredTransactions.length, baseCount: baseTransactions.length, showAllTransactions, isSystemPosMode, fromDate, toDate }, timestamp: Date.now(), hypothesisId: 'H1' }) }).catch(() => {});
+    fetch('http://127.0.0.1:7242/ingest/ede2961e-f205-45b6-9c27-3e60ff143b09', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': 'a09730' }, body: JSON.stringify({ sessionId: 'a09730', location: 'TransactionList.tsx:grandTotalSource', message: 'Grand total mode vs source', data: { isSystemPosMode, showAllTransactions, usingReportTotals, receiptizePrintedIdsSize: receiptizePrintedIds.size, transactionsLen: transactions.length, baseCount: baseTransactions.length, filteredCount: filteredTransactions.length, grossFromList, netFromList, sumFinalFromFiltered, sumFinalFromAll, reportGross: reportTotals?.gross, reportNet: reportTotals?.net }, timestamp: Date.now(), hypothesisId: 'H1', runId: 'daftar-grand-total' }) }).catch(() => {});
   }
   // #endregion
   const totalRefund = filteredTransactions.reduce((sum, t) => sum + parseNum(t.refund_total), 0);
-  // #region agent log
-  if (isSystemPosMode && typeof fetch === 'function') {
-    const withRefund = filteredTransactions.filter((t) => (t.refund_total ?? 0) > 0);
-    fetch('http://127.0.0.1:7245/ingest/519de021-d49d-473f-a8a1-4215977c867a', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ location: 'TransactionList.tsx:totalRefund', message: 'grand total calc system_pos', data: { totalRefund, baseTransactionsLen: baseTransactions.length, filteredLen: filteredTransactions.length, withRefundCount: withRefund.length, receiptizePrintedIdsSize: receiptizePrintedIds.size }, hypothesisId: 'H3', hypothesisId2: 'H4', hypothesisId3: 'H5', timestamp: Date.now() }) }).catch(() => {});
-  }
-  // #endregion
   const totalVoucherDiscount = filteredTransactions.reduce((sum, t) => sum + parseNum(t.voucher_discount), 0);
-  // Calculate Total CU and Transaction Count from both receipt (Printer 1) and receiptize (Printer 2)
-  const { totalCustomerUnit, totalTransactionCount } = (() => {
-    let totalCU = 0;
-    let txCount = 0;
-
-    transactions.forEach((tx) => {
-      const txId = String(tx.id);
-      const hasReceiptCounter = typeof receiptCounters[txId] === 'number' && receiptCounters[txId] > 0;
-      const hasReceiptizeCounter = typeof receiptizeCounters[txId] === 'number' && receiptizeCounters[txId] > 0;
-
-      // Include transaction if it has either receipt or receiptize counter
-      if (hasReceiptCounter || hasReceiptizeCounter) {
-        txCount += 1;
-        const cuValue = typeof tx.customer_unit === 'number' ? tx.customer_unit : 0;
-        totalCU += Number.isFinite(cuValue) ? cuValue : 0;
-      }
-    });
-
-    return { totalCustomerUnit: totalCU, totalTransactionCount: txCount };
-  })();
+  // Txs/CU follow current mode: use the same list as Grand Total (filteredTransactions = visible rows).
+  const completedForCount = filteredTransactions.filter(
+    (t) => (t.status || '').toLowerCase() !== 'cancelled' && (t.status || '').toLowerCase() !== 'pending'
+  );
+  const totalTransactionCount = completedForCount.length;
+  const totalCustomerUnit = completedForCount.reduce(
+    (sum, t) => sum + (typeof t.customer_unit === 'number' && Number.isFinite(t.customer_unit) ? t.customer_unit : 0),
+    0
+  );
 
   // Aggregations for footer: count and total amount per payment method (based on table shown)
   const paymentMethodCounts: Record<string, number> = {
@@ -1845,11 +1881,6 @@ export default function TransactionList({ businessId, onLoadTransaction }: Trans
   }
 
 
-  // #region agent log
-  if (typeof fetch === 'function') {
-    fetch('http://127.0.0.1:7242/ingest/7b565785-72b5-49f7-b2c0-57606ea0d0b5', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ location: 'TransactionList.tsx:mainReturn', message: 'TransactionList main return', data: { filteredCount: filteredTransactions.length, isLoading, hasTable: filteredTransactions.length > 0 }, timestamp: Date.now(), sessionId: 'debug-session', hypothesisId: 'H2' }) }).catch(() => { });
-  }
-  // #endregion
   return (
     <div className="flex-1 flex flex-col bg-white h-full w-full min-w-0 overflow-x-hidden">
       <div className="flex-1 flex flex-col w-full min-w-0 max-w-[95%] xl:max-w-[1600px] mx-auto px-4 sm:px-6 py-6">
@@ -1890,6 +1921,11 @@ export default function TransactionList({ businessId, onLoadTransaction }: Trans
               month: 'short',
               year: 'numeric'
             })}
+            {' '}
+            |{' '}
+            <span className="bg-green-600 text-white py-1 pl-2 pr-2 rounded">
+              NET + Pesanan belum dibayar = {formatPrice((reportTotals?.net ?? netCompleted) + netPending)}
+            </span>
           </h1>
 
           {/* Offline/System POS Toggle - Only show for super admin */}
@@ -1916,10 +1952,10 @@ export default function TransactionList({ businessId, onLoadTransaction }: Trans
           )}
         </div>
 
-        {/* Summary Cards — 8 cols: Metode Pembayaran (3), Pengambilan+Voucher (1), Grand Total (2) */}
-        <div className="grid grid-cols-1 md:grid-cols-8 gap-4 mb-1 flex-shrink-0">
-          {/* Payment Methods Card — 2-column layout; width reduced 25% (3 cols) */}
-          <div className="bg-white shadow-sm border border-gray-200 pl-4 pt-4 pb-4 pr-2 md:col-span-3 min-w-0 flex flex-col h-[10.5rem]">
+        {/* Summary Cards — custom 4-track grid: Metode 25% narrower so Grand Total fits on 1366x768; all cards same height */}
+        <div className="grid grid-cols-1 md:grid-cols-[2.25fr_1fr_0.807fr_0.807fr] md:auto-rows-[10.5rem] gap-4 mb-1 flex-shrink-0">
+          {/* Payment Methods Card — first track (2.25fr, was 3fr) */}
+          <div className="bg-white shadow-sm border border-gray-200 pl-4 pt-4 pb-4 pr-2 md:col-span-1 min-w-0 flex flex-col min-h-[10.5rem] md:h-full md:min-h-0">
             <div className="flex items-center gap-2 mb-2 flex-shrink-0 pr-2">
               <div className="w-3 h-3 bg-blue-500 rounded-full"></div>
               <h3 className="font-semibold text-gray-900 text-sm">Metode Pembayaran</h3>
@@ -1949,17 +1985,33 @@ export default function TransactionList({ businessId, onLoadTransaction }: Trans
                     <td className="py-0.5 pr-1 text-gray-600 truncate">Cash</td>
                     <td className="py-0.5 px-0.5 text-right tabular-nums font-medium text-gray-900">{paymentMethodCounts.cash}</td>
                     <td className="py-0.5 pl-0.5 pr-1 text-left tabular-nums font-medium text-gray-900 truncate" title={formatPrice(paymentMethodTotals.cash)}>{formatPrice(paymentMethodTotals.cash)}</td>
+                    <td className="py-0.5 pr-1 text-gray-600 truncate">ShopeeFood</td>
+                    <td className="py-0.5 px-0.5 text-right tabular-nums font-medium text-gray-900">{paymentMethodCounts.shopeefood}</td>
+                    <td className="py-0.5 pl-0.5 pr-1 text-left tabular-nums font-medium text-gray-900 truncate" title={formatPrice(paymentMethodTotals.shopeefood)}>{formatPrice(paymentMethodTotals.shopeefood)}</td>
+                  </tr>
+                  <tr className="border-b border-gray-100">
                     <td className="py-0.5 pr-1 text-gray-600 truncate">Debit</td>
                     <td className="py-0.5 px-0.5 text-right tabular-nums font-medium text-gray-900">{paymentMethodCounts.debit}</td>
-                    <td className="py-0.5 pl-0.5 text-left tabular-nums font-medium text-gray-900 truncate" title={formatPrice(paymentMethodTotals.debit)}>{formatPrice(paymentMethodTotals.debit)}</td>
+                    <td className="py-0.5 pl-0.5 pr-1 text-left tabular-nums font-medium text-gray-900 truncate" title={formatPrice(paymentMethodTotals.debit)}>{formatPrice(paymentMethodTotals.debit)}</td>
+                    <td className="py-0.5 pr-1 text-gray-600 truncate">GrabFood</td>
+                    <td className="py-0.5 px-0.5 text-right tabular-nums font-medium text-gray-900">{paymentMethodCounts.grabfood}</td>
+                    <td className="py-0.5 pl-0.5 pr-1 text-left tabular-nums font-medium text-gray-900 truncate" title={formatPrice(paymentMethodTotals.grabfood)}>{formatPrice(paymentMethodTotals.grabfood)}</td>
                   </tr>
                   <tr className="border-b border-gray-100">
                     <td className="py-0.5 pr-1 text-gray-600 truncate">QR</td>
                     <td className="py-0.5 px-0.5 text-right tabular-nums font-medium text-gray-900">{paymentMethodCounts.qr}</td>
                     <td className="py-0.5 pl-0.5 pr-1 text-left tabular-nums font-medium text-gray-900 truncate" title={formatPrice(paymentMethodTotals.qr)}>{formatPrice(paymentMethodTotals.qr)}</td>
+                    <td className="py-0.5 pr-1 text-gray-600 truncate">TikTok</td>
+                    <td className="py-0.5 px-0.5 text-right tabular-nums font-medium text-gray-900">{paymentMethodCounts.tiktok}</td>
+                    <td className="py-0.5 pl-0.5 pr-1 text-left tabular-nums font-medium text-gray-900 truncate" title={formatPrice(paymentMethodTotals.tiktok)}>{formatPrice(paymentMethodTotals.tiktok)}</td>
+                  </tr>
+                  <tr className="border-b border-gray-100">
                     <td className="py-0.5 pr-1 text-gray-600 truncate">E-Wallet</td>
                     <td className="py-0.5 px-0.5 text-right tabular-nums font-medium text-gray-900">{paymentMethodCounts.ewallet}</td>
-                    <td className="py-0.5 pl-0.5 text-left tabular-nums font-medium text-gray-900 truncate" title={formatPrice(paymentMethodTotals.ewallet)}>{formatPrice(paymentMethodTotals.ewallet)}</td>
+                    <td className="py-0.5 pl-0.5 pr-1 text-left tabular-nums font-medium text-gray-900 truncate" title={formatPrice(paymentMethodTotals.ewallet)}>{formatPrice(paymentMethodTotals.ewallet)}</td>
+                    <td className="py-0.5 pr-1 text-gray-600 truncate">Qpon</td>
+                    <td className="py-0.5 px-0.5 text-right tabular-nums font-medium text-gray-900">{paymentMethodCounts.qpon}</td>
+                    <td className="py-0.5 pl-0.5 text-left tabular-nums font-medium text-gray-900 truncate" title={formatPrice(paymentMethodTotals.qpon)}>{formatPrice(paymentMethodTotals.qpon)}</td>
                   </tr>
                   <tr className="border-b border-gray-100">
                     <td className="py-0.5 pr-1 text-gray-600 truncate">CL</td>
@@ -1967,23 +2019,7 @@ export default function TransactionList({ businessId, onLoadTransaction }: Trans
                     <td className="py-0.5 pl-0.5 pr-1 text-left tabular-nums font-medium text-gray-900 truncate" title={formatPrice(paymentMethodTotals.cl)}>{formatPrice(paymentMethodTotals.cl)}</td>
                     <td className="py-0.5 pr-1 text-gray-600 truncate">GoFood</td>
                     <td className="py-0.5 px-0.5 text-right tabular-nums font-medium text-gray-900">{paymentMethodCounts.gofood}</td>
-                    <td className="py-0.5 pl-0.5 text-left tabular-nums font-medium text-gray-900 truncate" title={formatPrice(paymentMethodTotals.gofood)}>{formatPrice(paymentMethodTotals.gofood)}</td>
-                  </tr>
-                  <tr className="border-b border-gray-100">
-                    <td className="py-0.5 pr-1 text-gray-600 truncate">GrabFood</td>
-                    <td className="py-0.5 px-0.5 text-right tabular-nums font-medium text-gray-900">{paymentMethodCounts.grabfood}</td>
-                    <td className="py-0.5 pl-0.5 pr-1 text-left tabular-nums font-medium text-gray-900 truncate" title={formatPrice(paymentMethodTotals.grabfood)}>{formatPrice(paymentMethodTotals.grabfood)}</td>
-                    <td className="py-0.5 pr-1 text-gray-600 truncate">ShopeeFood</td>
-                    <td className="py-0.5 px-0.5 text-right tabular-nums font-medium text-gray-900">{paymentMethodCounts.shopeefood}</td>
-                    <td className="py-0.5 pl-0.5 text-left tabular-nums font-medium text-gray-900 truncate" title={formatPrice(paymentMethodTotals.shopeefood)}>{formatPrice(paymentMethodTotals.shopeefood)}</td>
-                  </tr>
-                  <tr className="border-b border-gray-100">
-                    <td className="py-0.5 pr-1 text-gray-600 truncate">TikTok</td>
-                    <td className="py-0.5 px-0.5 text-right tabular-nums font-medium text-gray-900">{paymentMethodCounts.tiktok}</td>
-                    <td className="py-0.5 pl-0.5 pr-1 text-left tabular-nums font-medium text-gray-900 truncate" title={formatPrice(paymentMethodTotals.tiktok)}>{formatPrice(paymentMethodTotals.tiktok)}</td>
-                    <td className="py-0.5 pr-1 text-gray-600 truncate">Qpon</td>
-                    <td className="py-0.5 px-0.5 text-right tabular-nums font-medium text-gray-900">{paymentMethodCounts.qpon}</td>
-                    <td className="py-0.5 pl-0.5 text-left tabular-nums font-medium text-gray-900 truncate" title={formatPrice(paymentMethodTotals.qpon)}>{formatPrice(paymentMethodTotals.qpon)}</td>
+                    <td className="py-0.5 pl-0.5 pr-1 text-left tabular-nums font-medium text-gray-900 truncate" title={formatPrice(paymentMethodTotals.gofood)}>{formatPrice(paymentMethodTotals.gofood)}</td>
                   </tr>
                   <tr className="border-b border-gray-100">
                     <td className="py-0.5 pr-1 text-gray-600 truncate">Voucher</td>
@@ -1998,71 +2034,54 @@ export default function TransactionList({ businessId, onLoadTransaction }: Trans
             </div>
           </div>
 
-          {/* One column (50% of previous): Metode Pengambilan above, Voucher below */}
-          <div className="flex flex-col gap-4 md:col-span-1 md:h-[10.5rem]">
-            {/* Pickup Methods Card — compact: smaller font, no line spacing */}
-            <div className="bg-white shadow-sm border border-gray-200 p-3 md:flex-1 md:min-h-0 flex flex-col">
-              <div className="flex items-center gap-1.5 mb-1">
-                <div className="w-2.5 h-2.5 bg-green-500 rounded-full"></div>
-                <h3 className="font-semibold text-gray-900 text-xs leading-tight">Metode Pengambilan</h3>
+          {/* Single card: Dine in / Take away counters + Total diskon */}
+          <div className="bg-white shadow-sm border border-gray-200 p-4 md:col-span-1 min-h-[10.5rem] md:h-full md:min-h-0 flex flex-col min-w-0">
+            <div className="flex items-center gap-2 mb-2">
+              <div className="w-3 h-3 bg-green-500 rounded-full"></div>
+              <h3 className="font-semibold text-gray-900 text-sm">Ringkasan</h3>
+            </div>
+            <div className="space-y-2 text-xs flex-1">
+              <div className="flex justify-between items-baseline">
+                <span className="text-gray-600">Dine in counter</span>
+                <span className="font-medium text-gray-900 tabular-nums">{dineInCount}</span>
               </div>
-              <div className="space-y-0 pb-2">
-                <div className="flex justify-between text-[10px] leading-tight">
-                  <span className="text-gray-600">Dine In</span>
-                  <span className="font-medium text-gray-900">{dineInCount}</span>
-                </div>
-                <div className="flex justify-between text-[10px] leading-tight">
-                  <span className="text-gray-600">Take Away</span>
-                  <span className="font-medium text-gray-900">{takeAwayCount}</span>
-                </div>
+              <div className="flex justify-between items-baseline">
+                <span className="text-gray-600">Take away counter</span>
+                <span className="font-medium text-gray-900 tabular-nums">{takeAwayCount}</span>
               </div>
             </div>
+          </div>
 
-            {/* Voucher Card — compact: smaller font, no line spacing */}
-            <div
-              className="bg-white shadow-sm border border-gray-200 p-3 md:flex-1 md:min-h-0 flex flex-col"
-              onClick={(() => {
-                let clicks = 0;
-                let last = 0;
-                return () => {
-                  const now = Date.now();
-                  if (now - last > 3000) {
-                    clicks = 0;
-                  }
-                  clicks += 1;
-                  last = now;
-                  if (clicks >= 5) {
-                    clicks = 0;
-                    last = 0;
-                    if (process.env.NODE_ENV === 'development') {
-                      // In development, use Next.js router for reliable navigation
-                      router.push('/logs/printing');
-                    } else {
-                      // In production (Electron file://), use window.location
-                      window.location.href = 'logs/printing.html';
-                    }
-                  }
-                };
-              })()}
-              role="button"
-              aria-label="Voucher Card"
-              title="Voucher"
-            >
-              <div className="flex items-center gap-1.5 mb-1">
-                <div className="w-2.5 h-2.5 bg-yellow-500 rounded-full"></div>
-                <h3 className="font-semibold text-gray-900 text-xs leading-tight">Voucher</h3>
-              </div>
-              <div className="space-y-0 pb-2">
-                <div className="flex justify-between text-[10px] leading-tight">
-                  <span className="text-gray-600">Jumlah Voucher</span>
-                  <span className="font-medium text-gray-900">{voucherCount}</span>
-                </div>
-                <div className="flex justify-between text-[10px] leading-tight">
-                  <span className="text-gray-600">Total Diskon</span>
-                  <span className="font-medium text-green-700">{formatPrice(totalVoucherDiscount)}</span>
-                </div>
-              </div>
+          {/* Item Dibatalkan card — before Grand Total; follows current mode (Printer 2 only vs all). Button opens modal. */}
+          <div className="bg-white shadow-sm border border-gray-200 p-4 md:col-span-1 min-h-[10.5rem] md:h-full md:min-h-0 flex flex-col min-w-0">
+            <div className="flex items-center gap-2 mb-2">
+              <div className="w-3 h-3 bg-red-400 rounded-full"></div>
+              <h3 className="font-semibold text-gray-900 text-sm">Item Dibatalkan</h3>
             </div>
+            <div className="flex flex-col gap-1 text-xs flex-1">
+              <div className="flex justify-between items-baseline">
+                <span className="text-gray-600">Jumlah item</span>
+                <span className="font-medium text-gray-900 tabular-nums">
+                  {displayedCancelledItems.reduce((s, i) => s + Number(i.quantity || 0), 0)}
+                </span>
+              </div>
+              <div className="flex justify-between items-baseline">
+                <span className="text-gray-600">Total nilai</span>
+                <span className="font-medium text-red-700 tabular-nums">
+                  {formatPrice(displayedCancelledItems.reduce((s, i) => s + Number(i.total_price || 0), 0))}
+                </span>
+              </div>
+              {displayedCancelledItems.length === 0 && (
+                <span className="text-gray-400 mt-1">Tidak ada</span>
+              )}
+            </div>
+            <button
+              type="button"
+              onClick={(e) => { e.stopPropagation(); setShowCancelledModal(true); }}
+              className="mt-2 w-full py-1.5 px-2 rounded border border-gray-300 bg-gray-50 hover:bg-gray-100 text-gray-700 text-xs font-medium transition-colors"
+            >
+              Lihat pembatalan
+            </button>
           </div>
 
           {/* Grand Total Card — takes remaining width (5 cols) */}
@@ -2072,53 +2091,13 @@ export default function TransactionList({ businessId, onLoadTransaction }: Trans
             totalRefund={reportTotals?.refund ?? refundCompleted}
             totalRevenue={reportTotals ? reportTotals.net + reportTotals.refund : totalRevenueCompleted}
             netAmount={reportTotals?.net ?? netCompleted}
-            pending={{
-              grossAmount: grossPending,
-              totalDiscount: discountPending,
-              totalRefund: refundPending,
-              netAmount: netPending,
-            }}
             totalCustomerUnit={totalCustomerUnit}
             totalTransactionCount={totalTransactionCount}
             onFiveClick={handleFiveClickToggle}
           />
-
-          {/* Item Dibatalkan card — quantity + amount; click opens modal with table */}
-          <div
-            className="bg-white shadow-sm border border-gray-200 p-4 md:col-span-2 md:max-w-[14.5rem] min-h-[10.5rem] flex flex-col cursor-pointer hover:bg-gray-50 transition-colors"
-            onClick={() => cancelledItems.length > 0 && setShowCancelledModal(true)}
-            role="button"
-            tabIndex={0}
-            onKeyDown={(e) => {
-              if ((e.key === 'Enter' || e.key === ' ') && cancelledItems.length > 0) setShowCancelledModal(true);
-            }}
-            title={cancelledItems.length > 0 ? 'Klik untuk lihat detail item dibatalkan' : undefined}
-          >
-            <div className="flex items-center gap-2 mb-2">
-              <div className="w-3 h-3 bg-red-400 rounded-full"></div>
-              <h3 className="font-semibold text-gray-900 text-sm">Item Dibatalkan</h3>
-            </div>
-            <div className="flex flex-col gap-1 text-xs">
-              <div className="flex justify-between items-baseline">
-                <span className="text-gray-600">Jumlah item</span>
-                <span className="font-medium text-gray-900 tabular-nums">
-                  {cancelledItems.reduce((s, i) => s + Number(i.quantity || 0), 0)}
-                </span>
-              </div>
-              <div className="flex justify-between items-baseline">
-                <span className="text-gray-600">Total nilai</span>
-                <span className="font-medium text-red-700 tabular-nums">
-                  {formatPrice(cancelledItems.reduce((s, i) => s + Number(i.total_price || 0), 0))}
-                </span>
-              </div>
-              {cancelledItems.length === 0 && (
-                <span className="text-gray-400 mt-1">Tidak ada</span>
-              )}
-            </div>
-          </div>
         </div>
 
-        {/* Modal: Tabel Item Dibatalkan (same columns as Ganti Shift) */}
+        {/* Modal: Tabel Item Dibatalkan (same columns as Ganti Shift). Shows items for current mode. */}
         {showCancelledModal && createPortal(
           <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/50" onClick={() => setShowCancelledModal(false)} role="dialog" aria-modal="true" aria-labelledby="cancelled-modal-title">
             <div className="bg-white rounded-lg shadow-xl max-w-4xl w-full max-h-[90vh] flex flex-col" onClick={(e) => e.stopPropagation()}>
@@ -2134,15 +2113,15 @@ export default function TransactionList({ businessId, onLoadTransaction }: Trans
                     <tr className="border-b border-gray-200 text-left text-gray-600 font-medium">
                       <th className="py-2 pr-2 whitespace-nowrap">Waktu</th>
                       <th className="py-2 pr-2">Produk</th>
-                      <th className="py-2 pr-2 text-right whitespace-nowrap">Qty</th>
-                      <th className="py-2 pr-2 text-right whitespace-nowrap">Harga</th>
+                      <th className="py-2 pr-2 text-right whitespace-nowrap text-black">Qty</th>
+                      <th className="py-2 pr-2 text-right whitespace-nowrap text-black">Harga</th>
                       <th className="py-2 pr-2 whitespace-nowrap">#Struk</th>
                       <th className="py-2 pr-2">Pelanggan</th>
                       <th className="py-2">Dibatalkan Oleh</th>
                     </tr>
                   </thead>
                   <tbody>
-                    {cancelledItems.map((item, idx) => {
+                    {displayedCancelledItems.map((item, idx) => {
                       const cancelledBy = [item.cancelled_by_user_name, item.cancelled_by_waiter_name]
                         .filter((n) => n && n !== 'Tidak diketahui')
                         .join(' / ') || '–';
@@ -2150,8 +2129,8 @@ export default function TransactionList({ businessId, onLoadTransaction }: Trans
                         <tr key={idx} className="border-b border-gray-100 hover:bg-gray-50">
                           <td className="py-1.5 pr-2 text-gray-700 whitespace-nowrap">{item.cancelled_at ? formatDate(item.cancelled_at) : '–'}</td>
                           <td className="py-1.5 pr-2 text-gray-900">{item.product_name || '–'}</td>
-                          <td className="py-1.5 pr-2 text-right tabular-nums">{item.quantity ?? 0}</td>
-                          <td className="py-1.5 pr-2 text-right tabular-nums">{formatPrice(item.total_price ?? 0)}</td>
+                          <td className="py-1.5 pr-2 text-right tabular-nums text-black">{item.quantity ?? 0}</td>
+                          <td className="py-1.5 pr-2 text-right tabular-nums text-black">{formatPrice(item.total_price ?? 0)}</td>
                           <td className="py-1.5 pr-2 text-gray-700">#{item.receipt_number ?? '–'}</td>
                           <td className="py-1.5 pr-2 text-gray-700">{item.customer_name ?? '–'}</td>
                           <td className="py-1.5 text-gray-700">{cancelledBy}</td>
@@ -2162,8 +2141,8 @@ export default function TransactionList({ businessId, onLoadTransaction }: Trans
                   <tfoot>
                     <tr className="border-t-2 border-gray-200 font-medium text-gray-900">
                       <td colSpan={2} className="py-2 pr-2">Total</td>
-                      <td className="py-2 pr-2 text-right tabular-nums">{cancelledItems.reduce((s, i) => s + Number(i.quantity || 0), 0)}</td>
-                      <td className="py-2 pr-2 text-right tabular-nums">{formatPrice(cancelledItems.reduce((s, i) => s + Number(i.total_price || 0), 0))}</td>
+                      <td className="py-2 pr-2 text-right tabular-nums text-black">{displayedCancelledItems.reduce((s, i) => s + Number(i.quantity || 0), 0)}</td>
+                      <td className="py-2 pr-2 text-right tabular-nums text-black">{formatPrice(displayedCancelledItems.reduce((s, i) => s + Number(i.total_price || 0), 0))}</td>
                       <td colSpan={3} className="py-2" />
                     </tr>
                   </tfoot>
@@ -2876,7 +2855,6 @@ interface GrandTotalCardProps {
   totalRefund: number;
   totalRevenue: number;
   netAmount: number;
-  pending?: PendingTotals;
   totalCustomerUnit: number;
   totalTransactionCount: number;
   onFiveClick: () => void;
@@ -2887,19 +2865,13 @@ function GrandTotalCard({
   totalDiscount,
   totalRefund,
   netAmount,
-  pending,
   totalCustomerUnit,
   totalTransactionCount,
   onFiveClick,
 }: GrandTotalCardProps) {
-  const hasPending =
-    pending &&
-    (pending.grossAmount > 0 || pending.totalDiscount > 0 || pending.totalRefund > 0 || pending.netAmount > 0);
-  const combinedNet = hasPending && pending ? netAmount + pending.netAmount : 0;
-
   return (
     <div
-      className="bg-white shadow-sm border border-gray-200 p-4 md:col-span-2 md:max-w-[14.5rem] cursor-pointer hover:bg-gray-50 transition-colors min-h-[10.5rem] flex flex-col"
+      className="bg-white shadow-sm border border-gray-200 p-4 md:col-span-1 min-w-0 cursor-pointer hover:bg-gray-50 transition-colors min-h-[10.5rem] md:h-full md:min-h-0 flex flex-col"
       onClick={onFiveClick}
       title="Click 5 times to toggle R/RR badge display"
     >
@@ -2933,49 +2905,11 @@ function GrandTotalCard({
               {totalRefund > 0 ? `-${formatPrice(totalRefund)}` : formatPrice(0)}
             </td>
           </tr>
-          <tr className="border-t border-gray-200">
-            <td className="font-semibold text-gray-900 py-1 pr-1 whitespace-nowrap">Net</td>
-            <td className="font-semibold text-gray-900 py-1 pr-0 text-right">:</td>
-            <td className="font-bold text-gray-900 tabular-nums text-right pl-1 py-1">{formatPrice(netAmount)}</td>
+          <tr className="border-t border-gray-200 bg-green-600">
+            <td className="font-semibold text-white py-1 pl-2 pr-1 whitespace-nowrap">Net</td>
+            <td className="font-semibold text-white py-1 pr-0 text-right">:</td>
+            <td className="font-bold text-white tabular-nums text-right pl-1 py-1 pr-2">{formatPrice(netAmount)}</td>
           </tr>
-          {hasPending && pending && (
-            <>
-              <tr className="border-t border-gray-100">
-                <td colSpan={3} className="text-gray-500 py-1 pr-2 font-medium">
-                  Pending
-                </td>
-              </tr>
-              <tr>
-                <td className="text-gray-500 py-0.5 pr-1 pl-1 whitespace-nowrap">Gross</td>
-                <td className="text-gray-500 py-0.5 pr-0 text-right">:</td>
-                <td className="text-gray-600 tabular-nums text-right pl-1">{formatPrice(pending.grossAmount)}</td>
-              </tr>
-              <tr>
-                <td className="text-gray-500 py-0.5 pr-1 pl-1 whitespace-nowrap">Discount</td>
-                <td className="text-gray-500 py-0.5 pr-0 text-right">:</td>
-                <td className="text-gray-600 tabular-nums text-right pl-1">
-                  {pending.totalDiscount > 0 ? `-${formatPrice(pending.totalDiscount)}` : formatPrice(0)}
-                </td>
-              </tr>
-              <tr>
-                <td className="text-gray-500 py-0.5 pr-1 pl-1 whitespace-nowrap">Refund</td>
-                <td className="text-gray-500 py-0.5 pr-0 text-right">:</td>
-                <td className="text-gray-600 tabular-nums text-right pl-1">
-                  {pending.totalRefund > 0 ? `-${formatPrice(pending.totalRefund)}` : formatPrice(0)}
-                </td>
-              </tr>
-              <tr>
-                <td className="text-gray-500 py-0.5 pr-1 pl-1 whitespace-nowrap">Net</td>
-                <td className="text-gray-500 py-0.5 pr-0 text-right">:</td>
-                <td className="font-medium text-gray-600 tabular-nums text-right pl-1">{formatPrice(pending.netAmount)}</td>
-              </tr>
-              <tr className="border-t border-gray-100">
-                <td className="text-gray-500 py-0.5 pr-1 pl-1 font-medium whitespace-nowrap">Combined Net</td>
-                <td className="text-gray-500 py-0.5 pr-0 text-right">:</td>
-                <td className="font-semibold text-gray-900 tabular-nums text-right pl-1">{formatPrice(combinedNet)}</td>
-              </tr>
-            </>
-          )}
           <tr className="border-t border-gray-100">
             <td className="text-gray-600 py-0.5 pr-1 whitespace-nowrap">Txs/CU</td>
             <td className="text-gray-600 py-0.5 pr-0 text-right">:</td>

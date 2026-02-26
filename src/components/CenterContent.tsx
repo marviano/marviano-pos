@@ -863,9 +863,11 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
             const txs = await electronAPI.localDbGetTransactions(businessId, 10000);
             const txArray = Array.isArray(txs) ? txs : [];
             const transaction = txArray.find((tx: unknown) => {
-              if (tx && typeof tx === 'object' && 'uuid_id' in tx) {
-                const t = tx as { uuid_id?: string; id?: string };
-                return (t.uuid_id === item.transactionId) || (t.id === item.transactionId);
+              if (tx && typeof tx === 'object') {
+                const t = tx as { uuid_id?: string; id?: string; receipt_number?: string | number | null };
+                const idMatch = (t.uuid_id === item.transactionId) || (String(t.id) === String(item.transactionId));
+                const receiptMatch = t.receipt_number != null && String(t.receipt_number) === String(item.transactionId);
+                return idMatch || receiptMatch;
               }
               return false;
             }) as Record<string, unknown> | undefined;
@@ -905,9 +907,11 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
               const allTransactions = await electronAPI.localDbGetTransactions(businessId, 10000);
               const transactionsArray = Array.isArray(allTransactions) ? allTransactions : [];
               const transaction = transactionsArray.find((tx: unknown) => {
-                if (tx && typeof tx === 'object' && 'uuid_id' in tx) {
-                  const t = tx as { uuid_id?: string; id?: string };
-                  return (t.uuid_id === item.transactionId) || (t.id === item.transactionId);
+                if (tx && typeof tx === 'object') {
+                  const t = tx as { uuid_id?: string; id?: string; receipt_number?: string | number | null };
+                  const idMatch = (t.uuid_id === item.transactionId) || (String(t.id) === String(item.transactionId));
+                  const receiptMatch = t.receipt_number != null && String(t.receipt_number) === String(item.transactionId);
+                  return idMatch || receiptMatch;
                 }
                 return false;
               }) as Record<string, unknown> | undefined;
@@ -1044,9 +1048,11 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
             const txs = await electronAPI.localDbGetTransactions(businessId, 10000);
             const txArray = Array.isArray(txs) ? txs : [];
             const transaction = txArray.find((tx: unknown) => {
-              if (tx && typeof tx === 'object' && 'uuid_id' in tx) {
-                const t = tx as { uuid_id?: string; id?: string };
-                return (t.uuid_id === item.transactionId) || (t.id === item.transactionId);
+              if (tx && typeof tx === 'object') {
+                const t = tx as { uuid_id?: string; id?: string; receipt_number?: string | number | null };
+                const idMatch = (t.uuid_id === item.transactionId) || (String(t.id) === String(item.transactionId));
+                const receiptMatch = t.receipt_number != null && String(t.receipt_number) === String(item.transactionId);
+                return idMatch || receiptMatch;
               }
               return false;
             }) as Record<string, unknown> | undefined;
@@ -1086,9 +1092,11 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
               const allTransactions = await electronAPI.localDbGetTransactions(businessId, 10000);
               const transactionsArray = Array.isArray(allTransactions) ? allTransactions : [];
               const transaction = transactionsArray.find((tx: unknown) => {
-                if (tx && typeof tx === 'object' && 'uuid_id' in tx) {
-                  const t = tx as { uuid_id?: string; id?: string };
-                  return (t.uuid_id === item.transactionId) || (t.id === item.transactionId);
+                if (tx && typeof tx === 'object') {
+                  const t = tx as { uuid_id?: string; id?: string; receipt_number?: string | number | null };
+                  const idMatch = (t.uuid_id === item.transactionId) || (String(t.id) === String(item.transactionId));
+                  const receiptMatch = t.receipt_number != null && String(t.receipt_number) === String(item.transactionId);
+                  return idMatch || receiptMatch;
                 }
                 return false;
               }) as Record<string, unknown> | undefined;

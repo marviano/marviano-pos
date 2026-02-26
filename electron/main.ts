@@ -4346,9 +4346,45 @@ function createWindows(): void {
 
       let query = `
         SELECT 
-          t.*,
-          GREATEST(0, (t.total_amount - COALESCE(cancelled.total_cancelled, 0))) as total_amount,
-          GREATEST(0, (t.final_amount - COALESCE(cancelled.total_cancelled, 0))) as final_amount,
+          t.id as t_id,
+          t.uuid_id,
+          t.business_id,
+          t.user_id,
+          t.waiter_id,
+          t.shift_uuid,
+          t.payment_method,
+          t.pickup_method,
+          t.voucher_discount,
+          t.voucher_type,
+          t.voucher_value,
+          t.voucher_label,
+          t.amount_received,
+          t.change_amount,
+          t.status,
+          t.created_at,
+          t.updated_at,
+          t.synced_at,
+          t.sync_status,
+          t.sync_attempts,
+          t.last_sync_attempt,
+          t.contact_id,
+          t.customer_name,
+          t.customer_unit,
+          t.note,
+          t.bank_name,
+          t.card_number,
+          t.cl_account_id,
+          t.cl_account_name,
+          t.bank_id,
+          t.transaction_type,
+          t.payment_method_id,
+          t.table_id,
+          t.paid_at,
+          t.checker_printed,
+          t.last_refunded_at,
+          t.receipt_number as t_receipt_number,
+          COALESCE(active.active_total, t.total_amount) as total_amount,
+          GREATEST(0, COALESCE(active.active_total, t.total_amount) - COALESCE(t.voucher_discount, 0)) as final_amount,
           COALESCE(t.uuid_id, t.id) as id,
           CASE 
             WHEN t.created_at IS NOT NULL THEN
@@ -4362,11 +4398,10 @@ function createWindows(): void {
             NULLIF(t.refund_total, 0),
             COALESCE(refund_summary.total_refund, 0)
           ) as refund_total,
-          -- Always recalculate refund_status based on total refund amount vs final_amount (net of cancelled)
           CASE 
             WHEN COALESCE(refund_summary.total_refund, t.refund_total, 0) > 0 THEN
               CASE 
-                WHEN COALESCE(refund_summary.total_refund, t.refund_total, 0) >= ((t.final_amount - COALESCE(cancelled.total_cancelled, 0)) - 0.01) THEN 'full'
+                WHEN COALESCE(refund_summary.total_refund, t.refund_total, 0) >= (GREATEST(0, COALESCE(active.active_total, t.total_amount) - COALESCE(t.voucher_discount, 0)) - 0.01) THEN 'full'
                 ELSE 'partial'
               END
             ELSE 'none'
@@ -4376,11 +4411,11 @@ function createWindows(): void {
           SELECT 
             transaction_id, 
             uuid_transaction_id,
-            SUM(total_price) as total_cancelled
+            SUM(total_price) as active_total
           FROM transaction_items
-          WHERE production_status = 'cancelled'
+          WHERE (production_status IS NULL OR production_status != 'cancelled')
           GROUP BY uuid_transaction_id, transaction_id
-        ) cancelled ON (t.uuid_id = cancelled.uuid_transaction_id OR t.id = cancelled.transaction_id)
+        ) active ON (t.uuid_id = active.uuid_transaction_id OR t.id = active.transaction_id)
         LEFT JOIN (
           SELECT 
             transaction_uuid,
@@ -7413,13 +7448,14 @@ function createWindows(): void {
       }
       const shiftStartMySQL = toMySQLDateTime(shiftStart);
       const shiftEndMySQL = shiftEnd ? toMySQLDateTime(shiftEnd) : null;
+      // total_amount: sum of final_amount (not reduced by cancelled) so Ringkasan Total Omset / Grand Total are not reduced by item dibatalkan
       let statsQuery = `
         SELECT 
           COUNT(*) as order_count,
-          COALESCE(SUM(t.final_amount - COALESCE(cancelled.total_cancelled, 0)), 0) as total_amount,
+          COALESCE(SUM(t.final_amount), 0) as total_amount,
           COALESCE(SUM(
             CASE 
-              WHEN voucher_type = 'free' THEN (t.total_amount - COALESCE(cancelled.total_cancelled, 0))
+              WHEN voucher_type = 'free' THEN t.total_amount
               ELSE COALESCE(voucher_discount, 0)
             END
           ), 0) as total_discount,
@@ -7431,15 +7467,6 @@ function createWindows(): void {
           ), 0) as voucher_count,
           COALESCE(SUM(COALESCE(customer_unit, 0)), 0) as total_cu
         FROM transactions t
-        LEFT JOIN (
-          SELECT 
-            transaction_id, 
-            uuid_transaction_id,
-            SUM(total_price) as total_cancelled
-          FROM transaction_items
-          WHERE production_status = 'cancelled'
-          GROUP BY uuid_transaction_id, transaction_id
-        ) cancelled ON (t.uuid_id = cancelled.uuid_transaction_id OR t.id = cancelled.transaction_id)
         WHERE business_id = ?
         AND status = 'completed'
       `;
@@ -7600,7 +7627,7 @@ function createWindows(): void {
     }
   });
 
-  // Get payment method breakdown (net: final_amount per transaction, after discounts; excludes cancelled/refunded logic is via status = 'completed').
+  // Get payment method breakdown: final amount per transaction (final_amount - cancelled), same as Daftar Transaksi.
   // When shiftUuids (non-empty): all transactions bound to any of those shifts (whole day). When shiftUuid: single shift (all users). Else: userId + time.
   ipcMain.handle('localdb-get-payment-breakdown', async (event, userId: number | null, shiftStart: string, shiftEnd: string | null, businessId: number | null = null, shiftUuid: string | null = null, shiftUuids?: string[]) => {
     try {
@@ -7608,7 +7635,13 @@ function createWindows(): void {
         return [];
       }
 
-      const amountExpr = 'COALESCE(SUM(t.final_amount), 0)';
+      const amountExpr = 'COALESCE(SUM(t.final_amount - COALESCE(cancelled.total_cancelled, 0)), 0)';
+      const cancelledJoin = `
+        LEFT JOIN (
+          SELECT uuid_transaction_id, transaction_id, SUM(total_price) as total_cancelled
+          FROM transaction_items WHERE production_status = 'cancelled'
+          GROUP BY uuid_transaction_id, transaction_id
+        ) cancelled ON (t.uuid_id = cancelled.uuid_transaction_id OR t.id = cancelled.transaction_id)`;
       if (shiftUuids && shiftUuids.length > 0) {
         const query = `
           SELECT 
@@ -7617,6 +7650,7 @@ function createWindows(): void {
             COUNT(t.id) as transaction_count,
             ${amountExpr} as total_amount
           FROM transactions t
+          ${cancelledJoin}
           LEFT JOIN payment_methods pm ON t.payment_method_id = pm.id
           WHERE t.business_id = ? AND t.shift_uuid IN (${shiftUuids.map(() => '?').join(',')}) AND t.status = 'completed'
           GROUP BY t.payment_method_id, pm.name, pm.code ORDER BY transaction_count DESC
@@ -7633,6 +7667,7 @@ function createWindows(): void {
             COUNT(t.id) as transaction_count,
             ${amountExpr} as total_amount
           FROM transactions t
+          ${cancelledJoin}
           LEFT JOIN payment_methods pm ON t.payment_method_id = pm.id
           WHERE t.business_id = ? AND t.shift_uuid = ? AND t.status = 'completed'
           GROUP BY t.payment_method_id, pm.name, pm.code ORDER BY transaction_count DESC
@@ -7652,6 +7687,7 @@ function createWindows(): void {
           COUNT(t.id) as transaction_count,
           ${amountExpr} as total_amount
         FROM transactions t
+        ${cancelledJoin}
         LEFT JOIN payment_methods pm ON t.payment_method_id = pm.id
         WHERE t.business_id = ?
         AND t.created_at >= ?
@@ -7808,10 +7844,18 @@ function createWindows(): void {
         return { cash_shift: 0, cash_whole_day: 0 };
       }
 
-      // Cash sales: gross (total_amount) so Ringkasan Cash Sales matches Payment Method Cash.
+      // Cash sales: final amount (final_amount - cancelled) to match Daftar Transaksi.
+      const cashAmountExpr = 'COALESCE(SUM(t.final_amount - COALESCE(cancelled.total_cancelled, 0)), 0)';
+      const cancelledJoin = `
+        LEFT JOIN (
+          SELECT uuid_transaction_id, transaction_id, SUM(total_price) as total_cancelled
+          FROM transaction_items WHERE production_status = 'cancelled'
+          GROUP BY uuid_transaction_id, transaction_id
+        ) cancelled ON (t.uuid_id = cancelled.uuid_transaction_id OR t.id = cancelled.transaction_id)`;
       let shiftQuery = `
-        SELECT COALESCE(SUM(t.total_amount), 0) as cash_total
+        SELECT ${cashAmountExpr} as cash_total
         FROM transactions t
+        ${cancelledJoin}
         WHERE t.business_id = ?
         AND t.payment_method_id = ?
         AND t.status = 'completed'
@@ -7866,8 +7910,13 @@ function createWindows(): void {
         const dayEnd = new Date(dayEndGMT7.getTime() - gmt7Offset);
 
         wholeDayResult = await executeQueryOne<{ cash_total: number }>(`
-          SELECT COALESCE(SUM(t.total_amount), 0) as cash_total
+          SELECT COALESCE(SUM(t.final_amount - COALESCE(cancelled.total_cancelled, 0)), 0) as cash_total
           FROM transactions t
+          LEFT JOIN (
+            SELECT uuid_transaction_id, transaction_id, SUM(total_price) as total_cancelled
+            FROM transaction_items WHERE production_status = 'cancelled'
+            GROUP BY uuid_transaction_id, transaction_id
+          ) cancelled ON (t.uuid_id = cancelled.uuid_transaction_id OR t.id = cancelled.transaction_id)
           WHERE t.business_id = ?
           AND t.created_at >= ?
           AND t.created_at <= ?
@@ -13042,9 +13091,8 @@ function generateShiftBreakdownHTML(
       ? Number(cashSummaryData.cash_whole_day_refunds ?? cashSummaryData.cash_shift_refunds ?? 0)
       : Number(cashSummaryData.cash_shift_refunds ?? 0);
     // Coerce to number: IPC can send gross_total_omset as string (e.g. "55771000.00244" from number+string concat on frontend)
-    // gross_total_omset includes totalCancelledItemsAmount so Ringkasan can show it as explicit deduction
-    const totalCancelledItemsAmount = (report.cancelledItems || []).reduce((s: number, i: { total_price?: number }) => s + Number(i.total_price || 0), 0);
-    const grossTotalOmsetRaw = report.gross_total_omset ?? (Number(report.statistics.total_amount || 0) + totalRefundsForGrandTotal + effectiveTotalDiscount + totalCancelledItemsAmount);
+    // gross_total_omset = Total Omset before refund & discount (excludes cancelled items)
+    const grossTotalOmsetRaw = report.gross_total_omset ?? (Number(report.statistics.total_amount || 0) + totalRefundsForGrandTotal + effectiveTotalDiscount);
     const grossTotalOmset = Math.round(Number(grossTotalOmsetRaw));
     const cashShiftSales = Number(cashSummaryData.cash_shift_sales ?? cashSummaryData.cash_shift ?? 0) || 0;
     const cashShiftRefunds = Number(cashSummaryData.cash_shift_refunds ?? 0) || 0;
@@ -13095,6 +13143,7 @@ function generateShiftBreakdownHTML(
 
     const refundList = report.refunds || [];
     const cancelledItemsList = report.cancelledItems || [];
+    const totalCancelledItemsAmount = cancelledItemsList.reduce((s: number, i: { total_price?: number }) => s + Number(i.total_price || 0), 0);
     const refundRows = refundList.map((r: PrintableShiftRefundRow) => {
       const txId = r.transaction_uuid_id || r.transaction_uuid || '-';
       const method = formatPlatformLabel(r.payment_method || 'offline');
@@ -13168,12 +13217,6 @@ function generateShiftBreakdownHTML(
             <span class="summary-label">Refund:</span>
             <span class="summary-value">-${formatIntegerId(totalRefundsForGrandTotal)}</span>
           </div>
-          ${totalCancelledItemsAmount > 0 ? `
-          <div class="summary-line summary-line-indent" style="color: #991b1b;">
-            <span class="summary-label">Item Dibatalkan:</span>
-            <span class="summary-value">-${formatIntegerId(Math.round(totalCancelledItemsAmount))}</span>
-          </div>
-          ` : ''}
           <div class="summary-block-voucher">
             <div class="summary-line summary-line-highlight-voucher">
               <span class="summary-label">Diskon Voucher:</span>

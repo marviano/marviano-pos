@@ -198,16 +198,31 @@ const TransactionDetailModal: React.FC<TransactionDetailModalProps> = ({
     return Number.isNaN(calculated) ? 0 : Number(calculated.toFixed(2));
   }, [transaction]);
 
+  // Derive Total Belanja and Total Bayar from non-cancelled items so they stay correct when items are cancelled
+  const { displayTotalBelanja, displayTotalBayar } = useMemo(() => {
+    if (!transaction?.items?.length) {
+      const total = Number(transaction?.total_amount) || 0;
+      const voucher = Number(transaction?.voucher_discount) || 0;
+      return { displayTotalBelanja: total, displayTotalBayar: Math.max(0, total - voucher) };
+    }
+    const subtotalFromItems = transaction.items
+      .filter((i) => (i.production_status || '').toLowerCase() !== 'cancelled')
+      .reduce((sum, i) => sum + (typeof i.total_price === 'number' ? i.total_price : Number(i.total_price) || 0), 0);
+    const voucher = Number(transaction.voucher_discount) || 0;
+    const finalFromItems = Math.max(0, subtotalFromItems - voucher);
+    return {
+      displayTotalBelanja: subtotalFromItems,
+      displayTotalBayar: finalFromItems
+    };
+  }, [transaction]);
+
   const outstandingAmount = useMemo(() => {
     if (!transaction) return 0;
-    const finalAmount = typeof transaction.final_amount === 'number'
-      ? transaction.final_amount
-      : (typeof transaction.final_amount === 'string' ? parseFloat(transaction.final_amount) : 0);
-    const safeFinalAmount = Number.isNaN(finalAmount) ? 0 : finalAmount;
+    const safeFinalAmount = Number.isNaN(displayTotalBayar) ? 0 : displayTotalBayar;
     const safeTotalRefunded = Number.isNaN(totalRefunded) ? 0 : totalRefunded;
     const result = Math.max(0, safeFinalAmount - safeTotalRefunded);
     return Number.isNaN(result) ? 0 : Number(result.toFixed(2));
-  }, [transaction, totalRefunded]);
+  }, [transaction, totalRefunded, displayTotalBayar]);
 
   // Get payment method code from ID or string
   const getPaymentMethodCode = useCallback((transaction: TransactionDetail): string => {
@@ -719,7 +734,7 @@ const TransactionDetailModal: React.FC<TransactionDetailModalProps> = ({
                 <div className="text-center">
                   <p className="text-sm font-medium text-gray-600">Total Belanja</p>
                   <p className="text-xl font-bold text-blue-600">
-                    {formatPrice(transaction.total_amount)}
+                    {formatPrice(displayTotalBelanja)}
                   </p>
                 </div>
                 <div className="text-center">
@@ -736,7 +751,7 @@ const TransactionDetailModal: React.FC<TransactionDetailModalProps> = ({
                 <div className="text-center">
                   <p className="text-sm font-medium text-gray-600">Total Bayar</p>
                   <p className="text-xl font-bold text-green-600">
-                    {formatPrice(transaction.final_amount)}
+                    {formatPrice(displayTotalBayar)}
                   </p>
                 </div>
               </div>
@@ -1202,7 +1217,7 @@ const TransactionDetailModal: React.FC<TransactionDetailModalProps> = ({
                         Total:
                       </td>
                       <td className="py-3 px-3 text-right font-bold text-lg text-gray-900">
-                        {formatPrice(transaction.total_amount)}
+                        {formatPrice(displayTotalBelanja)}
                       </td>
                     </tr>
                   </tfoot>

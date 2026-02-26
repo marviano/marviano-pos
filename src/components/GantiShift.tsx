@@ -1976,8 +1976,7 @@ export default function GantiShift() {
 
           console.log('🖨️ [PRINT WHOLE DAY] Sending to printer...');
 
-          const dayTotalCancelled = (dayReportData.cancelledItems ?? []).reduce((s, i) => s + Number(i.total_price || 0), 0);
-          const dayGrossOmset = Math.round((Number(dayReportData.statistics.total_amount) || 0) + (Number(dayCashRefunds) || 0) + (Number(dayReportData.statistics.total_discount) || 0) + dayTotalCancelled);
+          const dayGrossOmset = Math.round((Number(dayReportData.statistics.total_amount) || 0) + (Number(dayCashRefunds) || 0) + (Number(dayReportData.statistics.total_discount) || 0));
           const result = await electronAPI.printShiftBreakdown({
             user_name: 'Semua Shift',
             shift_start: dayBounds.dayStartUtc,
@@ -2089,8 +2088,7 @@ export default function GantiShift() {
 
           console.log(`🖨️ [PRINT SHIFT ${selection.shiftIndex}] Sending to printer...`);
 
-          const shiftTotalCancelled = (shiftReportData.cancelledItems ?? []).reduce((s, i) => s + Number(i.total_price || 0), 0);
-          const shiftGrossOmset = Math.round((Number(shiftReportData.statistics.total_amount) || 0) + (Number(shiftCashRefunds) || 0) + (Number(shiftReportData.statistics.total_discount) || 0) + shiftTotalCancelled);
+          const shiftGrossOmset = Math.round((Number(shiftReportData.statistics.total_amount) || 0) + (Number(shiftCashRefunds) || 0) + (Number(shiftReportData.statistics.total_discount) || 0));
           const result = await electronAPI.printShiftBreakdown({
             user_name: shift.user_name,
             shift_start: shift.shift_start,
@@ -2219,8 +2217,7 @@ export default function GantiShift() {
         businessId
       );
 
-      const customTotalCancelled = (reportData.cancelledItems ?? []).reduce((s, i) => s + Number(i.total_price || 0), 0);
-      const customGrossOmset = Math.round((Number(reportData.statistics.total_amount) || 0) + (Number(customCashRefunds) || 0) + (Number(reportData.statistics.total_discount) || 0) + customTotalCancelled);
+      const customGrossOmset = Math.round((Number(reportData.statistics.total_amount) || 0) + (Number(customCashRefunds) || 0) + (Number(reportData.statistics.total_discount) || 0));
       const result = await electronAPI.printShiftBreakdown({
         user_name: user?.name || activeShift?.user_name || 'Cashier',
         shift_start: startDateTime,
@@ -2514,14 +2511,11 @@ export default function GantiShift() {
   // Total of cancelled items (sum of total_price) - used for deduction in Category I, II, Paket, Barang Terjual
   const totalCancelledAmount = cancelledItems.reduce((s, i) => s + Number(i.total_price || 0), 0);
 
-  // Gross total omset (before refund, discount, and cancelled-items deduction) for Ringkasan display.
-  // Backend statistics.total_amount is net of cancelled items; we add totalCancelledAmount so the
-  // Ringkasan can show it as an explicit deduction alongside Refund and Diskon Voucher.
+  // Gross total omset (before refund & discount) for Ringkasan. Backend statistics.total_amount is already net of cancelled items.
   const grossTotalOmset =
     (Number(statistics.total_amount) || 0) +
     (Number(totalRefundsActive) || 0) +
-    effectiveTotalDiscount +
-    totalCancelledAmount;
+    effectiveTotalDiscount;
   const totalToppingRevenue = customizationSales.reduce((sum, c) => sum + (c.total_revenue || 0), 0);
 
   return (
@@ -2937,14 +2931,6 @@ export default function GantiShift() {
                           <span className="flex-grow border-b border-dotted border-red-200 mx-2"></span>
                           <span className="text-xs font-bold text-red-700">-{formatRupiah(totalRefundsActive)}</span>
                         </div>
-                        {/* Item Dibatalkan - centralised deduction (alongside Refund, Diskon Voucher) */}
-                        {totalCancelledAmount > 0 && (
-                          <div className="flex items-center py-1 mt-0 rounded px-2 bg-red-50/80 border border-red-200/60 mb-2">
-                              <span className="text-xs font-semibold text-red-800">Item Dibatalkan:</span>
-                              <span className="flex-grow border-b border-dotted border-red-200 mx-2"></span>
-                              <span className="text-xs font-bold text-red-700">-{formatRupiah(totalCancelledAmount)}</span>
-                            </div>
-                          )}
                         {/* Diskon Voucher - own box with green border */}
                         <div className="rounded-lg px-3 py-1.5 mb-2 bg-green-50 border border-green-200/60">
                           <div className="flex items-center py-0.5">
@@ -2966,12 +2952,12 @@ export default function GantiShift() {
                             );
                           })}
                         </div>
-                        {/* Grand total = Total Omset - Refund - Total Item Dibatalkan - Diskon Voucher */}
+                        {/* Grand total = Total Omset - Refund - Diskon Voucher */}
                         <div className="flex items-center py-1.5 rounded-lg px-3 bg-gray-100 border border-gray-200">
                           <span className="text-xs font-bold text-gray-800">Grand Total:</span>
                           <span className="flex-grow border-b border-dotted border-gray-300 mx-2"></span>
                           <span className="text-sm font-bold text-gray-900">
-                            {formatRupiah(Math.max(0, grossTotalOmset - (Number(totalRefundsActive) || 0) - totalCancelledAmount - effectiveTotalDiscount))}
+                            {formatRupiah(Math.max(0, grossTotalOmset - (Number(totalRefundsActive) || 0) - effectiveTotalDiscount))}
                           </span>
                         </div>
                       </div>
