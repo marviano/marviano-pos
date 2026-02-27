@@ -748,7 +748,7 @@ class SmartSyncService {
                   updated_at: cleaned.updated_at ?? cleaned.refunded_at ?? cleaned.created_at,
                 };
               });
-              console.log(`✅ [SMART SYNC] Added ${transactionData.transaction_refunds.length} refund(s) to transaction ${transactionData.id} payload`);
+              console.log(`✅ [SMART SYNC] Added ${rawRefunds.length} refund(s) to transaction ${transactionData.id} payload`);
             }
           } catch (error) {
             console.warn(`⚠️ [SMART SYNC] Failed to fetch transaction refunds for transaction ${transactionData.id}:`, error);
@@ -1017,7 +1017,8 @@ class SmartSyncService {
 
         // Mark as failed (will retry later) - use uuid_id so main process UPDATE matches the row
         const electronAPI = typeof window !== 'undefined' ? (window as { electronAPI?: UnknownRecord }).electronAPI : undefined;
-        const txUuidForFailed = transactionData.uuid_id || transactionData.id || transaction.id;
+        const tx = transaction as UnknownRecord;
+        const txUuidForFailed = tx.uuid_id ?? tx.id ?? transaction.id;
         if (electronAPI?.localDbMarkTransactionFailed && txUuidForFailed) {
           try {
             await (electronAPI.localDbMarkTransactionFailed as (id: string) => Promise<void>)(String(txUuidForFailed));
