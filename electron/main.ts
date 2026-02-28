@@ -4892,7 +4892,11 @@ function createWindows(): void {
   // Get transactions with items and refund summary for 1:1 match check (same detail as Daftar Transaksi showAllTransactions)
   ipcMain.handle('localdb-get-transactions-match-data', async (event, businessId?: number, from?: string, to?: string) => {
     try {
-      let query = `SELECT t.* FROM transactions t WHERE 1=1`;
+      let query = `SELECT t.*,
+        CASE WHEN t.created_at IS NOT NULL THEN
+          ROW_NUMBER() OVER (PARTITION BY DATE(t.created_at), t.business_id ORDER BY t.created_at ASC)
+        ELSE NULL END AS receipt_number
+      FROM transactions t WHERE t.status IN ('completed', 'refunded')`;
       const params: (string | number | null)[] = [];
 
       if (businessId) {
@@ -4910,18 +4914,32 @@ function createWindows(): void {
       const startIso = ensureIsoString(from);
       const endIso = ensureIsoString(to);
 
+      const mysqlStart = startIso ? toMySQLDateTime(startIso) : null;
+      const mysqlEnd = endIso ? toMySQLDateTime(endIso) : null;
       if (startIso) {
         query += ' AND t.created_at >= ?';
-        params.push(toMySQLDateTime(startIso));
+        params.push(mysqlStart);
       }
       if (endIso) {
         query += ' AND t.created_at <= ?';
-        params.push(toMySQLDateTime(endIso));
+        params.push(mysqlEnd);
       }
 
       query += ' ORDER BY t.created_at ASC';
 
       const transactions = await executeQuery(query, params) as any[];
+
+      const txArr = Array.isArray(transactions) ? transactions : [];
+      const createdAts = txArr.map((t: any) => t?.created_at).filter(Boolean);
+      const minCreated = createdAts.length ? createdAts.reduce((a: string, b: string) => (a < b ? a : b)) : null;
+      const maxCreated = createdAts.length ? createdAts.reduce((a: string, b: string) => (a > b ? a : b)) : null;
+      // #region agent log
+      (async () => {
+        try {
+          await fetch('http://127.0.0.1:7495/ingest/20000880-6f22-4a8b-8a8e-250eeb7d84f4', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': '0bbb61' }, body: JSON.stringify({ sessionId: '0bbb61', location: 'main.ts:localdb-get-transactions-match-data', message: 'Local match-data date filter and result bounds', data: { from, to, startIso, endIso, mysqlStart, mysqlEnd, count: txArr.length, minCreated, maxCreated, timezone: 'UTC+7 (WIB) - toMySQLDateTime used for query bounds' }, timestamp: Date.now(), hypothesisId: 'H3,H4' }) });
+        } catch (_e) { /* ignore */ }
+      })();
+      // #endregion
 
       if (!Array.isArray(transactions) || transactions.length === 0) {
         return [];
@@ -4946,28 +4964,47 @@ function createWindows(): void {
         itemsByTx.get(txUuid)!.push(row);
       }
 
-      const refundRows = await executeQuery(
-        `SELECT transaction_uuid, SUM(refund_amount) as refund_total, COUNT(*) as refund_count
+      const refundDetailRows = await executeQuery(
+        `SELECT id, uuid_id, transaction_uuid, refund_amount, refund_type, status, refunded_at, created_at
          FROM transaction_refunds
          WHERE transaction_uuid IN (${placeholders}) AND status IN ('pending', 'completed')
-         GROUP BY transaction_uuid`,
+         ORDER BY transaction_uuid, refunded_at ASC, id ASC`,
         uuidIds
       ) as any[];
 
-      const refundByTx = new Map<string, { refund_total: number; refund_count: number }>();
-      for (const row of refundRows || []) {
-        refundByTx.set(row.transaction_uuid, {
-          refund_total: Number(row.refund_total) || 0,
-          refund_count: Number(row.refund_count) || 0
+      const refundsByTx = new Map<string, any[]>();
+      for (const row of refundDetailRows || []) {
+        const txUuid = row.transaction_uuid;
+        if (!refundsByTx.has(txUuid)) refundsByTx.set(txUuid, []);
+        refundsByTx.get(txUuid)!.push({
+          id: row.id,
+          uuid_id: row.uuid_id,
+          transaction_uuid: row.transaction_uuid,
+          refund_amount: row.refund_amount != null ? Number(row.refund_amount) : 0,
+          refund_type: row.refund_type ?? null,
+          status: row.status ?? null,
+          refunded_at: row.refunded_at,
+          created_at: row.created_at
         });
       }
 
       return transactions.map(t => {
         const txId = t.uuid_id || t.id;
         const items = itemsByTx.get(txId) || [];
-        const refund = refundByTx.get(txId);
-        const refundTotalFromRefunds = refund ? refund.refund_total : 0;
-        const refundCount = refund ? refund.refund_count : 0;
+        const refunds = refundsByTx.get(txId) || [];
+        const refundTotalFromRefunds = refunds.reduce((sum: number, r: any) => sum + (Number(r.refund_amount) || 0), 0);
+        const refundCount = refunds.length;
+
+        let active_total: number | null = null;
+        let cancelled_items_count = 0;
+        for (const it of items) {
+          if (it.production_status === 'cancelled') {
+            cancelled_items_count++;
+          } else {
+            active_total = (active_total ?? 0) + (Number(it.total_price) || 0);
+          }
+        }
+        if (items.length === 0) active_total = t.total_amount != null ? Number(t.total_amount) : null;
 
         return {
           id: txId,
@@ -4979,6 +5016,7 @@ function createWindows(): void {
           payment_method_id: t.payment_method_id ?? null,
           pickup_method: t.pickup_method ?? null,
           total_amount: t.total_amount != null ? Number(t.total_amount) : null,
+          active_total: active_total ?? (t.total_amount != null ? Number(t.total_amount) : null),
           voucher_discount: t.voucher_discount != null ? Number(t.voucher_discount) : 0,
           voucher_type: t.voucher_type ?? null,
           voucher_value: t.voucher_value != null ? Number(t.voucher_value) : null,
@@ -5002,8 +5040,10 @@ function createWindows(): void {
           last_refunded_at: t.last_refunded_at ?? null,
           table_id: t.table_id ?? null,
           items,
+          refunds,
           refund_total_from_refunds: refundTotalFromRefunds,
-          refund_count: refundCount
+          refund_count: refundCount,
+          cancelled_items_count
         };
       });
     } catch (error) {
@@ -12891,7 +12931,7 @@ function generateShiftBreakdownHTML(
   const basePaddingMm = 3;
   const marginAdjust = shiftData.marginAdjustMm ?? 0;
   const clamped = Math.max(-5, Math.min(5, marginAdjust));
-  const leftPaddingMm = (basePaddingMm - clamped).toFixed(2);
+  const leftPaddingMm = (basePaddingMm - clamped + 1).toFixed(2);
   const rightPaddingMm = (basePaddingMm + clamped).toFixed(2);
 
   const formatDateTime = (dateString: string): string => {
@@ -13054,7 +13094,6 @@ function generateShiftBreakdownHTML(
           const quantity = product.total_quantity || 0;
           const baseSubtotal = product.base_subtotal ?? (product.total_subtotal - product.customization_subtotal);
           const unitPrice = quantity > 0 ? baseSubtotal / quantity : 0;
-          const transactionLabel = formatTransactionLabel(product.transaction_type);
           const isBundleItem = Boolean(product.is_bundle_item);
           subQty += quantity;
           if (!isBundleItem) subAmount += baseSubtotal;
@@ -13062,17 +13101,16 @@ function generateShiftBreakdownHTML(
             console.error(`❌ [HTML GEN] Invalid numbers in product: ${product.product_name}`, { quantity, baseSubtotal, unitPrice });
           }
           const productNameDisplay = isBundleItem
-            ? `<span style="font-size: 3.8pt;">(Bundle)</span> ${product.product_name}`
+            ? `<span style="font-size: 8pt;">(Bundle)</span> ${product.product_name}`
             : product.product_name;
           return `
       <tr>
-        <td style="width: 52%; text-align: left; padding: 0.3mm 0;">
+        <td style="width: 52%; text-align: left; padding: 0.3mm 0; font-size: 8pt;">
           <div>${productNameDisplay}</div>
-          <div style="font-size: 6pt; color: #555;">${transactionLabel}</div>
         </td>
-        <td style="width: 12%; text-align: left; padding: 0.3mm 0; font-variant-numeric: tabular-nums;">${quantity}</td>
-        <td style="width: 18%; text-align: left; padding: 0.3mm 0; font-size: 5pt; font-variant-numeric: tabular-nums;">${isBundleItem ? '-' : (isNaN(unitPrice) ? '0' : formatIntegerId(unitPrice))}</td>
-        <td style="width: 18%; text-align: right; padding: 0.3mm 0; font-variant-numeric: tabular-nums;">${isBundleItem ? '-' : (isNaN(baseSubtotal) ? '0' : formatIntegerId(baseSubtotal))}</td>
+        <td style="width: 12%; text-align: left; padding: 0.3mm 0; font-size: 8pt; font-variant-numeric: tabular-nums;">${quantity}</td>
+        <td style="width: 18%; text-align: left; padding: 0.3mm 0; font-size: 8pt; font-variant-numeric: tabular-nums;">${isBundleItem ? '-' : (isNaN(unitPrice) ? '0' : formatIntegerId(unitPrice))}</td>
+        <td style="width: 18%; text-align: right; padding: 0.3mm 0; font-size: 8pt; font-variant-numeric: tabular-nums;">${isBundleItem ? '-' : (isNaN(baseSubtotal) ? '0' : formatIntegerId(baseSubtotal))}</td>
       </tr>
       `;
         } catch (productError) {
@@ -13080,8 +13118,8 @@ function generateShiftBreakdownHTML(
           return `<tr><td colspan="4">Error processing product: ${product?.product_name || 'Unknown'}</td></tr>`;
         }
       }).join('');
-      const subtotalRow = `<tr style="background: #f0f0f0;"><td style="width: 52%; padding: 0.3mm 0; font-size: 6pt; font-weight: 600;">Subtotal</td><td style="width: 12%; text-align: left; font-size: 6pt; padding: 0.3mm 0; font-variant-numeric: tabular-nums;">${subQty}</td><td style="width: 18%; text-align: left; font-size: 5pt; padding: 0.3mm 0;">-</td><td style="width: 18%; text-align: right; font-size: 6pt; padding: 0.3mm 0; font-variant-numeric: tabular-nums;">${formatIntegerId(Math.round(subAmount))}</td></tr>`;
-      const headerRow = `<tr style="background: #e0e0e0;"><td colspan="4" style="padding: 0.5mm 0; font-size: 7pt; font-weight: 700;">${label}</td></tr>`;
+      const subtotalRow = `<tr style="background: #f0f0f0;"><td style="width: 52%; padding: 0.3mm 0; font-size: 8pt; font-weight: 600;">Subtotal</td><td style="width: 12%; text-align: left; font-size: 8pt; padding: 0.3mm 0; font-variant-numeric: tabular-nums;">${subQty}</td><td style="width: 18%; text-align: left; font-size: 8pt; padding: 0.3mm 0;">-</td><td style="width: 18%; text-align: right; font-size: 8pt; padding: 0.3mm 0; font-variant-numeric: tabular-nums;">${formatIntegerId(Math.round(subAmount))}</td></tr>`;
+      const headerRow = `<tr style="background: #e0e0e0;"><td colspan="4" style="padding: 0.5mm 0; font-size: 8pt; font-weight: 700;">${label}</td></tr>`;
       return `<tr><td colspan="4" style="padding: 0;"><table style="width: 100%; border-collapse: collapse; table-layout: fixed;"><colgroup><col style="width: 52%;"><col style="width: 12%;"><col style="width: 18%;"><col style="width: 18%;"></colgroup><tbody>` + headerRow + rows + subtotalRow + `</tbody></table></td></tr>`;
     }).join('');
 
@@ -13304,6 +13342,8 @@ function generateShiftBreakdownHTML(
       return `<tr><td style="font-size: 6pt;">${cancelledTime}</td><td style="font-size: 6pt;">${productName}</td><td class="right" style="font-size: 6pt;">${item.quantity}x</td><td class="right" style="font-size: 6pt;">${priceStr}</td><td style="font-size: 6pt;">#${receipt}</td><td style="font-size: 6pt;">${customer}</td><td style="font-size: 6pt;">${cancelledBy}</td></tr>`;
     }).join('');
 
+    const hasLowerSections = sectionOptions.paymentMethod === true || sectionOptions.categoryI === true || sectionOptions.categoryII === true || sectionOptions.paket === true || sectionOptions.barangTerjual === true || (sectionOptions.toppingSales === true && totalCustomizationRevenue > 0) || refundList.length > 0;
+
     return `
     <div class="report-block">
       <div class="header">
@@ -13364,7 +13404,7 @@ function generateShiftBreakdownHTML(
           </div>
           <div class="summary-line summary-line-highlight">
             <span class="summary-label">Grand Total:</span>
-            <span class="summary-value">${formatIntegerId(Math.max(0, Number(report.statistics.total_amount ?? 0)))}</span>
+            <span class="summary-value">${formatIntegerId(Math.max(0, grossTotalOmset - totalRefundsForGrandTotal - effectiveTotalDiscount))}</span>
           </div>
         </div>
         <div class="summary-subtitle">Kas</div>
@@ -13427,6 +13467,7 @@ function generateShiftBreakdownHTML(
       <div class="divider"></div>
       ` : ''}
 
+      ${hasLowerSections ? '<div class="report-block-larger">' : ''}
       ${sectionOptions.paymentMethod === true ? `
       <div class="section-title">PAYMENT METHOD</div>
       <table>
@@ -13572,7 +13613,7 @@ function generateShiftBreakdownHTML(
 
       ${refundList.length > 0 ? `
       <div class="section-title">REFUND</div>
-      <table>
+      <table class="refund-table">
         <thead>
           <tr>
             <th style="font-size: 6pt;">Transaction ID</th>
@@ -13593,6 +13634,7 @@ function generateShiftBreakdownHTML(
 
       <div class="divider"></div>
       ` : ''}
+      ${hasLowerSections ? '</div>' : ''}
     </div>
     `;
   };
@@ -13656,16 +13698,17 @@ function generateShiftBreakdownHTML(
 <head>
   <meta charset="UTF-8">
   <style>
-    @page { size: 80mm auto; margin: 0; }
+    @page { size: 77mm auto; margin: 0; }
     * { margin: 0; padding: 0; box-sizing: border-box; }
     body {
       font-family: 'Arial', 'Helvetica', sans-serif;
-      width: 42ch;
-      max-width: 42ch;
+      width: 100%;
+      max-width: 77mm;
+      box-sizing: border-box;
       font-size: 8pt;
       font-weight: 500;
       line-height: 1.2;
-      padding: 2mm 0 2mm 0;
+      padding: 2mm ${rightPaddingMm}mm 2mm ${leftPaddingMm}mm;
       word-wrap: break-word;
       overflow-wrap: break-word;
     }
@@ -13810,6 +13853,26 @@ function generateShiftBreakdownHTML(
     }
     .summary-line-indent {
       padding-left: 3mm;
+    }
+    /* From PAYMENT METHOD and below: +1pt font size */
+    .report-block-larger {
+      font-size: 9pt;
+    }
+    .report-block-larger .section-title {
+      font-size: 9pt;
+    }
+    .report-block-larger table {
+      font-size: 8pt;
+    }
+    .report-block-larger th {
+      font-size: 8pt;
+    }
+    .report-block-larger .barang-terjual-note {
+      font-size: 7pt;
+    }
+    .report-block-larger .refund-table th,
+    .report-block-larger .refund-table td {
+      font-size: 7pt !important;
     }
     /* Prevent table headers from repeating on every page */
     @media print {

@@ -302,7 +302,14 @@ export default function SyncManagement() {
     onlyInLocal: string[];
     onlyOnServer: string[];
     matching: number;
-    mismatches: Array<{ uuid: string; fields: string[] }>;
+    mismatches: Array<{
+      uuid: string;
+      fields: string[];
+      details?: Array<{ field: string; pictosValue: string | number; serverValue: string | number }>;
+      itemDiffs?: { countPictos: number; countServer: number; details: string[] };
+      refundDiffs?: { countPictos: number; countServer: number; details: string[] };
+      discountDiffs?: Array<{ field: string; pictosValue: string | number; serverValue: string | number }>;
+    }>;
   } | null>(null);
   const logsEndRef = useRef<HTMLDivElement>(null);
   const gatePasswordInputRef = useRef<HTMLInputElement>(null);
@@ -1460,10 +1467,17 @@ export default function SyncManagement() {
     try {
       const fromIso = normalizeDateInput(resyncFrom, false) ?? resyncFrom;
       const toIso = normalizeDateInput(resyncTo, true) ?? resyncTo;
+      const apiUrl = getApiUrl(`/api/transactions/match-check?business_id=${businessId}&from_date=${encodeURIComponent(fromDate)}&to_date=${encodeURIComponent(toDate)}&from_iso=${encodeURIComponent(fromIso)}&to_iso=${encodeURIComponent(toIso)}&limit=50000`);
+      // #region agent log
+      fetch('http://127.0.0.1:7495/ingest/20000880-6f22-4a8b-8a8e-250eeb7d84f4',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'0bbb61'},body:JSON.stringify({sessionId:'0bbb61',location:'SyncManagement.tsx:handleMatchCheck',message:'Verification date range (client)',data:{resyncFrom,resyncTo,fromDate,toDate,fromIso,toIso,apiUrlSent:apiUrl?.substring(0,120)},timestamp:Date.now(),hypothesisId:'H2,H5'})}).catch(()=>{});
+      const sampleWib = '2026-02-02 10:22:57';
+      const sampleUtc = new Date(Date.UTC(2026,1,2,3,22,57,0)).toISOString().slice(0,19).replace('T',' ');
+      fetch('http://127.0.0.1:7495/ingest/20000880-6f22-4a8b-8a8e-250eeb7d84f4',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'0bbb61'},body:JSON.stringify({sessionId:'0bbb61',location:'SyncManagement.tsx:timezoneAudit',message:'Timezone audit',data:{pictosLocalDb:'UTC+7 (WIB) - electron/mysqlDb toMySQLDateTime',payloadToSalespulse:'UTC - syncUtils convertDateForMySQL uses toISOString()',dateRangeToApi:'UTC - fromIso/toIso are WIB calendar day as UTC bounds',sampleSameInstant:{wib:sampleWib,utc:sampleUtc}},timestamp:Date.now()})}).catch(()=>{});
+      // #endregion
 
       const [localData, serverRes] = await Promise.all([
         electronAPI.localDbGetTransactionsMatchData(businessId, fromIso, toIso) as Promise<UnknownRecord[]>,
-        fetch(getApiUrl(`/api/transactions/match-check?business_id=${businessId}&from_date=${encodeURIComponent(fromDate)}&to_date=${encodeURIComponent(toDate)}&limit=50000`))
+        fetch(apiUrl)
       ]);
 
       if (!serverRes.ok) {
@@ -1475,6 +1489,16 @@ export default function SyncManagement() {
 
       const serverJson = await serverRes.json();
       const serverData: UnknownRecord[] = Array.isArray(serverJson?.transactions) ? serverJson.transactions : [];
+
+      const localCreated = (localData || []).map((t: UnknownRecord) => t.created_at).filter(Boolean);
+      const serverCreated = serverData.map((t: UnknownRecord) => t.created_at).filter(Boolean);
+      const minLocal = localCreated.length ? (localCreated as string[]).reduce((a, b) => (a < b ? a : b)) : null;
+      const maxLocal = localCreated.length ? (localCreated as string[]).reduce((a, b) => (a > b ? a : b)) : null;
+      const minServer = serverCreated.length ? (serverCreated as string[]).reduce((a, b) => (a < b ? a : b)) : null;
+      const maxServer = serverCreated.length ? (serverCreated as string[]).reduce((a, b) => (a > b ? a : b)) : null;
+      // #region agent log
+      fetch('http://127.0.0.1:7495/ingest/20000880-6f22-4a8b-8a8e-250eeb7d84f4',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'0bbb61'},body:JSON.stringify({sessionId:'0bbb61',location:'SyncManagement.tsx:after fetch',message:'Verification result set bounds',data:{localCount:(localData||[]).length,serverCount:serverData.length,minLocal,maxLocal,minServer,maxServer},timestamp:Date.now(),hypothesisId:'H4'})}).catch(()=>{});
+      // #endregion
 
       const localIds = new Set((localData || []).map((t: UnknownRecord) => String(t.uuid_id ?? t.id)));
       const serverIds = new Set(serverData.map((t: UnknownRecord) => String(t.uuid_id ?? t.id)));
@@ -1495,35 +1519,134 @@ export default function SyncManagement() {
       });
 
       const txFields = [
-        'total_amount', 'final_amount', 'refund_total', 'voucher_discount', 'status',
-        'payment_method_id', 'pickup_method', 'customer_name', 'waiter_id', 'user_id', 'shift_uuid',
-        'created_at', 'updated_at', 'paid_at'
+        'total_amount', 'active_total', 'final_amount', 'voucher_discount', 'voucher_type', 'voucher_value', 'voucher_label',
+        'status', 'payment_method', 'payment_method_id', 'pickup_method', 'customer_name', 'customer_unit', 'waiter_id', 'user_id', 'shift_uuid',
+        'created_at', 'updated_at', 'paid_at', 'note', 'receipt_number'
       ];
 
-      const mismatches: Array<{ uuid: string; fields: string[] }> = [];
+      const normalizeVal = (v: unknown): string | number => {
+        if (v == null) return '';
+        if (typeof v === 'number') return Math.round(v * 100) / 100;
+        return String(v).trim();
+      };
+      const num = (v: unknown): number => (typeof v === 'number' && !Number.isNaN(v) ? v : typeof v === 'string' ? parseFloat(v) || 0 : 0);
+      const eqNum = (a: unknown, b: unknown, tol = 0.01) => Math.abs(num(a) - num(b)) <= tol;
+      const datetimeFields = ['created_at', 'updated_at', 'paid_at'];
+      const toTimestamp = (v: unknown): number | null => {
+        if (v == null || v === '') return null;
+        if (typeof v === 'number' && !Number.isNaN(v)) return v < 1e12 ? v * 1000 : v;
+        const d = new Date(v as string | number | Date);
+        return Number.isNaN(d.getTime()) ? null : d.getTime();
+      };
+      const eqDateTime = (a: unknown, b: unknown, tolMs = 2000) => {
+        const ta = toTimestamp(a);
+        const tb = toTimestamp(b);
+        if (ta == null && tb == null) return true;
+        if (ta == null || tb == null) return false;
+        return Math.abs(ta - tb) <= tolMs;
+      };
+
+      const mismatches: Array<{
+        uuid: string;
+        fields: string[];
+        details?: Array<{ field: string; pictosValue: string | number; serverValue: string | number }>;
+        itemDiffs?: { countPictos: number; countServer: number; details: string[] };
+        refundDiffs?: { countPictos: number; countServer: number; details: string[] };
+        discountDiffs?: Array<{ field: string; pictosValue: string | number; serverValue: string | number }>;
+      }> = [];
+
       for (const uuid of commonIds) {
-        const localTx = localByUuid.get(uuid);
-        const serverTx = serverByUuid.get(uuid);
+        const localTx = localByUuid.get(uuid) as Record<string, unknown> | undefined;
+        const serverTx = serverByUuid.get(uuid) as Record<string, unknown> | undefined;
         if (!localTx || !serverTx) continue;
 
         const diffFields: string[] = [];
+        const details: Array<{ field: string; pictosValue: string | number; serverValue: string | number }> = [];
+
         for (const key of txFields) {
-          const l = (localTx as Record<string, unknown>)[key];
-          const s = (serverTx as Record<string, unknown>)[key];
-          const lv = l == null ? '' : (typeof l === 'number' ? l : String(l));
-          const sv = s == null ? '' : (typeof s === 'number' ? s : String(s));
-          if (lv !== sv) diffFields.push(key);
+          const l = localTx[key];
+          const s = serverTx[key];
+          const isDateTime = datetimeFields.includes(key);
+          const looksNumeric = (v: unknown) => typeof v === 'number' || (typeof v === 'string' && v !== '' && !Number.isNaN(parseFloat(v as string)));
+          const isNum = !isDateTime && (looksNumeric(l) || looksNumeric(s) || (l === '' || s === ''));
+          const same = isDateTime ? eqDateTime(l, s) : isNum ? eqNum(l, s) : (normalizeVal(l) === normalizeVal(s));
+          if (!same) {
+            diffFields.push(key);
+            details.push({ field: key, pictosValue: normalizeVal(l), serverValue: normalizeVal(s) });
+          }
+        }
+
+        const localRefund = num(localTx.refund_total_from_refunds ?? localTx.refund_total ?? 0);
+        const serverRefund = num(serverTx.refund_total_from_refunds ?? serverTx.refund_total ?? 0);
+        if (!eqNum(localRefund, serverRefund)) {
+          if (!diffFields.includes('refund_total')) diffFields.push('refund_total');
+          if (!details.some(d => d.field === 'refund_total')) {
+            details.push({ field: 'refund_total', pictosValue: localRefund, serverValue: serverRefund });
+          }
         }
 
         const localItems = Array.isArray(localTx.items) ? localTx.items : [];
         const serverItems = Array.isArray(serverTx.items) ? serverTx.items : [];
-        if (localItems.length !== serverItems.length) diffFields.push('items_count');
+        const localCancelled = num(localTx.cancelled_items_count);
+        const serverCancelled = num(serverTx.cancelled_items_count);
+        let itemDiffs: { countPictos: number; countServer: number; details: string[] } | undefined;
+        if (localItems.length !== serverItems.length || localCancelled !== serverCancelled) {
+          diffFields.push('items_count');
+          const lines = [`Item count: Pictos ${localItems.length}, salespulse ${serverItems.length}`];
+          if (localCancelled !== serverCancelled) {
+            lines.push(`Cancelled items: Pictos ${localCancelled}, salespulse ${serverCancelled}`);
+          }
+          for (let i = 0; i < Math.max(localItems.length, serverItems.length); i++) {
+            const li = localItems[i] as Record<string, unknown> | undefined;
+            const si = serverItems[i] as Record<string, unknown> | undefined;
+            if (!li && si) lines.push(`Item ${i + 1}: missing on Pictos (only on salespulse)`);
+            else if (li && !si) lines.push(`Item ${i + 1}: missing on salespulse (only on Pictos)`);
+            else if (li && si) {
+              const pq = num(li.quantity); const sq = num(si.quantity);
+              const pp = num(li.unit_price); const sp = num(si.unit_price);
+              const pt = num(li.total_price); const st = num(si.total_price);
+              const pStatus = String(li.production_status ?? '');
+              const sStatus = String(si.production_status ?? '');
+              if (!eqNum(pq, sq) || !eqNum(pp, sp) || !eqNum(pt, st) || pStatus !== sStatus) {
+                lines.push(`Item ${i + 1}: qty ${pq} vs ${sq}, price ${pp} vs ${sp}, total ${pt} vs ${st}, status "${pStatus}" vs "${sStatus}"`);
+              }
+            }
+          }
+          itemDiffs = { countPictos: localItems.length, countServer: serverItems.length, details: lines };
+        }
 
-        const localRefund = Number((localTx as Record<string, unknown>).refund_total_from_refunds ?? (localTx as Record<string, unknown>).refund_total ?? 0);
-        const serverRefund = Number((serverTx as Record<string, unknown>).refund_total_from_refunds ?? (serverTx as Record<string, unknown>).refund_total ?? 0);
-        if (Math.abs(localRefund - serverRefund) > 0.01) diffFields.push('refund_total');
+        const localRefunds = Array.isArray(localTx.refunds) ? localTx.refunds : [];
+        const serverRefunds = Array.isArray(serverTx.refunds) ? serverTx.refunds : [];
+        let refundDiffs: { countPictos: number; countServer: number; details: string[] } | undefined;
+        if (localRefunds.length !== serverRefunds.length || !eqNum(localRefund, serverRefund)) {
+          const lines = [`Refund count: Pictos ${localRefunds.length}, salespulse ${serverRefunds.length}`, `Refund total: Pictos ${localRefund}, salespulse ${serverRefund}`];
+          for (let i = 0; i < Math.max(localRefunds.length, serverRefunds.length); i++) {
+            const lr = localRefunds[i] as Record<string, unknown> | undefined;
+            const sr = serverRefunds[i] as Record<string, unknown> | undefined;
+            if (!lr && sr) lines.push(`Refund ${i + 1}: missing on Pictos (only on salespulse) — ${num(sr.refund_amount)} ${sr.refund_type ?? ''}`);
+            else if (lr && !sr) lines.push(`Refund ${i + 1}: missing on salespulse (only on Pictos) — ${num(lr.refund_amount)} ${lr.refund_type ?? ''}`);
+            else if (lr && sr && (!eqNum(lr.refund_amount, sr.refund_amount) || String(lr.refund_type ?? '') !== String(sr.refund_type ?? '') || String(lr.status ?? '') !== String(sr.status ?? ''))) {
+              lines.push(`Refund ${i + 1}: amount ${num(lr.refund_amount)} vs ${num(sr.refund_amount)}, type ${lr.refund_type} vs ${sr.refund_type}, status ${lr.status} vs ${sr.status}`);
+            }
+          }
+          refundDiffs = { countPictos: localRefunds.length, countServer: serverRefunds.length, details: lines };
+        }
 
-        if (diffFields.length > 0) mismatches.push({ uuid, fields: diffFields });
+        const discountFields = ['voucher_discount', 'voucher_type', 'voucher_value', 'voucher_label'];
+        const discountDiffs = discountFields
+          .filter(k => diffFields.includes(k))
+          .map(k => ({ field: k, pictosValue: normalizeVal(localTx[k]), serverValue: normalizeVal(serverTx[k]) }));
+
+        if (diffFields.length > 0) {
+          mismatches.push({
+            uuid,
+            fields: diffFields,
+            details,
+            itemDiffs,
+            refundDiffs,
+            discountDiffs: discountDiffs.length > 0 ? discountDiffs : undefined
+          });
+        }
       }
 
       const matching = commonIds.length - mismatches.length;
@@ -2490,7 +2613,7 @@ WHERE ${baseWhere};`;
               {/* Modal: Match check result */}
               {matchCheckResult && (
                 <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50" onClick={() => setMatchCheckResult(null)} role="dialog" aria-modal="true" aria-labelledby="match-check-title">
-                  <div className="bg-white rounded-xl shadow-xl max-w-lg w-full max-h-[85vh] flex flex-col" onClick={e => e.stopPropagation()}>
+                  <div className="bg-white rounded-xl shadow-xl max-w-2xl w-full max-h-[90vh] flex flex-col" onClick={e => e.stopPropagation()}>
                     <div className="flex items-center justify-between p-4 border-b border-gray-200">
                       <h2 id="match-check-title" className="font-semibold text-gray-900 text-lg">Verifikasi data (Pictos vs salespulse.cc)</h2>
                       <button type="button" onClick={() => setMatchCheckResult(null)} className="p-2 rounded hover:bg-gray-100 text-gray-600" aria-label="Tutup">
@@ -2501,45 +2624,89 @@ WHERE ${baseWhere};`;
                       {matchCheckResult.onlyInLocal.length === 0 && matchCheckResult.onlyOnServer.length === 0 && matchCheckResult.mismatches.length === 0 ? (
                         <p className="text-green-700 font-medium flex items-center gap-2">
                           <CheckCircle className="w-5 h-5 shrink-0" />
-                          Data match 1:1 (sama detail seperti Daftar Transaksi)
+                          Data match 1:1 (transaksi, item, refund, discount sama)
                         </p>
                       ) : (
                         <>
                           <p className="text-gray-700">
-                            <span className="font-medium">Hanya di Pictos (db_host):</span> {matchCheckResult.onlyInLocal.length} transaksi
-                            {matchCheckResult.onlyInLocal.length > 0 && matchCheckResult.onlyInLocal.length <= 10 && (
-                              <span className="block mt-1 text-xs text-gray-500 font-mono truncate">{matchCheckResult.onlyInLocal.join(', ')}</span>
+                            <span className="font-medium">Missing on salespulse.cc (only in Pictos):</span> {matchCheckResult.onlyInLocal.length} transaksi
+                            {matchCheckResult.onlyInLocal.length > 0 && matchCheckResult.onlyInLocal.length <= 15 && (
+                              <span className="block mt-1 text-xs text-gray-500 font-mono break-all">{matchCheckResult.onlyInLocal.join(', ')}</span>
                             )}
-                            {matchCheckResult.onlyInLocal.length > 10 && (
-                              <span className="block mt-1 text-xs text-gray-500">(10 pertama: {matchCheckResult.onlyInLocal.slice(0, 10).join(', ')})</span>
+                            {matchCheckResult.onlyInLocal.length > 15 && (
+                              <span className="block mt-1 text-xs text-gray-500 font-mono">(15 pertama: {matchCheckResult.onlyInLocal.slice(0, 15).join(', ')})</span>
                             )}
                           </p>
                           <p className="text-gray-700">
-                            <span className="font-medium">Hanya di salespulse.cc:</span> {matchCheckResult.onlyOnServer.length} transaksi
-                            {matchCheckResult.onlyOnServer.length > 0 && matchCheckResult.onlyOnServer.length <= 10 && (
-                              <span className="block mt-1 text-xs text-gray-500 font-mono truncate">{matchCheckResult.onlyOnServer.join(', ')}</span>
+                            <span className="font-medium">Missing on Pictos (only in salespulse.cc):</span> {matchCheckResult.onlyOnServer.length} transaksi
+                            {matchCheckResult.onlyOnServer.length > 0 && matchCheckResult.onlyOnServer.length <= 15 && (
+                              <span className="block mt-1 text-xs text-gray-500 font-mono break-all">{matchCheckResult.onlyOnServer.join(', ')}</span>
                             )}
-                            {matchCheckResult.onlyOnServer.length > 10 && (
-                              <span className="block mt-1 text-xs text-gray-500">(10 pertama: {matchCheckResult.onlyOnServer.slice(0, 10).join(', ')})</span>
+                            {matchCheckResult.onlyOnServer.length > 15 && (
+                              <span className="block mt-1 text-xs text-gray-500 font-mono">(15 pertama: {matchCheckResult.onlyOnServer.slice(0, 15).join(', ')})</span>
                             )}
                           </p>
                           <p className="text-gray-700">
                             <span className="font-medium">Sama (match):</span> {matchCheckResult.matching} transaksi
                           </p>
                           {matchCheckResult.mismatches.length > 0 && (
-                            <p className="text-gray-700">
-                              <span className="font-medium">Beda field (uuid):</span> {matchCheckResult.mismatches.length} transaksi
-                              <ul className="mt-2 list-disc list-inside text-xs text-gray-600 space-y-1 max-h-40 overflow-auto">
-                                {matchCheckResult.mismatches.slice(0, 20).map((m, i) => (
-                                  <li key={i} className="truncate" title={m.uuid}>
-                                    {m.uuid}: {m.fields.join(', ')}
+                            <div className="text-gray-700">
+                              <span className="font-medium">Different data (same UUID, beda field/item/refund/discount):</span> {matchCheckResult.mismatches.length} transaksi
+                              <ul className="mt-2 space-y-3 max-h-[50vh] overflow-auto list-none pl-0">
+                                {matchCheckResult.mismatches.slice(0, 30).map((m, i) => (
+                                  <li key={i} className="border border-gray-200 rounded-lg p-2 bg-gray-50">
+                                    <div className="font-mono text-xs text-gray-600 truncate" title={m.uuid}>{m.uuid}</div>
+                                    <div className="text-xs text-gray-500 mt-1">Fields: {m.fields.join(', ')}</div>
+                                    {m.details && m.details.length > 0 && (
+                                      <div className="mt-1.5 text-xs">
+                                        <span className="font-medium text-gray-600">Detail:</span>
+                                        <ul className="list-disc list-inside mt-0.5 space-y-0.5">
+                                          {m.details.slice(0, 10).map((d, j) => (
+                                            <li key={j}>{d.field}: Pictos=<span className="font-mono">{String(d.pictosValue)}</span> vs salespulse=<span className="font-mono">{String(d.serverValue)}</span></li>
+                                          ))}
+                                          {m.details.length > 10 && <li className="text-gray-400">... +{m.details.length - 10} more</li>}
+                                        </ul>
+                                      </div>
+                                    )}
+                                    {m.itemDiffs && (
+                                      <div className="mt-1.5 text-xs">
+                                        <span className="font-medium text-amber-700">Items:</span>
+                                        <ul className="list-disc list-inside mt-0.5 space-y-0.5 text-gray-600">
+                                          {m.itemDiffs.details.slice(0, 5).map((line, j) => (
+                                            <li key={j}>{line}</li>
+                                          ))}
+                                          {m.itemDiffs.details.length > 5 && <li className="text-gray-400">... +{m.itemDiffs.details.length - 5} more</li>}
+                                        </ul>
+                                      </div>
+                                    )}
+                                    {m.refundDiffs && (
+                                      <div className="mt-1.5 text-xs">
+                                        <span className="font-medium text-red-700">Refunds:</span>
+                                        <ul className="list-disc list-inside mt-0.5 space-y-0.5 text-gray-600">
+                                          {m.refundDiffs.details.slice(0, 5).map((line, j) => (
+                                            <li key={j}>{line}</li>
+                                          ))}
+                                          {m.refundDiffs.details.length > 5 && <li className="text-gray-400">... +{m.refundDiffs.details.length - 5} more</li>}
+                                        </ul>
+                                      </div>
+                                    )}
+                                    {m.discountDiffs && m.discountDiffs.length > 0 && (
+                                      <div className="mt-1.5 text-xs">
+                                        <span className="font-medium text-blue-700">Discount:</span>
+                                        <ul className="list-disc list-inside mt-0.5 text-gray-600">
+                                          {m.discountDiffs.map((d, j) => (
+                                            <li key={j}>{d.field}: Pictos={String(d.pictosValue)} vs salespulse={String(d.serverValue)}</li>
+                                          ))}
+                                        </ul>
+                                      </div>
+                                    )}
                                   </li>
                                 ))}
-                                {matchCheckResult.mismatches.length > 20 && (
-                                  <li className="text-gray-500">... dan {matchCheckResult.mismatches.length - 20} lainnya</li>
+                                {matchCheckResult.mismatches.length > 30 && (
+                                  <li className="text-gray-500 text-xs">... dan {matchCheckResult.mismatches.length - 30} lainnya</li>
                                 )}
                               </ul>
-                            </p>
+                            </div>
                           )}
                         </>
                       )}

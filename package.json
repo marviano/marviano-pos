@@ -14,6 +14,7 @@
     "electron-dev": "cross-env PORT=3000 concurrently -n \"NEXT,ELECTRON\" -c \"blue,green\" \"cross-env PORT=3000 node scripts/dev-server-filter.js\" \"wait-on http://localhost:3000 && electron .\"",
     "electron-dev:3001": "cross-env PORT=3001 concurrently \"cross-env PORT=3001 npm run dev\" \"wait-on http://localhost:3001 && electron .\"",
     "electron-dev:3002": "cross-env PORT=3002 concurrently \"cross-env PORT=3002 npm run dev\" \"wait-on http://localhost:3002 && electron .\"",
+    "electron-dev:3301": "cross-env PORT=3301 concurrently \"cross-env PORT=3301 npm run dev\" \"wait-on http://localhost:3301 && electron .\"",
     "electron-pack": "npm run build && electron-builder",
     "build-electron": "tsc -p electron/tsconfig.json",
     "dist": "npm run build-electron && npm run build && node scripts/fix-nested-html-paths.js && electron-builder --publish=never",
