@@ -373,16 +373,11 @@ export default function SyncManagement() {
 
   useEffect(() => {
     const checkPendingTransactions = async () => {
-      const electronAPI = getElectronAPI();
-      if (!electronAPI?.localDbGetUnsyncedTransactions) {
-        return;
-      }
       try {
-        const pending = await electronAPI.localDbGetUnsyncedTransactions();
-        // Pending count is now managed by syncStatus state
-        console.log('Pending transactions:', Array.isArray(pending) ? pending.length : 0);
+        const count = await smartSyncService.getPendingTransactionCount();
+        setSyncStatus(prev => (prev.pendingTransactions === count ? prev : { ...prev, pendingTransactions: count }));
       } catch (error) {
-        console.warn('Failed to get pending transactions:', error);
+        console.warn('Failed to get pending transaction count:', error);
       }
     };
 
@@ -2526,7 +2521,7 @@ WHERE ${baseWhere};`;
               </div>
 
               {/* Re-sync Transaction Controls */}
-              <div className="flex gap-2 items-stretch bg-gray-50 p-1.5 rounded-xl border border-gray-200 min-h-[10rem]">
+              <div className="flex gap-2 items-stretch bg-gray-50 p-1.5 rounded-xl border border-gray-200 h-24">
                 <div className="flex flex-col justify-center gap-1.5 px-0.5">
                   <div className="flex flex-col gap-0.5">
                     <label className="text-[9px] text-gray-500 font-semibold uppercase tracking-wider">Dari</label>
@@ -2548,12 +2543,12 @@ WHERE ${baseWhere};`;
                   </div>
                 </div>
 
-                <div className="flex flex-col gap-1 h-full">
+                <div className="flex flex-col gap-1 h-full min-h-0">
                   <button
                     onClick={handleResyncAllTransactions}
                     disabled={syncStatus.syncInProgress || isResyncing}
                     className={`
-                      flex-1 w-24 flex flex-col items-center justify-center gap-1 py-1 px-1 rounded-lg font-medium transition-all text-[10px] shrink-0 shadow-sm
+                      flex-1 min-h-0 w-24 flex flex-row items-center justify-center gap-1 py-0.5 px-1 rounded-lg font-medium transition-all text-[8px] shadow-sm
                       ${syncStatus.syncInProgress || isResyncing
                         ? 'bg-gray-400 text-white cursor-not-allowed'
                         : 'bg-green-600 hover:bg-green-700 text-white'
@@ -2563,11 +2558,11 @@ WHERE ${baseWhere};`;
                   >
                     {isResyncing ? (
                       <>
-                        <RefreshCw className="w-5 h-5 animate-spin shrink-0" />
-                        <div className="flex flex-col items-center gap-0 leading-tight">
-                          <span className="font-semibold text-[10px]">Re-syncing...</span>
+                        <RefreshCw className="w-3.5 h-3.5 shrink-0 animate-spin" />
+                        <div className="flex flex-col items-start gap-0 leading-tight min-w-0">
+                          <span className="font-semibold text-[8px]">Re-syncing...</span>
                           {resyncProgress && (
-                            <span className="text-[9px] opacity-90 leading-tight font-mono mt-0.5 bg-green-700/50 px-1 rounded">
+                            <span className="text-[6px] opacity-90 leading-tight font-mono mt-0.5 bg-green-700/50 px-0.5 rounded">
                               {resyncProgress.current} / {resyncProgress.total}
                             </span>
                           )}
@@ -2575,9 +2570,10 @@ WHERE ${baseWhere};`;
                       </>
                     ) : (
                       <>
-                        <RefreshCw className="w-5 h-5 shrink-0" />
-                        <div className="flex flex-col items-center gap-0 leading-tight text-center">
-                          <span className="font-bold text-[10px] leading-tight">Upsert salespulse.cc</span>
+                        <RefreshCw className="w-3.5 h-3.5 shrink-0" />
+                        <div className="flex flex-col items-start gap-0 leading-tight text-left">
+                          <span className="font-bold text-[8px] leading-tight">Upsert</span>
+                          <span className="font-bold text-[8px] leading-tight">salespulse.cc</span>
                         </div>
                       </>
                     )}
@@ -2587,7 +2583,7 @@ WHERE ${baseWhere};`;
                     onClick={handleMatchCheck}
                     disabled={syncStatus.syncInProgress || isResyncing || isMatchChecking || !resyncFrom || !resyncTo}
                     className={`
-                      flex-1 w-24 flex flex-col items-center justify-center gap-0.5 py-1 px-1 rounded-lg font-medium transition-all text-[10px] shrink-0 shadow-sm
+                      flex-1 min-h-0 w-24 flex flex-col items-center justify-center gap-0 py-0.5 px-1 rounded-lg font-medium transition-all text-[10px] shadow-sm
                       ${isMatchChecking || !resyncFrom || !resyncTo
                         ? 'bg-gray-300 text-gray-500 cursor-not-allowed'
                         : 'bg-blue-600 hover:bg-blue-700 text-white'

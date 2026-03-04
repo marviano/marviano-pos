@@ -206,7 +206,7 @@ interface ElectronTransactionItem {
 
 // Type for window.electronAPI
 interface ElectronAPI {
-  localDbGetTransactions: (businessId: number, limit: number) => Promise<ElectronTransaction[]>;
+  localDbGetTransactions: (businessId: number, limit: number, options?: { todayOnly?: boolean; from?: string; to?: string }) => Promise<ElectronTransaction[]>;
   localDbGetTransactionItems: (transactionId: string) => Promise<ElectronTransactionItem[]>;
   localDbGetTransactionRefunds: (transactionId: string) => Promise<TransactionRefund[]>;
   localDbGetAllProducts: (businessId?: number) => Promise<ElectronProduct[]>;
@@ -285,6 +285,7 @@ export default function TransactionList({ businessId, onLoadTransaction }: Trans
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [searchTerm, setSearchTerm] = useState('');
+  const [appliedSearchTerm, setAppliedSearchTerm] = useState(''); // Applied only when user clicks Cari
   const [filterMethod, setFilterMethod] = useState<string>('all');
   const [amountFrom, setAmountFrom] = useState<string>('');
   const [amountTo, setAmountTo] = useState<string>('');
@@ -464,6 +465,13 @@ export default function TransactionList({ businessId, onLoadTransaction }: Trans
 
   const [fromDate, setFromDate] = useState<string>(getTodayUTC7());
   const [toDate, setToDate] = useState<string>(getTodayUTC7());
+  // Applied filter state — used for fetch and list filter only when user clicks Cari
+  const [appliedFromDate, setAppliedFromDate] = useState<string>(getTodayUTC7());
+  const [appliedToDate, setAppliedToDate] = useState<string>(getTodayUTC7());
+  const [appliedFilterMethod, setAppliedFilterMethod] = useState<string>('all');
+  const [appliedAmountFrom, setAppliedAmountFrom] = useState<string>('');
+  const [appliedAmountTo, setAppliedAmountTo] = useState<string>('');
+  const [appliedShiftFilterUuid, setAppliedShiftFilterUuid] = useState<string>('');
   const [selectedTransaction, setSelectedTransaction] = useState<TransactionDetail | null>(null);
   const [isDetailModalOpen, setIsDetailModalOpen] = useState(false);
   const [isLoadingDetail, setIsLoadingDetail] = useState(false);
@@ -803,8 +811,8 @@ export default function TransactionList({ businessId, onLoadTransaction }: Trans
     }
 
     try {
-      // Try with date range first
-      let response = await electronAPI.getPrinter2AuditLog(fromDate, toDate, 2000);
+      // Try with date range first (use applied range — same as fetch)
+      let response = await electronAPI.getPrinter2AuditLog(appliedFromDate, appliedToDate, 2000);
       let entries = Array.isArray(response?.entries) ? response.entries : [];
 
       // If no results with date filter, try without date filter (fallback)
@@ -845,7 +853,7 @@ export default function TransactionList({ businessId, onLoadTransaction }: Trans
       console.error('Failed to fetch Receiptize audit log:', err);
       return { success: false, ids: new Set<string>(), counters: {} };
     }
-  }, [fromDate, toDate]);
+  }, [appliedFromDate, appliedToDate]);
 
   // Fetch original Receipt counters from Printer1 audit log (same logic as reprint)
   const fetchReceiptPrintedIds = useCallback(async (): Promise<ReceiptFetchResult> => {
@@ -856,8 +864,8 @@ export default function TransactionList({ businessId, onLoadTransaction }: Trans
     }
 
     try {
-      // Try with date range first
-      let response = await electronAPI.getPrinter1AuditLog(fromDate, toDate, 2000);
+      // Try with date range first (use applied range — same as fetch)
+      let response = await electronAPI.getPrinter1AuditLog(appliedFromDate, appliedToDate, 2000);
       let entries = Array.isArray(response?.entries) ? response.entries : [];
 
       // If no results with date filter, try without date filter (fallback)
@@ -893,7 +901,7 @@ export default function TransactionList({ businessId, onLoadTransaction }: Trans
       console.error('Failed to fetch Receipt audit log:', err);
       return { success: false, counters: {} };
     }
-  }, [fromDate, toDate]);
+  }, [appliedFromDate, appliedToDate]);
 
   // Fetch transactions function
   const fetchTransactions = useCallback(async (): Promise<boolean> => {
@@ -910,10 +918,10 @@ export default function TransactionList({ businessId, onLoadTransaction }: Trans
       const electronAPI = (window as { electronAPI: ElectronAPI }).electronAPI;
       const useSystemPos = isSystemPosMode;
 
-      // Fetch from appropriate database
+      // Fetch from appropriate database (pass date range so backend returns only that range — faster first load)
       const dbTransactions: ElectronTransaction[] = useSystemPos && electronAPI.localDbGetSystemPosTransactions
         ? await electronAPI.localDbGetSystemPosTransactions(effectiveBusinessId, 50000)
-        : await electronAPI.localDbGetTransactions(effectiveBusinessId, 50000);
+        : await electronAPI.localDbGetTransactions(effectiveBusinessId, 50000, { from: appliedFromDate, to: appliedToDate });
 
       // Get users and businesses to show actual names (fetch once for all transactions)
       // Fetch from appropriate database based on mode
@@ -928,12 +936,12 @@ export default function TransactionList({ businessId, onLoadTransaction }: Trans
       // Filter by date range - need to convert to local date for accurate filtering
       // This ensures we only show transactions within the selected date range
       const dateFilteredTransactions = dbTransactions.filter((tx) => {
-        // Convert UTC to local date for accurate filtering
+        // Convert UTC to local date for accurate filtering (backend already filters by applied range; this is a safety net)
         const localDate = new Date(tx.created_at);
         const localDateString = localDate.getFullYear() + '-' +
           String(localDate.getMonth() + 1).padStart(2, '0') + '-' +
           String(localDate.getDate()).padStart(2, '0');
-        const isInRange = localDateString >= fromDate && localDateString <= toDate;
+        const isInRange = localDateString >= appliedFromDate && localDateString <= appliedToDate;
         return isInRange;
       });
 
@@ -1019,11 +1027,11 @@ export default function TransactionList({ businessId, onLoadTransaction }: Trans
       // #endregion
 
       // Fetch shifts for date range to build shift labels (Shift 1, Shift 2, ...)
-      // Only show shifts that fall within the selected date range
+      // Only show shifts that fall within the applied date range
       if (!useSystemPos && electronAPI.localDbGetShifts) {
         try {
-          const startDate = fromDate + 'T00:00:00.000Z';
-          const endDate = toDate + 'T23:59:59.999Z';
+          const startDate = appliedFromDate + 'T00:00:00.000Z';
+          const endDate = appliedToDate + 'T23:59:59.999Z';
           const { shifts } = await electronAPI.localDbGetShifts({
             businessId: effectiveBusinessId,
             startDate,
@@ -1038,8 +1046,8 @@ export default function TransactionList({ businessId, onLoadTransaction }: Trans
               const activeShift = (activeRes as { shift?: { uuid_id?: string; shift_start?: string } })?.shift;
               if (activeShift?.uuid_id && !allShifts.some((s) => s.uuid_id === activeShift.uuid_id)) {
                 const activeStart = activeShift.shift_start ? new Date(activeShift.shift_start) : null;
-                const rangeStart = new Date(fromDate + 'T00:00:00');
-                const rangeEnd = new Date(toDate + 'T23:59:59');
+                const rangeStart = new Date(appliedFromDate + 'T00:00:00');
+                const rangeEnd = new Date(appliedToDate + 'T23:59:59');
                 if (activeStart && activeStart >= rangeStart && activeStart <= rangeEnd) {
                   allShifts.push(activeShift as (typeof allShifts)[0]);
                 }
@@ -1065,8 +1073,8 @@ export default function TransactionList({ businessId, onLoadTransaction }: Trans
             byDate.get(key)!.push(s);
           }
           for (const [dateKey, dayShifts] of byDate) {
-            // Only include shifts whose date falls within the selected date range
-            if (dateKey < fromDate || dateKey > toDate) continue;
+            // Only include shifts whose date falls within the applied date range
+            if (dateKey < appliedFromDate || dateKey > appliedToDate) continue;
             const isToday = dateKey === todayGmt7;
             const dateObj = new Date(dateKey + 'T12:00:00');
             const filterDateLabel = isToday
@@ -1119,8 +1127,8 @@ export default function TransactionList({ businessId, onLoadTransaction }: Trans
         message: errorMessage,
         isSystemPosMode,
         businessId: effectiveBusinessId,
-        fromDate,
-        toDate
+        fromDate: appliedFromDate,
+        toDate: appliedToDate
       });
       // Set empty array on error to show empty state
       setTransactions([]);
@@ -1128,61 +1136,24 @@ export default function TransactionList({ businessId, onLoadTransaction }: Trans
     } finally {
       setIsLoading(false);
     }
-  }, [isSystemPosMode, fromDate, toDate, effectiveBusinessId, fetchReceiptizePrintedIds, fetchReceiptPrintedIds, canViewUserDataOnly, canViewAllData, canViewPastData, user]);
+  }, [isSystemPosMode, appliedFromDate, appliedToDate, effectiveBusinessId, fetchReceiptizePrintedIds, fetchReceiptPrintedIds, canViewUserDataOnly, canViewAllData, canViewPastData, user]);
 
   // Fetch report totals (same as Penjualan Produk) so Grand Total card matches that tab.
-  // Only use report totals in System POS mode; in Offline/default mode use list-derived totals (filtered by current mode).
+  // Offline mode: use list-derived totals only (reportTotals = null).
+  // System POS mode: also use list-derived totals from system_pos transaction list (do NOT use main DB product sales/refund).
   useEffect(() => {
-    if (!isSystemPosMode || !effectiveBusinessId || !fromDate || !toDate) {
-      setReportTotals(null);
-      // #region agent log
-      if (typeof fetch === 'function') {
-        fetch('http://127.0.0.1:7242/ingest/ede2961e-f205-45b6-9c27-3e60ff143b09', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': 'a09730' }, body: JSON.stringify({ sessionId: 'a09730', location: 'TransactionList.tsx:reportTotalsEffect', message: 'reportTotals cleared', data: { isSystemPosMode, reason: !isSystemPosMode ? 'offline' : 'missing deps' }, timestamp: Date.now(), hypothesisId: 'H1' }) }).catch(() => {});
-      }
-      // #endregion
-      return;
-    }
-    const electronAPI = (typeof window !== 'undefined' ? (window as { electronAPI?: ElectronAPI }).electronAPI : undefined);
-    if (!electronAPI?.localDbGetProductSales || !electronAPI?.localDbGetRefundTotal) {
+    if (!effectiveBusinessId || !appliedFromDate || !appliedToDate) {
       setReportTotals(null);
       return;
     }
-    let cancelled = false;
-    const startDateTime = `${fromDate}T00:00:00`;
-    const endDateTime = `${toDate}T23:59:59`;
-    Promise.all([
-      electronAPI.localDbGetProductSales(null, startDateTime, endDateTime, effectiveBusinessId),
-      electronAPI.localDbGetRefundTotal(effectiveBusinessId, startDateTime, endDateTime),
-    ])
-      .then(([result, refundTotal]) => {
-        if (cancelled) return;
-        const products = (result?.products ?? []) as Array<{ total_subtotal?: number; total_subtotal_after_refund?: number }>;
-        const gross = products.reduce((s, p) => s + (Number(p.total_subtotal) || 0), 0);
-        const afterRefund = products.reduce(
-          (s, p) => s + (Number(p.total_subtotal_after_refund) ?? Number(p.total_subtotal) ?? 0),
-          0
-        );
-        const discount = Math.max(0, gross - afterRefund);
-        const refund = typeof refundTotal === 'number' ? refundTotal : 0;
-        const net = Math.max(0, afterRefund - refund);
-        setReportTotals({ gross, discount, refund, net });
-        // #region agent log
-        if (typeof fetch === 'function') {
-          fetch('http://127.0.0.1:7242/ingest/ede2961e-f205-45b6-9c27-3e60ff143b09', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': 'a09730' }, body: JSON.stringify({ sessionId: 'a09730', location: 'TransactionList.tsx:reportTotalsSet', message: 'reportTotals set from API', data: { isSystemPosMode, gross, net, refund }, timestamp: Date.now(), hypothesisId: 'H1' }) }).catch(() => {});
-        }
-        // #endregion
-      })
-      .catch(() => {
-        if (!cancelled) setReportTotals(null);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [isSystemPosMode, fromDate, toDate, effectiveBusinessId]);
+    // In both Offline and System POS, Grand Total card uses list-derived totals (filteredTransactions).
+    // Main DB report APIs (product sales, refund total) are for Penjualan Produk tab only; do not drive the card here.
+    setReportTotals(null);
+  }, [isSystemPosMode, appliedFromDate, appliedToDate, effectiveBusinessId]);
 
   // Fetch cancelled items for date range (for Item Dibatalkan card)
   useEffect(() => {
-    if (!effectiveBusinessId || !fromDate || !toDate) {
+    if (!effectiveBusinessId || !appliedFromDate || !appliedToDate) {
       setCancelledItems([]);
       return;
     }
@@ -1191,13 +1162,13 @@ export default function TransactionList({ businessId, onLoadTransaction }: Trans
       setCancelledItems([]);
       return;
     }
-    const startDateTime = `${fromDate}T00:00:00`;
-    const endDateTime = `${toDate}T23:59:59`;
+    const startDateTime = `${appliedFromDate}T00:00:00`;
+    const endDateTime = `${appliedToDate}T23:59:59`;
     electronAPI
       .localDbGetShiftCancelledItems(null, startDateTime, endDateTime, effectiveBusinessId)
       .then((rows) => setCancelledItems(Array.isArray(rows) ? rows : []))
       .catch(() => setCancelledItems([]));
-  }, [effectiveBusinessId, fromDate, toDate]);
+  }, [effectiveBusinessId, appliedFromDate, appliedToDate]);
 
   // Fetch shifts for Bind to Shift modal (super admin only)
   useEffect(() => {
@@ -1495,30 +1466,32 @@ export default function TransactionList({ businessId, onLoadTransaction }: Trans
     lastGrandTotalClickRef.current = now;
   }, []);
 
-  const handleRefresh = useCallback(async () => {
-    const success = await fetchTransactions();
-    if (!success) {
-      return;
-    }
+  // Apply filters and refetch (Cari). Setting applied state triggers useEffect to call fetchTransactions.
+  const handleCari = useCallback(() => {
+    setAppliedFromDate(fromDate);
+    setAppliedToDate(toDate);
+    setAppliedSearchTerm(searchTerm);
+    setAppliedFilterMethod(filterMethod);
+    setAppliedAmountFrom(amountFrom);
+    setAppliedAmountTo(amountTo);
+    setAppliedShiftFilterUuid(shiftFilterUuid);
 
-    // Handle 5x refresh click logic
+    // 5x Cari click: show all transactions
     const now = Date.now();
     if (now - lastRefreshClick > 3000) {
-      // Reset counter if more than 3 seconds passed
       setRefreshClickCount(1);
     } else {
       setRefreshClickCount(prev => {
         const newCount = prev + 1;
         if (newCount >= 5) {
-          // Show all transactions after 5 clicks
           setShowAllTransactions(true);
-          return 0; // Reset counter
+          return 0;
         }
         return newCount;
       });
     }
     setLastRefreshClick(now);
-  }, [fetchTransactions, lastRefreshClick]);
+  }, [fromDate, toDate, searchTerm, filterMethod, amountFrom, amountTo, shiftFilterUuid, lastRefreshClick]);
 
   // Format date for display (GMT+7 / WIB)
   const formatDate = (dateString: string) => {
@@ -1652,8 +1625,16 @@ export default function TransactionList({ businessId, onLoadTransaction }: Trans
   }
 
   // Item Dibatalkan: follow current mode (Printer 2 only vs all), same as Grand Total / Txs
+  // In system_pos mode: only show cancelled items for transactions that are in the current system_pos list.
   const displayedCancelledItems = (() => {
-    if (showAllTransactions || isSystemPosMode) return cancelledItems;
+    if (isSystemPosMode) {
+      const txIds = new Set(transactions.map((t) => String(t.id)));
+      return cancelledItems.filter((item) => {
+        const txId = item.uuid_transaction_id ?? (item.transaction_id != null ? String(item.transaction_id) : null);
+        return txId != null && txIds.has(txId);
+      });
+    }
+    if (showAllTransactions) return cancelledItems;
     return cancelledItems.filter((item) => {
       const txId = item.uuid_transaction_id ?? (item.transaction_id != null ? String(item.transaction_id) : null);
       return txId != null && receiptizePrintedIds.has(txId);
@@ -1696,23 +1677,23 @@ export default function TransactionList({ businessId, onLoadTransaction }: Trans
   // Filter and sort transactions
   const filteredTransactions = baseTransactions
     .filter(transaction => {
-      const matchesSearch = searchTerm === '' ||
-        transaction.user_name?.toLowerCase().includes(searchTerm.toLowerCase()) ||
-        transaction.customer_name?.toLowerCase().includes(searchTerm.toLowerCase()) ||
-        (transaction.customer_unit !== undefined && transaction.customer_unit !== null && transaction.customer_unit.toString().includes(searchTerm)) ||
-        transaction.payment_method.toLowerCase().includes(searchTerm.toLowerCase()) ||
-        transaction.receipt_number?.toString().includes(searchTerm) ||
-        transaction.voucher_label?.toLowerCase().includes(searchTerm.toLowerCase());
+      const matchesSearch = appliedSearchTerm === '' ||
+        transaction.user_name?.toLowerCase().includes(appliedSearchTerm.toLowerCase()) ||
+        transaction.customer_name?.toLowerCase().includes(appliedSearchTerm.toLowerCase()) ||
+        (transaction.customer_unit !== undefined && transaction.customer_unit !== null && transaction.customer_unit.toString().includes(appliedSearchTerm)) ||
+        transaction.payment_method.toLowerCase().includes(appliedSearchTerm.toLowerCase()) ||
+        transaction.receipt_number?.toString().includes(appliedSearchTerm) ||
+        transaction.voucher_label?.toLowerCase().includes(appliedSearchTerm.toLowerCase());
 
-      const matchesFilter = filterMethod === 'all' || transaction.payment_method === filterMethod;
+      const matchesFilter = appliedFilterMethod === 'all' || transaction.payment_method === appliedFilterMethod;
 
       const matchesShiftFilter =
-        shiftFilterUuid === '' ||
-        (shiftFilterUuid === 'none' ? !transaction.shift_uuid : transaction.shift_uuid === shiftFilterUuid);
+        appliedShiftFilterUuid === '' ||
+        (appliedShiftFilterUuid === 'none' ? !transaction.shift_uuid : transaction.shift_uuid === appliedShiftFilterUuid);
 
       // Amount range filter (total_amount = pre-discount)
-      const fromNum = parseAmountDisplay(amountFrom);
-      const toNum = parseAmountDisplay(amountTo);
+      const fromNum = parseAmountDisplay(appliedAmountFrom);
+      const toNum = parseAmountDisplay(appliedAmountTo);
       let matchesAmount = true;
       if (fromNum != null && toNum != null) {
         matchesAmount = (transaction.total_amount ?? 0) >= fromNum && (transaction.total_amount ?? 0) <= toNum;
@@ -1918,11 +1899,11 @@ export default function TransactionList({ businessId, onLoadTransaction }: Trans
             }}
             title={canAccessPrinterManager ? "Click 5 times to open Printer 1 → Printer 2 Manager" : undefined}
           >
-            Daftar Transaksi | {new Date(fromDate).toLocaleDateString('id-ID', {
+            Daftar Transaksi | {new Date(appliedFromDate).toLocaleDateString('id-ID', {
               day: 'numeric',
               month: 'short',
               year: 'numeric'
-            })} - {new Date(toDate).toLocaleDateString('id-ID', {
+            })} - {new Date(appliedToDate).toLocaleDateString('id-ID', {
               day: 'numeric',
               month: 'short',
               year: 'numeric'
@@ -2172,9 +2153,9 @@ export default function TransactionList({ businessId, onLoadTransaction }: Trans
                   placeholder="Search..."
                   className="w-full pl-8 pr-7 py-1.5 border border-gray-300 rounded text-xs focus:ring-2 focus:ring-blue-500 focus:border-blue-500 text-gray-900"
                 />
-                {searchTerm && (
+                {(searchTerm || appliedSearchTerm) && (
                   <button
-                    onClick={() => setSearchTerm('')}
+                    onClick={() => { setSearchTerm(''); setAppliedSearchTerm(''); }}
                     className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600"
                   >
                     <X className="w-3 h-3" />
@@ -2349,22 +2330,23 @@ export default function TransactionList({ businessId, onLoadTransaction }: Trans
                   </div>
                 )}
               </div>
+              <style>{`@keyframes cari-flash { 0%, 100% { box-shadow: 0 0 0 0 rgba(34, 197, 94, 0.5); } 50% { box-shadow: 0 0 0 6px rgba(34, 197, 94, 0); } }`}</style>
               <button
-                onClick={handleRefresh}
+                type="button"
+                onClick={handleCari}
                 disabled={isLoading}
-                title="Refresh"
-                className="flex items-center justify-center min-w-8 px-2 py-1.5 text-white bg-blue-600 hover:bg-blue-700 rounded border border-blue-600 transition-colors disabled:opacity-50 flex-shrink-0"
+                title="Cari (apply filter & refresh)"
+                className="flex items-center justify-center gap-1 min-w-8 px-2 py-1.5 text-white bg-green-600 hover:bg-green-700 rounded border border-green-600 transition-colors flex-shrink-0 disabled:opacity-50 animate-[cari-flash_1.8s_ease-in-out_infinite]"
               >
-                <RefreshCw className={`w-3.5 h-3.5 ${isLoading ? 'animate-spin' : ''}`} />
+                {isLoading ? (
+                  <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                ) : (
+                  <Search className="w-3.5 h-3.5" />
+                )}
+                <span className="text-xs font-medium">Cari</span>
               </button>
               <button
                 onClick={() => {
-                  setSearchTerm('');
-                  setFilterMethod('all');
-                  setAmountFrom('');
-                  setAmountTo('');
-                  setShiftFilterUuid('');
-                  setShiftLabelByUuid({}); // Clear to avoid stale shift labels before refetch
                   const gmt7Offset = 7 * 60 * 60 * 1000;
                   const now = new Date();
                   const nowGmt7 = new Date(now.getTime() + gmt7Offset);
@@ -2373,8 +2355,23 @@ export default function TransactionList({ businessId, onLoadTransaction }: Trans
                   start.setUTCDate(start.getUTCDate() - 30);
                   const formatDateInput = (d: Date) =>
                     `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}-${String(d.getUTCDate()).padStart(2, '0')}`;
-                  setToDate(formatDateInput(end));
-                  setFromDate(formatDateInput(start));
+                  const newFrom = formatDateInput(start);
+                  const newTo = formatDateInput(end);
+                  setFromDate(newFrom);
+                  setToDate(newTo);
+                  setAppliedFromDate(newFrom);
+                  setAppliedToDate(newTo);
+                  setSearchTerm('');
+                  setAppliedSearchTerm('');
+                  setFilterMethod('all');
+                  setAppliedFilterMethod('all');
+                  setAmountFrom('');
+                  setAmountTo('');
+                  setAppliedAmountFrom('');
+                  setAppliedAmountTo('');
+                  setShiftFilterUuid('');
+                  setAppliedShiftFilterUuid('');
+                  setShiftLabelByUuid({});
                 }}
                 className="flex items-center gap-1.5 px-2.5 py-1.5 text-xs bg-gray-200 hover:bg-gray-300 text-gray-700 rounded transition-colors flex-shrink-0"
               >

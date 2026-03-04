@@ -253,7 +253,7 @@ declare global {
 
       // Transaction operations
       localDbGetTransactionByUuid?: (uuid: string) => Promise<unknown>;
-      localDbGetTransactions?: (businessId?: number, limit?: number, options?: { todayOnly?: boolean }) => Promise<unknown[]>;
+      localDbGetTransactions?: (businessId?: number, limit?: number, options?: { todayOnly?: boolean; from?: string; to?: string }) => Promise<unknown[]>;
       localDbUpdateTransactionShift?: (transactionUuid: string, shiftUuid: string | null) => Promise<{ success: boolean; error?: string }>;
       localDbDeleteSingleTransactionPreview?: (transactionUuid: string) => Promise<{
         success: boolean;
@@ -317,7 +317,8 @@ declare global {
       }>>;
       localDbUpsertTransactionRefunds?: (rows: unknown[]) => Promise<{ success: boolean; error?: string }>;
       localDbApplyTransactionRefund?: (payload: unknown) => Promise<{ success: boolean; error?: string }>;
-      localDbGetUnsyncedTransactions?: (businessId?: number) => Promise<unknown[]>;
+      localDbGetUnsyncedTransactionsCount?: (businessId?: number) => Promise<number>;
+      localDbGetUnsyncedTransactions?: (businessId?: number, includeItems?: boolean) => Promise<unknown[]>;
       localDbGetAllTransactions?: (businessId?: number, from?: string, to?: string) => Promise<unknown[]>;
       localDbGetTransactionsMatchData?: (businessId?: number, from?: string, to?: string) => Promise<unknown[]>;
       localDbDeleteUnsyncedTransactions?: (businessId?: number) => Promise<{ success: boolean; deletedCount?: number; error?: string }>;

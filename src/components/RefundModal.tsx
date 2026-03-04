@@ -2,7 +2,7 @@ import React, { useMemo, useState } from 'react';
 import { useAuth } from '@/hooks/useAuth';
 import { offlineSyncService } from '@/lib/offlineSync';
 import { smartSyncService } from '@/lib/smartSync';
-import { getApiUrl } from '@/lib/api';
+import { getApiUrl, getPosWriteApiKey } from '@/lib/api';
 import { TransactionDetail, TransactionRefund } from './TransactionDetailModal';
 
 interface RefundModalProps {
@@ -87,13 +87,13 @@ const RefundModal: React.FC<RefundModalProps> = ({
 
   const applyLocalRefund = async (
     refundRecord: TransactionRefund,
-    transactionUpdate: Partial<TransactionDetail>
+    transactionUpdate: Partial<TransactionDetail> & { transaction_uuid?: string }
   ) => {
     if (electronAPI?.localDbApplyTransactionRefund) {
       await (electronAPI.localDbApplyTransactionRefund as (payload: Record<string, unknown>) => Promise<unknown>)({
         refund: refundRecord,
         transactionUpdate: {
-          id: refundRecord.transaction_uuid,
+          transaction_uuid: transactionUpdate.transaction_uuid ?? refundRecord.transaction_uuid,
           refund_status: transactionUpdate.refund_status ?? null,
           refund_total: transactionUpdate.refund_total ?? null,
           last_refunded_at: refundRecord.refunded_at,
@@ -259,11 +259,12 @@ const RefundModal: React.FC<RefundModalProps> = ({
           // If transaction exists on server, try to create refund immediately
           if (transactionFound) {
             try {
+              const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+              const posKey = getPosWriteApiKey();
+              if (posKey) headers['X-POS-API-Key'] = posKey;
               const response = await fetch(getApiUrl(`/api/transactions/${serverTransactionUuid}/refund`), {
                 method: 'POST',
-                headers: {
-                  'Content-Type': 'application/json',
-                },
+                headers,
                 body: JSON.stringify({
                   ...refundPayload,
                   transaction_uuid: serverTransactionUuid
@@ -284,8 +285,7 @@ const RefundModal: React.FC<RefundModalProps> = ({
                 };
                 // Update existing refund record (will update, not insert duplicate due to UUID check)
                 await applyLocalRefund(completedRefund, {
-                  id: transaction.id, // Need transaction ID for the query
-                  // Pass undefined to avoid updating transaction - it's already been updated
+                  transaction_uuid: transaction.id,
                   refund_total: undefined,
                   refund_status: undefined,
                   status: undefined

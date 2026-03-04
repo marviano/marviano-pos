@@ -4330,16 +4330,18 @@ function createWindows(): void {
     }
   });
 
-  ipcMain.handle('localdb-get-transactions', async (event, businessId?: number, limit?: number, options?: { todayOnly?: boolean }) => {
+  ipcMain.handle('localdb-get-transactions', async (event, businessId?: number, limit?: number, options?: { todayOnly?: boolean; from?: string; to?: string }) => {
     try {
       const todayOnly = options?.todayOnly === true;
+      const fromDate = options?.from;
+      const toDate = options?.to;
 
       // Diagnostic logging
       const diagLogPathTx = path.join(app.getPath('userData'), 'path-diagnostic.log');
       try {
         const txCountResult = await executeQueryOne<{ cnt: number }>('SELECT COUNT(*) as cnt FROM transactions');
         const txCount = txCountResult?.cnt || 0;
-        fs.appendFileSync(diagLogPathTx, `${new Date().toISOString()} [GET-TX] businessId=${businessId}, limit=${limit}, todayOnly=${todayOnly}, totalTxInDb=${txCount}\n`);
+        fs.appendFileSync(diagLogPathTx, `${new Date().toISOString()} [GET-TX] businessId=${businessId}, limit=${limit}, todayOnly=${todayOnly}, from=${fromDate ?? 'none'}, to=${toDate ?? 'none'}, totalTxInDb=${txCount}\n`);
       } catch (e) {
         try { fs.appendFileSync(diagLogPathTx, `${new Date().toISOString()} [GET-TX] ERROR: ${e}\n`); } catch (e2) { }
       }
@@ -4437,6 +4439,18 @@ function createWindows(): void {
       if (todayOnly) {
         conditions.push('DATE(t.created_at) = CURDATE()');
         conditions.push("t.status IN ('pending', 'paid', 'completed')");
+      }
+
+      // Daftar Transaksi: filter by date range so we only fetch the selected range (faster first load)
+      if (fromDate && typeof fromDate === 'string') {
+        const startIso = fromDate.includes('T') ? fromDate : `${fromDate}T00:00:00.000Z`;
+        conditions.push('t.created_at >= ?');
+        params.push(toMySQLDateTime(startIso));
+      }
+      if (toDate && typeof toDate === 'string') {
+        const endIso = toDate.includes('T') ? toDate : `${toDate}T23:59:59.999Z`;
+        conditions.push('t.created_at <= ?');
+        params.push(toMySQLDateTime(endIso));
       }
 
       if (businessId) {
@@ -4782,8 +4796,29 @@ function createWindows(): void {
     }
   });
 
+  // Get count of unsynced transactions only (avoids loading full list + items; use for status/polling)
+  ipcMain.handle('localdb-get-unsynced-transactions-count', async (event, businessId?: number) => {
+    try {
+      let query = `SELECT COUNT(*) as count FROM transactions t WHERE t.sync_status IN ('pending', 'failed')`;
+      const params: (string | number)[] = [];
+      if (businessId) {
+        query += ' AND t.business_id = ?';
+        params.push(businessId);
+      }
+      const rows = await executeQuery(query, params);
+      const count = Array.isArray(rows) && rows.length > 0 && typeof (rows[0] as { count?: number }).count === 'number'
+        ? (rows[0] as { count: number }).count
+        : 0;
+      return count;
+    } catch (error) {
+      console.error('Error getting unsynced transactions count:', error);
+      return 0;
+    }
+  });
+
   // Get transactions that are not yet synced to cloud
-  ipcMain.handle('localdb-get-unsynced-transactions', async (event, businessId?: number) => {
+  // includeItems: when false, skips loading transaction_items (saves RAM for sync path; items are fetched per-tx in smartSync)
+  ipcMain.handle('localdb-get-unsynced-transactions', async (event, businessId?: number, includeItems: boolean = true) => {
     try {
       // Return all transactions where sync_status = 'pending' or 'failed'
       // This includes both transactions that haven't been synced yet AND failed uploads
@@ -4797,7 +4832,7 @@ function createWindows(): void {
                 ORDER BY t.created_at ASC
               )
             ELSE NULL
-          END as receipt_number
+          END as display_receipt_seq
         FROM transactions t
         WHERE t.sync_status IN ('pending', 'failed')
       `;
@@ -4812,11 +4847,15 @@ function createWindows(): void {
 
       const transactions = await executeQuery(query, params);
 
-      // ✅ NEW: Fetch transaction items for each transaction
-      if (Array.isArray(transactions) && transactions.length > 0) {
+      // Fetch transaction items only when requested (skip for sync path to reduce RAM; smartSync fetches per-tx)
+      if (includeItems && Array.isArray(transactions) && transactions.length > 0) {
         for (const transaction of transactions as any[]) {
           const items = await executeQuery('SELECT * FROM transaction_items WHERE transaction_id = ?', [transaction.id]);
           transaction.items = items || [];
+        }
+      } else if (Array.isArray(transactions) && transactions.length > 0) {
+        for (const transaction of transactions as any[]) {
+          transaction.items = [];
         }
       }
 
@@ -4840,7 +4879,7 @@ function createWindows(): void {
                 ORDER BY t.created_at ASC
               )
             ELSE NULL
-          END as receipt_number
+          END as display_receipt_seq
         FROM transactions t
         WHERE 1=1
       `;
@@ -4895,7 +4934,7 @@ function createWindows(): void {
       let query = `SELECT t.*,
         CASE WHEN t.created_at IS NOT NULL THEN
           ROW_NUMBER() OVER (PARTITION BY DATE(t.created_at), t.business_id ORDER BY t.created_at ASC)
-        ELSE NULL END AS receipt_number
+        ELSE NULL END AS display_receipt_seq
       FROM transactions t WHERE t.status IN ('completed', 'refunded')`;
       const params: (string | number | null)[] = [];
 
@@ -6861,10 +6900,19 @@ function createWindows(): void {
     }
   });
 
+  /** UUID-like: standard UUID format or string containing hyphen (e.g. ULID-style). */
+  const isUuidLike = (value: string): boolean => {
+    if (typeof value !== 'string' || !value) return false;
+    if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value)) return true;
+    if (value.includes('-') && value.length >= 32) return true;
+    return false;
+  };
+
   ipcMain.handle('localdb-apply-transaction-refund', async (event, payload: {
     refund: TransactionRefundRow;
     transactionUpdate?: {
-      id: string;
+      id?: string;
+      transaction_uuid?: string;
       refund_status?: string | null;
       refund_total?: number | null;
       last_refunded_at?: string | null;
@@ -7002,9 +7050,15 @@ function createWindows(): void {
         });
       }
 
-      if (transactionUpdate?.id) {
-        // Only update transaction if transactionUpdate fields are explicitly provided (not undefined)
-        // This prevents overwriting transaction data when syncing refunds that were already applied locally
+      // Resolve transaction identifier: prefer dedicated transaction_uuid; support id as UUID or numeric
+      const txIdentifier = transactionUpdate?.transaction_uuid ?? transactionUpdate?.id;
+      const updateByUuid = txIdentifier != null && isUuidLike(String(txIdentifier));
+      const updateByIdNumeric = txIdentifier != null && !updateByUuid && /^\d+$/.test(String(txIdentifier).trim());
+
+      await executeTransaction(queries);
+
+      // Update transaction aggregates (refund_total, refund_status, etc.) using uuid_id when UUID-like, else numeric id
+      if (txIdentifier && (updateByUuid || updateByIdNumeric) && transactionUpdate) {
         const updateFields: string[] = [];
         const updateParams: (string | number | null)[] = [];
 
@@ -7025,21 +7079,17 @@ function createWindows(): void {
           updateParams.push(transactionUpdate.status ?? null);
         }
 
-        // Only execute UPDATE if there are fields to update
         if (updateFields.length > 0) {
-          updateParams.push(transactionUpdate.id);
-          queries.push({
-            sql: `
-              UPDATE transactions
-              SET ${updateFields.join(', ')}
-              WHERE id = ?
-            `,
-            params: updateParams
-          });
+          const whereCol = updateByUuid ? 'uuid_id' : 'id';
+          const whereVal = updateByUuid ? String(txIdentifier) : parseInt(String(txIdentifier), 10);
+          updateParams.push(whereVal);
+          const updateSql = `UPDATE transactions SET ${updateFields.join(', ')} WHERE ${whereCol} = ?`;
+          const affected = await executeUpdate(updateSql, updateParams);
+          if (affected === 0) {
+            return { success: false, error: 'Transaction row was not updated (0 rows affected); sync may retry.' };
+          }
         }
       }
-
-      await executeTransaction(queries);
       // Sync refund to system_pos so Grand Total card shows refund when system_pos mode is on
       try {
         await ensureSystemPosSchema();
@@ -13311,16 +13361,21 @@ function generateShiftBreakdownHTML(
     const cancelledItemsList = report.cancelledItems || [];
     const totalCancelledItemsAmount = cancelledItemsList.reduce((s: number, i: { total_price?: number }) => s + Number(i.total_price || 0), 0);
     const refundRows = refundList.map((r: PrintableShiftRefundRow) => {
-      const txId = r.transaction_uuid_id || r.transaction_uuid || '-';
       const method = formatPlatformLabel(r.payment_method || 'offline');
       const total = formatIntegerId(Math.round(Number(r.final_amount || 0)));
       const refundAmt = formatIntegerId(Math.round(Number(r.refund_amount || 0)));
       const reason = (r.reason || '-').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-      const refundTime = r.refunded_at ? formatDateTime(r.refunded_at) : '-';
-      const issuer = (r.issuer_email || '-').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-      const waiter = (r.waiter_name || '-').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-      const customer = (r.customer_name || '-').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-      return `<tr><td style="font-size: 6pt;">${txId}</td><td style="font-size: 6pt;">${method}</td><td class="right" style="font-size: 6pt;">${total}</td><td class="right" style="font-size: 6pt; color: #991b1b;">-${refundAmt}</td><td style="font-size: 6pt;">${reason}</td><td style="font-size: 6pt;">${refundTime}</td><td style="font-size: 6pt;">${issuer}</td><td style="font-size: 6pt;">${waiter}</td><td style="font-size: 6pt;">${customer}</td></tr>`;
+      const issuer = (r.issuer_email || '').trim();
+      const waiter = (r.waiter_name || '').trim();
+      const refundByDisplay = issuer && waiter && waiter !== issuer
+        ? `${issuer} / ${waiter}`
+        : issuer
+          ? issuer
+          : waiter
+            ? waiter
+            : '-';
+      const refundBy = refundByDisplay.replace(/</g, '&lt;').replace(/>/g, '&gt;');
+      return `<tr><td>${method}</td><td class="right">${total}</td><td class="right" style="color: #991b1b;">-${refundAmt}</td><td>${reason}</td><td>${refundBy}</td></tr>`;
     }).join('');
 
     const cancelledItemsRows = cancelledItemsList.map((item: { product_name: string; quantity: number; total_price: number; cancelled_at: string; cancelled_by_user_name: string; cancelled_by_waiter_name: string; receipt_number?: string | null; customer_name?: string | null }) => {
@@ -13335,14 +13390,12 @@ function generateShiftBreakdownHTML(
             : '-';
       const cancelledTime = item.cancelled_at ? formatDateTime(item.cancelled_at) : '-';
       const priceStr = formatIntegerId(Math.round(Number(item.total_price || 0)));
-      const receipt = (item.receipt_number || '-').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-      const customer = (item.customer_name || 'Guest').replace(/</g, '&lt;').replace(/>/g, '&gt;');
       const productName = (item.product_name || '-').replace(/</g, '&lt;').replace(/>/g, '&gt;');
       const cancelledBy = cancelledByDisplay.replace(/</g, '&lt;').replace(/>/g, '&gt;');
-      return `<tr><td style="font-size: 6pt;">${cancelledTime}</td><td style="font-size: 6pt;">${productName}</td><td class="right" style="font-size: 6pt;">${item.quantity}x</td><td class="right" style="font-size: 6pt;">${priceStr}</td><td style="font-size: 6pt;">#${receipt}</td><td style="font-size: 6pt;">${customer}</td><td style="font-size: 6pt;">${cancelledBy}</td></tr>`;
+      return `<tr><td>${cancelledTime}</td><td>${productName}</td><td class="right">${item.quantity}x</td><td class="right">${priceStr}</td><td>${cancelledBy}</td></tr>`;
     }).join('');
 
-    const hasLowerSections = sectionOptions.paymentMethod === true || sectionOptions.categoryI === true || sectionOptions.categoryII === true || sectionOptions.paket === true || sectionOptions.barangTerjual === true || (sectionOptions.toppingSales === true && totalCustomizationRevenue > 0) || refundList.length > 0;
+    const hasLowerSections = sectionOptions.paymentMethod === true || sectionOptions.categoryI === true || sectionOptions.categoryII === true || sectionOptions.paket === true || sectionOptions.barangTerjual === true || (sectionOptions.toppingSales === true && totalCustomizationRevenue > 0);
 
     return `
     <div class="report-block">
@@ -13441,26 +13494,26 @@ function generateShiftBreakdownHTML(
       ${sectionOptions.itemDibatalkan !== false && cancelledItemsList.length > 0 ? `
       <div class="section-title">ITEM DIBATALKAN</div>
       <table>
-        <thead>
-          <tr>
-            <th style="font-size: 6pt;">Waktu Pembatalan</th>
-            <th style="font-size: 6pt;">Item</th>
-            <th class="right" style="font-size: 6pt;">Jumlah</th>
-            <th class="right" style="font-size: 6pt;">Harga</th>
-            <th style="font-size: 6pt;">Transaksi</th>
-            <th style="font-size: 6pt;">Pelanggan</th>
-            <th style="font-size: 6pt;">Dibatalkan Oleh</th>
-          </tr>
-        </thead>
         <tbody>
           ${cancelledItemsRows}
           <tr class="total-row">
-            <td style="font-size: 6pt;">TOTAL</td>
+            <td>TOTAL</td>
             <td></td>
-            <td class="right" style="font-size: 6pt;">${cancelledItemsList.reduce((s: number, i: { quantity?: number }) => s + Number(i.quantity || 0), 0)}x</td>
-            <td class="right" style="font-size: 6pt;">${formatIntegerId(Math.round(totalCancelledItemsAmount))}</td>
-            <td colspan="3"></td>
+            <td class="right">${cancelledItemsList.reduce((s: number, i: { quantity?: number }) => s + Number(i.quantity || 0), 0)}x</td>
+            <td class="right">${formatIntegerId(Math.round(totalCancelledItemsAmount))}</td>
+            <td></td>
           </tr>
+        </tbody>
+      </table>
+
+      <div class="divider"></div>
+      ` : ''}
+
+      ${refundList.length > 0 ? `
+      <div class="section-title">REFUND</div>
+      <table class="refund-table">
+        <tbody>
+          ${refundRows}
         </tbody>
       </table>
 
@@ -13610,30 +13663,6 @@ function generateShiftBreakdownHTML(
 
       <div class="divider"></div>
       ` : ''}
-
-      ${refundList.length > 0 ? `
-      <div class="section-title">REFUND</div>
-      <table class="refund-table">
-        <thead>
-          <tr>
-            <th style="font-size: 6pt;">Transaction ID</th>
-            <th style="font-size: 6pt;">Method</th>
-            <th class="right" style="font-size: 6pt;">Total</th>
-            <th class="right" style="font-size: 6pt;">Refund Amount</th>
-            <th style="font-size: 6pt;">Alasan</th>
-            <th style="font-size: 6pt;">Refund Time</th>
-            <th style="font-size: 6pt;">Issuer</th>
-            <th style="font-size: 6pt;">Waiter</th>
-            <th style="font-size: 6pt;">Nama Pelanggan</th>
-          </tr>
-        </thead>
-        <tbody>
-          ${refundRows}
-        </tbody>
-      </table>
-
-      <div class="divider"></div>
-      ` : ''}
       ${hasLowerSections ? '</div>' : ''}
     </div>
     `;
@@ -13698,48 +13727,48 @@ function generateShiftBreakdownHTML(
 <head>
   <meta charset="UTF-8">
   <style>
-    @page { size: 77mm auto; margin: 0; }
+    @page { size: 72mm auto; margin: 0; }
     * { margin: 0; padding: 0; box-sizing: border-box; }
     body {
       font-family: 'Arial', 'Helvetica', sans-serif;
       width: 100%;
-      max-width: 77mm;
+      max-width: 72mm;
       box-sizing: border-box;
-      font-size: 8pt;
+      font-size: 9pt;
       font-weight: 500;
-      line-height: 1.2;
-      padding: 2mm ${rightPaddingMm}mm 2mm ${leftPaddingMm}mm;
+      line-height: 1.15;
+      padding: 1.5mm ${rightPaddingMm}mm 1.5mm ${leftPaddingMm}mm;
       word-wrap: break-word;
       overflow-wrap: break-word;
     }
     .report-block + .report-block {
-      margin-top: 3mm;
-      padding-top: 3mm;
+      margin-top: 2mm;
+      padding-top: 2mm;
       border-top: 1px dashed #000;
     }
     .header {
       text-align: center;
-      margin-bottom: 2mm;
+      margin-bottom: 1.5mm;
     }
     .title {
-      font-size: 10pt;
+      font-size: 11pt;
       font-weight: 700;
       margin-bottom: 0.5mm;
     }
     .business-name {
-      font-size: 9pt;
+      font-size: 10pt;
       font-weight: 600;
       margin-bottom: 0mm;
     }
     .divider {
       border-top: 1px dashed #000;
-      margin: 1.5mm 0;
+      margin: 1mm 0;
     }
     .info-line {
       display: flex;
       justify-content: space-between;
-      margin-bottom: 0.5mm;
-      font-size: 7pt;
+      margin-bottom: 0.4mm;
+      font-size: 8pt;
     }
     .info-label {
       font-weight: 500;
@@ -13748,43 +13777,43 @@ function generateShiftBreakdownHTML(
       font-weight: 700;
     }
     .section-title {
-      font-size: 8pt;
+      font-size: 9pt;
       font-weight: 700;
-      margin: 1.5mm 0 1mm 0;
+      margin: 1mm 0 0.8mm 0;
       text-align: center;
       text-decoration: underline;
     }
     .summary-subtitle {
-      font-size: 7pt;
+      font-size: 8pt;
       font-weight: 700;
       color: #374151;
-      margin: 1mm 0 0.5mm 0;
-      padding-bottom: 0.5mm;
+      margin: 0.8mm 0 0.4mm 0;
+      padding-bottom: 0.4mm;
       border-bottom: 1px solid #9ca3af;
     }
     .barang-terjual-note {
-      font-size: 6pt;
+      font-size: 7.5pt;
       color: #6b7280;
-      margin-bottom: 1mm;
+      margin-bottom: 0.8mm;
       font-style: italic;
     }
     table {
       width: 100%;
       border-collapse: collapse;
-      margin: 1mm 0;
-      font-size: 7pt;
+      margin: 0.8mm 0;
+      font-size: 8pt;
     }
     th {
       text-align: left;
       font-weight: 700;
-      padding: 0.5mm 0;
-      font-size: 7pt;
+      padding: 0.4mm 0;
+      font-size: 8pt;
     }
     th.right, td.right {
       text-align: right;
     }
     td {
-      padding: 0.5mm 0;
+      padding: 0.4mm 0;
       font-weight: 500;
     }
     .total-row {
@@ -13792,13 +13821,13 @@ function generateShiftBreakdownHTML(
       background-color: #f0f0f0;
     }
     .summary {
-      margin-top: 1.5mm;
-      font-size: 7pt;
+      margin-top: 1mm;
+      font-size: 8pt;
     }
     .summary-line {
       display: flex;
       justify-content: space-between;
-      margin-bottom: 0.5mm;
+      margin-bottom: 0.4mm;
     }
     .summary-label {
       font-weight: 500;
@@ -13808,10 +13837,10 @@ function generateShiftBreakdownHTML(
     }
     .summary-line-highlight {
       font-weight: 700;
-      font-size: 8pt;
+      font-size: 9pt;
       background: #fef3c7;
-      padding: 1.2mm 1mm;
-      margin: 0 0 1mm 0;
+      padding: 1mm 0.8mm;
+      margin: 0 0 0.8mm 0;
       border: 1px solid #fcd34d;
     }
     .summary-line-highlight .summary-value {
@@ -13819,10 +13848,10 @@ function generateShiftBreakdownHTML(
     }
     .summary-line-highlight-voucher {
       font-weight: 700;
-      font-size: 8pt;
+      font-size: 9pt;
       background: #dcfce7;
-      padding: 1.2mm 1mm;
-      margin: 0 0 1mm 0;
+      padding: 1mm 0.8mm;
+      margin: 0 0 0.8mm 0;
       border: 1px solid #86efac;
     }
     .summary-line-highlight-voucher .summary-value {
@@ -13830,10 +13859,10 @@ function generateShiftBreakdownHTML(
     }
     .summary-line-highlight-topping {
       font-weight: 700;
-      font-size: 8pt;
+      font-size: 9pt;
       background: #dbeafe;
-      padding: 1.2mm 1mm;
-      margin: 0 0 1mm 0;
+      padding: 1mm 0.8mm;
+      margin: 0 0 0.8mm 0;
       border: 1px solid #93c5fd;
     }
     .summary-line-highlight-topping .summary-value {
@@ -13842,37 +13871,37 @@ function generateShiftBreakdownHTML(
     .summary-block-omset {
       background: #fef3c7;
       border: 1px solid #fcd34d;
-      padding: 1.5mm;
-      margin: 0 0 2mm 0;
+      padding: 1.2mm;
+      margin: 0 0 1.5mm 0;
     }
     .summary-block-voucher {
       background: #dcfce7;
       border: 1px solid #86efac;
-      padding: 1.5mm;
-      margin: 0 0 2mm 0;
+      padding: 1.2mm;
+      margin: 0 0 1.5mm 0;
     }
     .summary-line-indent {
-      padding-left: 3mm;
+      padding-left: 2.5mm;
     }
-    /* From PAYMENT METHOD and below: +1pt font size */
+    /* From PAYMENT METHOD and below: slightly larger than body */
     .report-block-larger {
-      font-size: 9pt;
+      font-size: 9.5pt;
     }
     .report-block-larger .section-title {
-      font-size: 9pt;
+      font-size: 10pt;
     }
     .report-block-larger table {
-      font-size: 8pt;
+      font-size: 8.5pt;
     }
     .report-block-larger th {
-      font-size: 8pt;
+      font-size: 8.5pt;
     }
     .report-block-larger .barang-terjual-note {
-      font-size: 7pt;
+      font-size: 8pt;
     }
     .report-block-larger .refund-table th,
     .report-block-larger .refund-table td {
-      font-size: 7pt !important;
+      font-size: 7.5pt !important;
     }
     /* Prevent table headers from repeating on every page */
     @media print {
@@ -13998,12 +14027,11 @@ ipcMain.handle('print-shift-breakdown', async (event, data: PrintableShiftReport
     console.log('   - Printer Type:', data.printerType);
 
     let printerName: string | null = null;
-    let shiftMarginAdjustMm: number | undefined;
     const printerType = data.printerType || 'receiptPrinter';
 
     console.log('🔍 [SHIFT PRINT] Looking up printer config for type:', printerType);
 
-    // Get printer name from config
+    // Get printer name from config (Print All does not use marginAdjustMm / offset)
     try {
       // First, list ALL printer configs for debugging
       const allConfigs = await executeQuery<PrinterConfigRow>('SELECT * FROM printer_configs');
@@ -14021,16 +14049,6 @@ ipcMain.handle('print-shift-breakdown', async (event, data: PrintableShiftReport
       if (config && config.system_printer_name) {
         printerName = config.system_printer_name.trim();
         console.log('✅ [SHIFT PRINT] Found printer config:', printerName);
-
-        if (config.extra_settings) {
-          try {
-            const extra = (typeof config.extra_settings === 'string' ? JSON.parse(config.extra_settings) : config.extra_settings) as { marginAdjustMm?: number };
-            if (typeof extra.marginAdjustMm === 'number' && !Number.isNaN(extra.marginAdjustMm)) {
-              shiftMarginAdjustMm = extra.marginAdjustMm;
-              console.log('🎚️ [SHIFT PRINT] Using marginAdjustMm from printer setup:', shiftMarginAdjustMm);
-            }
-          } catch (_) { /* ignore */ }
-        }
 
         // Validate printer name is not empty after trim
         if (!printerName || printerName.length === 0) {
@@ -14182,8 +14200,8 @@ ipcMain.handle('print-shift-breakdown', async (event, data: PrintableShiftReport
         cashSummary: data.cashSummary,
         wholeDayReport: data.wholeDayReport || null,
         businessName,
-        sectionOptions: data.sectionOptions,
-        marginAdjustMm: shiftMarginAdjustMm
+        sectionOptions: data.sectionOptions
+        // Print All: do not apply printer offset (marginAdjustMm)
       });
       console.log('✅ [SHIFT PRINT] HTML generation successful');
     } catch (htmlError) {

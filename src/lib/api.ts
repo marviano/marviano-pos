@@ -117,5 +117,15 @@ export const getApiUrl = (path: string): string => {
   return finalUrl;
 };
 
+/**
+ * POS write API key for ingest routes (transactions, refunds).
+ * Set NEXT_PUBLIC_POS_WRITE_API_KEY or POS_WRITE_API_KEY to match server POS_WRITE_API_KEY.
+ */
+export function getPosWriteApiKey(): string {
+  if (typeof process !== 'undefined' && process.env?.NEXT_PUBLIC_POS_WRITE_API_KEY) return process.env.NEXT_PUBLIC_POS_WRITE_API_KEY;
+  if (typeof process !== 'undefined' && process.env?.POS_WRITE_API_KEY) return process.env.POS_WRITE_API_KEY;
+  return '';
+}
+
 
 

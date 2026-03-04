@@ -1,11 +1,14 @@
 import { conflictResolutionService } from './conflictResolution';
-import { getApiUrl, cleanUrl } from '@/lib/api';
+import { getApiUrl, cleanUrl, getPosWriteApiKey } from '@/lib/api';
 import { getAutoSyncEnabled, onAutoSyncSettingChanged } from './autoSyncSettings';
 import { validateNotNullFields, convertTransactionDatesForMySQL, convertShiftDatesForMySQL, cleanRefundForMySQL } from './syncUtils';
 
 type UnknownRecord = Record<string, unknown>;
 
 const isElectron = typeof window !== 'undefined' && (window as { electronAPI?: UnknownRecord }).electronAPI;
+
+/** Set to true to log full payloads and payload structure in processBatch (increases RAM use) */
+const SMART_SYNC_VERBOSE = false;
 
 /**
  * Map payment method strings to their IDs (matching actual database IDs)
@@ -60,6 +63,9 @@ interface SyncConfig {
   maxRetries: number;
   retryDelay: number;
   serverLoadThreshold: number;
+  requestTimeoutMs: number;
+  requestRetries: number;
+  requestRetryBaseDelayMs: number;
 }
 
 interface PendingTransaction {
@@ -71,11 +77,14 @@ interface PendingTransaction {
 
 class SmartSyncService {
   private config: SyncConfig = {
-    maxBatchSize: 10, // Process max 10 transactions per batch
-    syncInterval: 30000, // Sync every 30 seconds when online
+    maxBatchSize: 10,
+    syncInterval: 30000,
     maxRetries: 3,
-    retryDelay: 5000, // 5 seconds between retries
-    serverLoadThreshold: 1000, // Max 1000ms response time threshold
+    retryDelay: 5000,
+    serverLoadThreshold: 1000,
+    requestTimeoutMs: 30000, // Per-request timeout so stalled calls don't block queue
+    requestRetries: 3,
+    requestRetryBaseDelayMs: 2000,
   };
 
   private syncTimer: NodeJS.Timeout | null = null;
@@ -222,8 +231,8 @@ class SmartSyncService {
       }
 
       console.log('🔍 [SMART SYNC] Fetching pending transactions...');
-      // Get pending transactions (sync_status = 'pending')
-      const pendingTransactions = await (electronAPI.localDbGetUnsyncedTransactions as (businessId?: number) => Promise<PendingTransaction[]>)();
+      // Get pending transactions without items (sync fetches items per-tx in processBatch to reduce RAM)
+      const pendingTransactions = await (electronAPI.localDbGetUnsyncedTransactions as (businessId?: number, includeItems?: boolean) => Promise<PendingTransaction[]>)(undefined, false);
       console.log(`📦 [SMART SYNC] Found ${pendingTransactions.length} pending transactions`, {
         count: pendingTransactions.length,
         transactionIds: pendingTransactions.slice(0, 10).map(t => t.id) // Show first 10 IDs
@@ -406,6 +415,7 @@ class SmartSyncService {
         if (transactionData.refund_total === undefined) transactionData.refund_total = 0;
         if (transactionData.last_refunded_at === undefined) transactionData.last_refunded_at = null;
         if (transactionData.contact_id === undefined) transactionData.contact_id = null;
+        // Send only persisted transactions.receipt_number (never synthetic row numbers)
         if (transactionData.receipt_number === undefined) transactionData.receipt_number = null;
         if (transactionData.table_id === undefined) transactionData.table_id = null;
         if (transactionData.waiter_id === undefined) transactionData.waiter_id = null;
@@ -536,73 +546,69 @@ class SmartSyncService {
         // Skip conflictResolutionService.validateData() for pending transactions - it checks age which blocks old pending transactions
         // Pending transactions should be synced regardless of age
 
-        // Log transaction data being sent (for debugging)
-        console.log(`📤 [SMART SYNC] Sending transaction ${transaction.id}:`, {
-          id: transactionData.id,
-          uuid_id: transactionData.uuid_id,
-          business_id: transactionData.business_id,
-          user_id: transactionData.user_id,
-          shift_uuid: transactionData.shift_uuid,
-          items_count: Array.isArray(transactionData.items) ? transactionData.items.length : 0,
-          total_amount: transactionData.total_amount,
-          final_amount: transactionData.final_amount,
-          payment_method: transactionData.payment_method,
-          payment_method_id: transactionData.payment_method_id,
-          pickup_method: transactionData.pickup_method,
-          refund_status: transactionData.refund_status,
-          refund_total: transactionData.refund_total,
-          contact_id: transactionData.contact_id,
-          receipt_number: transactionData.receipt_number,
-          table_id: transactionData.table_id,
-          created_at: transactionData.created_at,
-          customizations_count: Array.isArray(transactionData.transaction_item_customizations)
-            ? transactionData.transaction_item_customizations.length
-            : 0,
-          options_count: Array.isArray(transactionData.transaction_item_customization_options)
-            ? transactionData.transaction_item_customization_options.length
-            : 0,
-          activity_logs_count: Array.isArray(transactionData.activity_logs)
-            ? transactionData.activity_logs.length
-            : 0,
-        });
-
-        // Log full payload structure (summary)
-        console.log(`📋 [SMART SYNC] Transaction payload structure:`, {
-          topLevelKeys: Object.keys(transactionData),
-          items: Array.isArray(transactionData.items)
-            ? transactionData.items.map((item: UnknownRecord) => ({
-              id: item.id,
-              product_id: item.product_id,
-              quantity: item.quantity,
-              unit_price: item.unit_price,
-              total_price: item.total_price,
-              has_custom_note: !!item.custom_note,
-              has_bundle_selections: !!item.bundle_selections_json,
-            }))
-            : [],
-          hasCustomizations: Array.isArray(transactionData.transaction_item_customizations) &&
-            transactionData.transaction_item_customizations.length > 0,
-          hasOptions: Array.isArray(transactionData.transaction_item_customization_options) &&
-            transactionData.transaction_item_customization_options.length > 0,
-        });
-
-        // DEBUG: Log payment_method to see what's being sent
-        const paymentMethodValue = transactionData.payment_method;
-        const paymentMethodStr = paymentMethodValue ? String(paymentMethodValue) : 'null/undefined';
-        console.log(`🔍 [DEBUG] payment_method details:`, {
-          payment_method: paymentMethodStr,
-          payment_method_type: typeof paymentMethodValue,
-          payment_method_length: paymentMethodStr.length,
-          payment_method_id: transactionData.payment_method_id,
-          is_object: typeof paymentMethodValue === 'object' && paymentMethodValue !== null,
-          object_stringified: typeof paymentMethodValue === 'object' ? JSON.stringify(paymentMethodValue) : 'N/A',
-        });
-
-        // Log full payload (truncated for readability, but more than before)
-        const fullPayloadStr = JSON.stringify(transactionData, null, 2);
-        console.log(`📦 [SMART SYNC] Full transaction payload (first 2000 chars):`, fullPayloadStr.substring(0, 2000));
-        if (fullPayloadStr.length > 2000) {
-          console.log(`📦 [SMART SYNC] ... (payload truncated, total length: ${fullPayloadStr.length} chars)`);
+        // Log transaction data being sent (for debugging; verbose logs gated to reduce RAM)
+        if (SMART_SYNC_VERBOSE) {
+          console.log(`📤 [SMART SYNC] Sending transaction ${transaction.id}:`, {
+            id: transactionData.id,
+            uuid_id: transactionData.uuid_id,
+            business_id: transactionData.business_id,
+            user_id: transactionData.user_id,
+            shift_uuid: transactionData.shift_uuid,
+            items_count: Array.isArray(transactionData.items) ? transactionData.items.length : 0,
+            total_amount: transactionData.total_amount,
+            final_amount: transactionData.final_amount,
+            payment_method: transactionData.payment_method,
+            payment_method_id: transactionData.payment_method_id,
+            pickup_method: transactionData.pickup_method,
+            refund_status: transactionData.refund_status,
+            refund_total: transactionData.refund_total,
+            contact_id: transactionData.contact_id,
+            receipt_number: transactionData.receipt_number,
+            table_id: transactionData.table_id,
+            created_at: transactionData.created_at,
+            customizations_count: Array.isArray(transactionData.transaction_item_customizations)
+              ? transactionData.transaction_item_customizations.length
+              : 0,
+            options_count: Array.isArray(transactionData.transaction_item_customization_options)
+              ? transactionData.transaction_item_customization_options.length
+              : 0,
+            activity_logs_count: Array.isArray(transactionData.activity_logs)
+              ? transactionData.activity_logs.length
+              : 0,
+          });
+          const fullPayloadStr = JSON.stringify(transactionData, null, 2);
+          console.log(`📋 [SMART SYNC] Transaction payload structure:`, {
+            topLevelKeys: Object.keys(transactionData),
+            items: Array.isArray(transactionData.items)
+              ? transactionData.items.map((item: UnknownRecord) => ({
+                id: item.id,
+                product_id: item.product_id,
+                quantity: item.quantity,
+                unit_price: item.unit_price,
+                total_price: item.total_price,
+                has_custom_note: !!item.custom_note,
+                has_bundle_selections: !!item.bundle_selections_json,
+              }))
+              : [],
+            hasCustomizations: Array.isArray(transactionData.transaction_item_customizations) &&
+              transactionData.transaction_item_customizations.length > 0,
+            hasOptions: Array.isArray(transactionData.transaction_item_customization_options) &&
+              transactionData.transaction_item_customization_options.length > 0,
+          });
+          const paymentMethodValue = transactionData.payment_method;
+          const paymentMethodStr = paymentMethodValue ? String(paymentMethodValue) : 'null/undefined';
+          console.log(`🔍 [DEBUG] payment_method details:`, {
+            payment_method: paymentMethodStr,
+            payment_method_type: typeof paymentMethodValue,
+            payment_method_length: paymentMethodStr.length,
+            payment_method_id: transactionData.payment_method_id,
+            is_object: typeof paymentMethodValue === 'object' && paymentMethodValue !== null,
+            object_stringified: typeof paymentMethodValue === 'object' ? JSON.stringify(paymentMethodValue) : 'N/A',
+          });
+          console.log(`📦 [SMART SYNC] Full transaction payload (first 2000 chars):`, fullPayloadStr.substring(0, 2000));
+          if (fullPayloadStr.length > 2000) {
+            console.log(`📦 [SMART SYNC] ... (payload truncated, total length: ${fullPayloadStr.length} chars)`);
+          }
         }
 
         // Fetch transaction items and normalized customizations from actual database tables
@@ -688,25 +694,12 @@ class SmartSyncService {
             transactionData.transaction_item_customizations = normalizedCustomizations.customizations;
             transactionData.transaction_item_customization_options = normalizedCustomizations.options;
 
-            // Log customization details for debugging
-            console.log(`✅ [SMART SYNC] Added ${normalizedCustomizations.customizations.length} customizations and ${normalizedCustomizations.options.length} options to transaction ${transactionData.id}`);
+            if (SMART_SYNC_VERBOSE) {
+              console.log(`✅ [SMART SYNC] Added ${normalizedCustomizations.customizations.length} customizations and ${normalizedCustomizations.options.length} options to transaction ${transactionData.id}`);
+            }
 
-            // Debug: Log customization details to detect if all options are being sent
+            // Debug: Log customization details only when verbose (reduces RAM churn)
             if (normalizedCustomizations.customizations.length > 0) {
-              const customizationDetails = normalizedCustomizations.customizations.map(cust => {
-                const optionsForCust = normalizedCustomizations.options.filter(
-                  (opt: Record<string, unknown>) => opt.transaction_item_customization_id === cust.id
-                );
-                return {
-                  customization_id: cust.id,
-                  customization_type_id: cust.customization_type_id,
-                  options_count: optionsForCust.length,
-                  option_names: optionsForCust.map((opt: Record<string, unknown>) => opt.option_name as string).slice(0, 5) // First 5 option names
-                };
-              });
-              console.log(`🔍 [SMART SYNC] Customization details:`, JSON.stringify(customizationDetails, null, 2));
-
-              // Warn if there are suspiciously many options (might indicate all options are stored)
               const totalOptions = normalizedCustomizations.options.length;
               const totalCustomizations = normalizedCustomizations.customizations.length;
               if (totalOptions > 0 && totalCustomizations > 0) {
@@ -714,6 +707,20 @@ class SmartSyncService {
                 if (avgOptionsPerCust > 10) {
                   console.warn(`⚠️ [SMART SYNC] WARNING: Average ${avgOptionsPerCust.toFixed(1)} options per customization - this might indicate all available options are stored instead of just selected ones!`);
                 }
+              }
+              if (SMART_SYNC_VERBOSE) {
+                const customizationDetails = normalizedCustomizations.customizations.map(cust => {
+                  const optionsForCust = normalizedCustomizations.options.filter(
+                    (opt: Record<string, unknown>) => opt.transaction_item_customization_id === cust.id
+                  );
+                  return {
+                    customization_id: cust.id,
+                    customization_type_id: cust.customization_type_id,
+                    options_count: optionsForCust.length,
+                    option_names: optionsForCust.map((opt: Record<string, unknown>) => opt.option_name as string).slice(0, 5)
+                  };
+                });
+                console.log(`🔍 [SMART SYNC] Customization details:`, JSON.stringify(customizationDetails, null, 2));
               }
             }
           } catch (error) {
@@ -856,55 +863,73 @@ class SmartSyncService {
           itemsCount: Array.isArray(transactionData.items) ? transactionData.items.length : 0
         });
 
-        const response = await fetch(apiUrl, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify(transactionData),
-        }); const responseTime = Date.now() - startTime;
+        let response: Response;
+        let requestTimeout = false;
+        try {
+          const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+          const posKey = getPosWriteApiKey();
+          if (posKey) headers['X-POS-API-Key'] = posKey;
+          const result = await this.fetchWithTimeoutAndRetry(
+            apiUrl,
+            { method: 'POST', headers, body: JSON.stringify(transactionData) },
+            `transaction ${transaction.id}`
+          );
+          response = result.response;
+          requestTimeout = result.timeout;
+        } catch (fetchErr: unknown) {
+          const err = fetchErr as Error & { timeout?: boolean };
+          requestTimeout = err.timeout === true;
+          console.error(`❌ [SMART SYNC] Transaction ${transaction.id} request failed (${requestTimeout ? 'timeout' : 'error'}):`, {
+            error: err.message,
+            timeout: requestTimeout,
+          });
+          throw fetchErr;
+        }
+        const responseTime = Date.now() - startTime;
         this.serverLoadHistory.push(responseTime);
 
         console.log(`📥 [SMART SYNC] Server response for transaction ${transaction.id}:`, {
           status: response.status,
           statusText: response.statusText,
           responseTime: `${responseTime}ms`,
+          timeout: requestTimeout,
           headers: Object.fromEntries(response.headers.entries()),
         });
 
         if (response.ok) {
-          const result = await response.json();
-          console.log(`✅ [SMART SYNC] Transaction ${transaction.id} synced successfully`, {
+          const result = await response.json() as UnknownRecord;
+          const expectedItems = Array.isArray(transactionData.items) ? transactionData.items.length : 0;
+          const expectedRefunds = Array.isArray(transactionData.transaction_refunds) ? transactionData.transaction_refunds.length : 0;
+          const itemsApplied = typeof result.itemsApplied === 'number' ? result.itemsApplied : -1;
+          const refundsApplied = typeof result.refundsApplied === 'number' ? result.refundsApplied : -1;
+          // When server omits itemsApplied/refundsApplied (legacy or different deployment), treat 200 as full apply
+          const hasApplyCounts = itemsApplied >= 0 && refundsApplied >= 0;
+          const fullApply = hasApplyCounts
+            ? itemsApplied === expectedItems && refundsApplied === expectedRefunds
+            : true;
+
+          console.log(`✅ [SMART SYNC] Transaction ${transaction.id} server response`, {
             responseTime: `${responseTime}ms`,
-            resultKeys: Object.keys(result),
-            resultSummary: {
-              success: result.success,
-              message: result.message,
-              transactionId: result.transaction?.id || result.id,
-              transactionUuid: result.transaction?.uuid_id || result.uuid_id || transactionData.uuid_id,
-              serverInsertId: result.insertId || result.transaction?.id,
-              insertedCount: result.insertedCount,
-              updatedCount: result.updatedCount,
-              receiptNumber: result.receiptNumber || result.transaction?.receipt_number,
-            },
-            fullResult: result,
+            itemsApplied,
+            refundsApplied,
+            expectedItems,
+            expectedRefunds,
+            fullApply,
           });
 
-          // Log server confirmation details for verification
-          if (result.success) {
-            console.log(`🔍 [SMART SYNC] Server confirmed transaction:`, {
-              localId: transaction.id,
-              localUuid: transactionData.uuid_id,
-              serverId: result.insertId || result.transaction?.id || result.id,
-              serverUuid: result.transaction?.uuid_id || result.uuid_id || transactionData.uuid_id,
-              receiptNumber: result.receiptNumber || result.transaction?.receipt_number,
-              message: result.message,
-            });
+          if (!fullApply) {
+            console.warn(`⚠️ [SMART SYNC] Server did not confirm full apply for transaction ${transaction.id}; marking failed for retry`);
+            const electronAPI = typeof window !== 'undefined' ? (window as { electronAPI?: UnknownRecord }).electronAPI : undefined;
+            const txUuidForFail = (transaction as UnknownRecord).uuid_id ?? transaction.id;
+            if (electronAPI?.localDbMarkTransactionFailed && txUuidForFail) {
+              await (electronAPI.localDbMarkTransactionFailed as (id: string) => Promise<void>)(String(txUuidForFail));
+            }
+            failedCount++;
+            if (onProgress) onProgress(transaction, 'failed: partial apply');
+            await this.delay(100);
+            continue;
           }
 
-          // Mark transaction as synced
-          // CRITICAL FIX: Use uuid_id instead of id, because localDbMarkTransactionsSynced expects UUID strings
-          // Ensure we have the UUID - use uuid_id if available, otherwise use id (which should be the UUID string from the database)
           const electronAPI = typeof window !== 'undefined' ? (window as { electronAPI?: UnknownRecord }).electronAPI : undefined;
           const transactionUuid = transactionData.uuid_id || transactionData.id || transaction.id;
           if (transactionUuid && electronAPI?.localDbMarkTransactionsSynced) {
@@ -919,6 +944,8 @@ class SmartSyncService {
                 stack: markError instanceof Error ? markError.stack : undefined,
                 errorObject: markError
               });
+              failedCount++;
+              if (onProgress) onProgress(transaction, 'failed');
             }
           } else {
             console.warn(`⚠️ [SMART SYNC] Cannot mark transaction as synced:`, {
@@ -1008,12 +1035,16 @@ class SmartSyncService {
         await this.delay(100);
 
       } catch (error) {
+        const isTimeout = error instanceof Error && (error as Error & { timeout?: boolean }).timeout === true;
         console.error(`❌ [SMART SYNC] Failed to sync transaction ${transaction.id}:`, {
           error: error instanceof Error ? error.message : String(error),
+          timeout: isTimeout,
           stack: error instanceof Error ? error.stack : undefined,
-          errorObject: error,
           transactionId: transaction.id
         });
+        if (isTimeout) {
+          console.warn(`⏱️ [SMART SYNC] Transaction ${transaction.id} sync status: timeout (stalled network); will retry`);
+        }
 
         // Mark as failed (will retry later) - use uuid_id so main process UPDATE matches the row
         const electronAPI = typeof window !== 'undefined' ? (window as { electronAPI?: UnknownRecord }).electronAPI : undefined;
@@ -1022,7 +1053,7 @@ class SmartSyncService {
         if (electronAPI?.localDbMarkTransactionFailed && txUuidForFailed) {
           try {
             await (electronAPI.localDbMarkTransactionFailed as (id: string) => Promise<void>)(String(txUuidForFailed));
-            console.log(`⚠️ [SMART SYNC] Marked transaction ${transaction.id} as failed for retry`);
+            console.log(`⚠️ [SMART SYNC] Marked transaction ${transaction.id} as failed for retry${isTimeout ? ' (timeout)' : ''}`);
           } catch (markError) {
             console.error(`❌ [SMART SYNC] Failed to mark transaction ${transaction.id} as failed:`, {
               error: markError instanceof Error ? markError.message : String(markError),
@@ -1148,7 +1179,55 @@ class SmartSyncService {
   }
 
   /**
-   * Get count of pending transactions
+   * Fetch with per-request timeout and bounded retries (backoff + jitter).
+   * Surfaces timeout via thrown error message and return so sync logs can distinguish server rejection from network stall.
+   */
+  private async fetchWithTimeoutAndRetry(
+    url: string,
+    init: RequestInit,
+    label: string
+  ): Promise<{ response: Response; timeout: boolean }> {
+    const { requestTimeoutMs, requestRetries, requestRetryBaseDelayMs } = this.config;
+    let lastError: Error | null = null;
+    let lastTimeout = false;
+    for (let attempt = 0; attempt <= requestRetries; attempt++) {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), requestTimeoutMs);
+      try {
+        const response = await fetch(url, {
+          ...init,
+          signal: controller.signal,
+        });
+        clearTimeout(timeoutId);
+        return { response, timeout: false };
+      } catch (err) {
+        clearTimeout(timeoutId);
+        const isTimeout = err instanceof Error && (err.name === 'AbortError' || err.message?.includes('abort'));
+        lastTimeout = isTimeout;
+        lastError = err instanceof Error ? err : new Error(String(err));
+        if (attempt < requestRetries) {
+          const baseDelay = requestRetryBaseDelayMs * Math.pow(2, attempt);
+          const jitter = Math.random() * 0.3 * baseDelay;
+          const delayMs = Math.min(baseDelay + jitter, 15000);
+          console.warn(`⚠️ [SMART SYNC] ${label} attempt ${attempt + 1} ${isTimeout ? 'timed out' : 'failed'}, retrying in ${Math.round(delayMs)}ms`, {
+            error: lastError.message,
+            attempt: attempt + 1,
+            maxRetries: requestRetries,
+          });
+          await this.delay(delayMs);
+        }
+      }
+    }
+    const message = lastTimeout
+      ? `Request timed out after ${requestTimeoutMs}ms (${requestRetries + 1} attempts)`
+      : (lastError?.message ?? 'Request failed');
+    const e = new Error(message) as Error & { timeout?: boolean };
+    e.timeout = lastTimeout;
+    throw e;
+  }
+
+  /**
+   * Get count of pending transactions (uses count-only API when available to avoid loading full list + items)
    */
   async getPendingTransactionCount(): Promise<number> {
     try {
@@ -1157,13 +1236,15 @@ class SmartSyncService {
       }
 
       const electronAPI = typeof window !== 'undefined' ? (window as { electronAPI?: UnknownRecord }).electronAPI : undefined;
-      // Use localDbGetUnsyncedTransactions to get ALL pending transactions (sync_status = 'pending')
-      // This matches what the sync process uses and ensures we count all pending transactions
+      if (electronAPI?.localDbGetUnsyncedTransactionsCount) {
+        const count = await (electronAPI.localDbGetUnsyncedTransactionsCount as (businessId?: number) => Promise<number>)();
+        return typeof count === 'number' ? count : 0;
+      }
+      // Fallback: load list and return length (avoid when possible)
       if (!electronAPI?.localDbGetUnsyncedTransactions) {
         return 0;
       }
-
-      const pendingTransactions = await (electronAPI.localDbGetUnsyncedTransactions as (businessId?: number) => Promise<PendingTransaction[]>)();
+      const pendingTransactions = await (electronAPI.localDbGetUnsyncedTransactions as (businessId?: number, includeItems?: boolean) => Promise<PendingTransaction[]>)(undefined, false);
       return Array.isArray(pendingTransactions) ? pendingTransactions.length : 0;
     } catch (error) {
       console.warn('⚠️ [SMART SYNC] Failed to get pending transaction count:', error);
@@ -1499,13 +1580,25 @@ class SmartSyncService {
             fullPayload: payload,
           });
 
-          const response = await fetch(refundUrl, {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-            },
-            body: JSON.stringify(payload),
-          });
+          let response: Response;
+          try {
+            const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+            const posKey = getPosWriteApiKey();
+            if (posKey) headers['X-POS-API-Key'] = posKey;
+            const result = await this.fetchWithTimeoutAndRetry(
+              refundUrl,
+              { method: 'POST', headers, body: JSON.stringify(payload) },
+              `refund ${refund.id}`
+            );
+            response = result.response;
+            if (result.timeout) {
+              console.warn(`⏱️ [SMART SYNC] Refund ${refund.id} request timed out; marking failed for retry`);
+            }
+          } catch (fetchErr: unknown) {
+            const err = fetchErr as Error & { timeout?: boolean };
+            console.error(`❌ [SMART SYNC] Refund ${refund.id} request failed (${err.timeout ? 'timeout' : 'error'}):`, err.message);
+            throw fetchErr;
+          }
 
           console.log(`📥 [SMART SYNC] Server response for refund ${refund.id}:`, {
             status: response.status,
@@ -1564,7 +1657,7 @@ class SmartSyncService {
                         const localRefundUuid = refundData.uuid_id as string;
                         await (electronAPI.localDbApplyTransactionRefund as (p: UnknownRecord) => Promise<unknown>)({
                           refund: { ...result.refund, uuid_id: localRefundUuid },
-                          transactionUpdate: { id: transactionUuid, refund_status: undefined, refund_total: undefined, last_refunded_at: undefined, status: undefined },
+                          transactionUpdate: { transaction_uuid: transactionUuid, refund_status: undefined, refund_total: undefined, last_refunded_at: undefined, status: undefined },
                         });
                       }
                       await (electronAPI.localDbMarkRefundSynced as (id: number) => Promise<{ success: boolean }>)(refund.id);
@@ -1634,8 +1727,7 @@ class SmartSyncService {
                 uuid_id: localRefundUuid // Use local UUID to match existing record
               },
               transactionUpdate: {
-                id: transactionUuid,
-                // Explicitly pass undefined for all fields to prevent transaction update
+                transaction_uuid: transactionUuid,
                 refund_status: undefined,
                 refund_total: undefined,
                 last_refunded_at: undefined,

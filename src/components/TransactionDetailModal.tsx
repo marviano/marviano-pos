@@ -268,8 +268,8 @@ const TransactionDetailModal: React.FC<TransactionDetailModalProps> = ({
     }, 0);
   }, []);
 
-  // Reprint functionality
-  const handleReprint = useCallback(async () => {
+  // Reprint functionality: targetPrinter = which printer to send the reprint to (left half = P1, right half = P2)
+  const handleReprint = useCallback(async (targetPrinter: 'receiptPrinter' | 'receiptizePrinter') => {
     if (!transaction || isReprinting) return;
 
     setIsReprinting(true);
@@ -470,9 +470,8 @@ const TransactionDetailModal: React.FC<TransactionDetailModalProps> = ({
       // Get cashier name with fallback
       const cashierName = transaction.user_name || user?.name || 'Kasir';
 
-      // Always send reprint to Printer 1 (receipt) so the receipt comes out of the main receipt printer.
-      // We still use the original printer's counter for display and log to the correct audit (P1 or P2).
-      const reprintPrinterType: 'receiptPrinter' | 'receiptizePrinter' = 'receiptPrinter';
+      // Send reprint to the chosen printer (user picks via left/right half of button).
+      const reprintPrinterType: 'receiptPrinter' | 'receiptizePrinter' = targetPrinter;
 
       const vd = typeof transaction.voucher_discount === 'number' ? transaction.voucher_discount : (typeof transaction.voucher_discount === 'string' ? parseFloat(transaction.voucher_discount) : 0);
       const hasVoucher = vd > 0;
@@ -507,8 +506,8 @@ const TransactionDetailModal: React.FC<TransactionDetailModalProps> = ({
 
       if (printResult?.success) {
 
-        // Log the reprint in audit log with reprint flag and count
-        if (originalPrinterType === 'receiptPrinter') {
+        // Log the reprint in audit log for the printer we printed to (reprint flag and count)
+        if (reprintPrinterType === 'receiptPrinter') {
           const logPrinter1 = electronAPI.logPrinter1Print as ((transactionId: string, printer1ReceiptNumber: number, globalCounter?: number | null, isReprint?: boolean, reprintCount?: number) => Promise<{ success: boolean }>) | undefined;
           await logPrinter1?.(
             transaction.id,
@@ -1269,7 +1268,12 @@ const TransactionDetailModal: React.FC<TransactionDetailModalProps> = ({
             {/* Reprint Button */}
             <div className="flex items-center space-x-3">
               <button
-                onClick={handleReprint}
+                title="Kiri = Printer 1, Kanan = Printer 2"
+                onClick={(e) => {
+                  const rect = e.currentTarget.getBoundingClientRect();
+                  const isLeftHalf = e.clientX - rect.left < rect.width / 2;
+                  handleReprint(isLeftHalf ? 'receiptPrinter' : 'receiptizePrinter');
+                }}
                 disabled={isReprinting || !transaction || (typeof window !== 'undefined' && !(window as { electronAPI?: { printReceipt?: unknown } }).electronAPI?.printReceipt)}
                 className={`px-4 py-2 rounded-lg font-medium transition-colors flex items-center space-x-2 ${isReprinting
                   ? 'bg-gray-300 text-gray-500 cursor-not-allowed'
