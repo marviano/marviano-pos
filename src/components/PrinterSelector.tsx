@@ -226,7 +226,7 @@ export default function PrinterSelector() {
               break;
             case 'labelPrinter':
               selections.labelPrinter = config.system_printer_name;
-              margins.labelPrinter = marginAdjustMm;
+              margins.labelPrinter = 0; // offset removed for Printer 3 (checker uses fixed padding)
               copiesSettings.labelPrinter = copiesValue;
               break;
             case 'receiptizePrinter':
@@ -290,10 +290,22 @@ export default function PrinterSelector() {
       // Save to database
       const savePromises = [];
       const buildExtraSettings = (printerType: keyof PrinterSelection) => {
-        const marginAdjust = marginOffsets[printerType];
         const copiesValue = (printerType === 'receiptPrinter' || printerType === 'labelPrinter' || printerType === 'receiptizePrinter')
           ? (copies[printerType] || 1)
           : undefined;
+        // Printer 3 (labelPrinter): no marginAdjustMm (offset removed; checker uses fixed padding)
+        if (printerType === 'labelPrinter') {
+          const settings: { copies?: number; nonOfflineCopies?: number } = {};
+          if (copiesValue !== undefined) {
+            settings.copies = typeof copiesValue === 'number' && !Number.isNaN(copiesValue) && copiesValue > 0 ? copiesValue : 1;
+          }
+          const nonOffVal = typeof labelPrinterNonOfflineCopies === 'number' && !Number.isNaN(labelPrinterNonOfflineCopies) && labelPrinterNonOfflineCopies > 0
+            ? labelPrinterNonOfflineCopies
+            : 1;
+          settings.nonOfflineCopies = nonOffVal;
+          return settings;
+        }
+        const marginAdjust = marginOffsets[printerType];
         const settings: { marginAdjustMm: number; copies?: number; nonCashCopies?: number; nonOfflineCopies?: number } = {
           marginAdjustMm: typeof marginAdjust === 'number' && !Number.isNaN(marginAdjust) ? marginAdjust : 0,
         };
@@ -304,13 +316,6 @@ export default function PrinterSelector() {
         if (printerType === 'receiptPrinter' || printerType === 'receiptizePrinter') {
           const nonCashValue = nonCashCopies[printerType] ?? 1;
           settings.nonCashCopies = typeof nonCashValue === 'number' && !Number.isNaN(nonCashValue) && nonCashValue > 0 ? nonCashValue : 1;
-        }
-        // Printer 3 (labelPrinter): nonOfflineCopies for GoFood, Grab, Shopee, Qpon, TikTok
-        if (printerType === 'labelPrinter') {
-          const nonOffVal = typeof labelPrinterNonOfflineCopies === 'number' && !Number.isNaN(labelPrinterNonOfflineCopies) && labelPrinterNonOfflineCopies > 0
-            ? labelPrinterNonOfflineCopies
-            : 1;
-          settings.nonOfflineCopies = nonOffVal;
         }
         return settings;
       };
@@ -515,12 +520,11 @@ Please try:
       let testData: Record<string, unknown>;
 
       if (printerType === 'labelPrinter') {
-        // Label: use simple test print (no receipt template)
+        // Label: use simple test print (no receipt template). No offset for Printer 3.
         testData = {
           type: 'test',
           printerType: 'labelPrinter',
           printerName,
-          marginAdjustMm: marginOffsets.labelPrinter,
           content: `TEST PRINT - LABEL PRINTER\n\nThis is a test print to verify your printer is working correctly.\n\nPrinter: ${printerName}\nTime: ${new Date().toLocaleString()}\n\nIf you can see this, your printer is configured correctly!`,
         };
       } else {
@@ -902,34 +906,6 @@ Please try:
                   title="Copies for GoFood, Grab, Shopee, Qpon, TikTok"
                 />
               </div>
-            </div>
-
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-2">
-                Left Offset (mm)
-              </label>
-              <input
-                type="range"
-                min={-5}
-                max={5}
-                step={0.5}
-                value={marginOffsets.labelPrinter}
-                onChange={(e) => handleMarginChange('labelPrinter', Number(e.target.value))}
-                className="w-full"
-              />
-              <div className="mt-1 flex items-center justify-between text-xs text-gray-500">
-                <span>{marginOffsets.labelPrinter.toFixed(1)} mm</span>
-                <button
-                  type="button"
-                  onClick={() => resetMargin('labelPrinter')}
-                  className="text-green-600 hover:text-green-700"
-                >
-                  Reset
-                </button>
-              </div>
-              <p className="mt-2 text-xs text-gray-500">
-                Offset is applied to label layouts when supported. Save after adjusting.
-              </p>
             </div>
 
             <button

@@ -8,7 +8,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // POS functionality
   printReceipt: (data: UnknownRecord) => ipcRenderer.invoke('print-receipt', data),
   printLabel: (data: UnknownRecord) => ipcRenderer.invoke('print-label', data),
-  printLabelsBatch: (data: { labels: UnknownRecord[]; printerName?: string; printerType?: string; requestId?: string; business_id?: number; orderContext?: UnknownRecord; isOnlineOrder?: boolean }) => ipcRenderer.invoke('print-labels-batch', data),
+  printLabelsBatch: (data: { labels: UnknownRecord[]; printerName?: string; printerType?: string; requestId?: string; business_id?: number; orderContext?: UnknownRecord; splitByCategory?: boolean; isOnlineOrder?: boolean }) => ipcRenderer.invoke('print-labels-batch', data),
   openCashDrawer: () => ipcRenderer.invoke('open-cash-drawer'),
   playSound: (soundType: string) => ipcRenderer.invoke('play-sound', soundType),
   // System printers
@@ -414,7 +414,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getReceiptTemplateById: (id: number) => ipcRenderer.invoke('get-receipt-template-by-id', id),
   setDefaultReceiptTemplate: (templateType: 'receipt' | 'bill', templateName: string, businessId?: number) => ipcRenderer.invoke('set-default-receipt-template', templateType, templateName, businessId),
   saveReceiptTemplate: (templateType: 'receipt' | 'bill' | 'checker', templateCode: string, templateName?: string, businessId?: number, showNotes?: boolean, oneLabelPerProduct?: boolean) => ipcRenderer.invoke('save-receipt-template', templateType, templateCode, templateName, businessId, showNotes, oneLabelPerProduct),
-  updateReceiptTemplate: (id: number, templateCode: string, templateName?: string | null, showNotes?: boolean, oneLabelPerProduct?: boolean) => ipcRenderer.invoke('update-receipt-template', id, templateCode, templateName, showNotes, oneLabelPerProduct),
+  updateReceiptTemplate: (id: number, templateCode: string, templateName?: string | null, showNotes?: boolean, oneLabelPerProduct?: boolean, splitByCategory?: boolean) => ipcRenderer.invoke('update-receipt-template', id, templateCode, templateName, showNotes, oneLabelPerProduct, splitByCategory),
   uploadTemplateToVps: (id: number) => ipcRenderer.invoke('upload-template-to-vps', id),
   downloadTemplateFromVps: (id: number) => ipcRenderer.invoke('download-template-from-vps', id),
   getReceiptSettings: (businessId?: number) => ipcRenderer.invoke('get-receipt-settings', businessId),

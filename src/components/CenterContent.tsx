@@ -12,7 +12,7 @@ import PackageSelectionModal, { type PackageSelection, type PackageItemForPos, g
 import TableSelectionModal from './TableSelectionModal';
 import WaiterSelectionModal from './WaiterSelectionModal';
 import { offlineSyncService } from '@/lib/offlineSync';
-import { appAlert } from '@/components/AppDialog';
+import { appAlert, appConfirm } from '@/components/AppDialog';
 import { getApiUrl } from '@/lib/api';
 import { useAuth } from '@/hooks/useAuth';
 import { generateUUID } from '@/lib/uuid';
@@ -243,8 +243,7 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
   const [bundleItems, setBundleItems] = useState<BundleItem[]>([]);
   const [customerName, setCustomerName] = useState<string>('');
   const [cuValue, setCuValue] = useState<string>('1');
-  const [showPasswordModal, setShowPasswordModal] = useState(false);
-  const [passwordInput, setPasswordInput] = useState('');
+  // Password modal removed in favor of appConfirm
   const [pendingLockedItemAction, setPendingLockedItemAction] = useState<{ item: CartItem; action: 'reduce' | 'delete' } | null>(null);
   const [showCancellationWaiterModal, setShowCancellationWaiterModal] = useState(false);
 
@@ -1145,26 +1144,6 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
     }
   };
 
-  // Handle password verification for locked items
-  const handlePasswordSubmit = async () => {
-    if (passwordInput === 'KONFIRMASI') {
-      setShowPasswordModal(false);
-
-      if (pendingLockedItemAction) {
-        const { item, action } = pendingLockedItemAction;
-        try {
-          await performLockedItemCancellation(item, action, user?.id || null, null);
-        } catch (error) {
-          appAlert('Gagal memperbarui item. Silakan coba lagi.');
-        }
-        setPendingLockedItemAction(null);
-        setPasswordInput('');
-      }
-    } else {
-      appAlert('Password salah. Silakan coba lagi.');
-      setPasswordInput('');
-    }
-  };
 
   /** Handle cancellation authorized by waiter PIN */
   const handleCancellationAuthorized = async (waiterId: number) => {
@@ -1562,7 +1541,7 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
                         </div>
                         <div className="flex items-center space-x-2">
                           <button
-                            onClick={(e) => {
+                            onClick={async (e) => {
                               e.stopPropagation(); // Prevent opening edit modal
                               if (isLocked) {
                                 // For locked items, show verification modal
@@ -1573,7 +1552,20 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
                                 }
 
                                 if (canAccessBayarButton) {
-                                  setShowPasswordModal(true);
+                                  const confirmed = await appConfirm(
+                                    item.quantity > 1
+                                      ? `Apakah Anda yakin ingin mengurangi 1 item ${item.product.nama}?`
+                                      : `Apakah Anda yakin membatalkan item ${item.product.nama}?`
+                                  );
+
+                                  if (confirmed) {
+                                    try {
+                                      await performLockedItemCancellation(item, item.quantity > 1 ? 'reduce' : 'delete', user?.id || null, null);
+                                    } catch (error) {
+                                      appAlert('Gagal memperbarui item. Silakan coba lagi.');
+                                    }
+                                    setPendingLockedItemAction(null);
+                                  }
                                 } else {
                                   setShowCancellationWaiterModal(true);
                                 }
@@ -2222,48 +2214,6 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
         />
       )}
 
-      {/* Password Modal for Locked Items */}
-      {showPasswordModal && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-          <div className="bg-white rounded-lg shadow-xl w-full max-w-md p-6">
-            <h2 className="text-xl font-bold text-gray-900 mb-4">Verifikasi Password</h2>
-            <p className="text-sm text-gray-600 mb-4">
-              Item ini sudah dikirim ke kitchen/barista. Masukkan password untuk melanjutkan.
-            </p>
-            <input
-              type="password"
-              value={passwordInput}
-              onChange={(e) => setPasswordInput(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter') {
-                  handlePasswordSubmit();
-                }
-              }}
-              placeholder="ketik KONFIRMASI"
-              className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm text-black placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent mb-4"
-              autoFocus
-            />
-            <div className="flex justify-end gap-3">
-              <button
-                onClick={() => {
-                  setShowPasswordModal(false);
-                  setPasswordInput('');
-                  setPendingLockedItemAction(null);
-                }}
-                className="px-4 py-2 text-gray-700 bg-white border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors"
-              >
-                Batal
-              </button>
-              <button
-                onClick={handlePasswordSubmit}
-                className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors"
-              >
-                Verifikasi
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
 
       {/* Waiter Selection Modal */}
       <WaiterSelectionModal

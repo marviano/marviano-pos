@@ -2274,11 +2274,14 @@ export default function PaymentModal({
             // Use current logged-in business (businessId) so the template matches what the user selected for this business; not the transaction's business.
             // When checker template uses {{items}}, backend prints one order-summary slip using orderContext; otherwise prints per-item labels.
             if (allLabels.length > 0 || (orderContextForChecker.itemsHtml && orderContextForChecker.orderTime)) {
+              const checkerResult = await window.electronAPI?.getReceiptTemplate?.('checker', businessId ?? transactionData.business_id);
+              const splitByCategory = typeof checkerResult === 'object' && checkerResult !== null && (checkerResult as { splitByCategory?: boolean }).splitByCategory === true;
               const batchResult = await window.electronAPI?.printLabelsBatch?.({
                 labels: allLabels,
                 printerType: 'labelPrinter',
                 business_id: businessId ?? transactionData.business_id,
                 orderContext: orderContextForChecker,
+                splitByCategory,
                 isOnlineOrder: isOnline && !!selectedOnlinePlatform
               });
 

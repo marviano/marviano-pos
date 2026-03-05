@@ -1,31 +1,23 @@
 <!--
-  Template: slip pesanan (ukuran kertas = struk 80mm, 42ch).
+  Template: slip pesanan (ukuran kertas = 72mm, sama seperti Print All Ganti Shift — agar tidak terpotong kanan).
   Isi: waiter, pelanggan, meja, waktu pesanan, lalu produk dikelompokkan HANYA berdasarkan Category 1 (nama dari DB, contoh: Makanan, Minuman).
-  Contoh tampilan:
-    MAKANAN:
-    - AYAM GORENG
-    - NASI GORENG
-    MINUMAN:
-    - ES TEH
-    - ES JERUK
-  Placeholders: {{waiterName}}, {{customerName}}, {{tableName}}, {{orderTime}}, {{categoriesSections}} (semua kategori), {{leftPadding}}, {{rightPadding}}.
-  Padding: {{leftPadding}}, {{rightPadding}} — body padding.
+  Placeholders: {{waiterName}}, {{customerName}}, {{tableName}}, {{orderTime}}, {{categoriesSections}}, {{leftPadding}}, {{rightPadding}}.
 -->
 <!DOCTYPE html>
 <html>
 <head>
   <meta charset="UTF-8">
   <style>
-    @page { size: 80mm auto; margin: 0; }
+    @page { size: 72mm auto; margin: 0; }
     * { margin: 0; padding: 0; box-sizing: border-box; }
     body {
       font-family: 'Arial', 'Helvetica', sans-serif;
-      width: 42ch;
-      max-width: 42ch;
+      width: 100%;
+      max-width: 72mm;
       font-size: 10pt;
       font-weight: 500;
       line-height: 1.2;
-      padding: 2mm {{rightPadding}}mm 2mm {{leftPadding}}mm;
+      padding: 1.5mm {{rightPadding}}mm 1.5mm {{leftPadding}}mm;
       word-wrap: break-word;
       overflow-wrap: break-word;
     }

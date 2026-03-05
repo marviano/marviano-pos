@@ -115,6 +115,8 @@ interface EditTemplateModal {
   showNotes: boolean;
   /** Checker only: true = one label per product unit, false = one combined kitchen order slip. */
   oneLabelPerProduct: boolean;
+  /** Checker only (slip mode): true = after full summary slip, print one slip per category 1. */
+  splitByCategory: boolean;
   /** True if this template is the default (used for printing). */
   isDefault: boolean;
 }
@@ -447,6 +449,7 @@ export default function ReceiptTemplateSettings() {
         setAsDefault: false,
         showNotes: result.showNotes ?? false,
         oneLabelPerProduct: result.oneLabelPerProduct !== false,
+        splitByCategory: result.splitByCategory === true,
         isDefault: template.is_default ?? false,
       });
     } catch (error) {
@@ -474,6 +477,7 @@ export default function ReceiptTemplateSettings() {
       setAsDefault: false,
       showNotes: false,
       oneLabelPerProduct: true,
+      splitByCategory: false,
       isDefault: false,
     });
   };
@@ -493,7 +497,7 @@ export default function ReceiptTemplateSettings() {
       setMessage(null);
       if (editModal.mode === 'edit') {
         const newName = editModal.newName.trim();
-        const result = await window.electronAPI?.updateReceiptTemplate?.(editModal.templateId, editModal.code, newName, editModal.showNotes, editModal.oneLabelPerProduct);
+        const result = await window.electronAPI?.updateReceiptTemplate?.(editModal.templateId, editModal.code, newName, editModal.showNotes, editModal.oneLabelPerProduct, editModal.splitByCategory);
         if (!result?.success) {
           setMessage({ type: 'error', text: result?.error || 'Gagal menyimpan perubahan' });
           return;
@@ -519,7 +523,8 @@ export default function ReceiptTemplateSettings() {
           editModal.newName.trim(),
           businessId,
           editModal.showNotes,
-          editModal.oneLabelPerProduct
+          editModal.oneLabelPerProduct,
+          editModal.splitByCategory
         );
         if (!result?.success) {
           setMessage({ type: 'error', text: result?.error || 'Gagal menyimpan template' });
@@ -1435,6 +1440,23 @@ export default function ReceiptTemplateSettings() {
               )}
               {editModal.type === 'checker' && (
                 <p className="text-xs text-gray-500 ml-6 -mt-1">Centang = satu label per porsi; tidak centang = satu slip gabungan pesanan (semua item dalam satu cetakan).</p>
+              )}
+              {editModal.type === 'checker' && !editModal.oneLabelPerProduct && (
+                <>
+                  <label className="flex items-center gap-2 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={editModal.splitByCategory}
+                      onChange={(e) => setEditModal(prev => prev ? { ...prev, splitByCategory: e.target.checked } : null)}
+                      className="rounded border-gray-300 text-indigo-600 focus:ring-indigo-500"
+                    />
+                    <span className="text-sm font-medium text-gray-900">Cetak per kategori 1</span>
+                  </label>
+                  <p className="text-xs text-gray-500 ml-6 -mt-1">Setelah struk ringkasan, cetak 1 kertas per kategori (Makanan, Minuman, dst.).</p>
+                  <p className="text-xs text-blue-600 bg-blue-50 border border-blue-200 rounded-md px-3 py-2 mt-1">
+                    <strong>Contoh:</strong> Jika ada 2 kategori (Makanan &amp; Minuman), akan mencetak 3 kertas: Kertas 1 = Semua item • Kertas 2 = Makanan saja • Kertas 3 = Minuman saja
+                  </p>
+                </>
               )}
               {editModal.mode === 'edit' && !editModal.isDefault && (
                 <p className="text-sm text-amber-700 bg-amber-50 border border-amber-200 rounded-md px-3 py-2">

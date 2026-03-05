@@ -731,6 +731,7 @@ export async function initializeMySQLSchema(): Promise<void> {
       is_default TINYINT(1) DEFAULT 0 COMMENT 'Whether this template is the default/active template for its type',
       show_notes TINYINT(1) DEFAULT 0 COMMENT '1 = show item note/customization on print, 0 = hide',
       one_label_per_product TINYINT(1) DEFAULT 1 COMMENT 'Checker only: 1 = one label per product unit, 0 = one combined kitchen order slip',
+      checker_split_by_category TINYINT(1) NOT NULL DEFAULT 0 COMMENT 'Checker only (slip mode): 1 = after full slip print one slip per category 1',
       version INT DEFAULT 1 COMMENT 'Template version number',
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
       updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
@@ -868,6 +869,21 @@ export async function initializeMySQLSchema(): Promise<void> {
         // Column already exists
       } else {
         console.warn('⚠️ receipt_templates one_label_per_product migration:', err);
+      }
+    }
+
+    // One-time migration: add checker_split_by_category to receipt_templates (slip mode: print one slip per category 1)
+    try {
+      await pool.execute(
+        `ALTER TABLE receipt_templates ADD COLUMN checker_split_by_category TINYINT(1) NOT NULL DEFAULT 0 COMMENT 'Checker only (slip mode): 1 = after full slip print one slip per category 1' AFTER one_label_per_product`
+      );
+      console.log('✅ receipt_templates: added checker_split_by_category column');
+    } catch (alterErr: unknown) {
+      const err = alterErr as { code?: string; errno?: number };
+      if (err.code === 'ER_DUP_FIELDNAME' || err.errno === 1060) {
+        // Column already exists
+      } else {
+        console.warn('⚠️ receipt_templates checker_split_by_category migration:', err);
       }
     }
 

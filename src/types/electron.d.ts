@@ -98,6 +98,7 @@ declare global {
         printerType?: string;
         business_id?: number;
         orderContext?: { waiterName?: string; customerName?: string; tableName?: string; orderTime?: string; itemsHtml?: string; itemsHtmlCategory1?: string; itemsHtmlCategory2?: string; category1Name?: string; category2Name?: string; categories?: Array<{ categoryName: string; itemsHtml: string }> };
+        splitByCategory?: boolean;
         isOnlineOrder?: boolean;
       }) => Promise<{ success: boolean; error?: string }>;
       openCashDrawer: () => Promise<unknown>;
@@ -698,10 +699,10 @@ declare global {
       // Receipt Template and Settings Management
       getReceiptTemplate?: (templateType: 'receipt' | 'bill' | 'checker', businessId?: number) => Promise<{ success: boolean; template: string | null; error?: string }>;
       getReceiptTemplates?: (templateType: 'receipt' | 'bill' | 'checker', businessId?: number) => Promise<{ success: boolean; templates: Array<{ id: number; name: string; is_default: boolean }>; error?: string }>;
-      getReceiptTemplateById?: (id: number) => Promise<{ success: boolean; templateCode: string | null; showNotes?: boolean; oneLabelPerProduct?: boolean; error?: string }>;
+      getReceiptTemplateById?: (id: number) => Promise<{ success: boolean; templateCode: string | null; showNotes?: boolean; oneLabelPerProduct?: boolean; splitByCategory?: boolean; error?: string }>;
       setDefaultReceiptTemplate?: (templateType: 'receipt' | 'bill' | 'checker', templateName: string, businessId?: number) => Promise<{ success: boolean; error?: string }>;
-      saveReceiptTemplate?: (templateType: 'receipt' | 'bill' | 'checker', templateCode: string, templateName?: string, businessId?: number, showNotes?: boolean, oneLabelPerProduct?: boolean) => Promise<{ success: boolean; error?: string }>;
-      updateReceiptTemplate?: (id: number, templateCode: string, templateName?: string | null, showNotes?: boolean, oneLabelPerProduct?: boolean) => Promise<{ success: boolean; error?: string }>;
+      saveReceiptTemplate?: (templateType: 'receipt' | 'bill' | 'checker', templateCode: string, templateName?: string, businessId?: number, showNotes?: boolean, oneLabelPerProduct?: boolean, splitByCategory?: boolean) => Promise<{ success: boolean; error?: string }>;
+      updateReceiptTemplate?: (id: number, templateCode: string, templateName?: string | null, showNotes?: boolean, oneLabelPerProduct?: boolean, splitByCategory?: boolean) => Promise<{ success: boolean; error?: string }>;
       uploadTemplateToVps?: (id: number) => Promise<{ success: boolean; skipped?: boolean; message: string }>;
       downloadTemplateFromVps?: (id: number) => Promise<{ success: boolean; skipped?: boolean; message: string }>;
       getReceiptSettings?: (businessId?: number) => Promise<{

@@ -85,7 +85,7 @@ interface ReceiptTemplate {
   show_notes?: number;
 }
 
-export type GetReceiptTemplateResult = { templateCode: string | null; showNotes: boolean; templateName?: string | null; oneLabelPerProduct?: boolean };
+export type GetReceiptTemplateResult = { templateCode: string | null; showNotes: boolean; templateName?: string | null; oneLabelPerProduct?: boolean; splitByCategory?: boolean };
 
 /** Result of per-template VPS upload or download. */
 export interface TemplateSyncResult {
@@ -151,9 +151,9 @@ export class ReceiptManagementService {
     logDbOperation('read', 'receipt_templates', `templateType=${templateType} businessId=${businessId ?? 'null'}`);
     // #endregion
     try {
-      const selectCols = 'template_code, COALESCE(show_notes, 0) as show_notes, template_name, COALESCE(one_label_per_product, 1) as one_label_per_product';
+      const selectCols = 'template_code, COALESCE(show_notes, 0) as show_notes, template_name, COALESCE(one_label_per_product, 1) as one_label_per_product, COALESCE(checker_split_by_category, 0) as checker_split_by_category';
       if (businessId) {
-        const businessTemplate = await executeQueryOne<{ template_code: string; show_notes: number; template_name: string | null; one_label_per_product: number }>(
+        const businessTemplate = await executeQueryOne<{ template_code: string; show_notes: number; template_name: string | null; one_label_per_product: number; checker_split_by_category: number }>(
           `SELECT ${selectCols} FROM receipt_templates 
            WHERE template_type = ? AND business_id = ? AND is_active = 1 AND is_default = 1 
            ORDER BY version DESC LIMIT 1`,
@@ -169,11 +169,12 @@ export class ReceiptManagementService {
             showNotes: businessTemplate.show_notes === 1,
             templateName: businessTemplate.template_name ?? null,
             oneLabelPerProduct: businessTemplate.one_label_per_product !== 0,
+            splitByCategory: businessTemplate.checker_split_by_category === 1,
           };
         }
       }
 
-      const globalTemplate = await executeQueryOne<{ template_code: string; show_notes: number; template_name: string | null; one_label_per_product: number }>(
+      const globalTemplate = await executeQueryOne<{ template_code: string; show_notes: number; template_name: string | null; one_label_per_product: number; checker_split_by_category: number }>(
         `SELECT ${selectCols} FROM receipt_templates 
          WHERE template_type = ? AND business_id IS NULL AND is_active = 1 AND is_default = 1 
          ORDER BY version DESC LIMIT 1`,
@@ -189,6 +190,7 @@ export class ReceiptManagementService {
           showNotes: globalTemplate.show_notes === 1,
           templateName: globalTemplate.template_name ?? null,
           oneLabelPerProduct: globalTemplate.one_label_per_product !== 0,
+          splitByCategory: globalTemplate.checker_split_by_category === 1,
         };
       }
 
@@ -198,36 +200,37 @@ export class ReceiptManagementService {
       // #endregion
       // When no checker template is saved, use built-in label layout so labels still print with expected placeholders
       if (templateType === 'checker') {
-        return { templateCode: FALLBACK_CHECKER_TEMPLATE, showNotes: true, templateName: '(fallback)', oneLabelPerProduct: true };
+        return { templateCode: FALLBACK_CHECKER_TEMPLATE, showNotes: true, templateName: '(fallback)', oneLabelPerProduct: true, splitByCategory: false };
       }
-      return { templateCode: null, showNotes: false, templateName: null, oneLabelPerProduct: true };
+      return { templateCode: null, showNotes: false, templateName: null, oneLabelPerProduct: true, splitByCategory: false };
     } catch (error) {
       console.error(`❌ Error loading ${templateType} template:`, error);
-      return { templateCode: null, showNotes: false, templateName: null };
+      return { templateCode: null, showNotes: false, templateName: null, oneLabelPerProduct: true, splitByCategory: false };
     }
   }
 
   /**
    * Get template code and show_notes by template id (for copy/edit).
    */
-  async getReceiptTemplateById(id: number): Promise<{ templateCode: string | null; showNotes: boolean; oneLabelPerProduct: boolean }> {
+  async getReceiptTemplateById(id: number): Promise<{ templateCode: string | null; showNotes: boolean; oneLabelPerProduct: boolean; splitByCategory: boolean }> {
     // #region agent log
     logDbOperation('read', 'receipt_templates', `byId=${id}`);
     // #endregion
     try {
-      const row = await executeQueryOne<{ template_code: string; show_notes: number; one_label_per_product: number | null }>(
-        `SELECT template_code, COALESCE(show_notes, 0) as show_notes, COALESCE(one_label_per_product, 1) as one_label_per_product FROM receipt_templates WHERE id = ? AND is_active = 1 LIMIT 1`,
+      const row = await executeQueryOne<{ template_code: string; show_notes: number; one_label_per_product: number | null; checker_split_by_category: number | null }>(
+        `SELECT template_code, COALESCE(show_notes, 0) as show_notes, COALESCE(one_label_per_product, 1) as one_label_per_product, COALESCE(checker_split_by_category, 0) as checker_split_by_category FROM receipt_templates WHERE id = ? AND is_active = 1 LIMIT 1`,
         [id]
       );
-      if (!row) return { templateCode: null, showNotes: false, oneLabelPerProduct: true };
+      if (!row) return { templateCode: null, showNotes: false, oneLabelPerProduct: true, splitByCategory: false };
       return {
         templateCode: row.template_code ?? null,
         showNotes: row.show_notes === 1,
         oneLabelPerProduct: (row.one_label_per_product ?? 1) !== 0,
+        splitByCategory: (row.checker_split_by_category ?? 0) === 1,
       };
     } catch (error) {
       console.error('Error loading receipt template by id:', error);
-      return { templateCode: null, showNotes: false, oneLabelPerProduct: true };
+      return { templateCode: null, showNotes: false, oneLabelPerProduct: true, splitByCategory: false };
     }
   }
 
@@ -296,9 +299,9 @@ export class ReceiptManagementService {
   }
 
   /**
-   * Update existing template by id (overwrite template_code, optionally template_name, show_notes, one_label_per_product).
+   * Update existing template by id (overwrite template_code, optionally template_name, show_notes, one_label_per_product, splitByCategory).
    */
-  async updateReceiptTemplate(id: number, templateCode: string, templateName?: string | null, showNotes?: boolean, oneLabelPerProduct?: boolean): Promise<boolean> {
+  async updateReceiptTemplate(id: number, templateCode: string, templateName?: string | null, showNotes?: boolean, oneLabelPerProduct?: boolean, splitByCategory?: boolean): Promise<boolean> {
     // #region agent log
     logDbOperation('save', 'receipt_templates', `update id=${id}`);
     // #endregion
@@ -308,8 +311,9 @@ export class ReceiptManagementService {
         : null;
     const showNotesVal = showNotes === true ? 1 : 0;
     const oneLabelPerProductVal = oneLabelPerProduct !== false ? 1 : 0;
-    const sql = `UPDATE receipt_templates SET template_code = ?, template_name = COALESCE(?, template_name), show_notes = ?, one_label_per_product = ?, updated_at = NOW() WHERE id = ? AND is_active = 1`;
-    const params: (string | number | null)[] = [templateCode, nameToSet, showNotesVal, oneLabelPerProductVal, id];
+    const splitByCategoryVal = splitByCategory === true ? 1 : 0;
+    const sql = `UPDATE receipt_templates SET template_code = ?, template_name = COALESCE(?, template_name), show_notes = ?, one_label_per_product = ?, checker_split_by_category = ?, updated_at = NOW() WHERE id = ? AND is_active = 1`;
+    const params: (string | number | null)[] = [templateCode, nameToSet, showNotesVal, oneLabelPerProductVal, splitByCategoryVal, id];
     try {
       const result = await executeUpdate(sql, params);
       if (result > 0) {
@@ -324,15 +328,16 @@ export class ReceiptManagementService {
           is_default: number;
           show_notes: number;
           one_label_per_product: number;
+          checker_split_by_category: number;
           version: number;
           created_at: string;
           updated_at: string;
         }>(
-          `SELECT id, template_type, template_name, business_id, template_code, is_active, is_default, COALESCE(show_notes, 0) AS show_notes, COALESCE(one_label_per_product, 1) AS one_label_per_product, version, created_at, updated_at FROM receipt_templates WHERE id = ? AND is_active = 1 LIMIT 1`,
+          `SELECT id, template_type, template_name, business_id, template_code, is_active, is_default, COALESCE(show_notes, 0) AS show_notes, COALESCE(one_label_per_product, 1) AS one_label_per_product, COALESCE(checker_split_by_category, 0) AS checker_split_by_category, version, created_at, updated_at FROM receipt_templates WHERE id = ? AND is_active = 1 LIMIT 1`,
           [id]
         );
         if (row) {
-          // Exclude local-only columns from mirror write
+          // Exclude local-only columns (show_notes, one_label_per_product, checker_split_by_category) from mirror write
           const mirrorUpsertSql = `INSERT INTO receipt_templates (id, template_type, template_name, business_id, template_code, is_active, version, created_at, updated_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON DUPLICATE KEY UPDATE
@@ -382,12 +387,13 @@ export class ReceiptManagementService {
         is_default: number;
         show_notes: number;
         one_label_per_product: number;
+        checker_split_by_category: number;
         version: number;
         created_at: string;
         updated_at: string;
       }>(
         `SELECT id, template_type, template_name, business_id, template_code, is_active, is_default,
-         COALESCE(show_notes, 0) AS show_notes, COALESCE(one_label_per_product, 1) AS one_label_per_product,
+         COALESCE(show_notes, 0) AS show_notes, COALESCE(one_label_per_product, 1) AS one_label_per_product, COALESCE(checker_split_by_category, 0) AS checker_split_by_category,
          version, created_at, updated_at FROM receipt_templates WHERE id = ? AND is_active = 1 LIMIT 1`,
         [id]
       );
@@ -404,7 +410,7 @@ export class ReceiptManagementService {
       if (vpsRow && vpsUpdated >= localUpdated) {
         return { success: true, skipped: true, message: 'VPS sudah lebih baru, tidak ada perubahan' };
       }
-      // Exclude local-only columns (is_default, show_notes, one_label_per_product) from sync to VPS
+      // Exclude local-only columns (is_default, show_notes, one_label_per_product, checker_split_by_category) from sync to VPS
       const mirrorUpsertSql = `INSERT INTO receipt_templates (id, template_type, template_name, business_id, template_code, is_active, version, created_at, updated_at)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON DUPLICATE KEY UPDATE
@@ -470,12 +476,13 @@ export class ReceiptManagementService {
       if (localRow && localUpdated >= vpsUpdated) {
         return { success: true, skipped: true, message: 'Template lokal sudah lebih baru, tidak ada perubahan' };
       }
-      // Local-only columns: do not overwrite is_default, show_notes, one_label_per_product from VPS (keep local preferences)
+      // Local-only columns: do not overwrite is_default, show_notes, one_label_per_product, checker_split_by_category from VPS (keep local preferences)
       const oneLabelPerProduct = 1;
+      const checkerSplitByCategory = 0;
       const isDefault = 0;
       const showNotes = 0;
-      const upsertSql = `INSERT INTO receipt_templates (id, template_type, template_name, business_id, template_code, is_active, is_default, show_notes, one_label_per_product, version, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      const upsertSql = `INSERT INTO receipt_templates (id, template_type, template_name, business_id, template_code, is_active, is_default, show_notes, one_label_per_product, checker_split_by_category, version, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON DUPLICATE KEY UPDATE
           template_type = VALUES(template_type),
           template_name = VALUES(template_name),
@@ -494,6 +501,7 @@ export class ReceiptManagementService {
         isDefault,
         showNotes,
         oneLabelPerProduct,
+        checkerSplitByCategory,
         vpsRow.version,
         vpsRow.created_at,
         vpsRow.updated_at,
@@ -518,7 +526,8 @@ export class ReceiptManagementService {
     templateName?: string,
     businessId?: number,
     showNotes?: boolean,
-    oneLabelPerProduct?: boolean
+    oneLabelPerProduct?: boolean,
+    splitByCategory?: boolean
   ): Promise<boolean> {
     // #region agent log
     logDbOperation('save', 'receipt_templates', `save templateType=${templateType} businessId=${businessId ?? 'null'}`);
@@ -537,20 +546,22 @@ export class ReceiptManagementService {
       const newVersion = existing?.version ? existing.version + 1 : 1;
       const showNotesVal = showNotes === true ? 1 : 0;
       const oneLabelPerProductVal = templateType === 'checker' ? (oneLabelPerProduct !== false ? 1 : 0) : 1;
+      const splitByCategoryVal = templateType === 'checker' ? (splitByCategory === true ? 1 : 0) : 0;
 
-      const templateUpsertSql = `INSERT INTO receipt_templates (template_type, template_name, business_id, template_code, is_active, show_notes, one_label_per_product, version, updated_at)
-         VALUES (?, ?, ?, ?, 1, ?, ?, ?, NOW())
+      const templateUpsertSql = `INSERT INTO receipt_templates (template_type, template_name, business_id, template_code, is_active, show_notes, one_label_per_product, checker_split_by_category, version, updated_at)
+         VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, NOW())
          ON DUPLICATE KEY UPDATE 
            template_code = VALUES(template_code),
            show_notes = VALUES(show_notes),
            one_label_per_product = VALUES(one_label_per_product),
+           checker_split_by_category = VALUES(checker_split_by_category),
            version = VALUES(version),
            is_active = 1,
            updated_at = NOW()`;
-      const templateUpsertParams: (string | number | null)[] = [templateType, templateName || 'Default', businessId || null, templateCode, showNotesVal, oneLabelPerProductVal, newVersion];
+      const templateUpsertParams: (string | number | null)[] = [templateType, templateName || 'Default', businessId || null, templateCode, showNotesVal, oneLabelPerProductVal, splitByCategoryVal, newVersion];
 
       await executeUpsert(templateUpsertSql, templateUpsertParams);
-      // VPS may have older schema without one_label_per_product; omit it in mirror write
+      // VPS may have older schema without one_label_per_product/checker_split_by_category; omit in mirror write
       const mirrorUpsertSql = `INSERT INTO receipt_templates (template_type, template_name, business_id, template_code, is_active, show_notes, version, updated_at)
          VALUES (?, ?, ?, ?, 1, ?, ?, NOW())
          ON DUPLICATE KEY UPDATE 

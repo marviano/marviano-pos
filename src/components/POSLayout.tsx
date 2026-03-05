@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, type ComponentProps, useCallback } from 'react';
+import { useState, useEffect, type ComponentProps, useCallback, useRef } from 'react';
 import LeftSidebar from './LeftSidebar';
 import RightSidebar from './RightSidebar';
 import CenterContent from './CenterContent';
@@ -188,7 +188,7 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
     }
   }, [activeMenuItem]);
 
-  // Handle opening Barista & Kitchen, Kitchen, or Barista in a new window
+  // Handle opening Barista & Kitchen, Kitchen, or Barista in a new window automatically
   useEffect(() => {
     const electronAPI = getElectronAPI();
     if (activeMenuItem === 'Barista & Kitchen') {

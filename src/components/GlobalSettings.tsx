@@ -123,8 +123,6 @@ export default function GlobalSettings() {
   const [systemPrinters, setSystemPrinters] = useState<SystemPrinter[]>([]);
   const [selectedReceiptizePrinter, setSelectedReceiptizePrinter] = useState<string>('');
   const [selectedLabelPrinter, setSelectedLabelPrinter] = useState<string>('');
-  const [receiptizeOffset, setReceiptizeOffset] = useState<number>(0);
-  const [labelOffset, setLabelOffset] = useState<number>(0);
   const [taxToggle, setTaxToggle] = useState<boolean>(false);
   // const [isScanning, setIsScanning] = useState(false);
   const [isTesting, setIsTesting] = useState<string | null>(null);
@@ -147,51 +145,23 @@ export default function GlobalSettings() {
       if (configs.length > 0) {
         let receiptizePrinter = '';
         let labelPrinter = '';
-        let receiptizeMargin = 0;
-        let labelMargin = 0;
 
         configs.forEach((config: PrinterConfigRow) => {
           if (!config || typeof config.system_printer_name !== 'string') {
             return;
           }
-
-          let marginAdjustMm = 0;
-          if (config.extra_settings) {
-            try {
-              const extra =
-                typeof config.extra_settings === 'string'
-                  ? JSON.parse(config.extra_settings)
-                  : config.extra_settings;
-              if (
-                extra &&
-                typeof extra === 'object' &&
-                'marginAdjustMm' in extra &&
-                typeof (extra as { marginAdjustMm?: number }).marginAdjustMm === 'number' &&
-                !Number.isNaN((extra as { marginAdjustMm?: number }).marginAdjustMm)
-              ) {
-                marginAdjustMm = (extra as { marginAdjustMm: number }).marginAdjustMm;
-              }
-            } catch (parseError) {
-              console.error('Failed to parse extra_settings for printer config:', parseError);
-            }
-          }
-
           switch (config.printer_type) {
             case 'receiptizePrinter':
               receiptizePrinter = config.system_printer_name;
-              receiptizeMargin = marginAdjustMm;
               break;
             case 'labelPrinter':
               labelPrinter = config.system_printer_name;
-              labelMargin = marginAdjustMm;
               break;
           }
         });
 
         setSelectedReceiptizePrinter(receiptizePrinter);
         setSelectedLabelPrinter(labelPrinter);
-        setReceiptizeOffset(receiptizeMargin);
-        setLabelOffset(labelMargin);
         return;
       }
 
@@ -203,16 +173,6 @@ export default function GlobalSettings() {
         setSelectedLabelPrinter(selections.labelPrinter || '');
       }
 
-      const savedMargins = localStorage.getItem('printer-margin-offsets');
-      if (savedMargins) {
-        try {
-          const margins = JSON.parse(savedMargins);
-          setReceiptizeOffset(typeof margins.receiptizePrinter === 'number' ? margins.receiptizePrinter : 0);
-          setLabelOffset(typeof margins.labelPrinter === 'number' ? margins.labelPrinter : 0);
-        } catch (marginError) {
-          console.error('Failed to parse printer-margin-offsets from localStorage:', marginError);
-        }
-      }
     } catch (error) {
       console.error('Error loading saved printer selections:', error);
     }
@@ -222,36 +182,31 @@ export default function GlobalSettings() {
     try {
       const savePromises = [];
 
-      const buildExtraSettings = async (printerType: 'receiptizePrinter' | 'labelPrinter') => {
-        const marginAdjust = printerType === 'receiptizePrinter' ? receiptizeOffset : labelOffset;
-        const base: { marginAdjustMm: number; copies?: number; nonOfflineCopies?: number } = {
-          marginAdjustMm: typeof marginAdjust === 'number' && !Number.isNaN(marginAdjust) ? marginAdjust : 0,
-        };
-        if (printerType === 'labelPrinter') {
-          const configsRaw = await window.electronAPI?.localDbGetPrinterConfigs?.();
-          const configs = Array.isArray(configsRaw) ? configsRaw : [];
-          const labelConfig = configs.find((c: unknown) => (c as { printer_type?: string })?.printer_type === 'labelPrinter') as { extra_settings?: unknown } | undefined;
-          if (labelConfig?.extra_settings) {
-            try {
-              const extra = typeof labelConfig.extra_settings === 'string' ? JSON.parse(labelConfig.extra_settings) : labelConfig.extra_settings;
-              if (extra && typeof extra === 'object') {
-                if (typeof extra.copies === 'number' && extra.copies > 0) base.copies = Math.min(10, Math.floor(extra.copies));
-                if (typeof extra.nonOfflineCopies === 'number' && extra.nonOfflineCopies > 0) base.nonOfflineCopies = Math.min(10, Math.floor(extra.nonOfflineCopies));
-              }
-            } catch (_) { /* ignore */ }
-          }
+      const buildLabelExtraSettings = async (): Promise<{ copies?: number; nonOfflineCopies?: number }> => {
+        const configsRaw = await window.electronAPI?.localDbGetPrinterConfigs?.();
+        const configs = Array.isArray(configsRaw) ? configsRaw : [];
+        const labelConfig = configs.find((c: unknown) => (c as { printer_type?: string })?.printer_type === 'labelPrinter') as { extra_settings?: unknown } | undefined;
+        const base: { copies?: number; nonOfflineCopies?: number } = {};
+        if (labelConfig?.extra_settings) {
+          try {
+            const extra = typeof labelConfig.extra_settings === 'string' ? JSON.parse(labelConfig.extra_settings) : labelConfig.extra_settings;
+            if (extra && typeof extra === 'object') {
+              if (typeof extra.copies === 'number' && extra.copies > 0) base.copies = Math.min(10, Math.floor(extra.copies));
+              if (typeof extra.nonOfflineCopies === 'number' && extra.nonOfflineCopies > 0) base.nonOfflineCopies = Math.min(10, Math.floor(extra.nonOfflineCopies));
+            }
+          } catch (_) { /* ignore */ }
         }
         return base;
       };
 
       if (selectedReceiptizePrinter) {
         savePromises.push(
-          window.electronAPI?.localDbSavePrinterConfig?.('receiptizePrinter', selectedReceiptizePrinter, { marginAdjustMm: typeof receiptizeOffset === 'number' && !Number.isNaN(receiptizeOffset) ? receiptizeOffset : 0 })
+          window.electronAPI?.localDbSavePrinterConfig?.('receiptizePrinter', selectedReceiptizePrinter, {})
         );
       }
 
       if (selectedLabelPrinter) {
-        const labelExtra = await buildExtraSettings('labelPrinter');
+        const labelExtra = await buildLabelExtraSettings();
         savePromises.push(
           window.electronAPI?.localDbSavePrinterConfig?.('labelPrinter', selectedLabelPrinter, labelExtra)
         );
@@ -263,10 +218,6 @@ export default function GlobalSettings() {
       localStorage.setItem('printer-selections', JSON.stringify({
         receiptizePrinter: selectedReceiptizePrinter,
         labelPrinter: selectedLabelPrinter,
-      }));
-      localStorage.setItem('printer-margin-offsets', JSON.stringify({
-        receiptizePrinter: receiptizeOffset,
-        labelPrinter: labelOffset,
       }));
     } catch (error) {
       console.error('Error saving printer selections:', error);
@@ -334,7 +285,6 @@ export default function GlobalSettings() {
 
   const testPrinter = async (printerType: 'receiptizePrinter' | 'labelPrinter') => {
     const printerName = printerType === 'receiptizePrinter' ? selectedReceiptizePrinter : selectedLabelPrinter;
-    const offset = printerType === 'receiptizePrinter' ? receiptizeOffset : labelOffset;
 
     if (!printerName) {
       appAlert('Please select a printer first.');
@@ -348,7 +298,6 @@ export default function GlobalSettings() {
         type: 'test',
         printerType: printerType,
         printerName: printerName,
-        marginAdjustMm: offset,
         content: `TEST PRINT - ${printerType.toUpperCase()}\n\nThis is a test print to verify your printer is working correctly.\n\nPrinter: ${printerName}\nTime: ${new Date().toLocaleString()}\n\nIf you can see this, your printer is configured correctly!`
       };
 
@@ -368,18 +317,6 @@ export default function GlobalSettings() {
     } finally {
       setIsTesting(null);
     }
-  };
-
-  const handleOffsetChange = (type: 'receiptize' | 'label', value: number) => {
-    if (type === 'receiptize') {
-      setReceiptizeOffset(value);
-    } else {
-      setLabelOffset(value);
-    }
-    // Auto-save on change
-    setTimeout(() => {
-      saveSelections();
-    }, 500);
   };
 
   const handlePrinterSelect = (type: 'receiptize' | 'label', printerName: string) => {
@@ -426,37 +363,23 @@ export default function GlobalSettings() {
           <div className="w-[90%] border-t border-gray-200"></div>
         </div>
         <div className="flex justify-end">
-          <div className="flex items-center space-x-2 w-1/4">
-            <label className="text-sm font-medium text-gray-700 whitespace-nowrap">
-              Offset (mm)
-            </label>
-            <input
-              type="number"
-              min={-5}
-              max={5}
-              step={0.5}
-              value={receiptizeOffset}
-              onChange={(e) => handleOffsetChange('receiptize', Number(e.target.value))}
-              className="border border-gray-300 rounded-lg px-3 py-2 text-black focus:outline-none focus:ring-2 focus:ring-blue-500"
-            />
-            <button
-              onClick={() => testPrinter('receiptizePrinter')}
-              disabled={!selectedReceiptizePrinter || isTesting === 'receiptizePrinter'}
-              className="flex items-center justify-center space-x-2 bg-teal-500 hover:bg-teal-600 disabled:bg-gray-300 text-white px-4 py-2 rounded-lg transition-colors whitespace-nowrap"
-            >
-              {isTesting === 'receiptizePrinter' ? (
-                <>
-                  <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
-                  <span>Testing...</span>
-                </>
-              ) : (
-                <>
-                  <TestTube className="w-4 h-4" />
-                  <span>Uji Cetak</span>
-                </>
-              )}
-            </button>
-          </div>
+          <button
+            onClick={() => testPrinter('receiptizePrinter')}
+            disabled={!selectedReceiptizePrinter || isTesting === 'receiptizePrinter'}
+            className="flex items-center justify-center space-x-2 bg-teal-500 hover:bg-teal-600 disabled:bg-gray-300 text-white px-4 py-2 rounded-lg transition-colors whitespace-nowrap"
+          >
+            {isTesting === 'receiptizePrinter' ? (
+              <>
+                <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                <span>Testing...</span>
+              </>
+            ) : (
+              <>
+                <TestTube className="w-4 h-4" />
+                <span>Uji Cetak</span>
+              </>
+            )}
+          </button>
         </div>
       </div>
 
@@ -487,37 +410,23 @@ export default function GlobalSettings() {
           <div className="w-[90%] border-t border-gray-200"></div>
         </div>
         <div className="flex justify-end">
-          <div className="flex items-center space-x-2 w-1/4">
-            <label className="text-sm font-medium text-gray-700 whitespace-nowrap">
-              Offset (mm)
-            </label>
-            <input
-              type="number"
-              min={-5}
-              max={5}
-              step={0.5}
-              value={labelOffset}
-              onChange={(e) => handleOffsetChange('label', Number(e.target.value))}
-              className="border border-gray-300 rounded-lg px-3 py-2 text-black focus:outline-none focus:ring-2 focus:ring-green-500"
-            />
-            <button
-              onClick={() => testPrinter('labelPrinter')}
-              disabled={!selectedLabelPrinter || isTesting === 'labelPrinter'}
-              className="flex items-center justify-center space-x-2 bg-teal-500 hover:bg-teal-600 disabled:bg-gray-300 text-white px-4 py-2 rounded-lg transition-colors whitespace-nowrap"
-            >
-              {isTesting === 'labelPrinter' ? (
-                <>
-                  <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
-                  <span>Testing...</span>
-                </>
-              ) : (
-                <>
-                  <TestTube className="w-4 h-4" />
-                  <span>Uji Cetak</span>
-                </>
-              )}
-            </button>
-          </div>
+          <button
+            onClick={() => testPrinter('labelPrinter')}
+            disabled={!selectedLabelPrinter || isTesting === 'labelPrinter'}
+            className="flex items-center justify-center space-x-2 bg-teal-500 hover:bg-teal-600 disabled:bg-gray-300 text-white px-4 py-2 rounded-lg transition-colors whitespace-nowrap"
+          >
+            {isTesting === 'labelPrinter' ? (
+              <>
+                <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                <span>Testing...</span>
+              </>
+            ) : (
+              <>
+                <TestTube className="w-4 h-4" />
+                <span>Uji Cetak</span>
+              </>
+            )}
+          </button>
         </div>
       </div>
 

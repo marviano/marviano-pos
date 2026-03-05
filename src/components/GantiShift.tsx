@@ -918,12 +918,6 @@ export default function GantiShift() {
           total_amount: data.total_amount
         }))
         .sort((a, b) => a.category1_name.localeCompare(b.category1_name));
-      // #region agent log
-      const sumBase = products.filter(p => !p.is_bundle_item).reduce((s, p) => s + (Number(p.base_subtotal) || 0), 0);
-      const sumTotal = products.filter(p => !p.is_bundle_item).reduce((s, p) => s + (Number(p.total_subtotal) || Number(p.base_subtotal) + Number(p.customization_subtotal) || 0), 0);
-      const recalcTotal = recalculated.reduce((s, c) => s + (Number(c.total_amount) || 0), 0);
-      fetch('http://127.0.0.1:7495/ingest/20000880-6f22-4a8b-8a8e-250eeb7d84f4', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': 'ada822' }, body: JSON.stringify({ sessionId: 'ada822', hypothesisId: 'H_frontend_recalc', location: 'GantiShift.tsx:recalculateCategory1', message: 'Frontend Category I recalc', data: { sumBase, sumTotal, recalcTotal }, timestamp: Date.now() }) }).catch(() => {});
-      // #endregion
       setRecalculatedCategory1Breakdown(recalculated);
     } catch (error) {
       console.error('[Category I Recalc] Error:', error);
@@ -1238,11 +1232,6 @@ export default function GantiShift() {
       setPaymentBreakdown(breakdown);
       setCategory1Breakdown(category1BreakdownData);
       setCategory2Breakdown(category2BreakdownData);
-      // #region agent log
-      const cashRow = breakdown.find((p: { payment_method_code?: string }) => (p.payment_method_code || '').toLowerCase() === 'cash');
-      const paymentTotal = breakdown.reduce((s: number, p: { total_amount?: number }) => s + (Number(p?.total_amount) || 0), 0);
-      fetch('http://127.0.0.1:7495/ingest/20000880-6f22-4a8b-8a8e-250eeb7d84f4', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': 'ada822' }, body: JSON.stringify({ sessionId: 'ada822', hypothesisId: 'H_payment_totals', location: 'GantiShift.tsx:loadStatistics', message: 'Payment breakdown totals', data: { cashTotal: cashRow?.total_amount ?? 0, paymentTotal }, timestamp: Date.now() }) }).catch(() => {});
-      // #endregion
       // Do not overwrite cashSummary: RINGKASAN uses loadTabData as source of truth.
       // loadStatistics overwriting it caused Cash (Hari) to flip (e.g. 92k -> 0) after a few seconds.
       setProductSales(productSalesData.products || []);
@@ -1977,7 +1966,13 @@ export default function GantiShift() {
 
           console.log('🖨️ [PRINT WHOLE DAY] Sending to printer...');
 
-          const dayGrossOmset = Math.round((Number(dayReportData.statistics.total_amount) || 0) + (Number(dayCashRefunds) || 0) + (Number(dayReportData.statistics.total_discount) || 0));
+          // Use same effective discount as screen (voucher breakdown sum when > 0, else total_discount) so printed Total Omset/Grand Total match RINGKASAN
+          const dayVoucherSum = VOUCHER_BREAKDOWN_ORDER.reduce(
+            (sum, { key }) => sum + (Number((dayReportData.voucherBreakdown ?? {})[key]?.total) || 0),
+            0
+          );
+          const dayEffectiveDiscount = dayVoucherSum > 0 ? dayVoucherSum : (Number(dayReportData.statistics.total_discount) || 0);
+          const dayGrossOmset = Math.round((Number(dayReportData.statistics.total_amount) || 0) + (Number(dayCashRefunds) || 0) + dayEffectiveDiscount);
           const result = await electronAPI.printShiftBreakdown({
             user_name: 'Semua Shift',
             shift_start: dayBounds.dayStartUtc,
@@ -2090,7 +2085,13 @@ export default function GantiShift() {
 
           console.log(`🖨️ [PRINT SHIFT ${selection.shiftIndex}] Sending to printer...`);
 
-          const shiftGrossOmset = Math.round((Number(shiftReportData.statistics.total_amount) || 0) + (Number(shiftCashRefunds) || 0) + (Number(shiftReportData.statistics.total_discount) || 0));
+          // Use same effective discount as screen (voucher breakdown sum when > 0, else total_discount) so printed Total Omset/Grand Total match RINGKASAN
+          const shiftVoucherSum = VOUCHER_BREAKDOWN_ORDER.reduce(
+            (sum, { key }) => sum + (Number((shiftReportData.voucherBreakdown ?? {})[key]?.total) || 0),
+            0
+          );
+          const shiftEffectiveDiscount = shiftVoucherSum > 0 ? shiftVoucherSum : (Number(shiftReportData.statistics.total_discount) || 0);
+          const shiftGrossOmset = Math.round((Number(shiftReportData.statistics.total_amount) || 0) + (Number(shiftCashRefunds) || 0) + shiftEffectiveDiscount);
           const result = await electronAPI.printShiftBreakdown({
             user_name: shift.user_name,
             shift_start: shift.shift_start,

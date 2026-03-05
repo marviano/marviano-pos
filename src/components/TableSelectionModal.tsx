@@ -1060,12 +1060,15 @@ export default function TableSelectionModal({
 
           // Mark checker as printed before starting print so PaymentModal won't print again (avoids double print)
           await window.electronAPI?.localDbSetTransactionCheckerPrinted?.(transactionId);
+          const checkerResult = await window.electronAPI?.getReceiptTemplate?.('checker', businessId ?? undefined);
+          const splitByCategory = typeof checkerResult === 'object' && checkerResult !== null && (checkerResult as { splitByCategory?: boolean }).splitByCategory === true;
           await window.electronAPI.printLabelsBatch({
             requestId, // Pass ID to backend for tracing
             labels: newOrderLabels.length > 0 ? newOrderLabels : [{ orderTime: orderContextForChecker.orderTime, productName: '', counter: 1, itemNumber: 1, totalItems: 1, pickupMethod: pickupMethod === 'take-away' ? 'Take Away' : 'Dine In' }],
             printerType: 'labelPrinter',
             business_id: businessId ?? undefined,
             orderContext: orderContextForChecker,
+            splitByCategory,
             isOnlineOrder: false
           });
         } catch (labelErr) {
@@ -1551,11 +1554,14 @@ export default function TableSelectionModal({
         try {
           // Mark checker as printed before starting print so PaymentModal won't print again (avoids double print)
           await window.electronAPI?.localDbSetTransactionCheckerPrinted?.(transactionId);
+          const checkerResult = await window.electronAPI?.getReceiptTemplate?.('checker', businessId ?? undefined);
+          const splitByCategory = typeof checkerResult === 'object' && checkerResult !== null && (checkerResult as { splitByCategory?: boolean }).splitByCategory === true;
           await window.electronAPI.printLabelsBatch({
             labels: allLabels,
             printerType: 'labelPrinter',
             business_id: businessId ?? undefined,
             orderContext: orderContextForNewItems,
+            splitByCategory,
             isOnlineOrder: false
           });
         } catch (labelErr) {

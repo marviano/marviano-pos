@@ -11260,10 +11260,14 @@ const receiptManagementService = new ReceiptManagementService();
 ipcMain.handle('get-receipt-template', async (event, templateType: 'receipt' | 'bill' | 'checker', businessId?: number) => {
   try {
     const result = await receiptManagementService.getReceiptTemplate(templateType, businessId);
+    // For checker, return full result so frontend can pass splitByCategory to printLabelsBatch
+    if (templateType === 'checker') {
+      return { success: true, templateCode: result.templateCode, showNotes: result.showNotes, oneLabelPerProduct: result.oneLabelPerProduct, splitByCategory: result.splitByCategory === true };
+    }
     return result.templateCode;
   } catch (error) {
     console.error('Error getting receipt template:', error);
-    return null;
+    return templateType === 'checker' ? { success: false, templateCode: null, showNotes: false, oneLabelPerProduct: true, splitByCategory: false } : null;
   }
 });
 
@@ -11280,10 +11284,10 @@ ipcMain.handle('get-receipt-templates', async (event, templateType: 'receipt' | 
 ipcMain.handle('get-receipt-template-by-id', async (event, id: number) => {
   try {
     const result = await receiptManagementService.getReceiptTemplateById(id);
-    return { success: true, templateCode: result.templateCode, showNotes: result.showNotes, oneLabelPerProduct: result.oneLabelPerProduct };
+    return { success: true, templateCode: result.templateCode, showNotes: result.showNotes, oneLabelPerProduct: result.oneLabelPerProduct, splitByCategory: result.splitByCategory };
   } catch (error) {
     console.error('Error getting receipt template by id:', error);
-    return { success: false, error: String(error), templateCode: null, showNotes: false, oneLabelPerProduct: true };
+    return { success: false, error: String(error), templateCode: null, showNotes: false, oneLabelPerProduct: true, splitByCategory: false };
   }
 });
 
@@ -11297,9 +11301,9 @@ ipcMain.handle('set-default-receipt-template', async (event, templateType: 'rece
   }
 });
 
-ipcMain.handle('save-receipt-template', async (event, templateType: 'receipt' | 'bill' | 'checker', templateCode: string, templateName?: string, businessId?: number, showNotes?: boolean, oneLabelPerProduct?: boolean) => {
+ipcMain.handle('save-receipt-template', async (event, templateType: 'receipt' | 'bill' | 'checker', templateCode: string, templateName?: string, businessId?: number, showNotes?: boolean, oneLabelPerProduct?: boolean, splitByCategory?: boolean) => {
   try {
-    const success = await receiptManagementService.saveReceiptTemplate(templateType, templateCode, templateName, businessId, showNotes, oneLabelPerProduct);
+    const success = await receiptManagementService.saveReceiptTemplate(templateType, templateCode, templateName, businessId, showNotes, oneLabelPerProduct, splitByCategory);
     return { success };
   } catch (error) {
     console.error('Error saving receipt template:', error);
@@ -11307,12 +11311,12 @@ ipcMain.handle('save-receipt-template', async (event, templateType: 'receipt' | 
   }
 });
 
-ipcMain.handle('update-receipt-template', async (event, id: number, templateCode: string, templateName?: string | null, showNotes?: boolean, oneLabelPerProduct?: boolean) => {
+ipcMain.handle('update-receipt-template', async (event, id: number, templateCode: string, templateName?: string | null, showNotes?: boolean, oneLabelPerProduct?: boolean, splitByCategory?: boolean) => {
   try {
     if (templateName !== undefined && templateName !== null && String(templateName).trim() === '') {
       templateName = undefined;
     }
-    const success = await receiptManagementService.updateReceiptTemplate(id, templateCode, templateName, showNotes, oneLabelPerProduct);
+    const success = await receiptManagementService.updateReceiptTemplate(id, templateCode, templateName, showNotes, oneLabelPerProduct, splitByCategory);
     return { success };
   } catch (error) {
     console.error('Error updating receipt template:', error);
@@ -11594,6 +11598,8 @@ async function executeLabelsBatchPrint(data: {
   printerType?: string;
   business_id?: number;
   orderContext?: OrderContextForChecker;
+  /** When true (and template has splitByCategory), after Paper 1 print one slip per category 1 */
+  splitByCategory?: boolean;
   /** When true, use nonOfflineCopies for labelPrinter (GoFood, Grab, Shopee, Qpon, TikTok) */
   isOnlineOrder?: boolean;
 }): Promise<{ success: boolean; error?: string }> {
@@ -11610,12 +11616,13 @@ async function executeLabelsBatchPrint(data: {
     );
 
     // Load checker template early to decide order-summary vs per-item mode
-    let checkerResult: { templateCode: string | null; showNotes: boolean; templateName?: string | null; oneLabelPerProduct?: boolean } = { templateCode: null, showNotes: false, oneLabelPerProduct: true };
+    let checkerResult: { templateCode: string | null; showNotes: boolean; templateName?: string | null; oneLabelPerProduct?: boolean; splitByCategory?: boolean } = { templateCode: null, showNotes: false, oneLabelPerProduct: true, splitByCategory: false };
     try {
       checkerResult = await receiptManagementService.getReceiptTemplate('checker', businessId ?? undefined);
     } catch (_) {
       // ignore
     }
+    const splitByCategory = checkerResult.splitByCategory === true && data.splitByCategory === true;
     const firstLabelCustomizations = data.labels?.[0] && typeof (data.labels[0] as { customizations?: string }).customizations === 'string' ? (data.labels[0] as { customizations: string }).customizations : '';
     // #region agent log – which template is used (for debug-76ac0a.log)
     const requestId = (data as any).requestId || 'NO-ID';
@@ -11654,11 +11661,8 @@ async function executeLabelsBatchPrint(data: {
     console.log('🏷️ [EXECUTE] Printing labels batch - Count:', effectiveLabelOrSlipCount, useOrderSummarySlip ? '(order summary slip)' : '');
     let printerName = data.printerName;
     let copies = 1;
-    const dataMargin = (data as unknown as { marginAdjustMm?: number }).marginAdjustMm;
-    let batchMarginAdjustMm: number | undefined =
-      typeof dataMargin === 'number' && !Number.isNaN(dataMargin) ? dataMargin : undefined;
 
-    // Resolve printer name and copies from config when printerType is set
+    // Resolve printer name and copies from config when printerType is set (checker does not use offset/marginAdjustMm; same as ganti shift Print All)
     if (!printerName || data.printerType) {
       if (data.printerType) {
         try {
@@ -11676,9 +11680,6 @@ async function executeLabelsBatchPrint(data: {
                   copies = Math.min(10, Math.floor(extra.nonOfflineCopies));
                 } else if (extra && typeof extra.copies === 'number' && extra.copies > 0) {
                   copies = Math.min(10, Math.floor(extra.copies));
-                }
-                if (batchMarginAdjustMm === undefined && typeof extra.marginAdjustMm === 'number' && !Number.isNaN(extra.marginAdjustMm)) {
-                  batchMarginAdjustMm = extra.marginAdjustMm;
                 }
               } catch (_) { /* ignore */ }
             }
@@ -11711,13 +11712,14 @@ async function executeLabelsBatchPrint(data: {
       }
     });
 
-    // Padding for 80mm checker template (same as receipt): prevents right-side cutoff (pelanggan, meja, waktu pesanan)
-    const batchMarginClamped = Math.max(-5, Math.min(5, batchMarginAdjustMm ?? 0));
-    const batchLeftPadding = (7 - batchMarginClamped).toFixed(2);
-    const batchRightPadding = (7 + batchMarginClamped).toFixed(2);
+    // Padding for 80mm checker: fixed margins (no offset). Left 4mm; right 5mm to avoid right-side cutoff on thermal printers.
+    const batchLeftPadding = '4.00';
+    const batchRightPadding = '5.00';
 
     // Generate batch label HTML: use checker template if available; showNotes controls customizations per label
     let htmlContent: string;
+    /** When order-summary slip + split-by-category, used to build per-category slips after Paper 1. */
+    let orderDataForSplit: LabelPrintData | null = null;
     try {
       // --- 1st checker: build order-summary slip HTML (one slip per order when template uses {{items}}) ---
       if (useOrderSummarySlip && slipTemplateCode && data.orderContext) {
@@ -11735,6 +11737,7 @@ async function executeLabelsBatchPrint(data: {
           leftPadding: batchLeftPadding,
           rightPadding: batchRightPadding,
         };
+        orderDataForSplit = orderData;
         htmlContent = generateLabelHTMLFromTemplate(slipTemplateCode, orderData); // 1st checker HTML ready
         // #region agent log — debug what is printed on 1st print (content; printer name logged later when we resolve it)
         fetch('http://127.0.0.1:7245/ingest/519de021-d49d-473f-a8a1-4215977c867a', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ location: 'main.ts:executeLabelsBatchPrint:1stPrintContent', message: '1st print content (order summary slip)', data: { firstPrintPath: true, orderDataSummary: { waiterName: orderData.waiterName, customerName: orderData.customerName, tableName: orderData.tableName, orderTime: orderData.orderTime, itemsHtmlLength: (orderData.items || '').length, itemsHtmlPreview: (orderData.items || '').substring(0, 500) }, htmlContentLength: htmlContent.length, htmlContentPreview: htmlContent.substring(0, 2500) }, timestamp: Date.now(), hypothesisId: '1stPrint' }) }).catch(() => { });
@@ -11835,7 +11838,48 @@ async function executeLabelsBatchPrint(data: {
               }
               printedCount += 1;
               if (printedCount >= numCopies) {
-                console.log(`✅ Batch labels (${data.labels.length} labels) sent successfully` + (numCopies > 1 ? ` (${numCopies} copies)` : ''));
+                // Paper 1 (full summary) + copies done. If split-by-category, print one slip per category.
+                const categories = data.orderContext?.categories;
+                if (splitByCategory && categories?.length && slipTemplateCode && orderDataForSplit) {
+                  (async () => {
+                    try {
+                      for (const cat of categories) {
+                        const perCategoryData: LabelPrintData = {
+                          ...orderDataForSplit,
+                          categories: [{ categoryName: cat.categoryName, itemsHtml: cat.itemsHtml }],
+                          items: '',
+                          itemsCategory1: '',
+                          itemsCategory2: '',
+                        };
+                        const perCatHtml = generateLabelHTMLFromTemplate(slipTemplateCode, perCategoryData);
+                        if (jobPrintWindow.isDestroyed()) break;
+                        const loadPromise = new Promise<void>((resolve, reject) => {
+                          const onFinish = () => { jobPrintWindow.webContents.removeListener('did-fail-load', onFail); resolve(); };
+                          const onFail = (_e: unknown, code: number) => { jobPrintWindow.webContents.removeListener('did-finish-load', onFinish); reject(new Error(`load failed: ${code}`)); };
+                          jobPrintWindow.webContents.once('did-finish-load', onFinish);
+                          jobPrintWindow.webContents.once('did-fail-load', onFail);
+                          jobPrintWindow.loadURL(`data:text/html,${encodeURIComponent(perCatHtml)}`).catch(reject);
+                        });
+                        await loadPromise;
+                        await new Promise(r => setTimeout(r, 400));
+                        // One copy per per-category slip (so output is: 1 full + 1 per category, not duplicated by printer copies)
+                        if (jobPrintWindow.isDestroyed()) break;
+                        await new Promise<void>((res, rej) => {
+                          jobPrintWindow.webContents.print(printOptions, (ok: boolean, err: string) => (ok ? res() : rej(new Error(err))));
+                        });
+                      }
+                      console.log(`✅ Batch labels + ${categories!.length} per-category slip(s) sent successfully`);
+                      resolve({ success: true });
+                    } catch (perCatErr) {
+                      console.error('❌ Per-category slip print failed:', perCatErr);
+                      resolve({ success: false, error: String(perCatErr) });
+                    } finally {
+                      if (jobPrintWindow && !jobPrintWindow.isDestroyed()) jobPrintWindow.close();
+                    }
+                  })();
+                  return;
+                }
+                console.log(`✅ Batch labels (${data.labels?.length ?? 0} labels) sent successfully` + (numCopies > 1 ? ` (${numCopies} copies)` : ''));
                 resolve({ success: true });
                 setTimeout(() => {
                   if (jobPrintWindow && !jobPrintWindow.isDestroyed()) jobPrintWindow.close();
@@ -11888,6 +11932,7 @@ ipcMain.handle('print-labels-batch', async (event, data: {
   printerType?: string;
   business_id?: number;
   orderContext?: OrderContextForChecker;
+  splitByCategory?: boolean;
   isOnlineOrder?: boolean;
 }) => {
   // When orderContext is provided and checker template uses {{items}} or {{itemsCategory1}}/{{itemsCategory2}}, we print one order-summary slip (labels can be empty)
@@ -13046,20 +13091,6 @@ function generateShiftBreakdownHTML(
     // Use sectionOptions from options directly if provided, otherwise use defaults
     // This ensures we respect false values from the caller
     const providedSectionOptions = options.sectionOptions;
-
-    // Debug logging
-    writeDebugLog(JSON.stringify({
-      location: 'electron/main.ts:8453',
-      message: 'RENDER SECTION - Options sectionOptions',
-      data: options.sectionOptions,
-      timestamp: Date.now(),
-      sessionId: 'debug-session',
-      runId: 'post-fix',
-      hypothesisId: 'C'
-    }));
-
-    console.log('🔍 [RENDER SECTION] Options sectionOptions:', JSON.stringify(options.sectionOptions));
-    console.log('🔍 [RENDER SECTION] Using provided options directly:', providedSectionOptions !== undefined && providedSectionOptions !== null);
 
     const sectionOptions = providedSectionOptions ? {
       ringkasan: providedSectionOptions.ringkasan !== undefined ? providedSectionOptions.ringkasan : true,
@@ -14609,11 +14640,34 @@ ipcMain.handle('create-customer-display', async () => {
   return { success: true, message: 'Customer display created successfully' };
 });
 
+/** Robustly get bounds for the secondary display. Falls back to primary if no secondary found. */
+function getSecondaryDisplayBounds(windowWidth?: number, windowHeight?: number): { x: number; y: number; width: number; height: number } | null {
+  const displays = screen.getAllDisplays();
+  const primaryDisplay = screen.getPrimaryDisplay();
+
+  // Find the first display that is NOT the primary display
+  const secondaryDisplay = displays.find(d => d.id !== primaryDisplay.id) || displays[0];
+
+  if (!secondaryDisplay || secondaryDisplay.id === primaryDisplay.id && displays.length === 1) {
+    console.log('🔍 [DISPLAY] Only one display detected, opening on primary.');
+    return null;
+  }
+
+  const workArea = secondaryDisplay.workArea;
+  const width = windowWidth || workArea.width;
+  const height = windowHeight || workArea.height;
+
+  const x = workArea.x + Math.max(0, Math.floor((workArea.width - width) / 2));
+  const y = workArea.y + Math.max(0, Math.floor((workArea.height - height) / 2));
+
+  console.log(`🔍 [DISPLAY] Secondary display found: ${secondaryDisplay.id}, WorkArea: ${workArea.width}x${workArea.height}, Applied Bounds: x=${x}, y=${y}, w=${width}, h=${height}`);
+  return { x, y, width, height };
+}
+
 // Create Barista & Kitchen display window
 ipcMain.handle('create-barista-kitchen-window', async () => {
   console.log('🔍 [BARISTA-KITCHEN] Creating window...');
 
-  // If window already exists and is not destroyed, show it
   if (baristaKitchenWindow && !baristaKitchenWindow.isDestroyed()) {
     console.log('🔍 [BARISTA-KITCHEN] Window already exists, showing it...');
     baristaKitchenWindow.show();
@@ -14621,19 +14675,18 @@ ipcMain.handle('create-barista-kitchen-window', async () => {
     return { success: true, message: 'Barista & Kitchen window already exists' };
   }
 
-  // Create new window
-  const windowWidth = 1920;
-  const windowHeight = 1080;
+  const secondaryBounds = getSecondaryDisplayBounds();
+  const windowWidth = secondaryBounds?.width || 1920;
+  const windowHeight = secondaryBounds?.height || 1080;
 
-  console.log('🔍 [BARISTA-KITCHEN] Creating new BrowserWindow...');
   baristaKitchenWindow = new BrowserWindow({
     width: windowWidth,
     height: windowHeight,
-    center: true,
-    minWidth: 1280,
-    minHeight: 720,
+    ...(secondaryBounds ? { x: secondaryBounds.x, y: secondaryBounds.y } : { center: true }),
+    minWidth: 1024,
+    minHeight: 768,
     title: 'Pictos - Barista & Kitchen Display',
-    frame: false, // No title bar - frameless window
+    frame: false,
     backgroundColor: '#f3f4f6',
     movable: true,
     resizable: true,
@@ -14646,53 +14699,54 @@ ipcMain.handle('create-barista-kitchen-window', async () => {
     show: false,
   });
 
-  console.log('✅ [BARISTA-KITCHEN] BrowserWindow created');
-
-  // Remove menu bar (File, View, Window menus)
   baristaKitchenWindow.setMenuBarVisibility(false);
 
-  // Handle window closed
   baristaKitchenWindow.on('closed', () => {
-    console.log('🔍 [BARISTA-KITCHEN] Window closed');
     baristaKitchenWindow = null;
   });
 
-  // Show window when ready
   baristaKitchenWindow.once('ready-to-show', () => {
-    console.log('🔍 [BARISTA-KITCHEN] Window ready to show');
     if (baristaKitchenWindow && !baristaKitchenWindow.isDestroyed()) {
+      if (secondaryBounds) {
+        console.log('🔍 [BARISTA-KITCHEN] Applying secondary bounds at ready-to-show');
+        baristaKitchenWindow.setBounds(secondaryBounds);
+        baristaKitchenWindow.maximize();
+      }
       baristaKitchenWindow.show();
       baristaKitchenWindow.focus();
     }
   });
 
-  // Load barista-kitchen display page
   if (isDev) {
-    console.log('🔍 [BARISTA-KITCHEN] Dev mode - loading from localhost...');
-    // Try ports in order: 3000, 3001, 3002 (3000 is default Next.js port)
     const tryLoadURL = async (port: number) => {
       try {
         const url = `http://localhost:${port}/barista-kitchen-display`;
-        console.log(`🔍 [BARISTA-KITCHEN] Trying to load: ${url}`);
         await baristaKitchenWindow!.loadURL(url);
-        // Window will be shown via ready-to-show event
-        console.log(`✅ Barista & Kitchen window loaded on port ${port}`);
         return true;
       } catch (error) {
-        console.log(`❌ Failed to load Barista & Kitchen display on port ${port}:`, error);
         return false;
       }
     };
 
-    const ports = [3000, 3001, 3002];
-    let loaded = false;
+    // Use same port order as main window: env PORT first, then common dev ports (including 3301)
+    const preferredPort = Number(process.env.PORT ?? '');
+    const fallbackPorts = [3000, 3001, 3002, 3301];
+    const ports = [
+      ...(Number.isFinite(preferredPort) ? [preferredPort] : []),
+      ...fallbackPorts
+    ].filter((p, i, arr) => arr.indexOf(p) === i);
 
+    let loaded = false;
     for (const port of ports) {
       if (await tryLoadURL(port)) {
         loaded = true;
-        // Fallback: ensure window is shown even if ready-to-show already fired
+        // Ensure bounds are set after content load as well
         setTimeout(() => {
           if (baristaKitchenWindow && !baristaKitchenWindow.isDestroyed()) {
+            if (secondaryBounds) {
+              baristaKitchenWindow.setBounds(secondaryBounds);
+              baristaKitchenWindow.maximize();
+            }
             baristaKitchenWindow.show();
             baristaKitchenWindow.focus();
           }
@@ -14702,32 +14756,30 @@ ipcMain.handle('create-barista-kitchen-window', async () => {
     }
 
     if (!loaded) {
-      console.error('❌ Failed to load Barista & Kitchen display on any port');
-      return { success: false, error: 'Failed to load display on any port' };
+      // Show a helpful error in the window so the second display isn't blank
+      const errorHtml = `<!DOCTYPE html><html><head><meta charset="utf-8"><style>body{font-family:system-ui;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0;background:#f3f4f6;color:#374151;} .box{text-align:center;max-width:420px;padding:24px;}</style></head><body><div class="box"><h2>Barista & Kitchen display could not load</h2><p>Dev server was not reachable on ports: ${ports.join(', ')}.</p><p>Start the app with <code>npm run electron-dev</code> (or <code>electron-dev:3001</code> / <code>electron-dev:3301</code>) so the Next.js server is running, then open this window again.</p></div></body></html>`;
+      await baristaKitchenWindow!.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(errorHtml)}`);
+      if (baristaKitchenWindow && !baristaKitchenWindow.isDestroyed()) {
+        if (secondaryBounds) baristaKitchenWindow.setBounds(secondaryBounds);
+        baristaKitchenWindow.show();
+      }
+      return { success: false, error: `Failed to load display on any port (tried ${ports.join(', ')})` };
     }
   } else {
-    // In production, load from file
-    console.log('🔍 [BARISTA-KITCHEN] Production mode - loading from file...');
     try {
-      const filePath = path.join(__dirname, '../../out/barista-kitchen-display.html');
-      console.log(`🔍 [BARISTA-KITCHEN] Loading file: ${filePath}`);
-      await baristaKitchenWindow.loadFile(filePath);
-      // Window will be shown via ready-to-show event
-      console.log('✅ [BARISTA-KITCHEN] File loaded');
-      // Fallback: ensure window is shown
+      await baristaKitchenWindow.loadFile(path.join(__dirname, '../../out/barista-kitchen-display.html'));
       setTimeout(() => {
         if (baristaKitchenWindow && !baristaKitchenWindow.isDestroyed()) {
+          if (secondaryBounds) baristaKitchenWindow.setBounds(secondaryBounds);
           baristaKitchenWindow.show();
           baristaKitchenWindow.focus();
         }
       }, 500);
     } catch (error) {
-      console.error('❌ Failed to load Barista & Kitchen display:', error);
       return { success: false, error: String(error) };
     }
   }
 
-  console.log('✅ [BARISTA-KITCHEN] Window creation completed successfully');
   return { success: true, message: 'Barista & Kitchen window created successfully' };
 });
 
@@ -14745,14 +14797,15 @@ async function createDisplayWindow(
     win.focus();
     return { success: true };
   }
-  const windowWidth = 1920;
-  const windowHeight = 1080;
+  const secondaryBounds = getSecondaryDisplayBounds();
+  const windowWidth = secondaryBounds?.width || 1920;
+  const windowHeight = secondaryBounds?.height || 1080;
   win = new BrowserWindow({
     width: windowWidth,
     height: windowHeight,
-    center: true,
-    minWidth: 1280,
-    minHeight: 720,
+    ...(secondaryBounds ? { x: secondaryBounds.x, y: secondaryBounds.y } : { center: true }),
+    minWidth: 1024,
+    minHeight: 768,
     title: `Pictos - ${title}`,
     frame: false,
     backgroundColor: '#f3f4f6',
@@ -14772,12 +14825,22 @@ async function createDisplayWindow(
   win.once('ready-to-show', () => {
     const w = getWindow();
     if (w && !w.isDestroyed()) {
+      if (secondaryBounds) {
+        console.log(`🔍 [DISPLAY] Applying secondary bounds for ${title} at ready-to-show`);
+        w.setBounds(secondaryBounds);
+        w.maximize();
+      }
       w.show();
       w.focus();
     }
   });
   if (isDev) {
-    const ports = [3000, 3001, 3002];
+    const preferredPort = Number(process.env.PORT ?? '');
+    const fallbackPorts = [3000, 3001, 3002, 3301];
+    const ports = [
+      ...(Number.isFinite(preferredPort) ? [preferredPort] : []),
+      ...fallbackPorts
+    ].filter((p, i, arr) => arr.indexOf(p) === i);
     let loaded = false;
     for (const port of ports) {
       try {
@@ -14786,6 +14849,10 @@ async function createDisplayWindow(
         setTimeout(() => {
           const w = getWindow();
           if (w && !w.isDestroyed()) {
+            if (secondaryBounds) {
+              w.setBounds(secondaryBounds);
+              w.maximize();
+            }
             w.show();
             w.focus();
           }
@@ -14795,13 +14862,23 @@ async function createDisplayWindow(
         // try next port
       }
     }
-    if (!loaded) return { success: false, error: `Failed to load ${title} on any port` };
+    if (!loaded) {
+      const errorHtml = `<!DOCTYPE html><html><head><meta charset="utf-8"><style>body{font-family:system-ui;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0;background:#f3f4f6;color:#374151;} .box{text-align:center;max-width:420px;padding:24px;}</style></head><body><div class="box"><h2>${title} could not load</h2><p>Dev server was not reachable on ports: ${ports.join(', ')}.</p><p>Start the app with <code>npm run electron-dev</code> then open this window again.</p></div></body></html>`;
+      await win.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(errorHtml)}`);
+      const w = getWindow();
+      if (w && !w.isDestroyed()) {
+        if (secondaryBounds) w.setBounds(secondaryBounds);
+        w.show();
+      }
+      return { success: false, error: `Failed to load ${title} on any port (tried ${ports.join(', ')})` };
+    }
   } else {
     try {
       await win.loadFile(path.join(__dirname, '../../out', htmlFileName));
       setTimeout(() => {
         const w = getWindow();
         if (w && !w.isDestroyed()) {
+          if (secondaryBounds) w.setBounds(secondaryBounds);
           w.show();
           w.focus();
         }
