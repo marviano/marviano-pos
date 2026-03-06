@@ -10766,78 +10766,100 @@ function createWindows(): void {
   Menu.setApplicationMenu(menu);
 }
 
-// This method will be called when Electron has finished initialization
-app.whenReady().then(() => {
-  // Register custom protocol handler for slideshow images
-  protocol.registerFileProtocol('slideshow-file', (request, callback) => {
-    try {
-      const url = request.url.replace('slideshow-file://', '');
-      const slideshowPath = getSlideshowPath();
-      const filePath = path.join(slideshowPath, url);
+// Enforce single-instance behavior so the app can only be opened once
+const gotTheLock = app.requestSingleInstanceLock();
 
-      // Security check: ensure file is within slideshow directory
-      const normalizedPath = path.normalize(filePath);
-      const normalizedSlideshowPath = path.normalize(slideshowPath);
-
-      if (!normalizedPath.startsWith(normalizedSlideshowPath)) {
-        console.error('❌ Security: Attempted to access file outside slideshow directory');
-        callback({ error: -10 }); // ACCESS_DENIED
-        return;
+if (!gotTheLock) {
+  // Another instance is already running — exit this one immediately
+  originalConsoleLog('⚠️ Second instance detected, quitting this instance.');
+  app.quit();
+} else {
+  // If the user tries to open another instance, focus the existing one instead
+  app.on('second-instance', () => {
+    if (mainWindow) {
+      if (mainWindow.isMinimized()) {
+        mainWindow.restore();
       }
-
-      if (fs.existsSync(filePath)) {
-        callback({ path: filePath });
-      } else {
-        console.error('❌ Slideshow image not found:', filePath);
-        callback({ error: -6 }); // FILE_NOT_FOUND
-      }
-    } catch (error) {
-      console.error('❌ Error handling slideshow-file protocol:', error);
-      callback({ error: -2 }); // FAILED
-    }
-  });
-
-  // Serve product/business images from userData (downloaded during sync)
-  protocol.registerFileProtocol('pos-image', (request, callback) => {
-    try {
-      // Parse pos-image://images/products/filename.webp
-      // The URL parser treats "images" as hostname, so we need to combine hostname + pathname
-      const url = new URL(request.url);
-      const hostname = url.hostname || ''; // "images" in pos-image://images/products/...
-      const pathname = decodeURIComponent(url.pathname); // "/products/filename.webp"
-      // Combine: hostname (images) + pathname (/products/filename.webp) = images/products/filename.webp
-      const fullPath = hostname ? `${hostname}${pathname}` : pathname;
-      const parts = fullPath.split('/').filter(Boolean);
-      if (parts.length !== 3 || parts[0] !== 'images' || (parts[1] !== 'products' && parts[1] !== 'businesses') || !/^[^/\\]+\.(webp|png|jpg|jpeg|gif)$/i.test(parts[2])) {
-        callback({ error: -2 });
-        return;
-      }
-      const userData = app.getPath('userData');
-      const localPath = path.join(userData, 'images', parts[1], parts[2]);
-      const normalized = path.normalize(localPath);
-      if (!normalized.startsWith(path.normalize(path.join(userData, 'images')))) {
-        callback({ error: -10 });
-        return;
-      }
-      if (fs.existsSync(localPath)) {
-        callback({ path: localPath });
-      } else {
-        callback({ error: -6 });
-      }
-    } catch (error) {
-      callback({ error: -2 });
-    }
-  });
-
-  createWindows();
-
-  app.on('activate', () => {
-    // On macOS, re-create windows when the dock icon is clicked
-    if (BrowserWindow.getAllWindows().length === 0) {
+      mainWindow.focus();
+    } else if (!windowsInitialized) {
+      // In rare cases where mainWindow isn't created yet, ensure windows are created
       createWindows();
     }
   });
-});
+
+  // This method will be called when Electron has finished initialization
+  app.whenReady().then(() => {
+    // Register custom protocol handler for slideshow images
+    protocol.registerFileProtocol('slideshow-file', (request, callback) => {
+      try {
+        const url = request.url.replace('slideshow-file://', '');
+        const slideshowPath = getSlideshowPath();
+        const filePath = path.join(slideshowPath, url);
+
+        // Security check: ensure file is within slideshow directory
+        const normalizedPath = path.normalize(filePath);
+        const normalizedSlideshowPath = path.normalize(slideshowPath);
+
+        if (!normalizedPath.startsWith(normalizedSlideshowPath)) {
+          console.error('❌ Security: Attempted to access file outside slideshow directory');
+          callback({ error: -10 }); // ACCESS_DENIED
+          return;
+        }
+
+        if (fs.existsSync(filePath)) {
+          callback({ path: filePath });
+        } else {
+          console.error('❌ Slideshow image not found:', filePath);
+          callback({ error: -6 }); // FILE_NOT_FOUND
+        }
+      } catch (error) {
+        console.error('❌ Error handling slideshow-file protocol:', error);
+        callback({ error: -2 }); // FAILED
+      }
+    });
+
+    // Serve product/business images from userData (downloaded during sync)
+    protocol.registerFileProtocol('pos-image', (request, callback) => {
+      try {
+        // Parse pos-image://images/products/filename.webp
+        // The URL parser treats "images" as hostname, so we need to combine hostname + pathname
+        const url = new URL(request.url);
+        const hostname = url.hostname || ''; // "images" in pos-image://images/products/...
+        const pathname = decodeURIComponent(url.pathname); // "/products/filename.webp"
+        // Combine: hostname (images) + pathname (/products/filename.webp) = images/products/filename.webp
+        const fullPath = hostname ? `${hostname}${pathname}` : pathname;
+        const parts = fullPath.split('/').filter(Boolean);
+        if (parts.length !== 3 || parts[0] !== 'images' || (parts[1] !== 'products' && parts[1] !== 'businesses') || !/^[^/\\]+\.(webp|png|jpg|jpeg|gif)$/i.test(parts[2])) {
+          callback({ error: -2 });
+          return;
+        }
+        const userData = app.getPath('userData');
+        const localPath = path.join(userData, 'images', parts[1], parts[2]);
+        const normalized = path.normalize(localPath);
+        if (!normalized.startsWith(path.normalize(path.join(userData, 'images')))) {
+          callback({ error: -10 });
+          return;
+        }
+        if (fs.existsSync(localPath)) {
+          callback({ path: localPath });
+        } else {
+          callback({ error: -6 });
+        }
+      } catch (error) {
+        callback({ error: -2 });
+      }
+    });
+
+    createWindows();
+
+    app.on('activate', () => {
+      // On macOS, re-create windows when the dock icon is clicked
+      if (BrowserWindow.getAllWindows().length === 0) {
+        createWindows();
+      }
+    });
+  });
+}
 
 // Quit when all windows are closed
 app.on('window-all-closed', () => {
