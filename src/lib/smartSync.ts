@@ -200,6 +200,9 @@ class SmartSyncService {
    */
   private async syncPendingTransactions(): Promise<{ success: boolean; syncedCount: number; message: string }> {
 
+    // #region agent log
+    fetch('http://127.0.0.1:7495/ingest/176c0b85-d0c0-41ef-a970-2527232dc552', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': 'fd8931' }, body: JSON.stringify({ sessionId: 'fd8931', location: 'smartSync.ts:syncPendingTransactions', message: 'sync_start', data: { isElectron, isSyncing: this.isSyncing, isOnline: this.isOnline }, timestamp: Date.now(), hypothesisId: 'entry' }) }).catch(() => {});
+    // #endregion
     console.log('🚀 [SMART SYNC] ===== STARTING SYNC =====', {
       isElectron,
       isSyncing: this.isSyncing,
@@ -230,42 +233,59 @@ class SmartSyncService {
         return { success: false, syncedCount: 0, message: 'Electron API not available' };
       }
 
-      console.log('🔍 [SMART SYNC] Fetching pending transactions...');
-      // Get pending transactions without items (sync fetches items per-tx in processBatch to reduce RAM)
-      const pendingTransactions = await (electronAPI.localDbGetUnsyncedTransactions as (businessId?: number, includeItems?: boolean) => Promise<PendingTransaction[]>)(undefined, false);
-      console.log(`📦 [SMART SYNC] Found ${pendingTransactions.length} pending transactions`, {
-        count: pendingTransactions.length,
-        transactionIds: pendingTransactions.slice(0, 10).map(t => t.id) // Show first 10 IDs
-      });
-
       let syncedTransactionCount = 0;
-      if (pendingTransactions.length === 0) {
-        console.log('✅ [SMART SYNC] No pending transactions - proceeding to sync shifts/refunds/audits');
-      } else {
+      try {
+        console.log('🔍 [SMART SYNC] Fetching pending transactions...');
+        // Get pending transactions without items (sync fetches items per-tx in processBatch to reduce RAM)
+        const pendingTransactions = await (electronAPI.localDbGetUnsyncedTransactions as (businessId?: number, includeItems?: boolean) => Promise<PendingTransaction[]>)(undefined, false);
+        // #region agent log
+        fetch('http://127.0.0.1:7495/ingest/176c0b85-d0c0-41ef-a970-2527232dc552', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': 'fd8931' }, body: JSON.stringify({ sessionId: 'fd8931', location: 'smartSync.ts:after_get_pending', message: 'after_get_pending', data: { pendingCount: pendingTransactions.length, firstIds: pendingTransactions.slice(0, 5).map(t => t.id) }, timestamp: Date.now(), hypothesisId: 'A' }) }).catch(() => {});
+        // #endregion
+        console.log(`📦 [SMART SYNC] Found ${pendingTransactions.length} pending transactions`, {
+          count: pendingTransactions.length,
+          transactionIds: pendingTransactions.slice(0, 10).map(t => t.id) // Show first 10 IDs
+        });
 
-        // Process in batches to prevent server overload
-        const batches = this.createBatches(pendingTransactions, this.config.maxBatchSize);
-        console.log(`📊 [SMART SYNC] Created ${batches.length} batch(es) of max ${this.config.maxBatchSize} transactions each`);
+        if (pendingTransactions.length === 0) {
+          console.log('✅ [SMART SYNC] No pending transactions - proceeding to sync shifts/refunds/audits');
+        } else {
 
-        for (let batchIndex = 0; batchIndex < batches.length; batchIndex++) {
-          const batch = batches[batchIndex];
-          console.log(`🔄 [SMART SYNC] Processing batch ${batchIndex + 1}/${batches.length} (${batch.length} transactions)`);
-          const batchResult = await this.processBatch(batch, false);
-          syncedTransactionCount += batchResult.syncedCount;
+          // Process in batches to prevent server overload
+          const batches = this.createBatches(pendingTransactions, this.config.maxBatchSize);
+          console.log(`📊 [SMART SYNC] Created ${batches.length} batch(es) of max ${this.config.maxBatchSize} transactions each`);
 
-          // Add delay between batches to prevent server overload
-          if (batches.length > 1 && batchIndex < batches.length - 1) {
-            console.log('⏳ [SMART SYNC] Waiting 2 seconds before next batch...');
-            await this.delay(2000); // 2 second delay between batches
+          for (let batchIndex = 0; batchIndex < batches.length; batchIndex++) {
+            const batch = batches[batchIndex];
+            console.log(`🔄 [SMART SYNC] Processing batch ${batchIndex + 1}/${batches.length} (${batch.length} transactions)`);
+            const batchResult = await this.processBatch(batch, false);
+            syncedTransactionCount += batchResult.syncedCount;
+
+            // Add delay between batches to prevent server overload
+            if (batches.length > 1 && batchIndex < batches.length - 1) {
+              console.log('⏳ [SMART SYNC] Waiting 2 seconds before next batch...');
+              await this.delay(2000); // 2 second delay between batches
+            }
           }
+          console.log('✅ [SMART SYNC] All transaction batches processed');
         }
-        console.log('✅ [SMART SYNC] All transaction batches processed');
-      }
 
+        // #region agent log
+        fetch('http://127.0.0.1:7495/ingest/176c0b85-d0c0-41ef-a970-2527232dc552', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': 'fd8931' }, body: JSON.stringify({ sessionId: 'fd8931', location: 'smartSync.ts:after_batches', message: 'after_batches', data: { syncedTransactionCount }, timestamp: Date.now(), hypothesisId: 'B' }) }).catch(() => {});
+        // #endregion
+      } catch (txError) {
+        console.error('❌ [SMART SYNC] Transaction sync failed (continuing with shifts/refunds/audits):', {
+          error: txError instanceof Error ? txError.message : String(txError),
+          stack: txError instanceof Error ? txError.stack : undefined,
+          errorObject: txError
+        });
+      }
       // Also sync shifts
       console.log('🔄 [SMART SYNC] Starting shift sync...');
       try {
         await this.syncPendingShifts();
+        // #region agent log
+        fetch('http://127.0.0.1:7495/ingest/176c0b85-d0c0-41ef-a970-2527232dc552', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': 'fd8931' }, body: JSON.stringify({ sessionId: 'fd8931', location: 'smartSync.ts:after_shifts', message: 'after_shifts', data: {}, timestamp: Date.now(), hypothesisId: 'C' }) }).catch(() => {});
+        // #endregion
         console.log('✅ [SMART SYNC] Shift sync completed');
       } catch (error) {
         console.error('❌ [SMART SYNC] Shift sync failed:', {
@@ -279,6 +299,9 @@ class SmartSyncService {
       console.log('🔄 [SMART SYNC] Starting printer audit sync...');
       try {
         await this.syncPrinterAudits();
+        // #region agent log
+        fetch('http://127.0.0.1:7495/ingest/176c0b85-d0c0-41ef-a970-2527232dc552', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': 'fd8931' }, body: JSON.stringify({ sessionId: 'fd8931', location: 'smartSync.ts:after_printer_audits', message: 'after_printer_audits', data: {}, timestamp: Date.now(), hypothesisId: 'D' }) }).catch(() => {});
+        // #endregion
         console.log('✅ [SMART SYNC] Printer audit sync completed');
       } catch (error) {
         console.error('❌ [SMART SYNC] Printer audit sync failed:', {
@@ -292,6 +315,9 @@ class SmartSyncService {
       console.log('🔄 [SMART SYNC] Starting printer daily counters sync...');
       try {
         await this.syncPrinterDailyCounters();
+        // #region agent log
+        fetch('http://127.0.0.1:7495/ingest/176c0b85-d0c0-41ef-a970-2527232dc552', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': 'fd8931' }, body: JSON.stringify({ sessionId: 'fd8931', location: 'smartSync.ts:after_printer_counters', message: 'after_printer_counters', data: {}, timestamp: Date.now(), hypothesisId: 'E' }) }).catch(() => {});
+        // #endregion
         console.log('✅ [SMART SYNC] Printer daily counters sync completed');
       } catch (error) {
         console.error('❌ [SMART SYNC] Printer daily counters sync failed:', {
@@ -304,9 +330,23 @@ class SmartSyncService {
       // NOTE: Products are NOT uploaded here - server is source of truth for master data
       // Products should only be downloaded from server, not uploaded
 
+      // #region agent log
+      fetch('http://127.0.0.1:7495/ingest/176c0b85-d0c0-41ef-a970-2527232dc552', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': 'fd8931' }, body: JSON.stringify({ sessionId: 'fd8931', location: 'smartSync.ts:before_refunds', message: 'before_refunds', data: {}, timestamp: Date.now(), hypothesisId: 'F' }) }).catch(() => {});
+      // #endregion
       console.log('🔄 [SMART SYNC] Starting refund sync...');
-      await this.syncPendingRefunds();
-      console.log('✅ [SMART SYNC] Refund sync completed');
+      try {
+        await this.syncPendingRefunds();
+        // #region agent log
+        fetch('http://127.0.0.1:7495/ingest/176c0b85-d0c0-41ef-a970-2527232dc552', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': 'fd8931' }, body: JSON.stringify({ sessionId: 'fd8931', location: 'smartSync.ts:after_refunds', message: 'after_refunds', data: {}, timestamp: Date.now(), hypothesisId: 'G' }) }).catch(() => {});
+        // #endregion
+        console.log('✅ [SMART SYNC] Refund sync completed');
+      } catch (error) {
+        console.error('❌ [SMART SYNC] Refund sync failed:', {
+          error: error instanceof Error ? error.message : String(error),
+          stack: error instanceof Error ? error.stack : undefined,
+          errorObject: error
+        });
+      }
 
       // Auto re-sync refunded Printer 2 transactions to system_pos (local DB, works offline)
       if (isElectron) {
@@ -341,9 +381,14 @@ class SmartSyncService {
       return { success: true, syncedCount: syncedTransactionCount, message };
 
     } catch (error) {
+      const errMsg = error instanceof Error ? error.message : String(error);
+      const errStack = error instanceof Error ? error.stack : undefined;
+      // #region agent log
+      fetch('http://127.0.0.1:7495/ingest/176c0b85-d0c0-41ef-a970-2527232dc552', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': 'fd8931' }, body: JSON.stringify({ sessionId: 'fd8931', location: 'smartSync.ts:sync_failed', message: 'sync_failed', data: { errorMessage: errMsg, stackSnippet: errStack ? errStack.split('\n').slice(0, 5).join(' ') : undefined }, timestamp: Date.now(), hypothesisId: 'cause' }) }).catch(() => {});
+      // #endregion
       const syncDuration = Date.now() - syncStartTime; console.error('❌ [SMART SYNC] ===== SYNC FAILED =====', {
-        error: error instanceof Error ? error.message : String(error),
-        stack: error instanceof Error ? error.stack : undefined,
+        error: errMsg,
+        stack: errStack,
         errorObject: error,
         duration: `${syncDuration}ms`,
         timestamp: new Date().toISOString()
