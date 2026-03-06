@@ -10518,8 +10518,11 @@ function createWindows(): void {
   // Mark transaction as failed (for transactions table)
   ipcMain.handle('localdb-mark-transaction-failed', async (event, transactionId: string) => {
     try {
-      const now = Date.now();
-      // CRITICAL FIX: Use uuid_id instead of id, because smart sync passes UUID strings
+      // MySQL TIMESTAMP expects 'YYYY-MM-DD HH:MM:SS', not Unix ms
+      const now = toMySQLDateTime(new Date());
+      // #region agent log
+      fetch('http://127.0.0.1:7495/ingest/176c0b85-d0c0-41ef-a970-2527232dc552', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': 'f2d03c' }, body: JSON.stringify({ sessionId: 'f2d03c', location: 'main.ts:localdb-mark-transaction-failed', message: 'last_sync_attempt value passed to UPDATE', data: { transactionId, lastSyncAttemptValue: now, type: typeof now }, timestamp: Date.now(), hypothesisId: 'H1', runId: 'post-fix' }) }).catch(() => {});
+      // #endregion
       await executeUpdate(`
         UPDATE transactions 
         SET sync_status = 'failed', sync_attempts = sync_attempts + 1, last_sync_attempt = ?

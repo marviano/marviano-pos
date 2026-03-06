@@ -22,9 +22,11 @@
       overflow-wrap: break-word;
     }
     .dashed-line { border-top: 1px dashed #000; margin: 1.5mm 0; }
-    .info-line { display: flex; justify-content: space-between; margin-bottom: 0.5mm; }
-    .info-label { font-size: 9pt; font-weight: 500; }
-    .info-value { font-size: 9pt; font-weight: 700; }
+    .info-table { width: 100%; border-collapse: collapse; margin-bottom: 1mm; table-layout: auto; }
+    .info-table td { padding: 0 0 0.5mm 0; font-size: 9pt; vertical-align: top; }
+    .info-table td.lbl { font-weight: 500; white-space: nowrap; padding-right: 3.5mm; }
+    .info-table td.colon { white-space: nowrap; padding-right: 1mm; font-weight: 500; }
+    .info-table td.val { font-weight: 700; word-wrap: break-word; overflow-wrap: break-word; }
     .category-section { margin: 1.5mm 0; }
     .category-title { font-size: 9pt; font-weight: 700; margin-bottom: 0.5mm; }
     .item-line { font-size: 9pt; margin: 0.5mm 0; }
@@ -37,22 +39,28 @@
 <body>
   <div class="dashed-line"></div>
 
-  <div class="info-line">
-    <span class="info-label">Waiter:</span>
-    <span class="info-value">{{waiterName}}</span>
-  </div>
-  <div class="info-line">
-    <span class="info-label">Pelanggan:</span>
-    <span class="info-value">{{customerName}}</span>
-  </div>
-  <div class="info-line">
-    <span class="info-label">Meja:</span>
-    <span class="info-value">{{tableName}}</span>
-  </div>
-  <div class="info-line">
-    <span class="info-label">Waktu Pesanan:</span>
-    <span class="info-value">{{orderTime}}</span>
-  </div>
+  <table class="info-table">
+    <tr>
+      <td class="lbl">Waiter</td>
+      <td class="colon">:</td>
+      <td class="val">{{waiterName}}</td>
+    </tr>
+    <tr>
+      <td class="lbl">Pelanggan</td>
+      <td class="colon">:</td>
+      <td class="val">{{customerName}}</td>
+    </tr>
+    <tr>
+      <td class="lbl">Meja</td>
+      <td class="colon">:</td>
+      <td class="val">{{tableName}}</td>
+    </tr>
+    <tr>
+      <td class="lbl">Waktu Pesanan</td>
+      <td class="colon">:</td>
+      <td class="val">{{orderTime}}</td>
+    </tr>
+  </table>
 
   <div class="dashed-line"></div>
 
