@@ -328,6 +328,7 @@ declare global {
       localDbMarkTransactionsSyncedByIds?: (transactionIds: number[]) => Promise<{ success: boolean }>;
       localDbArchiveTransactions?: (payload: { businessId: number; from?: string | null; to?: string | null }) => Promise<number>;
       localDbDeleteTransactions?: (payload: { businessId: number; from?: string | null; to?: string | null }) => Promise<number>;
+      localDbResetFailedTransactions?: () => Promise<{ success: boolean; error?: string; resetCount?: number }>;
       localDbDeleteTransactionItems?: (payload: { businessId: number; from?: string | null; to?: string | null }) => Promise<{ success: boolean; deleted?: number }>;
       localDbSplitBill?: (payload: { sourceTransactionUuid: string; destinationTransactionUuid: string; itemIds: (number | string)[] }) => Promise<{ success: boolean; error?: string }>;
       localDbUpsertActivityLogs?: (rows: Array<{ user_id: number; action: string; business_id: number; details: string; created_at: string }>) => Promise<{ success: boolean; error?: string }>;
@@ -631,10 +632,17 @@ declare global {
         success: boolean;
         count: number;
         synced: number;
+        skipped?: number;
         failed: number;
         errors?: Array<{ transactionId: string; error: string }>;
         error?: string;
         message?: string;
+      }>;
+      getSystemPosVerifikasiData?: (businessId?: number, fromDate?: string, toDate?: string) => Promise<{
+        success: boolean;
+        salespulse: unknown[];
+        system_pos: unknown[];
+        error?: string;
       }>;
       upsertMasterDataToSystemPos?: () => Promise<{ success: boolean; upserted: number; error?: string }>;
       syncRefundedTransactionsToSystemPos?: () => Promise<{ success: boolean; syncedCount: number; error?: string }>;

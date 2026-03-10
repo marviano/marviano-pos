@@ -12,6 +12,8 @@ import { getDbConfig, getMirrorDbConfig } from './configManager';
 let mysqlPool: Pool | null = null; // Main database: salespulse
 let systemPosPool: Pool | null = null; // Printer 2 transactions: system_pos
 let mirrorPool: Pool | null = null; // Dual-write: localhost + salespulse (template struk tab)
+/** Verifikasi System POS: always read salespulse from db_host (localhost), not VPS primary. */
+let localSalespulsePool: Pool | null = null;
 
 /**
  * Initialize MySQL connection pool
@@ -211,6 +213,52 @@ export function toMySQLTimestamp(date: Date | string | number | null | undefined
 /**
  * Execute a SELECT query and return results
  */
+/**
+ * Execute SELECT on salespulse at db_host (127.0.0.1) only.
+ * Used by Verifikasi System POS so the "salespulse" side is always local, not the primary pool (which may be VPS).
+ * Pool uses same database name/user/password/port as getDbConfig() but host forced to 127.0.0.1.
+ */
+export function getLocalSalespulsePool(): Pool {
+  if (localSalespulsePool) return localSalespulsePool;
+  const primary = getDbConfig();
+  localSalespulsePool = mysql.createPool({
+    host: '127.0.0.1',
+    user: primary.user,
+    password: primary.password,
+    database: primary.database,
+    port: primary.port,
+    waitForConnections: true,
+    connectionLimit: 5,
+    queueLimit: 0,
+    enableKeepAlive: true,
+    keepAliveInitialDelay: 0,
+  });
+  localSalespulsePool.getConnection()
+    .then((conn) => {
+      console.log('✅ Local salespulse pool initialized (127.0.0.1) for Verifikasi System POS');
+      conn.release();
+    })
+    .catch((err) => {
+      console.warn('⚠️ Local salespulse pool connection failed:', (err as Error)?.message);
+    });
+  return localSalespulsePool;
+}
+
+export async function executeQueryOnLocalSalespulse<T = unknown>(
+  sql: string,
+  params: (string | number | null | boolean)[] = []
+): Promise<T[]> {
+  const pool = getLocalSalespulsePool();
+  try {
+    const [results] = await pool.execute(sql, params);
+    return results as T[];
+  } catch (error) {
+    console.error('❌ Local salespulse query error:', error);
+    console.error('SQL:', sql);
+    throw error;
+  }
+}
+
 export async function executeQuery<T = unknown>(
   sql: string,
   params: (string | number | null | boolean)[] = []
@@ -532,6 +580,18 @@ export async function executeSystemPosUpdate(
 }
 
 /**
+ * Execute an INSERT on System POS and return the insertId (for building id maps when re-inserting).
+ */
+export async function executeSystemPosInsertReturnId(
+  sql: string,
+  params: (string | number | null | boolean)[]
+): Promise<number> {
+  const pool = getSystemPosPool();
+  const [result] = await pool.execute(sql, params) as [mysql.ResultSetHeader, unknown];
+  return result.insertId ?? 0;
+}
+
+/**
  * Execute multiple queries in a transaction on System POS database
  */
 export async function executeSystemPosTransaction(
@@ -709,6 +769,15 @@ async function insertStubProductIntoSystemPos(productId: number): Promise<void> 
   }
 }
 
+/** Columns that exist in system_pos.transactions (CREATE + ALTERs). Used to avoid sending unknown columns from main DB. */
+const SYSTEM_POS_TRANSACTION_COLUMNS = new Set([
+  'uuid_id', 'business_id', 'user_id', 'waiter_id', 'shift_uuid', 'payment_method', 'payment_method_id', 'sync_status', 'sync_attempts', 'synced_at', 'last_sync_attempt', 'last_sync_error', 'table_id', 'pickup_method', 'total_amount', 'voucher_discount', 'voucher_type', 'voucher_value', 'voucher_label', 'final_amount', 'amount_received', 'change_amount', 'status', 'refund_status', 'refund_total', 'last_refunded_at', 'created_at', 'updated_at', 'paid_at', 'contact_id', 'customer_name', 'customer_unit', 'note', 'bank_name', 'card_number', 'cl_account_id', 'cl_account_name', 'bank_id', 'receipt_number', 'transaction_type', 'checker_printed', 'system_pos_synced_at'
+]);
+/** Columns that exist in system_pos.transaction_items (CREATE + ALTERs). Must include production_status for cancelled items. */
+const SYSTEM_POS_TRANSACTION_ITEM_COLUMNS = new Set([
+  'uuid_id', 'transaction_id', 'uuid_transaction_id', 'product_id', 'quantity', 'unit_price', 'total_price', 'custom_note', 'bundle_selections_json', 'package_selections_json', 'created_at', 'waiter_id', 'cancelled_by_user_id', 'cancelled_by_waiter_id', 'cancelled_at', 'production_started_at', 'production_status', 'production_finished_at', 'package_line_finished_at_json'
+]);
+
 /**
  * Insert complete transaction data into system_pos database
  * Fetches transaction and all related data from salespulse DB and inserts into system_pos DB
@@ -718,16 +787,11 @@ export async function insertTransactionToSystemPos(transactionId: string): Promi
   const systemPosPool = getSystemPosPool();
   
   try {
-    // Step 1: Check if transaction already exists in system_pos (deduplication)
+    // Step 1: Check if transaction already exists in system_pos
     const existingTx = await executeSystemPosQueryOne<{ id: number }>(
       'SELECT id FROM transactions WHERE uuid_id = ?',
       [transactionId]
     );
-    
-    if (existingTx) {
-      console.log(`⏭️ [SYSTEM POS] Transaction ${transactionId} already exists in system_pos, skipping insertion`);
-      return { success: true, skipped: true };
-    }
 
     // Step 2: Fetch transaction from salespulse DB
     const transaction = await executeQueryOne<Record<string, unknown>>(
@@ -897,79 +961,272 @@ export async function insertTransactionToSystemPos(transactionId: string): Promi
       }
     }
 
-    // Step 8: Insert all data into system_pos DB using transaction
-    const queries: Array<{ sql: string; params?: (string | number | null | boolean)[] }> = [];
+    // Step 7d: Use refund_total from actual transaction_refunds so we don't overwrite with stale 0 from salespulse.transactions
+    const refundTotalFromRefunds = (refunds as Array<Record<string, unknown>>).reduce((sum, r) => {
+      const status = String(r.status ?? '');
+      if (status !== 'pending' && status !== 'completed') return sum;
+      const amt = r.refund_amount != null ? Number(r.refund_amount) : 0;
+      return sum + (Number.isNaN(amt) ? 0 : amt);
+    }, 0);
+    const lastRefundedAt = (refunds as Array<Record<string, unknown>>).length > 0
+      ? (refunds as Array<Record<string, unknown>>).map(r => r.refunded_at).filter(Boolean).sort().reverse()[0] as string | null | undefined
+      : null;
+    const refundStatus = refundTotalFromRefunds >= (Number(transactionForInsert.final_amount) || 0) - 0.01 ? 'full'
+      : refundTotalFromRefunds > 0 ? 'partial' : (transactionForInsert.refund_status ?? 'none');
+    transactionForInsert = {
+      ...transactionForInsert,
+      refund_total: refundTotalFromRefunds,
+      refund_status: refundStatus,
+      last_refunded_at: lastRefundedAt ?? transactionForInsert.last_refunded_at
+    };
 
-    // Insert transaction
-    const txFields = Object.keys(transactionForInsert);
-    const txValues = txFields.map(field => convertToMySQLParam(transactionForInsert[field]));
-    const txPlaceholders = txFields.map(() => '?').join(', ');
-    queries.push({
-      sql: `INSERT INTO transactions (${txFields.join(', ')}) VALUES (${txPlaceholders})`,
-      params: txValues
-    });
+    // Step 8: Insert or update system_pos
+    const cancelledCount = items.filter((it: Record<string, unknown>) => String(it.production_status || '') === 'cancelled').length;
 
-    // Insert transaction items
-    for (const item of items) {
-      const itemFields = Object.keys(item);
-      const itemValues = itemFields.map(field => convertToMySQLParam(item[field]));
-      const itemPlaceholders = itemFields.map(() => '?').join(', ');
-      queries.push({
-        sql: `INSERT INTO transaction_items (${itemFields.join(', ')}) VALUES (${itemPlaceholders})`,
-        params: itemValues
-      });
+    if (existingTx) {
+      // Update path: replace existing transaction and all children so system_pos matches salespulse (cancelled items, totals, refunds).
+      const sysPosId = existingTx.id;
+      const connection = await getSystemPosPool().getConnection();
+      try {
+        await connection.beginTransaction();
+        // Delete children (order: options -> customizations -> items -> refunds)
+        await connection.execute(
+          `DELETE FROM transaction_item_customization_options
+           WHERE transaction_item_customization_id IN (
+             SELECT tic.id FROM transaction_item_customizations tic
+             INNER JOIN transaction_items ti ON tic.transaction_item_id = ti.id
+             WHERE ti.transaction_id = ?
+           )`,
+          [sysPosId]
+        );
+        await connection.execute(
+          'DELETE FROM transaction_item_customizations WHERE transaction_item_id IN (SELECT id FROM transaction_items WHERE transaction_id = ?)',
+          [sysPosId]
+        );
+        await connection.execute('DELETE FROM transaction_items WHERE transaction_id = ?', [sysPosId]);
+        await connection.execute('DELETE FROM transaction_refunds WHERE transaction_uuid = ?', [transactionId]);
+        // UPDATE transaction row (only columns that exist in system_pos.transactions)
+        const txUpdateFields = Object.keys(transactionForInsert).filter(f => f !== 'id' && SYSTEM_POS_TRANSACTION_COLUMNS.has(f));
+        const txUpdateSet = txUpdateFields.map(f => `\`${f}\` = ?`).join(', ');
+        const txUpdateParams = [...txUpdateFields.map(f => convertToMySQLParam(transactionForInsert[f])), sysPosId];
+        await connection.execute(`UPDATE transactions SET ${txUpdateSet} WHERE id = ?`, txUpdateParams);
+        // Insert items with transaction_id = system_pos id (only columns that exist in system_pos.transaction_items)
+        for (const item of items) {
+          const itemRow: Record<string, unknown> = { transaction_id: sysPosId };
+          for (const key of Object.keys(item)) {
+            if (key !== 'id' && SYSTEM_POS_TRANSACTION_ITEM_COLUMNS.has(key)) {
+              itemRow[key] = item[key];
+            }
+          }
+          const itemFields = Object.keys(itemRow);
+          const itemValues = itemFields.map(f => convertToMySQLParam(itemRow[f]));
+          const itemPlaceholders = itemFields.map(() => '?').join(', ');
+          await connection.execute(
+            `INSERT INTO transaction_items (${itemFields.map(f => `\`${f}\``).join(', ')}) VALUES (${itemPlaceholders})`,
+            itemValues
+          );
+        }
+        // Map main DB item id -> system_pos item id (by uuid_id); use same connection to see uncommitted inserts
+        const [sysPosRows] = await connection.execute(
+          'SELECT id, uuid_id FROM transaction_items WHERE transaction_id = ? ORDER BY id',
+          [sysPosId]
+        ) as [mysql.RowDataPacket[], mysql.FieldPacket[]];
+        const uuidToSysPosItemId = new Map<string, number>();
+        for (const row of sysPosRows || []) {
+          const uid = row?.uuid_id;
+          if (uid) uuidToSysPosItemId.set(String(uid).trim(), Number(row.id));
+        }
+        const mainItemIdToUuid = new Map<number, string>();
+        for (const it of items) {
+          const id = typeof it.id === 'number' ? it.id : (it.id != null ? Number(it.id) : NaN);
+          const uuid = it.uuid_id != null ? String(it.uuid_id).trim() : '';
+          if (!Number.isNaN(id) && uuid) mainItemIdToUuid.set(id, uuid);
+        }
+        const mainCustIdToSysPos: Record<number, number> = {};
+        for (const cust of customizations) {
+          const mainItemId = typeof cust.transaction_item_id === 'number' ? cust.transaction_item_id : Number(cust.transaction_item_id);
+          const uuid = mainItemIdToUuid.get(mainItemId);
+          const sysPosItemId = uuid ? uuidToSysPosItemId.get(uuid) : undefined;
+          if (sysPosItemId == null) continue;
+          const custRow = { ...cust, transaction_item_id: sysPosItemId } as Record<string, unknown>;
+          delete custRow.id;
+          const custFields = Object.keys(custRow);
+          const custValues = custFields.map(f => convertToMySQLParam(custRow[f]));
+          const custPlaceholders = custFields.map(() => '?').join(', ');
+          const [custResult] = await connection.execute(
+            `INSERT INTO transaction_item_customizations (${custFields.map(f => `\`${f}\``).join(', ')}) VALUES (${custPlaceholders})`,
+            custValues
+          ) as [mysql.ResultSetHeader, unknown];
+          const mainCustId = typeof cust.id === 'number' ? cust.id : (cust.id != null ? Number(cust.id) : NaN);
+          if (!Number.isNaN(mainCustId) && custResult.insertId) mainCustIdToSysPos[mainCustId] = custResult.insertId;
+        }
+        for (const opt of customizationOptions) {
+          const mainCustId = typeof opt.transaction_item_customization_id === 'number' ? opt.transaction_item_customization_id : Number(opt.transaction_item_customization_id);
+          const sysPosCustId = mainCustIdToSysPos[mainCustId];
+          if (sysPosCustId == null) continue;
+          const optRow = { ...opt, transaction_item_customization_id: sysPosCustId } as Record<string, unknown>;
+          delete optRow.id;
+          const optFields = Object.keys(optRow);
+          const optValues = optFields.map(f => convertToMySQLParam(optRow[f]));
+          const optPlaceholders = optFields.map(() => '?').join(', ');
+          await connection.execute(
+            `INSERT INTO transaction_item_customization_options (${optFields.map(f => `\`${f}\``).join(', ')}) VALUES (${optPlaceholders})`,
+            optValues
+          );
+        }
+        for (const refund of refunds) {
+          const refundFields = Object.keys(refund);
+          const refundValues = refundFields.map(f => convertToMySQLParam(refund[f]));
+          const refundPlaceholders = refundFields.map(() => '?').join(', ');
+          await connection.execute(
+            `INSERT INTO transaction_refunds (${refundFields.map(f => `\`${f}\``).join(', ')}) VALUES (${refundPlaceholders})`,
+            refundValues
+          );
+        }
+        if (shift) {
+          const shiftFields = Object.keys(shift);
+          const shiftValues = shiftFields.map(f => convertToMySQLParam(shift[f]));
+          const shiftPlaceholders = shiftFields.map(() => '?').join(', ');
+          await connection.execute(
+            `INSERT INTO shifts (${shiftFields.map(f => `\`${f}\``).join(', ')}) VALUES (${shiftPlaceholders}) ON DUPLICATE KEY UPDATE uuid_id = uuid_id`,
+            shiftValues
+          );
+        }
+        await connection.commit();
+        console.log(`✅ [SYSTEM POS] Updated transaction ${transactionId} in system_pos (${items.length} items, ${cancelledCount} cancelled)`);
+      } catch (updateErr: unknown) {
+        await connection.rollback();
+        throw updateErr;
+      } finally {
+        connection.release();
+      }
+      return { success: true };
     }
 
-    // Insert customizations
-    for (const customization of customizations) {
-      const custFields = Object.keys(customization);
-      const custValues = custFields.map(field => convertToMySQLParam(customization[field]));
-      const custPlaceholders = custFields.map(() => '?').join(', ');
-      queries.push({
-        sql: `INSERT INTO transaction_item_customizations (${custFields.join(', ')}) VALUES (${custPlaceholders})`,
-        params: custValues
-      });
+    // Insert path (new transaction): never copy main DB surrogate keys (id) into system_pos —
+    // transaction_items.id is global in system_pos; main's ids can collide (e.g. duplicate PRIMARY).
+    // Insert transactions without id, then items with transaction_id = new system_pos id, then
+    // customizations/options remapped by uuid_id (same strategy as update path).
+    const connection = await getSystemPosPool().getConnection();
+    try {
+      await connection.beginTransaction();
+      // INSERT transactions: only system_pos columns, omit id so AUTO_INCREMENT assigns safely
+      const txInsertFields = Object.keys(transactionForInsert).filter(
+        f => f !== 'id' && SYSTEM_POS_TRANSACTION_COLUMNS.has(f)
+      );
+      const txInsertValues = txInsertFields.map(f => convertToMySQLParam(transactionForInsert[f]));
+      const txInsertPlaceholders = txInsertFields.map(() => '?').join(', ');
+      const [txInsertResult] = await connection.execute(
+        `INSERT INTO transactions (${txInsertFields.map(f => `\`${f}\``).join(', ')}) VALUES (${txInsertPlaceholders})`,
+        txInsertValues
+      ) as [mysql.ResultSetHeader, mysql.FieldPacket[]];
+      const sysPosId = txInsertResult.insertId;
+      if (!sysPosId || typeof sysPosId !== 'number') {
+        throw new Error('system_pos INSERT transactions did not return insertId');
+      }
+      // Insert items with transaction_id = system_pos transaction id (do not copy main transaction_id)
+      for (const item of items) {
+        const itemRow: Record<string, unknown> = { transaction_id: sysPosId };
+        for (const key of Object.keys(item)) {
+          if (key !== 'id' && key !== 'transaction_id' && SYSTEM_POS_TRANSACTION_ITEM_COLUMNS.has(key)) {
+            itemRow[key] = item[key];
+          }
+        }
+        const itemFields = Object.keys(itemRow);
+        const itemValues = itemFields.map(f => convertToMySQLParam(itemRow[f]));
+        const itemPlaceholders = itemFields.map(() => '?').join(', ');
+        await connection.execute(
+          `INSERT INTO transaction_items (${itemFields.map(f => `\`${f}\``).join(', ')}) VALUES (${itemPlaceholders})`,
+          itemValues
+        );
+      }
+      // Map uuid_id -> system_pos item id for customization FK remapping
+      const [sysPosRows] = await connection.execute(
+        'SELECT id, uuid_id FROM transaction_items WHERE transaction_id = ? ORDER BY id',
+        [sysPosId]
+      ) as [mysql.RowDataPacket[], mysql.FieldPacket[]];
+      const uuidToSysPosItemId = new Map<string, number>();
+      for (const row of sysPosRows || []) {
+        const uid = row?.uuid_id;
+        if (uid) uuidToSysPosItemId.set(String(uid).trim(), Number(row.id));
+      }
+      const mainItemIdToUuid = new Map<number, string>();
+      for (const it of items) {
+        const mid = typeof it.id === 'number' ? it.id : (it.id != null ? Number(it.id) : NaN);
+        const uuid = it.uuid_id != null ? String(it.uuid_id).trim() : '';
+        if (!Number.isNaN(mid) && uuid) mainItemIdToUuid.set(mid, uuid);
+      }
+      const mainCustIdToSysPos: Record<number, number> = {};
+      for (const cust of customizations) {
+        const mainItemId =
+          typeof cust.transaction_item_id === 'number'
+            ? cust.transaction_item_id
+            : Number(cust.transaction_item_id);
+        const uuid = mainItemIdToUuid.get(mainItemId);
+        const sysPosItemId = uuid ? uuidToSysPosItemId.get(uuid) : undefined;
+        if (sysPosItemId == null) continue;
+        const custRow = { ...cust, transaction_item_id: sysPosItemId } as Record<string, unknown>;
+        delete custRow.id;
+        const custFields = Object.keys(custRow);
+        const custValues = custFields.map(f => convertToMySQLParam(custRow[f]));
+        const custPlaceholders = custFields.map(() => '?').join(', ');
+        const [custResult] = await connection.execute(
+          `INSERT INTO transaction_item_customizations (${custFields.map(f => `\`${f}\``).join(', ')}) VALUES (${custPlaceholders})`,
+          custValues
+        ) as [mysql.ResultSetHeader, unknown];
+        const mainCustId =
+          typeof cust.id === 'number' ? cust.id : (cust.id != null ? Number(cust.id) : NaN);
+        if (!Number.isNaN(mainCustId) && custResult.insertId) mainCustIdToSysPos[mainCustId] = custResult.insertId;
+      }
+      for (const opt of customizationOptions) {
+        const mainCustId =
+          typeof opt.transaction_item_customization_id === 'number'
+            ? opt.transaction_item_customization_id
+            : Number(opt.transaction_item_customization_id);
+        const sysPosCustId = mainCustIdToSysPos[mainCustId];
+        if (sysPosCustId == null) continue;
+        const optRow = { ...opt, transaction_item_customization_id: sysPosCustId } as Record<string, unknown>;
+        delete optRow.id;
+        const optFields = Object.keys(optRow);
+        const optValues = optFields.map(f => convertToMySQLParam(optRow[f]));
+        const optPlaceholders = optFields.map(() => '?').join(', ');
+        await connection.execute(
+          `INSERT INTO transaction_item_customization_options (${optFields.map(f => `\`${f}\``).join(', ')}) VALUES (${optPlaceholders})`,
+          optValues
+        );
+      }
+      for (const refund of refunds) {
+        const refundRow = { ...refund } as Record<string, unknown>;
+        delete refundRow.id;
+        const refundFields = Object.keys(refundRow);
+        const refundValues = refundFields.map(f => convertToMySQLParam(refundRow[f]));
+        const refundPlaceholders = refundFields.map(() => '?').join(', ');
+        await connection.execute(
+          `INSERT INTO transaction_refunds (${refundFields.map(f => `\`${f}\``).join(', ')}) VALUES (${refundPlaceholders})`,
+          refundValues
+        );
+      }
+      if (shift) {
+        const shiftRow = { ...shift } as Record<string, unknown>;
+        delete shiftRow.id;
+        const shiftFields = Object.keys(shiftRow);
+        const shiftValues = shiftFields.map(f => convertToMySQLParam(shiftRow[f]));
+        const shiftPlaceholders = shiftFields.map(() => '?').join(', ');
+        await connection.execute(
+          `INSERT INTO shifts (${shiftFields.map(f => `\`${f}\``).join(', ')}) VALUES (${shiftPlaceholders}) ON DUPLICATE KEY UPDATE uuid_id = uuid_id`,
+          shiftValues
+        );
+      }
+      await connection.commit();
+      console.log(
+        `✅ [SYSTEM POS] Successfully inserted transaction ${transactionId} (system_pos id=${sysPosId}) with ${items.length} items, ${customizations.length} customizations, ${refunds.length} refunds${shift ? ', 1 shift' : ''}`
+      );
+    } catch (insertErr: unknown) {
+      await connection.rollback();
+      throw insertErr;
+    } finally {
+      connection.release();
     }
-
-    // Insert customization options
-    for (const option of customizationOptions) {
-      const optFields = Object.keys(option);
-      const optValues = optFields.map(field => convertToMySQLParam(option[field]));
-      const optPlaceholders = optFields.map(() => '?').join(', ');
-      queries.push({
-        sql: `INSERT INTO transaction_item_customization_options (${optFields.join(', ')}) VALUES (${optPlaceholders})`,
-        params: optValues
-      });
-    }
-
-    // Insert refunds
-    for (const refund of refunds) {
-      const refundFields = Object.keys(refund);
-      const refundValues = refundFields.map(field => convertToMySQLParam(refund[field]));
-      const refundPlaceholders = refundFields.map(() => '?').join(', ');
-      queries.push({
-        sql: `INSERT INTO transaction_refunds (${refundFields.join(', ')}) VALUES (${refundPlaceholders})`,
-        params: refundValues
-      });
-    }
-
-    // Insert shift if exists
-    if (shift) {
-      const shiftFields = Object.keys(shift);
-      const shiftValues = shiftFields.map(field => convertToMySQLParam(shift[field]));
-      const shiftPlaceholders = shiftFields.map(() => '?').join(', ');
-      queries.push({
-        sql: `INSERT INTO shifts (${shiftFields.join(', ')}) VALUES (${shiftPlaceholders}) ON DUPLICATE KEY UPDATE uuid_id = uuid_id`,
-        params: shiftValues
-      });
-    }
-
-    // Execute all inserts in a transaction
-    if (queries.length > 0) {
-      await executeSystemPosTransaction(queries);
-      console.log(`✅ [SYSTEM POS] Successfully inserted transaction ${transactionId} with ${items.length} items, ${customizations.length} customizations, ${refunds.length} refunds${shift ? ', 1 shift' : ''}`);
-    }
-
     return { success: true };
   } catch (error: unknown) {
     const errorMsg = error instanceof Error ? error.message : String(error);

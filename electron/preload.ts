@@ -114,7 +114,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   localDbSaveSetting: (settingKey: string, settingValue: string) => ipcRenderer.invoke('localdb-save-setting', settingKey, settingValue),
 
   // Transaction sync status (using transactions table directly)
-  localDbMarkTransactionFailed: (transactionId: string) => ipcRenderer.invoke('localdb-mark-transaction-failed', transactionId),
+  localDbMarkTransactionFailed: (transactionId: string, errorMessage?: string) => ipcRenderer.invoke('localdb-mark-transaction-failed', transactionId, errorMessage),
   localDbQueueOfflineRefund: (refundData: UnknownRecord) => ipcRenderer.invoke('localdb-queue-offline-refund', refundData),
   localDbGetPendingRefunds: () => ipcRenderer.invoke('localdb-get-pending-refunds'),
   localDbMarkRefundSynced: (offlineRefundId: number) => ipcRenderer.invoke('localdb-mark-refund-synced', offlineRefundId),
@@ -182,6 +182,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   localDbDeleteUnsyncedTransactions: (businessId?: number) => ipcRenderer.invoke('localdb-delete-unsynced-transactions', businessId),
   localDbMarkTransactionsSynced: (transactionIds: string[]) => ipcRenderer.invoke('localdb-mark-transactions-synced', transactionIds),
   localDbResetTransactionSync: (transactionId: string) => ipcRenderer.invoke('localdb-reset-transaction-sync', transactionId),
+  localDbResetFailedTransactions: () => ipcRenderer.invoke('localdb-reset-failed-transactions'),
 
   // Transaction Items
   localDbUpsertTransactionItems: (rows: UnknownRecord[]) => ipcRenderer.invoke('localdb-upsert-transaction-items', rows),
@@ -260,6 +261,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   repopulateSystemPosQueue: (options?: { days?: number }) => ipcRenderer.invoke('repopulate-system-pos-queue', options),
   getSystemPosResyncPreview: (fromDate: string, toDate: string) => ipcRenderer.invoke('get-system-pos-resync-preview', fromDate, toDate),
   runSystemPosResync: (fromDate: string, toDate: string) => ipcRenderer.invoke('run-system-pos-resync', fromDate, toDate),
+  getSystemPosVerifikasiData: (businessId?: number, fromDate?: string, toDate?: string) => ipcRenderer.invoke('get-system-pos-verifikasi-data', businessId, fromDate, toDate),
   upsertMasterDataToSystemPos: () => ipcRenderer.invoke('upsert-master-data-to-system-pos'),
   syncRefundedTransactionsToSystemPos: () => ipcRenderer.invoke('sync-refunded-transactions-to-system-pos'),
   logPrinter1Print: (transactionId: string, printer1ReceiptNumber: number, globalCounter?: number, isReprint?: boolean, reprintCount?: number) =>

@@ -40,7 +40,14 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# Cursor IDE — ignore entire .cursor (debug logs, agent output, local state)
 .cursor/
-dist/.cursor
+**/.cursor/
+# Debug / session NDJSON logs (electron main / agents)
+debug-*.log
 *.log
+# Built app may write logs under dist/.cursor
+dist/.cursor/
+
 /dist

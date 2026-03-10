@@ -68,6 +68,7 @@ interface OfflineTransaction {
   sync_status?: string; // 'pending' | 'failed' | 'synced'
   sync_attempts?: number; // Number of sync attempts
   last_sync_attempt?: string | number | null; // Last sync attempt timestamp
+  last_sync_error?: string | null; // Last sync failure reason (shown on settings/sinkronisasi)
 }
 
 interface OfflineTransactionItemRow {
@@ -339,6 +340,19 @@ export default function SyncManagement() {
     synced: number;
     failed: number;
     errors: Array<{ transactionId: string; error: string }>;
+  } | null>(null);
+  const [isSystemPosVerifikasiLoading, setIsSystemPosVerifikasiLoading] = useState(false);
+  const [systemPosVerifikasiResult, setSystemPosVerifikasiResult] = useState<{
+    onlyInSalespulse: string[];
+    onlyInSystemPos: string[];
+    matching: number;
+    mismatches: Array<{
+      uuid: string;
+      fields: string[];
+      details?: Array<{ field: string; salespulseValue: string | number; systemPosValue: string | number }>;
+      itemDiffs?: { countSalespulse: number; countSystemPos: number; details: string[] };
+      refundDiffs?: { countSalespulse: number; countSystemPos: number; details: string[] };
+    }>;
   } | null>(null);
 
   // Initialize auto-sync enabled state
@@ -928,6 +942,45 @@ export default function SyncManagement() {
     }
   }, [checkResults, addLog, loadOfflineTransactions, fetchTransactionCounts]);
 
+  // Reset failed transactions to pending and trigger immediate upload (so server can accept them e.g. with item_error)
+  const [isRetryingFailed, setIsRetryingFailed] = useState(false);
+  const handleRetryFailed = useCallback(async () => {
+    const electronAPI = getElectronAPI();
+    if (!electronAPI?.localDbResetFailedTransactions) {
+      addLog('error', 'Fitur retry tidak tersedia');
+      return;
+    }
+    const failedCount = offlineTransactions.filter(t => t.sync_status === 'failed').length;
+    if (failedCount === 0) {
+      addLog('info', 'Tidak ada transaksi gagal yang perlu di-retry');
+      return;
+    }
+    setIsRetryingFailed(true);
+    try {
+      const result = await electronAPI.localDbResetFailedTransactions();
+      if (!result?.success) {
+        addLog('error', result?.error || 'Gagal reset transaksi gagal');
+        return;
+      }
+      const resetCount = result.resetCount ?? 0;
+      addLog('success', `✅ ${resetCount} transaksi gagal direset ke pending. Mengunggah sekarang...`);
+      await loadOfflineTransactions();
+      await fetchTransactionCounts();
+      const syncResult = await smartSyncService.forceSync();
+      if (syncResult.success && syncResult.syncedCount > 0) {
+        addLog('success', `✅ Upload selesai: ${syncResult.syncedCount} transaksi berhasil diunggah`);
+        await loadOfflineTransactions();
+        await fetchTransactionCounts();
+      } else if (syncResult.syncedCount === 0 && resetCount > 0) {
+        addLog('warning', 'Upload dijalankan. Jika masih gagal, periksa koneksi dan coba lagi.');
+      }
+    } catch (error) {
+      addLog('error', `Retry gagal: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    } finally {
+      setIsRetryingFailed(false);
+    }
+  }, [offlineTransactions, addLog, loadOfflineTransactions, fetchTransactionCounts]);
+
   // Restore database from server (Emergency recovery)
 
   // REMOVED: syncFromCloud function - now using offlineSyncService.syncFromOnline() instead
@@ -1463,12 +1516,6 @@ export default function SyncManagement() {
       const fromIso = normalizeDateInput(resyncFrom, false) ?? resyncFrom;
       const toIso = normalizeDateInput(resyncTo, true) ?? resyncTo;
       const apiUrl = getApiUrl(`/api/transactions/match-check?business_id=${businessId}&from_date=${encodeURIComponent(fromDate)}&to_date=${encodeURIComponent(toDate)}&from_iso=${encodeURIComponent(fromIso)}&to_iso=${encodeURIComponent(toIso)}&limit=50000`);
-      // #region agent log
-      fetch('http://127.0.0.1:7495/ingest/20000880-6f22-4a8b-8a8e-250eeb7d84f4',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'0bbb61'},body:JSON.stringify({sessionId:'0bbb61',location:'SyncManagement.tsx:handleMatchCheck',message:'Verification date range (client)',data:{resyncFrom,resyncTo,fromDate,toDate,fromIso,toIso,apiUrlSent:apiUrl?.substring(0,120)},timestamp:Date.now(),hypothesisId:'H2,H5'})}).catch(()=>{});
-      const sampleWib = '2026-02-02 10:22:57';
-      const sampleUtc = new Date(Date.UTC(2026,1,2,3,22,57,0)).toISOString().slice(0,19).replace('T',' ');
-      fetch('http://127.0.0.1:7495/ingest/20000880-6f22-4a8b-8a8e-250eeb7d84f4',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'0bbb61'},body:JSON.stringify({sessionId:'0bbb61',location:'SyncManagement.tsx:timezoneAudit',message:'Timezone audit',data:{pictosLocalDb:'UTC+7 (WIB) - electron/mysqlDb toMySQLDateTime',payloadToSalespulse:'UTC - syncUtils convertDateForMySQL uses toISOString()',dateRangeToApi:'UTC - fromIso/toIso are WIB calendar day as UTC bounds',sampleSameInstant:{wib:sampleWib,utc:sampleUtc}},timestamp:Date.now()})}).catch(()=>{});
-      // #endregion
 
       const [localData, serverRes] = await Promise.all([
         electronAPI.localDbGetTransactionsMatchData(businessId, fromIso, toIso) as Promise<UnknownRecord[]>,
@@ -1491,9 +1538,6 @@ export default function SyncManagement() {
       const maxLocal = localCreated.length ? (localCreated as string[]).reduce((a, b) => (a > b ? a : b)) : null;
       const minServer = serverCreated.length ? (serverCreated as string[]).reduce((a, b) => (a < b ? a : b)) : null;
       const maxServer = serverCreated.length ? (serverCreated as string[]).reduce((a, b) => (a > b ? a : b)) : null;
-      // #region agent log
-      fetch('http://127.0.0.1:7495/ingest/20000880-6f22-4a8b-8a8e-250eeb7d84f4',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'0bbb61'},body:JSON.stringify({sessionId:'0bbb61',location:'SyncManagement.tsx:after fetch',message:'Verification result set bounds',data:{localCount:(localData||[]).length,serverCount:serverData.length,minLocal,maxLocal,minServer,maxServer},timestamp:Date.now(),hypothesisId:'H4'})}).catch(()=>{});
-      // #endregion
 
       const localIds = new Set((localData || []).map((t: UnknownRecord) => String(t.uuid_id ?? t.id)));
       const serverIds = new Set(serverData.map((t: UnknownRecord) => String(t.uuid_id ?? t.id)));
@@ -1513,10 +1557,12 @@ export default function SyncManagement() {
         serverByUuid.set(u, t);
       });
 
+      // Exclude created_at/updated_at from comparison to avoid spamming; timezone/sync can differ.
+      // Exclude shift_uuid: SQLite vs MySQL often differ by casing/Buffer and values are logically the same; re-upsert does not fix display.
       const txFields = [
         'total_amount', 'active_total', 'final_amount', 'voucher_discount', 'voucher_type', 'voucher_value', 'voucher_label',
-        'status', 'payment_method', 'payment_method_id', 'pickup_method', 'customer_name', 'customer_unit', 'waiter_id', 'user_id', 'shift_uuid',
-        'created_at', 'updated_at', 'paid_at', 'note', 'receipt_number'
+        'status', 'payment_method', 'payment_method_id', 'pickup_method', 'customer_name', 'customer_unit', 'waiter_id', 'user_id',
+        'paid_at', 'note', 'receipt_number'
       ];
 
       const normalizeVal = (v: unknown): string | number => {
@@ -1804,6 +1850,110 @@ export default function SyncManagement() {
       setSystemPosResyncRunning(false);
     }
   }, [systemPosResyncFrom, systemPosResyncTo, addLog]);
+
+  // Verifikasi System POS: compare salespulse on db_host (127.0.0.1) vs system_pos for Printer 2 date range
+  const handleSystemPosVerifikasi = useCallback(async () => {
+    if (!businessId) {
+      addLog('warning', 'Pilih bisnis terlebih dahulu');
+      return;
+    }
+    if (!systemPosResyncFrom || !systemPosResyncTo) {
+      addLog('warning', 'Pilih rentang tanggal (Dari dan Sampai) untuk verifikasi System POS');
+      return;
+    }
+    const api = getElectronAPI();
+    if (!api?.getSystemPosVerifikasiData) {
+      addLog('error', 'Fitur verifikasi System POS tidak tersedia');
+      return;
+    }
+    setIsSystemPosVerifikasiLoading(true);
+    setSystemPosVerifikasiResult(null);
+    addLog('info', 'Memeriksa kecocokan data salespulse vs system_pos...');
+    try {
+      const res = await api.getSystemPosVerifikasiData(businessId, systemPosResyncFrom, systemPosResyncTo);
+      if (!res.success) {
+        addLog('error', res.error ?? 'Verifikasi System POS gagal');
+        setIsSystemPosVerifikasiLoading(false);
+        return;
+      }
+      const salespulseData = (res.salespulse || []) as UnknownRecord[];
+      const systemPosData = (res.system_pos || []) as UnknownRecord[];
+      const salespulseIds = new Set(salespulseData.map((t: UnknownRecord) => String(t.uuid_id ?? t.id)));
+      const systemPosIds = new Set(systemPosData.map((t: UnknownRecord) => String(t.uuid_id ?? t.id)));
+      const onlyInSalespulse = [...salespulseIds].filter(id => !systemPosIds.has(id));
+      const onlyInSystemPos = [...systemPosIds].filter(id => !salespulseIds.has(id));
+      const commonIds = [...salespulseIds].filter(id => systemPosIds.has(id));
+      const salespulseByUuid = new Map<string, UnknownRecord>();
+      salespulseData.forEach((t: UnknownRecord) => { salespulseByUuid.set(String(t.uuid_id ?? t.id), t); });
+      const systemPosByUuid = new Map<string, UnknownRecord>();
+      systemPosData.forEach((t: UnknownRecord) => { systemPosByUuid.set(String(t.uuid_id ?? t.id), t); });
+
+      const num = (v: unknown): number => (typeof v === 'number' && !Number.isNaN(v) ? v : typeof v === 'string' ? parseFloat(v) || 0 : 0);
+      const eqNum = (a: unknown, b: unknown, tol = 0.01) => Math.abs(num(a) - num(b)) <= tol;
+      const normalizeVal = (v: unknown): string | number => (v == null ? '' : typeof v === 'number' ? Math.round(v * 100) / 100 : String(v).trim());
+      const txFields = ['total_amount', 'final_amount', 'voucher_discount', 'voucher_type', 'voucher_value', 'voucher_label', 'status', 'payment_method', 'refund_total'];
+
+      const mismatches: Array<{
+        uuid: string;
+        fields: string[];
+        details?: Array<{ field: string; salespulseValue: string | number; systemPosValue: string | number }>;
+        itemDiffs?: { countSalespulse: number; countSystemPos: number; details: string[] };
+        refundDiffs?: { countSalespulse: number; countSystemPos: number; details: string[] };
+      }> = [];
+
+      for (const uuid of commonIds) {
+        const sp = salespulseByUuid.get(uuid) as Record<string, unknown> | undefined;
+        const sys = systemPosByUuid.get(uuid) as Record<string, unknown> | undefined;
+        if (!sp || !sys) continue;
+        const diffFields: string[] = [];
+        const details: Array<{ field: string; salespulseValue: string | number; systemPosValue: string | number }> = [];
+        for (const key of txFields) {
+          const a = sp[key];
+          const b = sys[key];
+          const isNum = (typeof a === 'number' || (typeof a === 'string' && a !== '' && !Number.isNaN(parseFloat(a as string)))) || (typeof b === 'number' || (typeof b === 'string' && b !== '' && !Number.isNaN(parseFloat(b as string))));
+          const same = isNum ? eqNum(a, b) : normalizeVal(a) === normalizeVal(b);
+          if (!same) {
+            diffFields.push(key);
+            details.push({ field: key, salespulseValue: normalizeVal(a), systemPosValue: normalizeVal(b) });
+          }
+        }
+        const spItems = Array.isArray(sp.items) ? sp.items : [];
+        const sysItems = Array.isArray(sys.items) ? sys.items : [];
+        const spCancelled = num(sp.cancelled_items_count);
+        const sysCancelled = num(sys.cancelled_items_count);
+        let itemDiffs: { countSalespulse: number; countSystemPos: number; details: string[] } | undefined;
+        if (spItems.length !== sysItems.length || spCancelled !== sysCancelled) {
+          diffFields.push('items_count');
+          const lines = [`Item count: salespulse ${spItems.length}, system_pos ${sysItems.length}`];
+          if (spCancelled !== sysCancelled) lines.push(`Cancelled: salespulse ${spCancelled}, system_pos ${sysCancelled}`);
+          itemDiffs = { countSalespulse: spItems.length, countSystemPos: sysItems.length, details: lines };
+        }
+        const spRefunds = Array.isArray(sp.refunds) ? sp.refunds : [];
+        const sysRefunds = Array.isArray(sys.refunds) ? sys.refunds : [];
+        const spRefundTotal = num(sp.refund_total_from_refunds ?? sp.refund_total ?? 0);
+        const sysRefundTotal = num(sys.refund_total_from_refunds ?? sys.refund_total ?? 0);
+        let refundDiffs: { countSalespulse: number; countSystemPos: number; details: string[] } | undefined;
+        if (spRefunds.length !== sysRefunds.length || !eqNum(spRefundTotal, sysRefundTotal)) {
+          refundDiffs = {
+            countSalespulse: spRefunds.length,
+            countSystemPos: sysRefunds.length,
+            details: [`Refund count: salespulse ${spRefunds.length}, system_pos ${sysRefunds.length}`, `Refund total: salespulse ${spRefundTotal}, system_pos ${sysRefundTotal}`]
+          };
+        }
+        if (diffFields.length > 0) {
+          mismatches.push({ uuid, fields: diffFields, details, itemDiffs, refundDiffs });
+        }
+      }
+      const matching = commonIds.length - mismatches.length;
+      setSystemPosVerifikasiResult({ onlyInSalespulse, onlyInSystemPos, matching, mismatches });
+      addLog('info', `Verifikasi System POS selesai: ${onlyInSalespulse.length} hanya di salespulse, ${onlyInSystemPos.length} hanya di system_pos, ${matching} sama, ${mismatches.length} beda`);
+    } catch (e) {
+      addLog('error', `Verifikasi System POS gagal: ${e instanceof Error ? e.message : String(e)}`);
+      setSystemPosVerifikasiResult(null);
+    } finally {
+      setIsSystemPosVerifikasiLoading(false);
+    }
+  }, [businessId, systemPosResyncFrom, systemPosResyncTo, addLog]);
 
   // Archive all transactions
   const archiveAllTransactions = async () => {
@@ -2610,11 +2760,46 @@ WHERE ${baseWhere};`;
               {matchCheckResult && (
                 <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50" onClick={() => setMatchCheckResult(null)} role="dialog" aria-modal="true" aria-labelledby="match-check-title">
                   <div className="bg-white rounded-xl shadow-xl max-w-2xl w-full max-h-[90vh] flex flex-col" onClick={e => e.stopPropagation()}>
-                    <div className="flex items-center justify-between p-4 border-b border-gray-200">
+                    <div className="flex items-center justify-between gap-2 p-4 border-b border-gray-200">
                       <h2 id="match-check-title" className="font-semibold text-gray-900 text-lg">Verifikasi data (Pictos vs salespulse.cc)</h2>
-                      <button type="button" onClick={() => setMatchCheckResult(null)} className="p-2 rounded hover:bg-gray-100 text-gray-600" aria-label="Tutup">
-                        <X className="w-5 h-5" />
-                      </button>
+                      <div className="flex items-center gap-1">
+                        <button
+                          type="button"
+                          onClick={async () => {
+                            const lines: string[] = ['Verifikasi data (Pictos vs salespulse.cc)', ''];
+                            lines.push(`Missing on salespulse.cc (only in Pictos): ${matchCheckResult.onlyInLocal.length} transaksi`);
+                            if (matchCheckResult.onlyInLocal.length > 0) lines.push(matchCheckResult.onlyInLocal.join(', '));
+                            lines.push('');
+                            lines.push(`Missing on Pictos (only in salespulse.cc): ${matchCheckResult.onlyOnServer.length} transaksi`);
+                            if (matchCheckResult.onlyOnServer.length > 0) lines.push(matchCheckResult.onlyOnServer.join(', '));
+                            lines.push('');
+                            lines.push(`Sama (match): ${matchCheckResult.matching} transaksi`);
+                            lines.push('');
+                            lines.push(`Different data (same UUID, beda field/item/refund/discount): ${matchCheckResult.mismatches.length} transaksi`);
+                            matchCheckResult.mismatches.forEach((m, i) => {
+                              lines.push('', `--- ${i + 1}. ${m.uuid} ---`, `Fields: ${m.fields.join(', ')}`);
+                              m.details?.forEach(d => lines.push(`  ${d.field}: Pictos=${d.pictosValue} vs salespulse=${d.serverValue}`));
+                              m.itemDiffs?.details?.forEach(line => lines.push(`  [Items] ${line}`));
+                              m.refundDiffs?.details?.forEach(line => lines.push(`  [Refunds] ${line}`));
+                              m.discountDiffs?.forEach(d => lines.push(`  [Discount] ${d.field}: Pictos=${d.pictosValue} vs salespulse=${d.serverValue}`));
+                            });
+                            try {
+                              await navigator.clipboard.writeText(lines.join('\n'));
+                              addLog('success', 'Hasil verifikasi data disalin ke clipboard');
+                            } catch (e) {
+                              addLog('error', 'Gagal menyalin: ' + (e instanceof Error ? e.message : String(e)));
+                            }
+                          }}
+                          className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-gray-300 bg-gray-50 hover:bg-gray-100 text-gray-700 text-sm font-medium"
+                          title="Salin seluruh hasil ke clipboard"
+                        >
+                          <Copy className="w-4 h-4" />
+                          <span>Copy</span>
+                        </button>
+                        <button type="button" onClick={() => setMatchCheckResult(null)} className="p-2 rounded hover:bg-gray-100 text-gray-600" aria-label="Tutup">
+                          <X className="w-5 h-5" />
+                        </button>
+                      </div>
                     </div>
                     <div className="overflow-auto flex-1 p-4 text-sm space-y-4">
                       {matchCheckResult.onlyInLocal.length === 0 && matchCheckResult.onlyOnServer.length === 0 && matchCheckResult.mismatches.length === 0 ? (
@@ -2626,20 +2811,14 @@ WHERE ${baseWhere};`;
                         <>
                           <p className="text-gray-700">
                             <span className="font-medium">Missing on salespulse.cc (only in Pictos):</span> {matchCheckResult.onlyInLocal.length} transaksi
-                            {matchCheckResult.onlyInLocal.length > 0 && matchCheckResult.onlyInLocal.length <= 15 && (
+                            {matchCheckResult.onlyInLocal.length > 0 && (
                               <span className="block mt-1 text-xs text-gray-500 font-mono break-all">{matchCheckResult.onlyInLocal.join(', ')}</span>
-                            )}
-                            {matchCheckResult.onlyInLocal.length > 15 && (
-                              <span className="block mt-1 text-xs text-gray-500 font-mono">(15 pertama: {matchCheckResult.onlyInLocal.slice(0, 15).join(', ')})</span>
                             )}
                           </p>
                           <p className="text-gray-700">
                             <span className="font-medium">Missing on Pictos (only in salespulse.cc):</span> {matchCheckResult.onlyOnServer.length} transaksi
-                            {matchCheckResult.onlyOnServer.length > 0 && matchCheckResult.onlyOnServer.length <= 15 && (
+                            {matchCheckResult.onlyOnServer.length > 0 && (
                               <span className="block mt-1 text-xs text-gray-500 font-mono break-all">{matchCheckResult.onlyOnServer.join(', ')}</span>
-                            )}
-                            {matchCheckResult.onlyOnServer.length > 15 && (
-                              <span className="block mt-1 text-xs text-gray-500 font-mono">(15 pertama: {matchCheckResult.onlyOnServer.slice(0, 15).join(', ')})</span>
                             )}
                           </p>
                           <p className="text-gray-700">
@@ -2647,9 +2826,12 @@ WHERE ${baseWhere};`;
                           </p>
                           {matchCheckResult.mismatches.length > 0 && (
                             <div className="text-gray-700">
+                              <p className="text-amber-700 bg-amber-50 border border-amber-200 rounded px-2 py-1.5 text-xs mb-2">
+                                Untuk mengunggah ulang transaksi yang beda: gunakan tombol <strong>Upsert salespulse.cc</strong> di atas (rentang Dari/Sampai sama dengan verifikasi), lalu jalankan.
+                              </p>
                               <span className="font-medium">Different data (same UUID, beda field/item/refund/discount):</span> {matchCheckResult.mismatches.length} transaksi
                               <ul className="mt-2 space-y-3 max-h-[50vh] overflow-auto list-none pl-0">
-                                {matchCheckResult.mismatches.slice(0, 30).map((m, i) => (
+                                {matchCheckResult.mismatches.map((m, i) => (
                                   <li key={i} className="border border-gray-200 rounded-lg p-2 bg-gray-50">
                                     <div className="font-mono text-xs text-gray-600 truncate" title={m.uuid}>{m.uuid}</div>
                                     <div className="text-xs text-gray-500 mt-1">Fields: {m.fields.join(', ')}</div>
@@ -2657,10 +2839,9 @@ WHERE ${baseWhere};`;
                                       <div className="mt-1.5 text-xs">
                                         <span className="font-medium text-gray-600">Detail:</span>
                                         <ul className="list-disc list-inside mt-0.5 space-y-0.5">
-                                          {m.details.slice(0, 10).map((d, j) => (
+                                          {m.details.map((d, j) => (
                                             <li key={j}>{d.field}: Pictos=<span className="font-mono">{String(d.pictosValue)}</span> vs salespulse=<span className="font-mono">{String(d.serverValue)}</span></li>
                                           ))}
-                                          {m.details.length > 10 && <li className="text-gray-400">... +{m.details.length - 10} more</li>}
                                         </ul>
                                       </div>
                                     )}
@@ -2668,10 +2849,9 @@ WHERE ${baseWhere};`;
                                       <div className="mt-1.5 text-xs">
                                         <span className="font-medium text-amber-700">Items:</span>
                                         <ul className="list-disc list-inside mt-0.5 space-y-0.5 text-gray-600">
-                                          {m.itemDiffs.details.slice(0, 5).map((line, j) => (
+                                          {m.itemDiffs.details.map((line, j) => (
                                             <li key={j}>{line}</li>
                                           ))}
-                                          {m.itemDiffs.details.length > 5 && <li className="text-gray-400">... +{m.itemDiffs.details.length - 5} more</li>}
                                         </ul>
                                       </div>
                                     )}
@@ -2679,10 +2859,9 @@ WHERE ${baseWhere};`;
                                       <div className="mt-1.5 text-xs">
                                         <span className="font-medium text-red-700">Refunds:</span>
                                         <ul className="list-disc list-inside mt-0.5 space-y-0.5 text-gray-600">
-                                          {m.refundDiffs.details.slice(0, 5).map((line, j) => (
+                                          {m.refundDiffs.details.map((line, j) => (
                                             <li key={j}>{line}</li>
                                           ))}
-                                          {m.refundDiffs.details.length > 5 && <li className="text-gray-400">... +{m.refundDiffs.details.length - 5} more</li>}
                                         </ul>
                                       </div>
                                     )}
@@ -2698,9 +2877,127 @@ WHERE ${baseWhere};`;
                                     )}
                                   </li>
                                 ))}
-                                {matchCheckResult.mismatches.length > 30 && (
-                                  <li className="text-gray-500 text-xs">... dan {matchCheckResult.mismatches.length - 30} lainnya</li>
-                                )}
+                              </ul>
+                            </div>
+                          )}
+                        </>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* Modal: Verifikasi System POS result */}
+              {systemPosVerifikasiResult && (
+                <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50" onClick={() => setSystemPosVerifikasiResult(null)} role="dialog" aria-modal="true" aria-labelledby="system-pos-verifikasi-title">
+                  <div className="bg-white rounded-xl shadow-xl max-w-2xl w-full max-h-[90vh] flex flex-col" onClick={e => e.stopPropagation()}>
+                    <div className="flex items-center justify-between gap-2 p-4 border-b border-gray-200">
+                      <h2 id="system-pos-verifikasi-title" className="font-semibold text-gray-900 text-lg">Verifikasi System POS (salespulse db_host vs system_pos)</h2>
+                      <div className="flex items-center gap-1">
+                        <button
+                          type="button"
+                          onClick={async () => {
+                            const r = systemPosVerifikasiResult;
+                            const lines = ['Verifikasi System POS (salespulse db_host vs system_pos)', ''];
+                            lines.push(`Hanya di salespulse: ${r.onlyInSalespulse.length} transaksi`);
+                            if (r.onlyInSalespulse.length > 0) lines.push(r.onlyInSalespulse.join(', '));
+                            lines.push('');
+                            lines.push(`Hanya di system_pos: ${r.onlyInSystemPos.length} transaksi`);
+                            if (r.onlyInSystemPos.length > 0) lines.push(r.onlyInSystemPos.join(', '));
+                            lines.push('');
+                            lines.push(`Sama (match): ${r.matching} transaksi`);
+                            lines.push('');
+                            lines.push(`Beda field/item/refund: ${r.mismatches.length} transaksi`);
+                            r.mismatches.forEach((m, i) => {
+                              lines.push('', `--- ${i + 1}. ${m.uuid} ---`, `Fields: ${m.fields.join(', ')}`);
+                              m.details?.forEach(d => lines.push(`  ${d.field}: salespulse=${d.salespulseValue} vs system_pos=${d.systemPosValue}`));
+                              m.itemDiffs?.details?.forEach(line => lines.push(`  [Items] ${line}`));
+                              m.refundDiffs?.details?.forEach(line => lines.push(`  [Refunds] ${line}`));
+                            });
+                            try {
+                              await navigator.clipboard.writeText(lines.join('\n'));
+                              addLog('success', 'Hasil verifikasi System POS disalin ke clipboard');
+                            } catch (e) {
+                              addLog('error', 'Gagal menyalin: ' + (e instanceof Error ? e.message : String(e)));
+                            }
+                          }}
+                          className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-gray-300 bg-gray-50 hover:bg-gray-100 text-gray-700 text-sm font-medium"
+                          title="Salin seluruh hasil ke clipboard"
+                        >
+                          <Copy className="w-4 h-4" />
+                          <span>Copy</span>
+                        </button>
+                        <button type="button" onClick={() => setSystemPosVerifikasiResult(null)} className="p-2 rounded hover:bg-gray-100 text-gray-600" aria-label="Tutup">
+                          <X className="w-5 h-5" />
+                        </button>
+                      </div>
+                    </div>
+                    <div className="overflow-auto flex-1 p-4 text-sm space-y-4">
+                      {systemPosVerifikasiResult.onlyInSalespulse.length === 0 && systemPosVerifikasiResult.onlyInSystemPos.length === 0 && systemPosVerifikasiResult.mismatches.length === 0 ? (
+                        <p className="text-green-700 font-medium flex items-center gap-2">
+                          <CheckCircle className="w-5 h-5 shrink-0" />
+                          Data match 1:1 (salespulse = system_pos)
+                        </p>
+                      ) : (
+                        <>
+                          <p className="text-gray-700">
+                            <span className="font-medium">Hanya di salespulse (db_host):</span> {systemPosVerifikasiResult.onlyInSalespulse.length} transaksi
+                            {systemPosVerifikasiResult.onlyInSalespulse.length > 0 && (
+                              <span className="block mt-1 text-xs text-gray-500 font-mono break-all">{systemPosVerifikasiResult.onlyInSalespulse.join(', ')}</span>
+                            )}
+                          </p>
+                          <p className="text-gray-700">
+                            <span className="font-medium">Hanya di system_pos:</span> {systemPosVerifikasiResult.onlyInSystemPos.length} transaksi
+                            {systemPosVerifikasiResult.onlyInSystemPos.length > 0 && (
+                              <span className="block mt-1 text-xs text-gray-500 font-mono break-all">{systemPosVerifikasiResult.onlyInSystemPos.join(', ')}</span>
+                            )}
+                          </p>
+                          <p className="text-gray-700">
+                            <span className="font-medium">Sama (match):</span> {systemPosVerifikasiResult.matching} transaksi
+                          </p>
+                          {systemPosVerifikasiResult.mismatches.length > 0 && (
+                            <div className="text-gray-700">
+                              <p className="text-amber-700 bg-amber-50 border border-amber-200 rounded px-2 py-1.5 text-xs mb-2">
+                                Untuk menyamakan: gunakan tombol <strong>Upsert System POS</strong> (rentang tanggal sama), lalu jalankan verifikasi lagi.
+                              </p>
+                              <span className="font-medium">Beda data (UUID sama, field/item/refund beda):</span> {systemPosVerifikasiResult.mismatches.length} transaksi
+                              <ul className="mt-2 space-y-3 max-h-[50vh] overflow-auto list-none pl-0">
+                                {systemPosVerifikasiResult.mismatches.map((m, i) => (
+                                  <li key={i} className="border border-gray-200 rounded-lg p-2 bg-gray-50">
+                                    <div className="font-mono text-xs text-gray-600 truncate" title={m.uuid}>{m.uuid}</div>
+                                    <div className="text-xs text-gray-500 mt-1">Fields: {m.fields.join(', ')}</div>
+                                    {m.details && m.details.length > 0 && (
+                                      <div className="mt-1.5 text-xs">
+                                        <span className="font-medium text-gray-600">Detail:</span>
+                                        <ul className="list-disc list-inside mt-0.5 space-y-0.5">
+                                          {m.details.map((d, j) => (
+                                            <li key={j}>{d.field}: salespulse=<span className="font-mono">{String(d.salespulseValue)}</span> vs system_pos=<span className="font-mono">{String(d.systemPosValue)}</span></li>
+                                          ))}
+                                        </ul>
+                                      </div>
+                                    )}
+                                    {m.itemDiffs && (
+                                      <div className="mt-1.5 text-xs">
+                                        <span className="font-medium text-amber-700">Items:</span>
+                                        <ul className="list-disc list-inside mt-0.5 space-y-0.5 text-gray-600">
+                                          {m.itemDiffs.details.map((line, j) => (
+                                            <li key={j}>{line}</li>
+                                          ))}
+                                        </ul>
+                                      </div>
+                                    )}
+                                    {m.refundDiffs && (
+                                      <div className="mt-1.5 text-xs">
+                                        <span className="font-medium text-red-700">Refunds:</span>
+                                        <ul className="list-disc list-inside mt-0.5 space-y-0.5 text-gray-600">
+                                          {m.refundDiffs.details.map((line, j) => (
+                                            <li key={j}>{line}</li>
+                                          ))}
+                                        </ul>
+                                      </div>
+                                    )}
+                                  </li>
+                                ))}
                               </ul>
                             </div>
                           )}
@@ -2735,32 +3032,36 @@ WHERE ${baseWhere};`;
                     </div>
                   </div>
 
-                  <div className="flex flex-col gap-1 h-full">
-                    {/* Action Button (Bottom Half) - Green */}
+                  <div className="flex flex-col gap-1 h-full flex-1">
                     <button
                       type="button"
                       onClick={handleSystemPosResyncRun}
                       disabled={systemPosResyncRunning}
                       className={`
-                          flex-1 w-24 flex flex-col items-center justify-center gap-1 py-1 px-1 rounded-lg font-medium transition-all text-[10px] shrink-0 shadow-sm
-                          ${systemPosResyncRunning
-                          ? 'bg-gray-400 text-white cursor-not-allowed'
-                          : 'bg-green-600 hover:bg-green-700 text-white'
-                        }
+                          flex-1 min-h-0 flex flex-col items-center justify-center gap-0 py-1 px-1 rounded-lg font-medium transition-all text-[10px] shrink-0 shadow-sm
+                          ${systemPosResyncRunning ? 'bg-gray-400 text-white cursor-not-allowed' : 'bg-green-600 hover:bg-green-700 text-white'}
                         `}
                     >
                       {systemPosResyncRunning ? (
-                        <>
-                          <RefreshCw className="w-4 h-4 animate-spin shrink-0" />
-                          <span className="font-semibold text-[9px]">Syncing...</span>
-                        </>
+                        <><RefreshCw className="w-4 h-4 animate-spin shrink-0" /><span className="font-semibold text-[9px]">Syncing...</span></>
                       ) : (
-                        <>
-                          <RefreshCw className="w-4 h-4 shrink-0" />
-                          <div className="flex flex-col items-center gap-0 leading-tight text-center">
-                            <span className="font-bold text-[10px] leading-tight">Upsert System POS</span>
-                          </div>
-                        </>
+                        <><RefreshCw className="w-4 h-4 shrink-0" /><span className="font-bold text-[9px] leading-tight">Upsert System POS</span></>
+                      )}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleSystemPosVerifikasi}
+                      disabled={systemPosResyncRunning || isSystemPosVerifikasiLoading || !systemPosResyncFrom || !systemPosResyncTo}
+                      className={`
+                          flex-1 min-h-0 flex flex-col items-center justify-center gap-0 py-1 px-1 rounded-lg font-medium transition-all text-[10px] shrink-0 shadow-sm
+                          ${isSystemPosVerifikasiLoading || !systemPosResyncFrom || !systemPosResyncTo ? 'bg-gray-300 text-gray-500 cursor-not-allowed' : 'bg-blue-600 hover:bg-blue-700 text-white'}
+                        `}
+                      title="Bandingkan data salespulse vs system_pos (Printer 2 dalam rentang tanggal)"
+                    >
+                      {isSystemPosVerifikasiLoading ? (
+                        <><Loader2 className="w-4 h-4 animate-spin shrink-0" /><span className="font-semibold text-[9px]">Memeriksa...</span></>
+                      ) : (
+                        <><CheckCircle className="w-4 h-4 shrink-0" /><span className="font-bold text-[9px] leading-tight">Verifikasi System POS</span></>
                       )}
                     </button>
                   </div>
@@ -2889,6 +3190,17 @@ WHERE ${baseWhere};`;
                     <RefreshCw className={`w-3 h-3 ${checkingStatus ? 'animate-spin' : ''}`} />
                     <span>{checkingStatus ? 'Mengecek...' : 'Cek Status'}</span>
                   </button>
+                  {offlineTransactions.some(t => t.sync_status === 'failed') && (
+                    <button
+                      onClick={handleRetryFailed}
+                      disabled={isRetryingFailed || syncStatus.syncInProgress}
+                      className="flex items-center gap-1 px-2 py-1 text-xs bg-amber-50 hover:bg-amber-100 text-amber-800 rounded transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                      title="Reset transaksi gagal ke pending dan unggah ulang sekarang"
+                    >
+                      <RefreshCw className={`w-3 h-3 ${isRetryingFailed ? 'animate-spin' : ''}`} />
+                      <span>{isRetryingFailed ? 'Mengunggah...' : 'Retry gagal'}</span>
+                    </button>
+                  )}
                   {Array.from(checkResults.values()).some(r => r.exists && r.checked) && (
                     <button
                       onClick={handleUpdateSyncedStatus}
@@ -3031,20 +3343,34 @@ WHERE ${baseWhere};`;
                             </td>
                             {/* Sync Status */}
                             <td className="px-2 py-1">
-                              <div className="flex items-center gap-1">
+                              <div className="flex flex-col gap-0.5">
                                 {transaction.sync_status === 'failed' ? (
-                                  <span
-                                    className="inline-flex px-1.5 py-0.5 text-[9px] font-semibold rounded-full bg-red-100 text-red-800"
-                                    title={`Gagal upload${transaction.sync_attempts ? ` (${transaction.sync_attempts} percobaan)` : ''}`}
-                                  >
-                                    ❌ Failed
-                                    {transaction.sync_attempts && transaction.sync_attempts > 0 && (
-                                      <span className="ml-1">({transaction.sync_attempts})</span>
+                                  <>
+                                    <span
+                                      className="inline-flex items-center px-1.5 py-0.5 text-[9px] font-semibold rounded-full bg-red-100 text-red-800 w-fit"
+                                      title={
+                                        [
+                                          transaction.sync_attempts ? `Gagal upload (${transaction.sync_attempts} percobaan)` : 'Gagal upload',
+                                          transaction.last_sync_error ? `Alasan: ${transaction.last_sync_error}` : null,
+                                        ]
+                                          .filter(Boolean)
+                                          .join('\n')
+                                      }
+                                    >
+                                      ❌ Failed
+                                      {transaction.sync_attempts != null && transaction.sync_attempts > 0 && (
+                                        <span className="ml-1">({transaction.sync_attempts})</span>
+                                      )}
+                                    </span>
+                                    {transaction.last_sync_error && (
+                                      <span className="text-[8px] text-red-600 max-w-[180px] truncate" title={transaction.last_sync_error}>
+                                        Alasan: {transaction.last_sync_error}
+                                      </span>
                                     )}
-                                  </span>
+                                  </>
                                 ) : (
                                   <span
-                                    className="inline-flex px-1.5 py-0.5 text-[9px] font-semibold rounded-full bg-blue-100 text-blue-800"
+                                    className="inline-flex px-1.5 py-0.5 text-[9px] font-semibold rounded-full bg-blue-100 text-blue-800 w-fit"
                                     title="Menunggu upload"
                                   >
                                     ⏳ Pending

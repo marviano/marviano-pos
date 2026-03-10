@@ -221,9 +221,12 @@ ORDER BY source, payment_method, pickup_method;
 ---
 
 ## Quick count difference (by date)
-Daily count of Salespulse (Printer 2) vs system_pos to spot which dates diverge.
+Daily count of Salespulse (Printer 2) vs system_pos to spot which dates diverge. Set `@from_date` and `@to_date` to restrict to a range (e.g. 1 Feb 2026–28 Feb 2026); for all dates, comment out the date filters and the `WHERE` line below.
 
 ```sql
+SET @from_date = '2026-02-01';
+SET @to_date   = '2026-02-28';
+
 SELECT
   d.date,
   COALESCE(p.printer2_count, 0) AS salespulse_txs,
@@ -233,22 +236,27 @@ FROM (
   SELECT DATE(p2.printed_at) AS date
   FROM salespulse.printer2_audit_log p2
   INNER JOIN salespulse.transactions t ON t.uuid_id = p2.transaction_id AND t.business_id = 4
+  AND DATE(p2.printed_at) BETWEEN @from_date AND @to_date
   UNION
   SELECT DATE(created_at) FROM system_pos.transactions
   WHERE status != 'archived' AND business_id = 4
+  AND DATE(created_at) BETWEEN @from_date AND @to_date
 ) d
 LEFT JOIN (
   SELECT DATE(p2.printed_at) AS dt, COUNT(DISTINCT p2.transaction_id) AS printer2_count
   FROM salespulse.printer2_audit_log p2
   INNER JOIN salespulse.transactions t ON t.uuid_id = p2.transaction_id AND t.business_id = 4
+  AND DATE(p2.printed_at) BETWEEN @from_date AND @to_date
   GROUP BY DATE(p2.printed_at)
 ) p ON d.date = p.dt
 LEFT JOIN (
   SELECT DATE(created_at) AS dt, COUNT(*) AS system_pos_count
   FROM system_pos.transactions
   WHERE status != 'archived' AND business_id = 4
+  AND DATE(created_at) BETWEEN @from_date AND @to_date
   GROUP BY DATE(created_at)
 ) s ON d.date = s.dt
+WHERE d.date BETWEEN @from_date AND @to_date
 ORDER BY d.date DESC;
 ```
 
@@ -289,3 +297,100 @@ LEFT JOIN salespulse.employees e ON ti.waiter_id = e.id
 WHERE t.uuid_id = 'YOUR_UUID_HERE';
 ```
 
+# Cek apakah kalkulasi view yang dilaporkan ke pajak sudah = yang ditampilkan daftar transaksi p2 only?
+
+## Query Anda (filter paid_at, raw kolom)
+SET @from_date = '2026-02-01';
+SET @to_date   = '2026-02-28';
+SELECT
+  COALESCE(SUM(t.total_amount), 0)                              AS gross,
+  COALESCE(SUM(t.refund_total), 0)                              AS refund,
+  COALESCE(SUM(t.final_amount), 0) - COALESCE(SUM(t.refund_total), 0) AS nett
+FROM system_pos.transactions t
+WHERE t.status <> 'archived'
+  AND t.business_id = 4
+  AND CAST(t.paid_at AS DATE) BETWEEN @from_date AND @to_date;
+
+---
+
+## Kenapa hasil SQL ≠ Grand Total di Daftar Transaksi (System POS)?
+
+1. **Tanggal**
+   - SQL Anda: filter **paid_at** (tanggal bayar).
+   - Daftar Transaksi: filter **created_at** (tanggal buat transaksi), dalam local date.
+   - Transaksi yang “dibuat” di luar range tapi “dibayar” di range (atau sebaliknya) akan masuk di satu sisi saja → gross/refund/nett beda.
+
+2. **Refund**
+   - SQL Anda: pakai kolom **system_pos.transactions.refund_total** (bisa belum sync).
+   - Daftar Transaksi (System POS): refund dihitung dari **salespulse.transaction_refunds** (main DB), lalu di-enrich ke tiap transaksi. Jadi total Refund di UI bisa lebih besar (371k vs 116k) karena sumber datanya beda.
+
+3. **Amount (total_amount / final_amount)**
+   - SQL Anda: pakai **t.total_amount** dan **t.final_amount** mentah dari tabel.
+   - Daftar Transaksi (System POS): pakai amount dari **item aktif saja** (active_total; item cancelled tidak masuk). Jadi gross/final bisa beda jika ada item dibatalkan.
+
+---
+
+## Apakah query Anda dipakai untuk menghitung isi view?
+
+**Tidak.**  
+- View **v_transactions** menampilkan **per baris**: jam, tanggal, no_bill, discount, tax, service_charge, subtotal, total (final_amount). Tidak ada agregasi gross/refund/nett, dan **tidak ada filter tanggal** di definisi view (semua transaksi, business_id = 4).  
+- Query Anda: agregat (SUM) **untuk range tanggal** (paid_at). Jadi query itu **bukan** “kalkulasi dari view”; view hanya list transaksi, bukan sumber angka Grand Total di app.
+
+---
+
+## Apakah isi view = data yang tampil di Daftar Transaksi System POS?
+
+**Tidak persis sama.**
+
+| Aspek        | View v_transactions                    | Daftar Transaksi (System POS)                         |
+|-------------|----------------------------------------|--------------------------------------------------------|
+| Filter tanggal | Tidak ada (semua waktu)                | Ada: range tanggal by **created_at**                   |
+| Kolom       | jam, tanggal, no_bill, discount, total | Gross, Discount, Refund, Net (dari list + agregasi)   |
+| Refund      | Tidak ada kolom refund                 | Ada; dari main DB transaction_refunds (enriched)      |
+| Amount      | Kolom tabel (final_amount, voucher_discount) | Dari query “active items” + enrich refund dari main DB |
+
+Jadi: **data yang dilihat petugas pajak lewat view** (kalau hanya baca view) **tidak sama** dengan yang tampil di Daftar Transaksi System POS, karena (1) view tidak filter tanggal, (2) view tidak punya refund, (3) view pakai kolom mentah tabel, sedangkan Daftar Transaksi pakai logic active items + refund dari main DB.
+
+---
+
+## Query yang selaras dengan Daftar Transaksi (created_at, completed only, active items)
+```sql
+-- Sama dengan Grand Total Daftar Transaksi System POS: created_at, completed only, active items
+SET @from_date = '2026-02-01';
+SET @to_date   = '2026-02-28';
+
+SELECT
+  COALESCE(SUM(gross_per_tx), 0)     AS gross,
+  COALESCE(SUM(gross_per_tx), 0) - COALESCE(SUM(final_per_tx), 0) AS discount,
+  COALESCE(SUM(refund_per_tx), 0)    AS refund,
+  COALESCE(SUM(final_per_tx), 0) - COALESCE(SUM(refund_per_tx), 0) AS nett
+FROM (
+  SELECT
+    t.id,
+    COALESCE(active.active_total, t.total_amount)     AS gross_per_tx,
+    GREATEST(0, COALESCE(active.active_total, t.total_amount) - COALESCE(t.voucher_discount, 0)) AS final_per_tx,
+    COALESCE(NULLIF(t.refund_total, 0), COALESCE(refund_summary.total_refund, 0)) AS refund_per_tx
+  FROM system_pos.transactions t
+  LEFT JOIN (
+    SELECT
+      uuid_transaction_id,
+      transaction_id,
+      SUM(total_price) AS active_total
+    FROM system_pos.transaction_items
+    WHERE (production_status IS NULL OR production_status != 'cancelled')
+    GROUP BY uuid_transaction_id, transaction_id
+  ) active ON (t.uuid_id = active.uuid_transaction_id OR t.id = active.transaction_id)
+  LEFT JOIN (
+    SELECT
+      transaction_uuid,
+      SUM(refund_amount) AS total_refund
+    FROM system_pos.transaction_refunds
+    WHERE status IN ('pending', 'completed')
+    GROUP BY transaction_uuid
+  ) refund_summary ON t.uuid_id = refund_summary.transaction_uuid
+  WHERE t.status != 'archived'
+    AND LOWER(TRIM(COALESCE(t.status, ''))) NOT IN ('cancelled', 'pending')
+    AND t.business_id = 4
+    AND CAST(t.created_at AS DATE) BETWEEN @from_date AND @to_date
+) sub;
+```

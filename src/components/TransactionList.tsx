@@ -34,6 +34,7 @@ const parseAmountDisplay = (s: string): number | null => {
 
 interface Transaction {
   id: string; // Changed to string for UUID
+  uuid_id?: string | null; // Transaction UUID (required for system_pos mode cancelled-items filter)
   business_id: number;
   user_id: number;
   waiter_id?: number | null;
@@ -126,6 +127,7 @@ interface ElectronTransaction {
   user_id: number;
   waiter_id?: number | null;
   payment_method: string;
+  payment_method_id?: number | null;
   pickup_method: string;
   total_amount: number;
   voucher_discount: number;
@@ -670,6 +672,7 @@ export default function TransactionList({ businessId, onLoadTransaction }: Trans
       const response: TransactionDetail = {
         ...transaction,
         payment_method: (transaction.payment_method || 'cash') as TransactionDetail['payment_method'],
+        payment_method_id: transaction.payment_method_id != null ? transaction.payment_method_id : undefined,
         pickup_method: (transaction.pickup_method || 'dine-in') as TransactionDetail['pickup_method'],
         transaction_type: (transaction.transaction_type || 'drinks') as TransactionDetail['transaction_type'],
         voucher_type: (transaction.voucher_type || 'none') as TransactionDetail['voucher_type'],
@@ -949,10 +952,11 @@ export default function TransactionList({ businessId, onLoadTransaction }: Trans
         const user = users.find((u) => u.id === tx.user_id);
         const business = businesses.find((b) => b.id === tx.business_id);
 
-        // CRITICAL: Use UUID as id, not numeric ID
-        // The database should have uuid_id field, but if not, use id as fallback
-        // This ensures consistency with the API which uses UUIDs
-        const transactionId = tx.id; // DB already uses UUID as id
+        // CRITICAL: Use UUID as id for consistency with API and cancelled-items filter
+        // system_pos returns numeric id; main DB may return uuid as id. Prefer uuid_id when present.
+        const transactionId = (tx as { uuid_id?: string }).uuid_id != null && String((tx as { uuid_id?: string }).uuid_id).trim() !== ''
+          ? String((tx as { uuid_id?: string }).uuid_id).trim()
+          : String(tx.id);
 
         // Calculate refund_total and refund_status from the transaction data
         // The query should already include these, but ensure they're properly typed
@@ -962,10 +966,12 @@ export default function TransactionList({ businessId, onLoadTransaction }: Trans
         const refundStatus = tx.refund_status || null;
 
         return {
-          id: transactionId, // Should already be UUID from DB
+          id: transactionId,
+          uuid_id: (tx as { uuid_id?: string }).uuid_id ?? null,
           business_id: tx.business_id,
           user_id: tx.user_id,
           payment_method: tx.payment_method as Transaction['payment_method'],
+          payment_method_id: tx.payment_method_id != null ? Number(tx.payment_method_id) : undefined,
           pickup_method: tx.pickup_method as Transaction['pickup_method'],
           total_amount: tx.total_amount,
           voucher_discount: tx.voucher_discount || 0,
@@ -1016,15 +1022,6 @@ export default function TransactionList({ businessId, onLoadTransaction }: Trans
       }
 
       setTransactions(filteredTransactions);
-
-      // #region agent log
-      if (useSystemPos && filteredTransactions.length > 0) {
-        const withRefund = filteredTransactions.filter(t => (t.refund_total ?? 0) > 0);
-        if (typeof fetch === 'function') {
-          fetch('http://127.0.0.1:7245/ingest/519de021-d49d-473f-a8a1-4215977c867a', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ location: 'TransactionList.tsx:fetchTransactions', message: 'system_pos mapped refund_total', data: { total: filteredTransactions.length, withRefundCount: withRefund.length, sample: withRefund.slice(0, 3).map(t => ({ id: t.id, refund_total: t.refund_total })) }, hypothesisId: 'H2', timestamp: Date.now() }) }).catch(() => { });
-        }
-      }
-      // #endregion
 
       // Fetch shifts for date range to build shift labels (Shift 1, Shift 2, ...)
       // Only show shifts that fall within the applied date range
@@ -1416,30 +1413,6 @@ export default function TransactionList({ businessId, onLoadTransaction }: Trans
     setShiftFilterUuid(''); // Reset shift filter when date range changes so dropdown only shows shifts in new range
   }, [effectiveBusinessId, fromDate, toDate, isSystemPosMode]);
 
-  // #region agent log
-  useEffect(() => {
-    if (transactions.length === 0) return;
-    const t = setTimeout(() => {
-      const table = document.querySelector('table.w-full.text-sm');
-      if (!table) {
-        if (typeof fetch === 'function') {
-          fetch('http://127.0.0.1:7242/ingest/7b565785-72b5-49f7-b2c0-57606ea0d0b5', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ location: 'TransactionList.tsx:useEffect', message: 'Table not found in DOM', data: { transactionsLength: transactions.length }, timestamp: Date.now(), sessionId: 'debug-session', hypothesisId: 'H2' }) }).catch(() => { });
-        }
-        return;
-      }
-      const th6 = table.querySelector('thead tr th:nth-child(6)');
-      const td6 = table.querySelector('tbody tr td:nth-child(6)');
-      const thStyle = th6 ? window.getComputedStyle(th6).textAlign : null;
-      const tdStyle = td6 ? window.getComputedStyle(td6).textAlign : null;
-      const thInline = th6 && (th6 as HTMLElement).getAttribute ? (th6 as HTMLElement).getAttribute('style') : null;
-      if (typeof fetch === 'function') {
-        fetch('http://127.0.0.1:7242/ingest/7b565785-72b5-49f7-b2c0-57606ea0d0b5', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ location: 'TransactionList.tsx:useEffect', message: 'Computed style Disc/Vc column', data: { thComputedTextAlign: thStyle, tdComputedTextAlign: tdStyle, thInlineStyle: thInline }, timestamp: Date.now(), sessionId: 'debug-session', hypothesisId: 'H3' }) }).catch(() => { });
-      }
-    }, 300);
-    return () => clearTimeout(t);
-  }, [transactions.length]);
-  // #endregion
-
   // State for refresh click counter (value is only used internally by React state)
   const [, setRefreshClickCount] = useState(0);
   const [lastRefreshClick, setLastRefreshClick] = useState(0);
@@ -1626,12 +1599,13 @@ export default function TransactionList({ businessId, onLoadTransaction }: Trans
 
   // Item Dibatalkan: follow current mode (Printer 2 only vs all), same as Grand Total / Txs
   // In system_pos mode: only show cancelled items for transactions that are in the current system_pos list.
+  // Use uuid_id for matching in system_pos (cancelled items have uuid_transaction_id; system_pos t.id is numeric and differs from main DB).
   const displayedCancelledItems = (() => {
     if (isSystemPosMode) {
-      const txIds = new Set(transactions.map((t) => String(t.id)));
+      const byUuid = new Set(transactions.map((t) => String(t.uuid_id ?? '').trim()).filter(Boolean));
       return cancelledItems.filter((item) => {
-        const txId = item.uuid_transaction_id ?? (item.transaction_id != null ? String(item.transaction_id) : null);
-        return txId != null && txIds.has(txId);
+        const txId = (item.uuid_transaction_id != null ? String(item.uuid_transaction_id) : null) ?? (item.transaction_id != null ? String(item.transaction_id) : null);
+        return txId != null && byUuid.has(txId);
       });
     }
     if (showAllTransactions) return cancelledItems;
@@ -1824,22 +1798,6 @@ export default function TransactionList({ businessId, onLoadTransaction }: Trans
     const vd = typeof t.voucher_discount === 'string' ? parseFloat(t.voucher_discount) : t.voucher_discount;
     if (!isNaN(vd) && vd > 0) voucherCount += 1;
   });
-
-  // #region agent log — log per-row checksums to find which rows have different values
-  const debugChecksumsLogKeyRef = useRef<string>('');
-  useEffect(() => {
-    if (!showAllTransactions || isLoading) return;
-    const parseNum = (v: unknown) => (typeof v === 'number' && !isNaN(v) ? v : typeof v === 'string' ? (parseFloat(v) || 0) : 0);
-    const rows = completedTransactions.map((t) => ({
-      id: t.id,
-      c: `${(t.payment_method || '').toLowerCase()}|${(t.pickup_method || '').toLowerCase()}|${parseNum(t.total_amount)}|${parseNum(t.final_amount)}|${parseNum(t.refund_total)}`,
-    }));
-    const key = `${effectiveBusinessId}|${fromDate}|${toDate}|${rows.length}`;
-    if (key === debugChecksumsLogKeyRef.current && rows.length > 0) return;
-    debugChecksumsLogKeyRef.current = key;
-    fetch('http://127.0.0.1:7495/ingest/20000880-6f22-4a8b-8a8e-250eeb7d84f4', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': '14f9d6' }, body: JSON.stringify({ sessionId: '14f9d6', location: 'TransactionList.tsx:rowChecksums', message: 'Per-row checksums for diff', data: { source: 'marviano-pos', fromDate, toDate, effectiveBusinessId, count: rows.length, rows }, timestamp: Date.now(), hypothesisId: 'H4' }) }).catch(() => {});
-  }, [showAllTransactions, isLoading, fromDate, toDate, effectiveBusinessId, completedTransactions]);
-  // #endregion
 
   if (isLoading) {
     return (

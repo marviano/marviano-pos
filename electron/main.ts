@@ -3,7 +3,7 @@ import * as path from 'path';
 import * as fs from 'fs';
 import * as os from 'os';
 import { PrinterManagementService } from './printerManagement';
-import { initializeMySQLPool, getMySQLPool, executeQuery, executeQueryOne, executeUpdate, executeUpsert, executeTransaction, getConnection, initializeSystemPosPool, executeSystemPosQuery, executeSystemPosQueryOne, executeSystemPosUpdate, executeSystemPosTransaction, executeSystemPosDdl, executeSystemPosDdlIgnoreDup, executeDdlIgnoreDup, toMySQLDateTime, toMySQLTimestamp, testDatabaseConnection, insertTransactionToSystemPos, upsertProductsFromMainToSystemPos, syncRefundedTransactionsToSystemPos } from './mysqlDb';
+import { initializeMySQLPool, getMySQLPool, executeQuery, executeQueryOne, executeUpdate, executeUpsert, executeTransaction, getConnection, initializeSystemPosPool, executeSystemPosQuery, executeSystemPosQueryOne, executeSystemPosUpdate, executeSystemPosTransaction, executeSystemPosDdl, executeSystemPosDdlIgnoreDup, executeDdlIgnoreDup, toMySQLDateTime, toMySQLTimestamp, testDatabaseConnection, insertTransactionToSystemPos, upsertProductsFromMainToSystemPos, syncRefundedTransactionsToSystemPos, executeQueryOnLocalSalespulse } from './mysqlDb';
 import { initializeMySQLSchema } from './mysqlSchema';
 import { readConfig, writeConfig, resetConfig, getDbConfig, type AppConfig } from './configManager';
 import { ReceiptManagementService, ReceiptTemplateData } from './receiptManagement';
@@ -31,18 +31,6 @@ function writeLabelDebugLog(payload: Record<string, unknown>): void {
     // do not break app if log write fails
   }
 }
-
-// #region agent log
-function debugSessionLog(payload: { sessionId: string; hypothesisId?: string; location: string; message: string; data?: Record<string, unknown> }): void {
-  try {
-    const logPath = path.join(__dirname, '..', 'debug-ada822.log');
-    const line = JSON.stringify({ ...payload, timestamp: Date.now() }) + '\n';
-    fs.appendFileSync(logPath, line);
-  } catch {
-    // do not break app if log write fails
-  }
-}
-// #endregion
 
 /** Extract @page rule snippet from HTML for debug (label height). */
 function getAtPageSnippet(html: string): string | null {
@@ -713,6 +701,7 @@ async function ensureSystemPosSchema(): Promise<void> {
       sync_attempts INT DEFAULT 0,
       synced_at DATETIME DEFAULT NULL,
       last_sync_attempt TIMESTAMP NULL DEFAULT NULL,
+      last_sync_error VARCHAR(512) DEFAULT NULL COMMENT 'Last sync failure reason',
       table_id INT DEFAULT NULL,
       pickup_method VARCHAR(50) DEFAULT NULL,
       total_amount DECIMAL(15,2) DEFAULT NULL,
@@ -858,6 +847,7 @@ async function ensureSystemPosSchema(): Promise<void> {
     'ALTER TABLE transactions ADD COLUMN sync_attempts INT DEFAULT 0 AFTER sync_status',
     'ALTER TABLE transactions ADD COLUMN synced_at DATETIME DEFAULT NULL AFTER synced_at',
     'ALTER TABLE transactions ADD COLUMN last_sync_attempt TIMESTAMP NULL DEFAULT NULL AFTER synced_at',
+    "ALTER TABLE transactions ADD COLUMN last_sync_error VARCHAR(512) DEFAULT NULL COMMENT 'Last sync failure reason' AFTER last_sync_attempt",
     'ALTER TABLE transactions ADD COLUMN table_id INT DEFAULT NULL',
     'ALTER TABLE transactions ADD COLUMN checker_printed TINYINT(1) NOT NULL DEFAULT 0 COMMENT \'1 = kitchen labels/checker already printed\'',
     'ALTER TABLE transactions ADD COLUMN paid_at DATETIME DEFAULT NULL COMMENT \'When the transaction was paid\' AFTER updated_at',
@@ -914,20 +904,16 @@ function createWindows(): void {
     });
 
     // Run main-DB migrations (e.g. transaction_items.waiter_id) — ignore if column already exists
-    // #region agent log
     void (async () => {
       try {
-        fetch('http://127.0.0.1:7242/ingest/7b565785-72b5-49f7-b2c0-57606ea0d0b5', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ location: 'main.ts:before-waiter-migration', message: 'Before main DB waiter_id migration', data: {}, timestamp: Date.now(), sessionId: 'debug-session', runId: 'run1', hypothesisId: 'H1' }) }).catch(() => { });
         await executeDdlIgnoreDup('ALTER TABLE transaction_items ADD COLUMN waiter_id INT DEFAULT NULL COMMENT \'Employee who added this line item\' AFTER created_at');
         await executeDdlIgnoreDup('ALTER TABLE transaction_items ADD INDEX idx_transaction_items_waiter (waiter_id)');
         await executeDdlIgnoreDup('ALTER TABLE transactions ADD COLUMN paid_at DATETIME DEFAULT NULL COMMENT \'When the transaction was paid\' AFTER updated_at');
-        fetch('http://127.0.0.1:7242/ingest/7b565785-72b5-49f7-b2c0-57606ea0d0b5', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ location: 'main.ts:after-waiter-migration', message: 'Main DB waiter_id migration completed', data: { success: true }, timestamp: Date.now(), sessionId: 'debug-session', runId: 'run1', hypothesisId: 'H1' }) }).catch(() => { });
+        await executeDdlIgnoreDup("ALTER TABLE transactions ADD COLUMN last_sync_error VARCHAR(512) DEFAULT NULL COMMENT 'Last sync failure reason' AFTER last_sync_attempt");
       } catch (migErr) {
-        fetch('http://127.0.0.1:7242/ingest/7b565785-72b5-49f7-b2c0-57606ea0d0b5', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ location: 'main.ts:waiter-migration-error', message: 'Main DB waiter_id migration failed', data: { error: (migErr as Error)?.message }, timestamp: Date.now(), sessionId: 'debug-session', runId: 'run1', hypothesisId: 'H1' }) }).catch(() => { });
         console.warn('⚠️ Main DB migration (transaction_items.waiter_id) failed (non-fatal):', (migErr as Error)?.message);
       }
     })();
-    // #endregion
 
     // MySQL pool is already initialized above
     console.log('✅ MySQL database connection initialized (salespulse)');
@@ -2831,10 +2817,6 @@ function createWindows(): void {
 
   // Employees Position
   ipcMain.handle('localdb-upsert-employees-position', async (event, rows: RowArray) => {
-    // #region agent log
-    const logData = { location: 'main.ts:2067', message: 'localdb-upsert-employees-position called', data: { rowCount: Array.isArray(rows) ? rows.length : 0, firstRow: Array.isArray(rows) && rows.length > 0 ? rows[0] : null }, timestamp: Date.now(), sessionId: 'debug-session', runId: 'run1', hypothesisId: 'C' };
-    writeDebugLog(JSON.stringify(logData));
-    // #endregion
     try {
       const queries: Array<{ sql: string; params?: (string | number | null | boolean)[] }> = [];
 
@@ -2873,24 +2855,12 @@ function createWindows(): void {
         });
       }
 
-      // #region agent log
-      const logBeforeExec = { location: 'main.ts:2107', message: 'Before executing employees_position queries', data: { queryCount: queries.length, firstQuery: queries.length > 0 ? { sql: queries[0].sql, paramCount: queries[0].params?.length || 0 } : null }, timestamp: Date.now(), sessionId: 'debug-session', runId: 'run1', hypothesisId: 'E' };
-      writeDebugLog(JSON.stringify(logBeforeExec));
-      // #endregion
       if (queries.length > 0) {
         await executeTransaction(queries);
-        // #region agent log
-        const logAfterExec = { location: 'main.ts:2110', message: 'After executing employees_position queries', data: { success: true }, timestamp: Date.now(), sessionId: 'debug-session', runId: 'run1', hypothesisId: 'E' };
-        writeDebugLog(JSON.stringify(logAfterExec));
-        // #endregion
         await upsertMasterDataToSystemPos(queries);
       }
       return { success: true };
     } catch (error) {
-      // #region agent log
-      const logError = { location: 'main.ts:2113', message: 'employees_position upsert error', data: { error: error instanceof Error ? error.message : String(error), stack: error instanceof Error ? error.stack : undefined }, timestamp: Date.now(), sessionId: 'debug-session', runId: 'run1', hypothesisId: 'D' };
-      writeDebugLog(JSON.stringify(logError));
-      // #endregion
       console.error('Error upserting employees_position:', error);
       return { success: false };
     }
@@ -2907,10 +2877,6 @@ function createWindows(): void {
 
   // Employees
   ipcMain.handle('localdb-upsert-employees', async (event, rows: RowArray, skipValidation: boolean = false) => {
-    // #region agent log
-    const logEntry = { location: 'main.ts:2127', message: 'localdb-upsert-employees called', data: { rowCount: Array.isArray(rows) ? rows.length : 0, skipValidation: skipValidation, firstRow: Array.isArray(rows) && rows.length > 0 ? rows[0] : null }, timestamp: Date.now(), sessionId: 'debug-session', runId: 'run1', hypothesisId: 'C' };
-    writeDebugLog(JSON.stringify(logEntry));
-    // #endregion
     try {
       const queries: Array<{ sql: string; params?: (string | number | null | boolean)[] }> = [];
       let skippedCount = 0;
@@ -3000,27 +2966,18 @@ function createWindows(): void {
 
         // Validate required fields
         if (!namaKaryawan) {
-          // #region agent log
-          writeDebugLog(JSON.stringify({ location: 'main.ts:2214', message: 'Skipping employee - missing nama_karyawan', data: { employeeId: employeeId }, timestamp: Date.now(), sessionId: 'debug-session', runId: 'run1', hypothesisId: 'F' }));
-          // #endregion
           console.warn(`⚠️ [EMPLOYEES] Skipping employee ${employeeId}: nama_karyawan is required`);
           skippedCount++;
           continue;
         }
 
         if (!jenisKelamin || !['pria', 'wanita'].includes(jenisKelamin)) {
-          // #region agent log
-          writeDebugLog(JSON.stringify({ location: 'main.ts:2220', message: 'Skipping employee - invalid jenis_kelamin', data: { employeeId: employeeId, jenisKelamin: jenisKelamin }, timestamp: Date.now(), sessionId: 'debug-session', runId: 'run1', hypothesisId: 'F' }));
-          // #endregion
           console.warn(`⚠️ [EMPLOYEES] Skipping employee ${employeeId}: invalid jenis_kelamin`);
           skippedCount++;
           continue;
         }
 
         if (!tanggalBekerja) {
-          // #region agent log
-          writeDebugLog(JSON.stringify({ location: 'main.ts:2226', message: 'Skipping employee - missing tanggal_bekerja', data: { employeeId: employeeId, tanggalBekerjaRaw: tanggalBekerjaRaw }, timestamp: Date.now(), sessionId: 'debug-session', runId: 'run1', hypothesisId: 'F' }));
-          // #endregion
           console.warn(`⚠️ [EMPLOYEES] Skipping employee ${employeeId}: tanggal_bekerja is required`);
           skippedCount++;
           continue;
@@ -3080,10 +3037,6 @@ function createWindows(): void {
         }
 
         try {
-          // #region agent log
-          const logBuild = { location: 'main.ts:2314', message: 'Building employee query', data: { employeeId: employeeId, business_id: businessId, user_id: userId, namaKaryawan: namaKaryawan, tanggalLahir: tanggalLahir, tanggalBekerja: tanggalBekerja, jenisKelamin: jenisKelamin }, timestamp: Date.now(), sessionId: 'debug-session', runId: 'run1', hypothesisId: 'B' };
-          writeDebugLog(JSON.stringify(logBuild));
-          // #endregion
           queries.push({
             sql: `INSERT INTO employees (
               id, user_id, business_id, jabatan_id, no_ktp, phone, nama_karyawan,
@@ -3101,19 +3054,12 @@ function createWindows(): void {
             ]
           });
         } catch (queryError) {
-          // #region agent log
-          const logError = { location: 'main.ts:2332', message: 'Error building employee query', data: { employeeId: employeeId, error: queryError instanceof Error ? queryError.message : String(queryError) }, timestamp: Date.now(), sessionId: 'debug-session', runId: 'run1', hypothesisId: 'G' };
-          writeDebugLog(JSON.stringify(logError));
-          // #endregion
           console.error(`❌ [EMPLOYEES] Error building query for employee ${employeeId}:`, queryError);
           skippedCount++;
           continue;
         }
       }
 
-      // #region agent log
-      writeDebugLog(JSON.stringify({ location: 'main.ts:2343', message: 'Before executing employee queries', data: { queryCount: queries.length, skipValidation: skipValidation, skippedCount: skippedCount }, timestamp: Date.now(), sessionId: 'debug-session', runId: 'run1', hypothesisId: 'E' }));
-      // #endregion
       if (queries.length > 0) {
         if (skipValidation) {
           // On first pass: Insert employees one by one to handle foreign key errors individually
@@ -3123,14 +3069,8 @@ function createWindows(): void {
             try {
               await executeUpdate(query.sql, query.params || []);
               successCount++;
-              // #region agent log
-              writeDebugLog(JSON.stringify({ location: 'main.ts:2351', message: 'Employee upsert success', data: { employeeId: query.params?.[0], business_id: query.params?.[2], user_id: query.params?.[1], nama_karyawan: query.params?.[6] }, timestamp: Date.now(), sessionId: 'debug-session', runId: 'run1', hypothesisId: 'C' }));
-              // #endregion
             } catch (insertError: unknown) {
               const err = insertError as { code?: string; errno?: number; message?: string };
-              // #region agent log
-              writeDebugLog(JSON.stringify({ location: 'main.ts:2353', message: 'Employee insert failed', data: { employeeId: query.params?.[0], error: err.message, code: err.code, errno: err.errno, isForeignKey: err.code === 'ER_NO_REFERENCED_ROW_2' || err.errno === 1452 }, timestamp: Date.now(), sessionId: 'debug-session', runId: 'run1', hypothesisId: 'E' }));
-              // #endregion
               if (err.code === 'ER_NO_REFERENCED_ROW_2' || err.errno === 1452) {
                 // Foreign key constraint - expected on first pass, will retry later
                 failCount++;
@@ -3143,9 +3083,6 @@ function createWindows(): void {
               }
             }
           }
-          // #region agent log
-          writeDebugLog(JSON.stringify({ location: 'main.ts:2366', message: 'First pass summary', data: { successCount: successCount, failCount: failCount, skippedCount: skippedCount }, timestamp: Date.now(), sessionId: 'debug-session', runId: 'run1', hypothesisId: 'E' }));
-          // #endregion
           console.log(`ℹ️ [EMPLOYEES] First pass: ${successCount} inserted, ${failCount} failed (will retry later)`);
           if (skippedCount > 0) {
             console.log(`⚠️ [EMPLOYEES] Skipped ${skippedCount} employees due to validation errors`);
@@ -3153,31 +3090,18 @@ function createWindows(): void {
         } else {
           // On retry pass: Use transaction for better performance
           try {
-            // #region agent log
-            const employeesBeingUpserted = queries.map(q => ({ id: q.params?.[0], business_id: q.params?.[2], user_id: q.params?.[1], nama_karyawan: q.params?.[6] }));
-            writeDebugLog(JSON.stringify({ location: 'main.ts:2633', message: 'About to upsert employees in transaction', data: { queryCount: queries.length, employees: employeesBeingUpserted }, timestamp: Date.now(), sessionId: 'debug-session', runId: 'run1', hypothesisId: 'D' }));
-            // #endregion
             await executeTransaction(queries);
             await upsertMasterDataToSystemPos(queries);
-            // #region agent log
-            writeDebugLog(JSON.stringify({ location: 'main.ts:2374', message: 'Employee transaction success', data: { queryCount: queries.length, employees: employeesBeingUpserted }, timestamp: Date.now(), sessionId: 'debug-session', runId: 'run1', hypothesisId: 'D' }));
-            // #endregion
             if (skippedCount > 0) {
               console.log(`⚠️ [EMPLOYEES] Skipped ${skippedCount} employees due to missing foreign keys`);
             }
           } catch (transactionError: unknown) {
             const err = transactionError as { code?: string; errno?: number; message?: string };
-            // #region agent log
-            writeDebugLog(JSON.stringify({ location: 'main.ts:2378', message: 'Employee transaction error', data: { error: err.message, code: err.code, errno: err.errno }, timestamp: Date.now(), sessionId: 'debug-session', runId: 'run1', hypothesisId: 'E' }));
-            // #endregion
             console.error(`❌ [EMPLOYEES] Transaction error:`, transactionError);
             throw transactionError;
           }
         }
       } else {
-        // #region agent log
-        writeDebugLog(JSON.stringify({ location: 'main.ts:2383', message: 'No employee queries to execute', data: { rowCount: rows.length, skippedCount: skippedCount }, timestamp: Date.now(), sessionId: 'debug-session', runId: 'run1', hypothesisId: 'F' }));
-        // #endregion
         console.warn(`⚠️ [EMPLOYEES] No valid employees to insert (all ${rows.length} skipped)`);
       }
 
@@ -3198,21 +3122,9 @@ function createWindows(): void {
 
   ipcMain.handle('localdb-get-employees', async () => {
     try {
-      // #region agent log
-      const logBefore = { location: 'main.ts:2425', message: 'localdb-get-employees called', data: {}, timestamp: Date.now(), sessionId: 'debug-session', runId: 'run1', hypothesisId: 'B' };
-      writeDebugLog(JSON.stringify(logBefore));
-      // #endregion
       const result = await executeQuery('SELECT * FROM employees ORDER BY nama_karyawan ASC');
-      // #region agent log
-      const logAfter = { location: 'main.ts:2427', message: 'localdb-get-employees result', data: { resultCount: Array.isArray(result) ? result.length : 0, result: Array.isArray(result) ? result.map((e: any) => ({ id: e.id, business_id: e.business_id, jabatan_id: e.jabatan_id, nama: e.nama_karyawan })) : null }, timestamp: Date.now(), sessionId: 'debug-session', runId: 'run1', hypothesisId: 'B' };
-      writeDebugLog(JSON.stringify(logAfter));
-      // #endregion
       return result;
     } catch (error) {
-      // #region agent log
-      const logError = { location: 'main.ts:2430', message: 'localdb-get-employees error', data: { error: error instanceof Error ? error.message : String(error) }, timestamp: Date.now(), sessionId: 'debug-session', runId: 'run1', hypothesisId: 'B' };
-      writeDebugLog(JSON.stringify(logError));
-      // #endregion
       console.error('Error getting employees:', error);
       return [];
     }
@@ -4859,6 +4771,33 @@ function createWindows(): void {
         }
       }
 
+      // Enrich refund_total/refund_status from transaction_refunds (same as Daftar Transaksi list + get-all-transactions).
+      // transactions.refund_total is often 0; real totals are in transaction_refunds. Without this, smart sync would
+      // rely only on per-tx localDbGetTransactionRefunds; enriching here keeps one source of truth and avoids sync sending 0.
+      if (Array.isArray(transactions) && transactions.length > 0) {
+        const uuidIds = (transactions as any[]).map((t: any) => t.uuid_id || t.id).filter(Boolean);
+        if (uuidIds.length > 0) {
+          const placeholders = uuidIds.map(() => '?').join(',');
+          const refundSums = await executeQuery(
+            `SELECT transaction_uuid, SUM(refund_amount) as total FROM transaction_refunds WHERE transaction_uuid IN (${placeholders}) AND status IN ('pending', 'completed') GROUP BY transaction_uuid`,
+            uuidIds
+          ) as any[];
+          const refundByUuid = new Map<string, number>();
+          for (const row of refundSums || []) {
+            refundByUuid.set(String(row.transaction_uuid), Number(row.total) || 0);
+          }
+          for (const transaction of transactions as any[]) {
+            const txUuid = transaction.uuid_id || transaction.id;
+            const fromRefunds = refundByUuid.get(String(txUuid)) ?? 0;
+            const fromRow = Number(transaction.refund_total) || 0;
+            transaction.refund_total = Math.max(fromRow, fromRefunds);
+            if (fromRefunds > 0 && (!transaction.refund_status || transaction.refund_status === 'none')) {
+              transaction.refund_status = fromRefunds >= (Number(transaction.final_amount) || 0) - 0.01 ? 'full' : 'partial';
+            }
+          }
+        }
+      }
+
       return transactions;
     } catch (error) {
       console.error('Error getting unsynced transactions:', error);
@@ -4919,6 +4858,29 @@ function createWindows(): void {
           const items = await executeQuery('SELECT * FROM transaction_items WHERE transaction_id = ?', [transaction.id]);
           transaction.items = items || [];
         }
+
+        // Enrich refund_total from transaction_refunds so upsert sends correct value (match-data uses this; resync was sending only transactions.refund_total which can be 0)
+        const uuidIds = (transactions as any[]).map((t: any) => t.uuid_id || t.id).filter(Boolean);
+        if (uuidIds.length > 0) {
+          const placeholders = uuidIds.map(() => '?').join(',');
+          const refundSums = await executeQuery(
+            `SELECT transaction_uuid, SUM(refund_amount) as total FROM transaction_refunds WHERE transaction_uuid IN (${placeholders}) AND status IN ('pending', 'completed') GROUP BY transaction_uuid`,
+            uuidIds
+          ) as any[];
+          const refundByUuid = new Map<string, number>();
+          for (const row of refundSums || []) {
+            refundByUuid.set(String(row.transaction_uuid), Number(row.total) || 0);
+          }
+          for (const transaction of transactions as any[]) {
+            const txUuid = transaction.uuid_id || transaction.id;
+            const fromRefunds = refundByUuid.get(String(txUuid)) ?? 0;
+            const fromRow = Number(transaction.refund_total) || 0;
+            transaction.refund_total = Math.max(fromRow, fromRefunds);
+            if (fromRefunds > 0 && (!transaction.refund_status || transaction.refund_status === 'none')) {
+              transaction.refund_status = fromRefunds >= (Number(transaction.final_amount) || 0) - 0.01 ? 'full' : 'partial';
+            }
+          }
+        }
       }
 
       return transactions;
@@ -4972,13 +4934,6 @@ function createWindows(): void {
       const createdAts = txArr.map((t: any) => t?.created_at).filter(Boolean);
       const minCreated = createdAts.length ? createdAts.reduce((a: string, b: string) => (a < b ? a : b)) : null;
       const maxCreated = createdAts.length ? createdAts.reduce((a: string, b: string) => (a > b ? a : b)) : null;
-      // #region agent log
-      (async () => {
-        try {
-          await fetch('http://127.0.0.1:7495/ingest/20000880-6f22-4a8b-8a8e-250eeb7d84f4', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': '0bbb61' }, body: JSON.stringify({ sessionId: '0bbb61', location: 'main.ts:localdb-get-transactions-match-data', message: 'Local match-data date filter and result bounds', data: { from, to, startIso, endIso, mysqlStart, mysqlEnd, count: txArr.length, minCreated, maxCreated, timezone: 'UTC+7 (WIB) - toMySQLDateTime used for query bounds' }, timestamp: Date.now(), hypothesisId: 'H3,H4' }) });
-        } catch (_e) { /* ignore */ }
-      })();
-      // #endregion
 
       if (!Array.isArray(transactions) || transactions.length === 0) {
         return [];
@@ -5836,22 +5791,12 @@ function createWindows(): void {
 
   // NEW: Get normalized customizations for transaction items (for sync upload)
   ipcMain.handle('localdb-get-transaction-item-customizations-normalized', async (event, transactionId: string) => {
-    // #region agent log
-    console.log('🔍 [DEBUG] Electron function called with transactionId:', transactionId);
-    writeDebugLog(JSON.stringify({ location: 'main.ts:3762', message: 'Electron function called', data: { transactionId, type: typeof transactionId }, timestamp: Date.now(), sessionId: 'debug-session', runId: 'run1', hypothesisId: 'D' }));
-    // #endregion
-
     try {
       // Get all transaction items for this transaction
       // Support both UUID and numeric ID lookups (similar to localDbGetTransactionItems)
       const isReceiptNumberFormat = typeof transactionId === 'string' && /^0\d{15,}$/.test(String(transactionId).trim());
       const isNumeric = typeof transactionId === 'number' || (typeof transactionId === 'string' && /^\d+$/.test(String(transactionId).trim()));
       const isSimpleNumeric = isNumeric && !isReceiptNumberFormat;
-
-      // #region agent log
-      console.log('🔍 [DEBUG] Transaction ID analysis:', { transactionId, isReceiptNumberFormat, isNumeric, isSimpleNumeric });
-      writeDebugLog(JSON.stringify({ location: 'main.ts:3768', message: 'Transaction ID analysis', data: { transactionId, isReceiptNumberFormat, isNumeric, isSimpleNumeric }, timestamp: Date.now(), sessionId: 'debug-session', runId: 'run1', hypothesisId: 'D' }));
-      // #endregion
 
       let items: Array<{ id: number }> = [];
 
@@ -5860,26 +5805,9 @@ function createWindows(): void {
         // Convert transactionId to number if it's a string
         const numericId = typeof transactionId === 'string' ? parseInt(transactionId, 10) : transactionId;
         items = await executeQuery<{ id: number }>('SELECT id FROM transaction_items WHERE transaction_id = ?', [numericId]);
-        // #region agent log
-        console.log('🔍 [DEBUG] Items found (numeric):', items.length, 'items for transaction_id', numericId, items.map(i => i.id));
-        writeDebugLog(JSON.stringify({ location: 'main.ts:3786', message: 'Items found (numeric)', data: { transactionId, numericId, itemsCount: items.length, itemIds: items.map(i => i.id) }, timestamp: Date.now(), sessionId: 'debug-session', runId: 'run1', hypothesisId: 'D' }));
-        // #endregion
-
-        // Debug: Check if customizations exist for these items
-        if (items.length > 0) {
-          const itemIdsForCheck = items.map(i => i.id);
-          const placeholders = itemIdsForCheck.map(() => '?').join(',');
-          const existingCustomizations = await executeQuery<{ count: number }>(`SELECT COUNT(*) as count FROM transaction_item_customizations WHERE transaction_item_id IN (${placeholders})`, itemIdsForCheck);
-          console.log('🔍 [DEBUG] Existing customizations in DB for these items:', existingCustomizations[0]?.count || 0);
-          writeDebugLog(JSON.stringify({ location: 'main.ts:3790', message: 'Existing customizations check', data: { itemIds: itemIdsForCheck, existingCount: existingCustomizations[0]?.count || 0 }, timestamp: Date.now(), sessionId: 'debug-session', runId: 'run1', hypothesisId: 'D' }));
-        }
       } else {
         // UUID or receipt number format - match by uuid_transaction_id
         items = await executeQuery<{ id: number }>('SELECT id FROM transaction_items WHERE uuid_transaction_id = ?', [transactionId]);
-
-        // #region agent log
-        writeDebugLog(JSON.stringify({ location: 'main.ts:3790', message: 'Items found (UUID)', data: { transactionId, itemsCount: items.length, itemIds: items.map(i => i.id) }, timestamp: Date.now(), sessionId: 'debug-session', runId: 'run1', hypothesisId: 'D' }));
-        // #endregion
 
         // If no items found, try joining with transactions table
         if (items.length === 0) {
@@ -5889,9 +5817,6 @@ function createWindows(): void {
           );
           if (tx && tx.id) {
             items = await executeQuery<{ id: number }>('SELECT id FROM transaction_items WHERE transaction_id = ?', [tx.id]);
-            // #region agent log
-            writeDebugLog(JSON.stringify({ location: 'main.ts:3798', message: 'Items found (fallback)', data: { transactionId, txId: tx.id, itemsCount: items.length }, timestamp: Date.now(), sessionId: 'debug-session', runId: 'run1', hypothesisId: 'D' }));
-            // #endregion
           }
         }
       }
@@ -5899,18 +5824,8 @@ function createWindows(): void {
       const allCustomizations: Array<Record<string, unknown>> = [];
       const allOptions: Array<Record<string, unknown>> = [];
 
-      // #region agent log
-      console.log('🔍 [DEBUG] Starting to fetch customizations for', items.length, 'items');
-      writeDebugLog(JSON.stringify({ location: 'main.ts:3791', message: 'Starting to fetch customizations', data: { transactionId, itemsCount: items.length, itemIds: items.map(i => i.id) }, timestamp: Date.now(), sessionId: 'debug-session', runId: 'run1', hypothesisId: 'D' }));
-      // #endregion
-
       for (const item of items) {
         const itemId = item.id;
-
-        // #region agent log
-        console.log('🔍 [DEBUG] Fetching customizations for item:', itemId);
-        writeDebugLog(JSON.stringify({ location: 'main.ts:3796', message: 'Fetching customizations for item', data: { itemId, transactionId }, timestamp: Date.now(), sessionId: 'debug-session', runId: 'run1', hypothesisId: 'D' }));
-        // #endregion
 
         // Get customizations for this item with customization type name from product_customization_types
         // Use LEFT JOIN - if table doesn't exist, will fall back to NULL and use fallback name
@@ -5929,16 +5844,7 @@ function createWindows(): void {
             LEFT JOIN product_customization_types pct ON tic.customization_type_id = pct.id
             WHERE tic.transaction_item_id = ?
           `, [itemId]);
-
-          // #region agent log
-          console.log('🔍 [DEBUG] Customizations found for item', itemId, ':', customizations.length);
-          writeDebugLog(JSON.stringify({ location: 'main.ts:3812', message: 'Customizations query result', data: { itemId, customizationsCount: customizations.length, customizations: customizations.map((c: any) => ({ id: c.id, transaction_item_id: c.transaction_item_id, uuid_transaction_item_id: c.uuid_transaction_item_id })) }, timestamp: Date.now(), sessionId: 'debug-session', runId: 'run1', hypothesisId: 'D' }));
-          // #endregion
         } catch (error) {
-          // #region agent log
-          writeDebugLog(JSON.stringify({ location: 'main.ts:3814', message: 'Customizations query error', data: { itemId, error: String(error) }, timestamp: Date.now(), sessionId: 'debug-session', runId: 'run1', hypothesisId: 'D' }));
-          // #endregion
-
           // If product_customization_types table doesn't exist, query without JOIN
           console.warn('⚠️ product_customization_types table not found, using fallback names');
           customizations = await executeQuery<Record<string, unknown>>(`
@@ -5953,10 +5859,6 @@ function createWindows(): void {
             FROM transaction_item_customizations tic
             WHERE tic.transaction_item_id = ?
           `, [itemId]);
-
-          // #region agent log
-          writeDebugLog(JSON.stringify({ location: 'main.ts:3826', message: 'Customizations query result (fallback)', data: { itemId, customizationsCount: customizations.length }, timestamp: Date.now(), sessionId: 'debug-session', runId: 'run1', hypothesisId: 'D' }));
-          // #endregion
         }
 
         for (const customization of customizations) {
@@ -5977,19 +5879,11 @@ function createWindows(): void {
         }
       }
 
-      // #region agent log
-      console.log('🔍 [DEBUG] Returning customizations:', allCustomizations.length, 'customizations,', allOptions.length, 'options');
-      writeDebugLog(JSON.stringify({ location: 'main.ts:3849', message: 'Returning customizations', data: { transactionId, totalCustomizations: allCustomizations.length, totalOptions: allOptions.length }, timestamp: Date.now(), sessionId: 'debug-session', runId: 'run1', hypothesisId: 'D' }));
-      // #endregion
-
       return {
         customizations: allCustomizations,
         options: allOptions
       };
     } catch (error) {
-      // #region agent log
-      writeDebugLog(JSON.stringify({ location: 'main.ts:3890', message: 'Error in electron function', data: { transactionId, error: String(error), errorStack: error instanceof Error ? error.stack : undefined }, timestamp: Date.now(), sessionId: 'debug-session', runId: 'run1', hypothesisId: 'D' }));
-      // #endregion
       console.error('Error getting normalized customizations:', error);
       return { customizations: [], options: [] };
     }
@@ -6425,13 +6319,15 @@ function createWindows(): void {
   ipcMain.handle('localdb-get-system-pos-transactions', async (event, businessId?: number, limit?: number) => {
     try {
       await ensureSystemPosSchema();
+      // Align with main DB (localdb-get-transactions): total_amount and final_amount from active items only
+      // (exclude cancelled). Same formula so Daftar Transaksi Grand Total and payment method totals match.
       let query = `
         SELECT
           t.*,
-          GREATEST(0, (t.total_amount - COALESCE(cancelled.total_cancelled, 0))) as total_amount,
-          GREATEST(0, (t.final_amount - COALESCE(cancelled.total_cancelled, 0))) as final_amount,
           t.id,
           t.receipt_number,
+          COALESCE(active.active_total, t.total_amount) as total_amount,
+          GREATEST(0, COALESCE(active.active_total, t.total_amount) - COALESCE(t.voucher_discount, 0)) as final_amount,
           COALESCE(
             NULLIF(t.refund_total, 0),
             COALESCE(refund_summary.total_refund, 0)
@@ -6439,7 +6335,7 @@ function createWindows(): void {
           CASE 
             WHEN COALESCE(refund_summary.total_refund, t.refund_total, 0) > 0 THEN
               CASE 
-                WHEN COALESCE(refund_summary.total_refund, t.refund_total, 0) >= ((t.final_amount - COALESCE(cancelled.total_cancelled, 0)) - 0.01) THEN 'full'
+                WHEN COALESCE(refund_summary.total_refund, t.refund_total, 0) >= (GREATEST(0, COALESCE(active.active_total, t.total_amount) - COALESCE(t.voucher_discount, 0)) - 0.01) THEN 'full'
                 ELSE 'partial'
               END
             ELSE 'none'
@@ -6447,12 +6343,13 @@ function createWindows(): void {
         FROM transactions t
         LEFT JOIN (
           SELECT 
+            transaction_id,
             uuid_transaction_id,
-            SUM(total_price) as total_cancelled
+            SUM(total_price) as active_total
           FROM transaction_items
-          WHERE production_status = 'cancelled'
-          GROUP BY uuid_transaction_id
-        ) cancelled ON t.uuid_id = cancelled.uuid_transaction_id
+          WHERE (production_status IS NULL OR production_status != 'cancelled')
+          GROUP BY uuid_transaction_id, transaction_id
+        ) active ON (t.uuid_id = active.uuid_transaction_id OR t.id = active.transaction_id)
         LEFT JOIN (
           SELECT 
             transaction_uuid,
@@ -6513,15 +6410,6 @@ function createWindows(): void {
           console.warn('[SYSTEM POS] Failed to enrich refunds from main DB (non-fatal):', enrichErr instanceof Error ? enrichErr.message : String(enrichErr));
         }
       }
-      // #region agent log
-      try {
-        const withRefund = results.filter((r: Record<string, unknown>) => {
-          const v = r.refund_total;
-          return v != null && (typeof v === 'number' ? v > 0 : Number(v) > 0);
-        });
-        fetch('http://127.0.0.1:7245/ingest/519de021-d49d-473f-a8a1-4215977c867a', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ location: 'main.ts:localdb-get-system-pos-transactions', message: 'system_pos transactions refund check', data: { total: results.length, withRefundCount: withRefund.length, sampleRefunds: withRefund.slice(0, 3).map((r: Record<string, unknown>) => ({ id: r.id, refund_total: r.refund_total })) }, hypothesisId: 'H1', runId: 'post-fix', timestamp: Date.now() }) }).catch(() => { });
-      } catch (_) { }
-      // #endregion
       return results;
     } catch (error) {
       console.error('Error getting system-pos transactions:', error);
@@ -7374,7 +7262,7 @@ function createWindows(): void {
       const placeholders = transactionIds.map(() => '?').join(',');
       // CRITICAL FIX: Use uuid_id instead of id, because smart sync passes UUID strings
       await executeUpdate(
-        `UPDATE transactions SET synced_at = ?, sync_status = ?, sync_attempts = 0 WHERE uuid_id IN (${placeholders})`,
+        `UPDATE transactions SET synced_at = ?, sync_status = ?, sync_attempts = 0, last_sync_error = NULL WHERE uuid_id IN (${placeholders})`,
         [now, 'synced', ...transactionIds]
       );
       console.log(`✅ [MARK SYNCED] Marked ${transactionIds.length} transaction(s) as synced: ${transactionIds.slice(0, 3).join(', ')}${transactionIds.length > 3 ? '...' : ''}`);
@@ -7395,6 +7283,21 @@ function createWindows(): void {
     } catch (error) {
       console.error('Error resetting transaction sync status:', error);
       return { success: false };
+    }
+  });
+
+  // Reset all failed transactions so they are retried on next sync (sync_status -> pending, sync_attempts -> 0)
+  ipcMain.handle('localdb-reset-failed-transactions', async () => {
+    try {
+      const affected = await executeUpdate(
+        "UPDATE transactions SET synced_at = NULL, sync_status = 'pending', sync_attempts = 0, last_sync_error = NULL WHERE sync_status = 'failed'",
+        []
+      );
+      console.log(`🔄 [RESET FAILED] Reset ${affected} failed transaction(s) to pending for retry`);
+      return { success: true, resetCount: affected };
+    } catch (error) {
+      console.error('Error resetting failed transactions:', error);
+      return { success: false, error: String(error), resetCount: 0 };
     }
   });
 
@@ -10139,6 +10042,169 @@ function createWindows(): void {
     }
   });
 
+  // Verifikasi System POS: compare salespulse on db_host (127.0.0.1) vs system_pos — never use primary pool (may be VPS).
+  ipcMain.handle('get-system-pos-verifikasi-data', async (event, businessId?: number, fromDate?: string, toDate?: string) => {
+    try {
+      if (!fromDate || !toDate) {
+        return { success: false, error: 'fromDate and toDate required (YYYY-MM-DD)', salespulse: [], system_pos: [] };
+      }
+      const [yFrom, mFrom, dFrom] = fromDate.split('-').map(Number);
+      const [yTo, mTo, dTo] = toDate.split('-').map(Number);
+      const fromEpoch = new Date(yFrom, mFrom - 1, dFrom, 0, 0, 0, 0).getTime();
+      const toEpoch = new Date(yTo, mTo - 1, dTo, 23, 59, 59, 999).getTime();
+      if (fromEpoch > toEpoch) {
+        return { success: false, error: 'fromDate must be before or equal to toDate', salespulse: [], system_pos: [] };
+      }
+      // Always read from local salespulse (db_host); printer2_audit_log + transactions must match kasir source
+      const rows = await executeQueryOnLocalSalespulse<{ transaction_id: string }>(
+        `SELECT DISTINCT transaction_id FROM printer2_audit_log
+         WHERE printed_at_epoch >= ? AND printed_at_epoch <= ?
+         ORDER BY transaction_id`,
+        [fromEpoch, toEpoch]
+      );
+      const uuidIds = rows.map(r => r.transaction_id);
+      if (uuidIds.length === 0) {
+        return { success: true, salespulse: [], system_pos: [] };
+      }
+      const placeholders = uuidIds.map(() => '?').join(',');
+      const mainParams: (string | number)[] = [...uuidIds];
+      let mainTxQuery = `SELECT t.* FROM transactions t WHERE t.uuid_id IN (${placeholders}) AND t.status IN ('completed', 'refunded')`;
+      if (businessId != null) {
+        mainTxQuery += ' AND t.business_id = ?';
+        mainParams.push(businessId);
+      }
+      mainTxQuery += ' ORDER BY t.created_at ASC';
+      const mainTxRows = await executeQueryOnLocalSalespulse(mainTxQuery, mainParams) as Record<string, unknown>[];
+      const mainItems = await executeQueryOnLocalSalespulse(
+        `SELECT id, uuid_id, transaction_id, uuid_transaction_id, product_id, quantity, unit_price, total_price,
+         custom_note, production_status, cancelled_at, created_at
+         FROM transaction_items WHERE uuid_transaction_id IN (${placeholders}) ORDER BY uuid_transaction_id, id ASC`,
+        uuidIds
+      ) as Record<string, unknown>[];
+      const mainRefunds = await executeQueryOnLocalSalespulse(
+        `SELECT id, transaction_uuid, refund_amount, refund_type, status, refunded_at
+         FROM transaction_refunds WHERE transaction_uuid IN (${placeholders}) AND status IN ('pending', 'completed')
+         ORDER BY transaction_uuid, refunded_at ASC`,
+        uuidIds
+      ) as Record<string, unknown>[];
+      const itemsByTx = new Map<string, Record<string, unknown>[]>();
+      for (const row of mainItems || []) {
+        const txUuid = String(row.uuid_transaction_id ?? '');
+        if (!itemsByTx.has(txUuid)) itemsByTx.set(txUuid, []);
+        itemsByTx.get(txUuid)!.push(row);
+      }
+      const refundsByTx = new Map<string, Record<string, unknown>[]>();
+      for (const row of mainRefunds || []) {
+        const txUuid = String(row.transaction_uuid ?? '');
+        if (!refundsByTx.has(txUuid)) refundsByTx.set(txUuid, []);
+        refundsByTx.get(txUuid)!.push({ ...row, refund_amount: row.refund_amount != null ? Number(row.refund_amount) : 0 });
+      }
+      const salespulse = (mainTxRows || []).map((t: Record<string, unknown>) => {
+        const txId = String(t.uuid_id ?? t.id);
+        const items = itemsByTx.get(txId) || [];
+        const refunds = refundsByTx.get(txId) || [];
+        const refundTotalFromRefunds = refunds.reduce((sum: number, r: Record<string, unknown>) => sum + (Number(r.refund_amount) || 0), 0);
+        let cancelled_items_count = 0;
+        for (const it of items) {
+          if (String(it.production_status ?? '') === 'cancelled') cancelled_items_count++;
+        }
+        return {
+          id: txId,
+          uuid_id: txId,
+          business_id: t.business_id,
+          user_id: t.user_id,
+          payment_method: t.payment_method ?? null,
+          total_amount: t.total_amount != null ? Number(t.total_amount) : null,
+          final_amount: t.final_amount != null ? Number(t.final_amount) : null,
+          voucher_discount: t.voucher_discount != null ? Number(t.voucher_discount) : 0,
+          voucher_type: t.voucher_type ?? null,
+          voucher_value: t.voucher_value != null ? Number(t.voucher_value) : null,
+          voucher_label: t.voucher_label ?? null,
+          status: t.status ?? null,
+          created_at: t.created_at,
+          refund_total: refundTotalFromRefunds > 0 ? refundTotalFromRefunds : (t.refund_total != null ? Number(t.refund_total) : 0),
+          items,
+          refunds,
+          refund_total_from_refunds: refundTotalFromRefunds,
+          cancelled_items_count
+        };
+      });
+
+      await ensureSystemPosSchema();
+      let sysPosTxQuery = `SELECT t.id as sys_pos_id, t.uuid_id, t.business_id, t.user_id, t.payment_method, t.total_amount, t.final_amount, t.voucher_discount, t.voucher_type, t.voucher_value, t.voucher_label, t.status, t.created_at, t.refund_total FROM transactions t WHERE t.uuid_id IN (${placeholders})`;
+      const sysPosTxParams: (string | number)[] = [...uuidIds];
+      if (businessId != null) {
+        sysPosTxQuery += ' AND t.business_id = ?';
+        sysPosTxParams.push(businessId);
+      }
+      sysPosTxQuery += ' ORDER BY t.created_at ASC';
+      const sysPosTxRows = await executeSystemPosQuery<Record<string, unknown>>(sysPosTxQuery, sysPosTxParams);
+      if (sysPosTxRows.length === 0) {
+        return { success: true, salespulse, system_pos: [] };
+      }
+      const sysPosIds = sysPosTxRows.map((r: Record<string, unknown>) => r.sys_pos_id).filter((id): id is number => typeof id === 'number');
+      const sysPosIdPlaceholders = sysPosIds.map(() => '?').join(',');
+      const sysPosItems = await executeSystemPosQuery<Record<string, unknown>>(
+        `SELECT id, uuid_id, uuid_transaction_id, product_id, quantity, unit_price, total_price, custom_note, production_status, cancelled_at, created_at
+         FROM transaction_items WHERE transaction_id IN (${sysPosIdPlaceholders}) ORDER BY uuid_transaction_id, id ASC`,
+        sysPosIds
+      );
+      const sysPosRefunds = await executeSystemPosQuery<Record<string, unknown>>(
+        `SELECT id, transaction_uuid, refund_amount, refund_type, status, refunded_at
+         FROM transaction_refunds WHERE transaction_uuid IN (${placeholders}) AND status IN ('pending', 'completed')
+         ORDER BY transaction_uuid, refunded_at ASC`,
+        uuidIds
+      );
+      const sysItemsByTx = new Map<string, Record<string, unknown>[]>();
+      for (const row of sysPosItems || []) {
+        const txUuid = String(row.uuid_transaction_id ?? '');
+        if (!sysItemsByTx.has(txUuid)) sysItemsByTx.set(txUuid, []);
+        sysItemsByTx.get(txUuid)!.push(row);
+      }
+      const sysRefundsByTx = new Map<string, Record<string, unknown>[]>();
+      for (const row of sysPosRefunds || []) {
+        const txUuid = String(row.transaction_uuid ?? '');
+        if (!sysRefundsByTx.has(txUuid)) sysRefundsByTx.set(txUuid, []);
+        sysRefundsByTx.get(txUuid)!.push({ ...row, refund_amount: row.refund_amount != null ? Number(row.refund_amount) : 0 });
+      }
+      const system_pos = sysPosTxRows.map((t: Record<string, unknown>) => {
+        const txId = String(t.uuid_id ?? '');
+        const items = sysItemsByTx.get(txId) || [];
+        const refunds = sysRefundsByTx.get(txId) || [];
+        const refundTotalFromRefunds = refunds.reduce((sum: number, r: Record<string, unknown>) => sum + (Number(r.refund_amount) || 0), 0);
+        let cancelled_items_count = 0;
+        for (const it of items) {
+          if (String(it.production_status ?? '') === 'cancelled') cancelled_items_count++;
+        }
+        return {
+          id: txId,
+          uuid_id: txId,
+          business_id: t.business_id,
+          user_id: t.user_id,
+          payment_method: t.payment_method ?? null,
+          total_amount: t.total_amount != null ? Number(t.total_amount) : null,
+          final_amount: t.final_amount != null ? Number(t.final_amount) : null,
+          voucher_discount: t.voucher_discount != null ? Number(t.voucher_discount) : 0,
+          voucher_type: t.voucher_type ?? null,
+          voucher_value: t.voucher_value != null ? Number(t.voucher_value) : null,
+          voucher_label: t.voucher_label ?? null,
+          status: t.status ?? null,
+          created_at: t.created_at,
+          refund_total: refundTotalFromRefunds > 0 ? refundTotalFromRefunds : (t.refund_total != null ? Number(t.refund_total) : 0),
+          items,
+          refunds,
+          refund_total_from_refunds: refundTotalFromRefunds,
+          cancelled_items_count
+        };
+      });
+
+      return { success: true, salespulse, system_pos };
+    } catch (error) {
+      console.error('[SYSTEM POS] Error get-system-pos-verifikasi-data:', error);
+      return { success: false, error: String(error), salespulse: [], system_pos: [] };
+    }
+  });
+
   // Manual System POS Re-sync: sync Printer 2 transactions in date range to system_pos
   ipcMain.handle('run-system-pos-resync', async (event, fromDate: string, toDate: string) => {
     try {
@@ -10161,6 +10227,7 @@ function createWindows(): void {
       if (transactions.length === 0) {
         return { success: true, count: 0, synced: 0, failed: 0, errors: [], message: 'No Printer 2 transactions in date range' };
       }
+      await ensureSystemPosSchema();
       console.log(`[SYSTEM POS] Manual re-sync: ${transactions.length} Printer 2 transactions (${fromDate}..${toDate})`);
       const now = Date.now();
       const queries: Array<{ sql: string; params?: (string | number | null | boolean)[] }> = [];
@@ -10177,6 +10244,7 @@ function createWindows(): void {
       }
       await executeSystemPosTransaction(queries);
       let synced = 0;
+      let skipped = 0;
       let failed = 0;
       const errors: Array<{ transactionId: string; error: string }> = [];
       for (const tx of transactions) {
@@ -10184,7 +10252,11 @@ function createWindows(): void {
         const insertResult = await insertTransactionToSystemPos(transactionId);
         if (insertResult.success) {
           await executeSystemPosUpdate('UPDATE system_pos_queue SET synced_at = ? WHERE transaction_id = ?', [now, transactionId]);
-          synced++;
+          if ((insertResult as { skipped?: boolean }).skipped) {
+            skipped++;
+          } else {
+            synced++;
+          }
         } else {
           const errMsg = (insertResult.error ?? 'Unknown').substring(0, 500);
           await executeSystemPosUpdate(
@@ -10196,8 +10268,8 @@ function createWindows(): void {
           errors.push({ transactionId, error: errMsg });
         }
       }
-      console.log(`[SYSTEM POS] Manual re-sync done: ${synced} synced, ${failed} failed`);
-      return { success: true, count: transactions.length, synced, failed, errors };
+      console.log(`[SYSTEM POS] Manual re-sync done: ${synced} inserted, ${skipped} skipped (existing), ${failed} failed`);
+      return { success: true, count: transactions.length, synced, skipped, failed, errors };
     } catch (error) {
       console.error('[SYSTEM POS] Error running manual resync:', error);
       return { success: false, error: String(error), count: 0, synced: 0, failed: 0, errors: [] };
@@ -10515,20 +10587,18 @@ function createWindows(): void {
     }
   });
 
-  // Mark transaction as failed (for transactions table)
-  ipcMain.handle('localdb-mark-transaction-failed', async (event, transactionId: string) => {
+  // Mark transaction as failed (for transactions table). errorMessage is stored for display on settings/sinkronisasi.
+  ipcMain.handle('localdb-mark-transaction-failed', async (event, transactionId: string, errorMessage?: string) => {
     try {
       // MySQL TIMESTAMP expects 'YYYY-MM-DD HH:MM:SS', not Unix ms
       const now = toMySQLDateTime(new Date());
-      // #region agent log
-      fetch('http://127.0.0.1:7495/ingest/176c0b85-d0c0-41ef-a970-2527232dc552', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': 'f2d03c' }, body: JSON.stringify({ sessionId: 'f2d03c', location: 'main.ts:localdb-mark-transaction-failed', message: 'last_sync_attempt value passed to UPDATE', data: { transactionId, lastSyncAttemptValue: now, type: typeof now }, timestamp: Date.now(), hypothesisId: 'H1', runId: 'post-fix' }) }).catch(() => {});
-      // #endregion
+      const err = (errorMessage != null && String(errorMessage).trim() !== '') ? String(errorMessage).trim().slice(0, 500) : null;
       await executeUpdate(`
         UPDATE transactions 
-        SET sync_status = 'failed', sync_attempts = sync_attempts + 1, last_sync_attempt = ?
+        SET sync_status = 'failed', sync_attempts = sync_attempts + 1, last_sync_attempt = ?, last_sync_error = ?
         WHERE uuid_id = ?
-      `, [now, transactionId]);
-      console.log(`[MARK FAILED] Marked transaction ${transactionId} as failed`);
+      `, [now, err, transactionId]);
+      console.log(`[MARK FAILED] Marked transaction ${transactionId} as failed${err ? `: ${err}` : ''}`);
       return { success: true };
     } catch (error) {
       console.error('Error marking transaction as failed:', error);
