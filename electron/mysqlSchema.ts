@@ -677,6 +677,22 @@ export async function initializeMySQLSchema(): Promise<void> {
         ON DELETE CASCADE
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
 
+    // Restaurant_sections table (sections within a room, e.g. Front, VIP Area)
+    `CREATE TABLE IF NOT EXISTS restaurant_sections (
+      id INT NOT NULL AUTO_INCREMENT,
+      room_id INT NOT NULL,
+      name VARCHAR(100) NOT NULL,
+      color VARCHAR(7) NOT NULL DEFAULT '#E5E7EB',
+      created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      PRIMARY KEY (id),
+      INDEX idx_restaurant_sections_room_id (room_id),
+      CONSTRAINT fk_restaurant_sections_room_id
+        FOREIGN KEY (room_id)
+        REFERENCES restaurant_rooms(id)
+        ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+
     // Restaurant_tables table (for table layout management)
     `CREATE TABLE IF NOT EXISTS restaurant_tables (
       id INT NOT NULL AUTO_INCREMENT,
@@ -688,14 +704,20 @@ export async function initializeMySQLSchema(): Promise<void> {
       height DECIMAL(10, 6) NOT NULL DEFAULT 5.000000 COMMENT 'Height as percentage of canvas (0-100)',
       capacity INT NOT NULL DEFAULT 4 COMMENT 'Number of seats',
       shape ENUM('circle', 'rectangle') NOT NULL DEFAULT 'circle',
+      section_id INT NULL DEFAULT NULL COMMENT 'Optional section within the room',
       created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
       updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
       PRIMARY KEY (id),
       INDEX idx_restaurant_tables_room_id (room_id),
+      INDEX idx_restaurant_tables_section_id (section_id),
       CONSTRAINT fk_restaurant_tables_room_id 
         FOREIGN KEY (room_id) 
         REFERENCES restaurant_rooms(id) 
-        ON DELETE CASCADE
+        ON DELETE CASCADE,
+      CONSTRAINT fk_restaurant_tables_section_id
+        FOREIGN KEY (section_id)
+        REFERENCES restaurant_sections(id)
+        ON DELETE SET NULL
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
 
     // Restaurant_layout_elements table (for custom elements like doors, bathrooms, etc.)
@@ -959,6 +981,47 @@ export async function initializeMySQLSchema(): Promise<void> {
         // Column already exists
       } else {
         console.warn('⚠️ transaction_items package_selections_json migration:', err);
+      }
+    }
+
+    // One-time migration: add section_id to restaurant_tables (optional section within room)
+    try {
+      await pool.execute(
+        `ALTER TABLE restaurant_tables ADD COLUMN section_id INT NULL DEFAULT NULL COMMENT 'Optional section within the room' AFTER shape`
+      );
+      console.log('✅ restaurant_tables: added section_id column');
+    } catch (alterErr: unknown) {
+      const err = alterErr as { code?: string; errno?: number };
+      if (err.code === 'ER_DUP_FIELDNAME' || err.errno === 1060) {
+        // Column already exists
+      } else {
+        console.warn('⚠️ restaurant_tables section_id migration:', err);
+      }
+    }
+    try {
+      await pool.execute(
+        `ALTER TABLE restaurant_tables ADD INDEX idx_restaurant_tables_section_id (section_id)`
+      );
+      console.log('✅ restaurant_tables: added section_id index');
+    } catch (alterErr: unknown) {
+      const err = alterErr as { code?: string; errno?: number };
+      if (err.code === 'ER_DUP_KEYNAME' || err.errno === 1061) {
+        // Index already exists
+      } else {
+        console.warn('⚠️ restaurant_tables section_id index migration:', err);
+      }
+    }
+    try {
+      await pool.execute(
+        `ALTER TABLE restaurant_tables ADD CONSTRAINT fk_restaurant_tables_section_id FOREIGN KEY (section_id) REFERENCES restaurant_sections(id) ON DELETE SET NULL`
+      );
+      console.log('✅ restaurant_tables: added section_id foreign key');
+    } catch (alterErr: unknown) {
+      const err = alterErr as { code?: string; errno?: number };
+      if (err.code === 'ER_DUP_KEYNAME' || err.errno === 1826) {
+        // Constraint already exists
+      } else {
+        console.warn('⚠️ restaurant_tables section_id FK migration:', err);
       }
     }
 

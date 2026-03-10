@@ -235,7 +235,20 @@ declare global {
         height: number | string;
         capacity: number;
         shape: 'circle' | 'rectangle';
+        section_id?: number | null;
       }>>;
+      getRestaurantSections?: (roomId: number) => Promise<Array<{
+        id: number;
+        room_id: number;
+        name: string;
+        color: string;
+        created_at: string;
+        updated_at: string;
+      }>>;
+      createRestaurantSection?: (payload: { room_id: number; name: string; color?: string }) => Promise<{ id: number; room_id: number; name: string; color: string } | null>;
+      updateRestaurantSection?: (payload: { id: number; name?: string; color?: string }) => Promise<unknown>;
+      deleteRestaurantSection?: (sectionId: number) => Promise<{ success: boolean }>;
+      updateRestaurantTable?: (payload: { id: number; table_number?: string; capacity?: number; shape?: string; section_id?: number | null }) => Promise<unknown>;
       getRestaurantLayoutElements?: (roomId: number) => Promise<Array<{
         id: number;
         room_id: number;
@@ -249,6 +262,7 @@ declare global {
         text_color: string;
       }>>;
       localDbUpsertRestaurantRooms?: (rows: unknown[]) => Promise<{ success: boolean }>;
+      localDbUpsertRestaurantSections?: (rows: unknown[]) => Promise<{ success: boolean }>;
       localDbUpsertRestaurantTables?: (rows: unknown[]) => Promise<{ success: boolean }>;
       localDbUpsertRestaurantLayoutElements?: (rows: unknown[]) => Promise<{ success: boolean }>;
 

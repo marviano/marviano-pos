@@ -698,10 +698,15 @@ class OfflineSyncService {
           }
           advanceProgress();
 
-          // Restaurant Table Layout (rooms first, then tables due to foreign key)
+          // Restaurant Table Layout (rooms first, then sections, then tables due to foreign key)
           if (Array.isArray(data.restaurantRooms) && data.restaurantRooms.length > 0) {
             await (electronAPI.localDbUpsertRestaurantRooms as (rows: unknown[]) => Promise<{ success: boolean }>)?.(data.restaurantRooms);
             // console.log(`✅ ${data.restaurantRooms.length} restaurant rooms synced to local database`);
+          }
+          advanceProgress();
+
+          if (Array.isArray(data.restaurantSections) && data.restaurantSections.length > 0) {
+            await (electronAPI.localDbUpsertRestaurantSections as (rows: unknown[]) => Promise<{ success: boolean }>)?.(data.restaurantSections);
           }
           advanceProgress();
 

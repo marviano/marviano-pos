@@ -502,7 +502,13 @@ export class PrinterManagementService {
 
       const results = await executeQuery<Printer2AuditRow>(query, params);
       console.log(`✅ Retrieved ${results.length} printer2 audit log entries`);
-      
+
+      // #region agent log
+      try {
+        fetch('http://127.0.0.1:7495/ingest/176c0b85-d0c0-41ef-a970-2527232dc552', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': '6d26e8' }, body: JSON.stringify({ sessionId: '6d26e8', location: 'marviano-pos/electron/printerManagement.ts:getPrinter2AuditLog', message: 'P2 audit log result', data: { fromDate, toDate, resultsLength: results.length }, timestamp: Date.now(), hypothesisId: 'H3' }) }).catch(() => {});
+      } catch (_) { /* ignore */ }
+      // #endregion
+
       // Debug: show sample entries if any
       if (results.length > 0) {
         console.log(`🔍 [Printer2AuditLog] Sample entry: printed_at_epoch=${results[0].printed_at_epoch}, transaction_id=${results[0].transaction_id}`);

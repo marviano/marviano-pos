@@ -270,39 +270,52 @@ export default function BaristaDisplay({ viewOnly = false, legacyCardLayout = fa
 
           const itemQuantity = typeof item.quantity === 'number' ? item.quantity : (typeof item.quantity === 'string' ? parseInt(item.quantity, 10) : 1);
           let packageBreakdownLines: { id?: number; product_id: number; product_name: string; quantity: number; category1_id?: number; category1_name?: string; finished_at?: string | null; note?: string }[] | undefined;
-          const dbLines = (item as Record<string, unknown>).packageBreakdownLines;
-          if (Array.isArray(dbLines) && dbLines.length > 0) {
-            // DB stores per-package quantity; show as-is (header "Paket: 2x ..." indicates package count)
-            packageBreakdownLines = dbLines.map((l: Record<string, unknown>) => ({
-              id: typeof l.id === 'number' ? l.id : undefined,
-              product_id: l.product_id as number,
-              product_name: (l.product_name as string) || '',
-              quantity: (l.quantity as number) || 1,
-              category1_id: l.category1_id != null ? (typeof l.category1_id === 'number' ? l.category1_id : parseInt(String(l.category1_id), 10)) : undefined,
-              category1_name: l.category1_name != null ? String(l.category1_name) : undefined,
-              finished_at: l.finished_at != null ? String(l.finished_at) : null,
-              note: l.note != null ? String(l.note) : undefined,
-            }));
-          } else {
-            try {
-              const raw = (item as Record<string, unknown>).package_selections_json;
-              if (raw) {
-                const sel = typeof raw === 'string' ? JSON.parse(raw) : raw;
-                const withId = getPackageBreakdownLinesWithProductId(Array.isArray(sel) ? sel : [], itemQuantity);
-                if (withId.length > 0) {
-                  packageBreakdownLines = withId.map((line) => {
-                    const p = productsMap.get(line.product_id) as Record<string, unknown> | undefined;
-                    const category1_id = p && (typeof p.category1_id === 'number' || typeof p.category1_id === 'string') ? (typeof p.category1_id === 'number' ? p.category1_id : parseInt(String(p.category1_id), 10)) : undefined;
-                    const category1_name = p && typeof p.category1_name === 'string' ? p.category1_name : undefined;
-                    return { ...line, category1_id, category1_name };
-                  });
-                }
-              }
-            } catch (e) {
-              if (isPackageProduct && process.env.NODE_ENV !== 'production') {
-                console.warn('[BaristaDisplay] Failed to parse package_selections_json:', typeof product.nama === 'string' ? product.nama : 'Unknown', e);
+          const dbLines = (item as Record<string, unknown>).packageBreakdownLines as Array<Record<string, unknown>> | undefined;
+          const rawJson = (item as Record<string, unknown>).package_selections_json;
+          let fromJson: { product_id: number; product_name: string; quantity: number; note?: string }[] = [];
+          try {
+            if (rawJson) {
+              const sel = typeof rawJson === 'string' ? JSON.parse(rawJson) : rawJson;
+              fromJson = getPackageBreakdownLinesWithProductId(Array.isArray(sel) ? sel : [], itemQuantity);
+            }
+          } catch (e) {
+            if (isPackageProduct && process.env.NODE_ENV !== 'production') {
+              console.warn('[BaristaDisplay] Failed to parse package_selections_json:', typeof product.nama === 'string' ? product.nama : 'Unknown', e);
+            }
+          }
+          if (fromJson.length > 0) {
+            const dbByProduct = new Map<number, Record<string, unknown>>();
+            if (Array.isArray(dbLines)) {
+              for (const l of dbLines) {
+                const pid = l.product_id as number;
+                if (pid != null && !dbByProduct.has(pid)) dbByProduct.set(pid, l);
               }
             }
+            packageBreakdownLines = fromJson.map((line) => {
+              const p = productsMap.get(line.product_id) as Record<string, unknown> | undefined;
+              const category1_id = p && (typeof p.category1_id === 'number' || typeof p.category1_id === 'string') ? (typeof p.category1_id === 'number' ? p.category1_id : parseInt(String(p.category1_id), 10)) : undefined;
+              const category1_name = p && typeof p.category1_name === 'string' ? p.category1_name : undefined;
+              const db = dbByProduct.get(line.product_id);
+              const id = db && typeof db.id === 'number' ? db.id : undefined;
+              const finished_at = db && db.finished_at != null ? String(db.finished_at) : null;
+              const note = (db && db.note != null && String(db.note).trim() !== '') ? String(db.note) : line.note;
+              return { ...line, id, category1_id, category1_name, finished_at, note };
+            });
+          } else if (Array.isArray(dbLines) && dbLines.length > 0) {
+            const perPkgMultiplier = itemQuantity;
+            packageBreakdownLines = dbLines.map((l: Record<string, unknown>) => {
+              const perPkg = (l.quantity as number) || 1;
+              return {
+                id: typeof l.id === 'number' ? l.id : undefined,
+                product_id: l.product_id as number,
+                product_name: (l.product_name as string) || '',
+                quantity: perPkg * perPkgMultiplier,
+                category1_id: l.category1_id != null ? (typeof l.category1_id === 'number' ? l.category1_id : parseInt(String(l.category1_id), 10)) : undefined,
+                category1_name: l.category1_name != null ? String(l.category1_name) : undefined,
+                finished_at: l.finished_at != null ? String(l.finished_at) : null,
+                note: l.note != null ? String(l.note) : undefined,
+              };
+            });
           }
 
           const orderItem = {
@@ -588,12 +601,8 @@ export default function BaristaDisplay({ viewOnly = false, legacyCardLayout = fa
         const newOrderIds = [...currentOrderIds].filter(id => !previousOrderIdsRef.current.has(id));
         if (newOrderIds.length > 0) {
           try {
-            // #region agent log
             const isFileProtocol = typeof window !== 'undefined' && window.location?.protocol === 'file:';
             const soundPath = isFileProtocol ? './blacksmith_refine.mp3' : '/blacksmith_refine.mp3';
-            const resolvedUrl = typeof window !== 'undefined' ? new URL(soundPath, window.location.href).href : soundPath;
-            fetch('http://127.0.0.1:7245/ingest/519de021-d49d-473f-a8a1-4215977c867a', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ location: 'BaristaDisplay.tsx:sound', message: 'New order sound attempt', data: { protocol: window?.location?.protocol, soundPath, resolvedUrl, newOrderCount: newOrderIds.length }, timestamp: Date.now(), hypothesisId: 'A' }) }).catch(() => { });
-            // #endregion
             if (!soundRef.current) {
               soundRef.current = new Audio(soundPath);
               soundRef.current.volume = 0.7;
@@ -601,9 +610,6 @@ export default function BaristaDisplay({ viewOnly = false, legacyCardLayout = fa
             soundRef.current.pause();
             soundRef.current.currentTime = 0;
             soundRef.current.play().catch(error => {
-              // #region agent log
-              fetch('http://127.0.0.1:7245/ingest/519de021-d49d-473f-a8a1-4215977c867a', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ location: 'BaristaDisplay.tsx:play', message: 'Sound play failed', data: { error: String(error), name: (error as Error)?.name }, timestamp: Date.now(), hypothesisId: 'B' }) }).catch(() => { });
-              // #endregion
               console.warn('Failed to play sound:', error);
             });
           } catch (error) {

@@ -798,6 +798,7 @@ export default function TransactionList({ businessId, onLoadTransaction }: Trans
     success: boolean;
     ids: Set<string>;
     counters: Record<string, number>;
+    usedFallback?: boolean;
   }
 
   interface ReceiptFetchResult {
@@ -817,11 +818,13 @@ export default function TransactionList({ businessId, onLoadTransaction }: Trans
       // Try with date range first (use applied range — same as fetch)
       let response = await electronAPI.getPrinter2AuditLog(appliedFromDate, appliedToDate, 2000);
       let entries = Array.isArray(response?.entries) ? response.entries : [];
+      let usedFallback = false;
 
       // If no results with date filter, try without date filter (fallback)
       if (entries.length === 0) {
         response = await electronAPI.getPrinter2AuditLog(undefined, undefined, 2000);
         entries = Array.isArray(response?.entries) ? response.entries : [];
+        usedFallback = true;
       }
 
       const ids = new Set<string>();
@@ -851,10 +854,10 @@ export default function TransactionList({ businessId, onLoadTransaction }: Trans
       // Debug: Log sample IDs to see what format they are
       // Removed unused sampleIds variable
 
-      return { success: true, ids, counters: originalCounters };
+      return { success: true, ids, counters: originalCounters, usedFallback };
     } catch (err) {
       console.error('Failed to fetch Receiptize audit log:', err);
-      return { success: false, ids: new Set<string>(), counters: {} };
+      return { success: false, ids: new Set<string>(), counters: {}, usedFallback: false };
     }
   }, [appliedFromDate, appliedToDate]);
 
@@ -1104,6 +1107,16 @@ export default function TransactionList({ businessId, onLoadTransaction }: Trans
       const receiptizeResult = await fetchReceiptizePrintedIds();
       setReceiptizePrintedIds(receiptizeResult.ids);
       setReceiptizeCounters(receiptizeResult.counters);
+
+      // #region agent log
+      const printer2InRangeCount = dateFilteredTransactions.filter((tx) => {
+        const id = String((tx as { uuid_id?: string }).uuid_id ?? tx.id);
+        return receiptizeResult.ids.has(id);
+      }).length;
+      if (typeof fetch === 'function') {
+        fetch('http://127.0.0.1:7495/ingest/176c0b85-d0c0-41ef-a970-2527232dc552', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': '6d26e8' }, body: JSON.stringify({ sessionId: '6d26e8', location: 'marviano-pos/TransactionList.tsx:fetchTransactions', message: 'Printer2 list counts', data: { appliedFromDate, appliedToDate, receiptizeIdsSize: receiptizeResult.ids.size, usedFallback: receiptizeResult.usedFallback ?? false, dateFilteredCount: dateFilteredTransactions.length, printer2InRangeCount, isSystemPosMode: useSystemPos }, timestamp: Date.now(), hypothesisId: 'H3,H5' }) }).catch(() => {});
+      }
+      // #endregion
 
       if (!receiptizeResult.success) {
         setError(prev => prev ?? 'Failed to fetch Receiptize print history');

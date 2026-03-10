@@ -23,6 +23,16 @@ interface Table {
   height: number | string;
   capacity: number;
   shape: 'circle' | 'rectangle';
+  section_id?: number | null;
+}
+
+interface Section {
+  id: number;
+  room_id: number;
+  name: string;
+  color: string;
+  created_at?: string;
+  updated_at?: string;
 }
 
 interface LayoutElement {
@@ -54,8 +64,12 @@ export default function TableLayout({ onLoadTransaction }: TableLayoutProps = {}
   const [rooms, setRooms] = useState<Room[]>([]);
   const [selectedRoom, setSelectedRoom] = useState<number | null>(null);
   const [tables, setTables] = useState<Table[]>([]);
+  const [sections, setSections] = useState<Section[]>([]);
   const [layoutElements, setLayoutElements] = useState<LayoutElement[]>([]);
-  
+  const [sectionsPanelOpen, setSectionsPanelOpen] = useState(true);
+  const [sectionModal, setSectionModal] = useState<{ mode: 'add' | 'edit'; section?: Section } | null>(null);
+  const [editTableModal, setEditTableModal] = useState<Table | null>(null);
+
   const businessId = user?.selectedBusinessId;
   
   if (!businessId) {
@@ -167,6 +181,18 @@ export default function TableLayout({ onLoadTransaction }: TableLayoutProps = {}
     }
   }, [selectedRoom]);
 
+  const fetchSections = useCallback(async () => {
+    if (!selectedRoom) return;
+    try {
+      const electronAPI = window.electronAPI;
+      if (!electronAPI?.getRestaurantSections) return;
+      const data = await electronAPI.getRestaurantSections(selectedRoom);
+      setSections(Array.isArray(data) ? data : []);
+    } catch (error) {
+      console.error('Error fetching sections:', error);
+    }
+  }, [selectedRoom]);
+
   const fetchLayoutElements = useCallback(async () => {
     if (!selectedRoom) {
       return;
@@ -262,18 +288,20 @@ export default function TableLayout({ onLoadTransaction }: TableLayoutProps = {}
     }
   }, [businessId, fetchRooms]);
 
-  // Fetch tables and elements when room is selected
+  // Fetch tables, sections, and elements when room is selected
   useEffect(() => {
     if (selectedRoom) {
       fetchTables();
+      fetchSections();
       fetchLayoutElements();
       fetchPendingTransactions();
     } else {
       setTables([]);
+      setSections([]);
       setLayoutElements([]);
       setPendingTransactions([]);
     }
-  }, [selectedRoom, fetchTables, fetchLayoutElements, fetchPendingTransactions]);
+  }, [selectedRoom, fetchTables, fetchSections, fetchLayoutElements, fetchPendingTransactions]);
 
   // Fetch pending transactions periodically
   useEffect(() => {
@@ -340,11 +368,80 @@ export default function TableLayout({ onLoadTransaction }: TableLayoutProps = {}
         </div>
       )}
 
-      {/* Canvas */}
+      {/* Main content: Sections sidebar + Canvas */}
       {selectedRoom && (
+        <div className="flex flex-1 min-h-0 gap-4">
+          {/* Sections panel (collapsible) */}
+          <div className="w-72 flex-shrink-0 bg-white border border-gray-200 rounded-lg overflow-hidden flex flex-col">
+            <button
+              type="button"
+              onClick={() => setSectionsPanelOpen(!sectionsPanelOpen)}
+              className="flex items-center justify-between px-3 py-2.5 text-left font-semibold text-gray-700 bg-gray-50 border-b border-gray-200"
+            >
+              <span>Sections</span>
+              <span className="text-gray-500">{sectionsPanelOpen ? '▼' : '▶'}</span>
+            </button>
+            {sectionsPanelOpen && (
+              <div className="p-2 overflow-y-auto flex-1">
+                <button
+                  type="button"
+                  onClick={() => setSectionModal({ mode: 'add' })}
+                  className="w-full mb-2 text-xs font-medium text-white bg-indigo-600 hover:bg-indigo-700 rounded px-2 py-1.5"
+                >
+                  + Add Section
+                </button>
+                {sections.map((sec) => {
+                  const tableCount = tables.filter((t) => t.section_id === sec.id).length;
+                  return (
+                    <div
+                      key={sec.id}
+                      className="flex items-center gap-2 py-1.5 px-2 rounded-md bg-gray-50 border border-gray-200 mb-1"
+                    >
+                      <div
+                        className="w-3.5 h-3.5 rounded flex-shrink-0 border border-gray-300"
+                        style={{ backgroundColor: sec.color || '#E5E7EB' }}
+                      />
+                      <span className="flex-1 text-sm font-medium text-gray-900 truncate">{sec.name}</span>
+                      <span className="text-xs text-gray-500">{tableCount} tables</span>
+                      <button
+                        type="button"
+                        onClick={() => setSectionModal({ mode: 'edit', section: sec })}
+                        className="p-0.5 text-gray-400 hover:text-gray-600"
+                        title="Edit section"
+                      >
+                        ✏️
+                      </button>
+                      <button
+                        type="button"
+                        onClick={async () => {
+                          if (!window.confirm(`Delete section "${sec.name}"? Tables in this section will become unassigned.`)) return;
+                          try {
+                            await window.electronAPI?.deleteRestaurantSection?.(sec.id);
+                            await fetchSections();
+                            await fetchTables();
+                          } catch (e) {
+                            console.error(e);
+                          }
+                        }}
+                        className="p-0.5 text-gray-400 hover:text-red-600"
+                        title="Delete section"
+                      >
+                        🗑
+                      </button>
+                    </div>
+                  );
+                })}
+                <div className="text-xs text-gray-500 pt-1 px-2 border-t border-gray-100 mt-1">
+                  Unassigned: {tables.filter((t) => t.section_id == null).length} tables
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* Canvas */}
         <div 
           ref={canvasContainerRef}
-          className="flex-1 min-h-0"
+          className="flex-1 min-h-0 min-w-0"
           style={{
             ...(rooms.find(r => r.id === selectedRoom)?.canvas_width && rooms.find(r => r.id === selectedRoom)?.canvas_height
               ? {
@@ -507,15 +604,19 @@ export default function TableLayout({ onLoadTransaction }: TableLayoutProps = {}
                 (MIN_SIZE_PERCENT / 100) * canvasSize.height
               );
 
-              // Find pending transaction for this table
+              // Find pending transaction and section for this table
               const tableTransaction = pendingTransactions.find(
                 tx => tx.table_id === table.id
               );
+              const tableSection = table.section_id != null
+                ? sections.find((s) => s.id === table.section_id)
+                : null;
 
               return (
                 <TableDisplay
                   key={table.id}
                   table={table}
+                  section={tableSection}
                   pixelX={pixelX}
                   pixelY={pixelY}
                   pixelWidth={Math.max(pixelWidth, minPixelSize)}
@@ -525,11 +626,13 @@ export default function TableLayout({ onLoadTransaction }: TableLayoutProps = {}
                   transaction={tableTransaction}
                   currentTime={currentTime}
                   onLoadTransaction={onLoadTransaction}
+                  onEditTable={() => setEditTableModal(table)}
                 />
               );
               });
             })()}
           </div>
+        </div>
         </div>
       )}
 
@@ -542,6 +645,33 @@ export default function TableLayout({ onLoadTransaction }: TableLayoutProps = {}
           </div>
         </div>
       )}
+
+      {/* Section Add/Edit Modal */}
+      {sectionModal && selectedRoom && (
+        <SectionModal
+          mode={sectionModal.mode}
+          section={sectionModal.section}
+          roomId={selectedRoom}
+          onClose={() => setSectionModal(null)}
+          onSaved={async () => {
+            setSectionModal(null);
+            await fetchSections();
+          }}
+        />
+      )}
+
+      {/* Edit Table Modal */}
+      {editTableModal && (
+        <EditTableModal
+          table={editTableModal}
+          sections={sections}
+          onClose={() => setEditTableModal(null)}
+          onSaved={async () => {
+            setEditTableModal(null);
+            await fetchTables();
+          }}
+        />
+      )}
     </div>
   );
 }
@@ -549,6 +679,7 @@ export default function TableLayout({ onLoadTransaction }: TableLayoutProps = {}
 // Table Display Component — timer/content layout aligned with salespulse (no overlap on square, narrow padding)
 function TableDisplay({
   table,
+  section,
   pixelX,
   pixelY,
   pixelWidth,
@@ -557,9 +688,11 @@ function TableDisplay({
   smallFontSize,
   transaction,
   currentTime,
-  onLoadTransaction
+  onLoadTransaction,
+  onEditTable,
 }: {
   table: Table;
+  section?: Section | null;
   pixelX: number;
   pixelY: number;
   pixelWidth: number;
@@ -569,6 +702,7 @@ function TableDisplay({
   transaction?: PendingTransaction;
   currentTime: Date;
   onLoadTransaction?: (transactionId: string) => void;
+  onEditTable?: () => void;
 }) {
   const timerFontSize = Math.max(6, fontSize * 0.9);
   const timerPadV = Math.max(1, Math.round(timerFontSize * 0.12));
@@ -601,6 +735,18 @@ function TableDisplay({
     }
   };
 
+  const handleDoubleClick = () => {
+    onEditTable?.();
+  };
+
+  // Section color: border uses section color; optional light tint (hex + alpha for overlay)
+  const sectionColor = section?.color ?? '#E5E7EB';
+  const borderColor = section ? sectionColor : '#374151';
+  const defaultBg = isOccupied ? 'rgb(251 146 60)' : 'rgb(96 165 250)';
+  const bgWithTint = section && sectionColor.length >= 7
+    ? `linear-gradient(135deg, ${defaultBg} 0%, ${sectionColor}22 100%)`
+    : defaultBg;
+
   return (
     <div
       style={{
@@ -609,20 +755,25 @@ function TableDisplay({
         top: pixelY,
         width: pixelWidth,
         height: pixelHeight,
-        zIndex: 2, // Ensure tables are above layout elements
+        zIndex: 2,
       }}
-      className={isOccupied && onLoadTransaction ? "cursor-pointer" : "cursor-default"}
+      className={isOccupied && onLoadTransaction ? 'cursor-pointer' : 'cursor-default'}
       onClick={handleTableClick}
+      onDoubleClick={handleDoubleClick}
+      title={onEditTable ? 'Double-click to edit table' : undefined}
     >
       <div
         className={`w-full h-full flex flex-col items-center justify-center relative overflow-hidden ${
           table.shape === 'circle' ? 'rounded-full' : 'rounded-lg'
-        } ${isOccupied ? 'bg-orange-400' : 'bg-blue-400'} text-gray-900 border-2 border-gray-800 shadow-lg transition-colors ${
-          isOccupied && onLoadTransaction ? 'hover:bg-orange-500' : ''
+        } text-gray-900 border-2 shadow-lg transition-colors ${
+          isOccupied && onLoadTransaction ? 'hover:opacity-90' : ''
         }`}
         style={{
           minWidth: '40px',
           minHeight: '40px',
+          backgroundColor: bgWithTint.startsWith('linear') ? undefined : bgWithTint,
+          backgroundImage: bgWithTint.startsWith('linear') ? bgWithTint : undefined,
+          borderColor,
         }}
       >
         {/* Timer — scaled padding; top offset included in main content margin to avoid overlap on square */}
@@ -659,6 +810,189 @@ function TableDisplay({
           <div className="opacity-75 whitespace-nowrap leading-tight" style={{ fontSize: `${smallFontSize}px` }}>
             {table.capacity}p
           </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+const COLOR_PRESETS = ['#bfdbfe', '#bbf7d0', '#fde68a', '#fecaca', '#e9d5ff', '#fed7aa', '#e5e7eb'];
+
+function SectionModal({
+  mode,
+  section,
+  roomId,
+  onClose,
+  onSaved,
+}: {
+  mode: 'add' | 'edit';
+  section?: Section;
+  roomId: number;
+  onClose: () => void;
+  onSaved: () => void;
+}) {
+  const [name, setName] = useState(section?.name ?? '');
+  const [color, setColor] = useState(section?.color ?? COLOR_PRESETS[0]);
+  const [saving, setSaving] = useState(false);
+
+  const handleSave = async () => {
+    if (!name.trim()) return;
+    setSaving(true);
+    try {
+      const api = window.electronAPI;
+      if (mode === 'add') {
+        await api?.createRestaurantSection?.({ room_id: roomId, name: name.trim(), color });
+      } else if (section?.id) {
+        await api?.updateRestaurantSection?.({ id: section.id, name: name.trim(), color });
+      }
+      onSaved();
+    } catch (e) {
+      console.error(e);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 bg-black/30 flex items-center justify-center z-50" onClick={onClose}>
+      <div className="bg-white rounded-xl shadow-xl p-5 w-80" onClick={(e) => e.stopPropagation()}>
+        <h3 className="font-bold text-gray-900 mb-4">{mode === 'add' ? 'Add Section' : 'Edit Section'}</h3>
+        <label className="block text-xs font-semibold text-gray-600 mb-1">Section Name</label>
+        <input
+          type="text"
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+          placeholder="e.g. VIP Area"
+          className="w-full border border-gray-300 rounded-md px-2.5 py-2 text-sm mb-3"
+        />
+        <label className="block text-xs font-semibold text-gray-600 mb-1">Color</label>
+        <div className="flex items-center gap-2 flex-wrap mb-4">
+          <div
+            className="w-8 h-8 rounded-md border-2 border-gray-300"
+            style={{ backgroundColor: color }}
+          />
+          {COLOR_PRESETS.map((preset) => (
+            <button
+              key={preset}
+              type="button"
+              className={`w-5 h-5 rounded border-2 ${color === preset ? 'border-gray-700' : 'border-transparent'}`}
+              style={{ backgroundColor: preset }}
+              onClick={() => setColor(preset)}
+            />
+          ))}
+        </div>
+        <div className="flex justify-end gap-2">
+          <button type="button" onClick={onClose} className="px-4 py-2 rounded-md bg-gray-100 text-gray-700 text-sm">
+            Cancel
+          </button>
+          <button type="button" onClick={handleSave} disabled={saving || !name.trim()} className="px-4 py-2 rounded-md bg-indigo-600 text-white text-sm disabled:opacity-50">
+            {saving ? 'Saving…' : 'Save'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function EditTableModal({
+  table,
+  sections,
+  onClose,
+  onSaved,
+}: {
+  table: Table;
+  sections: Section[];
+  onClose: () => void;
+  onSaved: () => void;
+}) {
+  const [tableNumber, setTableNumber] = useState(table.table_number);
+  const [capacity, setCapacity] = useState(table.capacity);
+  const [shape, setShape] = useState(table.shape);
+  const [sectionId, setSectionId] = useState<number | ''>(table.section_id ?? '');
+  const [saving, setSaving] = useState(false);
+
+  const handleSave = async () => {
+    setSaving(true);
+    try {
+      await window.electronAPI?.updateRestaurantTable?.({
+        id: table.id,
+        table_number: tableNumber.trim(),
+        capacity,
+        shape,
+        section_id: sectionId === '' ? null : (sectionId as number),
+      });
+      onSaved();
+    } catch (e) {
+      console.error(e);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const selectedSection = sectionId !== '' ? sections.find((s) => s.id === sectionId) : null;
+
+  return (
+    <div className="fixed inset-0 bg-black/30 flex items-center justify-center z-50" onClick={onClose}>
+      <div className="bg-white rounded-xl shadow-xl p-5 w-[340px]" onClick={(e) => e.stopPropagation()}>
+        <h3 className="font-bold text-gray-900 mb-4">Edit Table</h3>
+        <div className="space-y-3">
+          <div>
+            <label className="block text-xs font-semibold text-gray-600 mb-1">Table Number</label>
+            <input
+              type="text"
+              value={tableNumber}
+              onChange={(e) => setTableNumber(e.target.value)}
+              className="w-full border border-gray-300 rounded-md px-2.5 py-2 text-sm"
+            />
+          </div>
+          <div>
+            <label className="block text-xs font-semibold text-gray-600 mb-1">Capacity</label>
+            <input
+              type="number"
+              min={1}
+              value={capacity}
+              onChange={(e) => setCapacity(Number(e.target.value) || 4)}
+              className="w-full border border-gray-300 rounded-md px-2.5 py-2 text-sm"
+            />
+          </div>
+          <div>
+            <label className="block text-xs font-semibold text-gray-600 mb-1">Shape</label>
+            <select
+              value={shape}
+              onChange={(e) => setShape(e.target.value as 'circle' | 'rectangle')}
+              className="w-full border border-gray-300 rounded-md px-2.5 py-2 text-sm"
+            >
+              <option value="circle">Circle</option>
+              <option value="rectangle">Rectangle</option>
+            </select>
+          </div>
+          <div>
+            <label className="block text-xs font-semibold text-gray-600 mb-1">Section</label>
+            <select
+              value={sectionId}
+              onChange={(e) => setSectionId(e.target.value === '' ? '' : Number(e.target.value))}
+              className="w-full border border-gray-300 rounded-md px-2.5 py-2 text-sm"
+            >
+              <option value="">— No Section —</option>
+              {sections.map((s) => (
+                <option key={s.id} value={s.id}>{s.name}</option>
+              ))}
+            </select>
+            {selectedSection && (
+              <div className="flex items-center gap-1.5 mt-1">
+                <div className="w-3 h-3 rounded border border-gray-300" style={{ backgroundColor: selectedSection.color }} />
+                <span className="text-xs text-gray-500">{selectedSection.name}</span>
+              </div>
+            )}
+          </div>
+        </div>
+        <div className="flex justify-end gap-2 mt-4">
+          <button type="button" onClick={onClose} className="px-4 py-2 rounded-md bg-gray-100 text-gray-700 text-sm">
+            Cancel
+          </button>
+          <button type="button" onClick={handleSave} disabled={saving} className="px-4 py-2 rounded-md bg-green-600 text-white text-sm disabled:opacity-50">
+            {saving ? 'Saving…' : 'Save'}
+          </button>
         </div>
       </div>
     </div>

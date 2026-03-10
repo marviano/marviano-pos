@@ -395,11 +395,29 @@ export async function GET(request: NextRequest) {
       counts.restaurantRooms = 0;
     }
 
+    // Sync Restaurant Sections (after rooms, before tables)
+    try {
+      const restaurantSections = await queryVps<unknown[]>(`
+        SELECT rs.id, rs.room_id, rs.name, rs.color, rs.created_at, rs.updated_at
+        FROM restaurant_sections rs
+        INNER JOIN restaurant_rooms rr ON rs.room_id = rr.id
+        WHERE rr.business_id = ?
+        ORDER BY rs.room_id ASC, rs.name ASC
+      `, [BUSINESS_ID] as (string | number)[]);
+      syncResults.restaurantSections = restaurantSections;
+      counts.restaurantSections = restaurantSections.length;
+      console.log(`✅ Synced ${restaurantSections.length} restaurant sections`);
+    } catch (error: unknown) {
+      console.warn('⚠️ Failed to sync restaurant sections:', error);
+      syncResults.restaurantSections = [];
+      counts.restaurantSections = 0;
+    }
+
     // Sync Restaurant Tables
     try {
       const restaurantTables = await queryVps<unknown[]>(`
         SELECT rt.id, rt.room_id, rt.table_number, rt.position_x, rt.position_y, 
-               rt.width, rt.height, rt.capacity, rt.shape, rt.created_at, rt.updated_at
+               rt.width, rt.height, rt.capacity, rt.shape, rt.section_id, rt.created_at, rt.updated_at
         FROM restaurant_tables rt
         INNER JOIN restaurant_rooms rr ON rt.room_id = rr.id
         WHERE rr.business_id = ?

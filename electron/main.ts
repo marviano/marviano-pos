@@ -16537,6 +16537,109 @@ ipcMain.handle('get-restaurant-layout-elements', async (event, roomId: number) =
   }
 });
 
+// Restaurant sections (per room)
+ipcMain.handle('get-restaurant-sections', async (event, roomId: number) => {
+  try {
+    const query = `
+      SELECT * FROM restaurant_sections
+      WHERE room_id = ?
+      ORDER BY name ASC
+    `;
+    return await executeQuery<RowArray>(query, [roomId]);
+  } catch (error) {
+    console.error('Error getting restaurant sections:', error);
+    return [];
+  }
+});
+
+ipcMain.handle('create-restaurant-section', async (event, payload: { room_id: number; name: string; color?: string }) => {
+  try {
+    const color = payload.color ?? '#E5E7EB';
+    const pool = getMySQLPool();
+    const [result] = await pool.execute(
+      'INSERT INTO restaurant_sections (room_id, name, color) VALUES (?, ?, ?)',
+      [payload.room_id, payload.name, color]
+    ) as [{ insertId: number; affectedRows: number }, unknown];
+    const id = result.insertId;
+    if (!id) throw new Error('Insert failed');
+    const row = await executeQueryOne<RowArray>('SELECT * FROM restaurant_sections WHERE id = ?', [id]);
+    return row ?? { id, room_id: payload.room_id, name: payload.name, color };
+  } catch (error) {
+    console.error('Error creating restaurant section:', error);
+    throw error;
+  }
+});
+
+ipcMain.handle('update-restaurant-section', async (event, payload: { id: number; name?: string; color?: string }) => {
+  try {
+    const updates: string[] = [];
+    const params: (string | number)[] = [];
+    if (payload.name !== undefined) {
+      updates.push('name = ?');
+      params.push(payload.name);
+    }
+    if (payload.color !== undefined) {
+      updates.push('color = ?');
+      params.push(payload.color);
+    }
+    if (updates.length === 0) return null;
+    params.push(payload.id);
+    await executeUpdate(
+      `UPDATE restaurant_sections SET ${updates.join(', ')} WHERE id = ?`,
+      params
+    );
+    const row = await executeQueryOne<RowArray>('SELECT * FROM restaurant_sections WHERE id = ?', [payload.id]);
+    return row;
+  } catch (error) {
+    console.error('Error updating restaurant section:', error);
+    throw error;
+  }
+});
+
+ipcMain.handle('delete-restaurant-section', async (event, sectionId: number) => {
+  try {
+    await executeUpdate('DELETE FROM restaurant_sections WHERE id = ?', [sectionId]);
+    return { success: true };
+  } catch (error) {
+    console.error('Error deleting restaurant section:', error);
+    throw error;
+  }
+});
+
+ipcMain.handle('update-restaurant-table', async (event, payload: { id: number; table_number?: string; capacity?: number; shape?: string; section_id?: number | null }) => {
+  try {
+    const updates: string[] = [];
+    const params: (string | number | null)[] = [];
+    if (payload.table_number !== undefined) {
+      updates.push('table_number = ?');
+      params.push(payload.table_number);
+    }
+    if (payload.capacity !== undefined) {
+      updates.push('capacity = ?');
+      params.push(payload.capacity);
+    }
+    if (payload.shape !== undefined) {
+      updates.push('shape = ?');
+      params.push(payload.shape);
+    }
+    if (payload.section_id !== undefined) {
+      updates.push('section_id = ?');
+      params.push(payload.section_id);
+    }
+    if (updates.length === 0) return null;
+    params.push(payload.id);
+    await executeUpdate(
+      `UPDATE restaurant_tables SET ${updates.join(', ')} WHERE id = ?`,
+      params
+    );
+    const row = await executeQueryOne<RowArray>('SELECT * FROM restaurant_tables WHERE id = ?', [payload.id]);
+    return row;
+  } catch (error) {
+    console.error('Error updating restaurant table:', error);
+    throw error;
+  }
+});
+
 // IPC handlers for syncing restaurant table layout data
 ipcMain.handle('localdb-upsert-restaurant-rooms', async (event, rows: RowArray) => {
   try {
@@ -16634,6 +16737,96 @@ ipcMain.handle('localdb-upsert-restaurant-rooms', async (event, rows: RowArray) 
   }
 });
 
+ipcMain.handle('localdb-upsert-restaurant-sections', async (event, rows: RowArray) => {
+  try {
+    const queries: Array<{ sql: string; params?: (string | number | null | boolean)[] }> = [];
+    let skippedCount = 0;
+
+    for (const r of rows) {
+      const getId = () => {
+        const val = r.id;
+        if (typeof val === 'number') return val;
+        if (typeof val === 'string') {
+          const num = Number(val);
+          return isNaN(num) ? null : num;
+        }
+        return null;
+      };
+      const getNumber = (key: string) => {
+        const val = r[key];
+        if (typeof val === 'number') return val;
+        if (typeof val === 'string') {
+          const num = Number(val);
+          return isNaN(num) ? null : num;
+        }
+        return null;
+      };
+      const getString = (key: string) => (typeof r[key] === 'string' ? r[key] as string : null);
+      const getDate = (key: string) => {
+        const val = r[key];
+        if (val instanceof Date) return val;
+        if (typeof val === 'string' || typeof val === 'number') return val;
+        return null;
+      };
+
+      const sectionId = getId();
+      const roomId = getNumber('room_id');
+
+      if (roomId) {
+        try {
+          const roomExists = await executeQueryOne<{ id: number }>('SELECT id FROM restaurant_rooms WHERE id = ? LIMIT 1', [roomId]);
+          if (!roomExists) {
+            console.warn(`⚠️ [RESTAURANT SECTIONS] Skipping section ${sectionId}: room_id ${roomId} does not exist`);
+            skippedCount++;
+            continue;
+          }
+        } catch (checkError) {
+          console.warn(`⚠️ [RESTAURANT SECTIONS] Failed to verify room_id ${roomId}:`, checkError);
+          skippedCount++;
+          continue;
+        }
+      }
+
+      const createdDate = getDate('created_at');
+      const updatedDate = getDate('updated_at');
+      const createdAt = createdDate ? toMySQLDateTime(createdDate as string | number | Date) : toMySQLDateTime(new Date());
+      const updatedAt = updatedDate ? toMySQLDateTime(updatedDate as string | number | Date) : toMySQLDateTime(new Date());
+
+      queries.push({
+        sql: `INSERT INTO restaurant_sections (
+          id, room_id, name, color, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?)
+        ON DUPLICATE KEY UPDATE
+          room_id=VALUES(room_id),
+          name=VALUES(name),
+          color=VALUES(color),
+          created_at=VALUES(created_at),
+          updated_at=VALUES(updated_at)`,
+        params: [
+          sectionId,
+          roomId,
+          getString('name'),
+          getString('color') ?? '#E5E7EB',
+          createdAt,
+          updatedAt
+        ]
+      });
+    }
+
+    if (queries.length > 0) {
+      await executeTransaction(queries);
+      await upsertMasterDataToSystemPos(queries);
+      if (skippedCount > 0) {
+        console.log(`⚠️ [RESTAURANT SECTIONS] Skipped ${skippedCount} sections due to missing rooms`);
+      }
+    }
+    return { success: true };
+  } catch (error) {
+    console.error('Error upserting restaurant sections:', error);
+    return { success: false };
+  }
+});
+
 ipcMain.handle('localdb-upsert-restaurant-tables', async (event, rows: RowArray) => {
   try {
     const queries: Array<{ sql: string; params?: (string | number | null | boolean)[] }> = [];
@@ -16690,10 +16883,12 @@ ipcMain.handle('localdb-upsert-restaurant-tables', async (event, rows: RowArray)
       const createdAt = createdDate ? toMySQLDateTime(createdDate as string | number | Date) : toMySQLDateTime(new Date());
       const updatedAt = updatedDate ? toMySQLDateTime(updatedDate as string | number | Date) : toMySQLDateTime(new Date());
 
+      const sectionId = getNumber('section_id') ?? null;
+
       queries.push({
         sql: `INSERT INTO restaurant_tables (
-          id, room_id, table_number, position_x, position_y, width, height, capacity, shape, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          id, room_id, table_number, position_x, position_y, width, height, capacity, shape, section_id, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON DUPLICATE KEY UPDATE
           room_id=VALUES(room_id),
           table_number=VALUES(table_number),
@@ -16703,6 +16898,7 @@ ipcMain.handle('localdb-upsert-restaurant-tables', async (event, rows: RowArray)
           height=VALUES(height),
           capacity=VALUES(capacity),
           shape=VALUES(shape),
+          section_id=VALUES(section_id),
           created_at=VALUES(created_at),
           updated_at=VALUES(updated_at)`,
         params: [
@@ -16715,6 +16911,7 @@ ipcMain.handle('localdb-upsert-restaurant-tables', async (event, rows: RowArray)
           getNumber('height') ?? 5.0,
           getNumber('capacity') ?? 4,
           getString('shape') ?? 'circle',
+          sectionId,
           createdAt,
           updatedAt
         ]
