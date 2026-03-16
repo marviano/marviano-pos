@@ -201,6 +201,7 @@ interface ReportDataPayload {
   customizationSales: CustomizationSale[];
   voucherBreakdown: VoucherBreakdown;
   refunds: RefundDetail[];
+  refundExcItems: RefundExcDetail[];
   cancelledItems: CancelledItemDetail[];
 }
 
@@ -223,6 +224,20 @@ interface RefundDetail {
   waiter_name?: string | null;
 }
 
+interface RefundExcDetail {
+  uuid_id: string;
+  nama: string;
+  pax: number;
+  tanggal: string;
+  jam: string;
+  no_hp: string | null;
+  jumlah_refund: number;
+  alasan: string | null;
+  created_by_email: string | null;
+  created_at: string;
+}
+
+
 const getGmt7DayBounds = (dateString?: string | null): { dayStartUtc: string; dayEndUtc: string } | null => {
   if (!dateString) {
     return null;
@@ -242,6 +257,32 @@ const getGmt7DayBounds = (dateString?: string | null): { dayStartUtc: string; da
     dayStartUtc: new Date(dayStartGmt7.getTime() - gmt7Offset).toISOString(),
     dayEndUtc: new Date(dayEndGmt7.getTime() - gmt7Offset).toISOString()
   };
+};
+
+/** Month is 1-based (1=Jan, 12=Dec). If mtd is true and (year, month) is current month, returns month start to end of today (GMT+7); else returns full month. */
+const getGmt7MonthBounds = (
+  year: number,
+  month: number,
+  mtd: boolean
+): { dayStartUtc: string; dayEndUtc: string } => {
+  const gmt7Offset = 7 * 60 * 60 * 1000;
+  const now = new Date();
+  const gmt7Now = new Date(now.getTime() + gmt7Offset);
+  const currentYear = gmt7Now.getUTCFullYear();
+  const currentMonth = gmt7Now.getUTCMonth() + 1; // 1-based
+  const monthStartGmt7 = new Date(Date.UTC(year, month - 1, 1, 0, 0, 0, 0));
+  const lastDay = new Date(Date.UTC(year, month, 0)).getUTCDate();
+  const monthEndGmt7 = new Date(Date.UTC(year, month - 1, lastDay, 23, 59, 59, 999));
+  const dayStartUtc = new Date(monthStartGmt7.getTime() - gmt7Offset).toISOString();
+  let dayEndUtc: string;
+  if (mtd && year === currentYear && month === currentMonth) {
+    const today = gmt7Now.getUTCDate();
+    const mtdEndGmt7 = new Date(Date.UTC(year, month - 1, today, 23, 59, 59, 999));
+    dayEndUtc = new Date(mtdEndGmt7.getTime() - gmt7Offset).toISOString();
+  } else {
+    dayEndUtc = new Date(monthEndGmt7.getTime() - gmt7Offset).toISOString();
+  }
+  return { dayStartUtc, dayEndUtc };
 };
 
 const getElectronAPI = () => (typeof window !== 'undefined' ? window.electronAPI : undefined);
@@ -389,6 +430,7 @@ export default function GantiShift() {
   const [customizationSales, setCustomizationSales] = useState<CustomizationSale[]>([]);
   const [voucherBreakdown, setVoucherBreakdown] = useState<VoucherBreakdown>({});
   const [refunds, setRefunds] = useState<RefundDetail[]>([]);
+  const [refundExcItems, setRefundExcItems] = useState<RefundExcDetail[]>([]);
   const [cancelledItems, setCancelledItems] = useState<CancelledItemDetail[]>([]);
   const [recalculatedCategory1Breakdown, setRecalculatedCategory1Breakdown] = useState<Category1Breakdown[]>([]);
   const [recalculatedCategory2Breakdown, setRecalculatedCategory2Breakdown] = useState<Category2Breakdown[]>([]);
@@ -739,6 +781,14 @@ export default function GantiShift() {
   });
   const [ringkasanOnly, setRingkasanOnly] = useState(false);
   const [showSettingsModal, setShowSettingsModal] = useState(false);
+  const [printMonthlySelected, setPrintMonthlySelected] = useState(false);
+  const [printSelectedMonth, setPrintSelectedMonth] = useState<string>(() => {
+    const d = new Date();
+    const gmt7 = new Date(d.getTime() + 7 * 60 * 60 * 1000);
+    const y = gmt7.getUTCFullYear();
+    const m = gmt7.getUTCMonth() + 1;
+    return `${y}-${String(m).padStart(2, '0')}`;
+  });
 
   // Tab view states
   const [activeTab, setActiveTab] = useState<TabView>('all-day');
@@ -1158,7 +1208,7 @@ export default function GantiShift() {
       const defaultCash: CashSummary = { cash_shift: 0, cash_whole_day: 0 };
 
       // Load all statistics in parallel with error handling
-      const [statsResult, breakdownResult, category1BreakdownResult, category2BreakdownResult, cashResult, productSalesResult, packageSalesResult, refundsResult, voucherBreakdownResult, cancelledItemsResult] = await Promise.allSettled([
+      const [statsResult, breakdownResult, category1BreakdownResult, category2BreakdownResult, cashResult, productSalesResult, packageSalesResult, refundsResult, refundExcResult, voucherBreakdownResult, cancelledItemsResult] = await Promise.allSettled([
         electronAPI.localDbGetShiftStatistics
           ? electronAPI.localDbGetShiftStatistics(null, activeShift.shift_start, activeShift.shift_end, businessId, activeShift.uuid_id)
           : Promise.resolve(defaultStats),
@@ -1189,6 +1239,14 @@ export default function GantiShift() {
             shiftEnd: activeShift.shift_end
           })
           : Promise.resolve<RefundDetail[]>([]),
+        electronAPI.localDbGetShiftRefundExc
+          ? electronAPI.localDbGetShiftRefundExc({
+            businessId: businessId,
+            shiftUuid: activeShift.uuid_id,
+            shiftStart: activeShift.shift_start,
+            shiftEnd: activeShift.shift_end ?? undefined
+          })
+          : Promise.resolve<RefundExcDetail[]>([]),
         electronAPI.localDbGetVoucherBreakdown
           ? electronAPI.localDbGetVoucherBreakdown(null, activeShift.shift_start, activeShift.shift_end, businessId, activeShift.uuid_id)
           : Promise.resolve<VoucherBreakdown>({}),
@@ -1251,6 +1309,8 @@ export default function GantiShift() {
 
       const refundsData = refundsResult.status === 'fulfilled' ? (refundsResult.value as RefundDetail[]) : [];
       setRefunds(refundsData);
+      const refundExcData = refundExcResult.status === 'fulfilled' ? (refundExcResult.value as RefundExcDetail[]) : [];
+      setRefundExcItems(refundExcData);
       const cancelledItemsData = cancelledItemsResult.status === 'fulfilled' ? (cancelledItemsResult.value as CancelledItemDetail[]) : [];
       setCancelledItems(cancelledItemsData);
 
@@ -1366,7 +1426,11 @@ export default function GantiShift() {
           }
           : null;
 
-        const [statsResult, breakdownResult, category1BreakdownResult, category2BreakdownResult, cashResult, productSalesResult, packageSalesResult, voucherBreakdownResult, refundsResult, cancelledItemsResult] = await Promise.allSettled([
+        const refundExcRequestPayload = electronAPI.localDbGetShiftRefundExc
+          ? { businessId: reportBusinessId ?? 0, shiftUuid: shiftUuid ?? undefined, shiftStart: start, shiftEnd: end ?? undefined }
+          : null;
+
+        const [statsResult, breakdownResult, category1BreakdownResult, category2BreakdownResult, cashResult, productSalesResult, packageSalesResult, voucherBreakdownResult, refundsResult, refundExcResult, cancelledItemsResult] = await Promise.allSettled([
           electronAPI.localDbGetShiftStatistics
             ? electronAPI.localDbGetShiftStatistics(userId, start, end, reportBusinessId, shiftUuid ?? undefined, dayShiftUuids.length > 0 ? dayShiftUuids : undefined)
             : Promise.resolve(defaultStats),
@@ -1394,6 +1458,9 @@ export default function GantiShift() {
           refundsRequestPayload && electronAPI.localDbGetShiftRefunds
             ? electronAPI.localDbGetShiftRefunds(refundsRequestPayload)
             : Promise.resolve<RefundDetail[]>([]),
+          refundExcRequestPayload && electronAPI.localDbGetShiftRefundExc
+            ? electronAPI.localDbGetShiftRefundExc(refundExcRequestPayload)
+            : Promise.resolve<RefundExcDetail[]>([]),
           electronAPI.localDbGetShiftCancelledItems
             ? electronAPI.localDbGetShiftCancelledItems(userId, start, end ?? start, reportBusinessId, shiftUuid ?? undefined, dayShiftUuids.length > 0 ? dayShiftUuids : undefined)
             : Promise.resolve<CancelledItemDetail[]>([])
@@ -1456,6 +1523,7 @@ export default function GantiShift() {
 
         const voucherBreakdownPayload = voucherBreakdownResult.status === 'fulfilled' ? (voucherBreakdownResult.value as VoucherBreakdown) : {};
         const refundsPayload = refundsResult.status === 'fulfilled' ? (refundsResult.value as RefundDetail[]) : [];
+        const refundExcPayload = refundExcResult.status === 'fulfilled' ? (refundExcResult.value as RefundExcDetail[]) : [];
         const cancelledItemsPayload = cancelledItemsResult.status === 'fulfilled' ? (cancelledItemsResult.value as CancelledItemDetail[]) : [];
         return {
           statistics: {
@@ -1474,6 +1542,7 @@ export default function GantiShift() {
           customizationSales: productSalesPayload.customizations || [],
           voucherBreakdown: voucherBreakdownPayload ?? {},
           refunds: refundsPayload,
+          refundExcItems: refundExcPayload,
           cancelledItems: cancelledItemsPayload
         };
       } catch (error) {
@@ -1726,6 +1795,13 @@ export default function GantiShift() {
     return () => window.removeEventListener('refund-completed', handler);
   }, []);
 
+  // Refresh Ringkasan when a Refund Exc. is created (e.g. from RefundExcModal)
+  useEffect(() => {
+    const handler = () => handleRefreshRef.current();
+    window.addEventListener('refund-exc-created', handler);
+    return () => window.removeEventListener('refund-exc-created', handler);
+  }, []);
+
   // Get today's date in GMT+7 format (YYYY-MM-DD)
   const getTodayGmt7 = (): string => {
     const now = new Date();
@@ -1845,12 +1921,13 @@ export default function GantiShift() {
       return;
     }
 
-    // Validate exactly one selection: Whole Day OR one shift (not both, not multiple shifts)
+    // Validate exactly one selection: Whole Day OR one shift OR Monthly (with month chosen)
     const selectedShifts = printSelections.filter(s => s.selected);
-    const hasValidSelection = (printWholeDaySelected && selectedShifts.length === 0) ||
-      (!printWholeDaySelected && selectedShifts.length === 1);
+    const hasValidSelection = (printWholeDaySelected && selectedShifts.length === 0 && !printMonthlySelected) ||
+      (printMonthlySelected && printSelectedMonth) ||
+      (!printWholeDaySelected && !printMonthlySelected && selectedShifts.length === 1);
     if (!hasValidSelection) {
-      setError('Silakan pilih satu laporan untuk dicetak (Whole Day atau satu shift).');
+      setError('Silakan pilih satu laporan untuk dicetak (Whole Day, Bulanan, atau satu shift).');
       return;
     }
 
@@ -1981,6 +2058,7 @@ export default function GantiShift() {
             statistics: dayReportData.statistics,
             gross_total_omset: dayGrossOmset,
             refunds: dayReportData.refunds ?? [],
+            refundExcItems: dayReportData.refundExcItems ?? [],
             cancelledItems: dayReportData.cancelledItems ?? [],
             productSales: productsForPrint,
             packageSalesBreakdown: dayReportData.packageSalesBreakdown ?? [],
@@ -2025,6 +2103,130 @@ export default function GantiShift() {
           await new Promise(r => setTimeout(r, 500));
         } catch (error) {
           console.error('Error printing whole day report:', error);
+          throw error;
+        }
+      } else if (printMonthlySelected && printSelectedMonth) {
+        try {
+          const [y, m] = printSelectedMonth.split('-').map(Number);
+          const now = new Date();
+          const gmt7 = new Date(now.getTime() + 7 * 60 * 60 * 1000);
+          const isCurrentMonth = y === gmt7.getUTCFullYear() && m === gmt7.getUTCMonth() + 1;
+          const lastDayOfMonth = new Date(Date.UTC(y, m, 0)).getUTCDate();
+          const isMonthFinished = !isCurrentMonth || gmt7.getUTCDate() >= lastDayOfMonth;
+          const isMtd = isCurrentMonth && !isMonthFinished;
+          const monthBounds = getGmt7MonthBounds(y, m, isMtd);
+          const monthName = new Date(y, m - 1, 1).toLocaleDateString('id-ID', { month: 'long', year: 'numeric' });
+          const reportLabel = `Laporan Bulanan - ${monthName}${isMtd ? ' (MTD)' : ''}`;
+
+          console.log('📊 [PRINT MONTHLY] Starting...', monthBounds, reportLabel);
+
+          const electronAPIForShifts = getElectronAPI();
+          let dayShiftsForReport: Shift[] = [];
+          if (electronAPIForShifts?.localDbGetShifts) {
+            const shiftsResult = await electronAPIForShifts.localDbGetShifts({
+              businessId: businessId,
+              startDate: monthBounds.dayStartUtc,
+              endDate: monthBounds.dayEndUtc
+            });
+            dayShiftsForReport = (shiftsResult?.shifts || []) as Shift[];
+          }
+
+          const dayReportData = await fetchReportPayload({
+            start: monthBounds.dayStartUtc,
+            end: monthBounds.dayEndUtc,
+            userId: null,
+            list_of_shifts: dayShiftsForReport
+          });
+
+          const dayCash = dayReportData.cashSummary;
+          const dayCashSales = dayCash.cash_shift_sales ?? dayCash.cash_shift ?? 0;
+          const dayCashRefunds = dayCash.cash_whole_day_refunds ?? dayCash.cash_shift_refunds ?? 0;
+          let modalAwalWholeDay = 0;
+          if (dayShiftsForReport.length > 0) {
+            modalAwalWholeDay = dayShiftsForReport[0].modal_awal || 0;
+          }
+          const wholeDayKasExpected = modalAwalWholeDay + dayCashSales;
+          const lastShiftWithKas = dayShiftsForReport.length > 0
+            ? [...dayShiftsForReport].reverse().find((s) => s.kas_akhir != null && s.kas_akhir !== undefined) ?? null
+            : null;
+          const wholeDayKasAkhir = lastShiftWithKas != null ? Number(lastShiftWithKas.kas_akhir) : null;
+          let wholeDayKasSelisih: number | null = null;
+          let wholeDayKasSelisihLabel: 'balanced' | 'plus' | 'minus' | null = null;
+          if (wholeDayKasAkhir != null) {
+            const computed = Math.round(Number((wholeDayKasAkhir - wholeDayKasExpected).toFixed(2)));
+            wholeDayKasSelisih = computed;
+            wholeDayKasSelisihLabel = Math.abs(computed) < 1 ? 'balanced' : (computed > 0 ? 'plus' : 'minus');
+          }
+
+          const productsForPrint = groupProducts
+            ? groupProductSalesForPrint(dayReportData.productSales)
+            : dayReportData.productSales;
+          const recalculatedCategory1 = await recalculateCategory1ForPrint(
+            dayReportData.productSales,
+            dayReportData.category1Breakdown || [],
+            electronAPI,
+            businessId
+          );
+          const recalculatedCategory2 = await recalculateCategory2ForPrint(
+            dayReportData.productSales,
+            dayReportData.category2Breakdown || [],
+            electronAPI,
+            businessId
+          );
+
+          const dayVoucherSum = VOUCHER_BREAKDOWN_ORDER.reduce(
+            (sum, { key }) => sum + (Number((dayReportData.voucherBreakdown ?? {})[key]?.total) || 0),
+            0
+          );
+          const dayEffectiveDiscount = dayVoucherSum > 0 ? dayVoucherSum : (Number(dayReportData.statistics.total_discount) || 0);
+          const dayGrossOmset = Math.round((Number(dayReportData.statistics.total_amount) || 0) + (Number(dayCashRefunds) || 0) + dayEffectiveDiscount);
+          const result = await electronAPI.printShiftBreakdown({
+            user_name: reportLabel,
+            shift_start: monthBounds.dayStartUtc,
+            shift_end: monthBounds.dayEndUtc,
+            modal_awal: modalAwalWholeDay,
+            statistics: dayReportData.statistics,
+            gross_total_omset: dayGrossOmset,
+            refunds: dayReportData.refunds ?? [],
+            refundExcItems: dayReportData.refundExcItems ?? [],
+            cancelledItems: dayReportData.cancelledItems ?? [],
+            productSales: productsForPrint,
+            packageSalesBreakdown: dayReportData.packageSalesBreakdown ?? [],
+            customizationSales: dayReportData.customizationSales,
+            paymentBreakdown: dayReportData.paymentBreakdown.map(p => ({
+              payment_method_name: p.payment_method_name || p.payment_method_code,
+              transaction_count: p.transaction_count,
+              total_amount: p.total_amount || 0
+            })),
+            category1Breakdown: recalculatedCategory1,
+            category2Breakdown: recalculatedCategory2,
+            voucherBreakdown: dayReportData.voucherBreakdown ?? {},
+            cashSummary: {
+              cash_shift: dayCash.cash_shift ?? 0,
+              cash_shift_sales: dayCashSales,
+              cash_shift_refunds: dayCashRefunds,
+              cash_whole_day: dayCash.cash_whole_day ?? 0,
+              cash_whole_day_sales: dayCash.cash_whole_day_sales ?? dayCash.cash_whole_day ?? 0,
+              cash_whole_day_refunds: dayCash.cash_whole_day_refunds ?? 0,
+              total_cash_in_cashier: wholeDayKasExpected,
+              kas_mulai: modalAwalWholeDay,
+              kas_expected: wholeDayKasExpected,
+              kas_akhir: wholeDayKasAkhir,
+              kas_selisih: wholeDayKasSelisih,
+              kas_selisih_label: wholeDayKasSelisihLabel
+            },
+            business_id: businessId,
+            printerType: 'receiptPrinter',
+            sectionOptions: printSectionOptions
+          });
+
+          if (!result.success) {
+            throw new Error(result.error || 'Gagal mencetak laporan bulanan');
+          }
+          console.log('✅ [PRINT MONTHLY] Success!');
+          await new Promise(r => setTimeout(r, 500));
+        } catch (error) {
+          console.error('Error printing monthly report:', error);
           throw error;
         }
       }
@@ -2100,6 +2302,7 @@ export default function GantiShift() {
             statistics: shiftReportData.statistics,
             gross_total_omset: shiftGrossOmset,
             refunds: shiftReportData.refunds ?? [],
+            refundExcItems: shiftReportData.refundExcItems ?? [],
             cancelledItems: shiftReportData.cancelledItems ?? [],
             productSales: productsForPrint,
             packageSalesBreakdown: shiftReportData.packageSalesBreakdown ?? [],
@@ -2229,6 +2432,7 @@ export default function GantiShift() {
         statistics: reportData.statistics,
         gross_total_omset: customGrossOmset,
         refunds: reportData.refunds ?? [],
+        refundExcItems: reportData.refundExcItems ?? [],
         cancelledItems: reportData.cancelledItems ?? [],
         productSales: productsForPrint,
         packageSalesBreakdown: reportData.packageSalesBreakdown ?? [],
@@ -2341,6 +2545,7 @@ export default function GantiShift() {
         setCustomizationSales(dayData.customizationSales);
         setVoucherBreakdown(dayData.voucherBreakdown ?? {});
         setRefunds(dayData.refunds ?? []);
+        setRefundExcItems(dayData.refundExcItems ?? []);
         setCancelledItems(dayData.cancelledItems ?? []);
         didLoad = true;
       } else {
@@ -2375,6 +2580,7 @@ export default function GantiShift() {
         setCustomizationSales(shiftData.customizationSales);
         setVoucherBreakdown(shiftData.voucherBreakdown ?? {});
         setRefunds(shiftData.refunds ?? []);
+        setRefundExcItems(shiftData.refundExcItems ?? []);
         setCancelledItems(shiftData.cancelledItems ?? []);
         didLoad = true;
       }
@@ -2455,6 +2661,8 @@ export default function GantiShift() {
   const cashShiftRefunds = Number(cashSummary.cash_shift_refunds ?? 0) || 0;
   const cashWholeDayRefunds = Number(cashSummary.cash_whole_day_refunds ?? 0) || 0;
   const totalRefundsActive = activeTab === 'all-day' ? cashWholeDayRefunds : cashShiftRefunds;
+  const totalRefundExcActive = refundExcItems.reduce((s, r) => s + (Number(r.jumlah_refund) || 0), 0);
+  const totalRefundCombined = (Number(totalRefundsActive) || 0) + totalRefundExcActive;
 
   // Get the correct modal awal based on active tab
   let kasMulaiActive = 0;
@@ -2517,7 +2725,7 @@ export default function GantiShift() {
   // Gross total omset (before refund & discount) for Ringkasan. Backend statistics.total_amount is already net of cancelled items.
   const grossTotalOmset =
     (Number(statistics.total_amount) || 0) +
-    (Number(totalRefundsActive) || 0) +
+    totalRefundCombined +
     effectiveTotalDiscount;
   const totalToppingRevenue = customizationSales.reduce((sum, c) => sum + (c.total_revenue || 0), 0);
 
@@ -2917,106 +3125,153 @@ export default function GantiShift() {
                   <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-6">
                     <h2 className="text-xl font-semibold text-gray-800 mb-3 text-center">RINGKASAN</h2>
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                      {/* Left Column - Transaction Summary */}
-                      <div className="space-y-0">
-                        <h3 className="text-xs font-semibold text-gray-700 mb-2 pb-1 border-b border-gray-300">Transaksi</h3>
-                        {/* Total Omset (gross: before refund & discount) */}
-                        <div className="rounded-lg bg-amber-50 border border-amber-200/60 mb-2 px-3 py-2">
-                          <div className="flex items-center py-1">
-                            <span className="text-sm font-semibold text-amber-900">Total Omset <span className="text-xs font-normal text-amber-700/80">(sebelum refund & diskon)</span>:</span>
-                            <span className="flex-grow border-b border-dotted border-amber-300 mx-2"></span>
-                            <span className="text-sm font-bold text-amber-900">{formatRupiah(grossTotalOmset)}</span>
-                          </div>
-                        </div>
-                        {/* Refund - own box with red border */}
-                        <div className="flex items-center py-1.5 rounded-lg px-3 mb-2 bg-red-50 border border-red-200">
-                          <span className="text-xs font-semibold text-red-800">Refund:</span>
-                          <span className="flex-grow border-b border-dotted border-red-200 mx-2"></span>
-                          <span className="text-xs font-bold text-red-700">-{formatRupiah(totalRefundsActive)}</span>
-                        </div>
-                        {/* Diskon Voucher - own box with green border */}
-                        <div className="rounded-lg px-3 py-1.5 mb-2 bg-green-50 border border-green-200/60">
-                          <div className="flex items-center py-0.5">
-                            <span className="text-xs font-semibold text-green-800">Diskon Voucher:</span>
-                            <span className="flex-grow border-b border-dotted border-green-200 mx-2"></span>
-                            <span className="text-xs font-bold text-green-700">
-                              {effectiveTotalDiscount > 0 ? `-${formatRupiah(effectiveTotalDiscount)}` : formatRupiah(0)}
-                            </span>
-                          </div>
-                          {VOUCHER_BREAKDOWN_ORDER.map(({ key, label }) => {
-                            const e = voucherBreakdown[key];
-                            if (!e || e.count <= 0) return null;
-                            return (
-                              <div key={key} className="flex items-center py-0.5 pl-4">
-                                <span className="text-xs text-gray-600">{label} ({e.count}):</span>
-                                <span className="flex-grow border-b border-dotted border-gray-200 mx-2"></span>
-                                <span className="text-xs font-semibold text-green-600">-{formatRupiah(e.total)}</span>
-                              </div>
-                            );
-                          })}
-                        </div>
-                        {/* Grand total = Total Omset - Refund - Diskon Voucher */}
-                        <div className="flex items-center py-1.5 rounded-lg px-3 bg-gray-100 border border-gray-200">
-                          <span className="text-xs font-bold text-gray-800">Grand Total:</span>
-                          <span className="flex-grow border-b border-dotted border-gray-300 mx-2"></span>
-                          <span className="text-sm font-bold text-gray-900">
-                            {formatRupiah(Math.max(0, grossTotalOmset - (Number(totalRefundsActive) || 0) - effectiveTotalDiscount))}
-                          </span>
-                        </div>
+                      {/* Left Column - LKKH (font size via parent; no text-xs/text-sm so it inherits) */}
+                      <div className="space-y-0" style={{ fontSize: '1em' }}>
+                        <h3 className="font-semibold text-gray-700 mb-2 pb-1 border-b border-gray-300">LKKH</h3>
+                        <table className="w-max border-collapse">
+                          <tbody>
+                            {(() => {
+                              const byCat1 = (name: string) =>
+                                category1Breakdown.find((c) => c.category1_name?.toLowerCase() === name.toLowerCase())?.total_amount ?? 0;
+                              const byPayment = (code: string) =>
+                                paymentBreakdown.find((p) => (p.payment_method_code || '').toLowerCase() === code)?.total_amount ?? 0;
+                              const rows: { label: string; value: number; isDeduction?: boolean }[] = [
+                                { label: 'Makanan', value: byCat1('Makanan') },
+                                { label: 'Minuman', value: byCat1('Minuman') },
+                                { label: 'Discount', value: effectiveTotalDiscount, isDeduction: true },
+                                { label: 'Refund', value: totalRefundCombined, isDeduction: true },
+                                { label: 'GOFOOD', value: byPayment('gofood') },
+                                { label: 'SHOPEEFOOD', value: byPayment('shopeefood') },
+                                { label: 'GRABFOOD', value: byPayment('grabfood') },
+                                { label: 'TRANSFER (DEBIT)', value: byPayment('debit') + byPayment('transfer') },
+                                { label: 'QRIS', value: byPayment('qris') + byPayment('qr') },
+                                { label: 'CL/CityLedger', value: byPayment('cl') + byPayment('cityledger') },
+                              ];
+                              return rows.map(({ label, value, isDeduction }) => (
+                                <tr key={label} className="border-b border-gray-100">
+                                  <td className="py-0.5 pr-1 text-gray-700 whitespace-nowrap">{label}</td>
+                                  <td className="py-0.5 px-0.5 text-center text-gray-500 w-px">:</td>
+                                  <td className={`py-0.5 pl-1 text-right font-semibold whitespace-nowrap ${isDeduction && value > 0 ? 'text-red-600' : 'text-gray-900'}`}>
+                                    {isDeduction && value > 0 ? `-${formatRupiah(value)}` : formatRupiah(value)}
+                                  </td>
+                                </tr>
+                              ));
+                            })()}
+                          </tbody>
+                        </table>
                       </div>
 
-                      {/* Right Column - Cash Summary */}
-                      <div className="space-y-0">
-                        <h3 className="text-xs font-semibold text-gray-700 mb-2 pb-1 border-b border-gray-300">Kas</h3>
-                        <div className="flex items-center py-0.5">
-                          <span className="text-xs text-gray-700">Kas Mulai:</span>
-                          <span className="flex-grow border-b border-dotted border-gray-300 mx-2"></span>
-                          <span className="text-xs font-semibold text-gray-900">{formatRupiah(kasMulaiActive)}</span>
-                        </div>
-                        <div className="flex items-center py-0.5">
-                          <span className="text-xs text-gray-700">Cash Sales:</span>
-                          <span className="flex-grow border-b border-dotted border-gray-300 mx-2"></span>
-                          <span className="text-xs font-semibold text-gray-900">{formatRupiah(cashShiftSales)}</span>
-                        </div>
-                        <div className="flex items-center py-0.5">
-                          <span className="text-xs font-semibold text-gray-800">Kas Diharapkan:</span>
-                          <span className="flex-grow border-b border-dotted border-gray-300 mx-2"></span>
-                          <span className="text-xs font-bold text-purple-700">{formatRupiah(kasExpectedActive)}</span>
-                        </div>
-                        <div className="border-t border-gray-300 my-1.5" />
-                        <div className="flex items-center py-0.5">
-                          <span className="text-xs text-gray-700">Jumlah Pesanan:</span>
-                          <span className="flex-grow border-b border-dotted border-gray-300 mx-2"></span>
-                          <span className="text-xs font-semibold text-gray-900">{statistics.order_count} transaksi</span>
-                        </div>
-                        <div className="flex items-center py-0.5">
-                          <span className="text-xs text-gray-700">Jumlah CU:</span>
-                          <span className="flex-grow border-b border-dotted border-gray-300 mx-2"></span>
-                          <span className="text-xs font-semibold text-gray-900">{statistics.total_cu ?? 0}</span>
-                        </div>
-                        {kasAkhirActive !== null && (
-                          <>
-                            <div className="flex items-center py-0.5">
-                              <span className="text-xs text-gray-700">Kas Akhir:</span>
-                              <span className="flex-grow border-b border-dotted border-gray-300 mx-2"></span>
-                              <span className="text-xs font-semibold text-gray-900">{formatRupiah(kasAkhirActive)}</span>
+                      {/* Right Column - Transaksi then Kas (stacked) */}
+                      <div className="flex flex-col gap-4">
+                        {/* Transaksi */}
+                        <div className="space-y-0">
+                          <h3 className="text-xs font-semibold text-gray-700 mb-2 pb-1 border-b border-gray-300">Transaksi</h3>
+                          <div className="rounded-lg bg-amber-50 border border-amber-200/60 mb-2 px-3 py-2">
+                            <div className="flex items-center py-1">
+                              <span className="text-sm font-semibold text-amber-900">Total Omset <span className="text-xs font-normal text-amber-700/80">(sebelum refund & diskon)</span>:</span>
+                              <span className="flex-grow border-b border-dotted border-amber-300 mx-2"></span>
+                              <span className="text-sm font-bold text-amber-900">{formatRupiah(grossTotalOmset)}</span>
                             </div>
+                          </div>
+                          <div className="rounded-lg px-3 py-1.5 mb-2 bg-red-50 border border-red-200">
+                            <div className="flex items-center py-1">
+                              <span className="text-xs font-semibold text-red-800">Refund:</span>
+                              <span className="flex-grow border-b border-dotted border-red-200 mx-2"></span>
+                              <span className="text-xs font-bold text-red-700">-{formatRupiah(totalRefundCombined)}</span>
+                            </div>
+                            <div className="flex items-center py-0.5 pl-4">
+                              <span className="text-xs text-red-700">↳ Refund Transaksi:</span>
+                              <span className="flex-grow border-b border-dotted border-red-200 mx-2"></span>
+                              <span className="text-xs font-semibold text-red-600">-{formatRupiah(Number(totalRefundsActive) || 0)}</span>
+                            </div>
+                            <div className="flex items-center py-0.5 pl-4">
+                              <span className="text-xs text-red-700">↳ Refund Exc.:</span>
+                              <span className="flex-grow border-b border-dotted border-red-200 mx-2"></span>
+                              <span className="text-xs font-semibold text-red-600">-{formatRupiah(totalRefundExcActive)}</span>
+                            </div>
+                          </div>
+                          <div className="rounded-lg px-3 py-1.5 mb-2 bg-green-50 border border-green-200/60">
                             <div className="flex items-center py-0.5">
-                              <span className="text-xs text-gray-700">Selisih Kas:</span>
-                              <span className="flex-grow border-b border-dotted border-gray-300 mx-2"></span>
-                              <span className={`text-xs font-semibold ${kasSelisihLabelValue === 'balanced' ? 'text-green-600' :
-                                kasSelisihLabelValue === 'plus' ? 'text-blue-600' : 'text-red-600'
-                                }`}>
-                                {kasSelisihValue !== null ? (
-                                  kasSelisihValue > 0 ? `+${formatRupiah(kasSelisihValue)}` : formatRupiah(kasSelisihValue)
-                                ) : '-'}
-                                {kasSelisihLabelValue && ` (${kasSelisihLabelValue === 'balanced' ? 'Balanced' :
-                                  kasSelisihLabelValue === 'plus' ? 'Plus' : 'Minus'
-                                  })`}
+                              <span className="text-xs font-semibold text-green-800">Diskon Voucher:</span>
+                              <span className="flex-grow border-b border-dotted border-green-200 mx-2"></span>
+                              <span className="text-xs font-bold text-green-700">
+                                {effectiveTotalDiscount > 0 ? `-${formatRupiah(effectiveTotalDiscount)}` : formatRupiah(0)}
                               </span>
                             </div>
-                          </>
-                        )}
+                            {VOUCHER_BREAKDOWN_ORDER.map(({ key, label }) => {
+                              const e = voucherBreakdown[key];
+                              if (!e || e.count <= 0) return null;
+                              return (
+                                <div key={key} className="flex items-center py-0.5 pl-4">
+                                  <span className="text-xs text-gray-600">{label} ({e.count}):</span>
+                                  <span className="flex-grow border-b border-dotted border-gray-200 mx-2"></span>
+                                  <span className="text-xs font-semibold text-green-600">-{formatRupiah(e.total)}</span>
+                                </div>
+                              );
+                            })}
+                          </div>
+                          <div className="flex items-center py-1.5 rounded-lg px-3 bg-gray-100 border border-gray-200">
+                            <span className="text-xs font-bold text-gray-800">Grand Total:</span>
+                            <span className="flex-grow border-b border-dotted border-gray-300 mx-2"></span>
+                            <span className="text-sm font-bold text-gray-900">
+                              {formatRupiah(Math.max(0, grossTotalOmset - totalRefundCombined - effectiveTotalDiscount))}
+                            </span>
+                          </div>
+                        </div>
+
+                        {/* Kas */}
+                        <div className="space-y-0">
+                          <h3 className="text-xs font-semibold text-gray-700 mb-2 pb-1 border-b border-gray-300">Kas</h3>
+                          <div className="flex items-center py-0.5">
+                            <span className="text-xs text-gray-700">Kas Mulai:</span>
+                            <span className="flex-grow border-b border-dotted border-gray-300 mx-2"></span>
+                            <span className="text-xs font-semibold text-gray-900">{formatRupiah(kasMulaiActive)}</span>
+                          </div>
+                          <div className="flex items-center py-0.5">
+                            <span className="text-xs text-gray-700">Cash Sales:</span>
+                            <span className="flex-grow border-b border-dotted border-gray-300 mx-2"></span>
+                            <span className="text-xs font-semibold text-gray-900">{formatRupiah(cashShiftSales)}</span>
+                          </div>
+                          <div className="flex items-center py-0.5">
+                            <span className="text-xs font-semibold text-gray-800">Kas Diharapkan:</span>
+                            <span className="flex-grow border-b border-dotted border-gray-300 mx-2"></span>
+                            <span className="text-xs font-bold text-purple-700">{formatRupiah(kasExpectedActive)}</span>
+                          </div>
+                          <div className="border-t border-gray-300 my-1.5" />
+                          <div className="flex items-center py-0.5">
+                            <span className="text-xs text-gray-700">Jumlah Pesanan:</span>
+                            <span className="flex-grow border-b border-dotted border-gray-300 mx-2"></span>
+                            <span className="text-xs font-semibold text-gray-900">{statistics.order_count} transaksi</span>
+                          </div>
+                          <div className="flex items-center py-0.5">
+                            <span className="text-xs text-gray-700">Jumlah CU:</span>
+                            <span className="flex-grow border-b border-dotted border-gray-300 mx-2"></span>
+                            <span className="text-xs font-semibold text-gray-900">{statistics.total_cu ?? 0}</span>
+                          </div>
+                          {kasAkhirActive !== null && (
+                            <>
+                              <div className="flex items-center py-0.5">
+                                <span className="text-xs text-gray-700">Kas Akhir:</span>
+                                <span className="flex-grow border-b border-dotted border-gray-300 mx-2"></span>
+                                <span className="text-xs font-semibold text-gray-900">{formatRupiah(kasAkhirActive)}</span>
+                              </div>
+                              <div className="flex items-center py-0.5">
+                                <span className="text-xs text-gray-700">Selisih Kas:</span>
+                                <span className="flex-grow border-b border-dotted border-gray-300 mx-2"></span>
+                                <span className={`text-xs font-semibold ${kasSelisihLabelValue === 'balanced' ? 'text-green-600' :
+                                  kasSelisihLabelValue === 'plus' ? 'text-blue-600' : 'text-red-600'
+                                  }`}>
+                                  {kasSelisihValue !== null ? (
+                                    kasSelisihValue > 0 ? `+${formatRupiah(kasSelisihValue)}` : formatRupiah(kasSelisihValue)
+                                  ) : '-'}
+                                  {kasSelisihLabelValue && ` (${kasSelisihLabelValue === 'balanced' ? 'Balanced' :
+                                    kasSelisihLabelValue === 'plus' ? 'Plus' : 'Minus'
+                                    })`}
+                                </span>
+                              </div>
+                            </>
+                          )}
+                        </div>
                       </div>
                     </div>
                   </div>
@@ -3093,6 +3348,53 @@ export default function GantiShift() {
                               );
                             })}
                           </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* REFUND EXC. SECTION */}
+                  {refundExcItems.length > 0 && (
+                    <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-4">
+                      <h2 className="text-base font-semibold text-gray-800 mb-3 text-center">REFUND EXC.</h2>
+                      <div className="overflow-x-auto">
+                        <table className="w-full text-xs">
+                          <thead>
+                            <tr className="border-b-2 border-gray-300 bg-gray-50">
+                              <th className="px-2 py-2 text-left font-semibold text-gray-700">Nama</th>
+                              <th className="px-2 py-2 text-right font-semibold text-gray-700">Pax</th>
+                              <th className="px-2 py-2 text-left font-semibold text-gray-700">Tanggal & Jam</th>
+                              <th className="px-2 py-2 text-left font-semibold text-gray-700">No. HP</th>
+                              <th className="px-2 py-2 text-left font-semibold text-gray-700">Alasan</th>
+                              <th className="px-2 py-2 text-right font-semibold text-gray-700">Jumlah Refund</th>
+                              <th className="px-2 py-2 text-left font-semibold text-gray-700">Dibuat Oleh</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {refundExcItems.map((row, idx) => {
+                              const datePart = row.tanggal ? new Date(row.tanggal).toLocaleDateString('id-ID', { day: 'numeric', month: 'short', year: 'numeric' }) : '-';
+                              const timePart = row.jam ?? '-';
+                              const dateTimeStr = row.tanggal && row.jam ? `${datePart}, ${timePart}` : (row.tanggal ? datePart : timePart);
+                              return (
+                                <tr key={row.uuid_id || idx} className="border-b border-gray-200 hover:bg-gray-50">
+                                  <td className="px-2 py-2 text-gray-900">{row.nama ?? '-'}</td>
+                                  <td className="px-2 py-2 text-right text-gray-700">{row.pax ?? 0}</td>
+                                  <td className="px-2 py-2 text-gray-600">{dateTimeStr}</td>
+                                  <td className="px-2 py-2 text-gray-600">{row.no_hp ?? '-'}</td>
+                                  <td className="px-2 py-2 text-gray-700">{row.alasan ?? '-'}</td>
+                                  <td className="px-2 py-2 text-right text-red-600 font-semibold">-{formatRupiah(Number(row.jumlah_refund) || 0)}</td>
+                                  <td className="px-2 py-2 text-gray-600">{row.created_by_email ?? '-'}</td>
+                                </tr>
+                              );
+                            })}
+                          </tbody>
+                          <tfoot>
+                            <tr className="border-t-2 border-gray-300 bg-gray-100 font-semibold">
+                              <td className="px-2 py-2 text-gray-800" colSpan={5}>TOTAL</td>
+                              <td className="px-2 py-2 text-right text-red-700">-{formatRupiah(totalRefundExcActive)}</td>
+                              <td className="px-2 py-2"></td>
+                            </tr>
+                          </tfoot>
                         </table>
                       </div>
                     </div>
@@ -3665,6 +3967,7 @@ export default function GantiShift() {
                   checked={printWholeDaySelected}
                   onChange={() => {
                     setPrintWholeDaySelected(true);
+                    setPrintMonthlySelected(false);
                     setPrintSelections(prev => prev.map(s => ({ ...s, selected: false })));
                   }}
                   className="w-5 h-5 text-blue-600 rounded focus:ring-2 focus:ring-blue-500"
@@ -3674,6 +3977,52 @@ export default function GantiShift() {
                   <p className="text-sm text-gray-600">
                     {formatDateTime(shiftSequenceInfo.dayStartUtc)} - Sekarang
                   </p>
+                </div>
+              </label>
+
+              <div className="border-t border-gray-300 my-3"></div>
+
+              {/* Monthly Option */}
+              <label className="flex items-start space-x-3 cursor-pointer p-3 rounded-lg hover:bg-gray-50 border border-gray-200">
+                <input
+                  type="checkbox"
+                  checked={printMonthlySelected}
+                  onChange={() => {
+                    setPrintMonthlySelected(true);
+                    setPrintWholeDaySelected(false);
+                    setPrintSelections(prev => prev.map(s => ({ ...s, selected: false })));
+                  }}
+                  className="w-5 h-5 text-indigo-600 rounded focus:ring-2 focus:ring-indigo-500 mt-0.5"
+                />
+                <div className="flex-1 min-w-0">
+                  <span className="font-semibold text-gray-900">Bulanan (Monthly)</span>
+                  <p className="text-sm text-gray-600 mt-1">
+                    Laporan satu bulan penuh, atau MTD jika bulan berjalan belum selesai.
+                  </p>
+                  {printMonthlySelected && (
+                    <div className="mt-3 flex items-center gap-2">
+                      <span className="text-sm text-gray-700">Bulan:</span>
+                      <input
+                        type="month"
+                        value={printSelectedMonth}
+                        onChange={(e) => setPrintSelectedMonth(e.target.value)}
+                        className="px-3 py-1.5 border border-gray-300 rounded-md text-sm text-gray-900 focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500"
+                      />
+                      {(() => {
+                        const [y, m] = printSelectedMonth.split('-').map(Number);
+                        const now = new Date();
+                        const gmt7 = new Date(now.getTime() + 7 * 60 * 60 * 1000);
+                        const isCurrentMonth = y === gmt7.getUTCFullYear() && m === gmt7.getUTCMonth() + 1;
+                        const isMonthFinished = !isCurrentMonth || (gmt7.getUTCDate() === new Date(gmt7.getUTCFullYear(), gmt7.getUTCMonth() + 1, 0).getDate());
+                        const isMtd = isCurrentMonth && !isMonthFinished;
+                        return (
+                          <span className="text-xs text-gray-500">
+                            {isMtd ? '(MTD)' : '(Bulan penuh)'}
+                          </span>
+                        );
+                      })()}
+                    </div>
+                  )}
                 </div>
               </label>
 
@@ -3695,6 +4044,7 @@ export default function GantiShift() {
                       onChange={(e) => {
                         if (e.target.checked) {
                           setPrintWholeDaySelected(false);
+                          setPrintMonthlySelected(false);
                           setPrintSelections(prev =>
                             prev.map(s => ({ ...s, selected: s.shiftId === selection.shiftId }))
                           );
@@ -3904,6 +4254,7 @@ export default function GantiShift() {
                 onClick={() => {
                   setShowPrintSelectionModal(false);
                   setPrintWholeDaySelected(false);
+                  setPrintMonthlySelected(false);
                   setPrintSelections(prev => prev.map(s => ({ ...s, selected: false })));
                 }}
                 disabled={isPrintingSelected}
@@ -3913,7 +4264,7 @@ export default function GantiShift() {
               </button>
               <button
                 onClick={handlePrintSelected}
-                disabled={isPrintingSelected || (!printWholeDaySelected && printSelections.filter(s => s.selected).length === 0)}
+                disabled={isPrintingSelected || (!printWholeDaySelected && !printMonthlySelected && printSelections.filter(s => s.selected).length === 0)}
                 className="flex-1 px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:opacity-50 disabled:cursor-not-allowed font-medium transition-colors flex items-center justify-center space-x-2"
               >
                 {isPrintingSelected ? (
@@ -3924,7 +4275,7 @@ export default function GantiShift() {
                 ) : (
                   <>
                     <Printer className="w-4 h-4" />
-                    <span>Print ({(printWholeDaySelected ? 1 : 0) + printSelections.filter(s => s.selected).length})</span>
+                    <span>Print ({printWholeDaySelected || printMonthlySelected ? 1 : printSelections.filter(s => s.selected).length})</span>
                   </>
                 )}
               </button>

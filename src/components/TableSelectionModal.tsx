@@ -46,9 +46,13 @@ interface LayoutElement {
 interface PendingTransaction {
   id: string;
   table_id: number | null;
+  table_ids?: number[];
   status: string;
   created_at: string;
 }
+
+/** Occupancy from IPC: today's pending transactions with at least one active item (matches Active Orders). */
+type OccupiedTableEntry = { tableId: number; transactionUuid: string; created_at: string };
 
 interface BundleSelectionItem {
   category2_id?: number;
@@ -220,6 +224,8 @@ interface TableSelectionModalProps {
   } | null;
   onItemsLocked?: (itemIds: number[]) => void;
   waiterId?: number | null;
+  /** Pre-selected table IDs (e.g. from reservation Send to Kasir). Multi-select mode with these pre-highlighted. */
+  preSelectedTableIds?: number[];
 }
 
 const getElectronAPI = () => (typeof window !== 'undefined' ? window.electronAPI : undefined);
@@ -236,6 +242,7 @@ export default function TableSelectionModal({
   loadedTransactionInfo = null,
   onItemsLocked,
   waiterId = null,
+  preSelectedTableIds,
 }: TableSelectionModalProps) {
   const { user } = useAuth();
   const [rooms, setRooms] = useState<Room[]>([]);
@@ -257,8 +264,9 @@ export default function TableSelectionModal({
       </div>
     );
   }
-  const [pendingTransactions, setPendingTransactions] = useState<PendingTransaction[]>([]);
-  // const [selectedTableId, setSelectedTableId] = useState<number | null>(null);
+  /** Occupied tables from IPC (today + has active items); matches Active Orders so table layout and list stay in sync. */
+  const [occupiedByTable, setOccupiedByTable] = useState<OccupiedTableEntry[]>([]);
+  const [selectedTableIds, setSelectedTableIds] = useState<number[]>([]);
   const [isSaving, setIsSaving] = useState(false);
   const [showConfirmationModal, setShowConfirmationModal] = useState(false);
   const [newItemsToSave, setNewItemsToSave] = useState<CartItem[]>([]);
@@ -325,11 +333,17 @@ export default function TableSelectionModal({
     }
   }, [selectedRoom, isOpen, rooms]);
 
+  // Init selected table IDs from preSelectedTableIds when modal opens
+  useEffect(() => {
+    if (isOpen) {
+      setSelectedTableIds(Array.isArray(preSelectedTableIds) && preSelectedTableIds.length > 0 ? [...preSelectedTableIds] : []);
+    }
+  }, [isOpen, preSelectedTableIds]);
+
   // Fetch data when modal opens
   useEffect(() => {
     if (isOpen && businessId && businessId > 0) {
       fetchRooms();
-      fetchPendingTransactions();
 
       // If in "lihat" mode, automatically show confirmation for new items
       // Only check once when modal opens
@@ -459,44 +473,42 @@ export default function TableSelectionModal({
     }
   }, [selectedRoom, isOpen, fetchTables, fetchLayoutElements]);
 
-  const fetchPendingTransactions = async () => {
+  /** Fetch table occupancy from IPC: only today's pending tx with at least one active item (matches Active Orders). */
+  const fetchOccupiedTables = useCallback(async () => {
+    const tableIds = tables.map((t) => t.id);
+    if (tableIds.length === 0 || !businessId) {
+      setOccupiedByTable([]);
+      return;
+    }
     try {
       const electronAPI = getElectronAPI();
-      if (!electronAPI?.localDbGetTransactions) {
-        console.error('localDbGetTransactions not available');
+      if (!electronAPI?.localDbGetPendingTransactionsByTableIds) {
+        setOccupiedByTable([]);
         return;
       }
-
-      // Fetch all transactions and filter for pending ones with table_id
-      const allTransactions = await electronAPI.localDbGetTransactions(businessId, 10000); const pending = (Array.isArray(allTransactions) ? allTransactions : [])
-        .filter((tx: unknown) => {
-          if (tx && typeof tx === 'object' && 'status' in tx && 'table_id' in tx) {
-            const transaction = tx as { status: string; table_id: number | null; uuid_id?: string; id?: string };
-            const isPending = transaction.status === 'pending' && transaction.table_id !== null; return isPending;
-          }
-          return false;
-        })
-        .map((tx: unknown) => {
-          const t = tx as { id?: string; uuid_id?: string; table_id: number; status: string; created_at?: string };
-          const txId = t.uuid_id || t.id || '';
-          return {
-            id: txId,
-            table_id: t.table_id,
-            status: t.status,
-            created_at: t.created_at || new Date().toISOString(),
-          };
-        }); setPendingTransactions(pending);
+      const result = await electronAPI.localDbGetPendingTransactionsByTableIds(businessId, tableIds) as OccupiedTableEntry[];
+      setOccupiedByTable(Array.isArray(result) ? result : []);
     } catch (error) {
-      console.error('Error fetching pending transactions:', error);
+      console.error('Error fetching occupied tables:', error);
+      setOccupiedByTable([]);
     }
-  };
+  }, [businessId, tables]);
+
+  useEffect(() => {
+    if (isOpen && businessId && tables.length > 0) {
+      fetchOccupiedTables();
+    } else if (!isOpen || tables.length === 0) {
+      setOccupiedByTable([]);
+    }
+  }, [isOpen, businessId, tables, fetchOccupiedTables]);
 
   const checkTableHasPendingOrder = (tableId: number): boolean => {
-    return pendingTransactions.some(tx => tx.table_id === tableId);
+    return occupiedByTable.some((e) => e.tableId === tableId);
   };
 
   const getPendingTransactionForTable = (tableId: number): PendingTransaction | null => {
-    const result = pendingTransactions.find(tx => tx.table_id === tableId) || null; return result;
+    const e = occupiedByTable.find((x) => x.tableId === tableId);
+    return e ? { id: e.transactionUuid, table_id: tableId, created_at: e.created_at, status: 'pending' } : null;
   };
 
   const handleTableClick = async (tableId: number) => {
@@ -517,25 +529,37 @@ export default function TableSelectionModal({
       return;
     }
 
-    // Normal mode: check if table has pending order
+    // Normal mode: toggle multi-select (table cannot be occupied when adding)
     if (checkTableHasPendingOrder(tableId)) {
       appAlert(`Meja ${tables.find(t => t.id === tableId)?.table_number || tableId} sudah memiliki pesanan aktif. Silakan pilih meja lain.`);
       return;
     }
 
-    // Check if cart is empty
+    setSelectedTableIds((prev) => {
+      const idx = prev.indexOf(tableId);
+      if (idx >= 0) return prev.filter((_, i) => i !== idx);
+      return [...prev, tableId];
+    });
+  };
+
+  const handleConfirmTables = async () => {
+    if (selectedTableIds.length === 0) {
+      appAlert('Pilih minimal satu meja.');
+      return;
+    }
     if (cartItems.length === 0) {
       appAlert('Keranjang kosong. Silakan tambahkan produk terlebih dahulu.');
       return;
     }
-
-    await savePendingTransaction(tableId);
+    const occupied = selectedTableIds.filter((tid) => checkTableHasPendingOrder(tid));
+    if (occupied.length > 0) {
+      appAlert(`Meja ${occupied.map((id) => tables.find(t => t.id === id)?.table_number || id).join(', ')} sudah memiliki pesanan aktif.`);
+      return;
+    }
+    await savePendingTransaction(selectedTableIds);
   };
 
-  const savePendingTransaction = async (tableId: number | null) => {
-    // #region agent log
-    fetch('http://127.0.0.1:7245/ingest/519de021-d49d-473f-a8a1-4215977c867a', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ location: 'TableSelectionModal.tsx:savePendingTransaction', message: 'Simpan Order save started', data: { tableId, source: 'Simpan Order' }, timestamp: Date.now(), hypothesisId: 'count' }) }).catch(() => { });
-    // #endregion
+  const savePendingTransaction = async (tableIds: number[] | null) => {
     setIsSaving(true);
     try {
       const electronAPI = getElectronAPI();
@@ -604,7 +628,8 @@ export default function TableSelectionModal({
         cl_account_name: null,
         transaction_type: transactionType,
         payment_method_id: 1, // Cash default
-        table_id: tableId ?? null,
+        table_id: tableIds && tableIds.length > 0 ? tableIds[0] : null,
+        table_ids: tableIds && tableIds.length > 0 ? tableIds : null,
         receipt_number: null,
       };
 
@@ -1036,10 +1061,14 @@ export default function TableSelectionModal({
       const orderContextRowsCategory2 = categories[1]?.itemsHtml ?? '';
       const category1Name = categories[0]?.categoryName ?? 'Kategori 1';
       const category2Name = categories[1]?.categoryName ?? '';
+      // Multi-table: show all table numbers on checker/bill (e.g. "1, 2, 3" or "Meja 1, Meja 2")
+      const tableNameForChecker = tableIds && tableIds.length > 0
+        ? tableIds.map((tid) => tables.find((t) => t.id === tid)?.table_number ?? `Meja ${tid}`).join(', ')
+        : '';
       const orderContextForChecker = {
         waiterName: waiterNameForChecker,
         customerName: customerName.trim() || '',
-        tableName: tableId != null ? (tables.find(t => t.id === tableId)?.table_number ?? `Meja ${tableId}`) : '',
+        tableName: tableNameForChecker,
         orderTime: transactionData.created_at,
         itemsHtml: orderContextRows,
         itemsHtmlCategory1: orderContextRowsCategory1,
@@ -1051,12 +1080,8 @@ export default function TableSelectionModal({
 
       if ((newOrderLabels.length > 0 || orderContextForChecker.itemsHtml) && window.electronAPI?.printLabelsBatch) {
         try {
-          // #region agent log
           const requestId = `REQ-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
           console.log(`🖨️ [FRONTEND] Simpan Order requesting printLabelsBatch. ID: ${requestId}. Table: ${orderContextForChecker.tableName}. Time: ${orderContextForChecker.orderTime}`);
-
-          fetch('http://127.0.0.1:7245/ingest/519de021-d49d-473f-a8a1-4215977c867a', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ location: 'TableSelectionModal.tsx:printLabelsBatch', message: 'Simpan Order calling printLabelsBatch', data: { requestId, source: 'Simpan Order', table: orderContextForChecker.tableName, time: orderContextForChecker.orderTime, labelsCount: newOrderLabels.length, hasChecker: !!(orderContextForChecker.itemsHtml && orderContextForChecker.itemsHtml.trim()) }, timestamp: Date.now(), hypothesisId: 'count' }) }).catch(() => { });
-          // #endregion
 
           // Mark checker as printed before starting print so PaymentModal won't print again (avoids double print)
           await window.electronAPI?.localDbSetTransactionCheckerPrinted?.(transactionId);
@@ -1073,15 +1098,17 @@ export default function TableSelectionModal({
           });
         } catch (labelErr) {
           console.error('❌ Error printing checker for new order:', labelErr);
+          // Pesanan sudah tersimpan; jangan tampilkan "Gagal menyimpan" — beri tahu hanya cetak yang gagal
+          appAlert('Pesanan tersimpan. Cetak checker/label gagal. Silakan coba cetak ulang dari daftar pesanan.');
         }
       }
 
       console.log('✅ Pending transaction saved:', transactionId);
-      console.log('✅ Table ID:', tableId);
+      console.log('✅ Table ID(s):', tableIds);
       console.log('✅ Items saved:', transactionItems.length);
 
-      // Refresh pending transactions list
-      await fetchPendingTransactions();
+      // Refresh occupied tables so layout matches Active Orders
+      await fetchOccupiedTables();
 
       // Dispatch custom event to immediately refresh pending orders count in POSLayout
       if (typeof window !== 'undefined') {
@@ -1575,8 +1602,8 @@ export default function TableSelectionModal({
         onItemsLocked(newItemIds);
       }
 
-      // Refresh pending transactions list
-      await fetchPendingTransactions();
+      // Refresh occupied tables so layout matches Active Orders
+      await fetchOccupiedTables();
 
       // Dispatch custom event to immediately refresh pending orders count in POSLayout
       if (typeof window !== 'undefined') {
@@ -1826,7 +1853,9 @@ export default function TableSelectionModal({
 
                           const hasPendingOrder = checkTableHasPendingOrder(table.id);
                           const pendingTransaction = getPendingTransactionForTable(table.id);
-                          const orderCreatedAt = pendingTransaction?.created_at || null; return (
+                          const orderCreatedAt = pendingTransaction?.created_at || null;
+                          const isSelected = selectedTableIds.includes(table.id);
+                          return (
                             <TableDisplay
                               key={table.id}
                               table={table}
@@ -1838,6 +1867,7 @@ export default function TableSelectionModal({
                               smallFontSize={smallFontSize}
                               hasPendingOrder={hasPendingOrder}
                               orderCreatedAt={orderCreatedAt}
+                              isSelected={isSelected}
                               onClick={() => !isSaving && handleTableClick(table.id)}
                             />
                           );
@@ -1853,6 +1883,40 @@ export default function TableSelectionModal({
                       <p>No rooms found for this business.</p>
                       <p className="text-sm mt-2">Create rooms in Salespulse first.</p>
                     </div>
+                  </div>
+                )}
+
+                {/* Footer: selected tables + Konfirmasi (dine-in, normal mode) */}
+                {!loadedTransactionInfo && pickupMethod === 'dine-in' && (
+                  <div className="flex-shrink-0 border-t border-gray-200 px-4 py-3 flex flex-wrap items-center justify-between gap-3 bg-white">
+                    <div>
+                      <div className="text-sm text-gray-600">Meja dipilih:</div>
+                      <div className="flex flex-wrap gap-1.5 mt-1">
+                        {selectedTableIds.length === 0 ? (
+                          <span className="text-xs text-gray-400">Klik meja untuk memilih (bisa lebih dari 1)</span>
+                        ) : (
+                          selectedTableIds.map((tid) => {
+                            const table = tables.find((t) => t.id === tid);
+                            return (
+                              <span
+                                key={tid}
+                                className="inline-flex items-center gap-1 px-2 py-1 rounded-lg bg-blue-100 text-blue-800 text-xs font-semibold"
+                              >
+                                {table?.table_number ?? `Meja ${tid}`}
+                              </span>
+                            );
+                          })
+                        )}
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={handleConfirmTables}
+                      disabled={isSaving || selectedTableIds.length === 0 || cartItems.length === 0}
+                      className="px-4 py-2 rounded-lg bg-green-600 hover:bg-green-700 disabled:bg-gray-400 disabled:cursor-not-allowed text-white text-sm font-bold whitespace-nowrap"
+                    >
+                      {isSaving ? 'Menyimpan...' : `Konfirmasi ${selectedTableIds.length} Meja →`}
+                    </button>
                   </div>
                 )}
               </>
@@ -1904,6 +1968,7 @@ function TableDisplay({
   smallFontSize,
   hasPendingOrder,
   orderCreatedAt,
+  isSelected = false,
   onClick,
 }: {
   table: Table;
@@ -1915,6 +1980,7 @@ function TableDisplay({
   smallFontSize: number;
   hasPendingOrder: boolean;
   orderCreatedAt: string | null;
+  isSelected?: boolean;
   onClick: () => void;
 }) {
   const [timer, setTimer] = useState<string>('--:--');
@@ -1944,7 +2010,7 @@ function TableDisplay({
     return () => clearInterval(interval);
   }, [orderCreatedAt]);
 
-  const tableBgColor = hasPendingOrder ? '#ef4444' : '#60a5fa';
+  const tableBgColor = hasPendingOrder ? '#ef4444' : isSelected ? '#2563eb' : '#60a5fa';
 
   return (
     <div
@@ -1968,7 +2034,7 @@ function TableDisplay({
     >
       <div
         className={`w-full h-full flex flex-col items-center justify-center relative overflow-hidden transition-all duration-200 ${table.shape === 'circle' ? 'rounded-full' : 'rounded-lg'
-          } text-gray-900 border-2 border-gray-800 shadow-lg hover:shadow-2xl hover:border-yellow-400`}
+          } text-gray-900 border-2 ${isSelected ? 'border-blue-900 shadow-xl ring-2 ring-blue-400' : 'border-gray-800 shadow-lg hover:shadow-2xl hover:border-yellow-400'}`}
         style={{
           minWidth: '40px',
           minHeight: '40px',

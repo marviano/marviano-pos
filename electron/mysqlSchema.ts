@@ -720,6 +720,18 @@ export async function initializeMySQLSchema(): Promise<void> {
         ON DELETE SET NULL
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
 
+    // Transaction_tables junction table (replaces transactions.table_ids_json)
+    `CREATE TABLE IF NOT EXISTS transaction_tables (
+      transaction_id INT NOT NULL,
+      table_id INT NOT NULL,
+      sort_order SMALLINT NOT NULL DEFAULT 0,
+      PRIMARY KEY (transaction_id, table_id),
+      INDEX idx_transaction_tables_transaction_id (transaction_id),
+      INDEX idx_transaction_tables_table_id (table_id),
+      CONSTRAINT fk_transaction_tables_transaction FOREIGN KEY (transaction_id) REFERENCES transactions(id) ON DELETE CASCADE,
+      CONSTRAINT fk_transaction_tables_table FOREIGN KEY (table_id) REFERENCES restaurant_tables(id) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT 'Junction: which tables belong to a transaction (replaces table_ids_json)'`,
+
     // Restaurant_layout_elements table (for custom elements like doors, bathrooms, etc.)
     `CREATE TABLE IF NOT EXISTS restaurant_layout_elements (
       id INT NOT NULL AUTO_INCREMENT,
@@ -839,7 +851,60 @@ export async function initializeMySQLSchema(): Promise<void> {
       CONSTRAINT fk_employees_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE SET NULL,
       CONSTRAINT fk_employees_business FOREIGN KEY (business_id) REFERENCES businesses(id) ON DELETE SET NULL,
       CONSTRAINT fk_employees_jabatan FOREIGN KEY (jabatan_id) REFERENCES employees_position(id) ON DELETE SET NULL
-    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='Employee records linked to users and businesses'`
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='Employee records linked to users and businesses'`,
+
+    // Reservations table (reservation page)
+    `CREATE TABLE IF NOT EXISTS reservations (
+      id INT NOT NULL AUTO_INCREMENT,
+      uuid_id VARCHAR(36) NOT NULL,
+      business_id INT NOT NULL,
+      nama VARCHAR(255) NOT NULL,
+      phone VARCHAR(30) NOT NULL,
+      tanggal DATE NOT NULL,
+      jam TIME NOT NULL,
+      pax INT NOT NULL DEFAULT 1,
+      dp DECIMAL(15,2) NOT NULL DEFAULT 0.00,
+      total_price DECIMAL(15,2) NOT NULL DEFAULT 0.00,
+      table_ids_json JSON DEFAULT NULL,
+      penanggung_jawab_id INT DEFAULT NULL,
+      created_by_email VARCHAR(255) DEFAULT NULL,
+      note TEXT DEFAULT NULL,
+      status ENUM('upcoming','attended','cancelled') NOT NULL DEFAULT 'upcoming',
+      created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      PRIMARY KEY (id),
+      UNIQUE KEY uuid_id (uuid_id),
+      INDEX idx_reservations_business (business_id),
+      INDEX idx_reservations_tanggal (tanggal),
+      INDEX idx_reservations_status (status),
+      CONSTRAINT fk_reservations_business FOREIGN KEY (business_id) REFERENCES businesses(id) ON DELETE CASCADE,
+      CONSTRAINT fk_reservations_pj FOREIGN KEY (penanggung_jawab_id) REFERENCES employees(id) ON DELETE SET NULL
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+
+    // Refund exceptions (reservation cancellation refunds, etc. — standalone, no FK to transactions)
+    `CREATE TABLE IF NOT EXISTS refund_exc (
+      id INT NOT NULL AUTO_INCREMENT,
+      uuid_id VARCHAR(36) NOT NULL,
+      business_id INT NOT NULL,
+      shift_uuid CHAR(36) DEFAULT NULL,
+      nama VARCHAR(255) NOT NULL,
+      pax INT NOT NULL DEFAULT 1,
+      tanggal DATE NOT NULL,
+      jam TIME NOT NULL,
+      no_hp VARCHAR(30) DEFAULT NULL,
+      jumlah_refund DECIMAL(15,2) NOT NULL DEFAULT 0.00,
+      alasan ENUM('pembatalan reservasi','other') NOT NULL DEFAULT 'other',
+      created_by_user_id INT NOT NULL,
+      created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      sync_status ENUM('pending','synced','failed') NOT NULL DEFAULT 'pending',
+      synced_at DATETIME DEFAULT NULL,
+      PRIMARY KEY (id),
+      UNIQUE KEY uuid_id (uuid_id),
+      KEY idx_refund_exc_business_date (business_id, tanggal),
+      KEY idx_refund_exc_shift (shift_uuid),
+      KEY idx_refund_exc_sync (sync_status)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`
   ];
 
   try {
@@ -861,6 +926,22 @@ export async function initializeMySQLSchema(): Promise<void> {
         // Column already exists — expected after first run; no log
       } else {
         console.warn('⚠️ receipt_templates show_notes migration:', err);
+      }
+    }
+
+    // One-time migration: add created_by_email to reservations if missing
+    try {
+      await pool.execute(
+        `ALTER TABLE reservations ADD COLUMN created_by_email VARCHAR(255) DEFAULT NULL COMMENT 'Email of user who created the reservation' AFTER penanggung_jawab_id`,
+        []
+      );
+      console.log('✅ reservations: added created_by_email column');
+    } catch (alterErr: unknown) {
+      const err = alterErr as { code?: string; errno?: number };
+      if (err.code === 'ER_DUP_FIELDNAME' || err.errno === 1060) {
+        // Column already exists
+      } else {
+        console.warn('⚠️ reservations created_by_email migration:', err);
       }
     }
 
@@ -1022,6 +1103,93 @@ export async function initializeMySQLSchema(): Promise<void> {
         // Constraint already exists
       } else {
         console.warn('⚠️ restaurant_tables section_id FK migration:', err);
+      }
+    }
+
+    // One-time migration: add items_json to reservations (pre-order product snapshot)
+    try {
+      await pool.execute(
+        `ALTER TABLE reservations ADD COLUMN items_json JSON DEFAULT NULL COMMENT 'Pre-ordered items: [{product_id, product_name, quantity, unit_price, customizations?, customNote?, bundleSelections?, packageSelections?}]'`
+      );
+      console.log('✅ reservations: added items_json column');
+    } catch (alterErr: unknown) {
+      const err = alterErr as { code?: string; errno?: number };
+      if (err.code === 'ER_DUP_FIELDNAME' || err.errno === 1060) {
+        // Column already exists
+      } else {
+        console.warn('⚠️ reservations items_json migration:', err);
+      }
+    }
+
+    // One-time migration: ensure transaction_tables junction exists (for DBs created before it was in the tables array)
+    try {
+      await pool.execute(
+        `CREATE TABLE IF NOT EXISTS transaction_tables (
+          transaction_id INT NOT NULL,
+          table_id INT NOT NULL,
+          sort_order SMALLINT NOT NULL DEFAULT 0,
+          PRIMARY KEY (transaction_id, table_id),
+          INDEX idx_transaction_tables_transaction_id (transaction_id),
+          INDEX idx_transaction_tables_table_id (table_id),
+          CONSTRAINT fk_transaction_tables_transaction FOREIGN KEY (transaction_id) REFERENCES transactions(id) ON DELETE CASCADE,
+          CONSTRAINT fk_transaction_tables_table FOREIGN KEY (table_id) REFERENCES restaurant_tables(id) ON DELETE CASCADE
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT 'Junction: which tables belong to a transaction'`
+      );
+      console.log('✅ transaction_tables: junction table ensured');
+    } catch (alterErr: unknown) {
+      console.warn('⚠️ transaction_tables creation:', alterErr);
+    }
+
+    // One-time migration: copy table_ids_json into transaction_tables, then drop the column
+    try {
+      const [rows] = await pool.execute(
+        'SELECT id, table_ids_json FROM transactions WHERE table_ids_json IS NOT NULL'
+      ) as [Array<{ id: number; table_ids_json: string | number[] | null }>, unknown];
+      for (const row of rows || []) {
+        const transactionId = row?.id;
+        const raw = row?.table_ids_json;
+        if (transactionId == null || raw == null) continue;
+        let arr: number[] = [];
+        if (typeof raw === 'string') {
+          try {
+            arr = JSON.parse(raw) as number[];
+          } catch {
+            continue;
+          }
+        } else if (Array.isArray(raw)) {
+          arr = raw.map((x: unknown) => (typeof x === 'number' ? x : Number(x)));
+        }
+        if (!Array.isArray(arr) || arr.length === 0) continue;
+        for (let i = 0; i < arr.length; i++) {
+          const tableId = Number(arr[i]);
+          if (Number.isNaN(tableId)) continue;
+          await pool.execute(
+            'INSERT IGNORE INTO transaction_tables (transaction_id, table_id, sort_order) VALUES (?, ?, ?)',
+            [transactionId, tableId, i]
+          );
+        }
+      }
+      console.log('✅ transaction_tables: migrated data from table_ids_json');
+    } catch (migErr: unknown) {
+      const err = migErr as { code?: string; errno?: number };
+      if (err.code === 'ER_BAD_FIELD_ERROR' || err.errno === 1054) {
+        // Column table_ids_json already dropped — expected after first run
+      } else {
+        console.warn('⚠️ transaction_tables data migration:', migErr);
+      }
+    }
+
+    // table_ids_json was removed from transactions in favour of the transaction_tables
+    // junction table. This DROP is idempotent — safe to run on any DB state.
+    try {
+      await pool.execute('ALTER TABLE transactions DROP COLUMN table_ids_json');
+      console.log('✅ transactions: dropped table_ids_json column (replaced by transaction_tables)');
+    } catch (alterErr: unknown) {
+      const err = alterErr as { code?: string; errno?: number };
+      if (err.code === 'ER_BAD_FIELD_ERROR' || err.errno === 1054 || err.code === 'ER_CANT_DROP_FIELD_OR_KEY' || err.errno === 1091) {
+        // Column doesn't exist or already dropped — expected on fresh install or already migrated
+      } else {
+        console.warn('⚠️ transactions drop table_ids_json:', alterErr);
       }
     }
 

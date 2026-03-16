@@ -14,7 +14,8 @@ import {
   Table as TableIcon,
   ChefHat,
   Coffee,
-  ChevronLeft
+  ChevronLeft,
+  CalendarCheck
 } from 'lucide-react';
 import { useAuth } from '@/hooks/useAuth';
 import { isSuperAdmin } from '@/lib/auth';
@@ -78,6 +79,8 @@ export default function LeftSidebar({ menuItems, activeMenuItem, onMenuItemClick
         return <Coffee className="w-5 h-5" />;
       case 'Barista & Kitchen':
         return <ChefHat className="w-5 h-5" />;
+      case 'Reservation':
+        return <CalendarCheck className="w-5 h-5" />;
       default:
         return <Database className="w-5 h-5" />;
     }
@@ -165,6 +168,13 @@ export default function LeftSidebar({ menuItems, activeMenuItem, onMenuItemClick
             // Daftar Transaksi - requires access_daftartransaksi permission
             if (item.name === 'Daftar Transaksi') {
               if (!isAdmin && !hasPermission(user, 'access_daftartransaksi')) {
+                return null;
+              }
+            }
+
+            // Reservation - requires access_reservation permission
+            if (item.name === 'Reservation') {
+              if (!isAdmin && !hasPermission(user, 'access_reservation')) {
                 return null;
               }
             }

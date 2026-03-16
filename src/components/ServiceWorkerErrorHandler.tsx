@@ -42,46 +42,35 @@ export default function ServiceWorkerErrorHandler() {
       // Let other errors through normally
     };
 
-    // Intercept console errors from service workers
-    // Note: We use a more targeted approach by checking error stack traces
+    // Intercept console errors/warns from service workers.
+    // Optimization: only do string serialization when the first arg is a string containing 'sw.js'
+    // or an Error, avoiding the overhead on every unrelated console call.
     const originalConsoleError = console.error;
     const originalConsoleWarn = console.warn;
-    
+
+    const isSwRelated = (args: unknown[]): boolean => {
+      const first = args[0];
+      if (typeof first === 'string' && first.includes('sw.js')) return true;
+      if (first instanceof Error && first.stack?.includes('sw.js')) return true;
+      return false;
+    };
+
+    const isCachePostError = (args: unknown[]): boolean => {
+      const s = String(args[0]);
+      return (
+        s.includes('Failed to execute \'put\' on \'Cache\'') ||
+        s.includes('Request method \'POST\' is unsupported') ||
+        (s.includes('Cache') && s.includes('POST'))
+      );
+    };
+
     console.error = (...args: unknown[]) => {
-      const errorString = args.map(arg => String(arg)).join(' ');
-      const stackString = args.find(arg => arg instanceof Error && arg.stack) 
-        ? (args.find(arg => arg instanceof Error) as Error).stack || ''
-        : '';
-      
-      // Check if this is the service worker cache error
-      if (
-        (errorString.includes('sw.js') || stackString.includes('sw.js')) &&
-        (errorString.includes('Failed to execute \'put\' on \'Cache\'') ||
-         errorString.includes('Request method \'POST\' is unsupported') ||
-         errorString.includes('Cache') && errorString.includes('POST'))
-      ) {
-        // Suppress this specific error - it's non-critical in Electron
-        return;
-      }
-      
-      // Call original console.error for other errors
+      if (isSwRelated(args) && isCachePostError(args)) return;
       originalConsoleError.apply(console, args);
     };
-    
-    // Also intercept console.warn for similar messages
+
     console.warn = (...args: unknown[]) => {
-      const errorString = args.map(arg => String(arg)).join(' ');
-      
-      // Check if this is the service worker cache warning
-      if (
-        errorString.includes('sw.js') &&
-        (errorString.includes('Cache') && errorString.includes('POST'))
-      ) {
-        // Suppress this specific warning
-        return;
-      }
-      
-      // Call original console.warn for other warnings
+      if (isSwRelated(args) && isCachePostError(args)) return;
       originalConsoleWarn.apply(console, args);
     };
 

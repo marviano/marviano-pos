@@ -5,6 +5,7 @@ import { useRouter } from 'next/navigation';
 import { useAuth } from '@/hooks/useAuth';
 import { useAppDialog } from '@/components/AppDialog';
 import { isSuperAdmin } from '@/lib/auth';
+import { hasPermission } from '@/lib/permissions';
 import POSLayout from '@/components/POSLayout';
 import OfflineStatus from '@/components/OfflineStatus';
 import { LogOut, X, RefreshCw, Monitor, Download, Loader2 } from 'lucide-react';
@@ -81,6 +82,16 @@ export default function Home() {
       // }
     }
   }, []);
+
+  // Gate smart sync: only allow when user has Daftar Transaksi + Bayar button access; set business for auto verifikasi hari ini
+  useEffect(() => {
+    const allowed =
+      user != null &&
+      (isSuperAdmin(user) ||
+        (hasPermission(user, 'access_daftartransaksi') && hasPermission(user, 'access_kasir_bayar_button')));
+    smartSyncService.setSmartSyncAllowedByPermission(allowed);
+    smartSyncService.setVerificationBusinessId(user?.selectedBusinessId ?? null);
+  }, [user]);
 
   // Check database health on mount
   useEffect(() => {
@@ -344,6 +355,8 @@ export default function Home() {
                   }
                   await offlineSyncService.syncFromOnline(user?.selectedBusinessId ?? undefined);
                   setDatabaseStatus('Master data downloaded');
+                  // Brief delay so main process DB writes from sync are committed before UI refetches
+                  await new Promise(r => setTimeout(r, 200));
                   window.dispatchEvent(new CustomEvent('dataSynced'));
                 } catch (error) {
                   console.error('Download master data failed:', error);

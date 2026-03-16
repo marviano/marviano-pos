@@ -162,26 +162,6 @@ export default function PackageSelectionModal({
     setFlexibleQtys(initial);
   }, [isOpen, itemsKey]);
 
-  // #region agent log
-  useEffect(() => {
-    if (!isOpen || packageItems.length === 0) return;
-    const payload = {
-      location: 'PackageSelectionModal.tsx',
-      message: 'package items raw and deduped',
-      data: {
-        rawCount: packageItems.length,
-        rawItems: packageItems.map(i => ({ id: i.id, selection_type: i.selection_type, display_order: i.display_order, product_id: i.product_id, required_quantity: i.required_quantity, product_name: i.product_name, choice_count: (i.choice_products || []).length })),
-        dedupedCount: sortedItems.length,
-        dedupedItems: sortedItems.map(i => ({ id: i.id, selection_type: i.selection_type, display_order: i.display_order, product_id: i.product_id, required_quantity: i.required_quantity, product_name: i.product_name, choice_count: (i.choice_products || []).length }))
-      },
-      timestamp: Date.now(),
-      sessionId: 'debug-session',
-      hypothesisId: 'duplication'
-    };
-    fetch('http://127.0.0.1:7244/ingest/c0917f49-320f-4b63-aac0-b89a407233e0', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) }).catch(() => { });
-  }, [isOpen, itemsKey]);
-  // #endregion
-
   const getFlexibleTotal = (itemId: number) => {
     const q = flexibleQtys[itemId] || {};
     return Object.values(q).reduce((sum, n) => sum + n, 0);

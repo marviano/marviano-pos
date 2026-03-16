@@ -55,6 +55,9 @@ interface PendingTransaction {
   status: string;
 }
 
+/** Occupancy from IPC: today's pending tx with at least one active item (matches Active Orders). */
+type OccupiedTableEntry = { tableId: number; transactionUuid: string; created_at: string };
+
 interface TableLayoutProps {
   onLoadTransaction?: (transactionId: string) => void;
 }
@@ -79,7 +82,7 @@ export default function TableLayout({ onLoadTransaction }: TableLayoutProps = {}
       </div>
     );
   }
-  const [pendingTransactions, setPendingTransactions] = useState<PendingTransaction[]>([]);
+  const [occupiedByTable, setOccupiedByTable] = useState<OccupiedTableEntry[]>([]);
   const [currentTime, setCurrentTime] = useState(new Date());
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -214,47 +217,34 @@ export default function TableLayout({ onLoadTransaction }: TableLayoutProps = {}
     }
   }, [selectedRoom]);
 
-  const fetchPendingTransactions = useCallback(async () => {
-    if (!businessId) return;
-    
+  /** Fetch table occupancy from IPC: only today's pending tx with at least one active item (matches Active Orders). */
+  const fetchOccupiedTables = useCallback(async () => {
+    if (!businessId || tables.length === 0) {
+      setOccupiedByTable([]);
+      return;
+    }
     try {
       const electronAPI = window.electronAPI;
-      if (!electronAPI?.localDbGetTransactions) {
+      if (!electronAPI?.localDbGetPendingTransactionsByTableIds) {
+        setOccupiedByTable([]);
         return;
       }
-
-      const allTransactions = await electronAPI.localDbGetTransactions(businessId, 10000);
-      const transactionsArray = Array.isArray(allTransactions) ? allTransactions : [];
-      
-      const pending = transactionsArray
-        .filter((tx: unknown) => {
-          if (tx && typeof tx === 'object' && 'status' in tx) {
-            const transaction = tx as { status: string };
-            return transaction.status === 'pending';
-          }
-          return false;
-        })
-        .map((tx: unknown) => {
-          const t = tx as {
-            uuid_id?: string;
-            id?: string;
-            table_id?: number | null;
-            created_at?: string;
-            status?: string;
-          };
-          return {
-            uuid_id: t.uuid_id || t.id || '',
-            table_id: t.table_id || null,
-            created_at: t.created_at || new Date().toISOString(),
-            status: t.status || 'pending',
-          };
-        });
-
-      setPendingTransactions(pending);
+      const tableIds = tables.map((t) => t.id);
+      const result = await electronAPI.localDbGetPendingTransactionsByTableIds(businessId, tableIds) as OccupiedTableEntry[];
+      setOccupiedByTable(Array.isArray(result) ? result : []);
     } catch (error) {
-      console.error('Error fetching pending transactions:', error);
+      console.error('Error fetching occupied tables:', error);
+      setOccupiedByTable([]);
     }
-  }, [businessId]);
+  }, [businessId, tables]);
+
+  useEffect(() => {
+    if (selectedRoom && businessId && tables.length > 0) {
+      fetchOccupiedTables();
+    } else {
+      setOccupiedByTable([]);
+    }
+  }, [selectedRoom, businessId, tables, fetchOccupiedTables]);
 
   useEffect(() => {
     // Always observe container resize to recalculate scale when using stored dimensions
@@ -294,33 +284,31 @@ export default function TableLayout({ onLoadTransaction }: TableLayoutProps = {}
       fetchTables();
       fetchSections();
       fetchLayoutElements();
-      fetchPendingTransactions();
     } else {
       setTables([]);
       setSections([]);
       setLayoutElements([]);
-      setPendingTransactions([]);
+      setOccupiedByTable([]);
     }
-  }, [selectedRoom, fetchTables, fetchSections, fetchLayoutElements, fetchPendingTransactions]);
+  }, [selectedRoom, fetchTables, fetchSections, fetchLayoutElements]);
 
-  // Fetch pending transactions periodically
+  // Refresh occupied tables periodically (occupancy is also set when tables load)
   useEffect(() => {
-    if (selectedRoom && businessId) {
-      fetchPendingTransactions();
-      const interval = setInterval(fetchPendingTransactions, 5000);
+    if (selectedRoom && businessId && tables.length > 0) {
+      const interval = setInterval(fetchOccupiedTables, 5000);
       return () => clearInterval(interval);
     }
-  }, [selectedRoom, businessId, fetchPendingTransactions]);
+  }, [selectedRoom, businessId, tables.length, fetchOccupiedTables]);
 
-  // Update timer display every second
+  // Update timer display every second when any table is occupied
   useEffect(() => {
-    if (pendingTransactions.length > 0) {
+    if (occupiedByTable.length > 0) {
       const interval = setInterval(() => {
         setCurrentTime(new Date());
       }, 1000);
       return () => clearInterval(interval);
     }
-  }, [pendingTransactions.length]);
+  }, [occupiedByTable.length]);
 
   if (loading) {
     return (
@@ -604,10 +592,11 @@ export default function TableLayout({ onLoadTransaction }: TableLayoutProps = {}
                 (MIN_SIZE_PERCENT / 100) * canvasSize.height
               );
 
-              // Find pending transaction and section for this table
-              const tableTransaction = pendingTransactions.find(
-                tx => tx.table_id === table.id
-              );
+              // Find occupancy for this table (today + has active items; matches Active Orders)
+              const occupied = occupiedByTable.find((e) => e.tableId === table.id);
+              const tableTransaction: PendingTransaction | undefined = occupied
+                ? { uuid_id: occupied.transactionUuid, table_id: table.id, created_at: occupied.created_at, status: 'pending' }
+                : undefined;
               const tableSection = table.section_id != null
                 ? sections.find((s) => s.id === table.section_id)
                 : null;

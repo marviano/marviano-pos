@@ -327,15 +327,11 @@ export async function executeTransaction(
       await connection.execute('SET FOREIGN_KEY_CHECKS = 0', []);
     }
     await connection.beginTransaction();
-    console.log(`🔄 [TRANSACTION] Started transaction with ${queries.length} queries${disableFk ? ' (FK checks off)' : ''}`);
 
     for (let i = 0; i < queries.length; i++) {
       const { sql, params = [] } = queries[i];
       try {
-        const [result] = await connection.execute(sql, params) as [mysql.ResultSetHeader, unknown];
-        if (i < 5 || i === queries.length - 1) {
-          console.log(`  ✓ Query ${i + 1}/${queries.length}: ${result.affectedRows} rows affected`);
-        }
+        await connection.execute(sql, params);
       } catch (queryError) {
         console.error(`❌ [TRANSACTION] Query ${i + 1} failed:`, queryError);
         console.error(`  SQL: ${sql.substring(0, 200)}...`);
@@ -344,7 +340,6 @@ export async function executeTransaction(
     }
 
     await connection.commit();
-    console.log(`✅ [TRANSACTION] Committed successfully - ${queries.length} queries executed`);
   } catch (error) {
     await connection.rollback();
     console.error('❌ [TRANSACTION] Error occurred, rolling back:', error);
@@ -602,11 +597,20 @@ export async function executeSystemPosTransaction(
   
   try {
     await connection.beginTransaction();
-    
+
     for (const { sql, params = [] } of queries) {
-      await connection.execute(sql, params);
+      try {
+        await connection.execute(sql, params);
+      } catch (queryErr: unknown) {
+        const qe = queryErr as { errno?: number; code?: string };
+        if (qe.errno === 1062 || qe.code === 'ER_DUP_ENTRY') {
+          // Duplicate key (e.g. products.unique_menu_code_business) — skip this row, keep rest of transaction
+          continue;
+        }
+        throw queryErr;
+      }
     }
-    
+
     await connection.commit();
   } catch (error) {
     await connection.rollback();
@@ -801,6 +805,20 @@ export async function insertTransactionToSystemPos(transactionId: string): Promi
 
     if (!transaction) {
       return { success: false, error: `Transaction ${transactionId} not found in salespulse DB` };
+    }
+
+    // Step 2b: Load table IDs from transaction_tables junction (replaces table_ids_json) for system_pos sync
+    const txId = transaction.id != null ? Number(transaction.id) : null;
+    if (txId != null) {
+      const ttRows = await executeQuery<{ table_id: number }>(
+        'SELECT table_id FROM transaction_tables WHERE transaction_id = ? ORDER BY sort_order',
+        [txId]
+      );
+      const tableIds = Array.isArray(ttRows) ? ttRows.map(r => r?.table_id).filter((id): id is number => id != null && !Number.isNaN(id)) : [];
+      if (tableIds.length > 0) {
+        (transaction as Record<string, unknown>).table_ids = tableIds;
+        if (transaction.table_id == null) (transaction as Record<string, unknown>).table_id = tableIds[0];
+      }
     }
 
     // Step 3: Fetch transaction items
@@ -1345,10 +1363,7 @@ export async function syncRefundedTransactionsToSystemPos(): Promise<{ success: 
       if (!existingTx) {
         // Transaction missing in system_pos - full sync
         const insertResult = await insertTransactionToSystemPos(transactionId);
-        if (insertResult.success) {
-          syncedCount++;
-          console.log(`✅ [SYSTEM POS] Auto re-sync: inserted missing refunded transaction ${transactionId}`);
-        }
+        if (insertResult.success) syncedCount++;
         continue;
       }
 
@@ -1394,11 +1409,10 @@ export async function syncRefundedTransactionsToSystemPos(): Promise<{ success: 
       }
 
       syncedCount++;
-      console.log(`✅ [SYSTEM POS] Auto re-sync: updated refund data for transaction ${transactionId}`);
     }
 
     if (syncedCount > 0) {
-      console.log(`✅ [SYSTEM POS] Auto re-sync completed: ${syncedCount} refunded transaction(s) synced`);
+      console.log(`✅ [SYSTEM POS] Auto re-sync: ${syncedCount} refunded transaction(s) synced`);
     }
 
     return { success: true, syncedCount };

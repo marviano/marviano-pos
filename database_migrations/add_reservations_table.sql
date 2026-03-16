@@ -1,0 +1,26 @@
+-- Reservations table for reservation page (create/read/update/delete)
+CREATE TABLE IF NOT EXISTS reservations (
+  id INT NOT NULL AUTO_INCREMENT,
+  uuid_id VARCHAR(36) NOT NULL,
+  business_id INT NOT NULL,
+  nama VARCHAR(255) NOT NULL,
+  phone VARCHAR(30) NOT NULL,
+  tanggal DATE NOT NULL,
+  jam TIME NOT NULL,
+  pax INT NOT NULL DEFAULT 1,
+  dp DECIMAL(15,2) NOT NULL DEFAULT 0.00,
+  total_price DECIMAL(15,2) NOT NULL DEFAULT 0.00,
+  table_ids_json JSON DEFAULT NULL,
+  penanggung_jawab_id INT DEFAULT NULL,
+  note TEXT DEFAULT NULL,
+  status ENUM('upcoming','attended','cancelled') NOT NULL DEFAULT 'upcoming',
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (id),
+  UNIQUE KEY uuid_id (uuid_id),
+  INDEX idx_reservations_business (business_id),
+  INDEX idx_reservations_tanggal (tanggal),
+  INDEX idx_reservations_status (status),
+  CONSTRAINT fk_reservations_business FOREIGN KEY (business_id) REFERENCES businesses(id) ON DELETE CASCADE,
+  CONSTRAINT fk_reservations_pj FOREIGN KEY (penanggung_jawab_id) REFERENCES employees(id) ON DELETE SET NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

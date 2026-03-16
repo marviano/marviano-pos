@@ -31,6 +31,22 @@ export const dateToUTC7String = (date: Date): string => {
   return utc7Time.toISOString().split('T')[0];
 };
 
+/**
+ * Get current date and time in GMT+7 (WIB) as "YYYY-MM-DD HH:mm:ss".
+ * Use for activity log created_at and any display/storage that should be in local (Jakarta) time.
+ */
+export const getNowUTC7String = (): string => {
+  const now = new Date();
+  const utc7 = new Date(now.getTime() + (7 * 60 * 60 * 1000));
+  const y = utc7.getUTCFullYear();
+  const m = String(utc7.getUTCMonth() + 1).padStart(2, '0');
+  const d = String(utc7.getUTCDate()).padStart(2, '0');
+  const h = String(utc7.getUTCHours()).padStart(2, '0');
+  const min = String(utc7.getUTCMinutes()).padStart(2, '0');
+  const s = String(utc7.getUTCSeconds()).padStart(2, '0');
+  return `${y}-${m}-${d} ${h}:${min}:${s}`;
+};
+
 
 
 

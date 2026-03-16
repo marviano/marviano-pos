@@ -118,13 +118,64 @@ export const getApiUrl = (path: string): string => {
 };
 
 /**
- * POS write API key for ingest routes (transactions, refunds).
+ * POS write API key for ingest routes (transactions, refunds, reservations).
  * Set NEXT_PUBLIC_POS_WRITE_API_KEY or POS_WRITE_API_KEY to match server POS_WRITE_API_KEY.
  */
 export function getPosWriteApiKey(): string {
   if (typeof process !== 'undefined' && process.env?.NEXT_PUBLIC_POS_WRITE_API_KEY) return process.env.NEXT_PUBLIC_POS_WRITE_API_KEY;
   if (typeof process !== 'undefined' && process.env?.POS_WRITE_API_KEY) return process.env.POS_WRITE_API_KEY;
   return '';
+}
+
+export interface FetchFromVpsOptions extends Omit<RequestInit, 'signal'> {
+  /** Optional AbortSignal for cleanup on component unmount. */
+  signal?: AbortSignal;
+}
+
+/**
+ * Fetch from Salespulse VPS with POS auth. Single point of contact for Reservation Page VPS reads/writes.
+ * - Uses getApiUrl(path) for base URL
+ * - Attaches X-POS-API-Key for authenticated endpoints
+ * - Returns parsed JSON or throws on HTTP error
+ */
+export async function fetchFromVps<T = unknown>(
+  path: string,
+  options: FetchFromVpsOptions = {}
+): Promise<T> {
+  const { signal, ...rest } = options;
+  const url = getApiUrl(path.startsWith('/') ? path : `/${path}`);
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    ...(typeof rest.headers === 'object' && rest.headers && !(rest.headers instanceof Headers)
+      ? (rest.headers as Record<string, string>)
+      : {}),
+  };
+  const posKey = getPosWriteApiKey();
+  if (posKey) headers['X-POS-API-Key'] = posKey;
+
+  const response = await fetch(url, {
+    ...rest,
+    headers,
+    signal: signal ?? undefined,
+  });
+
+  if (!response.ok) {
+    const text = await response.text();
+    let errBody: string | undefined;
+    try {
+      const j = JSON.parse(text) as { error?: string };
+      errBody = j?.error ?? text;
+    } catch {
+      errBody = text || `HTTP ${response.status}`;
+    }
+    throw new Error(errBody || `HTTP ${response.status}`);
+  }
+
+  const contentType = response.headers.get('content-type');
+  if (contentType?.includes('application/json')) {
+    return response.json() as Promise<T>;
+  }
+  return undefined as T;
 }
 
 

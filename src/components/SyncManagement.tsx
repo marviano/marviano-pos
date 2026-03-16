@@ -25,6 +25,7 @@ import { getApiUrl } from '@/lib/api';
 import { useAuth } from '@/hooks/useAuth';
 import { appAlert, appConfirm } from '@/components/AppDialog';
 import { getAutoSyncEnabled, setAutoSyncEnabled, onAutoSyncSettingChanged } from '@/lib/autoSyncSettings';
+import { runMatchCheck, normalizeDateInput, type MatchCheckResult } from '@/lib/verificationMatchCheck';
 
 type UnknownRecord = Record<string, unknown>;
 // type SmartSyncStatus = ReturnType<typeof smartSyncService.getStatus>;
@@ -181,48 +182,6 @@ const toRecordArray = (value: unknown): UnknownRecord[] =>
   Array.isArray(value)
     ? value.filter((item): item is UnknownRecord => typeof item === 'object' && item !== null)
     : [];
-
-const convertUtc7ToUtcDate = (
-  year: number,
-  month: number,
-  day: number,
-  hour: number,
-  minute: number,
-  isEnd: boolean
-): Date => {
-  const seconds = isEnd ? 59 : 0;
-  const milliseconds = isEnd ? 999 : 0;
-  const utcMillis = Date.UTC(year, month - 1, day, hour - 7, minute, seconds, milliseconds);
-  return new Date(utcMillis);
-};
-
-const normalizeDateInput = (value: string | null | undefined, isEnd: boolean): string | null => {
-  if (!value) return null;
-  const trimmed = value.trim();
-  if (!trimmed) return null;
-
-  const dateOnlyMatch = trimmed.match(/^(\d{4})-(\d{2})-(\d{2})$/);
-  if (dateOnlyMatch) {
-    const [, y, m, d] = dateOnlyMatch.map(Number);
-    const date = convertUtc7ToUtcDate(y, m, d, isEnd ? 23 : 0, isEnd ? 59 : 0, isEnd);
-    return date.toISOString();
-  }
-
-  const dateTimeMatch = trimmed.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})$/);
-  if (dateTimeMatch) {
-    const [, y, m, d, h, min] = dateTimeMatch.map(Number);
-    const date = convertUtc7ToUtcDate(y, m, d, h, min, isEnd);
-    return date.toISOString();
-  }
-
-  const parsed = new Date(trimmed);
-  if (Number.isNaN(parsed.getTime())) return null;
-  if (isEnd) {
-    parsed.setUTCMilliseconds(999);
-    parsed.setUTCSeconds(59);
-  }
-  return parsed.toISOString();
-};
 
 // Deep compare two objects
 const deepEqual = (obj1: unknown, obj2: unknown): boolean => {
@@ -1138,6 +1097,53 @@ export default function SyncManagement() {
             addLog('error', `❌ Error uploading shifts: ${error instanceof Error ? error.message : 'Unknown error'}`);
           }
         }
+
+        // 1b. Upload unsynced reservations to salespulse.cc
+        if (electronAPI?.localDbGetUnsyncedReservations && electronAPI?.localDbMarkReservationsSynced) {
+          try {
+            const unsyncedReservations = await electronAPI.localDbGetUnsyncedReservations(undefined) as UnknownRecord[];
+            if (Array.isArray(unsyncedReservations) && unsyncedReservations.length > 0) {
+              addLog('info', `📤 Uploading ${unsyncedReservations.length} reservations to cloud...`);
+              const formatted = unsyncedReservations.map((row: UnknownRecord) => ({
+                uuid_id: row.uuid_id ?? row.id,
+                business_id: row.business_id,
+                nama: row.nama,
+                phone: row.phone,
+                tanggal: typeof row.tanggal === 'string' ? row.tanggal.split('T')[0] : row.tanggal,
+                jam: row.jam,
+                pax: row.pax ?? 1,
+                dp: row.dp ?? 0,
+                total_price: row.total_price ?? 0,
+                table_ids_json: row.table_ids_json ?? null,
+                items_json: row.items_json ?? null,
+                penanggung_jawab_id: row.penanggung_jawab_id ?? null,
+                created_by_email: row.created_by_email ?? null,
+                note: row.note ?? null,
+                status: row.status ?? 'upcoming',
+                created_at: row.created_at ?? null,
+                updated_at: row.updated_at ?? null,
+                deleted_at: row.deleted_at ?? null,
+                deleted_reason: row.deleted_reason ?? null
+              }));
+              const resResponse = await fetch(getApiUrl('/api/reservations'), {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ reservations: formatted })
+              });
+              if (resResponse.ok) {
+                const uuidIds: string[] = formatted.map((f: UnknownRecord) => String(f.uuid_id));
+                await electronAPI.localDbMarkReservationsSynced(uuidIds);
+                const resResult = await resResponse.json() as UnknownRecord;
+                addLog('success', `✅ ${resResult.insertedCount ?? formatted.length ?? 0} reservations uploaded successfully`);
+              } else {
+                const errorText = await resResponse.text();
+                addLog('warning', `⚠️ Failed to upload reservations: ${resResponse.status} - ${errorText.substring(0, 200)}`);
+              }
+            }
+          } catch (resErr) {
+            addLog('error', `❌ Error uploading reservations: ${resErr instanceof Error ? resErr.message : 'Unknown error'}`);
+          }
+        }
       }
 
       // 2. Upload Transactions (if not skipped)
@@ -1489,6 +1495,26 @@ export default function SyncManagement() {
     }
   }, [businessId, addLog, loadOfflineTransactions, fetchTransactionCounts, resyncFrom, resyncTo]);
 
+  const runMatchCheckCore = useCallback(async (
+    businessId: number,
+    fromDate: string,
+    toDate: string,
+    fromIso: string,
+    toIso: string
+  ): Promise<MatchCheckResult> => {
+    const electronAPI = getElectronAPI();
+    if (!electronAPI?.localDbGetTransactionsMatchData) {
+      throw new Error('Fitur verifikasi data tidak tersedia (database offline)');
+    }
+    const getTransactionsMatchData = (bid: number, from: string, to: string) =>
+      (electronAPI.localDbGetTransactionsMatchData as (businessId?: number, from?: string, to?: string) => Promise<UnknownRecord[]>)(bid, from, to);
+    return runMatchCheck(businessId, fromDate, toDate, fromIso, toIso, {
+      getTransactionsMatchData,
+      getApiUrl,
+      fetch
+    });
+  }, []);
+
   // Verifikasi data: compare transactions between db_host (marviano_pos) and salespulse.cc (same detail as Daftar Transaksi showAllTransactions)
   const handleMatchCheck = useCallback(async () => {
     if (!businessId) {
@@ -1501,207 +1527,18 @@ export default function SyncManagement() {
       addLog('warning', 'Pilih rentang tanggal (Dari dan Sampai) untuk verifikasi');
       return;
     }
-
-    const electronAPI = getElectronAPI();
-    if (!electronAPI?.localDbGetTransactionsMatchData) {
-      addLog('error', 'Fitur verifikasi data tidak tersedia (database offline)');
-      return;
-    }
-
     setIsMatchChecking(true);
     setMatchCheckResult(null);
     addLog('info', 'Memeriksa kecocokan data Pictos vs salespulse.cc...');
-
     try {
       const fromIso = normalizeDateInput(resyncFrom, false) ?? resyncFrom;
       const toIso = normalizeDateInput(resyncTo, true) ?? resyncTo;
-      const apiUrl = getApiUrl(`/api/transactions/match-check?business_id=${businessId}&from_date=${encodeURIComponent(fromDate)}&to_date=${encodeURIComponent(toDate)}&from_iso=${encodeURIComponent(fromIso)}&to_iso=${encodeURIComponent(toIso)}&limit=50000`);
-
-      const [localData, serverRes] = await Promise.all([
-        electronAPI.localDbGetTransactionsMatchData(businessId, fromIso, toIso) as Promise<UnknownRecord[]>,
-        fetch(apiUrl)
-      ]);
-
-      if (!serverRes.ok) {
-        const errText = await serverRes.text();
-        addLog('error', `Gagal mengambil data dari salespulse.cc: ${serverRes.status} ${errText}`);
-        setIsMatchChecking(false);
-        return;
-      }
-
-      const serverJson = await serverRes.json();
-      const serverData: UnknownRecord[] = Array.isArray(serverJson?.transactions) ? serverJson.transactions : [];
-
-      const localCreated = (localData || []).map((t: UnknownRecord) => t.created_at).filter(Boolean);
-      const serverCreated = serverData.map((t: UnknownRecord) => t.created_at).filter(Boolean);
-      const minLocal = localCreated.length ? (localCreated as string[]).reduce((a, b) => (a < b ? a : b)) : null;
-      const maxLocal = localCreated.length ? (localCreated as string[]).reduce((a, b) => (a > b ? a : b)) : null;
-      const minServer = serverCreated.length ? (serverCreated as string[]).reduce((a, b) => (a < b ? a : b)) : null;
-      const maxServer = serverCreated.length ? (serverCreated as string[]).reduce((a, b) => (a > b ? a : b)) : null;
-
-      const localIds = new Set((localData || []).map((t: UnknownRecord) => String(t.uuid_id ?? t.id)));
-      const serverIds = new Set(serverData.map((t: UnknownRecord) => String(t.uuid_id ?? t.id)));
-
-      const onlyInLocal = [...localIds].filter(id => !serverIds.has(id));
-      const onlyOnServer = [...serverIds].filter(id => !localIds.has(id));
-      const commonIds = [...localIds].filter(id => serverIds.has(id));
-
-      const localByUuid = new Map<string, UnknownRecord>();
-      (localData || []).forEach((t: UnknownRecord) => {
-        const u = String(t.uuid_id ?? t.id);
-        localByUuid.set(u, t);
-      });
-      const serverByUuid = new Map<string, UnknownRecord>();
-      serverData.forEach((t: UnknownRecord) => {
-        const u = String(t.uuid_id ?? t.id);
-        serverByUuid.set(u, t);
-      });
-
-      // Exclude created_at/updated_at from comparison to avoid spamming; timezone/sync can differ.
-      // Exclude shift_uuid: SQLite vs MySQL often differ by casing/Buffer and values are logically the same; re-upsert does not fix display.
-      const txFields = [
-        'total_amount', 'active_total', 'final_amount', 'voucher_discount', 'voucher_type', 'voucher_value', 'voucher_label',
-        'status', 'payment_method', 'payment_method_id', 'pickup_method', 'customer_name', 'customer_unit', 'waiter_id', 'user_id',
-        'paid_at', 'note', 'receipt_number'
-      ];
-
-      const normalizeVal = (v: unknown): string | number => {
-        if (v == null) return '';
-        if (typeof v === 'number') return Math.round(v * 100) / 100;
-        return String(v).trim();
-      };
-      const num = (v: unknown): number => (typeof v === 'number' && !Number.isNaN(v) ? v : typeof v === 'string' ? parseFloat(v) || 0 : 0);
-      const eqNum = (a: unknown, b: unknown, tol = 0.01) => Math.abs(num(a) - num(b)) <= tol;
-      const datetimeFields = ['created_at', 'updated_at', 'paid_at'];
-      const toTimestamp = (v: unknown): number | null => {
-        if (v == null || v === '') return null;
-        if (typeof v === 'number' && !Number.isNaN(v)) return v < 1e12 ? v * 1000 : v;
-        const d = new Date(v as string | number | Date);
-        return Number.isNaN(d.getTime()) ? null : d.getTime();
-      };
-      const eqDateTime = (a: unknown, b: unknown, tolMs = 2000) => {
-        const ta = toTimestamp(a);
-        const tb = toTimestamp(b);
-        if (ta == null && tb == null) return true;
-        if (ta == null || tb == null) return false;
-        return Math.abs(ta - tb) <= tolMs;
-      };
-
-      const mismatches: Array<{
-        uuid: string;
-        fields: string[];
-        details?: Array<{ field: string; pictosValue: string | number; serverValue: string | number }>;
-        itemDiffs?: { countPictos: number; countServer: number; details: string[] };
-        refundDiffs?: { countPictos: number; countServer: number; details: string[] };
-        discountDiffs?: Array<{ field: string; pictosValue: string | number; serverValue: string | number }>;
-      }> = [];
-
-      for (const uuid of commonIds) {
-        const localTx = localByUuid.get(uuid) as Record<string, unknown> | undefined;
-        const serverTx = serverByUuid.get(uuid) as Record<string, unknown> | undefined;
-        if (!localTx || !serverTx) continue;
-
-        const diffFields: string[] = [];
-        const details: Array<{ field: string; pictosValue: string | number; serverValue: string | number }> = [];
-
-        for (const key of txFields) {
-          const l = localTx[key];
-          const s = serverTx[key];
-          const isDateTime = datetimeFields.includes(key);
-          const looksNumeric = (v: unknown) => typeof v === 'number' || (typeof v === 'string' && v !== '' && !Number.isNaN(parseFloat(v as string)));
-          const isNum = !isDateTime && (looksNumeric(l) || looksNumeric(s) || (l === '' || s === ''));
-          const same = isDateTime ? eqDateTime(l, s) : isNum ? eqNum(l, s) : (normalizeVal(l) === normalizeVal(s));
-          if (!same) {
-            diffFields.push(key);
-            details.push({ field: key, pictosValue: normalizeVal(l), serverValue: normalizeVal(s) });
-          }
-        }
-
-        const localRefund = num(localTx.refund_total_from_refunds ?? localTx.refund_total ?? 0);
-        const serverRefund = num(serverTx.refund_total_from_refunds ?? serverTx.refund_total ?? 0);
-        if (!eqNum(localRefund, serverRefund)) {
-          if (!diffFields.includes('refund_total')) diffFields.push('refund_total');
-          if (!details.some(d => d.field === 'refund_total')) {
-            details.push({ field: 'refund_total', pictosValue: localRefund, serverValue: serverRefund });
-          }
-        }
-
-        const localItems = Array.isArray(localTx.items) ? localTx.items : [];
-        const serverItems = Array.isArray(serverTx.items) ? serverTx.items : [];
-        const localCancelled = num(localTx.cancelled_items_count);
-        const serverCancelled = num(serverTx.cancelled_items_count);
-        let itemDiffs: { countPictos: number; countServer: number; details: string[] } | undefined;
-        if (localItems.length !== serverItems.length || localCancelled !== serverCancelled) {
-          diffFields.push('items_count');
-          const lines = [`Item count: Pictos ${localItems.length}, salespulse ${serverItems.length}`];
-          if (localCancelled !== serverCancelled) {
-            lines.push(`Cancelled items: Pictos ${localCancelled}, salespulse ${serverCancelled}`);
-          }
-          for (let i = 0; i < Math.max(localItems.length, serverItems.length); i++) {
-            const li = localItems[i] as Record<string, unknown> | undefined;
-            const si = serverItems[i] as Record<string, unknown> | undefined;
-            if (!li && si) lines.push(`Item ${i + 1}: missing on Pictos (only on salespulse)`);
-            else if (li && !si) lines.push(`Item ${i + 1}: missing on salespulse (only on Pictos)`);
-            else if (li && si) {
-              const pq = num(li.quantity); const sq = num(si.quantity);
-              const pp = num(li.unit_price); const sp = num(si.unit_price);
-              const pt = num(li.total_price); const st = num(si.total_price);
-              const pStatus = String(li.production_status ?? '');
-              const sStatus = String(si.production_status ?? '');
-              if (!eqNum(pq, sq) || !eqNum(pp, sp) || !eqNum(pt, st) || pStatus !== sStatus) {
-                lines.push(`Item ${i + 1}: qty ${pq} vs ${sq}, price ${pp} vs ${sp}, total ${pt} vs ${st}, status "${pStatus}" vs "${sStatus}"`);
-              }
-            }
-          }
-          itemDiffs = { countPictos: localItems.length, countServer: serverItems.length, details: lines };
-        }
-
-        const localRefunds = Array.isArray(localTx.refunds) ? localTx.refunds : [];
-        const serverRefunds = Array.isArray(serverTx.refunds) ? serverTx.refunds : [];
-        let refundDiffs: { countPictos: number; countServer: number; details: string[] } | undefined;
-        if (localRefunds.length !== serverRefunds.length || !eqNum(localRefund, serverRefund)) {
-          const lines = [`Refund count: Pictos ${localRefunds.length}, salespulse ${serverRefunds.length}`, `Refund total: Pictos ${localRefund}, salespulse ${serverRefund}`];
-          for (let i = 0; i < Math.max(localRefunds.length, serverRefunds.length); i++) {
-            const lr = localRefunds[i] as Record<string, unknown> | undefined;
-            const sr = serverRefunds[i] as Record<string, unknown> | undefined;
-            if (!lr && sr) lines.push(`Refund ${i + 1}: missing on Pictos (only on salespulse) — ${num(sr.refund_amount)} ${sr.refund_type ?? ''}`);
-            else if (lr && !sr) lines.push(`Refund ${i + 1}: missing on salespulse (only on Pictos) — ${num(lr.refund_amount)} ${lr.refund_type ?? ''}`);
-            else if (lr && sr && (!eqNum(lr.refund_amount, sr.refund_amount) || String(lr.refund_type ?? '') !== String(sr.refund_type ?? '') || String(lr.status ?? '') !== String(sr.status ?? ''))) {
-              lines.push(`Refund ${i + 1}: amount ${num(lr.refund_amount)} vs ${num(sr.refund_amount)}, type ${lr.refund_type} vs ${sr.refund_type}, status ${lr.status} vs ${sr.status}`);
-            }
-          }
-          refundDiffs = { countPictos: localRefunds.length, countServer: serverRefunds.length, details: lines };
-        }
-
-        const discountFields = ['voucher_discount', 'voucher_type', 'voucher_value', 'voucher_label'];
-        const discountDiffs = discountFields
-          .filter(k => diffFields.includes(k))
-          .map(k => ({ field: k, pictosValue: normalizeVal(localTx[k]), serverValue: normalizeVal(serverTx[k]) }));
-
-        if (diffFields.length > 0) {
-          mismatches.push({
-            uuid,
-            fields: diffFields,
-            details,
-            itemDiffs,
-            refundDiffs,
-            discountDiffs: discountDiffs.length > 0 ? discountDiffs : undefined
-          });
-        }
-      }
-
-      const matching = commonIds.length - mismatches.length;
-      setMatchCheckResult({
-        onlyInLocal,
-        onlyOnServer,
-        matching,
-        mismatches
-      });
-
-      if (onlyInLocal.length === 0 && onlyOnServer.length === 0 && mismatches.length === 0) {
+      const result = await runMatchCheckCore(businessId, fromDate, toDate, fromIso, toIso);
+      setMatchCheckResult(result);
+      if (result.onlyInLocal.length === 0 && result.onlyOnServer.length === 0 && result.mismatches.length === 0) {
         addLog('success', 'Data match 1:1 (Pictos = salespulse.cc)');
       } else {
-        addLog('info', `Verifikasi selesai: ${onlyInLocal.length} hanya di Pictos, ${onlyOnServer.length} hanya di salespulse.cc, ${matching} sama, ${mismatches.length} beda field`);
+        addLog('info', `Verifikasi selesai: ${result.onlyInLocal.length} hanya di Pictos, ${result.onlyOnServer.length} hanya di salespulse.cc, ${result.matching} sama, ${result.mismatches.length} beda field`);
       }
     } catch (error) {
       addLog('error', `Verifikasi gagal: ${error instanceof Error ? error.message : String(error)}`);
@@ -1709,7 +1546,7 @@ export default function SyncManagement() {
     } finally {
       setIsMatchChecking(false);
     }
-  }, [businessId, addLog, resyncFrom, resyncTo]);
+  }, [businessId, addLog, resyncFrom, resyncTo, runMatchCheckCore]);
 
   // Download master data from server
   const handleFullSyncClick = useCallback(async () => {
@@ -2063,10 +1900,10 @@ export default function SyncManagement() {
   // Cleanup test transactions (hardcoded: marviano.austin@gmail.com OR user_id IS NULL)
   const cleanupTestTransactions = async () => {
     const confirmed = await appConfirm(
-      `⚠️ WARNING: This will PERMANENTLY DELETE ALL transactions from all 2 databases:\n\n` +
-      `1. Local MySQL (local POS)\n` +
-      `2. SalesPulse MySQL (online)\n\n` +
-      `Target: marviano.austin@gmail.com OR user_id IS NULL\n\n` +
+      `⚠️ WARNING: This will PERMANENTLY DELETE test data from:\n\n` +
+      `1. Local MySQL (local POS + system_pos)\n` +
+      `2. SalesPulse MySQL (VPS / online API)\n\n` +
+      `Deleted: transactions (user_id IS NULL or marviano.austin@gmail.com), their items/refunds/audit logs, shifts owned by marviano.austin@gmail.com. Counters reset for affected businesses.\n\n` +
       `This action CANNOT be undone!\n\n` +
       `Are you absolutely sure you want to proceed?`
     );
@@ -3780,16 +3617,28 @@ WHERE ${baseWhere};`;
                     <Trash2 className="w-5 h-5 text-red-600" />
                     <h4 className="font-semibold text-gray-900 text-lg">Cleanup Test Transactions</h4>
                   </div>
-                  <p className="text-sm text-gray-700 mb-4">
-                    Permanently delete ALL test transactions from salespulse, system_pos, and SalesPulse API. Printer daily counters (and any other counters) are reset for each affected business.
-                  </p>
-                  <div className="bg-red-100 border border-red-300 rounded-lg p-3 mb-4">
+                  <div className="bg-red-100 border border-red-300 rounded-lg p-3 mb-3">
                     <p className="text-xs text-red-800 font-medium mb-1">
-                      <strong>Target Criteria:</strong>
+                      <strong>Target criteria (what is selected):</strong>
                     </p>
                     <ul className="text-xs text-red-700 list-disc list-inside space-y-0.5">
-                      <li><code className="bg-red-200 px-1 rounded">marviano.austin@gmail.com</code></li>
-                      <li><code className="bg-red-200 px-1 rounded">user_id IS NULL</code></li>
+                      <li>Transactions where <code className="bg-red-200 px-1 rounded">user_id IS NULL</code></li>
+                      <li>Transactions made by <code className="bg-red-200 px-1 rounded">marviano.austin@gmail.com</code></li>
+                      <li>Shifts <strong>owned by</strong> <code className="bg-red-200 px-1 rounded">marviano.austin@gmail.com</code></li>
+                    </ul>
+                  </div>
+                  <div className="bg-amber-50 border border-amber-200 rounded-lg p-3 mb-4">
+                    <p className="text-xs text-amber-900 font-medium mb-1.5">
+                      <strong>What will be deleted (per database):</strong>
+                    </p>
+                    <ul className="text-xs text-amber-800 space-y-0.5">
+                      <li>• Transactions matching the criteria above</li>
+                      <li>• All transaction items, customizations, and refunds for those transactions</li>
+                      <li>• Refunds made by the test user or with <code>refunded_by</code> NULL</li>
+                      <li>• Shifts owned by marviano.austin@gmail.com</li>
+                      <li>• Printer audit logs (printer1, printer2) for those transactions</li>
+                      <li>• system_pos: queue rows and transactions for those transaction UUIDs</li>
+                      <li>• Printer daily counters reset for each affected business</li>
                     </ul>
                   </div>
                   <button
@@ -3810,7 +3659,7 @@ WHERE ${baseWhere};`;
                     )}
                   </button>
                   <p className="text-xs text-red-700 mt-3">
-                    ⚠️ This action cannot be undone. All transactions, items, and audit logs matching the criteria are permanently deleted from salespulse, system_pos, and online. Counters are reset.
+                    ⚠️ This action cannot be undone. Deletion runs on local DB and on the SalesPulse API (VPS); data is removed from both.
                   </p>
                 </div>
 

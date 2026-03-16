@@ -8,6 +8,7 @@ import { useAuth } from '@/hooks/useAuth';
 import { getApiUrl } from '@/lib/api';
 import { offlineSyncService } from '@/lib/offlineSync';
 import { authManager, type User } from '@/lib/auth';
+import { smartSyncService } from '@/lib/smartSync';
 
 interface Business {
   id: number;
@@ -198,6 +199,7 @@ export default function Login() {
           }
         }
         await authManager.completeLogin(loginResult as User & { _businesses?: unknown[]; _isSuperAdmin?: boolean }, selectedBusinessId);
+        smartSyncService.setVerificationBusinessId(selectedBusinessId);
       } else {
         // 2+ businesses and no valid last selection: show business selection
         setPendingLogin({
@@ -226,6 +228,7 @@ export default function Login() {
         }
       }
       await authManager.completeLogin(pendingLogin.user as User & { _businesses?: unknown[]; _isSuperAdmin?: boolean }, businessId);
+      if (businessId != null) smartSyncService.setVerificationBusinessId(businessId);
       setPendingLogin(null);
       // Router will handle redirect via useEffect
     } catch (error) {

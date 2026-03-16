@@ -22,6 +22,18 @@ declare global {
     statistics: { order_count: number; total_amount: number; total_discount: number; voucher_count: number; total_cu?: number };
     gross_total_omset?: number;
     refunds?: ShiftPrintRefundRow[];
+    refundExcItems?: Array<{
+      uuid_id: string;
+      nama: string;
+      pax: number;
+      tanggal: string;
+      jam: string;
+      no_hp: string | null;
+      jumlah_refund: number;
+      alasan: string | null;
+      created_by_email: string | null;
+      created_at: string;
+    }>;
     cancelledItems?: Array<{ product_name: string; quantity: number; total_price: number; cancelled_at: string; cancelled_by_user_name: string; cancelled_by_waiter_name: string; receipt_number?: string | null; customer_name?: string | null }>;
     productSales: Array<{
       product_name: string;
@@ -83,6 +95,7 @@ declare global {
       paket?: boolean;
       toppingSales?: boolean;
       itemDibatalkan?: boolean;
+      refundExc?: boolean;
     };
   };
 
@@ -112,6 +125,8 @@ declare global {
       maximizeWindow: () => Promise<unknown>;
       navigateTo: (path: string) => Promise<unknown>;
       focusWindow: () => Promise<{ success: boolean; error?: string }>;
+      openExternal?: (url: string) => Promise<{ success: boolean }>;
+      smartSyncAppendVerificationLog?: (content: string, dateYyyyMmDd?: string) => Promise<{ success: boolean; error?: string }>;
 
       // Authentication events
       notifyLoginSuccess: () => Promise<unknown>;
@@ -269,6 +284,7 @@ declare global {
       // Transaction operations
       localDbGetTransactionByUuid?: (uuid: string) => Promise<unknown>;
       localDbGetTransactions?: (businessId?: number, limit?: number, options?: { todayOnly?: boolean; from?: string; to?: string }) => Promise<unknown[]>;
+      localDbGetPendingOrdersCount?: (businessId?: number) => Promise<{ success: boolean; count: number }>;
       localDbUpdateTransactionShift?: (transactionUuid: string, shiftUuid: string | null) => Promise<{ success: boolean; error?: string }>;
       localDbDeleteSingleTransactionPreview?: (transactionUuid: string) => Promise<{
         success: boolean;
@@ -330,6 +346,11 @@ declare global {
         final_amount: number;
         transaction_created_at: string;
       }>>;
+      localDbCreateRefundExc?: (payload: unknown) => Promise<{ success: boolean; id: number; error?: string }>;
+      localDbGetShiftRefundExc?: (payload: { businessId: number; shiftUuid?: string | null; shiftStart?: string; shiftEnd?: string | null }) => Promise<unknown[]>;
+      localDbGetRefundExcTotal?: (businessId: number, fromDate: string, toDate: string) => Promise<{ total: number; count: number }>;
+      localDbGetUnsyncedRefundExc?: (forceAll?: boolean) => Promise<unknown[]>;
+      localDbMarkRefundExcSynced?: (uuidIds: string[]) => Promise<{ success: boolean; count: number; error?: string }>;
       localDbUpsertTransactionRefunds?: (rows: unknown[]) => Promise<{ success: boolean; error?: string }>;
       localDbApplyTransactionRefund?: (payload: unknown) => Promise<{ success: boolean; error?: string }>;
       localDbGetUnsyncedTransactionsCount?: (businessId?: number) => Promise<number>;
@@ -369,6 +390,8 @@ declare global {
       // Contacts
       localDbUpsertContacts?: (rows: unknown[]) => Promise<{ success: boolean }>;
       localDbGetContacts?: (teamId?: number) => Promise<unknown[]>;
+      localDbSearchContacts?: (query: string) => Promise<Array<{ id: number; nama: string; phone_number: string }>>;
+      vpsCreateContact?: (data: { nama: string; phone_number: string; created_by_email?: string | null; business_id?: number | null }) => Promise<{ success: boolean; contact?: unknown; alreadyExists?: boolean; error?: string }>;
 
       // Teams
       localDbUpsertTeams?: (rows: unknown[]) => Promise<{ success: boolean }>;
@@ -381,6 +404,47 @@ declare global {
       // Employees
       localDbUpsertEmployees?: (rows: unknown[], skipValidation?: boolean) => Promise<{ success: boolean; skipped?: number; error?: string }>;
       localDbGetEmployees?: () => Promise<Record<string, unknown>[]>;
+
+      // Reservations
+      localDbGetReservations?: (businessId: number, filters?: { tanggal?: string; tanggalFrom?: string; tanggalTo?: string; status?: string; showArchived?: 'no' | 'only' }) => Promise<unknown[]>;
+      localDbGetReservationCountsByMonth?: (businessId: number, year: number, month: number) => Promise<Array<{ tanggal: string; count: number; sum_dp?: number; sum_total?: number }>>;
+      localDbCreateReservation?: (data: {
+        uuid_id: string;
+        business_id: number;
+        nama: string;
+        phone: string;
+        tanggal: string;
+        jam: string;
+        pax: number;
+        dp?: number;
+        total_price?: number;
+        table_ids?: number[];
+        table_ids_json?: number[] | null;
+        items_json?: unknown;
+        penanggung_jawab_id?: number | null;
+        created_by_email?: string | null;
+        note?: string | null;
+        status?: string;
+      }) => Promise<{ success: boolean; error?: string }>;
+      localDbUpdateReservation?: (uuid: string, data: {
+        nama?: string;
+        phone?: string;
+        tanggal?: string;
+        jam?: string;
+        pax?: number;
+        dp?: number;
+        total_price?: number;
+        table_ids?: number[];
+        table_ids_json?: number[] | null;
+        items_json?: unknown;
+        penanggung_jawab_id?: number | null;
+        note?: string | null;
+        status?: string;
+      }) => Promise<{ success: boolean; error?: string }>;
+      localDbArchiveReservation?: (uuid: string, reason: string) => Promise<{ success: boolean; error?: string }>;
+      localDbGetUnsyncedReservations?: (businessId?: number) => Promise<unknown[]>;
+      localDbMarkReservationsSynced?: (uuidIds: string[]) => Promise<{ success: boolean; count?: number; error?: string }>;
+      localDbGetPendingTransactionsByTableIds?: (businessId: number, tableIds: number[]) => Promise<Array<{ tableId: number; transactionUuid: string; created_at: string }>>;
 
       // Roles & permissions
       localDbUpsertRoles?: (rows: unknown[]) => Promise<{ success: boolean }>;

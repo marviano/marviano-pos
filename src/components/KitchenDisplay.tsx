@@ -66,10 +66,25 @@ const getElectronAPI = () => (typeof window !== 'undefined' ? window.electronAPI
 /** Cache TTL for static data (products, tables, rooms) - refresh every 5 minutes */
 const STATIC_DATA_CACHE_TTL_MS = 5 * 60 * 1000;
 
+const MAX_FINISHED_MAP_SIZE = 50;
+
+function trimFinishedMap(map: Map<string, GroupedOrderItem>, maxSize: number) {
+  if (map.size <= maxSize) return;
+  const sorted = Array.from(map.entries()).sort((a, b) => {
+    const aTime = a[1].production_finished_at ? new Date(a[1].production_finished_at).getTime() : 0;
+    const bTime = b[1].production_finished_at ? new Date(b[1].production_finished_at).getTime() : 0;
+    return bTime - aTime;
+  });
+  map.clear();
+  for (let i = 0; i < maxSize && i < sorted.length; i++) {
+    map.set(sorted[i][0], sorted[i][1]);
+  }
+}
+
 /** Limit for today's transactions (kitchen display - only needs today's active orders) */
 const TODAY_TRANSACTIONS_LIMIT = 200;
 
-export default function KitchenDisplay({ viewOnly = false, legacyCardLayout = false, enableSound }: { viewOnly?: boolean; legacyCardLayout?: boolean; enableSound?: boolean; }) {
+export default function KitchenDisplay({ viewOnly = false, legacyCardLayout = false, enableSound, pollingIntervalMs, pollingDelayMs }: { viewOnly?: boolean; legacyCardLayout?: boolean; enableSound?: boolean; pollingIntervalMs?: number; pollingDelayMs?: number; }) {
   const { user } = useAuth();
   const [activeOrders, setActiveOrders] = useState<GroupedOrderItem[]>([]);
   const [finishedOrders, setFinishedOrders] = useState<GroupedOrderItem[]>([]);
@@ -79,6 +94,7 @@ export default function KitchenDisplay({ viewOnly = false, legacyCardLayout = fa
   const soundRef = useRef<HTMLAudioElement | null>(null);
   const optimisticFinishedRef = useRef<Map<string, GroupedOrderItem>>(new Map());
   const persistingIdsRef = useRef<Set<string>>(new Set());
+  const isFetchingRef = useRef(false);
   /** Last finished list we displayed; used so a stale fetch never moves an item back to active. */
   const lastFinishedMapRef = useRef<Map<string, GroupedOrderItem>>(new Map());
   /** Cache for products, tables, rooms - reduces DB load during polling */
@@ -127,6 +143,8 @@ export default function KitchenDisplay({ viewOnly = false, legacyCardLayout = fa
 
   // Fetch orders from database
   const fetchOrders = useCallback(async () => {
+    if (isFetchingRef.current) return;
+    isFetchingRef.current = true;
     try {
       const electronAPI = getElectronAPI();
       if (!electronAPI) {
@@ -252,11 +270,24 @@ export default function KitchenDisplay({ viewOnly = false, legacyCardLayout = fa
             continue;
           }
 
-          const tableId = typeof tx.table_id === 'number' ? tx.table_id : (typeof tx.table_id === 'string' ? parseInt(tx.table_id, 10) : null);
-          const tableInfo = tableId && tablesMap.has(tableId) ? tablesMap.get(tableId)! : null;
-          const tableNumber = tableInfo ? tableInfo.table_number : null;
-          const roomId = tableInfo ? tableInfo.room_id : null;
-          const roomName = roomId && roomsMap.has(roomId) ? roomsMap.get(roomId)! : null;
+          // Multi-table: use table_ids when present, else table_id
+          const rawTableIds = (tx as Record<string, unknown>).table_ids;
+          const idsToUse = Array.isArray(rawTableIds) && rawTableIds.length > 0
+            ? rawTableIds.map((id: unknown) => typeof id === 'number' ? id : parseInt(String(id), 10)).filter((n: number) => !Number.isNaN(n))
+            : (tx.table_id != null ? [typeof tx.table_id === 'number' ? tx.table_id : parseInt(String(tx.table_id), 10)] : []);
+          const tableNumbers: string[] = [];
+          let roomName: string | null = null;
+          for (const tid of idsToUse) {
+            const tableInfo = tablesMap.has(tid) ? tablesMap.get(tid)! : null;
+            if (tableInfo) {
+              tableNumbers.push(tableInfo.table_number);
+              if (roomName == null && roomsMap.has(tableInfo.room_id)) roomName = roomsMap.get(tableInfo.room_id)!;
+            }
+          }
+          const tableNumber = tableNumbers.length > 0
+            ? (roomName ? `${tableNumbers.join(', ')}/${roomName}` : tableNumbers.join(', '))
+            : null;
+          const roomId = tableNumbers.length > 0 && roomName ? (tablesMap.has(idsToUse[0]) ? tablesMap.get(idsToUse[0])!.room_id : null) : null;
           const customerName = typeof tx.customer_name === 'string' ? tx.customer_name : null;
 
           const itemId = typeof item.id === 'number' ? item.id : (typeof item.id === 'string' ? parseInt(item.id, 10) : null);
@@ -577,6 +608,8 @@ export default function KitchenDisplay({ viewOnly = false, legacyCardLayout = fa
 
       // Include both package and non-package items so completed package items stay in "pesanan selesai" after payment
       lastFinishedMapRef.current = new Map(finishedMerged.map((x) => [x.uuid_id, x]));
+      trimFinishedMap(lastFinishedMapRef.current, MAX_FINISHED_MAP_SIZE);
+      trimFinishedMap(optimisticFinishedRef.current, MAX_FINISHED_MAP_SIZE);
       // Clear optimistic strikethrough and line finished_at for items now in finished (polling confirmed)
       setPackageCheckedSubItems((prev) => {
         const next = new Map(prev);
@@ -625,6 +658,8 @@ export default function KitchenDisplay({ viewOnly = false, legacyCardLayout = fa
     } catch (error) {
       console.error('Error fetching orders:', error);
       setLoading(false);
+    } finally {
+      isFetchingRef.current = false;
     }
   }, [businessId]);
 
@@ -646,12 +681,30 @@ export default function KitchenDisplay({ viewOnly = false, legacyCardLayout = fa
     return `${minutes} Menit`;
   };
 
-  // Poll database every 2 seconds (optimized for faster order visibility)
+  // Poll database with setTimeout-based scheduling: next poll starts only after current one completes.
+  // This prevents overlapping fetches that cause cascading CPU spikes over prolonged use.
   useEffect(() => {
-    fetchOrders();
-    const interval = setInterval(fetchOrders, 2000);
-    return () => clearInterval(interval);
-  }, [fetchOrders]);
+    let cancelled = false;
+    const POLL_INTERVAL_MS = pollingIntervalMs ?? 5000;
+    const poll = async () => {
+      await fetchOrders();
+      if (!cancelled) {
+        timeoutId = setTimeout(poll, POLL_INTERVAL_MS);
+      }
+    };
+    let timeoutId: ReturnType<typeof setTimeout>;
+    let delayId: ReturnType<typeof setTimeout> | undefined;
+    if (pollingDelayMs && pollingDelayMs > 0) {
+      delayId = setTimeout(() => { if (!cancelled) poll(); }, pollingDelayMs);
+    } else {
+      poll();
+    }
+    return () => {
+      cancelled = true;
+      clearTimeout(timeoutId);
+      if (delayId) clearTimeout(delayId);
+    };
+  }, [fetchOrders, pollingIntervalMs, pollingDelayMs]);
 
   // Cleanup audio only on unmount (not when polling effect re-runs, so sound can finish playing)
   useEffect(() => {

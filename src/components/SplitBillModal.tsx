@@ -11,6 +11,8 @@ interface PendingTransaction {
   id: string;
   uuid_id: string;
   table_id: number | null;
+  /** Multi-table: all table IDs for this transaction (when present, table_id is first). */
+  table_ids?: number[];
   customer_name: string | null;
   total_amount: number;
   final_amount: number;
@@ -181,6 +183,7 @@ export default function SplitBillModal({ isOpen, onClose, businessId, onRefresh 
             id?: string;
             uuid_id?: string;
             table_id?: number | null;
+            table_ids?: number[];
             customer_name?: string | null;
             waiter_id?: number | null;
             total_amount?: number;
@@ -188,18 +191,26 @@ export default function SplitBillModal({ isOpen, onClose, businessId, onRefresh 
             created_at?: string;
           };
           const txId = t.uuid_id || t.id || '';
-          const tableId = t.table_id || null;
-          const tableInfo = tableId && tablesMap.has(tableId) ? tablesMap.get(tableId)! : null;
-          const tableNumber = tableInfo ? tableInfo.table_number : null;
-          const roomId = tableInfo ? tableInfo.room_id : null;
-          const roomName = roomId && roomsMap.has(roomId) ? roomsMap.get(roomId)! : null;
+          const rawTableIds = t.table_ids;
+          const idsToUse = Array.isArray(rawTableIds) && rawTableIds.length > 0
+            ? rawTableIds.map((id: unknown) => typeof id === 'number' ? id : parseInt(String(id), 10)).filter((n: number) => !Number.isNaN(n))
+            : (t.table_id != null ? [typeof t.table_id === 'number' ? t.table_id : parseInt(String(t.table_id), 10)] : []);
+          const tableId = idsToUse.length > 0 ? idsToUse[0] : null;
+          const tableNumbers: string[] = [];
+          let roomName: string | null = null;
+          for (const tid of idsToUse) {
+            const tableInfo = tablesMap.has(tid) ? tablesMap.get(tid)! : null;
+            if (tableInfo) {
+              tableNumbers.push(tableInfo.table_number);
+              if (roomName == null && roomsMap.has(tableInfo.room_id)) roomName = roomsMap.get(tableInfo.room_id)!;
+            }
+          }
+          const tableRoomDisplay = tableNumbers.length > 0 && roomName
+            ? `${tableNumbers.join(', ')}/${roomName}`
+            : tableNumbers.length > 0
+              ? tableNumbers.join(', ')
+              : 'Take-away';
 
-          // Format: "table_name/room_name" or "Take-away" if no table
-          const tableRoomDisplay = tableId && tableNumber && roomName
-            ? `${tableNumber}/${roomName}`
-            : 'Take-away';
-
-          // Get waiter name
           const waiterId = typeof t.waiter_id === 'number' ? t.waiter_id : (typeof t.waiter_id === 'string' ? parseInt(t.waiter_id, 10) : null);
           const waiterName = waiterId && employeesMap.has(waiterId) ? employeesMap.get(waiterId)! : null;
 
@@ -207,6 +218,7 @@ export default function SplitBillModal({ isOpen, onClose, businessId, onRefresh 
             id: txId,
             uuid_id: txId,
             table_id: tableId,
+            ...(idsToUse.length > 0 ? { table_ids: idsToUse } : {}),
             customer_name: t.customer_name || null,
             total_amount: t.total_amount || 0,
             final_amount: t.final_amount || t.total_amount || 0,
@@ -783,26 +795,23 @@ export default function SplitBillModal({ isOpen, onClose, businessId, onRefresh 
       }
 
       const allTransactions = await electronAPI.localDbGetTransactions(businessId, 10000);
-      const pending = (Array.isArray(allTransactions) ? allTransactions : [])
-        .filter((tx: unknown) => {
-          if (tx && typeof tx === 'object' && 'status' in tx && 'table_id' in tx) {
-            const transaction = tx as { status: string; table_id: number | null; uuid_id?: string; id?: string };
-            const isPending = transaction.status === 'pending' && transaction.table_id !== null;
-            return isPending;
-          }
-          return false;
-        })
-        .map((tx: unknown) => {
-          const t = tx as { id?: string; uuid_id?: string; table_id: number; status: string; created_at?: string };
-          const txId = t.uuid_id || t.id || '';
-          return {
-            id: txId,
-            table_id: t.table_id,
-            status: t.status,
-            created_at: t.created_at || new Date().toISOString(),
-          };
-        });
-      setPendingTransactionsForTables(pending);
+      const txList = Array.isArray(allTransactions) ? allTransactions : [];
+      const expanded: Array<{ id: string; table_id: number; status: string; created_at: string }> = [];
+      for (const tx of txList) {
+        if (!tx || typeof tx !== 'object' || (tx as { status?: string }).status !== 'pending') continue;
+        const t = tx as { uuid_id?: string; id?: string; table_id?: number | null; table_ids?: number[]; status: string; created_at?: string };
+        const txId = t.uuid_id || t.id || '';
+        if (!txId) continue;
+        const tableIds = Array.isArray(t.table_ids) && t.table_ids.length > 0
+          ? t.table_ids.map((id: unknown) => typeof id === 'number' ? id : parseInt(String(id), 10)).filter((n: number) => !Number.isNaN(n))
+          : (t.table_id != null ? [t.table_id] : []);
+        if (tableIds.length === 0) continue;
+        const created = t.created_at || new Date().toISOString();
+        for (const tableId of tableIds) {
+          expanded.push({ id: txId, table_id: tableId, status: t.status, created_at: created });
+        }
+      }
+      setPendingTransactionsForTables(expanded);
     } catch (error) {
       console.error('Error fetching pending transactions:', error);
     }

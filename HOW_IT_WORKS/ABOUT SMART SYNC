@@ -1,0 +1,12 @@
+Smart sync only runs when the logged-in user has both of these permissions (or is super admin):
+
+access_daftartransaksi – access to Daftar Transaksi
+access_kasir_bayar_button – access to the Bayar button (pay)
+Summary:
+
+Super admin → smart sync always allowed (no permission check).
+Other users → smart sync allowed only if they have both:
+access_daftartransaksi
+access_kasir_bayar_button
+No user / logged out → smart sync off.
+User with only one of the two → smart sync off.

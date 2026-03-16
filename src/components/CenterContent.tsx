@@ -1,6 +1,6 @@
 'use client';
 
-import { ShoppingCart, LayoutGrid, Search, X } from 'lucide-react';
+import { ShoppingCart, LayoutGrid, Search, X, HelpCircle } from 'lucide-react';
 import { useState, useEffect, useMemo, useRef } from 'react';
 import Image from 'next/image';
 import ProductCustomizationModal from './ProductCustomizationModal';
@@ -213,9 +213,25 @@ interface CenterContentProps {
   onUnsavedChangesChange?: (hasUnsavedChanges: boolean) => void;
   /** When this value changes (e.g. on New click), reset nama pelanggan and pilih waiter */
   resetCustomerAndWaiterSignal?: number;
+  /** True when in reservation pre-order mode: hide Bayar, show Simpan ke Reservasi */
+  isReservationPreOrderMode?: boolean;
+  /** Called when user clicks Simpan ke Reservasi in pre-order mode */
+  onSaveToReservation?: () => void;
+  /** When set (from Send to Kasir), pre-fill table selection and customer name */
+  reservationCartInfo?: {
+    tableIds: number[];
+    tableName: string;
+    customerName: string;
+    reservationUuid: string;
+    pickupMethod: 'dine-in';
+  } | null;
+  /** Save current cart to reservation (when cart came from Kirim ke Pesanan Aktif) */
+  onSaveCartToReservation?: () => void;
+  /** Called when a new order is saved via table selection. If from reservation, reservationUuid is passed so parent can set reservation status to attended. */
+  onTableOrderSaved?: (reservationUuid?: string) => void;
 }
 
-export default function CenterContent({ products, cartItems, setCartItems, transactionType, isLoadingProducts = false, isOnline = false, selectedOnlinePlatform = null, searchQuery = '', setSearchQuery, loadedTransactionInfo = null, onReloadTransaction, onClearLoadedTransaction, onUnsavedChangesChange, resetCustomerAndWaiterSignal }: CenterContentProps) {
+export default function CenterContent({ products, cartItems, setCartItems, transactionType, isLoadingProducts = false, isOnline = false, selectedOnlinePlatform = null, searchQuery = '', setSearchQuery, loadedTransactionInfo = null, onReloadTransaction, onClearLoadedTransaction, onUnsavedChangesChange, resetCustomerAndWaiterSignal, isReservationPreOrderMode = false, onSaveToReservation, reservationCartInfo = null, onSaveCartToReservation, onTableOrderSaved }: CenterContentProps) {
   const { user } = useAuth();
   const canAccessBayarButton = isSuperAdmin(user) || hasPermission(user, 'access_kasir_bayar_button');
   const [showCustomizationModal, setShowCustomizationModal] = useState(false);
@@ -305,8 +321,12 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
     }
   }, [hasUnsavedChanges, onUnsavedChangesChange]);
 
-  // Populate customer name, waiter, CU, and pickup method when transaction is loaded
+  // Populate customer name, waiter, CU, and pickup method when transaction is loaded or from reservation (Send to Kasir)
   useEffect(() => {
+    if (reservationCartInfo) {
+      setCustomerName(reservationCartInfo.customerName ?? '');
+      setOrderPickupMethod(reservationCartInfo.pickupMethod ?? 'dine-in');
+    }
     if (loadedTransactionInfo) {
       setCustomerName(loadedTransactionInfo.customerName ?? '');
       const cu = loadedTransactionInfo.customer_unit;
@@ -315,7 +335,7 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
       setSelectedWaiterName(loadedTransactionInfo.waiterName ?? null);
       setSelectedWaiterColor(loadedTransactionInfo.waiterColor ?? null);
       setOrderPickupMethod(loadedTransactionInfo.pickupMethod ?? 'dine-in');
-    } else {
+    } else if (!reservationCartInfo) {
       setCustomerName('');
       setCuValue('1');
       setSelectedWaiterId(null);
@@ -324,7 +344,7 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
       // When no loaded transaction: platform tab -> take-away, offline -> dine-in
       setOrderPickupMethod(isOnline && selectedOnlinePlatform ? 'take-away' : 'dine-in');
     }
-  }, [loadedTransactionInfo, isOnline, selectedOnlinePlatform]);
+  }, [loadedTransactionInfo, reservationCartInfo, isOnline, selectedOnlinePlatform]);
 
   // When switching to an online platform tab, automatically set pickup to take-away
   useEffect(() => {
@@ -1686,29 +1706,92 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
             )}
 
             {/* Action Buttons */}
-            <div className="flex space-x-2 mt-3">
-              <button
-                onClick={() => setShowTableSelectionModal(true)}
-                disabled={cartItems.length === 0 || isOnline}
-                className="flex-1 bg-blue-500 hover:bg-blue-600 disabled:bg-gray-400 disabled:cursor-not-allowed text-white py-1.5 px-3 rounded-lg transition-colors text-sm"
-                title={isOnline ? 'Simpan Order hanya tersedia di tab Offline' : undefined}
-              >
-                Simpan Order
-              </button>
-              <button
-                onClick={() => setShowPaymentModal(true)}
-                disabled={cartItems.length === 0 || hasUnsavedChanges || !canAccessBayarButton}
-                className="flex-1 bg-green-500 hover:bg-green-600 disabled:bg-gray-400 disabled:cursor-not-allowed text-white py-1.5 px-3 rounded-lg transition-colors text-sm"
-                title={
-                  !canAccessBayarButton
-                    ? 'Anda tidak memiliki izin untuk mengakses tombol Bayar'
-                    : hasUnsavedChanges
-                      ? 'Simpan perubahan terlebih dahulu sebelum melakukan pembayaran'
-                      : 'Bayar'
-                }
-              >
-                Bayar
-              </button>
+            <div className="flex flex-wrap gap-2 mt-3">
+              {isReservationPreOrderMode ? (
+                <div className="relative flex-1 min-w-[120px]">
+                  <button
+                    type="button"
+                    className="absolute top-0 left-0 z-10 text-white/90 cursor-help hover:text-white p-0.5 rounded focus:outline-none focus:ring-1 focus:ring-white/50"
+                    title="Tekan simpan ke reservasi untuk menyimpan pesanan reservasi di kemudian hari"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      appAlert('Tekan simpan ke reservasi untuk menyimpan pesanan reservasi di kemudian hari');
+                    }}
+                  >
+                    <HelpCircle className="w-3.5 h-3.5" />
+                  </button>
+                  <button
+                    onClick={onSaveToReservation}
+                    disabled={cartItems.length === 0}
+                    className="w-full bg-green-600 hover:bg-green-700 disabled:bg-gray-400 disabled:cursor-not-allowed text-white py-1.5 px-3 rounded-lg transition-colors text-sm font-semibold"
+                  >
+                    Simpan ke Reservasi
+                  </button>
+                </div>
+              ) : (
+                <>
+                  <div className="relative flex-1 min-w-[120px]">
+                    <button
+                      type="button"
+                      className="absolute top-0 left-0 z-10 text-white/90 cursor-help hover:text-white p-0.5 rounded focus:outline-none focus:ring-1 focus:ring-white/50"
+                      title="Tekan simpan order untuk pesanan sekarang"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        appAlert('Tekan simpan order untuk pesanan sekarang');
+                      }}
+                    >
+                      <HelpCircle className="w-3.5 h-3.5" />
+                    </button>
+                    <button
+                      onClick={() => setShowTableSelectionModal(true)}
+                      disabled={cartItems.length === 0 || isOnline}
+                      className="w-full bg-blue-500 hover:bg-blue-600 disabled:bg-gray-400 disabled:cursor-not-allowed text-white py-1.5 px-3 rounded-lg transition-colors text-sm"
+                      title={isOnline ? 'Simpan Order hanya tersedia di tab Offline' : undefined}
+                    >
+                      Simpan Order
+                    </button>
+                  </div>
+                  {onSaveCartToReservation && (
+                    <div className="relative flex-1 min-w-[120px]">
+                      <button
+                        type="button"
+                        className="absolute top-0 left-0 z-10 text-white/90 cursor-help hover:text-white p-0.5 rounded focus:outline-none focus:ring-1 focus:ring-white/50"
+                        title="Tekan simpan ke reservasi untuk menyimpan pesanan reservasi di kemudian hari"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          appAlert('Tekan simpan ke reservasi untuk menyimpan pesanan reservasi di kemudian hari');
+                        }}
+                      >
+                        <HelpCircle className="w-3.5 h-3.5" />
+                      </button>
+                      <button
+                        onClick={onSaveCartToReservation}
+                        disabled={cartItems.length === 0}
+                        className="w-full bg-green-600 hover:bg-green-700 disabled:bg-gray-400 disabled:cursor-not-allowed text-white py-1.5 px-3 rounded-lg transition-colors text-sm font-semibold"
+                        title="Simpan produk di keranjang ke reservasi"
+                      >
+                        Simpan ke Reservasi
+                      </button>
+                    </div>
+                  )}
+                </>
+              )}
+              {!isReservationPreOrderMode && (
+                <button
+                  onClick={() => setShowPaymentModal(true)}
+                  disabled={cartItems.length === 0 || hasUnsavedChanges || !canAccessBayarButton}
+                  className="flex-1 min-w-[120px] bg-green-500 hover:bg-green-600 disabled:bg-gray-400 disabled:cursor-not-allowed text-white py-1.5 px-3 rounded-lg transition-colors text-sm"
+                  title={
+                    !canAccessBayarButton
+                      ? 'Anda tidak memiliki izin untuk mengakses tombol Bayar'
+                      : hasUnsavedChanges
+                        ? 'Simpan perubahan terlebih dahulu sebelum melakukan pembayaran'
+                        : 'Bayar'
+                  }
+                >
+                  Bayar
+                </button>
+              )}
             </div>
           </div>
         </div>
@@ -2062,6 +2145,7 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
         customerUnit={cuValue}
         pickupMethod={orderPickupMethod}
         loadedTransactionInfo={loadedTransactionInfo}
+        preSelectedTableIds={reservationCartInfo?.tableIds}
         onItemsLocked={(itemIds) => {
           // Mark items as locked after saving
           const newCartItems = cartItems.map(item =>
@@ -2117,6 +2201,7 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
             setSelectedWaiterId(null);
             setSelectedWaiterName(null);
             setSelectedWaiterColor(null);
+            onTableOrderSaved?.(reservationCartInfo?.reservationUuid);
           } else {
             // "Lihat" mode: reload transaction to get updated items with correct transactionItemId
             // After reload, all items will be locked, so unsaved changes flag will be cleared automatically

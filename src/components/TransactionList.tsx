@@ -3,7 +3,7 @@
 import { useState, useEffect, useCallback, useRef, useLayoutEffect, useMemo } from 'react';
 import { createPortal } from 'react-dom';
 import { useRouter } from 'next/navigation';
-import { Clock, CreditCard, RefreshCw, Search, Filter, ChevronUp, ChevronDown, ChevronRight, Wifi, WifiOff, Calendar, X, Trash2, Columns } from 'lucide-react';
+import { Clock, CreditCard, RefreshCw, Search, Filter, ChevronUp, ChevronDown, ChevronRight, Wifi, WifiOff, Calendar, X, Trash2, Columns, Info } from 'lucide-react';
 import TransactionDetailModal, { TransactionDetail, TransactionRefund } from './TransactionDetailModal';
 import Printer1ToPrinter2Manager from './Printer1ToPrinter2Manager';
 import { useAuth } from '@/hooks/useAuth';
@@ -252,6 +252,7 @@ interface ElectronAPI {
     customer_name?: string | null;
   }>>;
   localDbGetRefundTotal?: (businessId: number | null, shiftStart: string, shiftEnd: string | null) => Promise<number>;
+  localDbGetRefundExcTotal?: (businessId: number, fromDate: string, toDate: string) => Promise<{ total: number; count: number }>;
   localDbGetProductSales?: (userId: number | null, shiftStart: string, shiftEnd: string | null, businessId?: number, shiftUuid?: string | null, shiftUuids?: string[]) => Promise<{
     products: Array<{
       product_id: number;
@@ -301,6 +302,10 @@ export default function TransactionList({ businessId, onLoadTransaction }: Trans
     refund: number;
     net: number;
   } | null>(null);
+
+  // Refund Exc. total/count for date range (Grand Total card combined refund + popover)
+  const [refundExcTotal, setRefundExcTotal] = useState<number>(0);
+  const [refundExcCount, setRefundExcCount] = useState<number>(0);
 
   // Cancelled items (for "Item Dibatalkan" card + modal). API returns uuid_transaction_id/transaction_id for mode filtering.
   type CancelledItemRow = {
@@ -1108,16 +1113,6 @@ export default function TransactionList({ businessId, onLoadTransaction }: Trans
       setReceiptizePrintedIds(receiptizeResult.ids);
       setReceiptizeCounters(receiptizeResult.counters);
 
-      // #region agent log
-      const printer2InRangeCount = dateFilteredTransactions.filter((tx) => {
-        const id = String((tx as { uuid_id?: string }).uuid_id ?? tx.id);
-        return receiptizeResult.ids.has(id);
-      }).length;
-      if (typeof fetch === 'function') {
-        fetch('http://127.0.0.1:7495/ingest/176c0b85-d0c0-41ef-a970-2527232dc552', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': '6d26e8' }, body: JSON.stringify({ sessionId: '6d26e8', location: 'marviano-pos/TransactionList.tsx:fetchTransactions', message: 'Printer2 list counts', data: { appliedFromDate, appliedToDate, receiptizeIdsSize: receiptizeResult.ids.size, usedFallback: receiptizeResult.usedFallback ?? false, dateFilteredCount: dateFilteredTransactions.length, printer2InRangeCount, isSystemPosMode: useSystemPos }, timestamp: Date.now(), hypothesisId: 'H3,H5' }) }).catch(() => {});
-      }
-      // #endregion
-
       if (!receiptizeResult.success) {
         setError(prev => prev ?? 'Failed to fetch Receiptize print history');
         return false;
@@ -1178,6 +1173,31 @@ export default function TransactionList({ businessId, onLoadTransaction }: Trans
       .localDbGetShiftCancelledItems(null, startDateTime, endDateTime, effectiveBusinessId)
       .then((rows) => setCancelledItems(Array.isArray(rows) ? rows : []))
       .catch(() => setCancelledItems([]));
+  }, [effectiveBusinessId, appliedFromDate, appliedToDate]);
+
+  // Fetch Refund Exc. total for date range (Grand Total card combined refund + info popover)
+  useEffect(() => {
+    if (!effectiveBusinessId || !appliedFromDate || !appliedToDate) {
+      setRefundExcTotal(0);
+      setRefundExcCount(0);
+      return;
+    }
+    const electronAPI = (typeof window !== 'undefined' ? (window as { electronAPI?: ElectronAPI }).electronAPI : undefined);
+    if (!electronAPI?.localDbGetRefundExcTotal) {
+      setRefundExcTotal(0);
+      setRefundExcCount(0);
+      return;
+    }
+    electronAPI
+      .localDbGetRefundExcTotal(effectiveBusinessId, appliedFromDate, appliedToDate)
+      .then((res) => {
+        setRefundExcTotal(typeof res?.total === 'number' ? res.total : 0);
+        setRefundExcCount(typeof res?.count === 'number' ? res.count : 0);
+      })
+      .catch(() => {
+        setRefundExcTotal(0);
+        setRefundExcCount(0);
+      });
   }, [effectiveBusinessId, appliedFromDate, appliedToDate]);
 
   // Fetch shifts for Bind to Shift modal (super admin only)
@@ -1737,12 +1757,12 @@ export default function TransactionList({ businessId, onLoadTransaction }: Trans
     return fallback;
   };
 
-  // Grand Total (completed only): Gross = sum(total_amount), Discount = sum(total_amount − final_amount), Net = (Gross − Discount) − Refund
+  // Grand Total (completed only): Gross = sum(total_amount), Discount = sum(total_amount − final_amount), Net = (Gross − Discount) − Refund − Refund Exc.
   const grossCompleted = completedTransactions.reduce((sum, t) => sum + parseNum(t.total_amount), 0);
   const refundCompleted = completedTransactions.reduce((sum, t) => sum + parseNum(t.refund_total), 0);
   const totalRevenueCompleted = completedTransactions.reduce((sum, t) => sum + parseNum(t.final_amount), 0);
   const discountCompleted = Math.max(0, grossCompleted - totalRevenueCompleted);
-  const netCompleted = Math.max(0, totalRevenueCompleted - refundCompleted);
+  const netCompleted = Math.max(0, totalRevenueCompleted - refundCompleted - refundExcTotal);
 
   const grossPending = pendingTransactions.reduce((sum, t) => sum + parseNum(t.total_amount), 0);
   const refundPending = pendingTransactions.reduce((sum, t) => sum + parseNum(t.refund_total), 0);
@@ -2042,13 +2062,14 @@ export default function TransactionList({ businessId, onLoadTransaction }: Trans
             </button>
           </div>
 
-          {/* Grand Total Card — takes remaining width (5 cols) */}
+          {/* Grand Total Card — takes remaining width (5 cols); Refund = transaction refund + Refund Exc., net deducts both */}
           <GrandTotalCard
             grossAmount={reportTotals?.gross ?? grossCompleted}
             totalDiscount={reportTotals?.discount ?? discountCompleted}
             totalRefund={reportTotals?.refund ?? refundCompleted}
+            refundExcTotal={refundExcTotal}
             totalRevenue={reportTotals ? reportTotals.net + reportTotals.refund : totalRevenueCompleted}
-            netAmount={reportTotals?.net ?? netCompleted}
+            netAmount={reportTotals ? Math.max(0, reportTotals.net - refundExcTotal) : netCompleted}
             totalCustomerUnit={totalCustomerUnit}
             totalTransactionCount={totalTransactionCount}
             onFiveClick={handleFiveClickToggle}
@@ -2827,6 +2848,7 @@ interface GrandTotalCardProps {
   grossAmount: number;
   totalDiscount: number;
   totalRefund: number;
+  refundExcTotal?: number;
   totalRevenue: number;
   netAmount: number;
   totalCustomerUnit: number;
@@ -2838,11 +2860,29 @@ function GrandTotalCard({
   grossAmount,
   totalDiscount,
   totalRefund,
+  refundExcTotal = 0,
   netAmount,
   totalCustomerUnit,
   totalTransactionCount,
   onFiveClick,
 }: GrandTotalCardProps) {
+  const [showRefundPopover, setShowRefundPopover] = useState(false);
+  const refundPopoverRef = useRef<HTMLDivElement>(null);
+
+  const combinedRefund = totalRefund + refundExcTotal;
+
+  // Close popover when clicking outside
+  useEffect(() => {
+    if (!showRefundPopover) return;
+    const handleClick = (e: MouseEvent) => {
+      if (refundPopoverRef.current && !refundPopoverRef.current.contains(e.target as Node)) {
+        setShowRefundPopover(false);
+      }
+    };
+    document.addEventListener('mousedown', handleClick);
+    return () => document.removeEventListener('mousedown', handleClick);
+  }, [showRefundPopover]);
+
   return (
     <div
       className="bg-white shadow-sm border border-gray-200 p-4 md:col-span-1 min-w-0 cursor-pointer hover:bg-gray-50 transition-colors min-h-[10.5rem] md:h-full md:min-h-0 flex flex-col"
@@ -2873,10 +2913,39 @@ function GrandTotalCard({
             </td>
           </tr>
           <tr>
-            <td className="text-gray-600 py-0.5 pr-1 whitespace-nowrap">Refund</td>
+            <td className="text-gray-600 py-0.5 pr-1 align-top">
+              <div className="flex items-center gap-0.5 flex-wrap">
+                <span className="whitespace-nowrap">Refund</span>
+                <div className="relative inline-flex" ref={refundPopoverRef}>
+                  <button
+                    type="button"
+                    onClick={(e) => { e.stopPropagation(); setShowRefundPopover((v) => !v); }}
+                    className="p-0.5 rounded hover:bg-gray-200 text-gray-500 hover:text-gray-700 inline-flex items-center justify-center"
+                    aria-label="Breakdown Refund"
+                  >
+                    <Info className="w-3 h-3" />
+                  </button>
+                  {showRefundPopover && (
+                    <div className="absolute left-0 top-full mt-1 z-50 min-w-[180px] py-2 px-3 bg-gray-900 text-white text-xs rounded shadow-lg">
+                      <div className="font-medium text-gray-300 mb-1">Breakdown Refund</div>
+                      <div className="space-y-0.5">
+                        <div className="flex justify-between gap-4">
+                          <span>Refund Transaksi</span>
+                          <span className="tabular-nums text-red-300">{totalRefund > 0 ? `-${formatPrice(totalRefund)}` : formatPrice(0)}</span>
+                        </div>
+                        <div className="flex justify-between gap-4">
+                          <span>Refund Exc.</span>
+                          <span className="tabular-nums text-red-300">{refundExcTotal > 0 ? `-${formatPrice(refundExcTotal)}` : formatPrice(0)}</span>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </div>
+            </td>
             <td className="text-gray-600 py-0.5 pr-0 text-right">:</td>
             <td className="font-medium text-red-600 tabular-nums text-right pl-1">
-              {totalRefund > 0 ? `-${formatPrice(totalRefund)}` : formatPrice(0)}
+              {combinedRefund > 0 ? `-${formatPrice(combinedRefund)}` : formatPrice(0)}
             </td>
           </tr>
           <tr className="border-t border-gray-200 bg-green-600">

@@ -10,6 +10,7 @@ import PrinterSetup from './PrinterSetup';
 import SyncManagement from './SyncManagement';
 import GantiShift from './GantiShift';
 import Laporan from './Laporan';
+import ReservationPage from './ReservationPage';
 import GlobalSettings from './GlobalSettings';
 import StartShiftModal from './StartShiftModal';
 import ActiveOrdersTab from './ActiveOrdersTab';
@@ -17,10 +18,11 @@ import ReceiptTemplateSettings from './ReceiptTemplateSettings';
 import { mockMenuItems } from '@/data/mockData';
 import { fetchCategories, fetchProducts } from '@/lib/offlineDataFetcher';
 import { offlineSyncService } from '@/lib/offlineSync';
+import { parseReservationItemsJson, reservationItemsToCartItems, cartItemsToReservationItemsJson, computeTotalFromReservationItems } from '@/lib/reservationItems';
 import { useAuth } from '@/hooks/useAuth';
 import { isSuperAdmin } from '@/lib/auth';
 import { hasPermission } from '@/lib/permissions';
-import { ClipboardList, FilePlus, ChevronRight, Store, Globe } from 'lucide-react';
+import { ClipboardList, FilePlus, ChevronRight, Store, Globe, HelpCircle } from 'lucide-react';
 import { appAlert, appConfirm } from '@/components/AppDialog';
 
 type LocalCategory = {
@@ -56,16 +58,6 @@ interface POSLayoutProps {
   shouldBlurKasir?: boolean;
 }
 
-import { systemPosSyncService } from '@/lib/systemPosSync';
-
-// Initialize sync service
-if (typeof window !== 'undefined') {
-  // Access the singleton to ensure it's initialized
-  // const _ = systemPosSyncService;
-  // Initialize sync service (already imported side-effect)
-  console.log('[POSLayout] Initializing sync service:', !!systemPosSyncService);
-}
-
 export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setActiveMenuItem: externalSetActiveMenuItem /*, shouldBlurKasir = false */ }: POSLayoutProps = {}) {
   const { user } = useAuth();
   const [selectedCategory, setSelectedCategory] = useState('');
@@ -90,7 +82,9 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
   const [selectedOnlinePlatform, setSelectedOnlinePlatform] = useState<OnlinePlatform | null>(null);
   const [activeSettingsTab, setActiveSettingsTab] = useState('sync');
   const [showActiveOrders, setShowActiveOrders] = useState<boolean>(false);
+  const [showUnpaidTab, setShowUnpaidTab] = useState<boolean>(false);
   const [pendingOrdersCount, setPendingOrdersCount] = useState<number>(0);
+  const showOrdersOverlay = showActiveOrders || showUnpaidTab;
   const [loadedTransactionInfo, setLoadedTransactionInfo] = useState<{
     transactionId: string;
     tableName: string | null;
@@ -121,6 +115,21 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
   const [showWaiterNoShiftMessage, setShowWaiterNoShiftMessage] = useState(false);
   const [hasCheckedShift, setHasCheckedShift] = useState(false);
   const [newOrderResetSignal, setNewOrderResetSignal] = useState(0);
+  const [dataSyncKey, setDataSyncKey] = useState(0);
+
+  // Reservation pre-order: when set, Kasir is in "save to reservation" mode (banner, Simpan ke Reservasi)
+  const [reservationPreOrderMode, setReservationPreOrderMode] = useState<{
+    reservationUuid: string;
+    reservationNama: string;
+  } | null>(null);
+  // Reservation "Send to Kasir": pre-filled table/customer from reservation (no transactionId)
+  const [reservationCartInfo, setReservationCartInfo] = useState<{
+    tableIds: number[];
+    tableName: string;
+    customerName: string;
+    reservationUuid: string;
+    pickupMethod: 'dine-in';
+  } | null>(null);
 
   // Early return if user is not loaded yet
   if (!user) {
@@ -245,30 +254,23 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
   }
 
   // Helper functions to get current cart based on online status and platform
-  const getCurrentCart = (): CartItem[] => {
-    // Offline mode - one cart for all (drinks + bakery)
+  const getCurrentCart = useCallback((): CartItem[] => {
     if (!isOnlineTab) {
       return offlineCart;
     }
-
-    // Online mode - one cart per platform (drinks + bakery)
     if (selectedOnlinePlatform === 'gofood') return gofoodCart;
     if (selectedOnlinePlatform === 'grabfood') return grabfoodCart;
     if (selectedOnlinePlatform === 'shopeefood') return shopeefoodCart;
     if (selectedOnlinePlatform === 'tiktok') return tiktokCart;
     if (selectedOnlinePlatform === 'qpon') return qponCart;
+    return offlineCart;
+  }, [isOnlineTab, selectedOnlinePlatform, offlineCart, gofoodCart, grabfoodCart, shopeefoodCart, tiktokCart, qponCart]);
 
-    return offlineCart; // fallback
-  };
-
-  const setCurrentCart = (newCart: CartItem[]) => {
-    // Offline mode - one cart for all
+  const setCurrentCart = useCallback((newCart: CartItem[]) => {
     if (!isOnlineTab) {
       setOfflineCart(newCart);
       return;
     }
-
-    // Online mode - set cart based on platform
     if (selectedOnlinePlatform === 'gofood') {
       setGofoodCart(newCart);
     } else if (selectedOnlinePlatform === 'grabfood') {
@@ -280,10 +282,9 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
     } else if (selectedOnlinePlatform === 'qpon') {
       setQponCart(newCart);
     }
-  };
+  }, [isOnlineTab, selectedOnlinePlatform]);
 
-  // Clear all carts function
-  const clearAllCarts = () => {
+  const clearAllCarts = useCallback(() => {
     setOfflineCart([]);
     setGofoodCart([]);
     setGrabfoodCart([]);
@@ -293,9 +294,107 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
     setIsOnlineTab(false);
     setSelectedOnlinePlatform(null);
     setShowActiveOrders(false);
-    setLoadedTransactionInfo(null); // Reset transaction info
-    setNewOrderResetSignal(s => s + 1); // Tell CenterContent to reset nama pelanggan and pilih waiter
-  };
+      setShowUnpaidTab(false);
+    setLoadedTransactionInfo(null);
+    setReservationPreOrderMode(null);
+    setReservationCartInfo(null);
+    setNewOrderResetSignal(s => s + 1);
+  }, []);
+
+  const setActiveMenuItemRaw = externalSetActiveMenuItem ?? setInternalActiveMenuItem;
+
+  const onPickProductsFromKasir = useCallback((reservation: { uuid_id: string; nama: string; items_json?: string | unknown[] | null }) => {
+    const items = parseReservationItemsJson(reservation.items_json ?? null);
+    const productMap = new Map(products.map((p) => [p.id, p]));
+    const cartItems = reservationItemsToCartItems(items, productMap) as unknown as CartItem[];
+    setOfflineCart(cartItems);
+    setIsOnlineTab(false);
+    setSelectedOnlinePlatform(null);
+    setShowActiveOrders(false);
+      setShowUnpaidTab(false);
+    setReservationPreOrderMode({ reservationUuid: reservation.uuid_id, reservationNama: reservation.nama });
+    setReservationCartInfo(null);
+    setLoadedTransactionInfo(null);
+    setActiveMenuItemRaw('Kasir');
+  }, [products]);
+
+  const onSaveToReservation = useCallback(async () => {
+    if (!reservationPreOrderMode) return;
+    const api = getElectronAPI();
+    if (!api?.localDbUpdateReservation) return;
+    const cart = getCurrentCart();
+    const itemsJson = cartItemsToReservationItemsJson(cart);
+    const totalPrice = computeTotalFromReservationItems(itemsJson);
+    const result = await api.localDbUpdateReservation(reservationPreOrderMode.reservationUuid, { items_json: itemsJson, total_price: totalPrice });
+    if (result?.success) {
+      setReservationPreOrderMode(null);
+      setOfflineCart([]);
+      setActiveMenuItemRaw('Reservation');
+    } else {
+      await appAlert(result?.error ?? 'Gagal menyimpan produk ke reservasi.');
+    }
+  }, [reservationPreOrderMode, getCurrentCart]);
+
+  const onSendToKasir = useCallback((reservation: { uuid_id: string; nama: string; table_ids_json?: string | number[] | null; items_json?: string | unknown[] | null }, tableNameFromReservation?: string) => {
+    const tableIds = (() => {
+      const raw = reservation.table_ids_json;
+      if (Array.isArray(raw)) return raw.map(Number).filter((n) => !Number.isNaN(n));
+      if (typeof raw === 'string') {
+        try {
+          const arr = JSON.parse(raw) as number[];
+          return Array.isArray(arr) ? arr.map(Number).filter((n) => !Number.isNaN(n)) : [];
+        } catch { return []; }
+      }
+      return [];
+    })();
+    const tableName = tableNameFromReservation ?? (tableIds.length > 0 ? tableIds.map((id) => `Meja ${id}`).join(', ') : '');
+    const items = parseReservationItemsJson(reservation.items_json ?? null);
+    const productMap = new Map(products.map((p) => [p.id, p]));
+    const cartItems = reservationItemsToCartItems(items, productMap) as unknown as CartItem[];
+    setOfflineCart(cartItems);
+    setIsOnlineTab(false);
+    setSelectedOnlinePlatform(null);
+    setShowActiveOrders(false);
+      setShowUnpaidTab(false);
+    setReservationPreOrderMode(null);
+    setReservationCartInfo({
+      tableIds,
+      tableName,
+      customerName: reservation.nama ?? '',
+      reservationUuid: reservation.uuid_id,
+      pickupMethod: 'dine-in'
+    });
+    setLoadedTransactionInfo({
+      transactionId: '',
+      tableName: tableIds.length > 0 ? tableName : null,
+      roomName: null,
+      customerName: reservation.nama ?? null,
+      waiterId: null,
+      waiterName: null,
+      waiterColor: null,
+      pickupMethod: 'dine-in'
+    });
+    setActiveMenuItemRaw('Kasir');
+  }, [products]);
+
+  /** Save current cart to reservation items (when cart came from "Kirim ke Pesanan Aktif") */
+  const onSaveCartToReservation = useCallback(async () => {
+    if (!reservationCartInfo?.reservationUuid) return;
+    const api = getElectronAPI();
+    if (!api?.localDbUpdateReservation) return;
+    const cart = getCurrentCart();
+    const itemsJson = cartItemsToReservationItemsJson(cart);
+    const totalPrice = computeTotalFromReservationItems(itemsJson);
+    const result = await api.localDbUpdateReservation(reservationCartInfo.reservationUuid, { items_json: itemsJson, total_price: totalPrice });
+    if (result?.success) {
+      setReservationCartInfo(null);
+      setOfflineCart([]);
+      setLoadedTransactionInfo(null);
+      await appAlert('Produk berhasil disimpan ke reservasi.');
+    } else {
+      await appAlert(result?.error ?? 'Gagal menyimpan produk ke reservasi.');
+    }
+  }, [reservationCartInfo, getCurrentCart]);
 
   // Send tab updates to customer display (includes cart items for the active tab)
   const sendTabUpdate = useCallback((tabInfo: { activeTab: string; isOnline: boolean; selectedPlatform?: OnlinePlatform | null }) => {
@@ -411,7 +510,7 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
     return () => {
       isCancelled = true;
     };
-  }, [isOnlineTab, selectedOnlinePlatform, businessId]);
+  }, [isOnlineTab, selectedOnlinePlatform, businessId, dataSyncKey]);
 
   // Fetch products when category or tab changes with offline fallback
   // NEW: We need to determine transactionType from the selected category's products
@@ -478,7 +577,7 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
     return () => {
       isCancelled = true;
     };
-  }, [selectedCategory, isOnlineTab, selectedOnlinePlatform, businessId]); // Re-fetch when category or tab changes
+  }, [selectedCategory, isOnlineTab, selectedOnlinePlatform, businessId, dataSyncKey]);
 
   // Invalidate global-search cache when business or platform changes so next search refetches
   useEffect(() => {
@@ -571,118 +670,18 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
     syncOnStartup();
   }, [businessId]);
 
-  // Listen for data sync events to refresh categories and products
+  // Listen for data sync events — invalidate caches so the existing category/product effects re-run
   useEffect(() => {
-    if (!businessId || !fetchCategories || !fetchProducts) return;
-
-    const handleDataSynced = async () => {
-      setIsLoadingCategories(true);
-      setIsLoadingProducts(true);
-
-      try {
-        // Fetch drinks, bakery, foods, and packages categories
-        const [drinksCategories, bakeryCategories, foodsCategories, packagesCategories] = await Promise.all([
-          fetchCategories('drinks', {
-            isOnline: isOnlineTab,
-            platform: isOnlineTab ? (selectedOnlinePlatform ?? undefined) : undefined,
-            businessId: businessId
-          }),
-          fetchCategories('bakery', {
-            isOnline: isOnlineTab,
-            platform: isOnlineTab ? (selectedOnlinePlatform ?? undefined) : undefined,
-            businessId: businessId
-          }),
-          fetchCategories('foods', {
-            isOnline: isOnlineTab,
-            platform: isOnlineTab ? (selectedOnlinePlatform ?? undefined) : undefined,
-            businessId: businessId
-          }),
-          fetchCategories('packages', {
-            isOnline: isOnlineTab,
-            platform: isOnlineTab ? (selectedOnlinePlatform ?? undefined) : undefined,
-            businessId: businessId
-          })
-        ]);
-
-        // Tag drinks categories
-        const taggedDrinks = (drinksCategories as Array<{ jenis: string; active?: boolean }>)
-          .filter(cat => cat.jenis && cat.jenis.trim() !== '')
-          .map(cat => ({
-            jenis: cat.jenis,
-            active: cat.active ?? true,
-            productType: 'drinks' as const
-          }));
-
-        // Tag bakery categories
-        const taggedBakery = (bakeryCategories as Array<{ jenis: string; active?: boolean }>)
-          .filter(cat => cat.jenis && cat.jenis.trim() !== '')
-          .map(cat => ({
-            jenis: cat.jenis,
-            active: cat.active ?? true,
-            productType: 'bakery' as const
-          }));
-
-        // Tag foods categories
-        const taggedFoods = (foodsCategories as Array<{ jenis: string; active?: boolean }>)
-          .filter(cat => cat.jenis && cat.jenis.trim() !== '')
-          .map(cat => ({
-            jenis: cat.jenis,
-            active: cat.active ?? true,
-            productType: 'foods' as const
-          }));
-
-        // Tag packages categories
-        const taggedPackages = (packagesCategories as Array<{ jenis: string; active?: boolean }>)
-          .filter(cat => cat.jenis && cat.jenis.trim() !== '')
-          .map(cat => ({
-            jenis: cat.jenis,
-            active: cat.active ?? true,
-            productType: 'packages' as const
-          }));
-
-        const validCategories: LocalCategory[] = [...taggedDrinks, ...taggedBakery, ...taggedFoods, ...taggedPackages];
-        setCategories(validCategories);
-
-        if (validCategories.length > 0 && validCategories[0].jenis) {
-          setSelectedCategory(validCategories[0].jenis);
-          // Fetch products from drinks, bakery, foods, and packages
-          const [drinksProducts, bakeryProducts, foodsProducts, packagesProducts] = await Promise.all([
-            fetchProducts(validCategories[0].jenis, 'drinks', {
-              isOnline: isOnlineTab,
-              platform: isOnlineTab ? (selectedOnlinePlatform ?? undefined) : undefined,
-              businessId: businessId
-            }),
-            fetchProducts(validCategories[0].jenis, 'bakery', {
-              isOnline: isOnlineTab,
-              platform: isOnlineTab ? (selectedOnlinePlatform ?? undefined) : undefined,
-              businessId: businessId
-            }),
-            fetchProducts(validCategories[0].jenis, 'foods', {
-              isOnline: isOnlineTab,
-              platform: isOnlineTab ? (selectedOnlinePlatform ?? undefined) : undefined,
-              businessId: businessId
-            }),
-            fetchProducts(validCategories[0].jenis, 'packages', {
-              isOnline: isOnlineTab,
-              platform: isOnlineTab ? (selectedOnlinePlatform ?? undefined) : undefined,
-              businessId: businessId
-            })
-          ]);
-          setProducts([...drinksProducts, ...bakeryProducts, ...foodsProducts, ...packagesProducts]);
-        }
-      } catch (error) {
-        console.error('❌ Error refreshing after sync:', error);
-      } finally {
-        setIsLoadingCategories(false);
-        setIsLoadingProducts(false);
-      }
+    const handleDataSynced = () => {
+      setAllProductsForSearch(null);
+      setDataSyncKey(k => k + 1);
     };
 
     window.addEventListener('dataSynced', handleDataSynced);
     return () => {
       window.removeEventListener('dataSynced', handleDataSynced);
     };
-  }, [isOnlineTab, selectedOnlinePlatform, businessId]);
+  }, []);
 
   // Check for active shift when Kasir page is active (only if user has access_kasir)
   const canAccessKasir = isSuperAdmin(user) || hasPermission(user, 'access_kasir');
@@ -754,43 +753,43 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
     return () => clearInterval(interval);
   }, [showWaiterNoShiftMessage, businessId, user.id]);
 
-  // Fetch pending orders count when on Kasir page — today only, limit 1000 (badge caps at 99+)
-  const PENDING_COUNT_LIMIT = 1000;
   useEffect(() => {
     if (!businessId) return;
     if (activeMenuItem === 'Kasir') {
+      let cancelled = false;
+      const POLL_INTERVAL_MS = 15000;
+
       const fetchPendingCount = async () => {
         try {
           const electronAPI = getElectronAPI();
-          if (electronAPI?.localDbGetTransactions) {
-            const allTransactions = await electronAPI.localDbGetTransactions(businessId, PENDING_COUNT_LIMIT, { todayOnly: true });
-            const transactionsArray = Array.isArray(allTransactions) ? allTransactions : [];
-            const pendingCount = transactionsArray.filter((tx: unknown) => {
-              if (tx && typeof tx === 'object' && 'status' in tx) {
-                const transaction = tx as { status: string };
-                return transaction.status === 'pending';
-              }
-              return false;
-            }).length;
-            setPendingOrdersCount(pendingCount >= PENDING_COUNT_LIMIT ? 100 : pendingCount);
+          if (electronAPI?.localDbGetPendingOrdersCount) {
+            const result = await electronAPI.localDbGetPendingOrdersCount(businessId);
+            if (result?.success) {
+              setPendingOrdersCount(result.count);
+            }
           }
         } catch (error) {
           console.error('❌ Error fetching pending orders count:', error);
         }
       };
 
-      fetchPendingCount();
-
-      // Listen for immediate refresh when transaction is saved
       const handlePendingTransactionSaved = () => {
         fetchPendingCount();
       };
       window.addEventListener('pendingTransactionSaved', handlePendingTransactionSaved);
 
-      // Refresh count every 5 seconds
-      const interval = setInterval(fetchPendingCount, 5000);
+      const poll = async () => {
+        await fetchPendingCount();
+        if (!cancelled) {
+          timeoutId = setTimeout(poll, POLL_INTERVAL_MS);
+        }
+      };
+      let timeoutId: ReturnType<typeof setTimeout>;
+      poll();
+
       return () => {
-        clearInterval(interval);
+        cancelled = true;
+        clearTimeout(timeoutId);
         window.removeEventListener('pendingTransactionSaved', handlePendingTransactionSaved);
       };
     } else {
@@ -823,36 +822,35 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
         return;
       }
 
-      // Fetch table and room info if table_id exists
+      // Fetch table and room info: support multi-table (table_ids) and single table_id
       let tableName: string | null = null;
       let roomName: string | null = null;
-      if (transaction.table_id && electronAPI.getRestaurantTables && electronAPI.getRestaurantRooms) {
+      const tableIdsToResolve = (transaction as Record<string, unknown>).table_ids as number[] | undefined;
+      const singleTableId = transaction.table_id != null ? (typeof transaction.table_id === 'number' ? transaction.table_id : parseInt(String(transaction.table_id), 10)) : null;
+      const idsToUse = Array.isArray(tableIdsToResolve) && tableIdsToResolve.length > 0 ? tableIdsToResolve : (singleTableId != null ? [singleTableId] : []);
+      if (idsToUse.length > 0 && electronAPI.getRestaurantTables && electronAPI.getRestaurantRooms) {
         try {
-          // Get all rooms first
           const rooms = await electronAPI.getRestaurantRooms(businessId);
           const roomsArray = Array.isArray(rooms) ? rooms : [];
           const roomsMap = new Map<number, string>();
           roomsArray.forEach((room: { id: number; name: string }) => {
-            if (room.id) {
-              roomsMap.set(room.id, room.name);
-            }
+            if (room.id) roomsMap.set(room.id, room.name);
           });
-
-          // Fetch tables for each room to find the table
+          const tableNumbers: string[] = [];
           for (const room of roomsArray) {
             if (room.id) {
               const tables = await electronAPI.getRestaurantTables(room.id);
               const tablesArray = Array.isArray(tables) ? tables : [];
-              const foundTable = tablesArray.find((table: { id: number; table_number: string; room_id: number }) =>
-                table.id === transaction.table_id
-              );
-              if (foundTable) {
-                tableName = foundTable.table_number;
-                roomName = roomsMap.get(foundTable.room_id) || null;
-                break;
+              for (const tid of idsToUse) {
+                const foundTable = tablesArray.find((table: { id: number; table_number: string; room_id: number }) => table.id === tid);
+                if (foundTable) {
+                  tableNumbers.push(foundTable.table_number);
+                  if (roomName == null) roomName = roomsMap.get(foundTable.room_id) || null;
+                }
               }
             }
           }
+          if (tableNumbers.length > 0) tableName = tableNumbers.join(', ');
         } catch (error) {
           console.error('Error fetching table/room info:', error);
         }
@@ -1191,6 +1189,7 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
 
       // Close Active Orders tab
       setShowActiveOrders(false);
+      setShowUnpaidTab(false);
 
       console.log(`✅ Loaded ${cartItems.length} items from transaction ${transactionId} into cart`);
     } catch (error) {
@@ -1228,8 +1227,9 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
                       setIsOnlineTab(false);
                       setSelectedOnlinePlatform(null);
                       setShowActiveOrders(false);
+      setShowUnpaidTab(false);
                     }}
-                    className={`group relative px-5 py-2.5 rounded-md font-semibold text-sm transition-all duration-200 flex items-center gap-2 shrink-0 ${!isOnlineTab && !showActiveOrders
+                    className={`group relative px-5 py-2.5 rounded-md font-semibold text-sm transition-all duration-200 flex items-center gap-2 shrink-0 ${!isOnlineTab && !showOrdersOverlay
                       ? 'bg-indigo-600 text-white shadow-md hover:bg-indigo-700 active:scale-[0.98]'
                       : 'bg-white text-slate-700 border border-slate-300 hover:bg-indigo-50 hover:border-indigo-400 active:scale-[0.98]'
                       }`}
@@ -1239,13 +1239,13 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
                   </button>
 
                   {/* Online Section with Platform Buttons — selected = filled cyan, unselected = outline */}
-                  <div className={`flex items-center rounded-md overflow-hidden border transition-all duration-200 ${isOnlineTab && !showActiveOrders && !loadedTransactionInfo
+                  <div className={`flex items-center rounded-md overflow-hidden border transition-all duration-200 ${isOnlineTab && !showOrdersOverlay && !loadedTransactionInfo
                     ? 'bg-cyan-600 shadow-md border-cyan-600'
                     : 'bg-white border-slate-300 hover:border-cyan-400'
                     } ${loadedTransactionInfo ? 'opacity-50 cursor-not-allowed' : ''}`}
                   >
                     <div
-                      className={`px-4 py-2.5 font-semibold text-sm flex items-center gap-2 shrink-0 ${isOnlineTab && !showActiveOrders && !loadedTransactionInfo
+                      className={`px-4 py-2.5 font-semibold text-sm flex items-center gap-2 shrink-0 ${isOnlineTab && !showOrdersOverlay && !loadedTransactionInfo
                         ? 'text-white'
                         : 'text-slate-700'
                         } ${loadedTransactionInfo ? 'cursor-not-allowed' : 'cursor-default'}`}
@@ -1254,7 +1254,7 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
                       <span>Online</span>
                     </div>
 
-                    <div className={`flex h-full ${isOnlineTab && !showActiveOrders && !loadedTransactionInfo ? 'border-l border-cyan-400/40' : 'border-l border-slate-200'}`}>
+                    <div className={`flex h-full ${isOnlineTab && !showOrdersOverlay && !loadedTransactionInfo ? 'border-l border-cyan-400/40' : 'border-l border-slate-200'}`}>
                       <button
                         onClick={() => {
                           if (loadedTransactionInfo) return;
@@ -1262,11 +1262,12 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
                           setSelectedOnlinePlatform('gofood');
                           setIsOnlineTab(true);
                           setShowActiveOrders(false);
+      setShowUnpaidTab(false);
                         }}
                         disabled={!!loadedTransactionInfo}
-                        className={`px-3 py-2.5 text-sm font-semibold transition-all duration-200 h-full shrink-0 ${selectedOnlinePlatform === 'gofood' && isOnlineTab && !showActiveOrders && !loadedTransactionInfo
+                        className={`px-3 py-2.5 text-sm font-semibold transition-all duration-200 h-full shrink-0 ${selectedOnlinePlatform === 'gofood' && isOnlineTab && !showOrdersOverlay && !loadedTransactionInfo
                           ? 'bg-green-600 text-white'
-                          : isOnlineTab && !showActiveOrders && !loadedTransactionInfo
+                          : isOnlineTab && !showOrdersOverlay && !loadedTransactionInfo
                             ? 'text-white hover:bg-cyan-500/80'
                             : 'text-slate-700 hover:bg-slate-100'
                           } ${loadedTransactionInfo ? 'cursor-not-allowed' : ''}`}
@@ -1280,11 +1281,12 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
                           setSelectedOnlinePlatform('grabfood');
                           setIsOnlineTab(true);
                           setShowActiveOrders(false);
+      setShowUnpaidTab(false);
                         }}
                         disabled={!!loadedTransactionInfo}
-                        className={`px-3 py-2.5 text-sm font-semibold transition-all duration-200 h-full shrink-0 ${selectedOnlinePlatform === 'grabfood' && isOnlineTab && !showActiveOrders && !loadedTransactionInfo
+                        className={`px-3 py-2.5 text-sm font-semibold transition-all duration-200 h-full shrink-0 ${selectedOnlinePlatform === 'grabfood' && isOnlineTab && !showOrdersOverlay && !loadedTransactionInfo
                           ? 'bg-green-600 text-white'
-                          : isOnlineTab && !showActiveOrders && !loadedTransactionInfo
+                          : isOnlineTab && !showOrdersOverlay && !loadedTransactionInfo
                             ? 'text-white hover:bg-cyan-500/80'
                             : 'text-slate-700 hover:bg-slate-100'
                           } ${loadedTransactionInfo ? 'cursor-not-allowed' : ''}`}
@@ -1298,11 +1300,12 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
                           setSelectedOnlinePlatform('shopeefood');
                           setIsOnlineTab(true);
                           setShowActiveOrders(false);
+      setShowUnpaidTab(false);
                         }}
                         disabled={!!loadedTransactionInfo}
-                        className={`px-3 py-2.5 text-sm font-semibold transition-all duration-200 h-full shrink-0 ${selectedOnlinePlatform === 'shopeefood' && isOnlineTab && !showActiveOrders && !loadedTransactionInfo
+                        className={`px-3 py-2.5 text-sm font-semibold transition-all duration-200 h-full shrink-0 ${selectedOnlinePlatform === 'shopeefood' && isOnlineTab && !showOrdersOverlay && !loadedTransactionInfo
                           ? 'bg-green-600 text-white'
-                          : isOnlineTab && !showActiveOrders && !loadedTransactionInfo
+                          : isOnlineTab && !showOrdersOverlay && !loadedTransactionInfo
                             ? 'text-white hover:bg-cyan-500/80'
                             : 'text-slate-700 hover:bg-slate-100'
                           } ${loadedTransactionInfo ? 'cursor-not-allowed' : ''}`}
@@ -1316,11 +1319,12 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
                           setSelectedOnlinePlatform('qpon');
                           setIsOnlineTab(true);
                           setShowActiveOrders(false);
+      setShowUnpaidTab(false);
                         }}
                         disabled={!!loadedTransactionInfo}
-                        className={`px-3 py-2.5 text-sm font-semibold transition-all duration-200 h-full shrink-0 ${selectedOnlinePlatform === 'qpon' && isOnlineTab && !showActiveOrders && !loadedTransactionInfo
+                        className={`px-3 py-2.5 text-sm font-semibold transition-all duration-200 h-full shrink-0 ${selectedOnlinePlatform === 'qpon' && isOnlineTab && !showOrdersOverlay && !loadedTransactionInfo
                           ? 'bg-green-600 text-white'
-                          : isOnlineTab && !showActiveOrders && !loadedTransactionInfo
+                          : isOnlineTab && !showOrdersOverlay && !loadedTransactionInfo
                             ? 'text-white hover:bg-cyan-500/80'
                             : 'text-slate-700 hover:bg-slate-100'
                           } ${loadedTransactionInfo ? 'cursor-not-allowed' : ''}`}
@@ -1334,11 +1338,12 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
                           setSelectedOnlinePlatform('tiktok');
                           setIsOnlineTab(true);
                           setShowActiveOrders(false);
+      setShowUnpaidTab(false);
                         }}
                         disabled={!!loadedTransactionInfo}
-                        className={`px-3 py-2.5 text-sm font-semibold transition-all duration-200 h-full shrink-0 rounded-r-md ${selectedOnlinePlatform === 'tiktok' && isOnlineTab && !showActiveOrders && !loadedTransactionInfo
+                        className={`px-3 py-2.5 text-sm font-semibold transition-all duration-200 h-full shrink-0 rounded-r-md ${selectedOnlinePlatform === 'tiktok' && isOnlineTab && !showOrdersOverlay && !loadedTransactionInfo
                           ? 'bg-green-600 text-white'
-                          : isOnlineTab && !showActiveOrders && !loadedTransactionInfo
+                          : isOnlineTab && !showOrdersOverlay && !loadedTransactionInfo
                             ? 'text-white hover:bg-cyan-500/80'
                             : 'text-slate-700 hover:bg-slate-100'
                           } ${loadedTransactionInfo ? 'cursor-not-allowed' : ''}`}
@@ -1349,9 +1354,8 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
                   </div>
                 </div>
 
-                {/* New and Active Orders — primary action (New) = filled; Active Orders = tab pattern */}
+                {/* New, Active Orders, Transaksi Belum Terbayar */}
                 <div className="flex items-center gap-3 shrink-0">
-                  {/* New — primary CTA: solid, one color, clear hover */}
                   <button
                     onClick={clearAllCarts}
                     className="px-5 py-2.5 rounded-md font-semibold text-sm transition-all duration-200 flex items-center gap-2 bg-blue-600 text-white shadow-md hover:bg-blue-700 active:scale-[0.98]"
@@ -1360,10 +1364,11 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
                     <span>New</span>
                   </button>
 
-                  {/* Active Orders — selected = filled, unselected = outline */}
+                  {/* Active Orders — today's pending with items */}
                   <button
                     onClick={() => {
                       if (showActiveOrders && !checkUnsavedChanges()) return;
+                      setShowUnpaidTab(false);
                       setShowActiveOrders(!showActiveOrders);
                       if (!showActiveOrders) {
                         setIsOnlineTab(false);
@@ -1390,19 +1395,80 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
               </div>
             </div>
 
+            {/* Reservation pre-order banner (Kasir in "save to reservation" mode) */}
+            {reservationPreOrderMode && (
+              <div className="flex-shrink-0 bg-amber-100 border-b-2 border-amber-500 px-4 py-2.5 flex flex-wrap items-center justify-between gap-3">
+                <div className="flex items-center gap-2.5">
+                  <span className="inline-block px-2 py-1 rounded bg-amber-500 text-white text-[11px] font-bold uppercase tracking-wide">Mode Pre-Order Reservasi</span>
+                  <div>
+                    <div className="text-sm font-semibold text-amber-900">Memilih produk untuk: {reservationPreOrderMode.reservationNama}</div>
+                    <div className="text-xs text-amber-800 mt-0.5">Pilih produk lalu klik &quot;Simpan ke Reservasi&quot;. Tombol Bayar dinonaktifkan.</div>
+                  </div>
+                </div>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setReservationPreOrderMode(null);
+                      setOfflineCart([]);
+                      setActiveMenuItemRaw('Reservation');
+                    }}
+                    className="px-3 py-2 rounded-md border border-amber-500 bg-white text-amber-900 text-sm font-medium hover:bg-amber-50"
+                  >
+                    Batal
+                  </button>
+                  <div className="relative inline-block">
+                    <button
+                      type="button"
+                      className="absolute top-0 left-0 z-10 text-white/90 cursor-help hover:text-white p-0.5 rounded focus:outline-none focus:ring-1 focus:ring-white/50"
+                      title="Tekan simpan ke reservasi untuk menyimpan pesanan reservasi di kemudian hari"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        appAlert('Tekan simpan ke reservasi untuk menyimpan pesanan reservasi di kemudian hari');
+                      }}
+                    >
+                      <HelpCircle className="w-3.5 h-3.5" />
+                    </button>
+                    <button
+                      type="button"
+                      onClick={onSaveToReservation}
+                      className="px-4 py-2 rounded-md bg-green-600 text-white text-sm font-bold hover:bg-green-700 relative pl-6"
+                    >
+                      Simpan ke Reservasi ({getCurrentCart().length} item)
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
+
             {/* Main Content Area */}
             <div className="flex-1 flex h-full min-h-0 relative">
-              {/* Active Orders Tab - Overlay when active */}
+              {/* Active Orders (today only) or Transaksi Belum Terbayar (all unpaid) */}
               {showActiveOrders && (
                 <ActiveOrdersTab
                   businessId={businessId}
                   isOpen={showActiveOrders}
                   onLoadTransaction={loadTransactionIntoCart}
+                  todayOnly={true}
+                  title="Active Orders"
+                  onSwitchToUnpaidTab={() => {
+                    setShowActiveOrders(false);
+                    setShowUnpaidTab(true);
+                  }}
+                />
+              )}
+              {showUnpaidTab && (
+                <ActiveOrdersTab
+                  businessId={businessId}
+                  isOpen={showUnpaidTab}
+                  onLoadTransaction={loadTransactionIntoCart}
+                  todayOnly={false}
+                  title="Transaksi Belum Terbayar"
                 />
               )}
 
               {/* Center Content - Products filtered by selected category */}
-              {!showActiveOrders && (
+              {!showOrdersOverlay && (
                 <>
                   <CenterContent
                     products={searchQuery.trim() ? (allProductsForSearch ?? products) : products}
@@ -1422,6 +1488,17 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
                     }}
                     onUnsavedChangesChange={setHasUnsavedChanges}
                     resetCustomerAndWaiterSignal={newOrderResetSignal}
+                    isReservationPreOrderMode={!!reservationPreOrderMode}
+                    onSaveToReservation={reservationPreOrderMode ? onSaveToReservation : undefined}
+                    reservationCartInfo={reservationCartInfo}
+                    onSaveCartToReservation={reservationCartInfo ? onSaveCartToReservation : undefined}
+                    onTableOrderSaved={async (reservationUuid) => {
+                      if (reservationUuid) {
+                        const api = getElectronAPI();
+                        await api?.localDbUpdateReservation?.(reservationUuid, { status: 'attended' });
+                      }
+                      setReservationCartInfo(null);
+                    }}
                   />
 
                   {/* Right Sidebar - Categories from database */}
@@ -1453,11 +1530,6 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
             </div>
           );
         }
-        // #region agent log
-        if (typeof fetch === 'function') {
-          fetch('http://127.0.0.1:7242/ingest/7b565785-72b5-49f7-b2c0-57606ea0d0b5', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ location: 'POSLayout.tsx:DaftarTransaksi', message: 'Rendering TransactionList for Daftar Transaksi', data: { activeMenuItem }, timestamp: Date.now(), sessionId: 'debug-session', hypothesisId: 'H1' }) }).catch(() => { });
-        }
-        // #endregion
         return <TransactionList businessId={businessId} onLoadTransaction={loadTransactionIntoCart} />;
       }
 
@@ -1494,6 +1566,31 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
           );
         }
         return <Laporan />;
+      }
+
+      case 'Reservation': {
+        const canAccessReservation = isSuperAdmin(user) || hasPermission(user, 'access_reservation');
+        if (!canAccessReservation) {
+          return (
+            <div className="flex-1 flex items-center justify-center">
+              <div className="text-center space-y-2">
+                <h2 className="text-lg font-semibold text-gray-700">Akses Ditolak</h2>
+                <p className="text-gray-500 text-sm">
+                  Anda tidak memiliki izin untuk mengakses halaman Reservation.
+                </p>
+              </div>
+            </div>
+          );
+        }
+        return (
+          <ReservationPage
+            businessId={businessId}
+            userEmail={user?.email ?? null}
+            userId={user?.id ?? null}
+            onPickProductsFromKasir={onPickProductsFromKasir}
+            onSendToKasir={onSendToKasir}
+          />
+        );
       }
 
       case 'Settings':

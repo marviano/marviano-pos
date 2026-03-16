@@ -110,13 +110,14 @@ export function getConfigValue<K extends keyof AppConfig>(
 }
 
 /**
- * Get server host (DB_HOST) with fallback
+ * Get server host (DB_HOST) with fallback.
+ * When DB_HOST is set in .env, it wins (offline-first: app always uses local DB from .env).
+ * Otherwise use saved pos-config serverHost, then default 'localhost'.
  */
 export function getServerHost(): string {
-  return (
-    getConfigValue('serverHost', 'DB_HOST') || 
-    'localhost'
-  );
+  const envHost = process.env.DB_HOST?.trim();
+  if (envHost) return envHost;
+  return getConfigValue('serverHost') || 'localhost';
 }
 
 /**

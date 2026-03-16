@@ -770,6 +770,18 @@ export default function PaymentModal({
 
       const electronAPI = getElectronAPI();
 
+      // Fetch all products once — shared by kitchen routing (dbSavePromise) and receipt printing (setTimeout)
+      const allProducts = await electronAPI?.localDbGetAllProducts?.();
+      const productsMap = new Map<number, { id: number; category1_id?: number | null; category1_name?: string | null; kategori?: string | null;[key: string]: unknown }>();
+      if (Array.isArray(allProducts)) {
+        allProducts.forEach((p: unknown) => {
+          if (p && typeof p === 'object' && 'id' in p && typeof (p as { id: unknown }).id === 'number') {
+            const product = p as { id: number; category1_id?: number | null; category1_name?: string | null; kategori?: string | null;[key: string]: unknown };
+            productsMap.set(product.id, product);
+          }
+        });
+      }
+
       // 3. BACKGROUND DATABASE SAVE PROMISE
       const dbSavePromise = (async () => {
         if (!electronAPI) return;
@@ -959,26 +971,9 @@ export default function PaymentModal({
           };
         });
 
-        // ============================================
-        // DEBUG LOG: Payment Data Before Database Save
-        // ============================================
-        console.log('\n╔═══════════════════════════════════════════════════════════════════════════════════╗');
-        console.log('║                    💳 PAYMENT DEBUG LOG - BEFORE DATABASE SAVE                    ║');
-        console.log('╚═══════════════════════════════════════════════════════════════════════════════════╝\n');
-
-        console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-        console.log('📝 TRANSACTION DATA (To be saved to database):');
-        console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-        console.log(JSON.stringify(localTransactionData, null, 2));
-        console.log('\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-        console.log('📋 TRANSACTION ITEMS (To be saved to database):');
-        console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-        console.log(`Total Items: ${transactionItems.length}`);
-        transactionItems.forEach((item, index) => {
-          console.log(`\n[Item ${index + 1}]`);
-          console.log(JSON.stringify(item, null, 2));
-        });
-        console.log('\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
+        if (process.env.NODE_ENV === 'development') {
+          console.log('💳 PAYMENT DEBUG: Transaction', localTransactionData.id, 'Items:', transactionItems.length);
+        }
 
         // Save transaction to local database (Blocking but fast)
         await electronAPI.localDbUpsertTransactions?.([localTransactionData]);
@@ -989,32 +984,7 @@ export default function PaymentModal({
         console.log('📝 [PAYMENT] Saving transaction items:', transactionItems.length, 'items');
         await electronAPI.localDbUpsertTransactionItems?.(transactionItems);
 
-        // ============================================
-        // DEBUG LOG: Confirmation After Database Save
-        // ============================================
-        console.log('╔═══════════════════════════════════════════════════════════════════════════════════╗');
-        console.log('║                    ✅ PAYMENT DEBUG LOG - AFTER DATABASE SAVE                     ║');
-        console.log('╚═══════════════════════════════════════════════════════════════════════════════════╝\n');
-        console.log(`✅ Transaction ID: ${localTransactionData.id}`);
-        console.log(`✅ Business ID: ${localTransactionData.business_id}`);
-        console.log(`✅ User ID: ${localTransactionData.user_id}`);
-        console.log(`✅ Payment Method: ${localTransactionData.payment_method} (ID: ${localTransactionData.payment_method_id})`);
-        console.log(`✅ Pickup Method: ${localTransactionData.pickup_method}`);
-        console.log(`✅ Total Amount: ${localTransactionData.total_amount}`);
-        console.log(`✅ Final Amount: ${localTransactionData.final_amount}`);
-        console.log(`✅ Amount Received: ${localTransactionData.amount_received}`);
-        console.log(`✅ Change Amount: ${localTransactionData.change_amount}`);
-        console.log(`✅ Voucher Discount: ${localTransactionData.voucher_discount}`);
-        console.log(`✅ Voucher Type: ${localTransactionData.voucher_type || 'N/A'}`);
-        console.log(`✅ Voucher Value: ${localTransactionData.voucher_value || 'N/A'}`);
-        console.log(`✅ Customer Name: ${localTransactionData.customer_name || 'N/A'}`);
-        console.log(`✅ Customer Unit: ${localTransactionData.customer_unit || 'N/A'}`);
-        console.log(`✅ Bank Name: ${localTransactionData.bank_name || 'N/A'}`);
-        console.log(`✅ Card Number: ${localTransactionData.card_number || 'N/A'}`);
-        console.log(`✅ Transaction Type: ${localTransactionData.transaction_type}`);
-        console.log(`✅ Created At: ${localTransactionData.created_at}`);
-        console.log(`✅ Items Saved: ${transactionItems.length} item(s)`);
-        console.log('\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
+        console.log(`✅ Transaction saved: ${localTransactionData.id}, ${transactionItems.length} item(s), ${localTransactionData.payment_method}`);
 
         // Check if we should send items to kitchen/barista
         // Only send items that haven't been sent before (production_status is null)
@@ -1032,21 +1002,11 @@ export default function PaymentModal({
             return true;
           });
 
+        // productsMap is hoisted above dbSavePromise — shared with printing section
+
         // Broadcast order (Fire and forget, but keep promise for error logging)
         // Only create and send orderData if items haven't been sent before
         if (shouldSendToKitchen) {
-          // Get all products to retrieve category1_id
-          const allProducts = await electronAPI.localDbGetAllProducts?.();
-          const productsMap = new Map<number, { id: number; category1_id?: number | null; category1_name?: string | null; kategori?: string | null;[key: string]: unknown }>();
-          if (Array.isArray(allProducts)) {
-            allProducts.forEach((p: unknown) => {
-              if (p && typeof p === 'object' && 'id' in p && typeof (p as { id: unknown }).id === 'number') {
-                const product = p as { id: number; category1_id?: number | null; category1_name?: string | null; kategori?: string | null;[key: string]: unknown };
-                productsMap.set(product.id, product);
-              }
-            });
-          }
-
           // Helper function to map category1_name to category1_id
           const mapCategoryNameToId = (categoryName: string | null | undefined): number | null => {
             if (!categoryName) return null;
@@ -1083,36 +1043,12 @@ export default function PaymentModal({
               // Try to get category1_id, with fallback to category1_name/kategori mapping
               let category1_id: number | null = null;
               if (product) {
-                // First try direct category1_id
                 if (product.category1_id !== null && product.category1_id !== undefined && typeof product.category1_id === 'number') {
                   category1_id = product.category1_id;
-                  console.log(`✅ [DEBUG] Product ID ${item.product_id} (${productName}) has direct category1_id: ${category1_id}`);
                 } else {
-                  // Fallback: map from category1_name or kategori (local DB uses 'kategori' field)
                   const categoryName = (product.category1_name || product.kategori) as string | null | undefined;
-                  console.log(`🔍 [DEBUG] Product ID ${item.product_id} (${productName}) - checking category fields:`, {
-                    category1_id: product.category1_id,
-                    category1_name: product.category1_name,
-                    kategori: product.kategori,
-                    resolvedName: categoryName
-                  });
-
                   category1_id = mapCategoryNameToId(categoryName);
-
-                  if (category1_id === null) {
-                    console.warn(`⚠️ [DEBUG] Product ID ${item.product_id} (${productName}) has no category1_id and category name "${categoryName}" could not be mapped. Available fields:`, {
-                      id: product.id,
-                      category1_id: product.category1_id,
-                      category1_name: product.category1_name,
-                      kategori: product.kategori,
-                      allKeys: Object.keys(product)
-                    });
-                  } else {
-                    console.log(`✅ [DEBUG] Product ID ${item.product_id} (${productName}) mapped "${categoryName}" → category1_id: ${category1_id}`);
-                  }
                 }
-              } else {
-                console.warn(`⚠️ [DEBUG] Product ID ${item.product_id} (${productName}) not found in productsMap`);
               }
 
               return {
@@ -1137,82 +1073,68 @@ export default function PaymentModal({
             pickupMethod: transactionData.pickup_method as 'dine-in' | 'take-away'
           };
 
-          // Debug: Check productsMap size
-          console.log(`🔍 [DEBUG] ProductsMap size: ${productsMap.size}, Transaction items: ${transactionItems.length}`);
+          if (process.env.NODE_ENV === 'development') {
+            console.log(`🔍 [DEBUG] ProductsMap size: ${productsMap.size}, Transaction items: ${transactionItems.length}`);
+            console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+            console.log(`📦 [TRANSACTION] Broadcasting order #${orderData.transactionId}`);
+            console.log(`   Receipt: #${orderData.receiptNumber || 0} | Customer: ${orderData.customerName || 'N/A'} | Pickup: ${orderData.pickupMethod}`);
+            console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
 
-          // Detailed logging for debugging
-          console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-          console.log(`📦 [TRANSACTION] Broadcasting order #${orderData.transactionId}`);
-          console.log(`   Receipt: #${orderData.receiptNumber || 0} | Customer: ${orderData.customerName || 'N/A'} | Pickup: ${orderData.pickupMethod}`);
-          console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+            const itemsWithInvalidCategory = orderData.items.filter(item =>
+              item.category1_id === 0 ||
+              item.category1_id === null ||
+              (item.category1_id !== 1 && item.category1_id !== 2 && item.category1_id !== 3 && item.category1_id !== 5)
+            );
+            if (itemsWithInvalidCategory.length > 0) {
+              console.warn(`⚠️ [WARNING] ${itemsWithInvalidCategory.length} item(s) have invalid category1_id and will NOT be sent to any display:`);
+              itemsWithInvalidCategory.forEach(item => {
+                console.warn(`   - ${item.productName} (Product ID: ${item.productId}, category1_id: ${item.category1_id})`);
+              });
+            }
 
-          // Check for items with invalid category1_id (valid: 1=Makanan, 2=Minuman, 3=Dessert, 5=Bakery)
-          const itemsWithInvalidCategory = orderData.items.filter(item =>
-            item.category1_id === 0 ||
-            item.category1_id === null ||
-            (item.category1_id !== 1 && item.category1_id !== 2 && item.category1_id !== 3 && item.category1_id !== 5)
-          );
-          if (itemsWithInvalidCategory.length > 0) {
-            console.warn(`⚠️ [WARNING] ${itemsWithInvalidCategory.length} item(s) have invalid category1_id and will NOT be sent to any display:`);
-            itemsWithInvalidCategory.forEach(item => {
-              console.warn(`   - ${item.productName} (Product ID: ${item.productId}, category1_id: ${item.category1_id})`);
+            orderData.items.forEach((item, index) => {
+              let destination = '❓ UNKNOWN';
+              let categoryInfo = '(Kategori tidak diketahui)';
+              if (item.category1_id === 1) { destination = '🍳 DAPUR'; categoryInfo = '(Makanan)'; }
+              else if (item.category1_id === 2) { destination = '☕ BARISTA'; categoryInfo = '(Minuman)'; }
+              else if (item.category1_id === 3) { destination = '☕ BARISTA'; categoryInfo = '(Dessert)'; }
+              else if (item.category1_id === 5) { destination = '🍳 DAPUR'; categoryInfo = '(Bakery)'; }
+
+              console.log(`\n   [Item ${index + 1}] ${item.productName} x${item.quantity} → ${destination} ${categoryInfo}`);
+              if (item.category1_id === 0 || item.category1_id === null) {
+                console.warn(`      ⚠️  This item will NOT be sent to any display because category1_id is invalid!`);
+              }
+
+              if (item.customizations && Array.isArray(item.customizations) && item.customizations.length > 0) {
+                console.log(`      🎨 Customizations:`);
+                item.customizations.forEach((customization: unknown, custIdx: number) => {
+                  if (customization && typeof customization === 'object' && 'customization_name' in customization) {
+                    const cust = customization as { customization_name: string; selected_options?: Array<{ option_name: string; price_adjustment?: number }> };
+                    const options = cust.selected_options?.map(opt => {
+                      const price = opt.price_adjustment && opt.price_adjustment !== 0 ? ` (+${opt.price_adjustment})` : '';
+                      return `${opt.option_name}${price}`;
+                    }).join(', ') || 'N/A';
+                    console.log(`         ${custIdx + 1}. ${cust.customization_name}: ${options}`);
+                  }
+                });
+              }
+
+              if (item.customNote && item.customNote.trim()) {
+                console.log(`      📝 Custom Note: "${item.customNote}"`);
+              }
+
+              if (item.bundleSelections && Array.isArray(item.bundleSelections) && item.bundleSelections.length > 0) {
+                console.log(`      📦 Bundle Selections:`);
+                item.bundleSelections.forEach((bundle: unknown, bundleIdx: number) => {
+                  if (bundle && typeof bundle === 'object' && 'category2_name' in bundle) {
+                    const b = bundle as { category2_name: string; selectedProducts?: Array<{ product: { nama: string }; quantity?: number }> };
+                    const products = b.selectedProducts?.map(sp => `${sp.product.nama}${sp.quantity && sp.quantity > 1 ? ` x${sp.quantity}` : ''}`).join(', ') || 'N/A';
+                    console.log(`         ${bundleIdx + 1}. ${b.category2_name}: ${products}`);
+                  }
+                });
+              }
             });
           }
-
-          orderData.items.forEach((item, index) => {
-            let destination = '❓ UNKNOWN';
-            let categoryInfo = '(Kategori tidak diketahui)';
-            if (item.category1_id === 1) {
-              destination = '🍳 DAPUR';
-              categoryInfo = '(Makanan)';
-            } else if (item.category1_id === 2) {
-              destination = '☕ BARISTA';
-              categoryInfo = '(Minuman)';
-            } else if (item.category1_id === 3) {
-              destination = '☕ BARISTA';
-              categoryInfo = '(Dessert)';
-            } else if (item.category1_id === 5) {
-              destination = '🍳 DAPUR';
-              categoryInfo = '(Bakery)';
-            }
-
-            console.log(`\n   [Item ${index + 1}] ${item.productName} x${item.quantity} → ${destination} ${categoryInfo}`);
-            if (item.category1_id === 0 || item.category1_id === null) {
-              console.warn(`      ⚠️  This item will NOT be sent to any display because category1_id is invalid!`);
-            }
-
-            // Log customizations
-            if (item.customizations && Array.isArray(item.customizations) && item.customizations.length > 0) {
-              console.log(`      🎨 Customizations:`);
-              item.customizations.forEach((customization: unknown, custIdx: number) => {
-                if (customization && typeof customization === 'object' && 'customization_name' in customization) {
-                  const cust = customization as { customization_name: string; selected_options?: Array<{ option_name: string; price_adjustment?: number }> };
-                  const options = cust.selected_options?.map(opt => {
-                    const price = opt.price_adjustment && opt.price_adjustment !== 0 ? ` (+${opt.price_adjustment})` : '';
-                    return `${opt.option_name}${price}`;
-                  }).join(', ') || 'N/A';
-                  console.log(`         ${custIdx + 1}. ${cust.customization_name}: ${options}`);
-                }
-              });
-            }
-
-            // Log custom note
-            if (item.customNote && item.customNote.trim()) {
-              console.log(`      📝 Custom Note: "${item.customNote}"`);
-            }
-
-            // Log bundle selections if any
-            if (item.bundleSelections && Array.isArray(item.bundleSelections) && item.bundleSelections.length > 0) {
-              console.log(`      📦 Bundle Selections:`);
-              item.bundleSelections.forEach((bundle: unknown, bundleIdx: number) => {
-                if (bundle && typeof bundle === 'object' && 'category2_name' in bundle) {
-                  const b = bundle as { category2_name: string; selectedProducts?: Array<{ product: { nama: string }; quantity?: number }> };
-                  const products = b.selectedProducts?.map(sp => `${sp.product.nama}${sp.quantity && sp.quantity > 1 ? ` x${sp.quantity}` : ''}`).join(', ') || 'N/A';
-                  console.log(`         ${bundleIdx + 1}. ${b.category2_name}: ${products}`);
-                }
-              });
-            }
-          });
         } else {
           console.log('📦 [PAYMENT] Skipping kitchen/barista broadcast - all items were already sent when transaction was saved with "Simpan Order"');
         }
@@ -1229,11 +1151,49 @@ export default function PaymentModal({
       // 5. PRINTING LOGIC (Run after UI close)
       // Note: Using a timeout to ensure it runs out-of-band of the render cycle
       setTimeout(async () => {
+        // Pre-fetch business name, receipt template, and receipt settings once
+        // These are passed with every printReceipt call so the main process can skip DB queries
+        let prefetchedBusinessName: string | undefined;
+        let prefetchedTemplateCode: string | undefined;
+        let prefetchedReceiptSettings: Record<string, unknown> | undefined;
+        try {
+          const [businessesResult, templateResult, settingsResult] = await Promise.all([
+            window.electronAPI?.localDbGetBusinesses?.(),
+            window.electronAPI?.getReceiptTemplate?.('receipt', transactionData.business_id as number | undefined),
+            window.electronAPI?.getReceiptSettings?.(transactionData.business_id as number | undefined),
+          ]);
+          if (Array.isArray(businessesResult)) {
+            const biz = businessesResult.find((b: unknown) =>
+              b && typeof b === 'object' && 'id' in b && (b as { id: unknown }).id === transactionData.business_id
+            ) as { name?: string } | undefined;
+            if (biz?.name) prefetchedBusinessName = biz.name;
+          }
+          const templateStr = templateResult as unknown;
+          if (typeof templateStr === 'string' && templateStr.trim()) {
+            prefetchedTemplateCode = templateStr;
+          }
+          if (settingsResult && typeof settingsResult === 'object' && 'success' in settingsResult && (settingsResult as { success: boolean }).success) {
+            const s = (settingsResult as { settings?: Record<string, unknown> | null }).settings;
+            if (s) prefetchedReceiptSettings = s;
+          }
+        } catch (e) {
+          // Non-fatal: main process will fallback to its own DB queries
+        }
+
+        // Fetch printer configs once (reused for singlePrinterMode check and copies setting)
+        let cachedPrinterConfigs: unknown[] | null = null;
+        try {
+          const fetched = await window.electronAPI?.localDbGetPrinterConfigs?.();
+          if (Array.isArray(fetched)) cachedPrinterConfigs = fetched;
+        } catch (e) {
+          console.warn('⚠️ Failed to pre-fetch printer configs:', e);
+        }
+
         // Check for Single Printer Mode setting
         let singlePrinterModeEnabled = false;
         let printer2AuditLogChance: number | null = null;
         try {
-          const configsRaw = await window.electronAPI?.localDbGetPrinterConfigs?.();
+          const configsRaw = cachedPrinterConfigs;
           if (Array.isArray(configsRaw)) {
             type PrinterConfig = { printer_type?: string; extra_settings?: string | Record<string, unknown> | null };
             (configsRaw as PrinterConfig[]).forEach((config) => {
@@ -1328,19 +1288,9 @@ export default function PaymentModal({
           }
         }
 
-        // Prepare receipt data for printing
-        const receiptNumber = transactionData.id; // Use transaction ID as receipt number
-        // Fetch products for package breakdown category lookups
-        const allProductsForReceipt = await electronAPI?.localDbGetAllProducts?.();
-        const productsMapForReceipt = new Map<number, { id: number; category1_id?: number | null; category1_name?: string | null;[key: string]: unknown }>();
-        if (Array.isArray(allProductsForReceipt)) {
-          allProductsForReceipt.forEach((p: unknown) => {
-            if (p && typeof p === 'object' && 'id' in p && typeof (p as { id: unknown }).id === 'number') {
-              const product = p as { id: number; category1_id?: number | null; category1_name?: string | null;[key: string]: unknown };
-              productsMapForReceipt.set(product.id, product);
-            }
-          });
-        }
+        // Prepare receipt data for printing — productsMap is hoisted above dbSavePromise
+        const receiptNumber = transactionData.id;
+        const productsMapForReceipt = productsMap;
         const getTableNumber = () => {
           // Extract table number from receipt number
           if (typeof receiptNumber === 'string') {
@@ -1541,19 +1491,22 @@ export default function PaymentModal({
           customerName: customerName.trim() || '',
           transactionType: transactionType,
           pickupMethod: finalPickupMethod,
-          globalCounter
+          globalCounter,
+          businessName: prefetchedBusinessName,
+          templateCode: prefetchedTemplateCode,
+          receiptSettings: prefetchedReceiptSettings,
         };
 
         // Variables to store printer counters for label printing
         let printer1Counter: number | undefined = undefined;
         let printer2Counter: number | undefined = undefined;
 
-        // Get printer configs to read copies setting (cash vs non-cash)
+        // Get printer configs to read copies setting (reuse cached configs)
         const isCashPayment = selectedPaymentMethod === 'cash';
         let printer1Copies = 1;
         let printer2Copies = 1;
         try {
-          const configsRaw = await window.electronAPI?.localDbGetPrinterConfigs?.();
+          const configsRaw = cachedPrinterConfigs;
           if (Array.isArray(configsRaw)) {
             type PrinterConfig = { printer_type?: string; extra_settings?: string | Record<string, unknown> | null };
             const resolveCopies = (extra: Record<string, unknown> | null): number => {
@@ -1633,9 +1586,8 @@ export default function PaymentModal({
             // --- START PRINTING FIRST (Background parallel task) ---
             const printCopiesPromise = (async () => {
               try {
-                await new Promise(r => setTimeout(r, 500));
                 for (let copy = 1; copy <= printer1Copies; copy++) {
-                  if (copy > 1) await new Promise(r => setTimeout(r, 300));
+                  if (copy > 1) await new Promise(r => setTimeout(r, 100));
                   const printResult = await window.electronAPI?.printReceipt?.(printer1Data);
                   if (isSuccessResponse(printResult) && !printResult.success) {
                     console.error(`❌ Printer 1 failed (copy ${copy}/${printer1Copies}):`, printResult?.error);
@@ -1734,13 +1686,6 @@ export default function PaymentModal({
               printer1Counter: undefined // Explicitly clear printer1Counter for Printer 2
             };
             console.log(`📋 [PRINT] Printer 2 data prepared with counter: ${printer2Counter} (transaction: ${transactionData.id})`);
-            console.log(`🔍 [DEBUG] printer2Data object:`, JSON.stringify({
-              printerType: printer2Data.printerType,
-              printer2Counter: printer2Data.printer2Counter,
-              printer1Counter: printer2Data.printer1Counter,
-              globalCounter: printer2Data.globalCounter,
-              tableNumber: printer2Data.tableNumber
-            }, null, 2));
 
             // Verify counter is actually set before printing
             if (typeof printer2Data.printer2Counter !== 'number' || printer2Data.printer2Counter <= 0) {
@@ -1750,9 +1695,8 @@ export default function PaymentModal({
             // --- START PRINTING FIRST (Background parallel task) ---
             const printCopiesPromise = (async () => {
               try {
-                await new Promise(r => setTimeout(r, 500));
                 for (let copy = 1; copy <= printer2Copies; copy++) {
-                  if (copy > 1) await new Promise(r => setTimeout(r, 300));
+                  if (copy > 1) await new Promise(r => setTimeout(r, 100));
                   const printResult = await window.electronAPI?.printReceipt?.(printer2Data);
                   if (isSuccessResponse(printResult) && !printResult.success) {
                     console.error(`❌ Printer 2 failed (copy ${copy}/${printer2Copies}):`, printResult?.error);

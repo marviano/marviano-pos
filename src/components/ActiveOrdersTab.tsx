@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useCallback, useRef, useLayoutEffect } from 'react';
 import { createPortal } from 'react-dom';
-import { Edit, List, LayoutGrid, Printer, Scissors } from 'lucide-react';
+import { Edit, List, LayoutGrid, Printer, Scissors, ClipboardList } from 'lucide-react';
 import { appAlert } from '@/components/AppDialog';
 import { formatPackageLineDisplay } from './PackageSelectionModal';
 import TableLayout from './TableLayout';
@@ -17,6 +17,8 @@ interface PendingTransaction {
   id: string;
   uuid_id: string;
   table_id: number | null;
+  /** Multi-table: all table IDs for this transaction (when present, table_id is first). */
+  table_ids?: number[];
   customer_name: string | null;
   total_amount: number;
   final_amount: number;
@@ -37,6 +39,12 @@ interface ActiveOrdersTabProps {
   businessId: number;
   isOpen: boolean;
   onLoadTransaction?: (transactionId: string) => void;
+  /** If true (default), only today's pending transactions. If false, all pending (unpaid) with active items — "Transaksi Belum Terbayar". */
+  todayOnly?: boolean;
+  /** Tab title (e.g. "Active Orders" or "Transaksi Belum Terbayar"). */
+  title?: string;
+  /** When set and todayOnly is true, show a button that switches to Transaksi Belum Terbayar (calls this callback). */
+  onSwitchToUnpaidTab?: () => void;
 }
 
 const getElectronAPI = () => (typeof window !== 'undefined' ? window.electronAPI : undefined);
@@ -58,7 +66,7 @@ function ElapsedTimer({ createdAt, className }: { createdAt: string; className?:
   return <span className={className}>{text}</span>;
 }
 
-export default function ActiveOrdersTab({ businessId, isOpen, onLoadTransaction }: ActiveOrdersTabProps) {
+export default function ActiveOrdersTab({ businessId, isOpen, onLoadTransaction, todayOnly = true, title = 'Active Orders', onSwitchToUnpaidTab }: ActiveOrdersTabProps) {
   const [pendingTransactions, setPendingTransactions] = useState<PendingTransaction[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -112,8 +120,8 @@ export default function ActiveOrdersTab({ businessId, isOpen, onLoadTransaction 
         return;
       }
 
-      // Fetch today's transactions only and filter for pending ones
-      const allTransactions = await electronAPI.localDbGetTransactions(businessId, 10000, { todayOnly: true });
+      // Fetch pending transactions (today only or all, depending on tab)
+      const allTransactions = await electronAPI.localDbGetTransactions(businessId, todayOnly ? 500 : 2000, todayOnly ? { todayOnly: true } : undefined);
       const transactionsArray = Array.isArray(allTransactions) ? allTransactions : [];
 
       // Fetch tables and rooms to get table numbers and room names
@@ -134,11 +142,7 @@ export default function ActiveOrdersTab({ businessId, isOpen, onLoadTransaction 
               employeesColorMap.set(empId, typeof emp.color === 'string' && emp.color ? emp.color : null);
             }
           });
-          console.log('🔍 [ACTIVE ORDERS] Employees loaded:', {
-            totalEmployees: employeesArray.length,
-            employeesMap_size: employeesMap.size,
-            sampleEmployeeIds: Array.from(employeesMap.keys()).slice(0, 5)
-          });
+          // Employees loaded (debug only): count = employeesArray.length
         } catch (error) {
           console.warn('Failed to fetch employees:', error);
         }
@@ -180,6 +184,7 @@ export default function ActiveOrdersTab({ businessId, isOpen, onLoadTransaction 
             uuid_id?: string;
             id?: string;
             table_id?: number | null;
+            table_ids?: number[];
             customer_name?: string | null;
             waiter_id?: number | null;
             total_amount?: number;
@@ -220,17 +225,27 @@ export default function ActiveOrdersTab({ businessId, isOpen, onLoadTransaction 
             }
           }
 
-          // Transaction has items, process it
-          const tableId = transaction.table_id || null;
-          const tableInfo = tableId && tablesMap.has(tableId) ? tablesMap.get(tableId)! : null;
-          const tableNumber = tableInfo ? tableInfo.table_number : null;
-          const roomId = tableInfo ? tableInfo.room_id : null;
-          const roomName = roomId && roomsMap.has(roomId) ? roomsMap.get(roomId)! : null;
-
-          // Format: "table_name/room_name" or "Take-away" if no table
-          const tableRoomDisplay = tableId && tableNumber && roomName
-            ? `${tableNumber}/${roomName}`
-            : 'Take-away';
+          // Transaction has items, process it — support multi-table (table_ids) and single table_id
+          const rawTableIds = transaction.table_ids;
+          const idsToUse = Array.isArray(rawTableIds) && rawTableIds.length > 0
+            ? rawTableIds.map((id: unknown) => typeof id === 'number' ? id : parseInt(String(id), 10)).filter((n: number) => !Number.isNaN(n))
+            : (transaction.table_id != null ? [typeof transaction.table_id === 'number' ? transaction.table_id : parseInt(String(transaction.table_id), 10)] : []);
+          const tableId = idsToUse.length > 0 ? idsToUse[0] : null;
+          const tableNumbers: string[] = [];
+          let roomName: string | null = null;
+          for (const tid of idsToUse) {
+            const tableInfo = tablesMap.has(tid) ? tablesMap.get(tid)! : null;
+            if (tableInfo) {
+              tableNumbers.push(tableInfo.table_number);
+              if (roomName == null && roomsMap.has(tableInfo.room_id)) roomName = roomsMap.get(tableInfo.room_id)!;
+            }
+          }
+          // Format: "1, 2, 3/Room" or "1/R1, 2/R2" if different rooms; or "Take-away" if no table
+          const tableRoomDisplay = tableNumbers.length > 0 && roomName
+            ? `${tableNumbers.join(', ')}/${roomName}`
+            : tableNumbers.length > 0
+              ? tableNumbers.join(', ')
+              : 'Take-away';
 
           // Get waiter name and color
           const waiterId = typeof transaction.waiter_id === 'number'
@@ -238,15 +253,6 @@ export default function ActiveOrdersTab({ businessId, isOpen, onLoadTransaction 
             : (typeof transaction.waiter_id === 'string' ? parseInt(transaction.waiter_id, 10) : null);
           const waiterName = waiterId && employeesMap.has(waiterId) ? employeesMap.get(waiterId)! : null;
           const waiterColor = waiterId ? (employeesColorMap.get(waiterId) ?? null) : null;
-          console.log('🔍 [ACTIVE ORDERS] Transaction waiter lookup:', {
-            transactionId: txId,
-            waiter_id_from_db: transaction.waiter_id,
-            waiterId_parsed: waiterId,
-            employeesMap_size: employeesMap.size,
-            employeesMap_has_waiterId: waiterId ? employeesMap.has(waiterId) : false,
-            waiterName: waiterName
-          });
-
           // Pickup method: use stored value, or default take-away for platform orders (gofood/grabfood/shopeefood/qpon/tiktok)
           const platformPaymentMethods = ['gofood', 'grabfood', 'shopeefood', 'qpon', 'tiktok'];
           const pm = typeof transaction.pickup_method === 'string' ? transaction.pickup_method : null;
@@ -260,6 +266,7 @@ export default function ActiveOrdersTab({ businessId, isOpen, onLoadTransaction 
             id: txId,
             uuid_id: txId,
             table_id: tableId,
+            ...(idsToUse.length > 0 ? { table_ids: idsToUse } : {}),
             customer_name: transaction.customer_name || null,
             total_amount: transaction.total_amount || 0,
             final_amount: transaction.final_amount || transaction.total_amount || 0,
@@ -384,14 +391,24 @@ export default function ActiveOrdersTab({ businessId, isOpen, onLoadTransaction 
     } finally {
       setLoading(false);
     }
-  }, [businessId]);
+  }, [businessId, todayOnly]);
 
   useEffect(() => {
     if (isOpen) {
-      fetchPendingTransactions();
-      // Refresh transaction list every 5 seconds
-      const interval = setInterval(fetchPendingTransactions, 5000);
-      return () => clearInterval(interval);
+      let cancelled = false;
+      const POLL_INTERVAL_MS = 10000;
+      const poll = async () => {
+        await fetchPendingTransactions();
+        if (!cancelled) {
+          timeoutId = setTimeout(poll, POLL_INTERVAL_MS);
+        }
+      };
+      let timeoutId: ReturnType<typeof setTimeout>;
+      poll();
+      return () => {
+        cancelled = true;
+        clearTimeout(timeoutId);
+      };
     }
   }, [isOpen, fetchPendingTransactions]);
 
@@ -685,25 +702,31 @@ export default function ActiveOrdersTab({ businessId, isOpen, onLoadTransaction 
       // Get cashier name
       const cashierName = user?.name || 'Kasir';
 
-      // Get table number
-      const tableId = typeof transaction.table_id === 'number' ? transaction.table_id : null;
+      // Get table number — support multi-table (table_ids) and single table_id
+      const tableIdsToResolve = (transaction as Record<string, unknown>).table_ids as number[] | undefined;
+      const singleTableId = typeof transaction.table_id === 'number' ? transaction.table_id : (transaction.table_id != null ? parseInt(String(transaction.table_id), 10) : null);
+      const idsForBill = Array.isArray(tableIdsToResolve) && tableIdsToResolve.length > 0 ? tableIdsToResolve : (singleTableId != null ? [singleTableId] : []);
       let tableNumber = 'Take-away';
-      if (tableId && electronAPI.getRestaurantTables && electronAPI.getRestaurantRooms) {
+      if (idsForBill.length > 0 && electronAPI.getRestaurantTables && electronAPI.getRestaurantRooms) {
         try {
           const rooms = await electronAPI.getRestaurantRooms(businessId);
           const roomsArray = Array.isArray(rooms) ? rooms : [];
+          const tableNumbers: string[] = [];
+          let roomName = '';
           for (const room of roomsArray) {
             if (room.id) {
               const tables = await electronAPI.getRestaurantTables(room.id);
               const tablesArray = Array.isArray(tables) ? tables : [];
-              const table = tablesArray.find((t: { id: number }) => t.id === tableId);
-              if (table) {
-                const roomName = roomsArray.find((r: { id: number }) => r.id === room.id)?.name || '';
-                tableNumber = `${table.table_number}/${roomName}`;
-                break;
+              for (const tid of idsForBill) {
+                const table = tablesArray.find((t: { id: number }) => t.id === tid);
+                if (table) {
+                  tableNumbers.push(table.table_number);
+                  if (!roomName) roomName = roomsArray.find((r: { id: number }) => r.id === room.id)?.name || '';
+                }
               }
             }
           }
+          if (tableNumbers.length > 0) tableNumber = roomName ? `${tableNumbers.join(', ')}/${roomName}` : tableNumbers.join(', ');
         } catch (error) {
           console.warn('Failed to fetch table info:', error);
         }
@@ -742,7 +765,7 @@ export default function ActiveOrdersTab({ businessId, isOpen, onLoadTransaction 
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-4">
             <div>
-              <h2 className="text-xl font-bold text-gray-900">Active Orders</h2>
+              <h2 className="text-xl font-bold text-gray-900">{title}</h2>
             </div>
             <button
               onClick={() => setShowSplitBillModal(true)}
@@ -756,6 +779,16 @@ export default function ActiveOrdersTab({ businessId, isOpen, onLoadTransaction 
               <Scissors className="w-3.5 h-3.5" />
               Split Bill/Pindah Meja
             </button>
+            {todayOnly && onSwitchToUnpaidTab && (
+              <button
+                type="button"
+                onClick={onSwitchToUnpaidTab}
+                className="px-[14px] py-[7px] text-sm rounded-lg transition-all flex items-center gap-1.5 font-medium shadow-lg bg-white text-slate-700 border border-slate-300 hover:bg-amber-50 hover:border-amber-400 active:scale-95 focus:outline-none focus:ring-2 focus:ring-amber-500 focus:ring-offset-2"
+              >
+                <ClipboardList className="w-3.5 h-3.5" />
+                Transaksi Belum Terbayar
+              </button>
+            )}
           </div>
           <div className="flex gap-2">
             <button

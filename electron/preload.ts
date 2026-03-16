@@ -20,6 +20,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   maximizeWindow: () => ipcRenderer.invoke('maximize-window'),
   navigateTo: (path: string) => ipcRenderer.invoke('navigate-to', path),
   focusWindow: () => ipcRenderer.invoke('focus-window'),
+  openExternal: (url: string) => ipcRenderer.invoke('open-external', url),
+  smartSyncAppendVerificationLog: (content: string, dateYyyyMmDd?: string) => ipcRenderer.invoke('smart-sync-append-verification-log', content, dateYyyyMmDd),
 
   // Authentication events
   notifyLoginSuccess: () => ipcRenderer.invoke('login-success'),
@@ -72,6 +74,16 @@ contextBridge.exposeInMainWorld('electronAPI', {
   localDbGetEmployees: () => ipcRenderer.invoke('localdb-get-employees'),
   localDbCleanupOrphanedEmployees: (businessId: number, syncedEmployeeIds: number[]) => ipcRenderer.invoke('localdb-cleanup-orphaned-employees', businessId, syncedEmployeeIds),
 
+  // Reservations
+  localDbGetReservations: (businessId: number, filters?: { tanggal?: string; status?: string; showArchived?: 'no' | 'only' }) => ipcRenderer.invoke('localdb-get-reservations', businessId, filters),
+  localDbGetReservationCountsByMonth: (businessId: number, year: number, month: number) => ipcRenderer.invoke('localdb-get-reservation-counts-by-month', businessId, year, month),
+  localDbCreateReservation: (data: UnknownRecord) => ipcRenderer.invoke('localdb-create-reservation', data),
+  localDbUpdateReservation: (uuid: string, data: UnknownRecord) => ipcRenderer.invoke('localdb-update-reservation', uuid, data),
+  localDbArchiveReservation: (uuid: string, reason: string) => ipcRenderer.invoke('localdb-archive-reservation', uuid, reason),
+  localDbGetUnsyncedReservations: (businessId?: number) => ipcRenderer.invoke('localdb-get-unsynced-reservations', businessId),
+  localDbMarkReservationsSynced: (uuidIds: string[]) => ipcRenderer.invoke('localdb-mark-reservations-synced', uuidIds),
+  localDbGetPendingTransactionsByTableIds: (businessId: number, tableIds: number[]) => ipcRenderer.invoke('localdb-get-pending-transactions-by-table-ids', businessId, tableIds),
+
   // Ingredients
   localDbUpsertIngredients: (rows: UnknownRecord[]) => ipcRenderer.invoke('localdb-upsert-ingredients', rows),
   localDbGetIngredients: (businessId?: number) => ipcRenderer.invoke('localdb-get-ingredients', businessId),
@@ -83,6 +95,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // Contacts
   localDbUpsertContacts: (rows: UnknownRecord[]) => ipcRenderer.invoke('localdb-upsert-contacts', rows),
   localDbGetContacts: (teamId?: number) => ipcRenderer.invoke('localdb-get-contacts', teamId),
+  localDbSearchContacts: (query: string) => ipcRenderer.invoke('localdb-search-contacts', query),
+  vpsCreateContact: (data: { nama: string; phone_number: string; created_by_email?: string | null; business_id?: number | null }) => ipcRenderer.invoke('vps-create-contact', data),
 
   // Teams
   localDbUpsertTeams: (rows: UnknownRecord[]) => ipcRenderer.invoke('localdb-upsert-teams', rows),
@@ -172,6 +186,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   localDbGetTransactionByUuid: (uuid: string) => ipcRenderer.invoke('localdb-get-transaction-by-uuid', uuid),
   localDbGetTransactions: (businessId?: number, limit?: number, options?: { todayOnly?: boolean }) =>
     ipcRenderer.invoke('localdb-get-transactions', businessId, limit, options),
+  localDbGetPendingOrdersCount: (businessId?: number) =>
+    ipcRenderer.invoke('localdb-get-pending-orders-count', businessId),
   localDbUpdateTransactionShift: (transactionUuid: string, shiftUuid: string | null) => ipcRenderer.invoke('localdb-update-transaction-shift', transactionUuid, shiftUuid),
   localDbDeleteSingleTransactionPreview: (transactionUuid: string) => ipcRenderer.invoke('localdb-delete-single-transaction-preview', transactionUuid),
   localDbDeleteSingleTransaction: (transactionUuid: string) => ipcRenderer.invoke('localdb-delete-single-transaction', transactionUuid),
@@ -212,6 +228,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
   localDbGetSystemPosAllProducts: (businessId?: number) => ipcRenderer.invoke('localdb-get-system-pos-all-products', businessId),
   localDbGetSystemPosEmployees: () => ipcRenderer.invoke('localdb-get-system-pos-employees'),
   localDbGetShiftRefunds: (payload: { userId: number; businessId: number; shiftUuid?: string | null; shiftUuids?: string[]; shiftStart: string; shiftEnd?: string | null }) => ipcRenderer.invoke('localdb-get-shift-refunds', payload),
+  localDbCreateRefundExc: (payload: UnknownRecord) => ipcRenderer.invoke('localdb-create-refund-exc', payload),
+  localDbGetShiftRefundExc: (payload: { businessId: number; shiftUuid?: string | null; shiftStart?: string; shiftEnd?: string | null }) => ipcRenderer.invoke('localdb-get-shift-refund-exc', payload),
+  localDbGetRefundExcTotal: (businessId: number, fromDate: string, toDate: string) => ipcRenderer.invoke('localdb-get-refund-exc-total', businessId, fromDate, toDate),
+  localDbGetUnsyncedRefundExc: (forceAll?: boolean) => ipcRenderer.invoke('localdb-get-unsynced-refund-exc', forceAll),
+  localDbMarkRefundExcSynced: (uuidIds: string[]) => ipcRenderer.invoke('localdb-mark-refund-exc-synced', uuidIds),
   localDbUpsertTransactionRefunds: (rows: UnknownRecord[]) => ipcRenderer.invoke('localdb-upsert-transaction-refunds', rows),
   localDbApplyTransactionRefund: (payload: UnknownRecord) => ipcRenderer.invoke('localdb-apply-transaction-refund', payload),
   localDbSplitBill: (payload: { sourceTransactionUuid: string; destinationTransactionUuid: string; itemIds: number[] }) => ipcRenderer.invoke('localdb-split-bill', payload),

@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useOfflineSync } from '@/hooks/useOfflineSync';
 import { smartSyncService } from '@/lib/smartSync';
 import { getAutoSyncEnabled, onAutoSyncSettingChanged } from '@/lib/autoSyncSettings';
@@ -17,6 +17,8 @@ interface SmartSyncStatus {
   consecutiveFailures: number;
   averageServerLoad: number;
   autoSyncEnabled?: boolean;
+  lastVerifikasiRequeuedTotal?: number;
+  lastSyncedCount?: number;
 }
 
 const getElectronAPI = () => (typeof window !== 'undefined' ? window.electronAPI : undefined);
@@ -30,6 +32,8 @@ export default function OfflineStatus({ className = '' }: OfflineStatusProps) {
   const [smartSyncStatus, setSmartSyncStatus] = useState<SmartSyncStatus | null>(null);
   const [pendingCount, setPendingCount] = useState(0);
   const [autoSyncEnabled, setAutoSyncEnabled] = useState<boolean>(true);
+  const [showSyncTooltip, setShowSyncTooltip] = useState(false);
+  const syncAreaRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     // Initialize auto sync status
@@ -150,21 +154,50 @@ export default function OfflineStatus({ className = '' }: OfflineStatusProps) {
         </div>
       )}
 
-      {/* Smart Sync Status */}
+      {/* Smart Sync Status: badge shows diff count when present; click shows last run summary */}
       {smartSyncStatus && autoSyncEnabled && (
-        <div className="flex items-center space-x-[3px] text-[10px] text-white" style={{ textShadow: '0 1px 1px rgba(0,0,0,0.5)' }}>
+        <div
+          ref={syncAreaRef}
+          className="relative flex items-center space-x-[3px] text-[10px] text-white cursor-pointer select-none"
+          style={{ textShadow: '0 1px 1px rgba(0,0,0,0.5)' }}
+          onClick={() => setShowSyncTooltip(prev => !prev)}
+          onBlur={() => setShowSyncTooltip(false)}
+          tabIndex={0}
+          role="button"
+          aria-label="Sync status and last run summary"
+        >
           {smartSyncStatus.isSyncing ? (
-            <RefreshCw className="w-[10px] h-[10px] animate-spin" style={{ color: '#ffff00' }} />
+            <RefreshCw className="w-[10px] h-[10px] animate-spin shrink-0" style={{ color: '#ffff00' }} />
           ) : smartSyncStatus.consecutiveFailures > 0 ? (
-            <AlertTriangle className="w-[10px] h-[10px]" style={{ color: '#ffaa00' }} />
+            <AlertTriangle className="w-[10px] h-[10px] shrink-0" style={{ color: '#ffaa00' }} />
           ) : (
-            <CheckCircle className="w-[10px] h-[10px]" style={{ color: '#00ff00' }} />
+            <CheckCircle className="w-[10px] h-[10px] shrink-0" style={{ color: '#00ff00' }} />
           )}
           <span>
             {smartSyncStatus.isSyncing ? 'Syncing' : 
              smartSyncStatus.consecutiveFailures > 0 ? `${smartSyncStatus.consecutiveFailures} fails` :
              'Ready'}
           </span>
+          {/* Badge: number of differences found and re-queued in last run (or upserted if no diffs) */}
+          {!smartSyncStatus.isSyncing && ((smartSyncStatus.lastVerifikasiRequeuedTotal ?? 0) > 0 || (smartSyncStatus.lastSyncedCount ?? 0) > 0) ? (
+            <span
+              className="flex items-center justify-center min-w-[14px] h-[14px] px-1 rounded-full text-[9px] font-bold bg-amber-500 text-white border border-amber-600"
+              title="Last run: differences re-queued / upserted — click for detail"
+            >
+              {(smartSyncStatus.lastVerifikasiRequeuedTotal ?? 0) > 0
+                ? smartSyncStatus.lastVerifikasiRequeuedTotal
+                : smartSyncStatus.lastSyncedCount}
+            </span>
+          ) : null}
+          {showSyncTooltip && (
+            <div
+              className="absolute top-full right-0 mt-1 z-[100] px-2 py-1.5 rounded shadow-lg bg-gray-900 text-white text-[10px] whitespace-nowrap"
+              role="tooltip"
+            >
+              <div>Differences re-queued: {smartSyncStatus.lastVerifikasiRequeuedTotal ?? 0}</div>
+              <div>Upserted to salespulse: {smartSyncStatus.lastSyncedCount ?? 0}</div>
+            </div>
+          )}
         </div>
       )}
 

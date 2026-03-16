@@ -162,10 +162,10 @@ export default function BaristaKitchenDisplay() {
         {view === 'split' && (
           <div className="h-full flex">
             <div className="w-1/2 border-r border-gray-300">
-              <BaristaDisplay viewOnly={true} legacyCardLayout={true} enableSound={true} />
+              <BaristaDisplay viewOnly={true} legacyCardLayout={true} enableSound={true} pollingIntervalMs={10000} />
             </div>
             <div className="w-1/2">
-              <KitchenDisplay viewOnly={true} legacyCardLayout={true} enableSound={true} />
+              <KitchenDisplay viewOnly={true} legacyCardLayout={true} enableSound={true} pollingIntervalMs={10000} pollingDelayMs={5000} />
             </div>
           </div>
         )}

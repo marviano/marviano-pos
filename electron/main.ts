@@ -4,8 +4,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import { PrinterManagementService } from './printerManagement';
 import { initializeMySQLPool, getMySQLPool, executeQuery, executeQueryOne, executeUpdate, executeUpsert, executeTransaction, getConnection, initializeSystemPosPool, executeSystemPosQuery, executeSystemPosQueryOne, executeSystemPosUpdate, executeSystemPosTransaction, executeSystemPosDdl, executeSystemPosDdlIgnoreDup, executeDdlIgnoreDup, toMySQLDateTime, toMySQLTimestamp, testDatabaseConnection, insertTransactionToSystemPos, upsertProductsFromMainToSystemPos, syncRefundedTransactionsToSystemPos, executeQueryOnLocalSalespulse } from './mysqlDb';
-import { initializeMySQLSchema } from './mysqlSchema';
-import { readConfig, writeConfig, resetConfig, getDbConfig, type AppConfig } from './configManager';
+import { readConfig, writeConfig, resetConfig, getDbConfig, getApiUrl, type AppConfig } from './configManager';
 import { ReceiptManagementService, ReceiptTemplateData } from './receiptManagement';
 
 // Store original console functions early (before they might be suppressed)
@@ -175,6 +174,9 @@ type ReceiptPrintData = {
   isBill?: boolean;
   voucherDiscount?: number;
   voucherLabel?: string;
+  businessName?: string;
+  templateCode?: string;
+  receiptSettings?: Record<string, unknown>;
 };
 
 type LabelPrintData = {
@@ -537,6 +539,30 @@ const shouldLog = process.env.POS_DEBUG_LOGS === 'true';
 let mainWindow: BrowserWindow | null = null;
 let customerWindow: BrowserWindow | null = null;
 let printWindow: BrowserWindow | null = null;
+let labelPrintWindow: BrowserWindow | null = null;
+
+function getOrCreatePrintWindow(): BrowserWindow {
+  if (printWindow && !printWindow.isDestroyed()) {
+    return printWindow;
+  }
+  printWindow = new BrowserWindow({
+    width: 400, height: 600, show: false,
+    webPreferences: { nodeIntegration: false, contextIsolation: true }
+  });
+  return printWindow;
+}
+
+function getOrCreateLabelPrintWindow(): BrowserWindow {
+  if (labelPrintWindow && !labelPrintWindow.isDestroyed()) {
+    return labelPrintWindow;
+  }
+  labelPrintWindow = new BrowserWindow({
+    width: 400, height: 600, show: false,
+    webPreferences: { nodeIntegration: false, contextIsolation: true }
+  });
+  return labelPrintWindow;
+}
+
 let baristaKitchenWindow: BrowserWindow | null = null;
 let kitchenDisplayWindow: BrowserWindow | null = null;
 let baristaDisplayWindow: BrowserWindow | null = null;
@@ -668,6 +694,19 @@ async function ensureTransactionItemsCancellationColumns(): Promise<void> {
   }
 }
 
+/** Lazy migration: ensure reservations.synced_at exists (for sync to salespulse.cc). */
+let reservationsSyncedAtEnsured = false;
+async function ensureReservationsSyncedAtColumn(): Promise<void> {
+  if (reservationsSyncedAtEnsured) return;
+  try {
+    await executeDdlIgnoreDup('ALTER TABLE reservations ADD COLUMN synced_at BIGINT NULL DEFAULT NULL COMMENT \'When this reservation was synced to salespulse\' AFTER updated_at');
+    reservationsSyncedAtEnsured = true;
+    console.log('✅ reservations.synced_at column ensured (lazy migration)');
+  } catch (e) {
+    console.warn('⚠️ Lazy migration reservations.synced_at failed (will retry on next use):', (e as Error)?.message);
+  }
+}
+
 async function ensureSystemPosQueueTable(): Promise<void> {
   const sql = `CREATE TABLE IF NOT EXISTS system_pos_queue (
     id INT NOT NULL AUTO_INCREMENT,
@@ -684,7 +723,6 @@ async function ensureSystemPosQueueTable(): Promise<void> {
 }
 
 async function ensureSystemPosSchema(): Promise<void> {
-  console.log('[SYSTEM POS] Ensuring schema (transactions, transaction_items, ...)...');
   const mainDb = getDbConfig().database || 'salespulse';
 
   const tables: string[] = [
@@ -825,12 +863,9 @@ async function ensureSystemPosSchema(): Promise<void> {
   ];
 
   for (let i = 0; i < tables.length; i++) {
-    const names = ['transactions', 'transaction_items', 'transaction_item_customizations', 'transaction_item_customization_options', 'transaction_refunds'];
     await executeSystemPosDdl(tables[i]);
-    console.log(`[SYSTEM POS] Created/verified table: ${names[i]}`);
   }
   await ensureSystemPosQueueTable();
-  console.log('[SYSTEM POS] Created/verified table: system_pos_queue');
 
   const alterColumns: string[] = [
     'ALTER TABLE transactions ADD COLUMN waiter_id INT DEFAULT NULL AFTER user_id',
@@ -858,16 +893,16 @@ async function ensureSystemPosSchema(): Promise<void> {
     await executeSystemPosDdlIgnoreDup(sql);
   }
 
-  const masterTables = ['organizations', 'roles', 'businesses', 'category1', 'category2', 'category2_businesses', 'products', 'product_customization_types', 'product_customization_options', 'bundle_items', 'package_items', 'package_item_products', 'users', 'employees_position', 'employees', 'payment_methods'] as const;
+  const masterTables = ['organizations', 'roles', 'businesses', 'category1', 'category2', 'category2_businesses', 'products', 'product_customization_types', 'product_customization_options', 'bundle_items', 'package_items', 'package_item_products', 'users', 'employees_position', 'employees', 'payment_methods', 'restaurant_rooms', 'restaurant_sections', 'restaurant_tables'] as const;
   for (const t of masterTables) {
     try {
       await executeSystemPosDdl(`CREATE TABLE IF NOT EXISTS \`${t}\` LIKE \`${mainDb}\`.\`${t}\``);
-      console.log(`[SYSTEM POS] Created/verified table: ${t} (from main DB)`);
     } catch (e) {
       console.warn(`⚠️ [SYSTEM POS] Could not create ${t} from main DB (LIKE):`, (e as Error).message);
     }
   }
-  console.log('[SYSTEM POS] Schema ensured.');
+  // Add section_id to restaurant_tables if missing (existing system_pos DBs created before this column existed)
+  await executeSystemPosDdlIgnoreDup("ALTER TABLE restaurant_tables ADD COLUMN section_id INT NULL DEFAULT NULL COMMENT 'Optional section within the room' AFTER shape");
 }
 
 type QueryRow = { sql: string; params?: (string | number | null | boolean)[] };
@@ -877,7 +912,6 @@ async function upsertMasterDataToSystemPos(queries: QueryRow[]): Promise<void> {
   try {
     await ensureSystemPosSchema();
     await executeSystemPosTransaction(queries);
-    console.log(`[SYSTEM POS] Upserted ${queries.length} master data row(s) to system_pos`);
   } catch (e) {
     console.warn('[SYSTEM POS] Failed to upsert master data to system_pos (non-fatal):', e instanceof Error ? e.message : String(e));
   }
@@ -898,10 +932,6 @@ function createWindows(): void {
     // Initialize MySQL connection pool
     const mysqlPool = initializeMySQLPool();
 
-    // Initialize MySQL schema
-    initializeMySQLSchema().catch(err => {
-      console.error('❌ Failed to initialize MySQL schema:', err);
-    });
 
     // Run main-DB migrations (e.g. transaction_items.waiter_id) — ignore if column already exists
     void (async () => {
@@ -916,7 +946,8 @@ function createWindows(): void {
     })();
 
     // MySQL pool is already initialized above
-    console.log('✅ MySQL database connection initialized (salespulse)');
+    const dbConfig = getDbConfig();
+    console.log(`✅ MySQL database connection initialized: ${dbConfig.database} @ ${dbConfig.host}:${dbConfig.port} (reservations & POS data use this)`);
 
     // Initialize System POS MySQL connection pool (for printer 2 transactions)
     initializeSystemPosPool();
@@ -1117,10 +1148,11 @@ function createWindows(): void {
       mainWindow!.setSize(800, 432);
       mainWindow!.center();
     } else {
-      // Main POS page - set to fullscreen
-      console.log('🔍 Main POS page detected - setting fullscreen');
+      // Main POS page - maximize (keeps Windows taskbar visible; fullscreen would hide it)
+      console.log('🔍 Main POS page detected - maximizing window');
       mainWindow!.setResizable(true);
-      mainWindow!.setFullScreen(true);
+      mainWindow!.setFullScreen(false);
+      mainWindow!.maximize();
     }
   });
 
@@ -1139,10 +1171,11 @@ function createWindows(): void {
       mainWindow!.setSize(800, 432);
       mainWindow!.center();
     } else {
-      // Main POS page - set to fullscreen
-      console.log('🔍 Main POS page detected - setting fullscreen');
+      // Main POS page - maximize (keeps Windows taskbar visible)
+      console.log('🔍 Main POS page detected - maximizing window');
       mainWindow!.setResizable(true);
-      mainWindow!.setFullScreen(true);
+      mainWindow!.setFullScreen(false);
+      mainWindow!.maximize();
     }
   });
 
@@ -1163,30 +1196,35 @@ function createWindows(): void {
     }
   });
 
-  // Listen for successful login via IPC - THIS is when we go fullscreen
+  // Smart Sync: append verification diff log (local vs salespulse) to userData file, one file per date (YYYY-MM-DD)
+  ipcMain.handle('smart-sync-append-verification-log', async (_event, content: string, dateYyyyMmDd?: string) => {
+    try {
+      if (typeof content !== 'string') return { success: false, error: 'Content must be string' };
+      const userData = app.getPath('userData');
+      const safeDate = typeof dateYyyyMmDd === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(dateYyyyMmDd.trim())
+        ? dateYyyyMmDd.trim()
+        : new Date().toISOString().slice(0, 10);
+      const logPath = path.join(userData, `smart-sync-verification-diffs-${safeDate}.log`);
+      const line = content.endsWith('\n') ? content : content + '\n';
+      fs.appendFileSync(logPath, line);
+      return { success: true };
+    } catch (error) {
+      console.warn('Smart Sync verification log append failed:', error);
+      return { success: false, error: String(error) };
+    }
+  });
+
+  // Listen for successful login via IPC - maximize window (keeps Windows taskbar visible)
   ipcMain.handle('login-success', async () => {
     console.log('🔍 [ELECTRON] Login success IPC received!');
-    console.log('🔍 [ELECTRON] Main window exists:', !!mainWindow);
-    console.log('🔍 [ELECTRON] Main window isDestroyed:', mainWindow?.isDestroyed());
-    console.log('🔍 [ELECTRON] Main window isVisible:', mainWindow?.isVisible());
-    console.log('🔍 [ELECTRON] Main window isFullScreen:', mainWindow?.isFullScreen());
-
     if (mainWindow && !mainWindow.isDestroyed()) {
-      console.log('🔍 [ELECTRON] Setting fullscreen in 300ms...');
-      setTimeout(() => {
-        console.log('🔍 [ELECTRON] Now setting fullscreen...');
-        try {
-          mainWindow!.setResizable(true);
-          console.log('🔍 [ELECTRON] Resizable set to true');
-          mainWindow!.setFullScreen(true);
-          console.log('🔍 [ELECTRON] Fullscreen set to true');
-          console.log('🔍 [ELECTRON] Final isFullScreen:', mainWindow!.isFullScreen());
-        } catch (error) {
-          console.error('🔍 [ELECTRON] Error setting fullscreen:', error);
-        }
-      }, 300);
-    } else {
-      console.log('🔍 [ELECTRON] Cannot set fullscreen - window not available');
+      try {
+        mainWindow.setResizable(true);
+        mainWindow.setFullScreen(false);
+        mainWindow.maximize();
+      } catch (error) {
+        console.error('🔍 [ELECTRON] Error maximizing window:', error);
+      }
     }
     return { success: true };
   });
@@ -3153,6 +3191,328 @@ function createWindows(): void {
     }
   });
 
+  // Reservations
+  ipcMain.handle('localdb-get-reservations', async (_event, businessId: number, filters?: { tanggal?: string; tanggalFrom?: string; tanggalTo?: string; status?: string; showArchived?: 'no' | 'only' }) => {
+    try {
+      let query = 'SELECT * FROM reservations WHERE business_id = ?';
+      const params: (string | number)[] = [businessId];
+      const showArchived = filters?.showArchived ?? 'no';
+      if (showArchived === 'no') {
+        query += ' AND deleted_at IS NULL';
+      } else if (showArchived === 'only') {
+        query += ' AND deleted_at IS NOT NULL';
+      }
+      const fromStr = filters?.tanggalFrom?.trim();
+      const toStr = filters?.tanggalTo?.trim();
+      if (fromStr && toStr) {
+        query += ' AND tanggal BETWEEN ? AND ?';
+        params.push(fromStr.slice(0, 10), toStr.slice(0, 10));
+      } else if (fromStr) {
+        query += ' AND tanggal >= ?';
+        params.push(fromStr.slice(0, 10));
+      } else if (toStr) {
+        query += ' AND tanggal <= ?';
+        params.push(toStr.slice(0, 10));
+      } else if (filters?.tanggal) {
+        query += ' AND tanggal = ?';
+        params.push(filters.tanggal.slice(0, 10));
+      }
+      if (filters?.status && filters.status !== 'all' && filters.status !== 'archived') {
+        query += ' AND status = ?';
+        params.push(filters.status);
+      }
+      query += ' ORDER BY deleted_at IS NULL DESC, tanggal ASC, jam ASC';
+      const rows = await executeQuery(query, params);
+      const list = (Array.isArray(rows) ? rows : []) as Record<string, unknown>[];
+      // Normalize MySQL DATE/TIME to strings (YYYY-MM-DD, HH:mm) so IPC/renderer never see Date objects
+      // and avoid wrong date/time due to timezone deserialization. Use local getters so server TZ (e.g. WIB)
+      // calendar date is preserved; UTC would shift the day for DATE columns.
+      return list.map((row) => {
+        const out = { ...row };
+        const t = row.tanggal;
+        if (t instanceof Date) {
+          const y = t.getFullYear();
+          const m = String(t.getMonth() + 1).padStart(2, '0');
+          const d = String(t.getDate()).padStart(2, '0');
+          out.tanggal = `${y}-${m}-${d}`;
+        } else if (t != null && String(t).trim()) {
+          out.tanggal = String(t).trim().slice(0, 10);
+        }
+        const j = row.jam;
+        if (j instanceof Date) {
+          const h = String(j.getHours()).padStart(2, '0');
+          const min = String(j.getMinutes()).padStart(2, '0');
+          out.jam = `${h}:${min}`;
+        } else if (j != null && String(j).trim()) {
+          const s = String(j).trim();
+          if (s.length >= 5 && /^\d{1,2}:\d{2}/.test(s)) out.jam = s.slice(0, 5);
+          else out.jam = s;
+        }
+        return out;
+      });
+    } catch (err) {
+      console.error('localdb-get-reservations error:', err);
+      return [];
+    }
+  });
+
+  ipcMain.handle('localdb-get-reservation-counts-by-month', async (_event, businessId: number, year: number, month: number) => {
+    try {
+      const startDate = `${year}-${String(month).padStart(2, '0')}-01`;
+      const lastDay = new Date(year, month, 0);
+      const endDate = `${year}-${String(month).padStart(2, '0')}-${String(lastDay.getDate()).padStart(2, '0')}`;
+      const params = [businessId, startDate, endDate];
+      // Use DATE(tanggal) so key is always YYYY-MM-DD; include sum_dp and sum_total
+      const baseWhere = 'WHERE business_id = ? AND tanggal BETWEEN ? AND ? AND status IN (\'upcoming\', \'attended\')';
+      const selectPart = 'SELECT DATE(tanggal) AS tanggal, COUNT(*) AS count, COALESCE(SUM(dp), 0) AS sum_dp, COALESCE(SUM(total_price), 0) AS sum_total FROM reservations ';
+      let rows: unknown[];
+      try {
+        rows = await executeQuery(
+          selectPart + baseWhere + ' AND deleted_at IS NULL GROUP BY DATE(tanggal)',
+          params
+        );
+      } catch {
+        // Schema may not have deleted_at column yet
+        rows = await executeQuery(selectPart + baseWhere + ' GROUP BY DATE(tanggal)', params);
+      }
+      type CountRow = { tanggal: string | Date; count: number; sum_dp?: number; sum_total?: number };
+      const list = (Array.isArray(rows) ? rows : []) as CountRow[];
+      // Format date key as YYYY-MM-DD in local (server) time so it matches calendar cells (e.g. March 12 stays March 12; toISOString() would shift to UTC and break).
+      return list.map((r) => {
+        const t = r.tanggal;
+        let dateStr: string;
+        if (t instanceof Date) {
+          const y = t.getFullYear();
+          const m = String(t.getMonth() + 1).padStart(2, '0');
+          const d = String(t.getDate()).padStart(2, '0');
+          dateStr = `${y}-${m}-${d}`;
+        } else {
+          dateStr = String(t).trim().slice(0, 10);
+        }
+        return {
+          tanggal: dateStr,
+          count: Number(r.count) || 0,
+          sum_dp: Number(r.sum_dp) || 0,
+          sum_total: Number(r.sum_total) || 0
+        };
+      });
+    } catch (err) {
+      console.error('localdb-get-reservation-counts-by-month error:', err);
+      return [];
+    }
+  });
+
+  ipcMain.handle('localdb-create-reservation', async (_event, data: {
+    uuid_id: string;
+    business_id: number;
+    nama: string;
+    phone: string;
+    tanggal: string;
+    jam: string;
+    pax: number;
+    dp?: number;
+    total_price?: number;
+    table_ids_json?: number[] | null;
+    items_json?: unknown;
+    penanggung_jawab_id?: number | null;
+    created_by_email?: string | null;
+    note?: string | null;
+    status?: string;
+  }) => {
+    try {
+      await ensureReservationsSyncedAtColumn();
+      const tableIdsJson = data.table_ids_json != null ? JSON.stringify(data.table_ids_json) : null;
+      const itemsJson = data.items_json != null ? (typeof data.items_json === 'string' ? data.items_json : JSON.stringify(data.items_json)) : null;
+      await executeUpdate(
+        `INSERT INTO reservations (uuid_id, business_id, nama, phone, tanggal, jam, pax, dp, total_price, table_ids_json, items_json, penanggung_jawab_id, created_by_email, note, status)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          data.uuid_id,
+          data.business_id,
+          data.nama,
+          data.phone,
+          data.tanggal,
+          data.jam,
+          data.pax,
+          data.dp ?? 0,
+          data.total_price ?? 0,
+          tableIdsJson,
+          itemsJson,
+          data.penanggung_jawab_id ?? null,
+          data.created_by_email ?? null,
+          data.note ?? null,
+          data.status ?? 'upcoming'
+        ]
+      );
+      return { success: true };
+    } catch (err) {
+      console.error('localdb-create-reservation error:', err);
+      return { success: false, error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  ipcMain.handle('localdb-update-reservation', async (_event, uuid: string, data: {
+    nama?: string;
+    phone?: string;
+    tanggal?: string;
+    jam?: string;
+    pax?: number;
+    dp?: number;
+    total_price?: number;
+    table_ids_json?: number[] | null;
+    items_json?: unknown;
+    penanggung_jawab_id?: number | null;
+    note?: string | null;
+    status?: string;
+  }) => {
+    try {
+      const tableIdsJson = data.table_ids_json !== undefined ? (data.table_ids_json == null ? null : JSON.stringify(data.table_ids_json)) : undefined;
+      const itemsJson = data.items_json !== undefined ? (data.items_json == null ? null : (typeof data.items_json === 'string' ? data.items_json : JSON.stringify(data.items_json))) : undefined;
+      const updates: string[] = [];
+      const params: (string | number | null)[] = [];
+      if (data.nama !== undefined) { updates.push('nama = ?'); params.push(data.nama); }
+      if (data.phone !== undefined) { updates.push('phone = ?'); params.push(data.phone); }
+      if (data.tanggal !== undefined) { updates.push('tanggal = ?'); params.push(data.tanggal); }
+      if (data.jam !== undefined) { updates.push('jam = ?'); params.push(data.jam); }
+      if (data.pax !== undefined) { updates.push('pax = ?'); params.push(data.pax); }
+      if (data.dp !== undefined) { updates.push('dp = ?'); params.push(data.dp); }
+      if (data.total_price !== undefined) { updates.push('total_price = ?'); params.push(data.total_price); }
+      if (tableIdsJson !== undefined) { updates.push('table_ids_json = ?'); params.push(tableIdsJson); }
+      if (itemsJson !== undefined) { updates.push('items_json = ?'); params.push(itemsJson); }
+      if (data.penanggung_jawab_id !== undefined) { updates.push('penanggung_jawab_id = ?'); params.push(data.penanggung_jawab_id); }
+      if (data.note !== undefined) { updates.push('note = ?'); params.push(data.note); }
+      if (data.status !== undefined) { updates.push('status = ?'); params.push(data.status); }
+      if (updates.length === 0) {
+        // Still clear synced_at so reservation gets re-synced to salespulse
+        await ensureReservationsSyncedAtColumn();
+        await executeUpdate('UPDATE reservations SET synced_at = NULL WHERE uuid_id = ?', [uuid]);
+        return { success: true };
+      }
+      await ensureReservationsSyncedAtColumn();
+      updates.push('synced_at = NULL');
+      params.push(uuid);
+      await executeUpdate(`UPDATE reservations SET ${updates.join(', ')} WHERE uuid_id = ?`, params);
+      return { success: true };
+    } catch (err) {
+      console.error('localdb-update-reservation error:', err);
+      return { success: false, error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  ipcMain.handle('localdb-archive-reservation', async (_event, uuid: string, reason: string) => {
+    try {
+      await ensureReservationsSyncedAtColumn();
+      const now = new Date().toISOString().slice(0, 19).replace('T', ' ');
+      const reasonVal = typeof reason === 'string' && reason.trim() ? reason.trim() : null;
+      await executeUpdate(
+        'UPDATE reservations SET deleted_at = ?, deleted_reason = ?, status = ?, synced_at = NULL WHERE uuid_id = ?',
+        [now, reasonVal, 'cancelled', uuid]
+      );
+      return { success: true };
+    } catch (err) {
+      console.error('localdb-archive-reservation error:', err);
+      return { success: false, error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  // Get unsynced reservations (for sync to salespulse.cc)
+  ipcMain.handle('localdb-get-unsynced-reservations', async (_event, businessId?: number) => {
+    try {
+      await ensureReservationsSyncedAtColumn();
+      let query = 'SELECT * FROM reservations WHERE synced_at IS NULL';
+      const params: number[] = [];
+      if (businessId != null) {
+        query += ' AND business_id = ?';
+        params.push(businessId);
+      }
+      const rows = await executeQuery<Record<string, unknown>>(query, params.length > 0 ? params : []);
+      return rows;
+    } catch (err) {
+      console.error('localdb-get-unsynced-reservations error:', err);
+      return [];
+    }
+  });
+
+  // Mark reservations as synced after successful upload to salespulse.cc
+  ipcMain.handle('localdb-mark-reservations-synced', async (_event, uuidIds: string[]) => {
+    try {
+      if (!Array.isArray(uuidIds) || uuidIds.length === 0) return { success: true, count: 0 };
+      const placeholders = uuidIds.map(() => '?').join(',');
+      const affected = await executeUpdate(
+        `UPDATE reservations SET synced_at = ? WHERE uuid_id IN (${placeholders})`,
+        [Date.now(), ...uuidIds]
+      );
+      return { success: true, count: affected };
+    } catch (err) {
+      console.error('localdb-mark-reservations-synced error:', err);
+      return { success: false, count: 0, error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  /** Returns list of table IDs (from the requested set) that are already occupied by a pending transaction. Uses transaction_tables junction. Only considers today's pending transactions so it matches what Kasir/Active Orders shows (todayOnly). */
+  ipcMain.handle('localdb-get-pending-transactions-by-table-ids', async (_event, businessId: number, tableIds: number[]) => {
+    try {
+      if (!Array.isArray(tableIds) || tableIds.length === 0) {
+        return [];
+      }
+      const rows = await executeQuery<Record<string, unknown>>(
+        `SELECT t.uuid_id, t.table_id, t.created_at, tt.table_id AS tt_table_id
+         FROM transactions t
+         LEFT JOIN transaction_tables tt ON t.id = tt.transaction_id
+         WHERE t.business_id = ? AND t.status = 'pending' AND DATE(t.created_at) = CURDATE()`,
+        [businessId]
+      );
+      const occupied = new Map<number, { transactionUuid: string; created_at: string }>();
+      const requestedSet = new Set(tableIds.map(Number));
+      const txTableIds = new Map<string, { ids: Set<number>; created_at: string; mainTableId: number | null }>();
+      for (const tx of Array.isArray(rows) ? rows : []) {
+        const uuid = String(tx.uuid_id ?? '');
+        let entry = txTableIds.get(uuid);
+        if (!entry) {
+          const created = tx.created_at;
+          const createdStr = created instanceof Date ? created.toISOString().slice(0, 19).replace('T', ' ') : String(created ?? '');
+          const mainTid = tx.table_id != null ? Number(tx.table_id) : null;
+          entry = { ids: new Set<number>(), created_at: createdStr, mainTableId: mainTid };
+          txTableIds.set(uuid, entry);
+        }
+        const tid = tx.table_id;
+        if (tid != null) entry.ids.add(Number(tid));
+        const ttTableId = tx.tt_table_id;
+        if (ttTableId != null) entry.ids.add(Number(ttTableId));
+      }
+      // Only treat tables as occupied if the pending transaction has at least one active item
+      // (aligns with ActiveOrdersTab, which hides pending tx with no active items)
+      const uuids = Array.from(txTableIds.keys());
+      const uuidsWithActiveItems = new Set<string>();
+      if (uuids.length > 0) {
+        try {
+          const placeholders = uuids.map(() => '?').join(',');
+          const countRows = await executeQuery<{ uuid_transaction_id: string; cnt: number }>(
+            `SELECT uuid_transaction_id, COUNT(*) as cnt FROM transaction_items WHERE uuid_transaction_id IN (${placeholders}) AND (production_status IS NULL OR production_status != 'cancelled') GROUP BY uuid_transaction_id`,
+            uuids
+          );
+          for (const row of Array.isArray(countRows) ? countRows : []) {
+            if (row && Number(row.cnt) > 0) uuidsWithActiveItems.add(String(row.uuid_transaction_id));
+          }
+        } catch {
+          // on error, treat all as having items (conservative: avoid false-negative)
+        }
+      }
+      for (const [uuid, entry] of txTableIds) {
+        if (!uuidsWithActiveItems.has(uuid)) continue;
+        for (const id of requestedSet) {
+          if (entry.ids.has(id) && !occupied.has(id)) {
+            occupied.set(id, { transactionUuid: uuid, created_at: entry.created_at });
+          }
+        }
+      }
+      return Array.from(occupied.entries()).map(([tableId, v]) => ({ tableId, ...v }));
+    } catch (err) {
+      console.error('localdb-get-pending-transactions-by-table-ids error:', err);
+      return [];
+    }
+  });
+
   // Ingredients
   ipcMain.handle('localdb-upsert-ingredients', async (event, rows: RowArray) => {
     try {
@@ -3389,6 +3749,72 @@ function createWindows(): void {
     } catch (error) {
       console.error('Error getting contacts:', error);
       return [];
+    }
+  });
+
+  ipcMain.handle('localdb-search-contacts', async (_event, query: string) => {
+    try {
+      const q = typeof query === 'string' ? query.trim() : '';
+      if (!q) return [];
+      const pattern = `%${q.replace(/%/g, '\\%').replace(/_/g, '\\_')}%`;
+      return await executeQuery(
+        'SELECT id, nama, phone_number FROM contacts WHERE is_active = 1 AND (nama LIKE ? OR phone_number LIKE ?) ORDER BY nama ASC LIMIT 10',
+        [pattern, pattern]
+      );
+    } catch (error) {
+      console.error('Error searching contacts:', error);
+      return [];
+    }
+  });
+
+  ipcMain.handle('vps-create-contact', async (_event, data: { nama: string; phone_number: string; created_by_email?: string | null; business_id?: number | null }) => {
+    try {
+      const baseUrl = getApiUrl();
+      const apiKey = process.env.POS_WRITE_API_KEY || process.env.NEXT_PUBLIC_POS_WRITE_API_KEY;
+      if (!baseUrl || !apiKey) {
+        return { success: false, error: 'VPS API URL or POS_WRITE_API_KEY not configured' };
+      }
+      const url = (baseUrl.replace(/\/$/, '') + '/api/pos/contacts').replace(/([^:]\/)\/+/g, '$1');
+      const body: { nama: string; phone_number: string; created_by_email: string | null; business_id?: number | null } = {
+        nama: data.nama?.trim() ?? '',
+        phone_number: data.phone_number?.trim() ?? '',
+        created_by_email: data.created_by_email?.trim() || null
+      };
+      if (data.business_id != null && Number.isInteger(data.business_id) && data.business_id > 0) {
+        body.business_id = data.business_id;
+      }
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-pos-api-key': apiKey },
+        body: JSON.stringify(body)
+      });
+      const json = (await res.json().catch(() => ({}))) as { error?: string; alreadyExists?: boolean; [key: string]: unknown };
+      if (!res.ok) {
+        return { success: false, error: json.error ?? `HTTP ${res.status}` };
+      }
+      // Also insert into local DB so Tambah Reservasi contact suggestions find it immediately (suggestions use localdb-search-contacts). Skip if same DB as VPS (row already exists).
+      // Use only columns that exist on minimal local schema (nama, phone_number, is_active, created_at, updated_at).
+      const nama = data.nama?.trim() ?? '';
+      const phone_number = data.phone_number?.trim() ?? '';
+      try {
+        const existing = await executeQuery('SELECT id FROM contacts WHERE phone_number = ? LIMIT 1', [phone_number]) as Array<{ id: number }>;
+        if (!Array.isArray(existing) || existing.length === 0) {
+          const now = new Date().toISOString().slice(0, 19).replace('T', ' ');
+          await executeUpdate(
+            `INSERT INTO contacts (nama, phone_number, is_active, created_at, updated_at)
+             VALUES (?, ?, 1, ?, ?)`,
+            [nama, phone_number, now, now]
+          );
+        }
+      } catch (localErr) {
+        // Local table schema may differ or be read-only; VPS create still succeeded.
+        console.warn('vps-create-contact: local contact insert skipped:', localErr instanceof Error ? localErr.message : String(localErr));
+      }
+      return { success: true, contact: json, alreadyExists: !!json.alreadyExists };
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.error('vps-create-contact error:', message);
+      return { success: false, error: message };
     }
   });
 
@@ -3908,6 +4334,7 @@ function createWindows(): void {
   ipcMain.handle('localdb-upsert-transactions', async (event, rows: RowArray) => {
     try {
       const queries: Array<{ sql: string; params?: (string | number | null | boolean)[] }> = [];
+      const rowsWithTableIds: { uuid: string | null; tableIds: number[] }[] = [];
 
       for (const r of rows) {
         // Auto-link to active shift if shift_uuid is missing (use business_id only, not user_id)
@@ -3995,6 +4422,28 @@ function createWindows(): void {
         const statusVal = getStatus();
         const paidAt = (statusVal === 'completed' || statusVal === 'paid') ? toMySQLDateTime(new Date()) : null;
 
+        // table_ids (from table_ids_json or table_ids payload): set table_id = first for backward compat; rest go to transaction_tables
+        let tableIdVal: number | null = getNumber('table_id');
+        let tableIdsArray: number[] = [];
+        const rawTableIds = r.table_ids ?? r.table_ids_json;
+        if (rawTableIds != null && Array.isArray(rawTableIds) && rawTableIds.length > 0) {
+          tableIdsArray = rawTableIds.map((x: unknown) => (typeof x === 'number' ? x : parseInt(String(x), 10))).filter((n: number) => !Number.isNaN(n));
+          if (tableIdsArray.length > 0) {
+            tableIdVal = tableIdsArray[0];
+          }
+        } else if (typeof rawTableIds === 'string' && rawTableIds.trim()) {
+          try {
+            const arr = JSON.parse(rawTableIds) as number[];
+            if (Array.isArray(arr) && arr.length > 0) {
+              tableIdsArray = arr.map((x: unknown) => (typeof x === 'number' ? x : parseInt(String(x), 10))).filter((n: number) => !Number.isNaN(n));
+              tableIdVal = tableIdsArray[0] ?? null;
+            }
+          } catch {
+            // leave tableIdVal as from table_id
+          }
+        }
+        const uuidForTx = typeof r.id === 'string' ? r.id : (typeof r.id === 'number' ? String(r.id) : null);
+
         const params: (string | number | null | boolean)[] = [
           typeof r.id === 'string' ? r.id : (typeof r.id === 'number' ? String(r.id) : null), // uuid_id - the 19-digit UUID string
           getNumber('business_id'),
@@ -4030,7 +4479,7 @@ function createWindows(): void {
           getString('receipt_number'),
           getString('transaction_type') ?? 'drinks',
           getNumber('payment_method_id') ?? 0,
-          getNumber('table_id'),
+          tableIdVal,
           paidAt
         ];
 
@@ -4059,11 +4508,24 @@ function createWindows(): void {
             paid_at=IF(VALUES(status) IN ('completed','paid'), IFNULL(paid_at, VALUES(paid_at)), paid_at)`,
           params
         });
+        rowsWithTableIds.push({ uuid: uuidForTx, tableIds: tableIdsArray });
       }
 
       if (queries.length > 0) {
         await executeTransaction(queries);
         console.log('✅ [MYSQL] Transaction upsert successful');
+      }
+
+      // Sync transaction_tables junction (replaces table_ids_json)
+      for (const { uuid, tableIds } of rowsWithTableIds) {
+        if (!uuid) continue;
+        const txRow = await executeQueryOne<{ id: number }>('SELECT id FROM transactions WHERE uuid_id = ?', [uuid]);
+        const transactionId = txRow?.id;
+        if (transactionId == null) continue;
+        await executeUpdate('DELETE FROM transaction_tables WHERE transaction_id = ?', [transactionId]);
+        for (let i = 0; i < tableIds.length; i++) {
+          await executeUpdate('INSERT INTO transaction_tables (transaction_id, table_id, sort_order) VALUES (?, ?, ?)', [transactionId, tableIds[i], i]);
+        }
       }
       return { success: true };
     } catch (err: unknown) {
@@ -4230,12 +4692,25 @@ function createWindows(): void {
 
   ipcMain.handle('localdb-get-transaction-by-uuid', async (event, uuid: string) => {
     try {
-      const dbStart = Date.now();
-      const rows = await executeQuery(
+      const rows = await executeQuery<Record<string, unknown>>(
         'SELECT *, COALESCE(uuid_id, id) as id FROM transactions WHERE uuid_id = ? LIMIT 1',
         [uuid]
       );
-      return rows[0] || null;
+      const row = rows[0];
+      if (!row) return null;
+      const txIdRow = await executeQueryOne<{ id: number }>('SELECT id FROM transactions WHERE uuid_id = ?', [uuid]);
+      const txId = txIdRow?.id ?? null;
+      if (txId != null) {
+        const ttRows = await executeQuery<{ table_id: number }>(
+          'SELECT table_id FROM transaction_tables WHERE transaction_id = ? ORDER BY sort_order',
+          [txId]
+        );
+        const tableIds = Array.isArray(ttRows) ? ttRows.map(r => r?.table_id).filter((id): id is number => id != null && !Number.isNaN(id)) : [];
+        const fallback = row.table_id != null ? [Number(row.table_id)] : [];
+        const ids = tableIds.length > 0 ? tableIds : fallback;
+        row.table_ids = ids;
+      }
+      return row;
     } catch (err) {
       console.error('localdb-get-transaction-by-uuid error:', err);
       return null;
@@ -4385,6 +4860,41 @@ function createWindows(): void {
 
       const results = await executeQuery(query, params);
 
+      // Attach table_ids from transaction_tables junction (replaces table_ids_json)
+      if (Array.isArray(results) && results.length > 0) {
+        const rows = results as Record<string, unknown>[];
+        const tIds = rows
+          .map((r) => (r.t_id != null ? Number(r.t_id) : null))
+          .filter((id: number | null): id is number => id != null && !Number.isNaN(id));
+        const uniqueTIds = [...new Set(tIds)];
+        if (uniqueTIds.length > 0) {
+          const placeholders = uniqueTIds.map(() => '?').join(',');
+          const ttRows = await executeQuery<{ transaction_id: number; table_id: number }>(
+            `SELECT transaction_id, table_id FROM transaction_tables WHERE transaction_id IN (${placeholders}) ORDER BY transaction_id, sort_order`,
+            uniqueTIds
+          );
+          const mapTIdToTableIds = new Map<number, number[]>();
+          for (const row of Array.isArray(ttRows) ? ttRows : []) {
+            const tid = row?.transaction_id;
+            const tableId = row?.table_id;
+            if (tid == null || tableId == null) continue;
+            let arr = mapTIdToTableIds.get(tid);
+            if (!arr) {
+              arr = [];
+              mapTIdToTableIds.set(tid, arr);
+            }
+            arr.push(tableId);
+          }
+          for (const row of results as Record<string, unknown>[]) {
+            const tId = row.t_id != null ? Number(row.t_id) : null;
+            const tableIds = tId != null ? mapTIdToTableIds.get(tId) : undefined;
+            const fallback = row.table_id != null ? [Number(row.table_id)] : [];
+            const ids = (tableIds && tableIds.length > 0 ? tableIds : fallback) as number[];
+            row.table_ids = ids;
+          }
+        }
+      }
+
       // Diagnostic logging
       try { fs.appendFileSync(diagLogPathTx, `${new Date().toISOString()} [GET-TX] Returned ${results.length} transactions\n`); } catch (e) { }
 
@@ -4451,6 +4961,22 @@ function createWindows(): void {
     } catch (error) {
       console.error('Error getting transactions:', error);
       return [];
+    }
+  });
+
+  ipcMain.handle('localdb-get-pending-orders-count', async (_event, businessId?: number) => {
+    try {
+      let query = `SELECT COUNT(*) as count FROM transactions WHERE status = 'pending' AND DATE(created_at) = CURDATE()`;
+      const params: (number)[] = [];
+      if (businessId) {
+        query += ' AND business_id = ?';
+        params.push(businessId);
+      }
+      const result = await executeQueryOne<{ count: number }>(query, params);
+      return { success: true, count: result?.count ?? 0 };
+    } catch (error) {
+      console.error('Error getting pending orders count:', error);
+      return { success: false, count: 0 };
     }
   });
 
@@ -5465,7 +5991,7 @@ function createWindows(): void {
         const isNumeric = typeof transactionId === 'number' || (typeof transactionId === 'string' && /^\d+$/.test(String(transactionId).trim()));
         const isSimpleNumeric = isNumeric && !isReceiptNumberFormat; // Numeric but NOT receipt number format
 
-        console.log(`[localdb-get-transaction-items] Looking for items with transactionId: ${transactionId} (isNumeric: ${isNumeric}, isReceiptNumberFormat: ${isReceiptNumberFormat}, isSimpleNumeric: ${isSimpleNumeric})`); if (isSimpleNumeric) {
+        if (isSimpleNumeric) {
           // Simple numeric ID (not receipt number format) - match by transaction_id
           items = await executeQuery<Record<string, unknown>>(`
             SELECT ti.*, p.nama as product_name 
@@ -5486,7 +6012,6 @@ function createWindows(): void {
           `, [transactionId]);
           // Strategy 2: Join with transactions table to match by UUID or receipt_number
           if (items.length === 0) {
-            console.log(`[localdb-get-transaction-items] No items found by uuid_transaction_id, trying transaction join with receipt_number`);
             // Try matching receipt_number as string (for formats like "0142512252257150001")
             items = await executeQuery<Record<string, unknown>>(`
               SELECT ti.*, p.nama as product_name 
@@ -5502,7 +6027,6 @@ function createWindows(): void {
 
           // Strategy 3: If still no items, find transaction's numeric ID and match by transaction_id
           if (items.length === 0) {
-            console.log(`[localdb-get-transaction-items] No items found via join, trying to find by transaction numeric ID`);
             const transaction = await executeQuery<Record<string, unknown>>(`
               SELECT id, uuid_id, receipt_number FROM transactions 
               WHERE uuid_id = ? 
@@ -5516,16 +6040,10 @@ function createWindows(): void {
               const tx = transaction[0] as Record<string, unknown>;
               const txId = typeof tx.id === 'number' ? tx.id : (typeof tx.id === 'string' ? Number(tx.id) : null);
               const txUuidId = typeof tx.uuid_id === 'string' ? tx.uuid_id : null;
-              console.log(`[localdb-get-transaction-items] Found transaction:`, {
-                id: tx.id,
-                uuid_id: tx.uuid_id,
-                receipt_number: tx.receipt_number
-              });
 
               // Try with numeric ID
               if (txId !== null && !isNaN(txId)) {
                 const numericId: number = txId;
-                console.log(`[localdb-get-transaction-items] Querying items by transaction_id: ${numericId}`);
                 items = await executeQuery<Record<string, unknown>>(`
                   SELECT ti.*, p.nama as product_name 
                   FROM transaction_items ti
@@ -5537,7 +6055,6 @@ function createWindows(): void {
 
               // If still no items, try with UUID
               if (items.length === 0 && txUuidId) {
-                console.log(`[localdb-get-transaction-items] Querying items by uuid_transaction_id: ${txUuidId}`);
                 items = await executeQuery<Record<string, unknown>>(`
                   SELECT ti.*, p.nama as product_name 
                   FROM transaction_items ti
@@ -5546,21 +6063,8 @@ function createWindows(): void {
                   ORDER BY ti.id ASC
                 `, [txUuidId]);
               }
-            } else {
-              console.log(`[localdb-get-transaction-items] Transaction not found in database for: ${transactionId}`);
             }
           }
-        }
-
-        console.log(`[localdb-get-transaction-items] Found ${items.length} items for transactionId: ${transactionId}`);
-        if (items.length > 0) {
-          console.log(`[localdb-get-transaction-items] Sample item:`, {
-            id: items[0].id,
-            product_id: items[0].product_id,
-            product_name: items[0].product_name,
-            transaction_id: items[0].transaction_id,
-            uuid_transaction_id: items[0].uuid_transaction_id
-          });
         }
       } else {
         items = await executeQuery<Record<string, unknown>>(`
@@ -6629,6 +7133,160 @@ function createWindows(): void {
     }
   });
 
+  // --- Refund exceptions (refund_exc) ---
+  ipcMain.handle('localdb-create-refund-exc', async (_event, payload: {
+    uuid_id: string;
+    business_id: number;
+    shift_uuid?: string | null;
+    nama: string;
+    pax: number;
+    tanggal: string;
+    jam: string;
+    no_hp?: string | null;
+    jumlah_refund: number;
+    alasan: 'pembatalan reservasi' | 'other';
+    created_by_user_id: number;
+    created_at?: string;
+    updated_at?: string;
+  }) => {
+    try {
+      let shiftUuid = payload.shift_uuid ?? null;
+      if (!shiftUuid && payload.business_id) {
+        const activeShift = await executeQueryOne<{ uuid_id: string }>(`
+          SELECT uuid_id FROM shifts WHERE business_id = ? AND status = 'active' ORDER BY shift_start ASC LIMIT 1
+        `, [payload.business_id]);
+        if (activeShift) shiftUuid = activeShift.uuid_id;
+      }
+      const createdAt = payload.created_at ? toMySQLDateTime(payload.created_at) : toMySQLDateTime(new Date());
+      const updatedAt = payload.updated_at ? toMySQLDateTime(payload.updated_at) : toMySQLDateTime(new Date());
+      const tanggal = String(payload.tanggal ?? '').slice(0, 10);
+      const jam = String(payload.jam ?? '00:00').slice(0, 8);
+      await executeUpdate(
+        `INSERT INTO refund_exc (uuid_id, business_id, shift_uuid, nama, pax, tanggal, jam, no_hp, jumlah_refund, alasan, created_by_user_id, created_at, updated_at, sync_status)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')`,
+        [
+          payload.uuid_id,
+          payload.business_id,
+          shiftUuid,
+          payload.nama,
+          payload.pax ?? 1,
+          tanggal,
+          jam,
+          payload.no_hp ?? null,
+          payload.jumlah_refund,
+          payload.alasan ?? 'other',
+          payload.created_by_user_id,
+          createdAt,
+          updatedAt
+        ]
+      );
+      const row = await executeQueryOne<{ id: number }>('SELECT id FROM refund_exc WHERE uuid_id = ? LIMIT 1', [payload.uuid_id]);
+      return { success: true, id: row?.id ?? 0 };
+    } catch (err) {
+      console.error('localdb-create-refund-exc error:', err);
+      return { success: false, id: 0, error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  ipcMain.handle('localdb-get-shift-refund-exc', async (_event, payload: {
+    businessId: number;
+    shiftUuid?: string | null;
+    shiftStart?: string;
+    shiftEnd?: string | null;
+  }) => {
+    try {
+      const { businessId, shiftUuid, shiftStart, shiftEnd } = payload;
+      let query = `
+        SELECT re.*, u.email AS created_by_email
+        FROM refund_exc re
+        LEFT JOIN users u ON re.created_by_user_id = u.id
+        WHERE re.business_id = ?
+      `;
+      const params: (string | number | null)[] = [businessId];
+      if (shiftUuid) {
+        query += ' AND re.shift_uuid = ?';
+        params.push(shiftUuid);
+      } else if (shiftStart && shiftEnd) {
+        query += ' AND re.created_at BETWEEN ? AND ?';
+        params.push(toMySQLDateTime(shiftStart), toMySQLDateTime(shiftEnd));
+      } else if (shiftStart) {
+        query += ' AND re.created_at >= ?';
+        params.push(toMySQLDateTime(shiftStart));
+        if (shiftEnd) {
+          query += ' AND re.created_at <= ?';
+          params.push(toMySQLDateTime(shiftEnd));
+        }
+      }
+      query += ' ORDER BY re.created_at DESC';
+      const rows = await executeQuery<Record<string, unknown>>(query, params);
+      return (Array.isArray(rows) ? rows : []).map((row) => {
+        const out = { ...row };
+        const t = row.tanggal;
+        if (t instanceof Date) {
+          const y = t.getFullYear();
+          const m = String(t.getMonth() + 1).padStart(2, '0');
+          const d = String(t.getDate()).padStart(2, '0');
+          out.tanggal = `${y}-${m}-${d}`;
+        } else if (t != null && String(t).trim()) out.tanggal = String(t).trim().slice(0, 10);
+        const j = row.jam;
+        if (j instanceof Date) {
+          out.jam = `${String((j as Date).getHours()).padStart(2, '0')}:${String((j as Date).getMinutes()).padStart(2, '0')}`;
+        } else if (j != null && String(j).trim()) {
+          const s = String(j).trim();
+          out.jam = s.length >= 5 && /^\d{1,2}:\d{2}/.test(s) ? s.slice(0, 5) : s;
+        }
+        return out;
+      });
+    } catch (err) {
+      console.error('localdb-get-shift-refund-exc error:', err);
+      return [];
+    }
+  });
+
+  ipcMain.handle('localdb-get-refund-exc-total', async (_event, businessId: number, fromDate: string, toDate: string) => {
+    try {
+      const fromStr = String(fromDate ?? '').slice(0, 10);
+      const toStr = String(toDate ?? '').slice(0, 10);
+      if (!fromStr || !toStr) return { total: 0, count: 0 };
+      const row = await executeQueryOne<{ total: number | null; count: number }>(
+        'SELECT COALESCE(SUM(jumlah_refund), 0) AS total, COUNT(*) AS count FROM refund_exc WHERE business_id = ? AND tanggal BETWEEN ? AND ?',
+        [businessId, fromStr, toStr]
+      );
+      return { total: Number(row?.total ?? 0), count: Number(row?.count ?? 0) };
+    } catch (err) {
+      console.error('localdb-get-refund-exc-total error:', err);
+      return { total: 0, count: 0 };
+    }
+  });
+
+  ipcMain.handle('localdb-get-unsynced-refund-exc', async (_event, forceAll?: boolean) => {
+    try {
+      const query = forceAll
+        ? 'SELECT * FROM refund_exc'
+        : "SELECT * FROM refund_exc WHERE sync_status = 'pending'";
+      const rows = await executeQuery<Record<string, unknown>>(query, []);
+      return Array.isArray(rows) ? rows : [];
+    } catch (err) {
+      console.error('localdb-get-unsynced-refund-exc error:', err);
+      return [];
+    }
+  });
+
+  ipcMain.handle('localdb-mark-refund-exc-synced', async (_event, uuidIds: string[]) => {
+    try {
+      if (!Array.isArray(uuidIds) || uuidIds.length === 0) return { success: true, count: 0 };
+      const placeholders = uuidIds.map(() => '?').join(',');
+      await executeUpdate(
+        `UPDATE refund_exc SET sync_status = 'synced', synced_at = NOW() WHERE uuid_id IN (${placeholders})`,
+        uuidIds
+      );
+      return { success: true, count: uuidIds.length };
+    } catch (err) {
+      console.error('localdb-mark-refund-exc-synced error:', err);
+      return { success: false, count: 0, error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
   // Get cancelled items for shift (for Ganti Shift report). Same filters as other shift handlers.
   // Shows cancelled items for all transaction statuses (pending/completed) so Simpan Order cancellations are visible.
   // Returns: product_name, quantity, unit_price, total_price, cancelled_at, cancelled_by_user_name, cancelled_by_waiter_name, transaction info.
@@ -7265,7 +7923,6 @@ function createWindows(): void {
         `UPDATE transactions SET synced_at = ?, sync_status = ?, sync_attempts = 0, last_sync_error = NULL WHERE uuid_id IN (${placeholders})`,
         [now, 'synced', ...transactionIds]
       );
-      console.log(`✅ [MARK SYNCED] Marked ${transactionIds.length} transaction(s) as synced: ${transactionIds.slice(0, 3).join(', ')}${transactionIds.length > 3 ? '...' : ''}`);
       return { success: true };
     } catch (error) {
       console.error('Error marking transactions as synced:', error);
@@ -10776,6 +11433,14 @@ function createWindows(): void {
       customerWindow.close();
       customerWindow = null;
     }
+    if (printWindow && !printWindow.isDestroyed()) {
+      printWindow.close();
+      printWindow = null;
+    }
+    if (labelPrintWindow && !labelPrintWindow.isDestroyed()) {
+      labelPrintWindow.close();
+      labelPrintWindow = null;
+    }
   });
 
   if (customerWindow) {
@@ -10942,12 +11607,9 @@ app.on('window-all-closed', () => {
 
 // IPC handlers for POS-specific functionality
 ipcMain.handle('print-receipt', async (event, data: ReceiptPrintData) => {
-  // #region agent log
-  fetch('http://127.0.0.1:7245/ingest/519de021-d49d-473f-a8a1-4215977c867a', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ location: 'main.ts:print-receipt', message: 'print operation', data: { operation: 'print-receipt' }, timestamp: Date.now(), hypothesisId: 'count' }) }).catch(() => { });
-  // #endregion
   try {
-    console.log('📄 Printing receipt - Full data received:', JSON.stringify(data, null, 2));
-    console.log(`🔍 [PRINT-RECEIPT] Counter values: printer1Counter=${data.printer1Counter}, printer2Counter=${data.printer2Counter}, globalCounter=${data.globalCounter}, printerType=${data.printerType}`);
+    if (isDev) console.log('📄 Printing receipt - data received for printerType:', data.printerType);
+    if (isDev) console.log(`🔍 [PRINT-RECEIPT] Counter values: printer1Counter=${data.printer1Counter}, printer2Counter=${data.printer2Counter}, globalCounter=${data.globalCounter}, printerType=${data.printerType}`);
 
     let printerName = data.printerName;
     let marginAdjustMm: number | undefined =
@@ -10957,16 +11619,13 @@ ipcMain.handle('print-receipt', async (event, data: ReceiptPrintData) => {
     let printerConfig: PrinterConfigRow | null = null;
 
     if (data.printerType) {
-      console.log('🔍 Resolving printer configuration for type:', data.printerType);
+      if (isDev) console.log('🔍 Resolving printer configuration for type:', data.printerType);
       try {
-        const allConfigs = await executeQuery<PrinterConfigRow>('SELECT * FROM printer_configs');
-        console.log('📋 All printer configs in database:', allConfigs);
-
         printerConfig = await executeQueryOne<PrinterConfigRow>(
           'SELECT * FROM printer_configs WHERE printer_type = ?',
           [data.printerType]
         ) ?? null;
-        console.log('📋 Printer config query result for type', data.printerType, ':', printerConfig);
+        if (isDev) console.log('📋 Printer config query result for type', data.printerType, ':', printerConfig);
 
         if (!printerName && printerConfig && printerConfig.system_printer_name) {
           const configPrinterName = String(printerConfig.system_printer_name).trim();
@@ -11011,7 +11670,10 @@ ipcMain.handle('print-receipt', async (event, data: ReceiptPrintData) => {
           }
           if (!printerName || (typeof printerName === 'string' && !printerName.trim())) {
             console.log('⚠️ No system printer configured for type:', data.printerType);
-            console.log('💡 Available printer configs:', allConfigs.map(c => ({ type: c.printer_type, name: c.system_printer_name })));
+            if (isDev) {
+              const allConfigs = await executeQuery<PrinterConfigRow>('SELECT * FROM printer_configs');
+              console.log('💡 Available printer configs:', allConfigs.map(c => ({ type: c.printer_type, name: c.system_printer_name })));
+            }
             return { success: false, error: `No printer configured for ${data.printerType}. Please set up a printer in Settings → Printer Selector.` };
           }
         }
@@ -11046,24 +11708,11 @@ ipcMain.handle('print-receipt', async (event, data: ReceiptPrintData) => {
       return { success: false, error: 'No printer specified. Please set up a printer in Settings first.' };
     }
 
-    // Use HTML printing with character-based formatting
-    if (printWindow) {
-      printWindow.close();
-    }
+    // Reuse persistent print window for performance (avoids 1-3s Chromium startup per print)
+    printWindow = getOrCreatePrintWindow();
 
-    printWindow = new BrowserWindow({
-      width: 400,
-      height: 600,
-      show: false,
-      webPreferences: {
-        nodeIntegration: false,
-        contextIsolation: true,
-      }
-    });
-
-    // Fetch business name from database if business_id is provided
-    let businessName = 'Pictos'; // Default fallback
-    if (data.business_id) {
+    let businessName = data.businessName || 'Pictos';
+    if (!data.businessName && data.business_id) {
       try {
         const business = await executeQueryOne<{ name: string }>(
           'SELECT name FROM businesses WHERE id = ?',
@@ -11071,9 +11720,9 @@ ipcMain.handle('print-receipt', async (event, data: ReceiptPrintData) => {
         );
         if (business) {
           businessName = business.name;
-          console.log('✅ Fetched business name:', businessName, 'for business_id:', data.business_id);
+          if (isDev) console.log('✅ Fetched business name:', businessName, 'for business_id:', data.business_id);
         } else {
-          console.log('⚠️ Business not found for business_id:', data.business_id);
+          if (isDev) console.log('⚠️ Business not found for business_id:', data.business_id);
         }
       } catch (error) {
         console.error('❌ Error fetching business name:', error);
@@ -11121,8 +11770,11 @@ ipcMain.handle('print-receipt', async (event, data: ReceiptPrintData) => {
         // Determine if this is a bill or receipt, and fetch appropriate template
         const isBill = data.isBill === true;
         const templateType = isBill ? 'bill' : 'receipt';
-        const templateResult = await receiptManagementService.getReceiptTemplate(templateType, data.business_id);
-        let templateCode = templateResult.templateCode;
+        let templateCode = data.templateCode || null;
+        if (!templateCode) {
+          const templateResult = await receiptManagementService.getReceiptTemplate(templateType, data.business_id);
+          templateCode = templateResult.templateCode;
+        }
         // Notes only on printed checker and dapur/barista; never on customer receipt or bill
         const showNotes = false;
         // Inject voucher block for both bill and receipt templates when voucher is applied
@@ -11152,9 +11804,9 @@ ipcMain.handle('print-receipt', async (event, data: ReceiptPrintData) => {
         if (templateCode) {
           console.log(`✅ Using ${templateType} template from database for printing`);
 
-          // Fetch receipt settings (pengaturan konten) so test and real prints use saved content
-          const receiptSettings = await receiptManagementService.getReceiptSettings(data.business_id);
-          const displayBusinessName = (receiptSettings?.store_name?.trim() || businessName).trim() || businessName;
+          const receiptSettingsRaw = (data.receiptSettings as Record<string, unknown> | undefined) || await receiptManagementService.getReceiptSettings(data.business_id);
+          const receiptSettings = receiptSettingsRaw as { store_name?: string | null; contact_phone?: string | null; address?: string | null; footer_text?: string | null; logo_base64?: string | null } | undefined;
+          const displayBusinessName = (typeof receiptSettings?.store_name === 'string' ? receiptSettings.store_name.trim() : '') || businessName;
 
           // Generate items HTML string (package breakdown as indented bullets; note/customization only when showNotes is true)
           const items = data.items || [];
@@ -11241,11 +11893,11 @@ ipcMain.handle('print-receipt', async (event, data: ReceiptPrintData) => {
             reprintCount: data.reprintCount,
             leftPadding: (7 - clampedMarginAdjustMm).toFixed(2),
             rightPadding: (7 + clampedMarginAdjustMm).toFixed(2),
-            // Receipt settings data
-            contactPhone: receiptSettings?.contact_phone || '',
+            // Receipt settings data (coerce to string for ReceiptTemplateData when from IPC Record<string, unknown>)
+            contactPhone: typeof receiptSettings?.contact_phone === 'string' ? receiptSettings.contact_phone : '',
             logo: logoHTML,
-            address: receiptSettings?.address || '',
-            footerText: receiptSettings?.footer_text || '',
+            address: typeof receiptSettings?.address === 'string' ? receiptSettings.address : '',
+            footerText: typeof receiptSettings?.footer_text === 'string' ? receiptSettings.footer_text : '',
             // Bill discount (optional) - finalAmount is grand total (subtotal - voucher)
             voucherDiscount,
             voucherLabel,
@@ -11280,9 +11932,10 @@ ipcMain.handle('print-receipt', async (event, data: ReceiptPrintData) => {
 
     await printWindow.loadURL(`data:text/html,${encodeURIComponent(htmlContent)}`);
 
+    // loadURL already waits for did-finish-load; print immediately (no 500ms setTimeout)
     return new Promise((resolve) => {
       const currentWindow = printWindow;
-      setTimeout(async () => {
+      (async () => {
         try {
           if (!currentWindow || currentWindow.isDestroyed()) {
             console.error('❌ Print window not available when attempting to print');
@@ -11293,8 +11946,6 @@ ipcMain.handle('print-receipt', async (event, data: ReceiptPrintData) => {
           if (!deviceName) {
             console.error('❌ Printer not found in system list:', printerName);
             resolve({ success: false, error: `Printer "${printerName}" tidak ditemukan. Buka Setelan → Printer dan pilih printer lagi.` });
-            if (currentWindow && !currentWindow.isDestroyed()) currentWindow.close();
-            if (printWindow === currentWindow) printWindow = null;
             return;
           }
           const printOptions: { silent: boolean; printBackground: boolean; deviceName?: string } = {
@@ -11313,35 +11964,21 @@ ipcMain.handle('print-receipt', async (event, data: ReceiptPrintData) => {
                 const isCanceled = /cancel|canceled/i.test(String(errorType));
                 if (isCanceled && !receiptRetriedOnce && currentWindow && !currentWindow.isDestroyed()) {
                   receiptRetriedOnce = true;
-                  console.warn('⚠️ Print job canceled, retrying once in 1.5s...');
-                  setTimeout(doPrint, 1500);
+                  console.warn('⚠️ Print job canceled, retrying in 300ms...');
+                  setTimeout(doPrint, 300);
                   return;
                 }
                 console.error('❌ Print failed:', errorType);
                 resolve({ success: false, error: errorType });
               }
-              setTimeout(() => {
-                if (currentWindow && !currentWindow.isDestroyed()) {
-                  currentWindow.close();
-                }
-                if (printWindow === currentWindow) {
-                  printWindow = null;
-                }
-              }, 1000);
             });
           };
           doPrint();
         } catch (err) {
           console.error('❌ Exception during webContents.print:', err);
           resolve({ success: false, error: String(err) });
-          if (currentWindow && !currentWindow.isDestroyed()) {
-            currentWindow.close();
-          }
-          if (printWindow === currentWindow) {
-            printWindow = null;
-          }
         }
-      }, 500);
+      })();
     });
   } catch (error) {
     console.error('❌ Error in print-receipt handler:', error);
@@ -11477,7 +12114,7 @@ ipcMain.handle('upload-receipt-settings-to-vps', async (event, businessId?: numb
 // Execute single label print (used by queue)
 async function executeLabelPrint(data: LabelPrintData): Promise<{ success: boolean; error?: string }> {
   try {
-    console.log('🏷️ [EXECUTE] Printing label - Full data received:', JSON.stringify(data, null, 2));
+    if (isDev) console.log('🏷️ [EXECUTE] Printing label for product:', (data as any).productName);
 
     let printerName = data.printerName;
     let copies = 1;
@@ -11529,16 +12166,8 @@ async function executeLabelPrint(data: LabelPrintData): Promise<{ success: boole
       return { success: false, error: 'No printer specified.' };
     }
 
-    // Create a new print window for this job (don't reuse global)
-    const jobPrintWindow = new BrowserWindow({
-      width: 400,
-      height: 600,
-      show: false,
-      webPreferences: {
-        nodeIntegration: false,
-        contextIsolation: true,
-      }
-    });
+    // Reuse persistent label print window for performance
+    const jobPrintWindow = getOrCreateLabelPrintWindow();
 
     // Padding for 80mm checker template (same as receipt): prevents right-side cutoff (pelanggan, meja, waktu pesanan)
     const labelMarginClamped = Math.max(-5, Math.min(5, labelMarginAdjustMm ?? 0));
@@ -11550,15 +12179,7 @@ async function executeLabelPrint(data: LabelPrintData): Promise<{ success: boole
     let templateCodeForLog = '';
     try {
       const checkerResult = await receiptManagementService.getReceiptTemplate('checker', data.business_id);
-      // #region agent log
-      const code = checkerResult.templateCode ?? '';
-      templateCodeForLog = code;
-      const codeLen = code.length;
-      const pageSize = code.includes('40mm') ? '40mm' : code.includes('80mm') ? '80mm' : 'other';
-      const h1Payload = { location: 'main.ts:label-print', message: 'which template used (single label)', data: { businessIdRequested: data.business_id, templateName: checkerResult.templateName ?? null, templateCodeLength: codeLen, pageSize, hasTemplateCode: !!(checkerResult.templateCode && checkerResult.templateCode.trim()) }, hypothesisId: 'H1' as const };
-      writeLabelDebugLog(h1Payload);
-      fetch('http://127.0.0.1:7495/ingest/20000880-6f22-4a8b-8a8e-250eeb7d84f4', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': '76ac0a' }, body: JSON.stringify({ sessionId: '76ac0a', ...h1Payload, timestamp: Date.now() }) }).catch(() => { });
-      // #endregion
+      templateCodeForLog = checkerResult.templateCode ?? '';
       const dataCustomizations = typeof data.customizations === 'string' ? data.customizations : '';
       const hasCustomizations = (dataCustomizations || '').trim().length > 0;
       const stripCustomizations = !checkerResult.showNotes;
@@ -11569,41 +12190,19 @@ async function executeLabelPrint(data: LabelPrintData): Promise<{ success: boole
         if (labelData.itemNumber == null || labelData.itemNumber === 0) labelData.itemNumber = 1;
         if (labelData.totalItems == null || labelData.totalItems === 0) labelData.totalItems = 1;
         htmlContent = generateLabelHTMLFromTemplate(checkerResult.templateCode.trim(), labelData);
-        // #region agent log
-        const h2Payload = { location: 'main.ts:label-print', message: 'used DB template path', data: { htmlContentLength: htmlContent?.length ?? 0 }, hypothesisId: 'H2' as const };
-        writeLabelDebugLog(h2Payload);
-        fetch('http://127.0.0.1:7495/ingest/20000880-6f22-4a8b-8a8e-250eeb7d84f4', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': '76ac0a' }, body: JSON.stringify({ sessionId: '76ac0a', ...h2Payload, timestamp: Date.now() }) }).catch(() => { });
-        // #endregion
       } else {
         htmlContent = generateLabelHTML(data);
-        // #region agent log
-        const h4Payload = { location: 'main.ts:label-print', message: 'used fallback generateLabelHTML', data: { htmlContentLength: htmlContent?.length ?? 0 }, hypothesisId: 'H4' as const };
-        writeLabelDebugLog(h4Payload);
-        fetch('http://127.0.0.1:7495/ingest/20000880-6f22-4a8b-8a8e-250eeb7d84f4', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': '76ac0a' }, body: JSON.stringify({ sessionId: '76ac0a', ...h4Payload, timestamp: Date.now() }) }).catch(() => { });
-        // #endregion
       }
     } catch (e) {
       console.warn('⚠️ Checker template load failed, using built-in label HTML:', e);
       htmlContent = generateLabelHTML(data);
-      // #region agent log
-      const h4ErrPayload = { location: 'main.ts:label-print', message: 'checker load failed, fallback', data: { error: String(e), htmlContentLength: htmlContent?.length ?? 0 }, hypothesisId: 'H4' as const };
-      writeLabelDebugLog(h4ErrPayload);
-      fetch('http://127.0.0.1:7495/ingest/20000880-6f22-4a8b-8a8e-250eeb7d84f4', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': '76ac0a' }, body: JSON.stringify({ sessionId: '76ac0a', ...h4ErrPayload, timestamp: Date.now() }) }).catch(() => { });
-      // #endregion
     }
-
-    // #region agent log – label height: @page in template vs final HTML (debug-ba378a)
-    const atPageInTemplate = getAtPageSnippet(templateCodeForLog);
-    const atPageInFinal = getAtPageSnippet(htmlContent);
-    const pagePayload = { sessionId: 'ba378a', location: 'main.ts:label-print', message: 'label @page (single)', data: { atPageInTemplate, atPageInFinal, has30mmInTemplate: templateCodeForLog.includes('30mm'), hasAutoInTemplate: templateCodeForLog.includes('auto') }, hypothesisId: 'H-page', timestamp: Date.now() };
-    console.log('[LABEL HEIGHT DEBUG] single label @page in template:', atPageInTemplate, '| in final HTML:', atPageInFinal);
-    fetch('http://127.0.0.1:7495/ingest/20000880-6f22-4a8b-8a8e-250eeb7d84f4', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': 'ba378a' }, body: JSON.stringify(pagePayload) }).catch(() => { });
-    // #endregion
 
     await jobPrintWindow.loadURL(`data:text/html,${encodeURIComponent(htmlContent)}`);
 
+    // loadURL already waits for did-finish-load; print immediately
     return new Promise((resolve) => {
-      setTimeout(async () => {
+      (async () => {
         try {
           if (!jobPrintWindow || jobPrintWindow.isDestroyed()) {
             console.error('❌ Print window not available when attempting to print label');
@@ -11625,32 +12224,23 @@ async function executeLabelPrint(data: LabelPrintData): Promise<{ success: boole
               if (!success) {
                 console.error('❌ Label print failed:', errorType);
                 resolve({ success: false, error: errorType });
-                setTimeout(() => {
-                  if (jobPrintWindow && !jobPrintWindow.isDestroyed()) jobPrintWindow.close();
-                }, 500);
                 return;
               }
               printedCount += 1;
               if (printedCount >= numCopies) {
                 console.log('✅ Label sent successfully' + (numCopies > 1 ? ` (${numCopies} copies)` : ''));
                 resolve({ success: true });
-                setTimeout(() => {
-                  if (jobPrintWindow && !jobPrintWindow.isDestroyed()) jobPrintWindow.close();
-                }, 500);
                 return;
               }
-              setTimeout(doOnePrint, 400);
+              setTimeout(doOnePrint, 200);
             });
           };
           doOnePrint();
         } catch (err) {
           console.error('❌ Exception during webContents.print:', err);
           resolve({ success: false, error: String(err) });
-          if (jobPrintWindow && !jobPrintWindow.isDestroyed()) {
-            jobPrintWindow.close();
-          }
         }
-      }, 500);
+      })();
     });
   } catch (error) {
     console.error('❌ Error in executeLabelPrint:', error);
@@ -11719,15 +12309,9 @@ async function executeLabelsBatchPrint(data: {
     }
     const splitByCategory = checkerResult.splitByCategory === true && data.splitByCategory === true;
     const firstLabelCustomizations = data.labels?.[0] && typeof (data.labels[0] as { customizations?: string }).customizations === 'string' ? (data.labels[0] as { customizations: string }).customizations : '';
-    // #region agent log – which template is used (for debug-76ac0a.log)
     const requestId = (data as any).requestId || 'NO-ID';
-    const code = checkerResult.templateCode ?? '';
-    const pageSize = code.includes('40mm') ? '40mm' : code.includes('80mm') ? '80mm' : 'other';
-    const batchPayload = { location: 'main.ts:batch-label-print', message: 'which template used (batch)', data: { requestId, businessIdUsed: businessId ?? null, templateName: checkerResult.templateName ?? null, templateCodeLength: code.length, pageSize, hasCheckerTemplate: !!checkerResult.templateCode?.trim() }, hypothesisId: 'which' as const };
-    writeLabelDebugLog(batchPayload);
+    const pageSize = (checkerResult.templateCode ?? '').includes('40mm') ? '40mm' : (checkerResult.templateCode ?? '').includes('80mm') ? '80mm' : 'other';
     console.error(`🖨️ [BACKEND] Received printLabelsBatch. ID: ${requestId}. Table: ${data.orderContext?.tableName}. Time: ${data.orderContext?.orderTime}. Template: ${checkerResult.templateName ?? '(fallback)'} (${pageSize})`);
-    fetch('http://127.0.0.1:7245/ingest/519de021-d49d-473f-a8a1-4215977c867a', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ location: 'main.ts:executeLabelsBatchPrint', message: 'batch label checker result', data: { requestId, businessId: businessId ?? null, templateName: checkerResult.templateName, checkerShowNotes: checkerResult.showNotes, hasCheckerTemplate: !!checkerResult.templateCode?.trim(), pageSize, firstLabelCustomizationsLength: (firstLabelCustomizations || '').length }, timestamp: Date.now(), hypothesisId: 'A' }) }).catch(() => { });
-    // #endregion
     const checkerTemplateCode = checkerResult.templateCode?.trim() ?? null;
     const templateUsesItems = checkerTemplateCode != null && (checkerTemplateCode.includes('{{items}}') || checkerTemplateCode.includes('{{itemsCategory1}}') || checkerTemplateCode.includes('{{itemsCategory2}}') || checkerTemplateCode.includes('{{categoriesSections}}'));
     const hasOrderContextWithItems = hasOrderContext && (
@@ -11750,9 +12334,6 @@ async function executeLabelsBatchPrint(data: {
     }
 
     const effectiveLabelOrSlipCount = useOrderSummarySlip ? 1 : (data.labels?.length || 0);
-    // #region agent log
-    fetch('http://127.0.0.1:7245/ingest/519de021-d49d-473f-a8a1-4215977c867a', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ location: 'main.ts:executeLabelsBatchPrint', message: 'batch print effective count', data: { useOrderSummarySlip, effectiveLabelOrSlipCount, labelsLength: data.labels?.length ?? 0 }, timestamp: Date.now(), hypothesisId: 'count' }) }).catch(() => { });
-    // #endregion
     console.log('🏷️ [EXECUTE] Printing labels batch - Count:', effectiveLabelOrSlipCount, useOrderSummarySlip ? '(order summary slip)' : '');
     let printerName = data.printerName;
     let copies = 1;
@@ -11796,16 +12377,8 @@ async function executeLabelsBatchPrint(data: {
       return { success: false, error: 'No printer specified.' };
     }
 
-    // Create a new print window for this job (don't reuse global)
-    const jobPrintWindow = new BrowserWindow({
-      width: 400,
-      height: 600,
-      show: false,
-      webPreferences: {
-        nodeIntegration: false,
-        contextIsolation: true,
-      }
-    });
+    // Reuse persistent label print window for performance
+    const jobPrintWindow = getOrCreateLabelPrintWindow();
 
     // Padding for 80mm checker: fixed margins (no offset). Left 4mm; right 5mm to avoid right-side cutoff on thermal printers.
     const batchLeftPadding = '4.00';
@@ -11834,9 +12407,6 @@ async function executeLabelsBatchPrint(data: {
         };
         orderDataForSplit = orderData;
         htmlContent = generateLabelHTMLFromTemplate(slipTemplateCode, orderData); // 1st checker HTML ready
-        // #region agent log — debug what is printed on 1st print (content; printer name logged later when we resolve it)
-        fetch('http://127.0.0.1:7245/ingest/519de021-d49d-473f-a8a1-4215977c867a', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ location: 'main.ts:executeLabelsBatchPrint:1stPrintContent', message: '1st print content (order summary slip)', data: { firstPrintPath: true, orderDataSummary: { waiterName: orderData.waiterName, customerName: orderData.customerName, tableName: orderData.tableName, orderTime: orderData.orderTime, itemsHtmlLength: (orderData.items || '').length, itemsHtmlPreview: (orderData.items || '').substring(0, 500) }, htmlContentLength: htmlContent.length, htmlContentPreview: htmlContent.substring(0, 2500) }, timestamp: Date.now(), hypothesisId: '1stPrint' }) }).catch(() => { });
-        // #endregion
       } else {
         // Normalize itemNumber (1-based) and totalItems so counter shows e.g. 1/6, 2/6, ... on each label
         const labelsCount = data.labels?.length ?? 0;
@@ -11861,10 +12431,6 @@ async function executeLabelsBatchPrint(data: {
         } else {
           htmlContent = generateMultipleLabelsHTML(labelsToPrint);
         }
-        // #region agent log — debug what is printed when NOT order-summary slip (per-item or merged labels)
-        const firstL = data.labels?.[0];
-        fetch('http://127.0.0.1:7245/ingest/519de021-d49d-473f-a8a1-4215977c867a', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ location: 'main.ts:executeLabelsBatchPrint:1stPrintContent', message: '1st print content (per-item/merged labels path)', data: { firstPrintPath: false, labelsCount: data.labels?.length, firstLabel: firstL ? { productName: (firstL as { productName?: string }).productName, pickupMethod: (firstL as { pickupMethod?: string }).pickupMethod } : undefined, htmlContentLength: htmlContent?.length, htmlContentPreview: (htmlContent || '').substring(0, 2500) }, timestamp: Date.now(), hypothesisId: '1stPrint' }) }).catch(() => { });
-        // #endregion
       }
     } catch (e) {
       console.warn('⚠️ Checker template load failed, using built-in batch label HTML:', e);
@@ -11874,21 +12440,13 @@ async function executeLabelsBatchPrint(data: {
       }
     }
 
-    // #region agent log – label height: @page in batch (debug-ba378a)
-    const batchTemplateCode = checkerTemplateCode ?? '';
-    const atPageBatchTemplate = getAtPageSnippet(batchTemplateCode);
-    const atPageBatchFinal = getAtPageSnippet(htmlContent);
-    const batchPagePayload = { sessionId: 'ba378a', location: 'main.ts:executeLabelsBatchPrint', message: 'label @page (batch)', data: { atPageInTemplate: atPageBatchTemplate, atPageInFinal: atPageBatchFinal, has30mmInTemplate: batchTemplateCode.includes('30mm'), hasAutoInTemplate: batchTemplateCode.includes('auto'), useOrderSummarySlip }, hypothesisId: 'H-page', timestamp: Date.now() };
-    console.log('[LABEL HEIGHT DEBUG] batch @page in template:', atPageBatchTemplate, '| in final HTML:', atPageBatchFinal);
-    fetch('http://127.0.0.1:7495/ingest/20000880-6f22-4a8b-8a8e-250eeb7d84f4', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': 'ba378a' }, body: JSON.stringify(batchPagePayload) }).catch(() => { });
-    // #endregion
-
     // --- 1st checker: load generated HTML into print window ---
-    console.log(`📝 [BACKEND] Generated HTML for ID ${requestId} (first 100 chars): ${htmlContent.substring(0, 100)}...`);
+    if (isDev) console.log(`📝 [BACKEND] Generated HTML for ID ${requestId} (first 100 chars): ${htmlContent.substring(0, 100)}...`);
     await jobPrintWindow.loadURL(`data:text/html,${encodeURIComponent(htmlContent)}`);
 
+    // loadURL already waits for did-finish-load; print immediately
     return new Promise((resolve) => {
-      setTimeout(async () => {
+      (async () => {
         try {
           if (!jobPrintWindow || jobPrintWindow.isDestroyed()) {
             console.error('❌ Print window not available when attempting to print labels batch');
@@ -11904,36 +12462,25 @@ async function executeLabelsBatchPrint(data: {
             ...(is40x30LabelBatch ? { pageSize: { width: 40000, height: 30000 } } : {}),
           };
 
-          // Many label/thermal printers ignore the 'copies' option; print N times to get N physical copies
           const numCopies = Math.max(1, Math.min(10, copies));
-          // #region agent log — how many printed, what is printed, which printer
-          const whatIsPrinted = useOrderSummarySlip ? '1 order summary slip (checker)' : `${data.labels?.length ?? 0} label(s)`;
-          const contentHint = useOrderSummarySlip && data.orderContext ? { table: data.orderContext.tableName || '', itemsHtmlLength: (data.orderContext.itemsHtml || '').length } : { labelsCount: data.labels?.length ?? 0 };
-          fetch('http://127.0.0.1:7245/ingest/519de021-d49d-473f-a8a1-4215977c867a', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ location: 'main.ts:executeLabelsBatchPrint:printSummary', message: 'Print summary: how many and what', data: { totalPhysicalPrints: numCopies, whatIsPrinted, contentHint, printer: printerName || '(default)', deviceName: deviceName || null }, timestamp: Date.now(), hypothesisId: 'count' }) }).catch(() => { });
-          // #endregion
           let printedCount = 0;
           let retriedOnce = false;
           const doOnePrint = () => {
-            // --- 1st print (and subsequent copies): send checker slip to printer ---
             jobPrintWindow.webContents.print(printOptions, (success: boolean, errorType: string) => {
               if (!success) {
                 const isCanceled = /cancel|canceled/i.test(String(errorType));
                 if (isCanceled && !retriedOnce && jobPrintWindow && !jobPrintWindow.isDestroyed()) {
                   retriedOnce = true;
-                  console.warn('⚠️ Print job canceled, retrying once in 1.5s...');
-                  setTimeout(doOnePrint, 1500);
+                  console.warn('⚠️ Print job canceled, retrying in 300ms...');
+                  setTimeout(doOnePrint, 300);
                   return;
                 }
                 console.error('❌ Batch labels print failed:', errorType);
                 resolve({ success: false, error: errorType });
-                setTimeout(() => {
-                  if (jobPrintWindow && !jobPrintWindow.isDestroyed()) jobPrintWindow.close();
-                }, 500);
                 return;
               }
               printedCount += 1;
               if (printedCount >= numCopies) {
-                // Paper 1 (full summary) + copies done. If split-by-category, print one slip per category.
                 const categories = data.orderContext?.categories;
                 if (splitByCategory && categories?.length && slipTemplateCode && orderDataForSplit) {
                   (async () => {
@@ -11948,16 +12495,7 @@ async function executeLabelsBatchPrint(data: {
                         };
                         const perCatHtml = generateLabelHTMLFromTemplate(slipTemplateCode, perCategoryData);
                         if (jobPrintWindow.isDestroyed()) break;
-                        const loadPromise = new Promise<void>((resolve, reject) => {
-                          const onFinish = () => { jobPrintWindow.webContents.removeListener('did-fail-load', onFail); resolve(); };
-                          const onFail = (_e: unknown, code: number) => { jobPrintWindow.webContents.removeListener('did-finish-load', onFinish); reject(new Error(`load failed: ${code}`)); };
-                          jobPrintWindow.webContents.once('did-finish-load', onFinish);
-                          jobPrintWindow.webContents.once('did-fail-load', onFail);
-                          jobPrintWindow.loadURL(`data:text/html,${encodeURIComponent(perCatHtml)}`).catch(reject);
-                        });
-                        await loadPromise;
-                        await new Promise(r => setTimeout(r, 400));
-                        // One copy per per-category slip (so output is: 1 full + 1 per category, not duplicated by printer copies)
+                        await jobPrintWindow.loadURL(`data:text/html,${encodeURIComponent(perCatHtml)}`);
                         if (jobPrintWindow.isDestroyed()) break;
                         await new Promise<void>((res, rej) => {
                           jobPrintWindow.webContents.print(printOptions, (ok: boolean, err: string) => (ok ? res() : rej(new Error(err))));
@@ -11968,31 +12506,23 @@ async function executeLabelsBatchPrint(data: {
                     } catch (perCatErr) {
                       console.error('❌ Per-category slip print failed:', perCatErr);
                       resolve({ success: false, error: String(perCatErr) });
-                    } finally {
-                      if (jobPrintWindow && !jobPrintWindow.isDestroyed()) jobPrintWindow.close();
                     }
                   })();
                   return;
                 }
                 console.log(`✅ Batch labels (${data.labels?.length ?? 0} labels) sent successfully` + (numCopies > 1 ? ` (${numCopies} copies)` : ''));
                 resolve({ success: true });
-                setTimeout(() => {
-                  if (jobPrintWindow && !jobPrintWindow.isDestroyed()) jobPrintWindow.close();
-                }, 500);
                 return;
               }
-              setTimeout(doOnePrint, 400);
+              setTimeout(doOnePrint, 200);
             });
           };
-          doOnePrint(); // --- 1st print: trigger first checker slip (then repeats for numCopies) ---
+          doOnePrint();
         } catch (err) {
           console.error('❌ Exception during webContents.print:', err);
           resolve({ success: false, error: String(err) });
-          if (jobPrintWindow && !jobPrintWindow.isDestroyed()) {
-            jobPrintWindow.close();
-          }
         }
-      }, 500);
+      })();
     });
   } catch (error) {
     console.error('❌ Error in executeLabelsBatchPrint:', error);
@@ -12002,9 +12532,6 @@ async function executeLabelsBatchPrint(data: {
 
 // IPC handler for printing labels (queued)
 ipcMain.handle('print-label', async (event, data: LabelPrintData) => {
-  // #region agent log
-  fetch('http://127.0.0.1:7245/ingest/519de021-d49d-473f-a8a1-4215977c867a', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ location: 'main.ts:print-label', message: 'print operation', data: { operation: 'print-label' }, timestamp: Date.now(), hypothesisId: 'count' }) }).catch(() => { });
-  // #endregion
   return new Promise((resolve, reject) => {
     console.log('📋 [PRINT QUEUE] Adding label print job to queue');
     printQueue.push({
@@ -12045,9 +12572,6 @@ ipcMain.handle('print-labels-batch', async (event, data: {
     return { success: false, error: 'No labels provided for batch printing.' };
   }
 
-  // #region agent log
-  fetch('http://127.0.0.1:7245/ingest/519de021-d49d-473f-a8a1-4215977c867a', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ location: 'main.ts:print-labels-batch', message: 'print operation', data: { operation: 'print-labels-batch', labelsCount: data.labels?.length ?? 0, hasOrderContext }, timestamp: Date.now(), hypothesisId: 'count' }) }).catch(() => { });
-  // #endregion
   return new Promise((resolve, reject) => {
     console.log('📋 [PRINT QUEUE] Adding labels batch print job to queue');
     printQueue.push({
@@ -14141,9 +14665,6 @@ const VOUCHER_BREAKDOWN_ORDER: { key: string; label: string }[] = [
 // Print shift breakdown report
 ipcMain.handle('print-shift-breakdown', async (event, data: PrintableShiftReportSection & { business_id?: number; printerType?: string; wholeDayReport?: PrintableShiftReportSection | null; sectionOptions?: { ringkasan?: boolean; barangTerjual?: boolean; paymentMethod?: boolean; categoryI?: boolean; categoryII?: boolean; paket?: boolean; toppingSales?: boolean; itemDibatalkan?: boolean } }) => {
   try {
-    // #region agent log
-    writeDebugLog(JSON.stringify({ location: 'electron/main.ts:print-shift-breakdown', message: 'Received print payload', data: { gross_total_omset: data.gross_total_omset, statistics_total_amount: data.statistics?.total_amount, user_name: data.user_name }, timestamp: Date.now(), sessionId: 'debug-session', hypothesisId: 'B' }));
-    // #endregion
     console.log('🖨️ [SHIFT PRINT] Starting shift breakdown print...');
     console.log('   - Shift:', data.user_name);
     console.log('   - Products:', data.productSales?.length || 0);
@@ -14628,6 +15149,14 @@ ipcMain.handle('maximize-window', async () => {
     } else {
       windows[0].maximize();
     }
+  }
+  return { success: true };
+});
+
+ipcMain.handle('open-external', async (_event, url: string) => {
+  const { shell } = await import('electron');
+  if (typeof url === 'string' && url.startsWith('http')) {
+    await shell.openExternal(url);
   }
   return { success: true };
 });
