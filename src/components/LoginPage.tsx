@@ -159,8 +159,8 @@ export default function LoginPage({
   };
 
   return (
-    <div className="w-full h-screen flex items-center justify-center bg-gray-900 overflow-hidden" style={{ WebkitAppRegion: 'drag' } as React.CSSProperties}>
-      <div className="bg-white rounded-2xl shadow-2xl overflow-hidden w-full h-[432px] flex" style={{ WebkitAppRegion: 'drag' } as React.CSSProperties}>
+    <div className="w-full h-full bg-gray-900 overflow-hidden" style={{ WebkitAppRegion: 'drag' } as React.CSSProperties}>
+      <div className="bg-white overflow-hidden w-full h-full flex" style={{ WebkitAppRegion: 'drag' } as React.CSSProperties}>
         {/* Left Panel - Branding */}
         <div className="w-1/2 bg-gray-900 relative overflow-hidden">
           {/* Background Pattern */}

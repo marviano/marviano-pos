@@ -69,6 +69,8 @@ class AuthManager {
             };
             // Notify listeners after restoring state
             this.notifyListeners();
+            // Tell Electron to set hasLoggedIn and maximize (returning user skips login form)
+            void this.notifyElectronLoginSuccess();
           }
         }
       } catch (error) {

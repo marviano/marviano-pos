@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { X } from 'lucide-react';
 import LoginPage from '@/components/LoginPage';
@@ -35,6 +35,7 @@ export default function Login() {
     isSuperAdmin: boolean;
   } | null>(null);
   const [loginLogoRefreshAt, setLoginLogoRefreshAt] = useState<number | undefined>(undefined);
+  const [windowHeight, setWindowHeight] = useState<number | null>(null);
 
   // Ensure we're on the client side to prevent hydration mismatch
   useEffect(() => {
@@ -66,6 +67,27 @@ export default function Login() {
       logout({ redirect: false });
     }
   }, [isClient, isAuthenticated, user?.selectedBusinessId, router, logout]);
+
+  // Use main-process window size in Electron (getBounds is reliable); fallback to innerHeight in browser
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const update = async () => {
+      const api = (window as unknown as { electronAPI?: { getMainWindowSize?: () => Promise<{ width: number; height: number } | null> } }).electronAPI;
+      if (api?.getMainWindowSize) {
+        try {
+          const size = await api.getMainWindowSize();
+          if (size?.height != null) setWindowHeight(size.height);
+        } catch {
+          setWindowHeight(window.innerHeight);
+        }
+      } else {
+        setWindowHeight(window.innerHeight);
+      }
+    };
+    update();
+    window.addEventListener('resize', update);
+    return () => window.removeEventListener('resize', update);
+  }, []);
 
   const handleFullSync = useCallback(
     async (reason: 'initial' | 'manual') => {
@@ -250,8 +272,10 @@ export default function Login() {
   // When authenticated but no selectedBusinessId we call logout in effect — show form so we're not stuck on Loading.
   if (!isClient) {
     return (
-      <div className="h-screen bg-gray-900 flex items-center justify-center overflow-hidden">
-        <div className="text-white text-lg">Loading...</div>
+      <div className="h-screen bg-gray-900 flex flex-col items-center justify-center gap-4 overflow-hidden" role="status" aria-label="Loading application">
+        <div className="text-white/90 text-sm font-medium tracking-wide">Marviano POS</div>
+        <div className="w-10 h-10 border-2 border-white border-t-transparent rounded-full animate-spin" aria-hidden />
+        <div className="text-white/80 text-sm">Loading...</div>
       </div>
     );
   }
@@ -266,8 +290,8 @@ export default function Login() {
   // Show business selection if needed
   if (pendingLogin) {
     return (
-      <div className="w-full h-screen flex items-center justify-center bg-gray-900 overflow-hidden" style={{ WebkitAppRegion: 'drag' } as React.CSSProperties}>
-        <div className="bg-white rounded-2xl shadow-2xl overflow-hidden w-full h-[432px] flex" style={{ WebkitAppRegion: 'drag' } as React.CSSProperties}>
+      <div className="w-full h-full bg-gray-900 overflow-hidden" style={{ WebkitAppRegion: 'drag' } as React.CSSProperties}>
+        <div className="bg-white overflow-hidden w-full h-full flex" style={{ WebkitAppRegion: 'drag' } as React.CSSProperties}>
           {/* Left Panel - Branding (20% width) */}
           <div className="w-[20%] bg-gray-900 relative overflow-hidden">
             <div className="absolute inset-0 opacity-5">
@@ -314,7 +338,10 @@ export default function Login() {
   }
 
   return (
-    <div className="w-full h-screen bg-gray-900 overflow-hidden">
+    <div
+      className="w-full bg-gray-900 overflow-hidden min-h-0"
+      style={windowHeight != null ? { height: `${windowHeight}px` } : { height: '100dvh' }}
+    >
       <LoginPage
         onLogin={handleLogin}
         onClose={handleClose}

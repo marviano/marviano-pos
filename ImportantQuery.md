@@ -394,3 +394,6 @@ FROM (
     AND CAST(t.created_at AS DATE) BETWEEN @from_date AND @to_date
 ) sub;
 ```
+```sql
+WHERE T.status != 'active'
+  AND LOWER(TRIM(COALESCENCEt.status))) NOT IN ('cancelled', 'pending')

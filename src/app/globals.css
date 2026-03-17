@@ -17,16 +17,6 @@
   --font-mono: var(--font-geist-mono);
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-    --scrollbar-track: #2a2a2a;
-    --scrollbar-thumb: #555555;
-    --scrollbar-thumb-hover: #6b6b6b;
-  }
-}
-
 html,
 body {
   overflow: hidden;

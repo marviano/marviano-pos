@@ -540,6 +540,12 @@ let mainWindow: BrowserWindow | null = null;
 let customerWindow: BrowserWindow | null = null;
 let printWindow: BrowserWindow | null = null;
 let labelPrintWindow: BrowserWindow | null = null;
+/** Only maximize main window after user has logged in; avoids black full-screen on root / load before redirect to /login */
+let hasLoggedIn = false;
+
+/** Login window dimensions (single source of truth for create, navigate, and logout resize). */
+const LOGIN_WINDOW_WIDTH = 800;
+const LOGIN_WINDOW_HEIGHT = 432;
 
 function getOrCreatePrintWindow(): BrowserWindow {
   if (printWindow && !printWindow.isDestroyed()) {
@@ -1037,13 +1043,13 @@ function createWindows(): void {
     : (fs.existsSync(iconPathPictos) ? iconPathPictos : (fs.existsSync(iconPath) ? iconPath : undefined));
 
   // Create main POS window (cashier display)
-  // Start with login size (800x432), will be resized after successful login
+  // Start with login size, will be resized after successful login
   mainWindow = new BrowserWindow({
-    width: 800,
-    height: 432,
+    width: LOGIN_WINDOW_WIDTH,
+    height: LOGIN_WINDOW_HEIGHT,
     center: true,
-    minWidth: 800,
-    minHeight: 432,
+    minWidth: LOGIN_WINDOW_WIDTH,
+    minHeight: LOGIN_WINDOW_HEIGHT,
     title: 'Pictos - Login',
     frame: false,
     backgroundColor: '#111827',
@@ -1141,18 +1147,19 @@ function createWindows(): void {
     const isLogin = currentURL.pathname === '/login' || currentURL.pathname.endsWith('login.html');
 
     if (isLogin) {
-      // Keep login page at 800x432
-      console.log('🔍 Login page detected - setting login window size');
+      // Keep login page at fixed size (unmaximize first so setSize takes effect on Windows)
       mainWindow!.setFullScreen(false);
+      if (mainWindow!.isMaximized()) mainWindow!.unmaximize();
       mainWindow!.setResizable(false);
-      mainWindow!.setSize(800, 432);
+      mainWindow!.setSize(LOGIN_WINDOW_WIDTH, LOGIN_WINDOW_HEIGHT);
       mainWindow!.center();
     } else {
-      // Main POS page - maximize (keeps Windows taskbar visible; fullscreen would hide it)
-      console.log('🔍 Main POS page detected - maximizing window');
-      mainWindow!.setResizable(true);
-      mainWindow!.setFullScreen(false);
-      mainWindow!.maximize();
+      // Main POS page - only maximize if user has already logged in (avoids black full-screen on root / before redirect)
+      if (hasLoggedIn) {
+        mainWindow!.setResizable(true);
+        mainWindow!.setFullScreen(false);
+        mainWindow!.maximize();
+      }
     }
   });
 
@@ -1164,18 +1171,19 @@ function createWindows(): void {
     const isLogin = currentURL.pathname === '/login' || currentURL.pathname.endsWith('login.html');
 
     if (isLogin) {
-      // Keep login page at 800x432
-      console.log('🔍 Login page detected - setting login window size');
+      // Keep login page at fixed size (unmaximize first so setSize takes effect on Windows)
       mainWindow!.setFullScreen(false);
+      if (mainWindow!.isMaximized()) mainWindow!.unmaximize();
       mainWindow!.setResizable(false);
-      mainWindow!.setSize(800, 432);
+      mainWindow!.setSize(LOGIN_WINDOW_WIDTH, LOGIN_WINDOW_HEIGHT);
       mainWindow!.center();
     } else {
-      // Main POS page - maximize (keeps Windows taskbar visible)
-      console.log('🔍 Main POS page detected - maximizing window');
-      mainWindow!.setResizable(true);
-      mainWindow!.setFullScreen(false);
-      mainWindow!.maximize();
+      // Main POS page - only maximize if user has already logged in (avoids black full-screen on root / before redirect)
+      if (hasLoggedIn) {
+        mainWindow!.setResizable(true);
+        mainWindow!.setFullScreen(false);
+        mainWindow!.maximize();
+      }
     }
   });
 
@@ -1217,6 +1225,7 @@ function createWindows(): void {
   // Listen for successful login via IPC - maximize window (keeps Windows taskbar visible)
   ipcMain.handle('login-success', async () => {
     console.log('🔍 [ELECTRON] Login success IPC received!');
+    hasLoggedIn = true;
     if (mainWindow && !mainWindow.isDestroyed()) {
       try {
         mainWindow.setResizable(true);
@@ -1227,6 +1236,14 @@ function createWindows(): void {
       }
     }
     return { success: true };
+  });
+
+  ipcMain.handle('get-main-window-size', () => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      const b = mainWindow.getBounds();
+      return { width: b.width, height: b.height };
+    }
+    return null;
   });
 
   // Configuration management IPC handlers
@@ -1301,11 +1318,12 @@ function createWindows(): void {
 
   // Listen for logout via IPC
   ipcMain.handle('logout', async () => {
-    console.log('🔍 Logout - resizing back to login size');
-    if (mainWindow) {
+    hasLoggedIn = false;
+    if (mainWindow && !mainWindow.isDestroyed()) {
       mainWindow.setFullScreen(false);
+      if (mainWindow.isMaximized()) mainWindow.unmaximize();
       mainWindow.setResizable(false);
-      mainWindow.setSize(800, 432);
+      mainWindow.setSize(LOGIN_WINDOW_WIDTH, LOGIN_WINDOW_HEIGHT);
       mainWindow.center();
     }
     return { success: true };
@@ -11427,10 +11445,10 @@ function createWindows(): void {
       }
     }, 5000); // Wait longer for Next.js to be ready
   } else {
-    // In production, load the built Next.js app
-    const indexPath = path.join(__dirname, '../../out/index.html');
-    console.log('🔍 Loading production index file from:', indexPath);
-    mainWindow!.loadFile(indexPath);
+    // In production, load login page directly to avoid root / → maximize → black screen before redirect to /login
+    const loginPath = path.join(__dirname, '../../out/login.html');
+    console.log('🔍 Loading production login file from:', loginPath);
+    mainWindow!.loadFile(loginPath);
   }
 
   // Show windows when ready
@@ -11444,7 +11462,8 @@ function createWindows(): void {
   if (customerWindow) {
     customerWindow.once('ready-to-show', () => {
       customerWindow!.setFullScreen(true);
-      customerWindow!.show();
+      // Delay show so React can hydrate; avoids 1–3s black screen from initial HTML shell
+      setTimeout(() => customerWindow!.show(), 800);
     });
   }
 
@@ -13079,13 +13098,11 @@ function generateLabelHTML(data: LabelPrintData): string {
     .content {
     }
     .row {
-      display: table;
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
       width: calc(100% + 3mm);
-      table-layout: fixed;
       margin-right: -3mm;
-    }
-    .row > div {
-      display: table-cell;
     }
     .counter {
       font-size: 9pt;
@@ -13111,6 +13128,7 @@ function generateLabelHTML(data: LabelPrintData): string {
       font-size: 9pt;
       font-weight: 700;
       text-align: right;
+      white-space: nowrap;
     }
     .continuation {
       font-size: 7pt;
@@ -13228,13 +13246,11 @@ function generateMultipleLabelsHTML(labels: LabelPrintData[]): string {
     .content {
     }
     .row {
-      display: table;
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
       width: calc(100% + 3mm);
-      table-layout: fixed;
       margin-right: -3mm;
-    }
-    .row > div {
-      display: table-cell;
     }
     .counter {
       font-size: 9pt;
@@ -13260,6 +13276,7 @@ function generateMultipleLabelsHTML(labels: LabelPrintData[]): string {
       font-size: 9pt;
       font-weight: 700;
       text-align: right;
+      white-space: nowrap;
     }
     .continuation {
       font-size: 7pt;

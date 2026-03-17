@@ -18,6 +18,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   closeWindow: () => ipcRenderer.invoke('close-window'),
   minimizeWindow: () => ipcRenderer.invoke('minimize-window'),
   maximizeWindow: () => ipcRenderer.invoke('maximize-window'),
+  getMainWindowSize: () => ipcRenderer.invoke('get-main-window-size') as Promise<{ width: number; height: number } | null>,
   navigateTo: (path: string) => ipcRenderer.invoke('navigate-to', path),
   focusWindow: () => ipcRenderer.invoke('focus-window'),
   openExternal: (url: string) => ipcRenderer.invoke('open-external', url),

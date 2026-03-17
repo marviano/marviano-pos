@@ -1415,7 +1415,8 @@ class SmartSyncService {
 
       const indexByTxId = new Map<string | number, number>();
       for (let idx = 0; idx < allTransactions.length; idx++) {
-        const id = (allTransactions[idx] as UnknownRecord).id ?? (allTransactions[idx] as UnknownRecord).uuid_id;
+        const rawId = (allTransactions[idx] as UnknownRecord).id ?? (allTransactions[idx] as UnknownRecord).uuid_id;
+        const id = typeof rawId === 'string' || typeof rawId === 'number' ? rawId : undefined;
         if (id !== undefined) indexByTxId.set(id, idx);
       }
 
@@ -1428,12 +1429,13 @@ class SmartSyncService {
 
         const result = await this.processBatch(batch, true, (tx, status) => {
           if (onProgress) {
-            const txId = (tx as UnknownRecord).id ?? (tx as UnknownRecord).uuid_id;
+            const rawTxId = (tx as UnknownRecord).id ?? (tx as UnknownRecord).uuid_id;
+            const txId = typeof rawTxId === 'string' || typeof rawTxId === 'number' ? rawTxId : undefined;
             const txIndex = txId !== undefined ? indexByTxId.get(txId) ?? -1 : -1;
             onProgress({
               current: txIndex >= 0 ? txIndex + 1 : 0,
               total: allTransactions.length,
-              transactionId: txId ?? '',
+              transactionId: txId !== undefined ? String(txId) : '',
               status
             });
           }

@@ -62,12 +62,12 @@
     "directories": {
       "output": "dist-electron"
     },
+    "compression": "maximum",
     "files": [
       "dist/**/*",
       "out/**/*",
       "out/_next/**/*",
-      "public/**/*",
-      "scripts/**/*"
+      "public/**/*"
     ],
     "win": {
       "target": "nsis",

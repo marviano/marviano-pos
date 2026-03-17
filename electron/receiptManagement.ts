@@ -9,13 +9,12 @@ const FALLBACK_CHECKER_TEMPLATE = `<html>
     * { margin: 0; padding: 0; box-sizing: border-box; color: black; }
     body { font-family: 'Arial', 'Helvetica', sans-serif; width: 22ch; max-width: 22ch; font-size: 8pt; font-weight: 600; line-height: 1.4; padding: 3mm 0 3mm 3mm; word-wrap: break-word; overflow-wrap: break-word; color: black; }
     .content { }
-    .row { display: table; width: calc(100% + 3mm); table-layout: fixed; margin-right: -3mm; }
-    .row > div { display: table-cell; }
+    .row { display: flex; justify-content: space-between; align-items: baseline; width: calc(100% + 3mm); margin-right: -3mm; }
     .counter { font-size: 9pt; font-weight: 700; }
     .pickup { text-align: left; font-size: 7pt; font-weight: 700; text-transform: uppercase; }
     .product { text-align: left; font-size: 7pt; font-weight: 600; }
     .customizations { text-align: left; font-size: 7pt; font-weight: 500; }
-    .number { font-size: 9pt; font-weight: 700; text-align: right; }
+    .number { font-size: 9pt; font-weight: 700; text-align: right; white-space: nowrap; }
     .footer { margin-top: 2mm; }
     .time { text-align: left; font-size: 7pt; font-weight: 500; }
   </style>
