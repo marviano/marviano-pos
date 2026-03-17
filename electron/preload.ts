@@ -204,6 +204,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   localDbDeleteUnsyncedTransactions: (businessId?: number) => ipcRenderer.invoke('localdb-delete-unsynced-transactions', businessId),
   localDbMarkTransactionsSynced: (transactionIds: string[]) => ipcRenderer.invoke('localdb-mark-transactions-synced', transactionIds),
   localDbResetTransactionSync: (transactionId: string) => ipcRenderer.invoke('localdb-reset-transaction-sync', transactionId),
+  localDbGetTransactionFingerprints: (businessId: number, from: string, to: string) => ipcRenderer.invoke('localdb-get-transaction-fingerprints', businessId, from, to),
+  localDbResetTransactionSyncBatch: (uuids: string[]) => ipcRenderer.invoke('localdb-reset-transaction-sync-batch', uuids),
   localDbResetFailedTransactions: () => ipcRenderer.invoke('localdb-reset-failed-transactions'),
 
   // Transaction Items

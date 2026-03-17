@@ -2,7 +2,7 @@ import { conflictResolutionService } from './conflictResolution';
 import { getApiUrl, cleanUrl, getPosWriteApiKey } from '@/lib/api';
 import { getAutoSyncEnabled, onAutoSyncSettingChanged } from './autoSyncSettings';
 import { validateNotNullFields, convertTransactionDatesForMySQL, convertShiftDatesForMySQL, cleanRefundForMySQL } from './syncUtils';
-import { runMatchCheck, getTodayWibDateString, getWibDateStringForDaysAgo, normalizeDateInput, type MatchCheckResult } from './verificationMatchCheck';
+import { runMatchCheck, getTodayWibDateString, normalizeDateInput, type MatchCheckResult } from './verificationMatchCheck';
 
 type UnknownRecord = Record<string, unknown>;
 
@@ -67,7 +67,7 @@ interface SyncConfig {
   requestTimeoutMs: number;
   requestRetries: number;
   requestRetryBaseDelayMs: number;
-  /** Number of past days to run verifikasi (find diff + re-queue). 0 = today only, 1 = today + yesterday, 2 = today + yesterday + day before. */
+  /** Number of past days to run verifikasi (find diff + re-queue). 0 = today only. */
   verifikasiLookbackDays: number;
 }
 
@@ -81,14 +81,14 @@ interface PendingTransaction {
 class SmartSyncService {
   private config: SyncConfig = {
     maxBatchSize: 10,
-    syncInterval: 30000,
+    syncInterval: 600000, // 10 minutes
     maxRetries: 3,
     retryDelay: 5000,
     serverLoadThreshold: 1000,
     requestTimeoutMs: 30000, // Per-request timeout so stalled calls don't block queue
     requestRetries: 3,
     requestRetryBaseDelayMs: 2000,
-    verifikasiLookbackDays: 1, // today + yesterday so VPS stays 1:1 with db_host
+    verifikasiLookbackDays: 0, // today only
   };
 
   private syncTimer: NodeJS.Timeout | null = null;
@@ -237,7 +237,6 @@ class SmartSyncService {
    * Returns sync result with count of synced transactions
    */
   private async syncPendingTransactions(): Promise<{ success: boolean; syncedCount: number; message: string }> {
-
     if (SMART_SYNC_VERBOSE) {
       console.log('🚀 [SMART SYNC] ===== STARTING SYNC =====', {
         isElectron,
@@ -269,6 +268,7 @@ class SmartSyncService {
     try {
       // Check if the method is available
       const electronAPI = typeof window !== 'undefined' ? (window as { electronAPI?: UnknownRecord }).electronAPI : undefined; if (!electronAPI?.localDbGetUnsyncedTransactions) {
+        this.isSyncing = false;
         console.error('❌ [SMART SYNC] localDbGetUnsyncedTransactions not available - Electron may need restart', {
           electronAPI: !!electronAPI,
           hasLocalDbGetUnsyncedTransactions: !!electronAPI?.localDbGetUnsyncedTransactions
@@ -276,21 +276,30 @@ class SmartSyncService {
         return { success: false, syncedCount: 0, message: 'Electron API not available' };
       }
 
-      // Verifikasi: find difference (local vs VPS) for today + lookback days, re-queue onlyInLocal + mismatches, log BEFORE per date
-      const datesWithDifferences: string[] = [];
-      let verifikasiRequeuedTotal = 0;
-      if (this.verificationBusinessId != null && electronAPI?.localDbGetTransactionsMatchData && electronAPI?.localDbResetTransactionSync) {
+      // When we have consecutive failures, do a single quick health-check first. If server is unreachable, skip the full pipeline to avoid high CPU from repeated failing fetches and retries.
+      if (this.consecutiveFailures >= 2) {
+        const reachable = await this.quickHealthCheck();
+        if (!reachable) {
+          this.isSyncing = false;
+          if (SMART_SYNC_VERBOSE) console.log('⏳ [SMART SYNC] Server unreachable (consecutive failures) - skipping full sync to reduce CPU');
+          return { success: false, syncedCount: 0, message: 'Server unreachable - backing off' };
+        }
+        this.consecutiveFailures = 0;
+      }
+
+      // Diff-first: re-queue only transactions that are missing or different on VPS (today only)
+      let diffRequeuedCount = 0;
+      if (this.verificationBusinessId != null && electronAPI?.localDbGetTransactionFingerprints && electronAPI?.localDbResetTransactionSyncBatch) {
         try {
-          const lookback = Math.max(0, this.config.verifikasiLookbackDays);
-          for (let daysAgo = 0; daysAgo <= lookback; daysAgo++) {
-            const dateWib = getWibDateStringForDaysAgo(daysAgo);
-            const { hadDifferences: hadDiffs, requeuedCount } = await this.runVerifikasiForDateAndRequeue(electronAPI, dateWib);
-            verifikasiRequeuedTotal += requeuedCount;
-            if (hadDiffs) datesWithDifferences.push(dateWib);
-          }
-          this.lastVerifikasiRequeuedTotal = verifikasiRequeuedTotal;
-        } catch (verifErr) {
-          if (SMART_SYNC_VERBOSE) console.warn('⚠️ [SMART SYNC] Auto verifikasi failed (non-fatal, continuing sync):', verifErr instanceof Error ? verifErr.message : String(verifErr));
+          const todayWib = getTodayWibDateString();
+          const fromIsoRange = normalizeDateInput(todayWib, false) ?? todayWib;
+          const toIsoRange = normalizeDateInput(todayWib, true) ?? todayWib;
+          diffRequeuedCount = await this.diffAndUploadChanged(this.verificationBusinessId, fromIsoRange, toIsoRange);
+          this.lastVerifikasiRequeuedTotal = diffRequeuedCount;
+          if (SMART_SYNC_VERBOSE && diffRequeuedCount > 0) console.log(`🔄 [SMART SYNC] Diff-first: ${diffRequeuedCount} transaction(s) queued for upload (missing or changed on VPS)`);
+        } catch (diffErr) {
+          if (SMART_SYNC_VERBOSE) console.warn('⚠️ [SMART SYNC] Diff-first failed (non-fatal, continuing sync):', diffErr instanceof Error ? diffErr.message : String(diffErr));
+          this.lastVerifikasiRequeuedTotal = 0;
         }
       } else {
         this.lastVerifikasiRequeuedTotal = 0;
@@ -298,24 +307,7 @@ class SmartSyncService {
 
       let syncedTransactionCount = 0;
       try {
-        // Use same upsert path as "Upsert salespulse.cc" button for verification business + today+yesterday
-        // (localDbGetAllTransactions + processBatch(forceSync:true)) so VPS stays 1:1 with db_host
-        if (this.verificationBusinessId != null && electronAPI?.localDbGetAllTransactions) {
-          const lookback = Math.max(0, this.config.verifikasiLookbackDays);
-          const fromDateWib = getWibDateStringForDaysAgo(lookback);
-          const toDateWib = getTodayWibDateString();
-          const fromIsoRange = normalizeDateInput(fromDateWib, false) ?? fromDateWib;
-          const toIsoRange = normalizeDateInput(toDateWib, true) ?? toDateWib;
-          if (SMART_SYNC_VERBOSE) console.log(`🔄 [SMART SYNC] Running verification-range upsert (same as Upsert salespulse.cc): businessId=${this.verificationBusinessId} ${fromDateWib}–${toDateWib}`);
-          const resyncResult = await this.resyncAllTransactions(this.verificationBusinessId, undefined, fromIsoRange, toIsoRange);
-          syncedTransactionCount = resyncResult.syncedCount;
-          if (SMART_SYNC_VERBOSE) console.log(`✅ [SMART SYNC] Verification-range upsert done: ${resyncResult.syncedCount} synced, ${resyncResult.skippedCount} skipped, ${resyncResult.failedCount} failed, success=${resyncResult.success}`);
-        } else {
-          if (this.verificationBusinessId == null && SMART_SYNC_VERBOSE) console.warn('⚠️ [SMART SYNC] Skipping verification-range upsert: no business selected (verificationBusinessId is null). Select business on POS or re-login.');
-          else if (!electronAPI?.localDbGetAllTransactions && SMART_SYNC_VERBOSE) console.warn('⚠️ [SMART SYNC] Skipping verification-range upsert: localDbGetAllTransactions not available.');
-        }
-
-        // Then process any remaining pending (other businesses, or outside verifikasi range)
+        // Process any pending transactions (including those just re-queued by diff)
         if (SMART_SYNC_VERBOSE) console.log('🔍 [SMART SYNC] Fetching pending transactions...');
         const pendingTransactions = await (electronAPI.localDbGetUnsyncedTransactions as (businessId?: number, includeItems?: boolean) => Promise<PendingTransaction[]>)(undefined, false);
         if (SMART_SYNC_VERBOSE) {
@@ -348,17 +340,6 @@ class SmartSyncService {
           stack: txError instanceof Error ? txError.stack : undefined,
           errorObject: txError
         });
-      }
-
-      // Log AFTER upsert for each date that had differences at BEFORE (paired before/after per date)
-      if (datesWithDifferences.length > 0 && this.verificationBusinessId != null && electronAPI?.localDbGetTransactionsMatchData) {
-        try {
-          for (const dateWib of datesWithDifferences) {
-            await this.runVerifikasiForDateLogOnly(electronAPI, dateWib);
-          }
-        } catch (afterErr) {
-          if (SMART_SYNC_VERBOSE) console.warn('⚠️ [SMART SYNC] After-upsert verification log failed (non-fatal):', afterErr instanceof Error ? afterErr.message : String(afterErr));
-        }
       }
 
       // Also sync shifts
@@ -484,13 +465,6 @@ class SmartSyncService {
         syncedCount: 0,
         message: `Sync failed: ${error instanceof Error ? error.message : String(error)}`
       };
-
-      // Exponential backoff on consecutive failures
-      if (this.consecutiveFailures >= 3) {
-        const backoffDelay = Math.min(300000, this.config.retryDelay * Math.pow(2, this.consecutiveFailures));
-        if (SMART_SYNC_VERBOSE) console.log(`⏳ [SMART SYNC] Backing off for ${backoffDelay}ms due to consecutive failures (count: ${this.consecutiveFailures})`);
-        await this.delay(backoffDelay);
-      }
     } finally {
       this.isSyncing = false;
       if (SMART_SYNC_VERBOSE) console.log('🏁 [SMART SYNC] Sync process finished (isSyncing set to false)');
@@ -512,23 +486,24 @@ class SmartSyncService {
     let skippedCount = 0;
     let failedCount = 0;
 
+    // Check server load once per batch (not per transaction)
+    const serverLoad = await this.checkServerLoad();
+    if (serverLoad > this.config.serverLoadThreshold) {
+      if (SMART_SYNC_VERBOSE) console.log(`⚠️ [SMART SYNC] Server load high (${serverLoad}ms) - delaying entire batch`);
+      await this.delay(5000);
+      for (const transaction of batch) {
+        skippedCount++;
+        if (onProgress) onProgress(transaction, 'skipped: server load high');
+      }
+      return { syncedCount, skippedCount, failedCount };
+    }
+
     for (let i = 0; i < batch.length; i++) {
       const transaction = batch[i];
       const transactionIndex = i + 1;
       if (SMART_SYNC_VERBOSE) console.log(`📤 [SMART SYNC] Processing transaction ${transactionIndex}/${batch.length}: ${transaction.id || 'unknown'}`);
 
       try {
-        // Check server load before processing
-        const serverLoad = await this.checkServerLoad();
-        if (serverLoad > this.config.serverLoadThreshold) {
-          if (SMART_SYNC_VERBOSE) console.log(`⚠️ [SMART SYNC] Server load high (${serverLoad}ms) - delaying sync`);
-          await this.delay(5000);
-          skippedCount++;
-          if (onProgress) onProgress(transaction, 'skipped: server load high');
-          continue;
-        }
-
-
         // Use transaction data directly from transactions table
         let transactionData = transaction as UnknownRecord;
 
@@ -1217,6 +1192,26 @@ class SmartSyncService {
   }
 
   /**
+   * Quick health-check with short timeout. Used to skip full sync when server is unreachable (saves CPU).
+   * Returns true if server responded OK, false on network error or timeout.
+   */
+  private async quickHealthCheck(): Promise<boolean> {
+    try {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 5000);
+      const response = await fetch(cleanUrl(getApiUrl('/api/health-check')), {
+        method: 'GET',
+        cache: 'no-store',
+        signal: controller.signal,
+      });
+      clearTimeout(timeoutId);
+      return response.ok;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
    * Check server load by measuring response time
    */
   private async checkServerLoad(): Promise<number> {
@@ -1418,7 +1413,12 @@ class SmartSyncService {
       let skippedCount = 0;
       let failedCount = 0;
 
-      // Process in batches
+      const indexByTxId = new Map<string | number, number>();
+      for (let idx = 0; idx < allTransactions.length; idx++) {
+        const id = (allTransactions[idx] as UnknownRecord).id ?? (allTransactions[idx] as UnknownRecord).uuid_id;
+        if (id !== undefined) indexByTxId.set(id, idx);
+      }
+
       const batches = this.createBatches(allTransactions, this.config.maxBatchSize);
       if (SMART_SYNC_VERBOSE) console.log(`📊 [RE-SYNC] Processing ${batches.length} batch(es)`);
 
@@ -1428,11 +1428,12 @@ class SmartSyncService {
 
         const result = await this.processBatch(batch, true, (tx, status) => {
           if (onProgress) {
-            const txIndex = allTransactions.findIndex(t => (t as any).id === (tx as any).id);
+            const txId = (tx as UnknownRecord).id ?? (tx as UnknownRecord).uuid_id;
+            const txIndex = txId !== undefined ? indexByTxId.get(txId) ?? -1 : -1;
             onProgress({
-              current: txIndex + 1,
+              current: txIndex >= 0 ? txIndex + 1 : 0,
               total: allTransactions.length,
-              transactionId: (tx as any).id,
+              transactionId: txId ?? '',
               status
             });
           }
@@ -1512,6 +1513,67 @@ class SmartSyncService {
         console.warn('⚠️ [SMART SYNC] Failed to write verification diff log:', e);
       }
     }
+  }
+
+  /**
+   * Diff-first upload: compare local vs VPS fingerprints for a date range, re-queue only missing or changed transactions.
+   * Returns the number of transactions queued for upload (reset to pending).
+   */
+  private async diffAndUploadChanged(businessId: number, from: string, to: string): Promise<number> {
+    const electronAPI = typeof window !== 'undefined' ? (window as { electronAPI?: UnknownRecord }).electronAPI : undefined;
+    if (!electronAPI?.localDbGetTransactionFingerprints || !electronAPI?.localDbResetTransactionSyncBatch) {
+      return 0;
+    }
+
+    const getFingerprints = electronAPI.localDbGetTransactionFingerprints as (businessId: number, from: string, to: string) => Promise<Array<{ uuid_id: string; fp: string }>>;
+    const localList = await getFingerprints(businessId, from, to);
+    const localMap = new Map<string, string>();
+    for (const { uuid_id, fp } of localList) {
+      if (uuid_id) localMap.set(String(uuid_id), fp);
+    }
+
+    const baseUrl = getApiUrl('/api/transactions/fingerprint');
+    const url = `${baseUrl}?business_id=${businessId}&from_iso=${encodeURIComponent(from)}&to_iso=${encodeURIComponent(to)}`;
+    const headers: Record<string, string> = {};
+    const posKey = getPosWriteApiKey();
+    if (posKey) headers['X-POS-API-Key'] = posKey;
+
+    let vpsList: Array<{ uuid_id: string; fp: string }> = [];
+    try {
+      const { response } = await this.fetchWithTimeoutAndRetry(
+        url,
+        { method: 'GET', headers, cache: 'no-store' },
+        'fingerprint'
+      );
+      if (response.ok) {
+        const data = (await response.json()) as { success?: boolean; fingerprints?: Array<{ uuid_id: string; fp: string }> };
+        if (data?.success && Array.isArray(data.fingerprints)) vpsList = data.fingerprints;
+      }
+    } catch (err) {
+      if (SMART_SYNC_VERBOSE) console.warn('⚠️ [SMART SYNC] Fingerprint fetch failed (non-fatal):', err instanceof Error ? err.message : String(err));
+      return 0;
+    }
+
+    const vpsMap = new Map<string, string>();
+    for (const { uuid_id, fp } of vpsList) {
+      if (uuid_id) vpsMap.set(String(uuid_id), fp);
+    }
+
+    const missingOrChanged: string[] = [];
+    for (const [uuid, localFp] of localMap) {
+      const vpsFp = vpsMap.get(uuid);
+      if (vpsFp === undefined) missingOrChanged.push(uuid);
+      else if (vpsFp !== localFp) missingOrChanged.push(uuid);
+    }
+    if (SMART_SYNC_VERBOSE && vpsList.length > 0 && localMap.size > 0 && missingOrChanged.length > 0) {
+      const onlyOnVps = [...vpsMap.keys()].filter((k) => !localMap.has(k));
+      if (onlyOnVps.length > 0) console.log(`📋 [SMART SYNC] Only on VPS (awareness): ${onlyOnVps.length} transaction(s)`);
+    }
+
+    if (missingOrChanged.length === 0) return 0;
+    const resetBatch = electronAPI.localDbResetTransactionSyncBatch as (uuids: string[]) => Promise<{ success?: boolean }>;
+    await resetBatch(missingOrChanged);
+    return missingOrChanged.length;
   }
 
   /**

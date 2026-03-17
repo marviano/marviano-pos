@@ -3,7 +3,7 @@ import * as path from 'path';
 import * as fs from 'fs';
 import * as os from 'os';
 import { PrinterManagementService } from './printerManagement';
-import { initializeMySQLPool, getMySQLPool, executeQuery, executeQueryOne, executeUpdate, executeUpsert, executeTransaction, getConnection, initializeSystemPosPool, executeSystemPosQuery, executeSystemPosQueryOne, executeSystemPosUpdate, executeSystemPosTransaction, executeSystemPosDdl, executeSystemPosDdlIgnoreDup, executeDdlIgnoreDup, toMySQLDateTime, toMySQLTimestamp, testDatabaseConnection, insertTransactionToSystemPos, upsertProductsFromMainToSystemPos, syncRefundedTransactionsToSystemPos, executeQueryOnLocalSalespulse } from './mysqlDb';
+import { initializeMySQLPool, getMySQLPool, executeQuery, executeQueryOne, executeUpdate, executeUpsert, executeTransaction, getConnection, initializeSystemPosPool, executeSystemPosQuery, executeSystemPosQueryOne, executeSystemPosUpdate, executeSystemPosTransaction, executeSystemPosDdl, executeSystemPosDdlIgnoreDup, executeDdlIgnoreDup, toMySQLDateTime, toMySQLTimestamp, testDatabaseConnection, insertTransactionToSystemPos, upsertProductsFromMainToSystemPos, syncRefundedTransactionsToSystemPos, executeQueryOnLocalSalespulse, localDbGetTransactionFingerprints, localDbResetTransactionSyncBatch } from './mysqlDb';
 import { readConfig, writeConfig, resetConfig, getDbConfig, getApiUrl, type AppConfig } from './configManager';
 import { ReceiptManagementService, ReceiptTemplateData } from './receiptManagement';
 
@@ -7939,6 +7939,28 @@ function createWindows(): void {
       return { success: true };
     } catch (error) {
       console.error('Error resetting transaction sync status:', error);
+      return { success: false };
+    }
+  });
+
+  // Get transaction fingerprints for diff-first sync (local db_host)
+  ipcMain.handle('localdb-get-transaction-fingerprints', async (event, businessId: number, from: string, to: string) => {
+    try {
+      return await localDbGetTransactionFingerprints(businessId, from, to);
+    } catch (error) {
+      console.error('Error getting transaction fingerprints:', error);
+      return [];
+    }
+  });
+
+  // Reset sync status to pending for multiple transactions (batched)
+  ipcMain.handle('localdb-reset-transaction-sync-batch', async (event, uuids: string[]) => {
+    try {
+      if (!Array.isArray(uuids) || uuids.length === 0) return { success: true };
+      await localDbResetTransactionSyncBatch(uuids);
+      return { success: true };
+    } catch (error) {
+      console.error('Error resetting transaction sync batch:', error);
       return { success: false };
     }
   });

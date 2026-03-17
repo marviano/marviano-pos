@@ -306,6 +306,93 @@ export async function executeUpdate(
   }
 }
 
+/** Fingerprint row for diff-first sync: same formula as VPS /api/transactions/fingerprint */
+export interface TransactionFingerprint {
+  uuid_id: string;
+  fp: string;
+}
+
+/**
+ * Get transaction fingerprints for a date range (local db_host).
+ * Used by Smart Sync to diff against VPS and only re-queue missing/changed transactions.
+ */
+export async function localDbGetTransactionFingerprints(
+  businessId: number,
+  from: string,
+  to: string
+): Promise<TransactionFingerprint[]> {
+  const startIso = from ? new Date(from) : null;
+  const endIso = to ? new Date(to) : null;
+  const mysqlStart = startIso && !Number.isNaN(startIso.getTime()) ? toMySQLDateTime(from) : null;
+  const mysqlEnd = endIso && !Number.isNaN(endIso.getTime()) ? toMySQLDateTime(to) : null;
+
+  let query = `
+    SELECT
+      t.uuid_id,
+      COALESCE(t.status, 'completed') AS status,
+      COALESCE(t.total_amount, 0) AS total_amount,
+      COALESCE(t.final_amount, 0) AS final_amount,
+      COALESCE(t.refund_total, 0) AS refund_total,
+      COALESCE(t.refund_status, 'none') AS refund_status,
+      (SELECT COUNT(*) FROM transaction_items ti WHERE ti.uuid_transaction_id = t.uuid_id AND (ti.production_status IS NULL OR ti.production_status != 'cancelled')) AS item_count,
+      (SELECT COUNT(*) FROM transaction_items ti WHERE ti.uuid_transaction_id = t.uuid_id AND ti.production_status = 'cancelled') AS cancelled_item_count,
+      (SELECT COALESCE(SUM(refund_amount), 0) FROM transaction_refunds tr WHERE tr.transaction_uuid = t.uuid_id AND tr.status IN ('pending', 'completed')) AS refund_from_table
+    FROM transactions t
+    WHERE t.business_id = ? AND t.status IN ('completed', 'refunded')
+  `;
+  const params: (string | number | null)[] = [businessId];
+  if (mysqlStart) {
+    query += ' AND t.created_at >= ?';
+    params.push(mysqlStart);
+  }
+  if (mysqlEnd) {
+    query += ' AND t.created_at <= ?';
+    params.push(mysqlEnd);
+  }
+  query += ' ORDER BY t.created_at ASC';
+
+  const rows = await executeQuery<{
+    uuid_id: string;
+    status: string;
+    total_amount: number;
+    final_amount: number;
+    refund_total: number;
+    refund_status: string;
+    item_count: number;
+    cancelled_item_count: number;
+    refund_from_table: number;
+  }>(query, params);
+
+  return rows.map((r) => {
+    const refundTotal = Math.max(Number(r.refund_total) || 0, Number(r.refund_from_table) || 0);
+    const refundStatus = refundTotal > 0
+      ? (refundTotal >= (Number(r.final_amount) || 0) - 0.01 ? 'full' : 'partial')
+      : (r.refund_status || 'none');
+    const normalizedStatus = (r.status === 'completed' || r.status === 'paid') ? 'paid' : (r.status || 'paid');
+    const fp = [
+      normalizedStatus,
+      Number(r.total_amount) ?? 0,
+      Number(r.final_amount) ?? 0,
+      Number(r.item_count) ?? 0,
+      Number(r.cancelled_item_count) ?? 0,
+      refundTotal,
+      refundStatus,
+    ].join('|');
+    return { uuid_id: r.uuid_id, fp };
+  });
+}
+
+/**
+ * Reset sync status to pending for multiple transactions (batched).
+ * Used by Smart Sync diffAndUploadChanged to re-queue only missing/changed UUIDs.
+ */
+export async function localDbResetTransactionSyncBatch(uuids: string[]): Promise<void> {
+  if (uuids.length === 0) return;
+  const placeholders = uuids.map(() => '?').join(',');
+  const sql = `UPDATE transactions SET synced_at = NULL, sync_status = ? WHERE uuid_id IN (${placeholders})`;
+  await executeUpdate(sql, ['pending', ...uuids]);
+}
+
 export type ExecuteTransactionOptions = {
   /** When true, run SET FOREIGN_KEY_CHECKS=0 for this connection so inserts succeed on empty DB (e.g. structure-only restore). */
   disableForeignKeyChecks?: boolean;
