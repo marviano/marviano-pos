@@ -377,6 +377,9 @@ const TransactionDetailModal: React.FC<TransactionDetailModalProps> = ({
       const receiptItems: Array<{ name: string; quantity: number; price: number; total_price: number }> = [];
 
       transaction.items.forEach(item => {
+        // Receipts/bills should not include cancelled line items
+        if (item.production_status === 'cancelled') return;
+
         // Calculate base price (unit_price already includes customizations, but we need to format the name)
         const itemPrice = item.unit_price;
 

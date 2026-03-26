@@ -584,6 +584,10 @@ export default function ActiveOrdersTab({ businessId, isOpen, onLoadTransaction,
       const receiptItems: Array<{ name: string; quantity: number; price: number; total_price: number }> = [];
 
       (itemsArray as Array<Record<string, unknown>>).forEach((item) => {
+        // Bills should not include cancelled line items
+        const productionStatus = typeof item.production_status === 'string' ? item.production_status : null;
+        if (productionStatus === 'cancelled') return;
+
         const productId = typeof item.product_id === 'number' ? item.product_id : (typeof item.product_id === 'string' ? parseInt(item.product_id, 10) : null);
         if (!productId) return;
 
