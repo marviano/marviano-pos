@@ -6,6 +6,7 @@ import { PrinterManagementService } from './printerManagement';
 import { initializeMySQLPool, getMySQLPool, executeQuery, executeQueryOne, executeUpdate, executeUpsert, executeTransaction, getConnection, initializeSystemPosPool, executeSystemPosQuery, executeSystemPosQueryOne, executeSystemPosUpdate, executeSystemPosTransaction, executeSystemPosDdl, executeSystemPosDdlIgnoreDup, executeDdlIgnoreDup, toMySQLDateTime, toMySQLTimestamp, testDatabaseConnection, insertTransactionToSystemPos, upsertProductsFromMainToSystemPos, syncRefundedTransactionsToSystemPos, executeQueryOnLocalSalespulse, localDbGetTransactionFingerprints, localDbResetTransactionSyncBatch } from './mysqlDb';
 import { readConfig, writeConfig, resetConfig, getDbConfig, getApiUrl, type AppConfig } from './configManager';
 import { ReceiptManagementService, ReceiptTemplateData } from './receiptManagement';
+import { checkReaderConnected, enrollFingerprint, identifyFingerprint, setVKey, type StoredTemplate, type CaptureEvent } from './fingerprintManager';
 
 // Store original console functions early (before they might be suppressed)
 // These are used to bypass console suppression for critical error messages
@@ -948,6 +949,30 @@ function createWindows(): void {
         await executeDdlIgnoreDup("ALTER TABLE transactions ADD COLUMN last_sync_error VARCHAR(512) DEFAULT NULL COMMENT 'Last sync failure reason' AFTER last_sync_attempt");
       } catch (migErr) {
         console.warn('⚠️ Main DB migration (transaction_items.waiter_id) failed (non-fatal):', (migErr as Error)?.message);
+      }
+    })();
+
+    // Load fingerprint credentials from local_settings and pass to fingerprintManager
+    void (async () => {
+      try {
+        const rows = await executeQuery(
+          "SELECT setting_key, setting_value FROM local_settings WHERE setting_key IN ('fingerprint_vkey', 'fingerprint_sn', 'fingerprint_vc', 'fingerprint_ac')"
+        ) as { setting_key: string; setting_value: string }[];
+        
+        const settings: Record<string, string> = {};
+        rows.forEach(r => settings[r.setting_key] = r.setting_value);
+
+        if (settings.fingerprint_sn && settings.fingerprint_vc && settings.fingerprint_ac) {
+          const { checkReaderConnected, setCredentials } = require('./fingerprintManager');
+          setCredentials(settings.fingerprint_sn, settings.fingerprint_vc, settings.fingerprint_ac);
+          console.log('✅ FlexCode Fingerprint credentials loaded from local_settings');
+        } else if (settings.fingerprint_vkey) {
+          const { setVKey } = require('./fingerprintManager');
+          setVKey(settings.fingerprint_vkey);
+          console.log('✅ Legacy Fingerprint VKey loaded from local_settings');
+        }
+      } catch (err) {
+        console.warn('⚠️ Failed to load fingerprint settings from local_settings:', err);
       }
     })();
 
@@ -17601,6 +17626,375 @@ ipcMain.handle('localdb-upsert-restaurant-layout-elements', async (event, rows: 
     return { success: true, skipped: skippedCount };
   } catch (error) {
     console.error('[IPC] localdb-upsert-restaurant-layout-elements error details:', { error: error instanceof Error ? error.message : String(error), stack: error instanceof Error ? error.stack : undefined, rowCount: Array.isArray(rows) ? rows.length : 'not array' });
+    return { success: false, error: error instanceof Error ? error.message : String(error) };
+  }
+});
+
+// ─── Absensi / Attendance ─────────────────────────────────────────────────────
+
+/** Check whether the fingerprint reader is reachable */
+ipcMain.handle('absensi-check-reader', async () => {
+  try {
+    const result = await checkReaderConnected();
+    return { success: true, ...result };
+  } catch (error) {
+    return { success: false, connected: false, message: error instanceof Error ? error.message : String(error) };
+  }
+});
+
+/**
+ * Start fingerprint enrollment for an employee.
+ * Progress events are pushed back to the renderer via 'absensi-enroll-progress'.
+ * Returns the serialized template when all samples have been captured.
+ */
+ipcMain.handle('absensi-start-enroll', async (event, employeeId: number) => {
+  try {
+    if (!employeeId) throw new Error('Employee ID is required for enrollment.');
+    const result = await enrollFingerprint(employeeId, (progress: CaptureEvent) => {
+      event.sender.send('absensi-enroll-progress', progress);
+    });
+    return { success: true, templateBase64: result.templateBase64, quality: result.quality };
+  } catch (error) {
+    const err = error as { code?: string; message?: string };
+    return { success: false, error: err.message ?? String(error), code: err.code };
+  }
+});
+
+/**
+ * Start 1:N fingerprint identification.
+ * Loads all templates from DB, captures one scan, returns matched employee.
+ * Progress events are pushed via 'absensi-identify-progress'.
+ */
+ipcMain.handle('absensi-start-identify', async (event, businessId?: number) => {
+  try {
+    // Load all templates for the business (or all if no businessId)
+    let sql = `
+      SELECT ft.employee_id, ft.template_data
+      FROM fingerprint_templates ft
+      JOIN employees e ON e.id = ft.employee_id
+      WHERE 1=1`;
+    const params: (string | number | boolean | null)[] = [];
+    if (businessId) {
+      sql += ' AND e.business_id = ?';
+      params.push(businessId);
+    }
+    const rows = await executeQuery(sql, params) as { employee_id: number; template_data: string | Buffer }[];
+    const templates: StoredTemplate[] = rows.map(r => ({
+      employee_id: r.employee_id,
+      template_data: Buffer.isBuffer(r.template_data)
+        ? r.template_data.toString('base64')
+        : String(r.template_data),
+    }));
+
+    const result = await identifyFingerprint(templates, (progress: CaptureEvent) => {
+      event.sender.send('absensi-identify-progress', progress);
+    });
+    return { success: true, employeeId: result.employeeId, score: result.score };
+  } catch (error) {
+    const err = error as { code?: string; message?: string };
+    return { success: false, error: err.message ?? String(error), code: err.code };
+  }
+});
+
+/** Save an enrolled fingerprint template to the local DB */
+ipcMain.handle('absensi-save-template', async (_event, data: {
+  employee_id: number;
+  finger_index: number;
+  template_data: string;   // base64
+  quality?: number;
+  enrolled_by?: number;
+}) => {
+  try {
+    const result = await executeUpsert(
+      `INSERT INTO fingerprint_templates
+         (employee_id, finger_index, template_data, quality, enrolled_by, sync_status)
+       VALUES (?, ?, ?, ?, ?, 'pending')`,
+      [data.employee_id, data.finger_index ?? 0, data.template_data, data.quality ?? null, data.enrolled_by ?? null]
+    );
+    return { success: true, id: (result as { insertId?: number }).insertId };
+  } catch (error) {
+    return { success: false, error: error instanceof Error ? error.message : String(error) };
+  }
+});
+
+/** Delete a fingerprint template by id */
+ipcMain.handle('absensi-delete-template', async (_event, id: number) => {
+  try {
+    await executeUpdate('DELETE FROM fingerprint_templates WHERE id = ?', [id]);
+    return { success: true };
+  } catch (error) {
+    return { success: false, error: error instanceof Error ? error.message : String(error) };
+  }
+});
+
+/** Get all fingerprint templates for a specific employee */
+ipcMain.handle('absensi-get-templates-by-employee', async (_event, employeeId: number) => {
+  try {
+    const rows = await executeQuery(
+      `SELECT id, employee_id, finger_index, quality, enrolled_at, sync_status
+       FROM fingerprint_templates WHERE employee_id = ? ORDER BY enrolled_at DESC`,
+      [employeeId]
+    );
+    return { success: true, data: rows };
+  } catch (error) {
+    return { success: false, error: error instanceof Error ? error.message : String(error) };
+  }
+});
+
+/**
+ * Record a clock-in or clock-out event.
+ * Automatically determines status (on_time / late) by comparing scan_at to
+ * the matching schedule_shift_cache row.
+ */
+ipcMain.handle('absensi-create-attendance-log', async (_event, data: {
+  employee_id: number;
+  business_id: number;
+  clock_type: 'clock_in' | 'clock_out';
+  scan_at: string;           // ISO 8601 UTC
+  match_score?: number;
+  notes?: string;
+}) => {
+  try {
+    const scanAt = new Date(data.scan_at);
+    // UTC time-of-day in HH:MM:SS for schedule comparison
+    const scanTimeStr = scanAt.toISOString().substring(11, 19);
+    const scanDateStr = scanAt.toISOString().substring(0, 10);
+
+    // Find the active schedule shift for this employee at the scan time
+    const shiftRows = await executeQuery(
+      `SELECT ssc.id AS shift_id, ssc.start_time, ssc.end_time, ssc.late_tolerance_minutes
+       FROM employee_schedules_cache esc
+       JOIN schedules_cache sc    ON sc.id = esc.schedule_id AND sc.is_active = 1
+       JOIN schedule_shifts_cache ssc ON ssc.schedule_id = sc.id
+       WHERE esc.employee_id = ?
+         AND esc.effective_date <= ?
+         AND (esc.end_date IS NULL OR esc.end_date >= ?)
+         AND ? BETWEEN ssc.start_time AND ssc.end_time
+       ORDER BY ssc.start_time
+       LIMIT 1`,
+      [data.employee_id, scanDateStr, scanDateStr, scanTimeStr]
+    ) as { shift_id: number; start_time: string; end_time: string; late_tolerance_minutes: number }[];
+
+    let scheduleShiftId: number | null = null;
+    let status: string | null = null;
+    let lateMinutes = 0;
+
+    if (shiftRows.length > 0 && data.clock_type === 'clock_in') {
+      const shift = shiftRows[0];
+      scheduleShiftId = shift.shift_id;
+
+      // Parse start_time (HH:MM:SS) into today's UTC Date for comparison
+      const [sh, sm] = shift.start_time.split(':').map(Number);
+      const shiftStart = new Date(scanAt);
+      shiftStart.setUTCHours(sh, sm, 0, 0);
+
+      const diffMs = scanAt.getTime() - shiftStart.getTime();
+      const diffMin = Math.round(diffMs / 60_000);
+      const tolerance = shift.late_tolerance_minutes ?? 0;
+
+      if (diffMin > tolerance) {
+        status = 'late';
+        lateMinutes = diffMin;
+      } else {
+        status = 'on_time';
+        lateMinutes = 0;
+      }
+    } else if (shiftRows.length === 0) {
+      status = 'outside_schedule';
+    }
+
+    const result = await executeUpsert(
+      `INSERT INTO attendance_logs
+         (employee_id, business_id, schedule_shift_id, clock_type, scan_at,
+          status, late_minutes, match_score, notes, sync_status)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')`,
+      [
+        data.employee_id, data.business_id, scheduleShiftId,
+        data.clock_type, toMySQLDateTime(new Date(data.scan_at)),
+        status, lateMinutes, data.match_score ?? null, data.notes ?? null,
+      ]
+    );
+    return {
+      success: true,
+      id: (result as { insertId?: number }).insertId,
+      status,
+      lateMinutes,
+      scheduleShiftId,
+    };
+  } catch (error) {
+    return { success: false, error: error instanceof Error ? error.message : String(error) };
+  }
+});
+
+/** Query attendance logs with optional filters */
+ipcMain.handle('absensi-get-attendance-logs', async (_event, filters?: {
+  business_id?: number;
+  employee_id?: number;
+  date_from?: string;  // YYYY-MM-DD UTC
+  date_to?: string;
+  limit?: number;
+}) => {
+  try {
+    const params: (string | number | boolean | null)[] = [];
+    let sql = `
+      SELECT al.*, e.nama_karyawan, e.color AS employee_color,
+             ep.nama_jabatan
+      FROM attendance_logs al
+      JOIN employees e ON e.id = al.employee_id
+      LEFT JOIN employees_position ep ON ep.id = e.jabatan_id
+      WHERE 1=1`;
+
+    if (filters?.business_id) { sql += ' AND al.business_id = ?'; params.push(filters.business_id); }
+    if (filters?.employee_id) { sql += ' AND al.employee_id = ?'; params.push(filters.employee_id); }
+    if (filters?.date_from)   { sql += ' AND DATE(al.scan_at) >= ?'; params.push(filters.date_from); }
+    if (filters?.date_to)     { sql += ' AND DATE(al.scan_at) <= ?'; params.push(filters.date_to); }
+
+    sql += ' ORDER BY al.scan_at DESC';
+    sql += ` LIMIT ${Math.min(filters?.limit ?? 200, 1000)}`;
+
+    const rows = await executeQuery(sql, params);
+    return { success: true, data: rows };
+  } catch (error) {
+    return { success: false, error: error instanceof Error ? error.message : String(error) };
+  }
+});
+
+/**
+ * Returns each employee's latest attendance status for today (UTC date).
+ * Used to show who is currently clocked in.
+ */
+ipcMain.handle('absensi-get-today-status', async (_event, businessId: number) => {
+  try {
+    const today = new Date().toISOString().substring(0, 10);  // YYYY-MM-DD
+    const rows = await executeQuery(
+      `SELECT al.employee_id, al.clock_type, al.scan_at, al.status, al.late_minutes,
+              e.nama_karyawan, e.color AS employee_color
+       FROM attendance_logs al
+       JOIN employees e ON e.id = al.employee_id
+       WHERE al.business_id = ?
+         AND DATE(al.scan_at) = ?
+         AND al.id = (
+           SELECT MAX(al2.id)
+           FROM attendance_logs al2
+           WHERE al2.employee_id = al.employee_id
+             AND DATE(al2.scan_at) = ?
+         )
+       ORDER BY al.scan_at DESC`,
+      [businessId, today, today]
+    );
+    return { success: true, data: rows };
+  } catch (error) {
+    return { success: false, error: error instanceof Error ? error.message : String(error) };
+  }
+});
+
+/** Upsert schedule cache rows synced from VPS */
+ipcMain.handle('absensi-upsert-schedules-cache', async (_event, payload: {
+  schedules: { id: number; business_id: number; name: string; is_active: number }[];
+  shifts: { id: number; schedule_id: number; name?: string; start_time: string; end_time: string; late_tolerance_minutes: number }[];
+  employeeSchedules: { id: number; employee_id: number; schedule_id: number; effective_date: string; end_date: string | null }[];
+}) => {
+  try {
+    const queries: { sql: string; params: (string | number | boolean | null)[] }[] = [];
+
+    for (const s of (payload.schedules ?? [])) {
+      queries.push({
+        sql: `INSERT INTO schedules_cache (id, business_id, name, is_active)
+              VALUES (?, ?, ?, ?)
+              ON DUPLICATE KEY UPDATE name=VALUES(name), is_active=VALUES(is_active), synced_at=CURRENT_TIMESTAMP`,
+        params: [s.id, s.business_id, s.name, s.is_active],
+      });
+    }
+    for (const sh of (payload.shifts ?? [])) {
+      queries.push({
+        sql: `INSERT INTO schedule_shifts_cache (id, schedule_id, name, start_time, end_time, late_tolerance_minutes)
+              VALUES (?, ?, ?, ?, ?, ?)
+              ON DUPLICATE KEY UPDATE name=VALUES(name), start_time=VALUES(start_time),
+                end_time=VALUES(end_time), late_tolerance_minutes=VALUES(late_tolerance_minutes),
+                synced_at=CURRENT_TIMESTAMP`,
+        params: [sh.id, sh.schedule_id, sh.name ?? null, sh.start_time, sh.end_time, sh.late_tolerance_minutes],
+      });
+    }
+    for (const es of (payload.employeeSchedules ?? [])) {
+      queries.push({
+        sql: `INSERT INTO employee_schedules_cache (id, employee_id, schedule_id, effective_date, end_date)
+              VALUES (?, ?, ?, ?, ?)
+              ON DUPLICATE KEY UPDATE effective_date=VALUES(effective_date), end_date=VALUES(end_date),
+                synced_at=CURRENT_TIMESTAMP`,
+        params: [es.id, es.employee_id, es.schedule_id, es.effective_date, es.end_date ?? null],
+      });
+    }
+
+    if (queries.length > 0) await executeTransaction(queries);
+    return { success: true, upserted: queries.length };
+  } catch (error) {
+    return { success: false, error: error instanceof Error ? error.message : String(error) };
+  }
+});
+
+/**
+ * Save the SDK Vendor Key to local_settings and apply it immediately.
+ * Call this from the Absensi settings panel when the user enters their VKey.
+ */
+ipcMain.handle('absensi-set-vkey', async (_event, vkey: string) => {
+  try {
+    setVKey(vkey);
+    await executeUpsert(
+      `INSERT INTO local_settings (setting_key, setting_value, created_at, updated_at)
+       VALUES ('fingerprint_vkey', ?, NOW(), NOW())
+       ON DUPLICATE KEY UPDATE setting_value = VALUES(setting_value), updated_at = NOW()`,
+      [vkey]
+    );
+    return { success: true };
+  } catch (error) {
+    return { success: false, error: error instanceof Error ? error.message : String(error) };
+  }
+});
+
+/**
+ * Save FlexCode SDK credentials to local_settings and apply them.
+ */
+ipcMain.handle('absensi-set-credentials', async (_event, payload: { sn: string; vc: string; ac: string }) => {
+  try {
+    const { setCredentials } = require('./fingerprintManager');
+    setCredentials(payload.sn, payload.vc, payload.ac);
+    
+    const queries = [
+      { sql: "INSERT INTO local_settings (setting_key, setting_value, updated_at) VALUES ('fingerprint_sn', ?, NOW()) ON DUPLICATE KEY UPDATE setting_value=VALUES(setting_value), updated_at=NOW()", params: [payload.sn] },
+      { sql: "INSERT INTO local_settings (setting_key, setting_value, updated_at) VALUES ('fingerprint_vc', ?, NOW()) ON DUPLICATE KEY UPDATE setting_value=VALUES(setting_value), updated_at=NOW()", params: [payload.vc] },
+      { sql: "INSERT INTO local_settings (setting_key, setting_value, updated_at) VALUES ('fingerprint_ac', ?, NOW()) ON DUPLICATE KEY UPDATE setting_value=VALUES(setting_value), updated_at=NOW()", params: [payload.ac] },
+    ];
+    
+    await executeTransaction(queries);
+    return { success: true };
+  } catch (error) {
+    return { success: false, error: error instanceof Error ? error.message : String(error) };
+  }
+});
+
+/** Get cached schedules + shifts for a business */
+ipcMain.handle('absensi-get-schedules-cache', async (_event, businessId: number) => {
+  try {
+    const schedules = await executeQuery(
+      'SELECT * FROM schedules_cache WHERE business_id = ? AND is_active = 1 ORDER BY name',
+      [businessId]
+    );
+    const shifts = await executeQuery(
+      `SELECT ssc.* FROM schedule_shifts_cache ssc
+       JOIN schedules_cache sc ON sc.id = ssc.schedule_id
+       WHERE sc.business_id = ? ORDER BY ssc.start_time`,
+      [businessId]
+    );
+    const employeeSchedules = await executeQuery(
+      `SELECT esc.* FROM employee_schedules_cache esc
+       JOIN schedules_cache sc ON sc.id = esc.schedule_id
+       WHERE sc.business_id = ?
+         AND esc.effective_date <= DATE(NOW())
+         AND (esc.end_date IS NULL OR esc.end_date >= DATE(NOW()))`,
+      [businessId]
+    );
+    return { success: true, data: { schedules, shifts, employeeSchedules } };
+  } catch (error) {
     return { success: false, error: error instanceof Error ? error.message : String(error) };
   }
 });

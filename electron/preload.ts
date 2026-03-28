@@ -464,5 +464,64 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // Activity Logs
   localDbUpsertActivityLogs: (rows: UnknownRecord[]) => ipcRenderer.invoke('localdb-upsert-activity-logs', rows),
   localDbGetActivityLogs: (businessId?: number) => ipcRenderer.invoke('localdb-get-activity-logs', businessId),
+
+  // ─── Absensi / Fingerprint Attendance ──────────────────────────────────────
+  absensiCheckReader: () =>
+    ipcRenderer.invoke('absensi-check-reader'),
+  absensiStartEnroll: (employeeId: number) =>
+    ipcRenderer.invoke('absensi-start-enroll', employeeId),
+  absensiStartIdentify: (businessId?: number) =>
+    ipcRenderer.invoke('absensi-start-identify', businessId),
+  absensiSaveTemplate: (data: {
+    employee_id: number;
+    finger_index: number;
+    template_data: string;
+    quality?: number;
+    enrolled_by?: number;
+  }) => ipcRenderer.invoke('absensi-save-template', data),
+  absensiDeleteTemplate: (id: number) =>
+    ipcRenderer.invoke('absensi-delete-template', id),
+  absensiGetTemplatesByEmployee: (employeeId: number) =>
+    ipcRenderer.invoke('absensi-get-templates-by-employee', employeeId),
+  absensiCreateAttendanceLog: (data: {
+    employee_id: number;
+    business_id: number;
+    clock_type: 'clock_in' | 'clock_out';
+    scan_at: string;
+    match_score?: number;
+    notes?: string;
+  }) => ipcRenderer.invoke('absensi-create-attendance-log', data),
+  absensiGetAttendanceLogs: (filters?: {
+    business_id?: number;
+    employee_id?: number;
+    date_from?: string;
+    date_to?: string;
+    limit?: number;
+  }) => ipcRenderer.invoke('absensi-get-attendance-logs', filters),
+  absensiGetTodayStatus: (businessId: number) =>
+    ipcRenderer.invoke('absensi-get-today-status', businessId),
+  absensiUpsertSchedulesCache: (payload: {
+    schedules: UnknownRecord[];
+    shifts: UnknownRecord[];
+    employeeSchedules: UnknownRecord[];
+  }) => ipcRenderer.invoke('absensi-upsert-schedules-cache', payload),
+  absensiGetSchedulesCache: (businessId: number) =>
+    ipcRenderer.invoke('absensi-get-schedules-cache', businessId),
+  absensiSetVkey: (vkey: string) =>
+    ipcRenderer.invoke('absensi-set-vkey', vkey),
+  absensiSetCredentials: (payload: { sn: string; vc: string; ac: string }) =>
+    ipcRenderer.invoke('absensi-set-credentials', payload),
+
+  // Push events from main → renderer for live capture progress
+  onAbsensiEnrollProgress: (callback: (event: UnknownRecord) => void) => {
+    ipcRenderer.on('absensi-enroll-progress', (_e, data) => callback(data));
+  },
+  onAbsensiIdentifyProgress: (callback: (event: UnknownRecord) => void) => {
+    ipcRenderer.on('absensi-identify-progress', (_e, data) => callback(data));
+  },
+  removeAbsensiListeners: () => {
+    ipcRenderer.removeAllListeners('absensi-enroll-progress');
+    ipcRenderer.removeAllListeners('absensi-identify-progress');
+  },
 });
 

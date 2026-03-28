@@ -28,6 +28,7 @@
     "jspdf-autotable": "^5.0.7",
     "mysql2": "^3.15.3",
     "node-thermal-printer": "^4.4.5",
+    "winax": "^3.6.8",
     "ws": "^8.18.3",
     "xlsx": "^0.18.5"
   },
@@ -43,7 +44,7 @@
     "@types/ws": "^8.18.1",
     "concurrently": "^9.2.1",
     "cross-env": "^7.0.3",
-    "electron": "^38.2.2",
+    "electron": "^38.8.6",
     "electron-builder": "^26.0.12",
     "electron-rebuild": "^3.2.9",
     "eslint": "^9",
@@ -70,7 +71,14 @@
       "public/**/*"
     ],
     "win": {
-      "target": "nsis",
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "ia32"
+          ]
+        }
+      ],
       "icon": "public/256x256.png",
       "forceCodeSigning": false
     },

@@ -819,8 +819,127 @@ declare global {
         partnership_contact?: string | null;
       }, businessId?: number) => Promise<{ success: boolean; error?: string }>;
       uploadReceiptSettingsToVps?: (businessId?: number) => Promise<{ success: boolean; message: string }>;
+
+      // ─── Absensi / Fingerprint Attendance ─────────────────────────────────
+      absensiCheckReader?: () => Promise<{ success: boolean; connected: boolean; message: string }>;
+      absensiStartEnroll?: (employeeId: number) => Promise<{
+        success: boolean;
+        templateBase64?: string;
+        quality?: number;
+        error?: string;
+        code?: string;
+      }>;
+      absensiStartIdentify?: (businessId?: number) => Promise<{
+        success: boolean;
+        employeeId?: number;
+        score?: number;
+        error?: string;
+        code?: string;
+      }>;
+      absensiSaveTemplate?: (data: {
+        employee_id: number;
+        finger_index: number;
+        template_data: string;
+        quality?: number;
+        enrolled_by?: number;
+      }) => Promise<{ success: boolean; id?: number; error?: string }>;
+      absensiDeleteTemplate?: (id: number) => Promise<{ success: boolean; error?: string }>;
+      absensiGetTemplatesByEmployee?: (employeeId: number) => Promise<{
+        success: boolean;
+        data?: FingerprintTemplateRow[];
+        error?: string;
+      }>;
+      absensiCreateAttendanceLog?: (data: {
+        employee_id: number;
+        business_id: number;
+        clock_type: 'clock_in' | 'clock_out';
+        scan_at: string;
+        match_score?: number;
+        notes?: string;
+      }) => Promise<{
+        success: boolean;
+        id?: number;
+        status?: AttendanceStatus;
+        lateMinutes?: number;
+        scheduleShiftId?: number | null;
+        error?: string;
+      }>;
+      absensiGetAttendanceLogs?: (filters?: {
+        business_id?: number;
+        employee_id?: number;
+        date_from?: string;
+        date_to?: string;
+        limit?: number;
+      }) => Promise<{ success: boolean; data?: AttendanceLogRow[]; error?: string }>;
+      absensiGetTodayStatus?: (businessId: number) => Promise<{
+        success: boolean;
+        data?: TodayAttendanceRow[];
+        error?: string;
+      }>;
+      absensiUpsertSchedulesCache?: (payload: {
+        schedules: unknown[];
+        shifts: unknown[];
+        employeeSchedules: unknown[];
+      }) => Promise<{ success: boolean; upserted?: number; error?: string }>;
+      absensiSetVkey?: (vkey: string) => Promise<{ success: boolean; error?: string }>;
+      absensiSetCredentials?: (payload: { sn: string; vc: string; ac: string }) => Promise<{ success: boolean; error?: string }>;
+      absensiGetSchedulesCache?: (businessId: number) => Promise<{
+        success: boolean;
+        data?: { schedules: unknown[]; shifts: unknown[]; employeeSchedules: unknown[] };
+        error?: string;
+      }>;
+      onAbsensiEnrollProgress?: (callback: (event: AbsensiCaptureEvent) => void) => void;
+      onAbsensiIdentifyProgress?: (callback: (event: AbsensiCaptureEvent) => void) => void;
+      removeAbsensiListeners?: () => void;
     };
   }
+
+  // ─── Absensi domain types (globally available in renderer) ─────────────────
+
+  type AttendanceStatus = 'on_time' | 'late' | 'early_out' | 'outside_schedule';
+
+  type AbsensiCaptureEvent = {
+    type: 'reader_connect' | 'reader_disconnect' | 'finger_touch' | 'finger_gone' | 'sample_captured' | 'quality_low' | 'registration_start' | 'verification_start' | 'load_template' | string;
+    message: string;
+    samplesRemaining?: number;
+    image?: string;
+  };
+
+  type FingerprintTemplateRow = {
+    id: number;
+    employee_id: number;
+    finger_index: number;
+    quality: number | null;
+    enrolled_at: string;
+    sync_status: 'pending' | 'synced' | 'failed';
+  };
+
+  type AttendanceLogRow = {
+    id: number;
+    employee_id: number;
+    business_id: number;
+    schedule_shift_id: number | null;
+    clock_type: 'clock_in' | 'clock_out';
+    scan_at: string;
+    status: AttendanceStatus | null;
+    late_minutes: number;
+    match_score: number | null;
+    notes: string | null;
+    sync_status: 'pending' | 'synced' | 'failed';
+    nama_karyawan: string;
+    employee_color: string | null;
+    nama_jabatan: string | null;
+  };
+
+  type TodayAttendanceRow = {
+    employee_id: number;
+    clock_type: 'clock_in' | 'clock_out';
+    scan_at: string;
+    status: AttendanceStatus | null;
+    late_minutes: number;
+    nama_karyawan: string;
+    employee_color: string | null;
+  };
 }
 
 export { };

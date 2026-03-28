@@ -1,5 +1,0 @@
--- DEPRECATED: Do NOT run this migration.
--- table_ids_json was added then removed from transactions.
--- Multi-table support is handled by the transaction_tables junction table instead.
--- See: database_migrations/add_transaction_tables_junction.sql
--- See: database_migrations/MANUAL_RUN_ONCE.sql

@@ -1,0 +1,33 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(find /c/Code/marviano-pos/scripts -type f -name *.js -o -name *.ts)",
+      "Bash(grep -l \"export\" /c/Code/marviano-pos/src/lib/*.ts)",
+      "Bash(wc -l /c/Code/marviano-pos/src/components/*.tsx)",
+      "Bash(npm install:*)",
+      "Bash(dotnet --version)",
+      "Bash(cmd /c \"dotnet --version\")",
+      "Bash(cmd /c \"where dotnet\")",
+      "Bash(cmd /c \"csc /?\")",
+      "Bash(cmd /c \"where dotnet 2>nul && dotnet --version || echo NOT_FOUND\")",
+      "Bash(powershell -Command \"& { Get-Command dotnet -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source; if\\(-not \\(Get-Command dotnet -ErrorAction SilentlyContinue\\)\\) { 'NOT_FOUND' } }\")",
+      "Bash(powershell -Command \"& 'C:\\\\Program Files \\(x86\\)\\\\Microsoft Visual Studio\\\\Installer\\\\vswhere.exe' -all -format json 2>$null | ConvertFrom-Json | Select-Object displayName, installationVersion, installationPath\" 2>&1)",
+      "Bash(powershell -Command \"& 'C:\\\\Program Files \\(x86\\)\\\\Microsoft Visual Studio\\\\Installer\\\\vswhere.exe' -all -format json | ConvertFrom-Json | ForEach-Object { $_.displayName + ' | ' + $_.installationVersion + ' | ' + $_.installationPath }\")",
+      "Bash(powershell -Command \"& 'C:\\\\Program Files \\(x86\\)\\\\Microsoft Visual Studio\\\\Installer\\\\vswhere.exe' -all\")",
+      "Bash(find node_modules/winax -name *.vcxproj -o -name binding.gyp)",
+      "Bash(powershell -Command \"Get-ChildItem node_modules\\\\winax -Recurse -Filter '*.vcxproj' | Select-Object FullName\")",
+      "Bash(powershell -Command \"Get-ChildItem node_modules\\\\winax -Recurse | Select-Object Name, FullName | Format-Table -AutoSize\")",
+      "Bash(powershell -Command \"Get-ChildItem node_modules\\\\winax -Name | head -20\")",
+      "Bash(node \"../../node_modules/@electron/node-gyp/bin/node-gyp.js\" configure --msvs_version=2022)",
+      "Bash(powershell -Command \"Get-ChildItem 'node_modules\\\\winax\\\\build' -Recurse | Select-Object Name\")",
+      "Bash(npx electron-rebuild:*)",
+      "Bash(node:*)",
+      "Bash(powershell -Command \"Get-Content electron/main.ts | Measure-Object -Line | Select Lines; Get-Content electron/preload.ts | Measure-Object -Line | Select Lines\")",
+      "Bash(powershell -Command \"\\(Get-Content 'C:\\\\Code\\\\marviano-pos\\\\electron\\\\main.ts'\\).Count; \\(Get-Content 'C:\\\\Code\\\\marviano-pos\\\\electron\\\\preload.ts'\\).Count; \\(Get-Content 'C:\\\\Code\\\\marviano-pos\\\\src\\\\components\\\\LeftSidebar.tsx'\\).Count; \\(Get-Content 'C:\\\\Code\\\\marviano-pos\\\\src\\\\components\\\\POSLayout.tsx'\\).Count\")",
+      "Bash(npm run:*)",
+      "Bash(npx tsc:*)",
+      "Bash(\"C:/Windows/SysWOW64/WindowsPowerShell/v1.0/powershell.exe\" -NonInteractive -NoProfile -STA -Command \"\nAdd-Type -Path 'C:/Code/marviano-pos/3 Flexcode SDK/Sample Project/FlexCodeSDK_VisualCSharp_MySQL/FlexCodeSDK/FlexCodeSDK/obj/x86/Debug/Interop.FlexCodeSDK.dll'\ntry {\n    \\\\$ver = New-Object FlexCodeSDK.FinFPVerClass\n    Write-Output \\('Type: ' + \\\\$ver.GetType\\(\\).FullName\\)\n    \\\\$events = \\\\$ver.GetType\\(\\).GetEvents\\(\\) | ForEach-Object { \\\\$_.Name }\n    Write-Output \\('Events: ' + \\(\\\\$events -join ', '\\)\\)\n    [Runtime.InteropServices.Marshal]::ReleaseComObject\\(\\\\$ver\\) | Out-Null\n} catch {\n    Write-Output \\('Error: ' + \\\\$_.Exception.Message\\)\n}\n\" 2>&1)",
+      "Bash(\"C:/Windows/SysWOW64/cscript.exe\" //NoLogo //E:JScript \"C:/Users/Marviano/AppData/Local/Temp/marviano_fp_bridge.js\")"
+    ]
+  }
+}

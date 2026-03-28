@@ -881,6 +881,90 @@ export async function initializeMySQLSchema(): Promise<void> {
       CONSTRAINT fk_reservations_pj FOREIGN KEY (penanggung_jawab_id) REFERENCES employees(id) ON DELETE SET NULL
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
 
+    // ─── Attendance / Absensi ────────────────────────────────────────────────
+
+    // Cache of schedule definitions synced from VPS (read-only local copy)
+    `CREATE TABLE IF NOT EXISTS schedules_cache (
+      id INT NOT NULL COMMENT 'VPS schedules.id',
+      business_id INT DEFAULT NULL,
+      name VARCHAR(255) NOT NULL,
+      is_active TINYINT(1) NOT NULL DEFAULT 1,
+      synced_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      PRIMARY KEY (id),
+      KEY idx_sc_business (business_id)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='Read-only cache of VPS schedule definitions'`,
+
+    // Cache of time slots per schedule synced from VPS
+    `CREATE TABLE IF NOT EXISTS schedule_shifts_cache (
+      id INT NOT NULL COMMENT 'VPS schedule_shifts.id',
+      schedule_id INT NOT NULL,
+      name VARCHAR(100) DEFAULT NULL,
+      start_time TIME NOT NULL COMMENT 'UTC',
+      end_time TIME NOT NULL COMMENT 'UTC',
+      late_tolerance_minutes INT NOT NULL DEFAULT 0,
+      synced_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      PRIMARY KEY (id),
+      KEY idx_ssc_schedule (schedule_id)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='Read-only cache of VPS schedule time slots'`,
+
+    // Cache of employee-to-schedule assignments synced from VPS
+    `CREATE TABLE IF NOT EXISTS employee_schedules_cache (
+      id INT NOT NULL COMMENT 'VPS employee_schedules.id',
+      employee_id INT NOT NULL,
+      schedule_id INT NOT NULL,
+      effective_date DATE NOT NULL,
+      end_date DATE DEFAULT NULL COMMENT 'NULL means still active',
+      synced_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      PRIMARY KEY (id),
+      KEY idx_esc_employee (employee_id),
+      KEY idx_esc_effective (employee_id, effective_date, end_date)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='Read-only cache of VPS employee schedule assignments'`,
+
+    // Fingerprint templates — stored locally for fast 1:N matching, synced to VPS as backup
+    `CREATE TABLE IF NOT EXISTS fingerprint_templates (
+      id INT NOT NULL AUTO_INCREMENT,
+      employee_id INT NOT NULL,
+      finger_index TINYINT NOT NULL DEFAULT 0 COMMENT '0=right index, 1=left index, 2=right thumb, 3=left thumb, 4=right middle, 5=left middle',
+      template_data BLOB NOT NULL COMMENT 'DigitalPersona serialized template bytes (base64 stored as text in BLOB)',
+      quality TINYINT UNSIGNED DEFAULT NULL COMMENT 'Capture quality score 0-100',
+      enrolled_by INT DEFAULT NULL COMMENT 'users.id of admin who enrolled',
+      enrolled_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      vps_id INT DEFAULT NULL COMMENT 'ID on VPS after sync; NULL = not yet synced',
+      sync_status ENUM('pending','synced','failed') NOT NULL DEFAULT 'pending',
+      PRIMARY KEY (id),
+      KEY idx_fp_employee (employee_id),
+      KEY idx_fp_sync (sync_status),
+      CONSTRAINT fk_fp_employee FOREIGN KEY (employee_id) REFERENCES employees(id) ON DELETE CASCADE,
+      CONSTRAINT fk_fp_enrolled_by FOREIGN KEY (enrolled_by) REFERENCES users(id) ON DELETE SET NULL
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='Fingerprint templates for 1:N employee identification'`,
+
+    // Attendance logs — local-first, syncs to VPS (same pattern as transactions)
+    `CREATE TABLE IF NOT EXISTS attendance_logs (
+      id INT NOT NULL AUTO_INCREMENT,
+      employee_id INT NOT NULL,
+      business_id INT DEFAULT NULL,
+      schedule_shift_id INT DEFAULT NULL COMMENT 'schedule_shifts_cache.id; NULL if scanned outside any shift window',
+      clock_type ENUM('clock_in','clock_out') NOT NULL,
+      scan_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT 'Exact UTC time of fingerprint scan',
+      status ENUM('on_time','late','early_out','outside_schedule') DEFAULT NULL COMMENT 'NULL until evaluated against schedule',
+      late_minutes INT NOT NULL DEFAULT 0 COMMENT 'Minutes late relative to schedule start_time; 0 if on_time or no schedule',
+      match_score SMALLINT UNSIGNED DEFAULT NULL COMMENT 'DigitalPersona identification score at scan time',
+      notes TEXT DEFAULT NULL,
+      sync_status ENUM('pending','synced','failed') NOT NULL DEFAULT 'pending',
+      vps_id INT DEFAULT NULL COMMENT 'ID on VPS after sync',
+      created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (id),
+      KEY idx_att_employee (employee_id),
+      KEY idx_att_business (business_id),
+      KEY idx_att_scan_at (scan_at),
+      KEY idx_att_date_emp (employee_id, scan_at),
+      KEY idx_att_sync (sync_status),
+      CONSTRAINT fk_att_employee FOREIGN KEY (employee_id) REFERENCES employees(id) ON DELETE CASCADE,
+      CONSTRAINT fk_att_business FOREIGN KEY (business_id) REFERENCES businesses(id) ON DELETE SET NULL
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='Employee clock-in/clock-out records; local-first then synced to VPS'`,
+
+    // ─────────────────────────────────────────────────────────────────────────
+
     // Refund exceptions (reservation cancellation refunds, etc. — standalone, no FK to transactions)
     `CREATE TABLE IF NOT EXISTS refund_exc (
       id INT NOT NULL AUTO_INCREMENT,

@@ -15,7 +15,8 @@ import {
   ChefHat,
   Coffee,
   ChevronLeft,
-  CalendarCheck
+  CalendarCheck,
+  Fingerprint,
 } from 'lucide-react';
 import { useAuth } from '@/hooks/useAuth';
 import { isSuperAdmin } from '@/lib/auth';
@@ -81,6 +82,8 @@ export default function LeftSidebar({ menuItems, activeMenuItem, onMenuItemClick
         return <ChefHat className="w-5 h-5" />;
       case 'Reservation':
         return <CalendarCheck className="w-5 h-5" />;
+      case 'Absensi':
+        return <Fingerprint className="w-5 h-5" />;
       default:
         return <Database className="w-5 h-5" />;
     }
@@ -175,6 +178,13 @@ export default function LeftSidebar({ menuItems, activeMenuItem, onMenuItemClick
             // Reservation - requires access_reservation permission
             if (item.name === 'Reservation') {
               if (!isAdmin && !hasPermission(user, 'access_reservation')) {
+                return null;
+              }
+            }
+
+            // Absensi - requires access_absensi permission
+            if (item.name === 'Absensi') {
+              if (!isAdmin && !hasPermission(user, 'access_absensi')) {
                 return null;
               }
             }

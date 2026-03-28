@@ -1,0 +1,13 @@
+C:\Users\Hendry\documents\visual studio 2010\Projects\FlexCodeSDK\FlexCodeSDK\obj\x86\Debug\Interop.FlexCodeSDK.dll
+C:\Users\Hendry\documents\visual studio 2010\Projects\FlexCodeSDK\FlexCodeSDK\obj\x86\Debug\FlexCodeSDK.csproj.ResolveComReference.cache
+C:\Users\Hendry\documents\visual studio 2010\Projects\FlexCodeSDK\FlexCodeSDK\obj\x86\Debug\ResolveAssemblyReference.cache
+C:\Users\Hendry\documents\visual studio 2010\Projects\FlexCodeSDK\FlexCodeSDK\obj\x86\Debug\WindowsFormsApplication1.Form1.resources
+C:\Users\Hendry\documents\visual studio 2010\Projects\FlexCodeSDK\FlexCodeSDK\obj\x86\Debug\WindowsFormsApplication1.Properties.Resources.resources
+C:\Users\Hendry\documents\visual studio 2010\Projects\FlexCodeSDK\FlexCodeSDK\obj\x86\Debug\GenerateResource.read.1.tlog
+C:\Users\Hendry\documents\visual studio 2010\Projects\FlexCodeSDK\FlexCodeSDK\obj\x86\Debug\GenerateResource.write.1.tlog
+C:\Users\Hendry\documents\visual studio 2010\Projects\FlexCodeSDK\FlexCodeSDK\bin\Debug\FlexCodeSDK.exe
+C:\Users\Hendry\documents\visual studio 2010\Projects\FlexCodeSDK\FlexCodeSDK\bin\Debug\FlexCodeSDK.pdb
+C:\Users\Hendry\documents\visual studio 2010\Projects\FlexCodeSDK\FlexCodeSDK\obj\x86\Debug\FlexCodeSDK.exe
+C:\Users\Hendry\documents\visual studio 2010\Projects\FlexCodeSDK\FlexCodeSDK\obj\x86\Debug\FlexCodeSDK.pdb
+C:\Users\Hendry\Documents\Visual Studio 2010\Projects\FlexCodeSDK\FlexCodeSDK\obj\x86\Debug\WindowsFormsApplication1.Form2.resources
+C:\Users\Hendry\Documents\Visual Studio 2010\Projects\FlexCodeSDK\FlexCodeSDK\obj\x86\Debug\WindowsFormsApplication1.Form3.resources
