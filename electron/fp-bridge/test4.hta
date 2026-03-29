@@ -1,0 +1,44 @@
+<html>
+<head>
+<HTA:APPLICATION ID="TestApp" WINDOWSTATE="minimize" SHOWINTASKBAR="no" />
+</head>
+<body>
+<script language="VBScript">
+    Dim fso, f
+    Set fso = CreateObject("Scripting.FileSystemObject")
+    Set f = fso.OpenTextFile("hta-result4.txt", 2, True)
+    
+    Dim FPReg
+    ' CreateObject with prefix hook
+    Set FPReg = CreateObject("FlexCodeSDK.FinFPReg", "FPReg_")
+    
+    Sub FPReg_FPSamplesNeeded(Samples)
+        f.WriteLine("Event FPSamplesNeeded fired: " & Samples)
+    End Sub
+    
+    Sub FPReg_FPRegistrationStatus(Status)
+        f.WriteLine("Event FPRegistrationStatus fired: " & Status)
+    End Sub
+    
+    Sub StartTest()
+        On Error Resume Next
+        FPReg.DeviceInfo "C700F001339", "7901D3C13E34109", "VPFAAB943C33362467D451A0"
+        FPReg.FPRegistrationStart("VPFAAB943C33362467D451A0")
+        f.WriteLine("Success: FPRegistrationStart invoked! Events should fire now if we don't close.")
+        
+        If fso.FileExists("stophta") Then
+            f.Close()
+            window.close()
+        End If
+    End Sub
+    
+    StartTest()
+    window.setTimeout "CloseMe", 1000
+    
+    Sub CloseMe()
+        f.Close()
+        window.close()
+    End Sub
+</script>
+</body>
+</html>

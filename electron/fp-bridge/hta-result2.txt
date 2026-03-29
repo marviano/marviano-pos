@@ -1,0 +1,1 @@
+Success: DeviceInfo directly invoked via ActiveXObject!

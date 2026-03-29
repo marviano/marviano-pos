@@ -1,0 +1,30 @@
+<html>
+<head>
+<HTA:APPLICATION ID="TestApp" WINDOWSTATE="minimize" SHOWINTASKBAR="no" />
+</head>
+<body>
+<!-- Instantiate COM by ProgID -->
+<object id="FinFPReg" classid="progid:FlexCodeSDK.FinFPReg"></object>
+<script language="JScript">
+    try {
+        var fso = new ActiveXObject("Scripting.FileSystemObject");
+        var f = fso.OpenTextFile("hta-result.txt", 2, true);
+        
+        try {
+            FinFPReg.object.DeviceInfo("C700F001339", "7901D3C13E34109", "VPFAAB943C33362467D451A0");
+            f.WriteLine("Success: DeviceInfo invoked via .object wrapper!");
+        } catch(em) {
+            f.WriteLine("Invoke error via .object: " + em.message);
+        }
+        
+    } catch(e) {
+        if(f) {
+            f.WriteLine("Error: " + e.message);
+        }
+    } finally {
+        if(f) f.Close();
+        window.close();
+    }
+</script>
+</body>
+</html>

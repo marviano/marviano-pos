@@ -1,0 +1,25 @@
+<html>
+<head>
+<HTA:APPLICATION ID="TestApp" WINDOWSTATE="minimize" SHOWINTASKBAR="no" />
+</head>
+<body>
+<script language="JScript">
+    try {
+        var fso = new ActiveXObject("Scripting.FileSystemObject");
+        var f = fso.OpenTextFile("hta-result2.txt", 2, true);
+        
+        var FPReg = new ActiveXObject("FlexCodeSDK.FinFPReg");
+        FPReg.DeviceInfo("C700F001339", "7901D3C13E34109", "VPFAAB943C33362467D451A0");
+        f.WriteLine("Success: DeviceInfo directly invoked via ActiveXObject!");
+        
+    } catch(e) {
+        if(f) {
+            f.WriteLine("Error: " + e.message);
+        }
+    } finally {
+        if(f) f.Close();
+        window.close();
+    }
+</script>
+</body>
+</html>

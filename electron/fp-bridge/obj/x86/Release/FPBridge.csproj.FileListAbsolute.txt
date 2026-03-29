@@ -1,0 +1,1 @@
+d:\Austin\Code\marviano-pos\electron\fp-bridge\obj\x86\Release\FPBridge.csprojResolveAssemblyReference.cache

@@ -1,0 +1,38 @@
+<html>
+<head>
+<HTA:APPLICATION ID="TestApp" WINDOWSTATE="minimize" SHOWINTASKBAR="no" />
+</head>
+<body>
+<script language="JScript">
+    var fso = new ActiveXObject("Scripting.FileSystemObject");
+    var f = fso.OpenTextFile("hta-result3.txt", 2, true);
+    
+    var FPReg = new ActiveXObject("FlexCodeSDK.FinFPReg");
+    
+    function FPReg::FPSamplesNeeded(Samples) {
+        f.WriteLine("Event FPSamplesNeeded fired: " + Samples);
+    }
+    
+    function FPReg::FPRegistrationStatus(Status) {
+        f.WriteLine("Event FPRegistrationStatus fired: " + Status);
+    }
+    
+    try {
+        FPReg.DeviceInfo("C700F001339", "7901D3C13E34109", "VPFAAB943C33362467D451A0");
+        FPReg.FPRegistrationStart("VPFAAB943C33362467D451A0");
+        f.WriteLine("Success: FPRegistrationStart invoked! Events should fire now if we don't close.");
+        // We will pause for 1 second instead of closing immediately so events can fire
+        window.setTimeout(function() {
+            f.Close();
+            window.close();
+        }, 1000);
+    } catch(e) {
+        if(f) {
+            f.WriteLine("Error: " + e.message);
+            f.Close();
+        }
+        window.close();
+    }
+</script>
+</body>
+</html>
