@@ -883,6 +883,9 @@ declare global {
       }) => Promise<{ success: boolean; upserted?: number; error?: string }>;
       absensiSetVkey?: (vkey: string) => Promise<{ success: boolean; error?: string }>;
       absensiSetCredentials?: (payload: { sn: string; vc: string; ac: string }) => Promise<{ success: boolean; error?: string }>;
+      flexcodeHttpGet?: (
+        url: string
+      ) => Promise<{ ok: true; data: unknown } | { ok: false; error: string }>;
       absensiGetSchedulesCache?: (businessId: number) => Promise<{
         success: boolean;
         data?: { schedules: unknown[]; shifts: unknown[]; employeeSchedules: unknown[] };

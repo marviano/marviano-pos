@@ -511,6 +511,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.invoke('absensi-set-vkey', vkey),
   absensiSetCredentials: (payload: { sn: string; vc: string; ac: string }) =>
     ipcRenderer.invoke('absensi-set-credentials', payload),
+  /** GET http(s) from main process (avoids CORS when calling pictos-absensi from Electron). */
+  flexcodeHttpGet: (url: string) =>
+    ipcRenderer.invoke('flexcode-http-get', url) as Promise<
+      { ok: true; data: unknown } | { ok: false; error: string }
+    >,
 
   // Push events from main → renderer for live capture progress
   onAbsensiEnrollProgress: (callback: (event: UnknownRecord) => void) => {

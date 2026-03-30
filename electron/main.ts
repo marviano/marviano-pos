@@ -15219,10 +15219,40 @@ ipcMain.handle('maximize-window', async () => {
 
 ipcMain.handle('open-external', async (_event, url: string) => {
   const { shell } = await import('electron');
-  if (typeof url === 'string' && url.startsWith('http')) {
-    await shell.openExternal(url);
+  if (typeof url === 'string') {
+    if (url.startsWith('http') || url.startsWith('finspot:')) {
+      await shell.openExternal(url);
+    }
   }
   return { success: true };
+});
+
+/** GET JSON from FlexCode HTTP server (pictos-absensi). Bypasses renderer CORS / file:// fetch issues. */
+ipcMain.handle('flexcode-http-get', async (_event, url: string) => {
+  try {
+    if (typeof url !== 'string' || (!url.startsWith('http://') && !url.startsWith('https://'))) {
+      return { ok: false as const, error: 'Invalid URL' };
+    }
+    const res = await fetch(url, { method: 'GET', headers: { Accept: 'application/json' } });
+    const text = await res.text();
+    let data: unknown = text;
+    try {
+      data = text ? JSON.parse(text) : null;
+    } catch {
+      /* non-JSON body */
+    }
+    if (!res.ok) {
+      const msg =
+        typeof data === 'object' && data !== null && 'error' in data
+          ? String((data as { error: string }).error)
+          : `HTTP ${res.status}`;
+      return { ok: false as const, error: msg };
+    }
+    return { ok: true as const, data };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    return { ok: false as const, error: message };
+  }
 });
 
 ipcMain.handle('navigate-to', async (event, path) => {
