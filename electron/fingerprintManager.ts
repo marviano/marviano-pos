@@ -44,6 +44,7 @@ var action = getVal(raw, 'action');
 var sn = getVal(raw, 'sn');
 var vc = getVal(raw, 'vc');
 var ac = getVal(raw, 'ac');
+var vkey = getVal(raw, 'vkey');
 
 function out(type, msg) {
     var safe = String(msg).replace(/\\\\/g, '\\\\\\\\').replace(/"/g, '\\\\"').replace(/\\r/g, '').replace(/\\n/g, ' ');
@@ -65,8 +66,8 @@ if (action === 'enroll') {
         WScript.ConnectObject(reg, "reg_");
         
         reg.DeviceInfo(sn, vc, ac);
-        // CRITICAL BUG FIX: Must pass "MySecretKey" exactly, rather than the raw AC.
-        reg.FPRegistrationStart("MySecretKey");
+        // Encryption key must match enrollment/verification (PHP sample uses literal "SecurityKey").
+        reg.FPRegistrationStart(vkey);
         out('log', 'Registration started. Please place your finger on the scanner.');
         
         while (true) { WScript.Sleep(50); }
@@ -94,8 +95,8 @@ if (action === 'verify') {
                     var data = getVal(items[i], 'template_data');
                     if (id !== '' && data !== '') {
                         try {
-                            // CRITICAL BUG FIX: Key must exactly match "MySecretKey" used in Enroll!
-                            ver.FPLoad(id, 0, data, "MySecretKey"); 
+                            // Same key as FPRegistrationStart / PHP SecurityKey.
+                            ver.FPLoad(id, 0, data, vkey);
                             loadCount++;
                         } catch(e2) { out('log', 'Warning: Failed to load temp ' + id); }
                     }
@@ -181,6 +182,7 @@ export type StoredTemplate = {
 let _sn = '';
 let _vc = '';
 let _ac = '';
+let _vkey = 'SecurityKey';
 
 export function setCredentials(sn: string, vc: string, ac: string): void {
   _sn = sn.trim();
@@ -189,7 +191,7 @@ export function setCredentials(sn: string, vc: string, ac: string): void {
 }
 
 export function setVKey(vk: string): void {
-  _ac = vk.trim();
+  _vkey = vk.trim();
 }
 
 function getBridgeScriptPath(): string {
@@ -220,7 +222,14 @@ function runBridge(
         const lines = data.toString().split(/\\r?\\n/).filter((l: string) => l.trim().length > 0);
         for (const line of lines) {
           try {
-            const obj = JSON.parse(line);
+            const rawLine = line.trim();
+            // cscript can prepend noise/BOM; extract JSON object defensively.
+            const start = rawLine.indexOf('{');
+            const end = rawLine.lastIndexOf('}');
+            const jsonText = start !== -1 && end !== -1 && end > start
+              ? rawLine.slice(start, end + 1)
+              : rawLine;
+            const obj = JSON.parse(jsonText);
             if (obj.type === 'progress') {
               onProgress?.(obj);
             } else if (obj.type === 'log') {
@@ -258,7 +267,7 @@ function runBridge(
 // --- Public APIs ---
 export async function checkReaderConnected(): Promise<{ connected: boolean; message: string }> {
   try {
-    const res = await runBridge({ action: 'check', sn: _sn, vc: _vc, ac: _ac });
+    const res = await runBridge({ action: 'check', sn: _sn, vc: _vc, ac: _ac, vkey: _vkey });
     return { connected: res.connected === true, message: 'WSH SDK Connected' };
   } catch (err: any) {
     return { connected: false, message: err.message || String(err) };
@@ -270,7 +279,7 @@ export async function enrollFingerprint(
   onProgress?: OnProgress
 ): Promise<EnrollResult> {
   if (!_sn || !_vc || !_ac) throw ({ code: 'INVALID_CREDENTIALS', message: 'Credential belum diatur.' } as FpError);
-  const res = await runBridge({ action: 'enroll', sn: _sn, vc: _vc, ac: _ac, employeeId }, (obj) => {
+  const res = await runBridge({ action: 'enroll', sn: _sn, vc: _vc, ac: _ac, vkey: _vkey, employeeId }, (obj) => {
     if (obj.type === 'progress' && onProgress) {
       onProgress({ type: 'sample_captured', message: obj.message || 'Scanning...', samplesRemaining: obj.samplesRemaining });
     }
@@ -284,7 +293,7 @@ export async function identifyFingerprint(
   onProgress?: OnProgress
 ): Promise<IdentifyResult> {
   if (!_sn || !_vc || !_ac) throw ({ code: 'INVALID_CREDENTIALS', message: 'Credential belum diatur.' } as FpError);
-  const res = await runBridge({ action: 'verify', sn: _sn, vc: _vc, ac: _ac, templates: storedTemplates }, (obj) => {
+  const res = await runBridge({ action: 'verify', sn: _sn, vc: _vc, ac: _ac, vkey: _vkey, templates: storedTemplates }, (obj) => {
     if (obj.type === 'progress' && onProgress) {
       onProgress({ type: 'sample_captured', message: obj.message || 'Identifying...', samplesRemaining: 0 });
     }
