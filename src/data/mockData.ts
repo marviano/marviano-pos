@@ -63,7 +63,6 @@ export const mockProducts = [
 export const mockMenuItems = [
   { id: 1, name: "Kasir", active: true },
   { id: 14, name: "Reservation", active: false },
-  { id: 15, name: "Absensi", active: false },
   { id: 2, name: "Daftar Transaksi", active: false },
   { id: 5, name: "Ganti Shift", active: false },
   { id: 6, name: "Laporan", active: false },

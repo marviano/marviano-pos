@@ -952,30 +952,6 @@ function createWindows(): void {
       }
     })();
 
-    // Load fingerprint credentials from local_settings and pass to fingerprintManager
-    void (async () => {
-      try {
-        const rows = await executeQuery(
-          "SELECT setting_key, setting_value FROM local_settings WHERE setting_key IN ('fingerprint_vkey', 'fingerprint_sn', 'fingerprint_vc', 'fingerprint_ac')"
-        ) as { setting_key: string; setting_value: string }[];
-        
-        const settings: Record<string, string> = {};
-        rows.forEach(r => settings[r.setting_key] = r.setting_value);
-
-        if (settings.fingerprint_sn && settings.fingerprint_vc && settings.fingerprint_ac) {
-          const { checkReaderConnected, setCredentials } = require('./fingerprintManager');
-          setCredentials(settings.fingerprint_sn, settings.fingerprint_vc, settings.fingerprint_ac);
-          console.log('✅ FlexCode Fingerprint credentials loaded from local_settings');
-        } else if (settings.fingerprint_vkey) {
-          const { setVKey } = require('./fingerprintManager');
-          setVKey(settings.fingerprint_vkey);
-          console.log('✅ Legacy Fingerprint VKey loaded from local_settings');
-        }
-      } catch (err) {
-        console.warn('⚠️ Failed to load fingerprint settings from local_settings:', err);
-      }
-    })();
-
     // MySQL pool is already initialized above
     const dbConfig = getDbConfig();
     console.log(`✅ MySQL database connection initialized: ${dbConfig.database} @ ${dbConfig.host}:${dbConfig.port} (reservations & POS data use this)`);
@@ -15227,7 +15203,7 @@ ipcMain.handle('open-external', async (_event, url: string) => {
   return { success: true };
 });
 
-/** GET JSON from FlexCode HTTP server (pictos-absensi). Bypasses renderer CORS / file:// fetch issues. */
+/** GET JSON from FlexCode HTTP server. Bypasses renderer CORS / file:// fetch issues. */
 ipcMain.handle('flexcode-http-get', async (_event, url: string) => {
   try {
     if (typeof url !== 'string' || (!url.startsWith('http://') && !url.startsWith('https://'))) {
@@ -17660,6 +17636,8 @@ ipcMain.handle('localdb-upsert-restaurant-layout-elements', async (event, rows: 
   }
 });
 
+if (false) {
+
 // ─── Absensi / Attendance ─────────────────────────────────────────────────────
 
 /** Check whether the fingerprint reader is reachable */
@@ -18029,4 +18007,4 @@ ipcMain.handle('absensi-get-schedules-cache', async (_event, businessId: number)
   }
 });
 
-
+}
