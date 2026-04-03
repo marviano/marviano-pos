@@ -28,7 +28,6 @@
     "jspdf-autotable": "^5.0.7",
     "mysql2": "^3.15.3",
     "node-thermal-printer": "^4.4.5",
-    "winax": "^3.6.8",
     "ws": "^8.18.3",
     "xlsx": "^0.18.5"
   },

@@ -814,10 +814,9 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
       }
 
       // Fetch transaction
-      const transactions = await electronAPI.localDbGetTransactions?.(businessId, 10000);
-      const transactionsArray = Array.isArray(transactions) ? transactions as Record<string, unknown>[] : []; const transaction = transactionsArray.find((tx) =>
-        tx.uuid_id === transactionId || tx.id === transactionId
-      ) as Record<string, unknown> | undefined; if (!transaction) {
+      const rawTx = await electronAPI.localDbGetTransactionByUuid?.(transactionId);
+      const transaction = rawTx as Record<string, unknown> | undefined; 
+      if (!transaction) {
         await appAlert('Transaksi tidak ditemukan');
         return;
       }

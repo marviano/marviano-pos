@@ -446,21 +446,14 @@ export default function ActiveOrdersTab({ businessId, isOpen, onLoadTransaction,
       setPrintingBill(transactionId);
       const electronAPI = getElectronAPI();
 
-      if (!electronAPI?.localDbGetTransactions || !electronAPI?.localDbGetTransactionItems || !electronAPI?.localDbGetTransactionItemCustomizationsNormalized) {
+      if (!electronAPI?.localDbGetTransactionByUuid || !electronAPI?.localDbGetTransactionItems || !electronAPI?.localDbGetTransactionItemCustomizationsNormalized) {
         appAlert('Print Bill tidak tersedia. Pastikan aplikasi terhubung dengan database lokal.');
         return;
       }
 
-      // Fetch transaction data (today only)
-      const allTransactions = await electronAPI.localDbGetTransactions(businessId, 10000, { todayOnly: true });
-      const transactionsArray = Array.isArray(allTransactions) ? allTransactions : [];
-      const transaction = transactionsArray.find((tx: unknown) => {
-        if (tx && typeof tx === 'object') {
-          const t = tx as { uuid_id?: string; id?: string };
-          return (t.uuid_id === transactionId) || (t.id === transactionId);
-        }
-        return false;
-      }) as Record<string, unknown> | undefined;
+      // Fetch transaction data
+      const rawTx = await electronAPI.localDbGetTransactionByUuid(transactionId);
+      const transaction = rawTx as Record<string, unknown> | undefined;
 
       if (!transaction) {
         appAlert('Transaksi tidak ditemukan');

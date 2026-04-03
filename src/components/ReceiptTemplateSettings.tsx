@@ -236,13 +236,35 @@ export default function ReceiptTemplateSettings() {
   };
 
   const handleDownloadAllReceiptFromVps = async () => {
-    if (availableTemplates.receipt.length === 0) return;
     setDownloadingAllReceipt(true);
     try {
-      for (const template of availableTemplates.receipt) {
-        await window.electronAPI?.downloadTemplateFromVps?.(template.id);
+      // Use the main sync API to get templates for this business
+      const url = cleanUrl(getApiUrl(`/api/sync?business_id=${businessId}`));
+      const res = await fetch(url);
+      const data = await res.json().catch(() => ({}));
+      
+      if (!res.ok || !data.success) {
+        setMessage({ type: 'error', text: data?.message || data?.error || `Gagal mengambil data dari VPS (${res.status})` });
+        return;
       }
-      await loadAvailableTemplates();
+
+      const templates = data.data?.receiptTemplates || [];
+      if (templates.length === 0) {
+        setMessage({ type: 'error', text: 'Tidak ada template ditemukan di VPS untuk bisnis ini.' });
+        return;
+      }
+
+      // Upsert templates locally via bridge
+      const result = await window.electronAPI?.localDbUpsertReceiptTemplates?.(templates);
+      if (result?.success) {
+        await loadAvailableTemplates();
+        setMessage({ type: 'success', text: `Berhasil mendownload ${templates.length} template dari VPS.` });
+      } else {
+        setMessage({ type: 'error', text: 'Gagal menyimpan template hasil download ke database lokal.' });
+      }
+    } catch (e) {
+      console.error('Download templates error:', e);
+      setMessage({ type: 'error', text: 'Koneksi ke VPS gagal saat mendownload template.' });
     } finally {
       setDownloadingAllReceipt(false);
     }
@@ -371,12 +393,21 @@ export default function ReceiptTemplateSettings() {
         return;
       }
       const rows = Array.isArray(data.data) ? data.data : [];
+      if (rows.length === 0) {
+        setMessage({ type: 'error', text: 'Data pengaturan struk tidak ditemukan di VPS untuk bisnis ini.' });
+        setDownloadingReceiptSettings(false);
+        return;
+      }
+
       const result = await window.electronAPI?.localDbUpsertReceiptSettings?.(rows);
       if (result?.success) {
         setMessage({ type: 'success', text: 'Pengaturan struk berhasil didownload dari VPS.' });
         await loadSettings();
-        // Ensure form is filled from downloaded data (in case getReceiptSettings returns different shape or timing)
-        const row = rows.find((r: Record<string, unknown>) => (r.business_id === businessId || (businessId && r.business_id === Number(businessId)))) ?? rows.find((r: Record<string, unknown>) => r.business_id == null) ?? rows[0];
+        // Ensure form is filled from downloaded data (type-safe business_id matching)
+        const row = rows.find((r: Record<string, unknown>) => (
+          (r.business_id != null && Number(r.business_id) === Number(businessId))
+        )) ?? rows.find((r: Record<string, unknown>) => r.business_id == null) ?? rows[0];
+
         if (row && typeof row === 'object') {
           const r = row as Record<string, unknown>;
           const getStr = (k: string) => (typeof r[k] === 'string' ? r[k] as string : r[k] != null ? String(r[k]) : '') || '';
@@ -921,7 +952,7 @@ export default function ReceiptTemplateSettings() {
                 <button
                   type="button"
                   onClick={handleDownloadAllReceiptFromVps}
-                  disabled={saving || editModalLoading || loading || availableTemplates.receipt.length === 0 || downloadingAllReceipt}
+                  disabled={saving || editModalLoading || loading || downloadingAllReceipt}
                   className="px-4 py-2 border border-green-200 bg-white text-green-700 rounded-md hover:bg-green-50 disabled:bg-gray-100 disabled:text-gray-400 disabled:cursor-not-allowed flex items-center gap-2"
                 >
                   {downloadingAllReceipt ? (
