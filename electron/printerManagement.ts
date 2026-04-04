@@ -403,9 +403,15 @@ export class PrinterManagementService {
    * 2. Delete it from printer1_audit_log
    * 3. Get/increment Printer 2 daily counter
    * 4. Insert into printer2_audit_log with manual mode
-   * 5. Return success status
+   * 5. Return success and counters (for Receiptize print on the renderer)
    */
-  async moveTransactionToPrinter2(transactionId: string, businessId: number): Promise<boolean> {
+  async moveTransactionToPrinter2(
+    transactionId: string,
+    businessId: number
+  ): Promise<
+    | { success: true; printer2Counter: number; globalCounter: number | null }
+    | { success: false; error: string }
+  > {
     try {
       // Step 1: Get the Printer 1 audit entry
       const p1Entry = await executeQueryOne<Printer1AuditRow>(
@@ -414,15 +420,17 @@ export class PrinterManagementService {
       );
 
       if (!p1Entry) {
-        console.error(`❌ Transaction ${transactionId} not found in printer1_audit_log`);
-        return false;
+        const msg = `Transaction ${transactionId} not found in printer1_audit_log`;
+        console.error(`❌ ${msg}`);
+        return { success: false, error: msg };
       }
 
       // Step 2: Get and increment Printer 2 daily counter
       const printer2Counter = await this.getPrinterCounter('receiptizePrinter', businessId, true);
       if (printer2Counter <= 0) {
-        console.error(`❌ Failed to get Printer 2 counter for transaction ${transactionId}`);
-        return false;
+        const msg = `Failed to get Printer 2 counter for transaction ${transactionId}`;
+        console.error(`❌ ${msg}`);
+        return { success: false, error: msg };
       }
 
       // Step 3: Insert into printer2_audit_log
@@ -453,10 +461,15 @@ export class PrinterManagementService {
       );
 
       console.log(`✅ Moved transaction ${transactionId} from Printer 1 to Printer 2 audit log (Printer 2 counter: ${printer2Counter})`);
-      return true;
+      return {
+        success: true,
+        printer2Counter,
+        globalCounter: p1Entry.global_counter,
+      };
     } catch (error) {
       console.error(`❌ Error moving transaction ${transactionId} to Printer 2:`, error);
-      return false;
+      const msg = error instanceof Error ? error.message : String(error);
+      return { success: false, error: msg };
     }
   }
 

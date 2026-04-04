@@ -283,7 +283,7 @@ declare global {
 
       // Transaction operations
       localDbGetTransactionByUuid?: (uuid: string) => Promise<unknown>;
-      localDbGetTransactions?: (businessId?: number, limit?: number, options?: { todayOnly?: boolean; from?: string; to?: string }) => Promise<unknown[]>;
+      localDbGetTransactions?: (businessId?: number, limit?: number, options?: { todayOnly?: boolean; from?: string; to?: string; uuidIds?: string[] }) => Promise<unknown[]>;
       localDbGetPendingOrdersCount?: (businessId?: number) => Promise<{ success: boolean; count: number }>;
       localDbUpdateTransactionShift?: (transactionUuid: string, shiftUuid: string | null) => Promise<{ success: boolean; error?: string }>;
       localDbDeleteSingleTransactionPreview?: (transactionUuid: string) => Promise<{
@@ -693,7 +693,12 @@ declare global {
       getPrinter2AuditLog?: (fromDate?: string, toDate?: string, limit?: number, transactionId?: string) => Promise<{ success: boolean; entries: unknown[] }>;
       logPrinter1Print?: (transactionId: string, printer1ReceiptNumber: number, globalCounter?: number | null, isReprint?: boolean, reprintCount?: number) => Promise<{ success: boolean }>;
       getPrinter1AuditLog?: (fromDate?: string, toDate?: string, limit?: number, transactionId?: string) => Promise<{ success: boolean; entries: unknown[] }>;
-      moveTransactionToPrinter2?: (transactionId: string) => Promise<{ success: boolean; error?: string }>;
+      moveTransactionToPrinter2?: (transactionId: string) => Promise<{
+        success: boolean;
+        error?: string;
+        printer2Counter?: number;
+        globalCounter?: number | null;
+      }>;
       queueTransactionForSystemPos?: (transactionId: string) => Promise<{ success: boolean; alreadyQueued?: boolean; alreadySynced?: boolean; error?: string }>;
       getSystemPosQueue?: () => Promise<{ success: boolean; queue: Array<{ id: number; transaction_id: string; queued_at: number; synced_at: number | null; retry_count: number; last_error: string | null }> }>;
       markSystemPosSynced?: (transactionId: string) => Promise<{ success: boolean }>;

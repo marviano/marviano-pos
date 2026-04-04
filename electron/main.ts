@@ -4736,18 +4736,24 @@ function createWindows(): void {
     }
   });
 
-  ipcMain.handle('localdb-get-transactions', async (event, businessId?: number, limit?: number, options?: { todayOnly?: boolean; from?: string; to?: string }) => {
+  ipcMain.handle('localdb-get-transactions', async (event, businessId?: number, limit?: number, options?: { todayOnly?: boolean; from?: string; to?: string; uuidIds?: string[] }) => {
     try {
       const todayOnly = options?.todayOnly === true;
       const fromDate = options?.from;
       const toDate = options?.to;
+      const uuidIdsRaw = options?.uuidIds;
+      const useUuidFilter =
+        Array.isArray(uuidIdsRaw) &&
+        uuidIdsRaw.length > 0 &&
+        typeof businessId === 'number' &&
+        !Number.isNaN(businessId);
 
       // Diagnostic logging
       const diagLogPathTx = path.join(app.getPath('userData'), 'path-diagnostic.log');
       try {
         const txCountResult = await executeQueryOne<{ cnt: number }>('SELECT COUNT(*) as cnt FROM transactions');
         const txCount = txCountResult?.cnt || 0;
-        fs.appendFileSync(diagLogPathTx, `${new Date().toISOString()} [GET-TX] businessId=${businessId}, limit=${limit}, todayOnly=${todayOnly}, from=${fromDate ?? 'none'}, to=${toDate ?? 'none'}, totalTxInDb=${txCount}\n`);
+        fs.appendFileSync(diagLogPathTx, `${new Date().toISOString()} [GET-TX] businessId=${businessId}, limit=${limit}, todayOnly=${todayOnly}, from=${fromDate ?? 'none'}, to=${toDate ?? 'none'}, uuidFilterCount=${useUuidFilter ? uuidIdsRaw.length : 0}, totalTxInDb=${txCount}\n`);
       } catch (e) {
         try { fs.appendFileSync(diagLogPathTx, `${new Date().toISOString()} [GET-TX] ERROR: ${e}\n`); } catch (e2) { }
       }
@@ -4835,49 +4841,92 @@ function createWindows(): void {
           GROUP BY transaction_uuid
         ) refund_summary ON t.uuid_id = refund_summary.transaction_uuid
       `;
-      const params: (string | number | null | boolean)[] = [];
-      const conditions: string[] = [];
 
-      // Exclude archived transactions
-      conditions.push('t.status != \'archived\'');
+      let results: Record<string, unknown>[];
 
-      // Kitchen/barista display optimization: fetch only today's active orders
-      if (todayOnly) {
-        conditions.push('DATE(t.created_at) = CURDATE()');
-        conditions.push("t.status IN ('pending', 'paid', 'completed')");
+      if (useUuidFilter) {
+        const ids = [
+          ...new Set(
+            uuidIdsRaw
+              .map((x) => String(x).trim())
+              .filter((s) => s.length > 0)
+          ),
+        ];
+        const CHUNK = 400;
+        const merged: Record<string, unknown>[] = [];
+        const seenRowKeys = new Set<string>();
+
+        for (let i = 0; i < ids.length; i += CHUNK) {
+          const chunk = ids.slice(i, i + CHUNK);
+          const ph = chunk.map(() => '?').join(',');
+          const chunkConditions = [
+            "t.status != 'archived'",
+            't.business_id = ?',
+            `(t.uuid_id IN (${ph}) OR CAST(t.id AS CHAR) IN (${ph}))`,
+          ];
+          const chunkParams: (string | number)[] = [businessId, ...chunk, ...chunk];
+          const chunkQuery = `${query} WHERE ${chunkConditions.join(' AND ')} ORDER BY t.created_at DESC`;
+          const part = (await executeQuery(chunkQuery, chunkParams)) as Record<string, unknown>[];
+          for (const row of part || []) {
+            const tid = row.t_id != null ? Number(row.t_id) : NaN;
+            const key = !Number.isNaN(tid) ? `t:${tid}` : `u:${String(row.uuid_id ?? row.id ?? '')}`;
+            if (!seenRowKeys.has(key)) {
+              seenRowKeys.add(key);
+              merged.push(row);
+            }
+          }
+        }
+
+        const safeLimit =
+          limit && typeof limit === 'number' && limit > 0
+            ? Math.min(Math.max(limit, 1), 100000)
+            : null;
+        results = safeLimit != null && merged.length > safeLimit ? merged.slice(0, safeLimit) : merged;
+      } else {
+        const params: (string | number | null | boolean)[] = [];
+        const conditions: string[] = [];
+
+        // Exclude archived transactions
+        conditions.push('t.status != \'archived\'');
+
+        // Kitchen/barista display optimization: fetch only today's active orders
+        if (todayOnly) {
+          conditions.push('DATE(t.created_at) = CURDATE()');
+          conditions.push("t.status IN ('pending', 'paid', 'completed')");
+        }
+
+        // Daftar Transaksi: filter by date range so we only fetch the selected range (faster first load)
+        if (fromDate && typeof fromDate === 'string') {
+          const startIso = fromDate.includes('T') ? fromDate : `${fromDate}T00:00:00.000Z`;
+          conditions.push('t.created_at >= ?');
+          params.push(toMySQLDateTime(startIso));
+        }
+        if (toDate && typeof toDate === 'string') {
+          const endIso = toDate.includes('T') ? toDate : `${toDate}T23:59:59.999Z`;
+          conditions.push('t.created_at <= ?');
+          params.push(toMySQLDateTime(endIso));
+        }
+
+        if (businessId) {
+          conditions.push('t.business_id = ?');
+          params.push(businessId);
+        }
+
+        if (conditions.length > 0) {
+          query += ' WHERE ' + conditions.join(' AND ');
+        }
+
+        query += ' ORDER BY t.created_at DESC';
+
+        // LIMIT cannot be parameterized with window functions in some MySQL versions
+        // Validate and use string interpolation (safe since we validate it's a number)
+        if (limit && typeof limit === 'number' && limit > 0) {
+          const safeLimit = Math.min(Math.max(limit, 1), 100000); // Cap at 100k for safety
+          query += ` LIMIT ${safeLimit}`;
+        }
+
+        results = (await executeQuery(query, params)) as Record<string, unknown>[];
       }
-
-      // Daftar Transaksi: filter by date range so we only fetch the selected range (faster first load)
-      if (fromDate && typeof fromDate === 'string') {
-        const startIso = fromDate.includes('T') ? fromDate : `${fromDate}T00:00:00.000Z`;
-        conditions.push('t.created_at >= ?');
-        params.push(toMySQLDateTime(startIso));
-      }
-      if (toDate && typeof toDate === 'string') {
-        const endIso = toDate.includes('T') ? toDate : `${toDate}T23:59:59.999Z`;
-        conditions.push('t.created_at <= ?');
-        params.push(toMySQLDateTime(endIso));
-      }
-
-      if (businessId) {
-        conditions.push('t.business_id = ?');
-        params.push(businessId);
-      }
-
-      if (conditions.length > 0) {
-        query += ' WHERE ' + conditions.join(' AND ');
-      }
-
-      query += ' ORDER BY t.created_at DESC';
-
-      // LIMIT cannot be parameterized with window functions in some MySQL versions
-      // Validate and use string interpolation (safe since we validate it's a number)
-      if (limit && typeof limit === 'number' && limit > 0) {
-        const safeLimit = Math.min(Math.max(limit, 1), 100000); // Cap at 100k for safety
-        query += ` LIMIT ${safeLimit}`;
-      }
-
-      const results = await executeQuery(query, params);
 
       // Attach table_ids from transaction_tables junction (replaces table_ids_json)
       if (Array.isArray(results) && results.length > 0) {
@@ -11031,7 +11080,7 @@ function createWindows(): void {
 
       const result = await printerService.moveTransactionToPrinter2(transactionId, transaction.business_id);
 
-      if (result) {
+      if (result.success) {
         // Queue transaction for System POS sync
         try {
           const queueResult = await insertTransactionToSystemPos(transactionId);
@@ -11061,7 +11110,13 @@ function createWindows(): void {
         }
       }
 
-      return { success: result, error: result ? undefined : 'Failed to move transaction' };
+      return result.success
+        ? {
+            success: true,
+            printer2Counter: result.printer2Counter,
+            globalCounter: result.globalCounter,
+          }
+        : { success: false, error: result.error };
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error);
       console.error(`❌ [IPC] Error moving transaction to Printer 2:`, error);

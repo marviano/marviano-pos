@@ -6,6 +6,7 @@ import { hasPermission } from '@/lib/permissions';
 import { isSuperAdmin } from '@/lib/auth';
 import { X, RefreshCw, ArrowRight, AlertCircle, ChevronUp, ChevronDown } from 'lucide-react';
 import { appAlert } from '@/components/AppDialog';
+import { buildReceiptLineItemsForPrint } from '@/lib/buildReceiptLineItemsForPrint';
 
 interface Printer1Audit {
   transaction_id: string;
@@ -67,10 +68,21 @@ interface TransactionWithAudit extends Transaction {
 interface ElectronAPI {
   getPrinter1AuditLog?: (fromDate?: string, toDate?: string, limit?: number) => Promise<{ entries: Array<Record<string, unknown>> }>;
   getPrinter2AuditLog?: (fromDate?: string, toDate?: string, limit?: number) => Promise<{ entries: Array<Record<string, unknown>> }>;
-  localDbGetTransactions?: (businessId?: number, limit?: number) => Promise<Transaction[]>;
+  localDbGetTransactions?: (
+    businessId?: number,
+    limit?: number,
+    options?: { todayOnly?: boolean; from?: string; to?: string; uuidIds?: string[] }
+  ) => Promise<Transaction[]>;
   localDbGetUsers?: () => Promise<Array<{ id: number; name: string; email: string }>>;
   localDbGetEmployees?: () => Promise<Array<{ id: number; name: string; color?: string | null }>>;
-  moveTransactionToPrinter2?: (transactionId: string) => Promise<{ success: boolean; error?: string }>;
+  localDbGetTransactionItems?: (transactionId: string) => Promise<unknown[]>;
+  printReceipt?: (data: Record<string, unknown>) => Promise<{ success?: boolean; error?: string }>;
+  moveTransactionToPrinter2?: (transactionId: string) => Promise<{
+    success: boolean;
+    error?: string;
+    printer2Counter?: number;
+    globalCounter?: number | null;
+  }>;
 }
 
 const formatPrice = (price: number | string) => {
@@ -226,11 +238,11 @@ export default function Printer1ToPrinter2Manager({ onClose }: { onClose: () => 
         throw new Error('Electron local database API is not available. This page requires offline database support.');
       }
 
-      // Load audit logs
-      const [p1Result, p2Result, txResult, usersResult, empResult] = await Promise.all([
-        electronAPI.getPrinter1AuditLog(fromDate, toDate, 50000),
-        electronAPI.getPrinter2AuditLog(fromDate, toDate, 50000),
-        electronAPI.localDbGetTransactions(businessId, 100000),
+      // Audits are filtered by the date picker (default: today UTC+7). Printer service caps limit at 10k.
+      const auditLimit = 10000;
+      const [p1Result, p2Result, usersResult, empResult] = await Promise.all([
+        electronAPI.getPrinter1AuditLog(fromDate, toDate, auditLimit),
+        electronAPI.getPrinter2AuditLog(fromDate, toDate, auditLimit),
         electronAPI.localDbGetUsers?.() || Promise.resolve([]),
         electronAPI.localDbGetEmployees?.() || Promise.resolve([])
       ]);
@@ -258,9 +270,26 @@ export default function Printer1ToPrinter2Manager({ onClose }: { onClose: () => 
         reprint_count: a.reprint_count !== null && a.reprint_count !== undefined ? Number(a.reprint_count) : undefined,
       }));
 
+      const txIdSet = new Set<string>();
+      p1Logs.forEach((a) => {
+        if (a.transaction_id) txIdSet.add(a.transaction_id);
+      });
+      p2Logs.forEach((a) => {
+        if (a.transaction_id) txIdSet.add(a.transaction_id);
+      });
+      const uuidIds = [...txIdSet];
+
+      let txRows: Transaction[] = [];
+      if (uuidIds.length > 0) {
+        const txResult = await electronAPI.localDbGetTransactions(businessId, uuidIds.length + 100, {
+          uuidIds,
+        });
+        txRows = Array.isArray(txResult) ? (txResult as Transaction[]) : [];
+      }
+
       setPrinter1AuditLogs(p1Logs);
       setPrinter2AuditLogs(p2Logs);
-      setTransactions(txResult || []);
+      setTransactions(txRows);
 
       // Build users map
       const usersMap = new Map<number, { id: number; name: string; email: string }>();
@@ -428,15 +457,81 @@ export default function Printer1ToPrinter2Manager({ onClose }: { onClose: () => 
       return;
     }
 
-    setMovingTransactionId(transactionToMove.id);
+    const txSnapshot = transactionToMove;
+    setMovingTransactionId(txSnapshot.id);
     setShowConfirmDialog(false);
 
+    const num = (v: unknown) => {
+      if (typeof v === 'number' && !Number.isNaN(v)) return v;
+      const p = parseFloat(String(v ?? ''));
+      return Number.isFinite(p) ? p : 0;
+    };
+
     try {
-      const result = await electronAPI.moveTransactionToPrinter2(transactionToMove.id);
+      const result = await electronAPI.moveTransactionToPrinter2(txSnapshot.id);
 
       if (result.success) {
+        let printNote = '';
+        if (
+          electronAPI.printReceipt &&
+          electronAPI.localDbGetTransactionItems &&
+          typeof result.printer2Counter === 'number' &&
+          result.printer2Counter > 0
+        ) {
+          try {
+            const rawItems = await electronAPI.localDbGetTransactionItems(txSnapshot.id);
+            const receiptItems = buildReceiptLineItemsForPrint(Array.isArray(rawItems) ? rawItems : []);
+            const vd = num(txSnapshot.voucher_discount);
+            const hasVoucher = vd > 0;
+            const finalAmt = num(txSnapshot.final_amount);
+            const totalAmt = num(txSnapshot.total_amount);
+            const cashierUser = users.get(txSnapshot.user_id);
+            const cashierName =
+              (cashierUser?.name && String(cashierUser.name).trim()) ||
+              cashierUser?.email ||
+              'Kasir';
+            const printResult = await electronAPI.printReceipt({
+              type: 'normal',
+              printerType: 'receiptizePrinter',
+              business_id: txSnapshot.business_id,
+              items: receiptItems,
+              total: hasVoucher ? (totalAmt || finalAmt) : finalAmt,
+              final_amount: finalAmt,
+              voucherDiscount: hasVoucher ? vd : undefined,
+              voucherLabel: hasVoucher ? (txSnapshot.voucher_label ?? 'Voucher') : undefined,
+              paymentMethod: getPaymentMethodLabel(txSnapshot),
+              amountReceived: num(txSnapshot.amount_received),
+              change: num(txSnapshot.change_amount),
+              date: txSnapshot.created_at,
+              receiptNumber: txSnapshot.id,
+              cashier: cashierName,
+              customerName: txSnapshot.customer_name ?? '',
+              transactionType: txSnapshot.transaction_type || 'drinks',
+              pickupMethod: txSnapshot.pickup_method,
+              printer2Counter: result.printer2Counter,
+              globalCounter:
+                result.globalCounter != null && result.globalCounter !== undefined
+                  ? Number(result.globalCounter)
+                  : undefined,
+              isReprint: false,
+            });
+            if (!printResult?.success) {
+              printNote = ` Perhatian: gagal cetak Receiptize (${printResult?.error || 'unknown'}).`;
+              console.warn('[Printer1ToPrinter2Manager] Receiptize print after move failed:', printResult?.error);
+            }
+          } catch (printErr) {
+            const msg = printErr instanceof Error ? printErr.message : String(printErr);
+            printNote = ` Perhatian: gagal cetak Receiptize (${msg}).`;
+            console.error('[Printer1ToPrinter2Manager] Receiptize print error:', printErr);
+          }
+        } else if (!electronAPI.printReceipt || !electronAPI.localDbGetTransactionItems) {
+          printNote = ' Perhatian: cetak Receiptize tidak dijalankan (API tidak tersedia).';
+        }
+
         await loadData();
-        appAlert(`✅ Transaction ${transactionToMove.id} successfully moved to Printer 2 audit log.`);
+        appAlert(
+          `✅ Transaction ${txSnapshot.id} dipindah ke audit Printer 2.${printNote}`
+        );
       } else {
         appAlert(`❌ Failed to move transaction: ${result.error || 'Unknown error'}`);
       }
@@ -888,6 +983,7 @@ export default function Printer1ToPrinter2Manager({ onClose }: { onClose: () => 
                 <ul className="list-disc list-inside mt-2 space-y-1">
                   <li>Delete the entry from printer1_audit_log</li>
                   <li>Create a new entry in printer2_audit_log with Printer 2 daily counter</li>
+                  <li>Print the receipt to the Receiptize printer (Printer 2), if configured</li>
                   <li>Insert the transaction into system_pos database (if not already there)</li>
                 </ul>
               </p>

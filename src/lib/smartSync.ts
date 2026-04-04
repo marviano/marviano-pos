@@ -2,7 +2,7 @@ import { conflictResolutionService } from './conflictResolution';
 import { getApiUrl, cleanUrl, getPosWriteApiKey } from '@/lib/api';
 import { getAutoSyncEnabled, onAutoSyncSettingChanged } from './autoSyncSettings';
 import { validateNotNullFields, convertTransactionDatesForMySQL, convertShiftDatesForMySQL, cleanRefundForMySQL } from './syncUtils';
-import { runMatchCheck, getTodayWibDateString, normalizeDateInput, type MatchCheckResult } from './verificationMatchCheck';
+import { getTodayWibDateString, normalizeDateInput } from './verificationMatchCheck';
 
 type UnknownRecord = Record<string, unknown>;
 
@@ -307,12 +307,23 @@ class SmartSyncService {
 
       let syncedTransactionCount = 0;
       try {
+        // Only upload pending/failed transactions for the currently selected business (same as fingerprint diff / verifikasi).
+        const syncBusinessId = this.verificationBusinessId;
+        if (syncBusinessId == null) {
+          if (SMART_SYNC_VERBOSE) {
+            console.log('⏸️ [SMART SYNC] Skipping pending transaction upload: no selected business (setVerificationBusinessId)');
+          }
+        } else {
         // Process any pending transactions (including those just re-queued by diff)
-        if (SMART_SYNC_VERBOSE) console.log('🔍 [SMART SYNC] Fetching pending transactions...');
-        const pendingTransactions = await (electronAPI.localDbGetUnsyncedTransactions as (businessId?: number, includeItems?: boolean) => Promise<PendingTransaction[]>)(undefined, false);
+        if (SMART_SYNC_VERBOSE) console.log('🔍 [SMART SYNC] Fetching pending transactions...', { businessId: syncBusinessId });
+        const pendingTransactions = await (electronAPI.localDbGetUnsyncedTransactions as (businessId?: number, includeItems?: boolean) => Promise<PendingTransaction[]>)(
+          syncBusinessId,
+          false
+        );
         if (SMART_SYNC_VERBOSE) {
           console.log(`📦 [SMART SYNC] Found ${pendingTransactions.length} pending transactions`, {
             count: pendingTransactions.length,
+            businessId: syncBusinessId,
             transactionIds: pendingTransactions.slice(0, 10).map(t => t.id)
           });
         }
@@ -332,6 +343,7 @@ class SmartSyncService {
             }
           }
           if (SMART_SYNC_VERBOSE) console.log('✅ [SMART SYNC] All transaction batches processed');
+        }
         }
         this.lastSyncedCount = syncedTransactionCount;
       } catch (txError) {
@@ -1368,16 +1380,24 @@ class SmartSyncService {
         return 0;
       }
 
+      const businessId = this.verificationBusinessId;
+      if (businessId == null) {
+        return 0;
+      }
+
       const electronAPI = typeof window !== 'undefined' ? (window as { electronAPI?: UnknownRecord }).electronAPI : undefined;
       if (electronAPI?.localDbGetUnsyncedTransactionsCount) {
-        const count = await (electronAPI.localDbGetUnsyncedTransactionsCount as (businessId?: number) => Promise<number>)();
+        const count = await (electronAPI.localDbGetUnsyncedTransactionsCount as (businessId?: number) => Promise<number>)(businessId);
         return typeof count === 'number' ? count : 0;
       }
       // Fallback: load list and return length (avoid when possible)
       if (!electronAPI?.localDbGetUnsyncedTransactions) {
         return 0;
       }
-      const pendingTransactions = await (electronAPI.localDbGetUnsyncedTransactions as (businessId?: number, includeItems?: boolean) => Promise<PendingTransaction[]>)(undefined, false);
+      const pendingTransactions = await (electronAPI.localDbGetUnsyncedTransactions as (businessId?: number, includeItems?: boolean) => Promise<PendingTransaction[]>)(
+        businessId,
+        false
+      );
       return Array.isArray(pendingTransactions) ? pendingTransactions.length : 0;
     } catch (error) {
       console.warn('⚠️ [SMART SYNC] Failed to get pending transaction count:', error);
@@ -1477,47 +1497,6 @@ class SmartSyncService {
   }
 
   /**
-   * Build verification diff log lines for a match-check result (BEFORE or AFTER upsert).
-   */
-  private buildVerificationLogLines(result: MatchCheckResult, label: string, businessId: number, dateWib: string): string[] {
-    const lines: string[] = [
-      '',
-      `[${new Date().toISOString()}] ${label} business_id=${businessId} date=${dateWib}`,
-      `  onlyInLocal (Pictos): ${result.onlyInLocal.length} ${result.onlyInLocal.slice(0, 20).join(', ')}${result.onlyInLocal.length > 20 ? '...' : ''}`,
-      `  onlyOnServer (salespulse): ${result.onlyOnServer.length} ${result.onlyOnServer.slice(0, 20).join(', ')}${result.onlyOnServer.length > 20 ? '...' : ''}`,
-      `  mismatches (same UUID, different fields): ${result.mismatches.length}`
-    ];
-    for (const m of result.mismatches.slice(0, 50)) {
-      lines.push(`    uuid=${m.uuid} fields=[${m.fields.join(', ')}]`);
-      if (m.details?.length) {
-        for (const d of m.details.slice(0, 10)) {
-          lines.push(`      ${d.field}: Pictos=${d.pictosValue} salespulse=${d.serverValue}`);
-        }
-      }
-    }
-    if (result.mismatches.length > 50) {
-      lines.push(`    ... and ${result.mismatches.length - 50} more mismatches`);
-    }
-    return lines;
-  }
-
-  /**
-   * Append verification log content to the Smart Sync verification diff file (Electron userData).
-   * Logs are split by date: smart-sync-verification-diffs-YYYY-MM-DD.log
-   * @param dateYyyyMmDd Optional date (YYYY-MM-DD, e.g. today WIB) so entries go to that day's file
-   */
-  private async appendVerificationLog(content: string, dateYyyyMmDd?: string): Promise<void> {
-    const logApi = (typeof window !== 'undefined' && (window as { electronAPI?: UnknownRecord }).electronAPI?.smartSyncAppendVerificationLog) as ((c: string, d?: string) => Promise<{ success?: boolean }>) | undefined;
-    if (logApi) {
-      try {
-        await logApi(content, dateYyyyMmDd);
-      } catch (e) {
-        console.warn('⚠️ [SMART SYNC] Failed to write verification diff log:', e);
-      }
-    }
-  }
-
-  /**
    * Diff-first upload: compare local vs VPS fingerprints for a date range, re-queue only missing or changed transactions.
    * Returns the number of transactions queued for upload (reset to pending).
    */
@@ -1576,68 +1555,6 @@ class SmartSyncService {
     const resetBatch = electronAPI.localDbResetTransactionSyncBatch as (uuids: string[]) => Promise<{ success?: boolean }>;
     await resetBatch(missingOrChanged);
     return missingOrChanged.length;
-  }
-
-  /**
-   * Run verifikasi for a single date (local vs VPS): re-queue onlyInLocal + mismatches, log BEFORE when there are differences.
-   * @param dateWib YYYY-MM-DD (WIB) to compare
-   * @returns { hadDifferences, requeuedCount }
-   */
-  private async runVerifikasiForDateAndRequeue(electronAPI: UnknownRecord, dateWib: string): Promise<{ hadDifferences: boolean; requeuedCount: number }> {
-    const businessId = this.verificationBusinessId;
-    if (businessId == null) return { hadDifferences: false, requeuedCount: 0 };
-
-    const fromIso = normalizeDateInput(dateWib, false) ?? dateWib;
-    const toIso = normalizeDateInput(dateWib, true) ?? dateWib;
-
-    const getTransactionsMatchData = (bid: number, from: string, to: string) =>
-      (electronAPI.localDbGetTransactionsMatchData as (businessId?: number, from?: string, to?: string) => Promise<UnknownRecord[]>)(bid, from, to);
-
-    const result = await runMatchCheck(businessId, dateWib, dateWib, fromIso, toIso, {
-      getTransactionsMatchData,
-      getApiUrl,
-      fetch
-    });
-
-    const toRequeue = [...result.onlyInLocal, ...result.mismatches.map(m => m.uuid)];
-    if (toRequeue.length > 0) {
-      const resetSync = electronAPI.localDbResetTransactionSync as (id: string) => Promise<{ success?: boolean }>;
-      for (const uuid of toRequeue) {
-        await resetSync(String(uuid));
-      }
-      console.log(`✅ [SMART SYNC] Verifikasi ${dateWib}: ${toRequeue.length} transaksi diantre ulang untuk re-upload`);
-    }
-
-    const hadDifferences = result.onlyInLocal.length > 0 || result.onlyOnServer.length > 0 || result.mismatches.length > 0;
-    if (hadDifferences) {
-      const beforeLines = this.buildVerificationLogLines(result, 'BEFORE upsert', businessId, dateWib);
-      await this.appendVerificationLog(beforeLines.join('\n'), dateWib);
-    }
-    return { hadDifferences, requeuedCount: toRequeue.length };
-  }
-
-  /**
-   * Run verifikasi for a single date and append AFTER upsert state to the verification log (no re-queue).
-   * Call after transaction batches have been uploaded for paired before/after recording.
-   */
-  private async runVerifikasiForDateLogOnly(electronAPI: UnknownRecord, dateWib: string): Promise<void> {
-    const businessId = this.verificationBusinessId;
-    if (businessId == null) return;
-
-    const fromIso = normalizeDateInput(dateWib, false) ?? dateWib;
-    const toIso = normalizeDateInput(dateWib, true) ?? dateWib;
-
-    const getTransactionsMatchData = (bid: number, from: string, to: string) =>
-      (electronAPI.localDbGetTransactionsMatchData as (businessId?: number, from?: string, to?: string) => Promise<UnknownRecord[]>)(bid, from, to);
-
-    const result = await runMatchCheck(businessId, dateWib, dateWib, fromIso, toIso, {
-      getTransactionsMatchData,
-      getApiUrl,
-      fetch
-    });
-
-    const afterLines = this.buildVerificationLogLines(result, 'AFTER upsert', businessId, dateWib);
-    await this.appendVerificationLog(afterLines.join('\n'), dateWib);
   }
 
   /**
@@ -1990,7 +1907,13 @@ class SmartSyncService {
                 if (electronAPI.localDbResetTransactionSync) {
                   await (electronAPI.localDbResetTransactionSync as (id: string) => Promise<{ success?: boolean }>)(transactionUuid);
                 }
-                const pendingAfterReset = await (electronAPI.localDbGetUnsyncedTransactions as (businessId?: number) => Promise<PendingTransaction[]>)();
+                // No business filter: must find this UUID even if it belongs to another outlet on the same DB.
+                const pendingAfterReset = await (
+                  electronAPI.localDbGetUnsyncedTransactions as (
+                    businessId?: number,
+                    includeItems?: boolean
+                  ) => Promise<PendingTransaction[]>
+                )(undefined, false);
                 const txToSync = Array.isArray(pendingAfterReset) ? pendingAfterReset.find((t: PendingTransaction) => t.id === transactionUuid) : undefined;
                 if (txToSync) {
                   const batchResult = await this.processBatch([txToSync], false);

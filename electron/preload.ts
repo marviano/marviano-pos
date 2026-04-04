@@ -185,7 +185,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   localDbGetTransactionCheckerPrinted: (transactionUuid: string) => ipcRenderer.invoke('localdb-get-transaction-checker-printed', transactionUuid),
   localDbSetTransactionCheckerPrinted: (transactionUuid: string) => ipcRenderer.invoke('localdb-set-transaction-checker-printed', transactionUuid),
   localDbGetTransactionByUuid: (uuid: string) => ipcRenderer.invoke('localdb-get-transaction-by-uuid', uuid),
-  localDbGetTransactions: (businessId?: number, limit?: number, options?: { todayOnly?: boolean }) =>
+  localDbGetTransactions: (businessId?: number, limit?: number, options?: { todayOnly?: boolean; from?: string; to?: string; uuidIds?: string[] }) =>
     ipcRenderer.invoke('localdb-get-transactions', businessId, limit, options),
   localDbGetPendingOrdersCount: (businessId?: number) =>
     ipcRenderer.invoke('localdb-get-pending-orders-count', businessId),
