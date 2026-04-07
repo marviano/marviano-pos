@@ -5,6 +5,12 @@ import { useAuth } from '@/hooks/useAuth';
 import { hasPermission } from '@/lib/permissions';
 import { isSuperAdmin } from '@/lib/auth';
 
+const parseDateSafely = (value: unknown): Date | null => {
+  if (typeof value !== 'string' || value.trim() === '') return null;
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
+};
+
 export interface TransactionItem {
   id: string; // Changed to string for UUID
   product_name: string;
@@ -575,7 +581,12 @@ const TransactionDetailModal: React.FC<TransactionDetailModalProps> = ({
 
       try {
         // Fetch printer2 audit log to check if this is a receiptize transaction
-        const transactionDate = new Date(transaction.created_at);
+        const transactionDate = parseDateSafely(transaction.created_at);
+        if (!transactionDate) {
+          setReceiptizeCounter(null);
+          setIsReceiptize(false);
+          return;
+        }
         const startDate = new Date(transactionDate);
         startDate.setDate(startDate.getDate() - 1);
         const endDate = new Date(transactionDate);
@@ -636,7 +647,10 @@ const TransactionDetailModal: React.FC<TransactionDetailModalProps> = ({
   };
 
   const formatDate = (dateString: string) => {
-    const date = new Date(dateString);
+    const date = parseDateSafely(dateString);
+    if (!date) {
+      return '-';
+    }
     return date.toLocaleString('id-ID', {
       weekday: 'long',
       year: 'numeric',

@@ -208,7 +208,8 @@ interface ElectronTransactionItem {
 
 // Type for window.electronAPI
 interface ElectronAPI {
-  localDbGetTransactions: (businessId: number, limit: number, options?: { todayOnly?: boolean; from?: string; to?: string }) => Promise<ElectronTransaction[]>;
+  localDbGetTransactionByUuid?: (uuid: string) => Promise<ElectronTransaction | null>;
+  localDbGetTransactions: (businessId: number, limit: number, options?: { todayOnly?: boolean; from?: string; to?: string; uuidIds?: string[] }) => Promise<ElectronTransaction[]>;
   localDbGetTransactionItems: (transactionId: string) => Promise<ElectronTransactionItem[]>;
   localDbGetTransactionRefunds: (transactionId: string) => Promise<TransactionRefund[]>;
   localDbGetAllProducts: (businessId?: number) => Promise<ElectronProduct[]>;
@@ -530,38 +531,83 @@ export default function TransactionList({ businessId, onLoadTransaction }: Trans
       const electronAPI = (window as { electronAPI: ElectronAPI }).electronAPI;
       const useSystemPos = isSystemPosMode;
 
-      // Get transaction from appropriate database
-      const transactions: ElectronTransaction[] = useSystemPos && electronAPI.localDbGetSystemPosTransactions
-        ? await electronAPI.localDbGetSystemPosTransactions(effectiveBusinessId, 1000)
-        : await electronAPI.localDbGetTransactions(effectiveBusinessId, 1000);
+      let transaction: ElectronTransaction | undefined;
+      let transactionPool: ElectronTransaction[] = [];
 
-      // Try to find transaction by ID (UUID) or receipt_number
-      let transaction = transactions.find((tx) => {
-        return String(tx.id) === String(transactionId);
-      });
+      // Fast path: direct UUID lookup in offline DB (constant-time query path)
+      if (!useSystemPos && electronAPI.localDbGetTransactionByUuid) {
+        const directTx = await electronAPI.localDbGetTransactionByUuid(transactionId) as ElectronTransaction | null;
+        if (directTx) {
+          transaction = directTx;
+          transactionPool = [directTx];
+        }
+      }
 
-      // If not found by ID, try by receipt_number
+      // Fallback: lookup from list pool (system_pos or when direct lookup unavailable/miss)
       if (!transaction) {
-        transaction = transactions.find((tx) => {
-          return tx.receipt_number !== null && String(tx.receipt_number) === String(transactionId);
+        const transactions: ElectronTransaction[] = useSystemPos && electronAPI.localDbGetSystemPosTransactions
+          ? await electronAPI.localDbGetSystemPosTransactions(effectiveBusinessId, 1000)
+          : await electronAPI.localDbGetTransactions(effectiveBusinessId, 50000, { uuidIds: [transactionId] });
+        transactionPool = (!useSystemPos && transactions.length === 0)
+          ? await electronAPI.localDbGetTransactions(effectiveBusinessId, 1000)
+          : transactions;
+
+        // Try to find transaction by ID (UUID) or receipt_number
+        transaction = transactionPool.find((tx) => {
+          if (!tx) return false;
+          return String(tx.id) === String(transactionId);
         });
+
+        // Fallback lookup by UUID column when row id is uuid_id
+        if (!transaction) {
+          transaction = transactionPool.find((tx) => {
+            if (!tx) return false;
+            return String((tx as { uuid_id?: string | null }).uuid_id ?? '') === String(transactionId);
+          });
+        }
+
+        // If not found by ID, try by receipt_number
+        if (!transaction) {
+          transaction = transactionPool.find((tx) => {
+            if (!tx) return false;
+            return tx.receipt_number !== null && String(tx.receipt_number) === String(transactionId);
+          });
+        }
       }
 
       if (!transaction) {
         console.error(`❌ [TransactionList] Transaction not found in ${useSystemPos ? 'system_pos' : 'offline'} database:`, {
           transactionId,
-          availableIds: transactions.slice(0, 5).map(tx => ({ id: String(tx.id), receipt_number: tx.receipt_number }))
+          availableIds: transactionPool
+            .filter((tx): tx is ElectronTransaction => Boolean(tx))
+            .slice(0, 5)
+            .map(tx => ({ id: String(tx.id), receipt_number: tx.receipt_number }))
         });
         throw new Error(`Transaction not found in ${useSystemPos ? 'system_pos' : 'offline'} database`);
       }
 
+
       // Get the actual UUID from the transaction (id field should be UUID)
       const transactionUuid = transaction.id;
 
-      // Get transaction items from appropriate database
-      const allItems: ElectronTransactionItem[] = useSystemPos && electronAPI.localDbGetSystemPosTransactionItems
-        ? await electronAPI.localDbGetSystemPosTransactionItems(transactionUuid)
-        : await electronAPI.localDbGetTransactionItems(transactionUuid);
+      // Fetch independent data in parallel to reduce modal load time
+      const [allItems, products, users, businesses, refunds] = await Promise.all([
+        useSystemPos && electronAPI.localDbGetSystemPosTransactionItems
+          ? electronAPI.localDbGetSystemPosTransactionItems(transactionUuid)
+          : electronAPI.localDbGetTransactionItems(transactionUuid),
+        useSystemPos && electronAPI.localDbGetSystemPosAllProducts
+          ? electronAPI.localDbGetSystemPosAllProducts(effectiveBusinessId)
+          : electronAPI.localDbGetAllProducts(effectiveBusinessId),
+        useSystemPos && electronAPI.localDbGetSystemPosUsers
+          ? electronAPI.localDbGetSystemPosUsers()
+          : electronAPI.localDbGetUsers(),
+        useSystemPos && electronAPI.localDbGetSystemPosBusinesses
+          ? electronAPI.localDbGetSystemPosBusinesses()
+          : electronAPI.localDbGetBusinesses(),
+        useSystemPos && electronAPI.localDbGetSystemPosTransactionRefunds
+          ? electronAPI.localDbGetSystemPosTransactionRefunds(transactionId)
+          : electronAPI.localDbGetTransactionRefunds(transactionId)
+      ]) as [ElectronTransactionItem[], ElectronProduct[], ElectronUser[], ElectronBusiness[], TransactionRefund[]];
 
       // Include all items, including cancelled ones, so they can be shown in the detail modal
       const items: ElectronTransactionItem[] = allItems;
@@ -586,26 +632,6 @@ export default function TransactionList({ businessId, onLoadTransaction }: Trans
           console.warn('Failed to fetch package lines:', error);
         }
       }
-
-      // Products fetch as fallback in case product_name wasn't in JOIN result
-      // Fetch from appropriate database based on mode
-      const products: ElectronProduct[] = useSystemPos && electronAPI.localDbGetSystemPosAllProducts
-        ? await electronAPI.localDbGetSystemPosAllProducts(effectiveBusinessId)
-        : await electronAPI.localDbGetAllProducts(effectiveBusinessId);
-
-      // Get users and businesses to show actual names
-      // Fetch from appropriate database based on mode
-      const users: ElectronUser[] = useSystemPos && electronAPI.localDbGetSystemPosUsers
-        ? await electronAPI.localDbGetSystemPosUsers()
-        : await electronAPI.localDbGetUsers();
-      const businesses: ElectronBusiness[] = useSystemPos && electronAPI.localDbGetSystemPosBusinesses
-        ? await electronAPI.localDbGetSystemPosBusinesses()
-        : await electronAPI.localDbGetBusinesses();
-
-      // Get refunds from appropriate database
-      const refunds: TransactionRefund[] = useSystemPos && electronAPI.localDbGetSystemPosTransactionRefunds
-        ? await electronAPI.localDbGetSystemPosTransactionRefunds(transactionId)
-        : await electronAPI.localDbGetTransactionRefunds(transactionId);
 
       const user = users.find((u) => u.id === transaction.user_id);
       const business = businesses.find((b) => b.id === transaction.business_id);
@@ -688,6 +714,7 @@ export default function TransactionList({ businessId, onLoadTransaction }: Trans
         refund_total: refundTotalValue,
         refund_status: refundStatusValue
       };
+
 
       setSelectedTransaction(response);
       setIsDetailModalOpen(true);
@@ -947,6 +974,7 @@ export default function TransactionList({ businessId, onLoadTransaction }: Trans
       // Filter by date range - need to convert to local date for accurate filtering
       // This ensures we only show transactions within the selected date range
       const dateFilteredTransactions = dbTransactions.filter((tx) => {
+        if (!tx) return false;
         // Convert UTC to local date for accurate filtering (backend already filters by applied range; this is a safety net)
         const localDate = new Date(tx.created_at);
         const localDateString = localDate.getFullYear() + '-' +
@@ -957,6 +985,7 @@ export default function TransactionList({ businessId, onLoadTransaction }: Trans
       });
 
       const transactionsData = dateFilteredTransactions.map((tx) => {
+        if (!tx) return null;
         const user = users.find((u) => u.id === tx.user_id);
         const business = businesses.find((b) => b.id === tx.business_id);
 
@@ -1009,7 +1038,7 @@ export default function TransactionList({ businessId, onLoadTransaction }: Trans
       });
 
       // Apply permission-based filtering
-      let filteredTransactions = transactionsData;
+      let filteredTransactions = transactionsData.filter((tx): tx is NonNullable<typeof tx> => tx !== null);
 
       // Filter by user permissions (Super Admin sees all data)
       if (!isSuperAdmin(user) && canViewUserDataOnly && !canViewAllData && user) {
