@@ -118,6 +118,76 @@ const getPaymentMethodCode = (transaction: Transaction): string => {
   return transaction.payment_method?.toLowerCase() || 'cash';
 };
 
+/** Calendar YYYY-MM-DD in UTC+7 (Asia/Jakarta; no DST). */
+const getCalendarDateYMDInUTC7 = (isoOrDate: string | Date): string => {
+  const d = typeof isoOrDate === 'string' ? new Date(isoOrDate) : isoOrDate;
+  if (Number.isNaN(d.getTime())) return '';
+  return new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Jakarta',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).format(d);
+};
+
+const isTransactionCreatedTodayUTC7 = (createdAt: string): boolean => {
+  const txDay = getCalendarDateYMDInUTC7(createdAt);
+  const today = getCalendarDateYMDInUTC7(new Date());
+  return txDay !== '' && txDay === today;
+};
+
+/** Transaction Manager only lists paid/completed sales (excludes pending, etc.). */
+const isPaidOrCompleted = (tx: Transaction): boolean => {
+  const s = (tx.status || '').toLowerCase();
+  return s === 'paid' || s === 'completed';
+};
+
+/**
+ * One row per transaction: multiple printer audit rows (e.g. reprints) collapse to the latest print.
+ * Avoids duplicate React keys and double-counted totals.
+ */
+const mergePrinter1Audits = (
+  audits: Printer1Audit[],
+  txMap: Map<string, Transaction>
+): TransactionWithAudit[] => {
+  const merged = new Map<string, TransactionWithAudit>();
+  for (const audit of audits) {
+    const tx = txMap.get(audit.transaction_id);
+    if (!tx || !isPaidOrCompleted(tx)) continue;
+    const epoch = audit.printed_at_epoch ?? 0;
+    const existing = merged.get(audit.transaction_id);
+    if (!existing || epoch > (existing.printed_at_epoch ?? 0)) {
+      merged.set(audit.transaction_id, {
+        ...tx,
+        printer1_receipt_number: audit.printer1_receipt_number,
+        printed_at_epoch: audit.printed_at_epoch,
+      });
+    }
+  }
+  return Array.from(merged.values());
+};
+
+const mergePrinter2Audits = (
+  audits: Printer2Audit[],
+  txMap: Map<string, Transaction>
+): TransactionWithAudit[] => {
+  const merged = new Map<string, TransactionWithAudit>();
+  for (const audit of audits) {
+    const tx = txMap.get(audit.transaction_id);
+    if (!tx || !isPaidOrCompleted(tx)) continue;
+    const epoch = audit.printed_at_epoch ?? 0;
+    const existing = merged.get(audit.transaction_id);
+    if (!existing || epoch > (existing.printed_at_epoch ?? 0)) {
+      merged.set(audit.transaction_id, {
+        ...tx,
+        printer2_receipt_number: audit.printer2_receipt_number,
+        printed_at_epoch: audit.printed_at_epoch,
+      });
+    }
+  }
+  return Array.from(merged.values());
+};
+
 const getPaymentMethodLabel = (transaction: Transaction | string) => {
   const method = typeof transaction === 'string'
     ? transaction.toLowerCase()
@@ -323,68 +393,37 @@ export default function Printer1ToPrinter2Manager({ onClose }: { onClose: () => 
     }
   }, [businessId, hasPermissionToAccess, fromDate, toDate, loadData]);
 
-  // Combine transactions with audit log data
-  const transactionsWithAudit = useMemo(() => {
+  const printer1DisplayRows = useMemo(() => {
     const txMap = new Map<string, Transaction>();
-    transactions.forEach(tx => {
-      txMap.set(tx.id, tx);
-    });
-
-    const result: TransactionWithAudit[] = [];
-
-    if (activeTab === 'printer1') {
-      printer1AuditLogs.forEach(audit => {
-        const tx = txMap.get(audit.transaction_id);
-        if (tx) {
-          result.push({
-            ...tx,
-            printer1_receipt_number: audit.printer1_receipt_number,
-            printed_at_epoch: audit.printed_at_epoch
-          });
-        }
-      });
-    } else {
-      printer2AuditLogs.forEach(audit => {
-        const tx = txMap.get(audit.transaction_id);
-        if (tx) {
-          result.push({
-            ...tx,
-            printer2_receipt_number: audit.printer2_receipt_number,
-            printed_at_epoch: audit.printed_at_epoch
-          });
-        }
-      });
-    }
-
-    return result;
-  }, [activeTab, printer1AuditLogs, printer2AuditLogs, transactions]);
-
-  // Calculate totals for percentage
-  const printer1Total = useMemo(() => {
-    const txMap = new Map<string, Transaction>();
-    transactions.forEach(tx => txMap.set(tx.id, tx));
-    return printer1AuditLogs.reduce((sum, audit) => {
-      const tx = txMap.get(audit.transaction_id);
-      if (tx) {
-        const amount = typeof tx.final_amount === 'string' ? parseFloat(tx.final_amount) : tx.final_amount;
-        return sum + (isNaN(amount) ? 0 : amount);
-      }
-      return sum;
-    }, 0);
+    transactions.forEach((tx) => txMap.set(tx.id, tx));
+    return mergePrinter1Audits(printer1AuditLogs, txMap);
   }, [printer1AuditLogs, transactions]);
 
-  const printer2Total = useMemo(() => {
+  const printer2DisplayRows = useMemo(() => {
     const txMap = new Map<string, Transaction>();
-    transactions.forEach(tx => txMap.set(tx.id, tx));
-    return printer2AuditLogs.reduce((sum, audit) => {
-      const tx = txMap.get(audit.transaction_id);
-      if (tx) {
-        const amount = typeof tx.final_amount === 'string' ? parseFloat(tx.final_amount) : tx.final_amount;
-        return sum + (isNaN(amount) ? 0 : amount);
-      }
-      return sum;
-    }, 0);
+    transactions.forEach((tx) => txMap.set(tx.id, tx));
+    return mergePrinter2Audits(printer2AuditLogs, txMap);
   }, [printer2AuditLogs, transactions]);
+
+  const transactionsWithAudit = useMemo(
+    () => (activeTab === 'printer1' ? printer1DisplayRows : printer2DisplayRows),
+    [activeTab, printer1DisplayRows, printer2DisplayRows]
+  );
+
+  // Totals: one amount per transaction (matches deduped rows; paid/completed only)
+  const printer1Total = useMemo(() => {
+    return printer1DisplayRows.reduce((sum, row) => {
+      const amount = typeof row.final_amount === 'string' ? parseFloat(row.final_amount) : row.final_amount;
+      return sum + (isNaN(amount) ? 0 : amount);
+    }, 0);
+  }, [printer1DisplayRows]);
+
+  const printer2Total = useMemo(() => {
+    return printer2DisplayRows.reduce((sum, row) => {
+      const amount = typeof row.final_amount === 'string' ? parseFloat(row.final_amount) : row.final_amount;
+      return sum + (isNaN(amount) ? 0 : amount);
+    }, 0);
+  }, [printer2DisplayRows]);
 
   const totalAmount = printer1Total + printer2Total;
   const printer1Percentage = totalAmount > 0 ? (printer1Total / totalAmount) * 100 : 0;
@@ -443,12 +482,23 @@ export default function Printer1ToPrinter2Manager({ onClose }: { onClose: () => 
   };
 
   const handleMoveClick = (tx: TransactionWithAudit) => {
+    if (!isTransactionCreatedTodayUTC7(tx.created_at)) {
+      appAlert('Move is only allowed for transactions created today (WIB, UTC+7).');
+      return;
+    }
     setTransactionToMove(tx);
     setShowConfirmDialog(true);
   };
 
   const handleConfirmMove = async () => {
     if (!transactionToMove) return;
+
+    if (!isTransactionCreatedTodayUTC7(transactionToMove.created_at)) {
+      appAlert('Move is only allowed for transactions created today (WIB, UTC+7).');
+      setShowConfirmDialog(false);
+      setTransactionToMove(null);
+      return;
+    }
 
     const electronAPI = typeof window !== 'undefined' ? (window as { electronAPI?: ElectronAPI }).electronAPI : undefined;
 
@@ -612,7 +662,7 @@ export default function Printer1ToPrinter2Manager({ onClose }: { onClose: () => 
                 : 'text-gray-600 hover:text-gray-900 hover:bg-gray-50'
               }`}
           >
-            Printer 1 ({printer1AuditLogs.length})
+            Printer 1 ({printer1DisplayRows.length})
           </button>
           <button
             onClick={() => setActiveTab('printer2')}
@@ -621,7 +671,7 @@ export default function Printer1ToPrinter2Manager({ onClose }: { onClose: () => 
                 : 'text-gray-600 hover:text-gray-900 hover:bg-gray-50'
               }`}
           >
-            Printer 2 ({printer2AuditLogs.length})
+            Printer 2 ({printer2DisplayRows.length})
           </button>
         </div>
 
@@ -673,7 +723,7 @@ export default function Printer1ToPrinter2Manager({ onClose }: { onClose: () => 
             </div>
           ) : sortedTransactions.length === 0 ? (
             <div className="text-center py-8 text-gray-600">
-              <p>No transactions found in {activeTab === 'printer1' ? 'Printer 1' : 'Printer 2'} audit log for the selected date range.</p>
+              <p>No paid or completed transactions found in {activeTab === 'printer1' ? 'Printer 1' : 'Printer 2'} audit log for the selected date range.</p>
             </div>
           ) : (
             <div className="border border-gray-200 rounded overflow-hidden">
@@ -794,7 +844,9 @@ export default function Printer1ToPrinter2Manager({ onClose }: { onClose: () => 
                     </tr>
                   </thead>
                   <tbody className="bg-white divide-y divide-gray-200">
-                    {sortedTransactions.map((transaction, index) => (
+                    {sortedTransactions.map((transaction, index) => {
+                      const canMoveToday = isTransactionCreatedTodayUTC7(transaction.created_at);
+                      return (
                       <tr
                         key={transaction.id}
                         className={`transition-colors ${index % 2 === 0 ? 'bg-blue-50 hover:bg-gray-50' : 'bg-white hover:bg-gray-50'}`}
@@ -940,8 +992,14 @@ export default function Printer1ToPrinter2Manager({ onClose }: { onClose: () => 
                         {activeTab === 'printer1' && (
                           <td className="px-3 py-4 text-center">
                             <button
+                              type="button"
                               onClick={() => handleMoveClick(transaction)}
-                              disabled={movingTransactionId === transaction.id}
+                              disabled={movingTransactionId === transaction.id || !canMoveToday}
+                              title={
+                                !canMoveToday
+                                  ? 'Move is only allowed for transactions created today (WIB, UTC+7).'
+                                  : undefined
+                              }
                               className="px-3 py-1 bg-blue-500 text-white rounded hover:bg-blue-600 disabled:opacity-50 disabled:cursor-not-allowed transition-colors flex items-center gap-1 mx-auto text-xs"
                             >
                               {movingTransactionId === transaction.id ? (
@@ -959,7 +1017,8 @@ export default function Printer1ToPrinter2Manager({ onClose }: { onClose: () => 
                           </td>
                         )}
                       </tr>
-                    ))}
+                    );
+                    })}
                   </tbody>
                 </table>
               </div>

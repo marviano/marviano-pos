@@ -56,14 +56,6 @@ async function ensureCheckerTemplateType(): Promise<void> {
     /* mirror optional */
   }
 }
-import { getDbConfig } from './configManager';
-
-function logDbOperation(operation: 'read' | 'save', table: string, detail?: string): void {
-  try {
-    const db = getDbConfig();
-    fetch('http://127.0.0.1:7242/ingest/7b565785-72b5-49f7-b2c0-57606ea0d0b5', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ location: 'receiptManagement.ts', message: `${operation} ${table}`, data: { operation, table, dbHost: db.host, dbName: db.database, detail }, timestamp: Date.now(), sessionId: 'debug-session', runId: 'run1', hypothesisId: 'H1' }) }).catch(() => { });
-  } catch (_) { }
-}
 
 /**
  * Receipt Management Service
@@ -146,9 +138,6 @@ export class ReceiptManagementService {
    * Priority: business-specific default > global default
    */
   async getReceiptTemplate(templateType: ReceiptTemplateType, businessId?: number): Promise<GetReceiptTemplateResult> {
-    // #region agent log
-    logDbOperation('read', 'receipt_templates', `templateType=${templateType} businessId=${businessId ?? 'null'}`);
-    // #endregion
     try {
       const selectCols = 'template_code, COALESCE(show_notes, 0) as show_notes, template_name, COALESCE(one_label_per_product, 1) as one_label_per_product, COALESCE(checker_split_by_category, 0) as checker_split_by_category';
       if (businessId) {
@@ -160,9 +149,6 @@ export class ReceiptManagementService {
         );
         if (businessTemplate?.template_code) {
           console.log(`✅ Found business-specific default ${templateType} template for business ${businessId}`);
-          // #region agent log
-          fetch('http://127.0.0.1:7245/ingest/519de021-d49d-473f-a8a1-4215977c867a', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ location: 'receiptManagement.ts:getReceiptTemplate', message: 'checker/receipt template result', data: { templateType, businessId, showNotes: businessTemplate.show_notes === 1, hasTemplateCode: true, scope: 'business', templateName: businessTemplate.template_name }, timestamp: Date.now(), hypothesisId: 'A' }) }).catch(() => { });
-          // #endregion
           return {
             templateCode: businessTemplate.template_code,
             showNotes: businessTemplate.show_notes === 1,
@@ -181,9 +167,6 @@ export class ReceiptManagementService {
       );
       if (globalTemplate?.template_code) {
         console.log(`✅ Found global default ${templateType} template`);
-        // #region agent log
-        fetch('http://127.0.0.1:7245/ingest/519de021-d49d-473f-a8a1-4215977c867a', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ location: 'receiptManagement.ts:getReceiptTemplate', message: 'checker/receipt template result', data: { templateType, businessId: businessId ?? null, showNotes: globalTemplate.show_notes === 1, hasTemplateCode: true, scope: 'global', templateName: globalTemplate.template_name }, timestamp: Date.now(), hypothesisId: 'B' }) }).catch(() => { });
-        // #endregion
         return {
           templateCode: globalTemplate.template_code,
           showNotes: globalTemplate.show_notes === 1,
@@ -194,9 +177,6 @@ export class ReceiptManagementService {
       }
 
       console.warn(`⚠️ No default ${templateType} template found in database`);
-      // #region agent log
-      fetch('http://127.0.0.1:7245/ingest/519de021-d49d-473f-a8a1-4215977c867a', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ location: 'receiptManagement.ts:getReceiptTemplate', message: 'no default template', data: { templateType, businessId: businessId ?? null, showNotes: false, hasTemplateCode: false }, timestamp: Date.now(), hypothesisId: 'D' }) }).catch(() => { });
-      // #endregion
       // When no checker template is saved, use built-in label layout so labels still print with expected placeholders
       if (templateType === 'checker') {
         return { templateCode: FALLBACK_CHECKER_TEMPLATE, showNotes: true, templateName: '(fallback)', oneLabelPerProduct: true, splitByCategory: false };
@@ -212,9 +192,6 @@ export class ReceiptManagementService {
    * Get template code and show_notes by template id (for copy/edit).
    */
   async getReceiptTemplateById(id: number): Promise<{ templateCode: string | null; showNotes: boolean; oneLabelPerProduct: boolean; splitByCategory: boolean }> {
-    // #region agent log
-    logDbOperation('read', 'receipt_templates', `byId=${id}`);
-    // #endregion
     try {
       const row = await executeQueryOne<{ template_code: string; show_notes: number; one_label_per_product: number | null; checker_split_by_category: number | null }>(
         `SELECT template_code, COALESCE(show_notes, 0) as show_notes, COALESCE(one_label_per_product, 1) as one_label_per_product, COALESCE(checker_split_by_category, 0) as checker_split_by_category FROM receipt_templates WHERE id = ? AND is_active = 1 LIMIT 1`,
@@ -237,9 +214,6 @@ export class ReceiptManagementService {
    * Get list of available templates for a type
    */
   async getReceiptTemplates(templateType: ReceiptTemplateType, businessId?: number): Promise<Array<{ id: number; name: string; is_default: boolean; show_notes?: boolean }>> {
-    // #region agent log
-    logDbOperation('read', 'receipt_templates', `list templateType=${templateType} businessId=${businessId ?? 'null'}`);
-    // #endregion
     try {
       const templates = await executeQuery<{ id: number; template_name: string; is_default: number; show_notes: number }>(
         `SELECT id, template_name, is_default, COALESCE(show_notes, 0) as show_notes FROM receipt_templates 
@@ -301,9 +275,6 @@ export class ReceiptManagementService {
    * Update existing template by id (overwrite template_code, optionally template_name, show_notes, one_label_per_product, splitByCategory).
    */
   async updateReceiptTemplate(id: number, templateCode: string, templateName?: string | null, showNotes?: boolean, oneLabelPerProduct?: boolean, splitByCategory?: boolean): Promise<boolean> {
-    // #region agent log
-    logDbOperation('save', 'receipt_templates', `update id=${id}`);
-    // #endregion
     const nameToSet =
       templateName != null && String(templateName).trim() !== ''
         ? String(templateName).trim()
@@ -528,9 +499,6 @@ export class ReceiptManagementService {
     oneLabelPerProduct?: boolean,
     splitByCategory?: boolean
   ): Promise<boolean> {
-    // #region agent log
-    logDbOperation('save', 'receipt_templates', `save templateType=${templateType} businessId=${businessId ?? 'null'}`);
-    // #endregion
     try {
       if (templateType === 'checker') {
         await ensureCheckerTemplateType();
@@ -585,9 +553,6 @@ export class ReceiptManagementService {
    * Priority: business-specific > global
    */
   async getReceiptSettings(businessId?: number): Promise<ReceiptSettings | null> {
-    // #region agent log
-    logDbOperation('read', 'receipt_settings', `pengaturan konten businessId=${businessId ?? 'null'}`);
-    // #endregion
     try {
       // Try to get business-specific settings first
       if (businessId) {
@@ -651,9 +616,6 @@ export class ReceiptManagementService {
     settings: Partial<Omit<ReceiptSettings, 'id' | 'created_at' | 'updated_at' | 'is_active'>>,
     businessId?: number
   ): Promise<boolean> {
-    // #region agent log
-    logDbOperation('save', 'receipt_settings', `pengaturan konten businessId=${businessId ?? 'null'}`);
-    // #endregion
     const receiptSettingsSql = `INSERT INTO receipt_settings (
           business_id, store_name, address, phone_number, 
           contact_phone, logo_base64, footer_text, partnership_contact, 

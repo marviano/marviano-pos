@@ -103,9 +103,6 @@ export default function ReservationPage({ businessId, userEmail, userId, onPickP
       setReservations(Array.isArray(list) ? list : []);
     } catch (e) {
       const errorMessage = e instanceof Error ? e.message : 'Gagal memuat reservasi dari server.';
-      // #region agent log
-      fetch('http://127.0.0.1:7495/ingest/176c0b85-d0c0-41ef-a970-2527232dc552', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': '062531' }, body: JSON.stringify({ sessionId: '062531', location: 'ReservationPage.tsx:fetchReservations catch', message: 'fetchReservations failed', data: { errorMessage, hypothesisId: 'H1' }, timestamp: Date.now() }) }).catch(() => {});
-      // #endregion
       console.error('Fetch reservations error:', e);
       setReservations([]);
       setVpsError(errorMessage);

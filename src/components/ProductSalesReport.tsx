@@ -3,10 +3,10 @@
 /**
  * Product Sales Report (Laporan Penjualan)
  * Shows product-level quantity and revenue for a date range, broken down by sales platform.
- * Export to .xlsx via SheetJS. Only completed/paid transactions; cancelled items excluded.
+ * Export to .xlsx via SheetJS. Same transaction scope as Daftar Transaksi Grand Total (not cancelled/pending); cancelled line items excluded.
  */
 
-import { useState, useEffect, useCallback, useMemo } from 'react';
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { Calendar, FileText, Download, RefreshCw } from 'lucide-react';
 import { useAuth } from '@/hooks/useAuth';
 import { appAlert } from '@/components/AppDialog';
@@ -237,13 +237,21 @@ export default function ProductSalesReport() {
   const [startDate, setStartDate] = useState(getTodayUTC7);
   const [endDate, setEndDate] = useState(getTodayUTC7);
   const [rawProducts, setRawProducts] = useState<ProductSaleRow[]>([]);
+  /** Transaction-level gross/final (same formula as Daftar Transaksi); Ringkasan uses this — line-item aggregates can differ slightly (bundles). */
+  const [txSummary, setTxSummary] = useState<{ gross: number; finalAfterVoucher: number } | null>(null);
   const [totalRefundOmset, setTotalRefundOmset] = useState(0);
   const [loading, setLoading] = useState(false);
   const [hasFetched, setHasFetched] = useState(false);
   const [groupByCategory1, setGroupByCategory1] = useState(true);
 
+  /** Latest fetch wins; overlapping IPC calls (effect + Muat Laporan, Strict Mode, fast date changes) must not apply stale rows. */
+  const fetchGenerationRef = useRef(0);
+  const fetchInFlightRef = useRef(0);
+
   const fetchReport = useCallback(async () => {
     if (!businessId || !startDate || !endDate) return;
+    const gen = ++fetchGenerationRef.current;
+    fetchInFlightRef.current += 1;
     setLoading(true);
     setHasFetched(true);
     try {
@@ -252,23 +260,45 @@ export default function ProductSalesReport() {
         appAlert('Export/API tidak tersedia. Jalankan di aplikasi Electron.');
         return;
       }
-      const startDateTime = `${startDate}T00:00:00`;
-      const endDateTime = `${endDate}T23:59:59`;
-      const [result, refundTotal] = await Promise.all([
+      // Same ISO bounds as electron `localdb-get-transactions` (see main.ts) so toMySQLDateTime matches Daftar Transaksi.
+      const startDateTime = `${startDate}T00:00:00.000Z`;
+      const endDateTime = `${endDate}T23:59:59.999Z`;
+      const [result, refundTotal, summaryRes] = await Promise.all([
         api.localDbGetProductSales(null, startDateTime, endDateTime, businessId),
         api.localDbGetRefundTotal?.(businessId, startDateTime, endDateTime) ?? Promise.resolve(0),
+        api.localDbGetSalesSummaryByRange?.(businessId, startDateTime, endDateTime) ?? Promise.resolve(null),
       ]);
+      if (gen !== fetchGenerationRef.current) return;
       const list = (result?.products ?? []) as ProductSaleRow[];
       setRawProducts(list);
       const refundValue = typeof refundTotal === 'number' ? refundTotal : 0;
       setTotalRefundOmset(refundValue);
+      if (
+        summaryRes &&
+        typeof summaryRes === 'object' &&
+        typeof (summaryRes as { gross?: unknown }).gross === 'number' &&
+        typeof (summaryRes as { finalAfterVoucher?: unknown }).finalAfterVoucher === 'number'
+      ) {
+        setTxSummary({
+          gross: (summaryRes as { gross: number }).gross,
+          finalAfterVoucher: (summaryRes as { finalAfterVoucher: number }).finalAfterVoucher,
+        });
+      } else {
+        setTxSummary(null);
+      }
     } catch (e) {
       console.error('Product sales fetch error:', e);
-      appAlert('Gagal memuat laporan penjualan.');
-      setRawProducts([]);
-      setTotalRefundOmset(0);
+      if (gen === fetchGenerationRef.current) {
+        appAlert('Gagal memuat laporan penjualan.');
+        setRawProducts([]);
+        setTotalRefundOmset(0);
+        setTxSummary(null);
+      }
     } finally {
-      setLoading(false);
+      fetchInFlightRef.current -= 1;
+      if (fetchInFlightRef.current === 0) {
+        setLoading(false);
+      }
     }
   }, [businessId, startDate, endDate]);
 
@@ -299,6 +329,12 @@ export default function ProductSalesReport() {
     () => Math.max(0, totalOmsetAll - totalOmsetAfterRefund),
     [totalOmsetAll, totalOmsetAfterRefund]
   );
+
+  /** Ringkasan Pendapatan: align with Daftar Transaksi Grand Total when txSummary is available. */
+  const ringkasanGross = txSummary ? txSummary.gross : totalOmsetAll;
+  const ringkasanAfterVoucher = txSummary ? txSummary.finalAfterVoucher : totalOmsetAfterRefund;
+  const ringkasanDiscount = Math.max(0, ringkasanGross - ringkasanAfterVoucher);
+  const ringkasanNet = Math.max(0, ringkasanAfterVoucher - totalRefundOmset);
 
   const handleExportExcel = useCallback(() => {
     if (aggregates.length === 0) {
@@ -416,16 +452,15 @@ export default function ProductSalesReport() {
       });
       const afterPlatform = (doc as { lastAutoTable?: { finalY: number } }).lastAutoTable?.finalY ?? summaryStartY;
 
-      const netOmset = Math.max(0, totalOmsetAfterRefund - totalRefundOmset);
       autoTable(doc, {
         startY: summaryStartY,
         head: [['Ringkasan', 'Jumlah']],
         body: [
-          ['Gross', formatRupiah(totalOmsetAll)],
-          ['Discount', totalDiscountOmset > 0 ? `-${formatRupiah(totalDiscountOmset)}` : formatRupiah(0)],
+          ['Gross', formatRupiah(ringkasanGross)],
+          ['Discount', ringkasanDiscount > 0 ? `-${formatRupiah(ringkasanDiscount)}` : formatRupiah(0)],
           ['Refund', totalRefundOmset > 0 ? `-${formatRupiah(totalRefundOmset)}` : formatRupiah(0)],
         ],
-        foot: [['Net', formatRupiah(netOmset)]],
+        foot: [['Net', formatRupiah(ringkasanNet)]],
         theme: 'striped',
         ...tableTheme,
         margin: { left: margin + colWidth + 4, right: margin },
@@ -501,10 +536,10 @@ export default function ProductSalesReport() {
     startDate,
     endDate,
     mainPlatformRevenue,
-    totalOmsetAll,
-    totalOmsetAfterRefund,
+    ringkasanGross,
+    ringkasanDiscount,
+    ringkasanNet,
     totalRefundOmset,
-    totalDiscountOmset,
   ]);
 
   if (!businessId) {
@@ -649,11 +684,11 @@ export default function ProductSalesReport() {
                   <tbody>
                     <tr>
                       <td className="text-gray-600 py-1 pr-3">Gross</td>
-                      <td className="font-medium text-gray-900 tabular-nums text-right whitespace-nowrap">{formatRupiah(totalOmsetAll)}</td>
+                      <td className="font-medium text-gray-900 tabular-nums text-right whitespace-nowrap">{formatRupiah(ringkasanGross)}</td>
                     </tr>
                     <tr>
                       <td className="text-gray-600 py-1 pr-3">Discount</td>
-                      <td className="font-medium text-gray-900 tabular-nums text-right whitespace-nowrap">{totalDiscountOmset > 0 ? `-${formatRupiah(totalDiscountOmset)}` : formatRupiah(0)}</td>
+                      <td className="font-medium text-gray-900 tabular-nums text-right whitespace-nowrap">{ringkasanDiscount > 0 ? `-${formatRupiah(ringkasanDiscount)}` : formatRupiah(0)}</td>
                     </tr>
                     <tr>
                       <td className="text-gray-600 py-1 pr-3">Refund</td>
@@ -661,7 +696,7 @@ export default function ProductSalesReport() {
                     </tr>
                     <tr className="border-t border-gray-200">
                       <td className="font-semibold text-gray-700 py-1.5 pr-3">Net</td>
-                      <td className="font-bold text-gray-900 py-1.5 tabular-nums text-right whitespace-nowrap">{formatRupiah(Math.max(0, totalOmsetAfterRefund - totalRefundOmset))}</td>
+                      <td className="font-bold text-gray-900 py-1.5 tabular-nums text-right whitespace-nowrap">{formatRupiah(ringkasanNet)}</td>
                     </tr>
                   </tbody>
                 </table>

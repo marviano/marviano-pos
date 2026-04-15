@@ -513,7 +513,6 @@ export default function TransactionList({ businessId, onLoadTransaction }: Trans
   // Check for conflicting permissions (Super Admin bypasses this check)
   const hasConflictingPermissions = !isSuperAdmin(user) && canViewUserDataOnly && canViewAllData;
 
-  // Cleanup timeout on unmount
   useEffect(() => {
     return () => {
       if (headerClickTimeoutRef.current) {
@@ -521,6 +520,7 @@ export default function TransactionList({ businessId, onLoadTransaction }: Trans
       }
     };
   }, []);
+
   const fetchTransactionDetail = async (transactionId: string) => {
     setIsLoadingDetail(true);
     try {
@@ -1481,21 +1481,18 @@ export default function TransactionList({ businessId, onLoadTransaction }: Trans
   const grandTotalClickCountRef = useRef(0);
   const lastGrandTotalClickRef = useRef(0);
 
-  // Handle 5x click logic for grand total
   const handleFiveClickToggle = useCallback(() => {
     const now = Date.now();
     const timeSinceLastClick = now - lastGrandTotalClickRef.current;
 
     if (timeSinceLastClick > 3000) {
-      // Reset counter if more than 3 seconds passed
       grandTotalClickCountRef.current = 1;
     } else {
       grandTotalClickCountRef.current += 1;
       const newCount = grandTotalClickCountRef.current;
       if (newCount >= 5) {
-        // Toggle show all transactions after 5 clicks
-        setShowAllTransactions(prev => !prev);
-        grandTotalClickCountRef.current = 0; // Reset counter
+        setShowAllTransactions((prev) => !prev);
+        grandTotalClickCountRef.current = 0;
       }
     }
     lastGrandTotalClickRef.current = now;
@@ -1897,27 +1894,19 @@ export default function TransactionList({ businessId, onLoadTransaction }: Trans
             className="text-lg font-bold text-gray-800 cursor-pointer select-none"
             onClick={() => {
               if (!canAccessPrinterManager) return;
-
-              // Clear existing timeout
               if (headerClickTimeoutRef.current) {
                 clearTimeout(headerClickTimeoutRef.current);
               }
-
               const newCount = headerClickCount + 1;
               setHeaderClickCount(newCount);
-
-              // Reset counter after 2 seconds
               headerClickTimeoutRef.current = setTimeout(() => {
                 setHeaderClickCount(0);
               }, 2000);
-
-              // If clicked 5 times, open the manager
               if (newCount >= 5) {
                 setShowPrinterManager(true);
                 setHeaderClickCount(0);
               }
             }}
-            title={canAccessPrinterManager ? "Click 5 times to open Printer 1 → Printer 2 Manager" : undefined}
           >
             Daftar Transaksi | {new Date(appliedFromDate).toLocaleDateString('id-ID', {
               day: 'numeric',
@@ -2916,7 +2905,6 @@ function GrandTotalCard({
     <div
       className="bg-white shadow-sm border border-gray-200 p-4 md:col-span-1 min-w-0 cursor-pointer hover:bg-gray-50 transition-colors min-h-[10.5rem] md:h-full md:min-h-0 flex flex-col"
       onClick={onFiveClick}
-      title="Click 5 times to toggle R/RR badge display"
     >
       <div className="flex items-center gap-2 mb-2">
         <div className="w-3 h-3 bg-purple-500 rounded-full"></div>

@@ -616,6 +616,11 @@ declare global {
       }>;
       localDbUpdateShiftStart?: (shiftId: number, newStartTime: string) => Promise<{ success: boolean; error?: string }>;
       localDbGetRefundTotal?: (businessId: number | null, shiftStart: string, shiftEnd: string | null) => Promise<number>;
+      localDbGetSalesSummaryByRange?: (
+        businessId: number,
+        rangeStart: string,
+        rangeEnd: string | null
+      ) => Promise<{ gross: number; finalAfterVoucher: number }>;
       localDbGetProductSales?: (userId: number | null, shiftStart: string, shiftEnd: string | null, businessId?: number, shiftUuid?: string | null, shiftUuids?: string[]) => Promise<{
         products: Array<{
           product_id: number;

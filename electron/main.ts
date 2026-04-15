@@ -9408,7 +9408,7 @@ function createWindows(): void {
           WHERE status IN ('pending', 'completed')
           GROUP BY transaction_uuid
         ) refund_summary ON t.uuid_id = refund_summary.transaction_uuid
-        WHERE t.business_id = ? AND t.status = 'completed'
+        WHERE t.business_id = ? AND t.status NOT IN ('cancelled', 'pending', 'archived')
         AND t.created_at >= ?
       `;
       const params: (string | number | null)[] = [businessId, shiftStartMySQL];
@@ -9424,7 +9424,46 @@ function createWindows(): void {
     }
   });
 
-  // Get product sales breakdown for shift. Excludes cancelled items. Allocates gross transaction amount across non-cancelled items only (matches Payment Method).
+  /** Ringkasan Pendapatan: same gross/final as Daftar Transaksi Grand Total (transaction-level SUM), not sum of per-line product allocation (bundle/allocation can differ by a small amount). */
+  ipcMain.handle('localdb-get-sales-summary-by-range', async (_event, businessId: number, rangeStart: string, rangeEnd: string | null) => {
+    try {
+      const startMySQL = toMySQLDateTime(rangeStart);
+      const endMySQL = rangeEnd ? toMySQLDateTime(rangeEnd) : null;
+      let query = `
+        SELECT 
+          COALESCE(SUM(COALESCE(active.active_total, t.total_amount)), 0) as gross,
+          COALESCE(SUM(GREATEST(0, COALESCE(active.active_total, t.total_amount) - COALESCE(t.voucher_discount, 0))), 0) as final_after_voucher
+        FROM transactions t
+        LEFT JOIN (
+          SELECT 
+            transaction_id, 
+            uuid_transaction_id,
+            SUM(total_price) as active_total
+          FROM transaction_items
+          WHERE (production_status IS NULL OR production_status != 'cancelled')
+          GROUP BY uuid_transaction_id, transaction_id
+        ) active ON (t.uuid_id = active.uuid_transaction_id OR t.id = active.transaction_id)
+        WHERE t.business_id = ?
+          AND t.status NOT IN ('cancelled', 'pending', 'archived')
+          AND t.created_at >= ?
+      `;
+      const params: (string | number | null)[] = [businessId, startMySQL];
+      if (endMySQL) {
+        query += ' AND t.created_at <= ?';
+        params.push(endMySQL);
+      }
+      const row = await executeQueryOne<{ gross: number | string; final_after_voucher: number | string }>(query, params);
+      return {
+        gross: Number(row?.gross ?? 0),
+        finalAfterVoucher: Number(row?.final_after_voucher ?? 0),
+      };
+    } catch (err) {
+      console.error('localdb-get-sales-summary-by-range error:', err);
+      return { gross: 0, finalAfterVoucher: 0 };
+    }
+  });
+
+  // Get product sales breakdown for shift. Excludes cancelled items. Transaction status: same as Daftar Transaksi Grand Total (exclude cancelled/pending/archived, includes paid+completed). Allocates gross across non-cancelled items only.
   // When shiftUuids (non-empty): filter by t.shift_uuid IN (...). When shiftUuid: filter by t.shift_uuid = ?. Else: userId + time.
   ipcMain.handle('localdb-get-product-sales', async (event, userId: number | null, shiftStart: string, shiftEnd: string | null, businessId: number | null = null, shiftUuid?: string | null, shiftUuids?: string[]) => {
     try {
@@ -9433,7 +9472,6 @@ function createWindows(): void {
       }
       const shiftStartMySQL = toMySQLDateTime(shiftStart);
       const shiftEndMySQL = shiftEnd ? toMySQLDateTime(shiftEnd) : null;
-
       let query = `
         SELECT 
           ti.uuid_id as id,
@@ -9465,7 +9503,7 @@ function createWindows(): void {
         INNER JOIN products p ON ti.product_id = p.id
         LEFT JOIN category1 c1 ON p.category1_id = c1.id
         WHERE t.business_id = ?
-        AND t.status = 'completed'
+        AND t.status NOT IN ('cancelled', 'pending', 'archived')
         AND (ti.production_status IS NULL OR ti.production_status != 'cancelled')
       `;
       const params: (string | number | null | boolean)[] = [businessId];
