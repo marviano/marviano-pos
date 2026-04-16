@@ -1434,34 +1434,47 @@ function createWindows(): void {
         try { fs.mkdirSync(d, { recursive: true }); } catch { /* ignore */ }
       }
       const imagePathRe = /^\/images\/(products|businesses)\/([^/]+\.(webp|png|jpg|jpeg|gif))$/i;
+      const imageApiPathRe = /^\/api\/public\/images\/(products|businesses)\/([^/]+\.(webp|png|jpg|jpeg|gif))$/i;
       let downloadCount = 0;
       let rewriteCount = 0;
       let failCount = 0;
       const tryDownload = async (imageUrl: string): Promise<string> => {
         if (!imageUrl || typeof imageUrl !== 'string') return imageUrl;
-        const m = imageUrl.match(imagePathRe);
+        const m = imageUrl.match(imagePathRe) || imageUrl.match(imageApiPathRe);
         if (!m) {
           return imageUrl;
         }
         const [, sub, filename] = m;
-        const fullUrl = `${base}${imageUrl}`;
         const localPath = path.join(userData, 'images', sub, filename);
+        const normalizedImagePath = `/images/${sub}/${filename}`;
+        const fetchCandidates = imageUrl.startsWith('/api/public/images/')
+          ? [`${base}${imageUrl}`, `${base}${normalizedImagePath}`]
+          : [`${base}${imageUrl}`, `${base}/api/public/images/${sub}/${filename}`];
+
+        let downloaded = false;
         try {
-          const res = await fetch(fullUrl);
-          if (!res.ok) {
-            failCount++;
-            return `${base}${imageUrl}`;
+          for (const fullUrl of fetchCandidates) {
+            const res = await fetch(fullUrl);
+            if (!res.ok) continue;
+            const buf = await res.arrayBuffer();
+            fs.writeFileSync(localPath, Buffer.from(buf));
+            downloaded = true;
+            break;
           }
-          const buf = await res.arrayBuffer();
-          fs.writeFileSync(localPath, Buffer.from(buf));
+
+          if (!downloaded) {
+            failCount++;
+            return `${base}/api/public/images/${sub}/${filename}`;
+          }
+
           // Remove leading slash from imageUrl to avoid triple slash: pos-image:///images/... -> pos-image://images/...
-          const rewritten = `pos-image://${imageUrl.startsWith('/') ? imageUrl.slice(1) : imageUrl}`;
+          const rewritten = `pos-image://${normalizedImagePath.slice(1)}`;
           downloadCount++;
           rewriteCount++;
           return rewritten;
         } catch (err) {
           failCount++;
-          return `${base}${imageUrl}`;
+          return `${base}/api/public/images/${sub}/${filename}`;
         }
       };
       for (const p of products || []) {
