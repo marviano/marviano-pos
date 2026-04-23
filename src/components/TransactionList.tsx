@@ -343,9 +343,6 @@ export default function TransactionList({ businessId, onLoadTransaction }: Trans
   /** Maps shift uuid -> { filterLabel, cellLabel }. filterLabel for dropdown (e.g. "Hari ini | Shift 1"); cellLabel for table cells (e.g. "03/08/26 Shift 1"). */
   const [shiftLabelByUuid, setShiftLabelByUuid] = useState<Record<string, { filterLabel: string; cellLabel: string }>>({});
   const [showAllTransactions, setShowAllTransactions] = useState(false);
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  const [voucherClickCount, setVoucherClickCount] = useState(0);
-  const [showPrintingLogs, setShowPrintingLogs] = useState(false);
   const [employeesMap, setEmployeesMap] = useState<Map<number, { name: string; color: string | null }>>(new Map());
   const [itemWaiterIdsByTx, setItemWaiterIdsByTx] = useState<Record<string, number[]>>({});
   const [openWaiterPopoverFor, setOpenWaiterPopoverFor] = useState<string | null>(null);
@@ -490,9 +487,6 @@ export default function TransactionList({ businessId, onLoadTransaction }: Trans
 
   // Permission checks
   const canViewPastData = hasPermission(user, 'daftartransaksi.viewpastdata');
-  const canViewUserDataOnly = hasPermission(user, 'daftartransaksi.viewuserdataonly');
-  const canViewAllData = hasPermission(user, 'daftartransaksi.viewalldata');
-  const canViewPrintingLogs = hasPermission(user, 'daftartransaksi.viewprintinglogs');
   const canViewOfflineSystemPosSwitch = isSuperAdmin(user); // Only super admin can see the switch
   const canRefund = isSuperAdmin(user) || hasPermission(user, 'daftartransaksi.refund');
   const canAccessPrinterManager = isSuperAdmin(user) || hasPermission(user, 'access_printer1printer2manager');
@@ -509,9 +503,6 @@ export default function TransactionList({ businessId, onLoadTransaction }: Trans
   const setColumnVisible = (key: string, visible: boolean) => {
     setColumnVisibility((prev) => ({ ...prev, [key]: visible }));
   };
-
-  // Check for conflicting permissions (Super Admin bypasses this check)
-  const hasConflictingPermissions = !isSuperAdmin(user) && canViewUserDataOnly && canViewAllData;
 
   useEffect(() => {
     return () => {
@@ -1040,11 +1031,6 @@ export default function TransactionList({ businessId, onLoadTransaction }: Trans
       // Apply permission-based filtering
       let filteredTransactions = transactionsData.filter((tx): tx is NonNullable<typeof tx> => tx !== null);
 
-      // Filter by user permissions (Super Admin sees all data)
-      if (!isSuperAdmin(user) && canViewUserDataOnly && !canViewAllData && user) {
-        filteredTransactions = filteredTransactions.filter(tx => tx.user_id === parseInt(user.id));
-      }
-
       // Filter by date permissions (if user doesn't have viewpastdata permission, only show today's data)
       // Super Admin bypasses date restrictions
       if (!isSuperAdmin(user) && !canViewPastData) {
@@ -1170,7 +1156,7 @@ export default function TransactionList({ businessId, onLoadTransaction }: Trans
     } finally {
       setIsLoading(false);
     }
-  }, [isSystemPosMode, appliedFromDate, appliedToDate, effectiveBusinessId, fetchReceiptizePrintedIds, fetchReceiptPrintedIds, canViewUserDataOnly, canViewAllData, canViewPastData, user]);
+  }, [isSystemPosMode, appliedFromDate, appliedToDate, effectiveBusinessId, fetchReceiptizePrintedIds, fetchReceiptPrintedIds, canViewPastData, user]);
 
   // Fetch report totals (same as Penjualan Produk) so Grand Total card matches that tab.
   // Offline mode: use list-derived totals only (reportTotals = null).
@@ -1869,22 +1855,6 @@ export default function TransactionList({ businessId, onLoadTransaction }: Trans
     );
   }
 
-  // Permission error handling
-  if (hasConflictingPermissions) {
-    return (
-      <div className="flex items-center justify-center min-h-[400px]">
-        <div className="text-center p-8 bg-red-50 rounded-lg border border-red-200">
-          <div className="text-red-600 text-lg font-semibold mb-2">Permission Error</div>
-          <div className="text-red-700">User have both permissions, contact admin        </div>
-        </div>
-        {showPrinterManager && (
-          <Printer1ToPrinter2Manager onClose={() => setShowPrinterManager(false)} />
-        )}
-      </div>
-    );
-  }
-
-
   return (
     <div className="flex-1 flex flex-col bg-white h-full w-full min-w-0 overflow-x-hidden">
       <div className="flex-1 flex flex-col w-full min-w-0 max-w-[95%] xl:max-w-[1600px] mx-auto px-4 sm:px-6 py-6">
@@ -2481,11 +2451,10 @@ export default function TransactionList({ businessId, onLoadTransaction }: Trans
                             className={
                               col.key === 'customer_name' || col.key === 'user_name' ? 'min-w-0 align-middle' :
                                 col.key === 'waiter' ? 'whitespace-nowrap' :
-                                  col.key === 'voucher_discount' ? 'whitespace-nowrap cursor-pointer tabular-nums' :
+                                  col.key === 'voucher_discount' ? 'whitespace-nowrap tabular-nums' :
                                     col.key === 'refund_total' ? 'whitespace-nowrap tabular-nums' :
                                       col.key === 'actions' ? '' : 'whitespace-nowrap'
                             }
-                            onClick={col.key === 'voucher_discount' ? (e) => { e.stopPropagation(); setVoucherClickCount(prev => { const next = prev + 1; if (next >= 5 && canViewPrintingLogs) { setShowPrintingLogs(true); return 0; } return next; }); } : undefined}
                           >
                             {col.key === 'receipt_number' && (
                               <div className="flex items-center justify-center gap-1">
@@ -2792,46 +2761,6 @@ export default function TransactionList({ businessId, onLoadTransaction }: Trans
               >
                 {isSavingBindShift ? 'Menyimpan...' : 'Simpan'}
               </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Printing Logs Modal */}
-      {showPrintingLogs && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-          <div className="bg-white rounded-lg shadow-xl max-w-4xl w-full mx-4 max-h-[80vh] overflow-hidden">
-            <div className="flex items-center justify-between p-6 border-b border-gray-200">
-              <h2 className="text-xl font-semibold text-gray-900">Printing Logs</h2>
-              <button
-                onClick={() => setShowPrintingLogs(false)}
-                className="text-gray-400 hover:text-gray-600 transition-colors"
-              >
-                <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-                </svg>
-              </button>
-            </div>
-            <div className="p-6 overflow-y-auto max-h-[60vh]">
-              <div className="text-center py-8">
-                <div className="text-gray-500 mb-4">
-                  <svg className="w-16 h-16 mx-auto mb-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-                  </svg>
-                </div>
-                <h3 className="text-lg font-medium text-gray-900 mb-2">Printing Logs</h3>
-                <p className="text-gray-600 mb-4">
-                  This feature shows receipt printing history, reprint logs, and voucher printing activities.
-                </p>
-                <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">
-                  <p className="text-sm text-blue-800">
-                    <strong>Access granted:</strong> You have permission to view printing logs.
-                  </p>
-                  <p className="text-xs text-blue-600 mt-1">
-                    Feature implementation pending - this is a placeholder for the printing logs functionality.
-                  </p>
-                </div>
-              </div>
             </div>
           </div>
         </div>

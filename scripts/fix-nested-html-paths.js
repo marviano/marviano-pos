@@ -49,7 +49,7 @@ function fixNestedHtmlPaths() {
 
   for (const { fullPath, relativePath } of nestedHtmlFiles) {
     // Calculate depth (number of directories deep)
-    // relativePath is like "logs/printing.html", so we need to count directories only
+    // relativePath is like "reports/daily.html", so we need to count directories only
     const pathParts = relativePath.split(path.sep);
     const directories = pathParts.slice(0, -1); // Remove the filename
     const depth = directories.length;

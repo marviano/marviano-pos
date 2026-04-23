@@ -32,6 +32,21 @@ function writeLabelDebugLog(payload: Record<string, unknown>): void {
   }
 }
 
+/** NDJSON debug for print-receipt / reprint (session 0b28eb → debug-0b28eb.log). */
+function writeReprintDebugLog(payload: Record<string, unknown>): void {
+  try {
+    const logPath = path.join(__dirname, '..', 'debug-0b28eb.log');
+    const line = JSON.stringify({
+      sessionId: '0b28eb',
+      ...payload,
+      timestamp: (payload as { timestamp?: number }).timestamp ?? Date.now(),
+    }) + '\n';
+    fs.appendFileSync(logPath, line);
+  } catch {
+    // do not break app if log write fails
+  }
+}
+
 /** Extract @page rule snippet from HTML for debug (label height). */
 function getAtPageSnippet(html: string): string | null {
   const m = html.match(/@page\s*\{[^}]*\}/);
@@ -9917,6 +9932,17 @@ function createWindows(): void {
     }
   });
 
+  ipcMain.handle('localdb-get-banks', async () => {
+    try {
+      return await executeQuery(
+        'SELECT * FROM banks WHERE is_active = 1 ORDER BY is_popular DESC, bank_name ASC'
+      );
+    } catch (error) {
+      console.error('Error getting banks:', error);
+      return [];
+    }
+  });
+
   // Receipt Settings
   ipcMain.handle('localdb-upsert-receipt-settings', async (event, rows: RowArray) => {
     writeDebugLog(JSON.stringify({ location: 'main.ts:localdb-upsert-receipt-settings', message: 'Receipt settings upsert start', data: { rowCount: rows?.length ?? 0 }, timestamp: Date.now() }));
@@ -10560,6 +10586,37 @@ function createWindows(): void {
   ipcMain.handle('log-printer2-print', async (event, transactionId: string, printer2ReceiptNumber: number, mode: 'auto' | 'manual', cycleNumber?: number, globalCounter?: number, isReprint?: boolean, reprintCount?: number) => {
     if (!printerService) return { success: false };
     const result = await printerService.logPrinter2Print(transactionId, printer2ReceiptNumber, mode, cycleNumber, globalCounter, isReprint, reprintCount);
+    // Keep System POS parity with Printer 2 source of truth:
+    // if P2 audit was logged successfully, ensure transaction is queued/inserted even when UI queue call is missed.
+    if (result) {
+      try {
+        await ensureSystemPosSchema();
+        const now = Date.now();
+        await executeSystemPosTransaction([
+          {
+            sql: 'INSERT IGNORE INTO system_pos_queue (transaction_id, queued_at) VALUES (?, ?)',
+            params: [transactionId, now]
+          },
+          {
+            sql: 'UPDATE system_pos_queue SET synced_at = NULL, retry_count = 0, last_error = NULL WHERE transaction_id = ?',
+            params: [transactionId]
+          }
+        ]);
+        const insertResult = await insertTransactionToSystemPos(transactionId);
+        if (insertResult.success) {
+          await executeSystemPosUpdate('UPDATE system_pos_queue SET synced_at = ? WHERE transaction_id = ?', [now, transactionId]);
+        } else {
+          await executeSystemPosUpdate(
+            'UPDATE system_pos_queue SET retry_count = retry_count + 1, last_error = ? WHERE transaction_id = ?',
+            [(insertResult.error ?? 'Unknown error').substring(0, 500), transactionId]
+          );
+        }
+      } catch (autoSyncErr) {
+        // Non-fatal to printing flow; queue can still be repaired by manual re-sync tools.
+        const autoSyncMsg = autoSyncErr instanceof Error ? autoSyncErr.message : String(autoSyncErr);
+        console.warn(`[SYSTEM POS] Fallback auto-queue after Printer 2 log failed for ${transactionId}: ${autoSyncMsg}`);
+      }
+    }
     return { success: result };
   });
 
@@ -10995,6 +11052,12 @@ function createWindows(): void {
           cancelled_items_count
         };
       });
+      const salespulseIds = new Set((salespulse as Array<Record<string, unknown>>).map((t) => String(t.uuid_id ?? t.id ?? '')));
+      const systemPosIds = new Set((system_pos as Array<Record<string, unknown>>).map((t) => String(t.uuid_id ?? t.id ?? '')));
+      const missingInSystemPos = [...salespulseIds].filter((id) => !systemPosIds.has(id));
+      const extraInSystemPos = [...systemPosIds].filter((id) => !salespulseIds.has(id));
+      const salespulseGross = (salespulse as Array<Record<string, unknown>>).reduce((sum, t) => sum + (Number(t.total_amount) || 0), 0);
+      const systemPosGross = (system_pos as Array<Record<string, unknown>>).reduce((sum, t) => sum + (Number(t.total_amount) || 0), 0);
 
       return { success: true, salespulse, system_pos };
     } catch (error) {
@@ -11857,6 +11920,21 @@ ipcMain.handle('print-receipt', async (event, data: ReceiptPrintData) => {
     }
 
     // Reuse persistent print window for performance (avoids 1-3s Chromium startup per print)
+    const printWindowExistedBefore = !!(printWindow && !printWindow.isDestroyed());
+    // #region agent log
+    writeReprintDebugLog({
+      hypothesisId: 'H2',
+      location: 'electron/main.ts:print-receipt:entry',
+      message: 'print-receipt start',
+      data: {
+        printWindowExistedBefore,
+        isReprint: Boolean((data as { isReprint?: boolean }).isReprint),
+        printerType: (data as { printerType?: string }).printerType ?? null,
+        dataType: (data as { type?: string }).type ?? null,
+        itemsLen: Array.isArray((data as { items?: unknown[] }).items) ? (data as { items: unknown[] }).items.length : -1,
+      },
+    });
+    // #endregion
     printWindow = getOrCreatePrintWindow();
 
     let businessName = data.businessName || 'Pictos';
@@ -12078,7 +12156,37 @@ ipcMain.handle('print-receipt', async (event, data: ReceiptPrintData) => {
       }
     }
 
+    // #region agent log
+    writeReprintDebugLog({
+      hypothesisId: 'H4',
+      location: 'electron/main.ts:print-receipt:before-loadURL',
+      message: 'html built',
+      data: {
+        htmlLen: htmlContent.length,
+        itemsLen: Array.isArray((data as { items?: unknown[] }).items) ? (data as { items: unknown[] }).items.length : -1,
+        isReprint: Boolean((data as { isReprint?: boolean }).isReprint),
+        webContentsLoadingBeforeLoad: printWindow && !printWindow.isDestroyed() ? printWindow.webContents.isLoading() : null,
+      },
+    });
+    // #endregion
     await printWindow.loadURL(`data:text/html,${encodeURIComponent(htmlContent)}`);
+    // #region agent log
+    writeReprintDebugLog({
+      hypothesisId: 'H1',
+      location: 'electron/main.ts:print-receipt:after-loadURL',
+      message: 'loadURL finished',
+      data: {
+        webContentsLoadingAfterLoad: printWindow && !printWindow.isDestroyed() ? printWindow.webContents.isLoading() : null,
+        urlLen: (() => {
+          try {
+            return printWindow && !printWindow.isDestroyed() ? printWindow.webContents.getURL().length : -1;
+          } catch {
+            return -1;
+          }
+        })(),
+      },
+    });
+    // #endregion
 
     // loadURL already waits for did-finish-load; print immediately (no 500ms setTimeout)
     return new Promise((resolve) => {
@@ -12104,7 +12212,26 @@ ipcMain.handle('print-receipt', async (event, data: ReceiptPrintData) => {
 
           let receiptRetriedOnce = false;
           const doPrint = () => {
+            // #region agent log
+            writeReprintDebugLog({
+              hypothesisId: 'H1',
+              location: 'electron/main.ts:print-receipt:before-print',
+              message: 'invoking webContents.print',
+              data: {
+                webContentsLoading: currentWindow.webContents.isLoading(),
+                receiptRetriedOnce,
+              },
+            });
+            // #endregion
             currentWindow.webContents.print(printOptions, (success: boolean, errorType: string) => {
+              // #region agent log
+              writeReprintDebugLog({
+                hypothesisId: 'H3',
+                location: 'electron/main.ts:print-receipt:print-callback',
+                message: 'webContents.print callback',
+                data: { success, errorType: String(errorType), receiptRetriedOnce },
+              });
+              // #endregion
               if (success) {
                 console.log('✅ Print sent successfully');
                 resolve({ success: true });
@@ -12113,6 +12240,14 @@ ipcMain.handle('print-receipt', async (event, data: ReceiptPrintData) => {
                 if (isCanceled && !receiptRetriedOnce && currentWindow && !currentWindow.isDestroyed()) {
                   receiptRetriedOnce = true;
                   console.warn('⚠️ Print job canceled, retrying in 300ms...');
+                  // #region agent log
+                  writeReprintDebugLog({
+                    hypothesisId: 'H3',
+                    location: 'electron/main.ts:print-receipt:retry-scheduled',
+                    message: 'print canceled, scheduling retry',
+                    data: { errorType: String(errorType) },
+                  });
+                  // #endregion
                   setTimeout(doPrint, 300);
                   return;
                 }

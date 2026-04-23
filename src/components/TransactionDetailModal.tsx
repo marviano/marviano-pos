@@ -172,6 +172,17 @@ const TransactionDetailModal: React.FC<TransactionDetailModalProps> = ({
   const [isRefundModalOpen, setIsRefundModalOpen] = useState(false);
   const [usersMap, setUsersMap] = useState<Map<number, string>>(new Map());
 
+  // Avoid stale success/error state when loading another transaction; block reprint until detail is ready (helps slow devices).
+  useEffect(() => {
+    if (isLoading) {
+      setReprintStatus('idle');
+    }
+  }, [isLoading]);
+
+  useEffect(() => {
+    setReprintStatus('idle');
+  }, [transaction?.id]);
+
   // Calculate canRefund based on current user state to ensure it's always up-to-date
   // This prevents the button from appearing/disappearing due to stale prop values
   // We use the computed value as the source of truth, but keep the prop for backward compatibility
@@ -282,6 +293,24 @@ const TransactionDetailModal: React.FC<TransactionDetailModalProps> = ({
     setReprintStatus('idle');
 
     try {
+      // #region agent log
+      fetch('http://127.0.0.1:7242/ingest/176c0b85-d0c0-41ef-a970-2527232dc552', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': '0b28eb' },
+        body: JSON.stringify({
+          sessionId: '0b28eb',
+          hypothesisId: 'H5',
+          location: 'TransactionDetailModal.tsx:handleReprint:start',
+          message: 'reprint invoked',
+          data: {
+            targetPrinter,
+            itemsLen: Array.isArray(transaction.items) ? transaction.items.length : -1,
+            txIdPrefix: typeof transaction.id === 'string' ? transaction.id.slice(0, 8) : '',
+          },
+          timestamp: Date.now(),
+        }),
+      }).catch(() => {});
+      // #endregion
       const electronAPI = (window as {
         electronAPI?: {
           getPrinter1AuditLog?: (fromDate?: string, toDate?: string, limit?: number, transactionId?: string) => Promise<{ entries?: unknown[] }>;
@@ -512,6 +541,25 @@ const TransactionDetailModal: React.FC<TransactionDetailModalProps> = ({
 
       // Print the receipt
       const printResult = await electronAPI.printReceipt?.(reprintData);
+
+      // #region agent log
+      fetch('http://127.0.0.1:7242/ingest/176c0b85-d0c0-41ef-a970-2527232dc552', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': '0b28eb' },
+        body: JSON.stringify({
+          sessionId: '0b28eb',
+          hypothesisId: 'H3',
+          location: 'TransactionDetailModal.tsx:handleReprint:after-printReceipt',
+          message: 'printReceipt IPC returned',
+          data: {
+            success: Boolean(printResult?.success),
+            error: typeof printResult?.error === 'string' ? printResult.error : null,
+            receiptItemsLen: receiptItems.length,
+          },
+          timestamp: Date.now(),
+        }),
+      }).catch(() => {});
+      // #endregion
 
       if (printResult?.success) {
 
@@ -1283,16 +1331,26 @@ const TransactionDetailModal: React.FC<TransactionDetailModalProps> = ({
         <div className="sticky bottom-0 bg-gray-50 border-t border-gray-200 px-6 py-4 rounded-b-xl">
           <div className="flex justify-between items-center">
             {/* Reprint Button */}
-            <div className="flex items-center space-x-3">
+            <div className="flex items-center space-x-3 flex-wrap">
               <button
-                title="Kiri = Printer 1, Kanan = Printer 2"
+                title={
+                  isLoading
+                    ? 'Tunggu hingga detail transaksi selesai dimuat'
+                    : 'Kiri = Printer 1, Kanan = Printer 2'
+                }
                 onClick={(e) => {
                   const rect = e.currentTarget.getBoundingClientRect();
                   const isLeftHalf = e.clientX - rect.left < rect.width / 2;
                   handleReprint(isLeftHalf ? 'receiptPrinter' : 'receiptizePrinter');
                 }}
-                disabled={isReprinting || !transaction || (typeof window !== 'undefined' && !(window as { electronAPI?: { printReceipt?: unknown } }).electronAPI?.printReceipt)}
-                className={`px-4 py-2 rounded-lg font-medium transition-colors flex items-center space-x-2 ${isReprinting
+                disabled={
+                  isReprinting ||
+                  isLoading ||
+                  !transaction ||
+                  (typeof window !== 'undefined' &&
+                    !(window as { electronAPI?: { printReceipt?: unknown } }).electronAPI?.printReceipt)
+                }
+                className={`px-4 py-2 rounded-lg font-medium transition-colors flex items-center space-x-2 ${isReprinting || isLoading
                   ? 'bg-gray-300 text-gray-500 cursor-not-allowed'
                   : reprintStatus === 'success'
                     ? 'bg-green-100 text-green-800 border border-green-300'
@@ -1301,7 +1359,12 @@ const TransactionDetailModal: React.FC<TransactionDetailModalProps> = ({
                       : 'bg-blue-500 text-white hover:bg-blue-600'
                   }`}
               >
-                {isReprinting ? (
+                {isLoading ? (
+                  <>
+                    <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-gray-500"></div>
+                    <span>Memuat detail...</span>
+                  </>
+                ) : isReprinting ? (
                   <>
                     <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-gray-500"></div>
                     <span>Mencetak...</span>
@@ -1330,7 +1393,12 @@ const TransactionDetailModal: React.FC<TransactionDetailModalProps> = ({
                 )}
               </button>
 
-              {reprintStatus === 'error' && (
+              {isLoading && (
+                <span className="text-xs text-gray-500 max-w-[220px]">
+                  Cetak ulang aktif setelah detail transaksi siap.
+                </span>
+              )}
+              {reprintStatus === 'error' && !isLoading && (
                 <span className="text-xs text-red-600">
                   Gagal mencetak ulang. Coba lagi.
                 </span>

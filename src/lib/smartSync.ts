@@ -69,6 +69,8 @@ interface SyncConfig {
   requestRetryBaseDelayMs: number;
   /** Number of past days to run verifikasi (find diff + re-queue). 0 = today only. */
   verifikasiLookbackDays: number;
+  /** Max missing P2 transactions to repair to system_pos per sync run (today only). */
+  systemPosParityMaxPerRun: number;
 }
 
 interface PendingTransaction {
@@ -89,6 +91,7 @@ class SmartSyncService {
     requestRetries: 3,
     requestRetryBaseDelayMs: 2000,
     verifikasiLookbackDays: 0, // today only
+    systemPosParityMaxPerRun: 20, // keep lightweight to avoid UI lag
   };
 
   private syncTimer: NodeJS.Timeout | null = null;
@@ -446,6 +449,20 @@ class SmartSyncService {
           }
         } catch (sysPosErr) {
           if (SMART_SYNC_VERBOSE) console.warn('⚠️ [SMART SYNC] system_pos refund re-sync error (non-fatal):', sysPosErr instanceof Error ? sysPosErr.message : String(sysPosErr));
+        }
+      }
+
+      // Today-only parity check: ensure db_host Printer 2 transactions also exist in system_pos.
+      if (isElectron && this.verificationBusinessId != null) {
+        try {
+          const repaired = await this.repairSystemPosParityForToday(this.verificationBusinessId);
+          if (SMART_SYNC_VERBOSE && repaired > 0) {
+            console.log(`✅ [SMART SYNC] system_pos parity repair queued ${repaired} missing P2 transaction(s) for today`);
+          }
+        } catch (parityErr) {
+          if (SMART_SYNC_VERBOSE) {
+            console.warn('⚠️ [SMART SYNC] system_pos parity check failed (non-fatal):', parityErr instanceof Error ? parityErr.message : String(parityErr));
+          }
         }
       }
 
@@ -1190,6 +1207,64 @@ class SmartSyncService {
     }
 
     return { syncedCount, skippedCount, failedCount };
+  }
+
+  /**
+   * Compare today's P2 transactions (db_host source) vs system_pos and queue missing UUIDs.
+   * Uses a capped repair size per run to avoid heavy work on busy stores.
+   */
+  private async repairSystemPosParityForToday(businessId: number): Promise<number> {
+    const electronAPI = typeof window !== 'undefined' ? (window as { electronAPI?: UnknownRecord }).electronAPI : undefined;
+    if (!electronAPI?.getSystemPosVerifikasiData || !electronAPI?.queueTransactionForSystemPos) {
+      return 0;
+    }
+
+    const today = getTodayWibDateString();
+    const verifikasi = await (electronAPI.getSystemPosVerifikasiData as (businessId?: number, fromDate?: string, toDate?: string) => Promise<{
+      success: boolean;
+      salespulse: unknown[];
+      system_pos: unknown[];
+      error?: string;
+    }>)(businessId, today, today);
+
+    if (!verifikasi?.success) {
+      if (SMART_SYNC_VERBOSE) {
+        console.warn('⚠️ [SMART SYNC] system_pos parity verifikasi unsuccessful:', verifikasi?.error || 'unknown');
+      }
+      return 0;
+    }
+
+    const salespulseRows = Array.isArray(verifikasi.salespulse) ? verifikasi.salespulse : [];
+    const systemPosRows = Array.isArray(verifikasi.system_pos) ? verifikasi.system_pos : [];
+
+    const getUuid = (row: unknown): string => {
+      if (!row || typeof row !== 'object') return '';
+      const rec = row as Record<string, unknown>;
+      const raw = rec.uuid_id ?? rec.id;
+      return typeof raw === 'string' ? raw : (raw != null ? String(raw) : '');
+    };
+
+    const salespulseIds = salespulseRows.map(getUuid).filter((id) => id.length > 0);
+    const systemPosIds = new Set(systemPosRows.map(getUuid).filter((id) => id.length > 0));
+    const missing = salespulseIds.filter((id) => !systemPosIds.has(id));
+
+    if (missing.length === 0) {
+      return 0;
+    }
+
+    const cappedMissing = missing.slice(0, Math.max(1, this.config.systemPosParityMaxPerRun));
+    let repairedCount = 0;
+
+    for (const transactionId of cappedMissing) {
+      try {
+        const res = await (electronAPI.queueTransactionForSystemPos as (transactionId: string) => Promise<{ success: boolean }>)(transactionId);
+        if (res?.success) repairedCount++;
+      } catch {
+        // non-fatal, continue next transaction
+      }
+    }
+
+    return repairedCount;
   }
 
   /**

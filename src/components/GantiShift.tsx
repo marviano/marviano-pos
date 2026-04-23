@@ -805,6 +805,10 @@ export default function GantiShift() {
   const permissions = user?.permissions ?? [];
   const isAdmin = isSuperAdmin(user);
   const canForceCloseShift = isAdmin || permissions.includes('marviano-pos_gantishift.closeunattendedshift');
+  const canViewPastShiftData =
+    isAdmin ||
+    permissions.includes('gantishift.viewpastdata') ||
+    permissions.includes('marviano-pos_gantishift.viewpastdata');
   const currentUserId = Number(user?.id ?? 0);
   const canManageActiveShift = Boolean(activeShift && (isCurrentUsersShift || canForceCloseShift));
 
@@ -1820,6 +1824,12 @@ export default function GantiShift() {
       return;
     }
 
+    const today = getTodayGmt7();
+    if (!canViewPastShiftData && dateStr !== today) {
+      setError('Anda tidak memiliki izin untuk melihat data shift hari sebelumnya.');
+      return;
+    }
+
     try {
       setIsRefreshing(true);
       setError(null);
@@ -1872,10 +1882,17 @@ export default function GantiShift() {
     } finally {
       setIsRefreshing(false);
     }
-  }, [businessId]);
+  }, [businessId, canViewPastShiftData]);
 
   // Handle date selection change
   const handleDateChange = (dateStr: string) => {
+    const today = getTodayGmt7();
+    if (!canViewPastShiftData && dateStr && dateStr !== today) {
+      setError('Anda tidak memiliki izin untuk melihat data shift hari sebelumnya.');
+      setSelectedDate('');
+      setViewMode('current');
+      return;
+    }
     setSelectedDate(dateStr);
     setViewMode('historical');
     loadHistoricalShifts(dateStr);
@@ -2757,6 +2774,7 @@ export default function GantiShift() {
               <input
                 type="date"
                 value={selectedDate}
+                min={!canViewPastShiftData ? getTodayGmt7() : undefined}
                 max={getTodayGmt7()}
                 onChange={(e) => handleDateChange(e.target.value)}
                 className="px-2 py-1 border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-500 text-gray-900 bg-white text-xs"

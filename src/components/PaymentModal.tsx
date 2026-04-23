@@ -189,6 +189,10 @@ export default function PaymentModal({
   const [showConfirmation, setShowConfirmation] = useState(false);
   const [showDebitModal, setShowDebitModal] = useState(false);
   const [bankError, setBankError] = useState<string>('');
+  const [defaultQrBankId, setDefaultQrBankId] = useState<string>('');
+  const [defaultGofoodBankId, setDefaultGofoodBankId] = useState<string>('');
+  const [defaultGrabfoodBankId, setDefaultGrabfoodBankId] = useState<string>('');
+  const [defaultShopeefoodBankId, setDefaultShopeefoodBankId] = useState<string>('');
 
   // Check if current payment method is an online platform
   const [cardNumberError, setCardNumberError] = useState<string>('');
@@ -214,6 +218,32 @@ export default function PaymentModal({
   const isCustomerNameRequired = selectedPaymentMethod === 'cl';
   const isCustomerNameMissing = isCustomerNameRequired && trimmedCustomerName.length === 0;
   const isClInfoIncomplete = selectedPaymentMethod === 'cl' && isCustomerNameMissing;
+
+  const resolveConfiguredBankIdByPaymentMethod = (method: PaymentMethod): string => {
+    if (method === 'qr') return defaultQrBankId;
+    if (method === 'gofood') return defaultGofoodBankId || defaultQrBankId;
+    if (method === 'grabfood') return defaultGrabfoodBankId || defaultQrBankId;
+    if (method === 'shopeefood') return defaultShopeefoodBankId || defaultQrBankId;
+    return '';
+  };
+
+  const getResolvedTransactionBank = (): { bank_id: number | null; bank_name: string | null } => {
+    if (selectedPaymentMethod === 'debit') {
+      const resolvedDebitBank = banks.find((b) => b.id.toString() === bankId) ?? null;
+      return {
+        bank_id: resolvedDebitBank?.id ?? null,
+        bank_name: resolvedDebitBank?.bank_name ?? null,
+      };
+    }
+
+    const configuredBankId = resolveConfiguredBankIdByPaymentMethod(selectedPaymentMethod);
+    if (!configuredBankId) return { bank_id: null, bank_name: null };
+    const resolvedConfiguredBank = banks.find((b) => b.id.toString() === configuredBankId) ?? null;
+    return {
+      bank_id: resolvedConfiguredBank?.id ?? null,
+      bank_name: resolvedConfiguredBank?.bank_name ?? null,
+    };
+  };
 
   // Auto-set pickup method for online orders
   useEffect(() => {
@@ -626,6 +656,14 @@ export default function PaymentModal({
       setCardNumberError('');
     }
 
+    if (['qr', 'gofood', 'grabfood', 'shopeefood'].includes(selectedPaymentMethod)) {
+      const resolved = getResolvedTransactionBank();
+      if (!resolved.bank_id || !resolved.bank_name) {
+        appAlert('Bank settlement belum diatur. Buka Settings > Payment Settlement Bank, lalu pilih bank default untuk metode ini.');
+        return;
+      }
+    }
+
     // Validate City Ledger customer name
     if (selectedPaymentMethod === 'cl') {
       if (trimmedCustomerName === '') {
@@ -750,11 +788,11 @@ export default function PaymentModal({
         status: 'paid',
         created_at: new Date().toISOString(),
         note: null, // Add fields to match full schema
-        bank_name: selectedPaymentMethod === 'debit' ? (banks.find(b => b.id.toString() === bankId)?.bank_name || null) : null,
+        bank_name: getResolvedTransactionBank().bank_name,
         contact_id: null, // Will be used when contact book is integrated
         customer_name: trimmedCustomerName || null,
         customer_unit: customerUnit ? parseInt(customerUnit) : (customerUnitNumber || null),
-        bank_id: selectedPaymentMethod === 'debit' && bankId ? parseInt(bankId) : null,
+        bank_id: getResolvedTransactionBank().bank_id,
         card_number: cardNumber || null,
         cl_account_id: null,
         cl_account_name: selectedPaymentMethod === 'cl' ? (trimmedCustomerName || null) : null,
@@ -2296,6 +2334,28 @@ export default function PaymentModal({
       }
     };
     fetchBanks();
+  }, []);
+
+  useEffect(() => {
+    const loadPaymentBankSettings = async () => {
+      try {
+        const electronAPI = getElectronAPI();
+        if (!electronAPI?.localDbGetSetting) return;
+        const [qr, gofood, grabfood, shopeefood] = await Promise.all([
+          electronAPI.localDbGetSetting('default_qr_bank_id'),
+          electronAPI.localDbGetSetting('default_gofood_bank_id'),
+          electronAPI.localDbGetSetting('default_grabfood_bank_id'),
+          electronAPI.localDbGetSetting('default_shopeefood_bank_id'),
+        ]);
+        setDefaultQrBankId(qr ?? '');
+        setDefaultGofoodBankId(gofood ?? '');
+        setDefaultGrabfoodBankId(grabfood ?? '');
+        setDefaultShopeefoodBankId(shopeefood ?? '');
+      } catch (error) {
+        console.warn('Failed to load payment bank settings:', error);
+      }
+    };
+    loadPaymentBankSettings();
   }, []);
 
   // Close dropdown when clicking outside

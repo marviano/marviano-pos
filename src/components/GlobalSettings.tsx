@@ -124,6 +124,13 @@ export default function GlobalSettings() {
   const [selectedReceiptizePrinter, setSelectedReceiptizePrinter] = useState<string>('');
   const [selectedLabelPrinter, setSelectedLabelPrinter] = useState<string>('');
   const [taxToggle, setTaxToggle] = useState<boolean>(false);
+  const [banks, setBanks] = useState<Array<{ id: number; bank_name: string; bank_code?: string }>>([]);
+  const [defaultQrBankId, setDefaultQrBankId] = useState<string>('');
+  const [defaultGofoodBankId, setDefaultGofoodBankId] = useState<string>('');
+  const [defaultGrabfoodBankId, setDefaultGrabfoodBankId] = useState<string>('');
+  const [defaultShopeefoodBankId, setDefaultShopeefoodBankId] = useState<string>('');
+  const [bankLoadMessage, setBankLoadMessage] = useState<string>('');
+  const [paymentBankSaveMessage, setPaymentBankSaveMessage] = useState<string>('');
   // const [isScanning, setIsScanning] = useState(false);
   const [isTesting, setIsTesting] = useState<string | null>(null);
   const [isModalOpen, setIsModalOpen] = useState<{ type: 'receiptize' | 'label' | null }>({ type: null });
@@ -132,7 +139,96 @@ export default function GlobalSettings() {
   useEffect(() => {
     loadSavedSelections();
     scanForPrinters();
+    loadBanksAndPaymentSettings();
   }, []);
+
+  const loadBanksAndPaymentSettings = async () => {
+    try {
+      const electronAPI = window.electronAPI;
+      if (!electronAPI) return;
+
+      if (electronAPI.localDbGetBanks) {
+        let bankRows = await electronAPI.localDbGetBanks();
+
+        // Always upsert core banks so required options exist even on partially-seeded DB.
+        if (electronAPI.localDbUpsertBanks) {
+          await electronAPI.localDbUpsertBanks([
+            { bank_code: 'BCA', bank_name: 'BANK CENTRAL ASIA', is_popular: 1, is_active: 1 },
+            { bank_code: 'BNI', bank_name: 'BANK NEGARA INDONESIA', is_popular: 1, is_active: 1 },
+            { bank_code: 'MANDIRI', bank_name: 'BANK MANDIRI', is_popular: 1, is_active: 1 },
+            { bank_code: 'BRI', bank_name: 'BANK RAKYAT INDONESIA', is_popular: 1, is_active: 1 },
+            { bank_code: 'BTN', bank_name: 'BANK TABUNGAN NEGARA', is_popular: 0, is_active: 1 },
+            { bank_code: 'CIMB', bank_name: 'BANK CIMB', is_popular: 0, is_active: 1 },
+            { bank_code: 'DANAMON', bank_name: 'BANK DANAMON', is_popular: 0, is_active: 1 },
+            { bank_code: 'PERMATA', bank_name: 'BANK PERMATA', is_popular: 0, is_active: 1 },
+            { bank_code: 'BSI', bank_name: 'BANK BSI', is_popular: 0, is_active: 1 },
+          ]);
+          bankRows = await electronAPI.localDbGetBanks();
+          if (!Array.isArray(bankRows) || bankRows.length === 0) {
+            setBankLoadMessage('Daftar bank masih kosong. Coba sinkronisasi atau isi manual.');
+          } else {
+            setBankLoadMessage('Daftar bank diperbarui otomatis (termasuk BNI).');
+            setTimeout(() => setBankLoadMessage(''), 2500);
+          }
+        }
+
+        if (Array.isArray(bankRows)) {
+          setBanks(bankRows as Array<{ id: number; bank_name: string; bank_code?: string }>);
+          if (bankRows.length === 0) {
+            setBankLoadMessage('Daftar bank masih kosong. Coba sinkronisasi atau isi manual.');
+          }
+        }
+      }
+
+      const [qr, gofood, grabfood, shopeefood] = await Promise.all([
+        electronAPI.localDbGetSetting?.('default_qr_bank_id') ?? Promise.resolve(null),
+        electronAPI.localDbGetSetting?.('default_gofood_bank_id') ?? Promise.resolve(null),
+        electronAPI.localDbGetSetting?.('default_grabfood_bank_id') ?? Promise.resolve(null),
+        electronAPI.localDbGetSetting?.('default_shopeefood_bank_id') ?? Promise.resolve(null),
+      ]);
+
+      setDefaultQrBankId(qr ?? '');
+      setDefaultGofoodBankId(gofood ?? '');
+      setDefaultGrabfoodBankId(grabfood ?? '');
+      setDefaultShopeefoodBankId(shopeefood ?? '');
+    } catch (error) {
+      console.error('Error loading payment bank settings:', error);
+      setBankLoadMessage('Gagal memuat daftar bank.');
+    }
+  };
+
+  const savePaymentBankSettings = async () => {
+    try {
+      const electronAPI = window.electronAPI;
+      if (!electronAPI?.localDbSaveSetting) return;
+
+      await Promise.all([
+        electronAPI.localDbSaveSetting('default_qr_bank_id', defaultQrBankId || ''),
+        electronAPI.localDbSaveSetting('default_gofood_bank_id', defaultGofoodBankId || ''),
+        electronAPI.localDbSaveSetting('default_grabfood_bank_id', defaultGrabfoodBankId || ''),
+        electronAPI.localDbSaveSetting('default_shopeefood_bank_id', defaultShopeefoodBankId || ''),
+      ]);
+      setPaymentBankSaveMessage('Pengaturan bank settlement berhasil disimpan.');
+      setTimeout(() => setPaymentBankSaveMessage(''), 2500);
+      appAlert('Berhasil menyimpan pengaturan bank settlement.');
+    } catch (error) {
+      console.error('Error saving payment bank settings:', error);
+      setPaymentBankSaveMessage('Gagal menyimpan pengaturan bank settlement.');
+      appAlert('Error saving payment bank settings. Please try again.');
+    }
+  };
+
+  const renderBankOptions = () => (
+    <>
+      <option value="">-- Belum dipilih --</option>
+      {banks.map((bank) => (
+        <option key={bank.id} value={String(bank.id)}>
+          {bank.bank_name}
+          {bank.bank_code ? ` (${bank.bank_code})` : ''}
+        </option>
+      ))}
+    </>
+  );
 
   const loadSavedSelections = async () => {
     try {
@@ -465,6 +561,80 @@ export default function GlobalSettings() {
             <span className="text-gray-700">Indonesia</span>
             <ChevronRight className="w-5 h-5 text-gray-400" />
           </div>
+        </div>
+      </div>
+
+      {/* Payment Settlement Bank Mapping */}
+      <div className="bg-white rounded-lg border border-gray-200 shadow-sm p-6 space-y-4">
+        <div className="flex items-center justify-between">
+          <h3 className="text-sm font-semibold text-gray-800">Payment Settlement Bank</h3>
+          <button
+            onClick={savePaymentBankSettings}
+            className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors text-sm"
+          >
+            Simpan
+          </button>
+        </div>
+        <p className="text-xs text-gray-600">
+          Mapping ini dipakai agar transaksi QR / GoFood / GrabFood / ShopeeFood otomatis mengirim bank_name ke backend accounting.
+        </p>
+        {bankLoadMessage ? (
+          <p className="text-xs text-blue-700 bg-blue-50 border border-blue-200 rounded px-2 py-1">{bankLoadMessage}</p>
+        ) : null}
+        {paymentBankSaveMessage ? (
+          <p className={`text-xs rounded px-2 py-1 border ${
+            paymentBankSaveMessage.startsWith('Gagal')
+              ? 'text-red-700 bg-red-50 border-red-200'
+              : 'text-green-700 bg-green-50 border-green-200'
+          }`}>
+            {paymentBankSaveMessage}
+          </p>
+        ) : null}
+
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <label className="flex flex-col gap-1">
+            <span className="text-xs font-medium text-gray-700">Default QR Bank</span>
+            <select
+              value={defaultQrBankId}
+              onChange={(e) => setDefaultQrBankId(e.target.value)}
+              className="px-3 py-2 border border-gray-300 rounded-lg text-sm text-gray-900"
+            >
+              {renderBankOptions()}
+            </select>
+          </label>
+
+          <label className="flex flex-col gap-1">
+            <span className="text-xs font-medium text-gray-700">Default GoFood Settlement Bank</span>
+            <select
+              value={defaultGofoodBankId}
+              onChange={(e) => setDefaultGofoodBankId(e.target.value)}
+              className="px-3 py-2 border border-gray-300 rounded-lg text-sm text-gray-900"
+            >
+              {renderBankOptions()}
+            </select>
+          </label>
+
+          <label className="flex flex-col gap-1">
+            <span className="text-xs font-medium text-gray-700">Default GrabFood Settlement Bank</span>
+            <select
+              value={defaultGrabfoodBankId}
+              onChange={(e) => setDefaultGrabfoodBankId(e.target.value)}
+              className="px-3 py-2 border border-gray-300 rounded-lg text-sm text-gray-900"
+            >
+              {renderBankOptions()}
+            </select>
+          </label>
+
+          <label className="flex flex-col gap-1">
+            <span className="text-xs font-medium text-gray-700">Default ShopeeFood Settlement Bank</span>
+            <select
+              value={defaultShopeefoodBankId}
+              onChange={(e) => setDefaultShopeefoodBankId(e.target.value)}
+              className="px-3 py-2 border border-gray-300 rounded-lg text-sm text-gray-900"
+            >
+              {renderBankOptions()}
+            </select>
+          </label>
         </div>
       </div>
 
