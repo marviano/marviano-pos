@@ -630,6 +630,30 @@ class OfflineSyncService {
           }
           advanceProgress();
 
+          // Download Master Data should also update Setelan payment settlement defaults
+          // from server-side mapping (payment_method_cash_book_routes), if available.
+          if (electronAPI.localDbSaveSetting && data.paymentSettlementSettings) {
+            try {
+              const localBanks = Array.isArray(data.banks) ? (data.banks as Array<{ id?: number; bank_name?: string }>) : [];
+              const resolveBankIdByName = (bankNameRaw: unknown): string => {
+                const bankName = String(bankNameRaw ?? '').trim().toLowerCase();
+                if (!bankName) return '';
+                const matched = localBanks.find((b) => String(b.bank_name ?? '').trim().toLowerCase() === bankName);
+                return matched?.id != null ? String(matched.id) : '';
+              };
+              await Promise.all([
+                electronAPI.localDbSaveSetting('default_qr_bank_id', resolveBankIdByName(data.paymentSettlementSettings.default_qr_bank_name)),
+                electronAPI.localDbSaveSetting('default_gofood_bank_id', resolveBankIdByName(data.paymentSettlementSettings.default_gofood_bank_name)),
+                electronAPI.localDbSaveSetting('default_grabfood_bank_id', resolveBankIdByName(data.paymentSettlementSettings.default_grabfood_bank_name)),
+                electronAPI.localDbSaveSetting('default_shopeefood_bank_id', resolveBankIdByName(data.paymentSettlementSettings.default_shopeefood_bank_name)),
+                electronAPI.localDbSaveSetting('default_qpon_bank_id', resolveBankIdByName(data.paymentSettlementSettings.default_qpon_bank_name)),
+                electronAPI.localDbSaveSetting('default_tiktok_bank_id', resolveBankIdByName(data.paymentSettlementSettings.default_tiktok_bank_name)),
+              ]);
+            } catch (settingsSyncErr) {
+              console.warn('⚠️ [SYNC] payment settlement settings sync failed (non-fatal):', settingsSyncErr);
+            }
+          }
+
           // Receipt Settings: NOT downloaded in Download Master Data (user controls via "Download Receipt Settings" in Template Struk)
           // advanceProgress();
 

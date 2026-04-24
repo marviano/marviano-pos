@@ -3,6 +3,8 @@
 import { useState, useEffect } from 'react';
 import { Printer, Tag, Power, Globe, ChevronRight, TestTube, CheckCircle, XCircle, AlertCircle } from 'lucide-react';
 import { appAlert } from '@/components/AppDialog';
+import { useAuth } from '@/hooks/useAuth';
+import { fetchFromVps, initApiUrlCache } from '@/lib/api';
 
 interface SystemPrinter {
   name: string;
@@ -120,6 +122,7 @@ function PrinterModal({ isOpen, onClose, printers, selectedPrinter, onSelect, ti
 }
 
 export default function GlobalSettings() {
+  const { user } = useAuth();
   const [systemPrinters, setSystemPrinters] = useState<SystemPrinter[]>([]);
   const [selectedReceiptizePrinter, setSelectedReceiptizePrinter] = useState<string>('');
   const [selectedLabelPrinter, setSelectedLabelPrinter] = useState<string>('');
@@ -129,14 +132,18 @@ export default function GlobalSettings() {
   const [defaultGofoodBankId, setDefaultGofoodBankId] = useState<string>('');
   const [defaultGrabfoodBankId, setDefaultGrabfoodBankId] = useState<string>('');
   const [defaultShopeefoodBankId, setDefaultShopeefoodBankId] = useState<string>('');
+  const [defaultQponBankId, setDefaultQponBankId] = useState<string>('');
+  const [defaultTiktokBankId, setDefaultTiktokBankId] = useState<string>('');
   const [bankLoadMessage, setBankLoadMessage] = useState<string>('');
   const [paymentBankSaveMessage, setPaymentBankSaveMessage] = useState<string>('');
+  const [paymentBankMessageCopied, setPaymentBankMessageCopied] = useState<boolean>(false);
   // const [isScanning, setIsScanning] = useState(false);
   const [isTesting, setIsTesting] = useState<string | null>(null);
   const [isModalOpen, setIsModalOpen] = useState<{ type: 'receiptize' | 'label' | null }>({ type: null });
 
   // Load saved printer selections on component mount
   useEffect(() => {
+    void initApiUrlCache().catch(() => {});
     loadSavedSelections();
     scanForPrinters();
     loadBanksAndPaymentSettings();
@@ -166,9 +173,6 @@ export default function GlobalSettings() {
           bankRows = await electronAPI.localDbGetBanks();
           if (!Array.isArray(bankRows) || bankRows.length === 0) {
             setBankLoadMessage('Daftar bank masih kosong. Coba sinkronisasi atau isi manual.');
-          } else {
-            setBankLoadMessage('Daftar bank diperbarui otomatis (termasuk BNI).');
-            setTimeout(() => setBankLoadMessage(''), 2500);
           }
         }
 
@@ -180,17 +184,21 @@ export default function GlobalSettings() {
         }
       }
 
-      const [qr, gofood, grabfood, shopeefood] = await Promise.all([
+      const [qr, gofood, grabfood, shopeefood, qpon, tiktok] = await Promise.all([
         electronAPI.localDbGetSetting?.('default_qr_bank_id') ?? Promise.resolve(null),
         electronAPI.localDbGetSetting?.('default_gofood_bank_id') ?? Promise.resolve(null),
         electronAPI.localDbGetSetting?.('default_grabfood_bank_id') ?? Promise.resolve(null),
         electronAPI.localDbGetSetting?.('default_shopeefood_bank_id') ?? Promise.resolve(null),
+        electronAPI.localDbGetSetting?.('default_qpon_bank_id') ?? Promise.resolve(null),
+        electronAPI.localDbGetSetting?.('default_tiktok_bank_id') ?? Promise.resolve(null),
       ]);
 
       setDefaultQrBankId(qr ?? '');
       setDefaultGofoodBankId(gofood ?? '');
       setDefaultGrabfoodBankId(grabfood ?? '');
       setDefaultShopeefoodBankId(shopeefood ?? '');
+      setDefaultQponBankId(qpon ?? '');
+      setDefaultTiktokBankId(tiktok ?? '');
     } catch (error) {
       console.error('Error loading payment bank settings:', error);
       setBankLoadMessage('Gagal memuat daftar bank.');
@@ -207,7 +215,47 @@ export default function GlobalSettings() {
         electronAPI.localDbSaveSetting('default_gofood_bank_id', defaultGofoodBankId || ''),
         electronAPI.localDbSaveSetting('default_grabfood_bank_id', defaultGrabfoodBankId || ''),
         electronAPI.localDbSaveSetting('default_shopeefood_bank_id', defaultShopeefoodBankId || ''),
+        electronAPI.localDbSaveSetting('default_qpon_bank_id', defaultQponBankId || ''),
+        electronAPI.localDbSaveSetting('default_tiktok_bank_id', defaultTiktokBankId || ''),
       ]);
+
+      const businessId = user?.selectedBusinessId;
+      if (businessId != null) {
+        try {
+          await initApiUrlCache();
+          const pick = (bankIdStr: string) => {
+            if (!bankIdStr) return null;
+            const b = banks.find((x) => String(x.id) === bankIdStr);
+            if (!b) return null;
+            return { bank_name: b.bank_name, bank_code: b.bank_code ?? null };
+          };
+          await fetchFromVps<{ success?: boolean; routes?: unknown; error?: string }>(
+            '/api/accounting/pos-payment-settlement-routes',
+            {
+              method: 'POST',
+              body: JSON.stringify({
+                business_id: businessId,
+                channels: {
+                  qr: pick(defaultQrBankId),
+                  gofood: pick(defaultGofoodBankId),
+                  grabfood: pick(defaultGrabfoodBankId),
+                  shopeefood: pick(defaultShopeefoodBankId),
+                  qpon: pick(defaultQponBankId),
+                  tiktok: pick(defaultTiktokBankId),
+                },
+              }),
+            }
+          );
+        } catch (syncErr) {
+          console.error('SalesPulse payment settlement sync failed:', syncErr);
+          setPaymentBankSaveMessage(
+            `Disimpan di POS. Gagal sinkron ke SalesPulse: ${syncErr instanceof Error ? syncErr.message : 'unknown error'}`
+          );
+          appAlert('Pengaturan disimpan lokal. Sinkron ke server gagal — cek API URL dan POS_WRITE_API_KEY.');
+          return;
+        }
+      }
+
       setPaymentBankSaveMessage('Pengaturan bank settlement berhasil disimpan.');
       setTimeout(() => setPaymentBankSaveMessage(''), 2500);
       appAlert('Berhasil menyimpan pengaturan bank settlement.');
@@ -215,6 +263,17 @@ export default function GlobalSettings() {
       console.error('Error saving payment bank settings:', error);
       setPaymentBankSaveMessage('Gagal menyimpan pengaturan bank settlement.');
       appAlert('Error saving payment bank settings. Please try again.');
+    }
+  };
+
+  const copyPaymentBankMessage = async () => {
+    if (!paymentBankSaveMessage) return;
+    try {
+      await navigator.clipboard.writeText(paymentBankSaveMessage);
+      setPaymentBankMessageCopied(true);
+      setTimeout(() => setPaymentBankMessageCopied(false), 1500);
+    } catch (error) {
+      console.error('Failed to copy payment bank message:', error);
     }
   };
 
@@ -575,23 +634,29 @@ export default function GlobalSettings() {
             Simpan
           </button>
         </div>
-        <p className="text-xs text-gray-600">
-          Mapping ini dipakai agar transaksi QR / GoFood / GrabFood / ShopeeFood otomatis mengirim bank_name ke backend accounting.
-        </p>
         {bankLoadMessage ? (
           <p className="text-xs text-blue-700 bg-blue-50 border border-blue-200 rounded px-2 py-1">{bankLoadMessage}</p>
         ) : null}
         {paymentBankSaveMessage ? (
-          <p className={`text-xs rounded px-2 py-1 border ${
-            paymentBankSaveMessage.startsWith('Gagal')
+          <div className={`text-xs rounded px-2 py-1 border flex items-center justify-between gap-2 ${
+            paymentBankSaveMessage.startsWith('Gagal') || paymentBankSaveMessage.startsWith('Disimpan di POS. Gagal')
               ? 'text-red-700 bg-red-50 border-red-200'
               : 'text-green-700 bg-green-50 border-green-200'
           }`}>
-            {paymentBankSaveMessage}
-          </p>
+            <span>{paymentBankSaveMessage}</span>
+            {(paymentBankSaveMessage.startsWith('Gagal') || paymentBankSaveMessage.startsWith('Disimpan di POS. Gagal')) ? (
+              <button
+                type="button"
+                onClick={copyPaymentBankMessage}
+                className="shrink-0 rounded border border-red-300 bg-white px-2 py-0.5 text-[11px] text-red-700 hover:bg-red-100"
+              >
+                {paymentBankMessageCopied ? 'Tersalin' : 'Copy'}
+              </button>
+            ) : null}
+          </div>
         ) : null}
 
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
           <label className="flex flex-col gap-1">
             <span className="text-xs font-medium text-gray-700">Default QR Bank</span>
             <select
@@ -630,6 +695,28 @@ export default function GlobalSettings() {
             <select
               value={defaultShopeefoodBankId}
               onChange={(e) => setDefaultShopeefoodBankId(e.target.value)}
+              className="px-3 py-2 border border-gray-300 rounded-lg text-sm text-gray-900"
+            >
+              {renderBankOptions()}
+            </select>
+          </label>
+
+          <label className="flex flex-col gap-1">
+            <span className="text-xs font-medium text-gray-700">Default Qpon Settlement Bank</span>
+            <select
+              value={defaultQponBankId}
+              onChange={(e) => setDefaultQponBankId(e.target.value)}
+              className="px-3 py-2 border border-gray-300 rounded-lg text-sm text-gray-900"
+            >
+              {renderBankOptions()}
+            </select>
+          </label>
+
+          <label className="flex flex-col gap-1">
+            <span className="text-xs font-medium text-gray-700">Default TikTok Settlement Bank</span>
+            <select
+              value={defaultTiktokBankId}
+              onChange={(e) => setDefaultTiktokBankId(e.target.value)}
               className="px-3 py-2 border border-gray-300 rounded-lg text-sm text-gray-900"
             >
               {renderBankOptions()}

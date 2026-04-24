@@ -193,6 +193,8 @@ export default function PaymentModal({
   const [defaultGofoodBankId, setDefaultGofoodBankId] = useState<string>('');
   const [defaultGrabfoodBankId, setDefaultGrabfoodBankId] = useState<string>('');
   const [defaultShopeefoodBankId, setDefaultShopeefoodBankId] = useState<string>('');
+  const [defaultQponBankId, setDefaultQponBankId] = useState<string>('');
+  const [defaultTiktokBankId, setDefaultTiktokBankId] = useState<string>('');
 
   // Check if current payment method is an online platform
   const [cardNumberError, setCardNumberError] = useState<string>('');
@@ -224,6 +226,8 @@ export default function PaymentModal({
     if (method === 'gofood') return defaultGofoodBankId || defaultQrBankId;
     if (method === 'grabfood') return defaultGrabfoodBankId || defaultQrBankId;
     if (method === 'shopeefood') return defaultShopeefoodBankId || defaultQrBankId;
+    if (method === 'qpon') return defaultQponBankId || defaultQrBankId;
+    if (method === 'tiktok') return defaultTiktokBankId || defaultQrBankId;
     return '';
   };
 
@@ -656,7 +660,7 @@ export default function PaymentModal({
       setCardNumberError('');
     }
 
-    if (['qr', 'gofood', 'grabfood', 'shopeefood'].includes(selectedPaymentMethod)) {
+    if (['qr', 'gofood', 'grabfood', 'shopeefood', 'qpon', 'tiktok'].includes(selectedPaymentMethod)) {
       const resolved = getResolvedTransactionBank();
       if (!resolved.bank_id || !resolved.bank_name) {
         appAlert('Bank settlement belum diatur. Buka Settings > Payment Settlement Bank, lalu pilih bank default untuk metode ini.');
@@ -2341,16 +2345,20 @@ export default function PaymentModal({
       try {
         const electronAPI = getElectronAPI();
         if (!electronAPI?.localDbGetSetting) return;
-        const [qr, gofood, grabfood, shopeefood] = await Promise.all([
+        const [qr, gofood, grabfood, shopeefood, qpon, tiktok] = await Promise.all([
           electronAPI.localDbGetSetting('default_qr_bank_id'),
           electronAPI.localDbGetSetting('default_gofood_bank_id'),
           electronAPI.localDbGetSetting('default_grabfood_bank_id'),
           electronAPI.localDbGetSetting('default_shopeefood_bank_id'),
+          electronAPI.localDbGetSetting('default_qpon_bank_id'),
+          electronAPI.localDbGetSetting('default_tiktok_bank_id'),
         ]);
         setDefaultQrBankId(qr ?? '');
         setDefaultGofoodBankId(gofood ?? '');
         setDefaultGrabfoodBankId(grabfood ?? '');
         setDefaultShopeefoodBankId(shopeefood ?? '');
+        setDefaultQponBankId(qpon ?? '');
+        setDefaultTiktokBankId(tiktok ?? '');
       } catch (error) {
         console.warn('Failed to load payment bank settings:', error);
       }
