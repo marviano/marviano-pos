@@ -2783,11 +2783,9 @@ export default function PaymentModal({
                             </button>
 
                             <button
-                              onClick={() => setSelectedPaymentMethod('ewallet')}
-                              className={`flex-1 py-2 rounded border transition-all duration-200 ${selectedPaymentMethod === 'ewallet'
-                                ? 'bg-teal-100 border-teal-400 text-teal-800'
-                                : 'bg-gray-50 border-gray-200 text-gray-700 hover:bg-gray-100'
-                                }`}
+                              disabled
+                              className="flex-1 py-2 rounded border bg-gray-100 border-gray-200 text-gray-400 cursor-not-allowed opacity-50"
+                              title="E-Wallet is currently disabled"
                             >
                               <span className="font-medium text-xs">E-Wallet</span>
                             </button>
