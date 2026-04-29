@@ -68,6 +68,8 @@ export interface TransactionRefund {
   status?: string;
   refunded_at: string;
   refunded_by?: number;
+  payment_method_id?: number | null;
+  refund_bank_name?: string | null;
 }
 
 export interface TransactionDetail {
@@ -272,6 +274,30 @@ const TransactionDetailModal: React.FC<TransactionDetailModalProps> = ({
     };
     return labels[method] || method;
   }, [getPaymentMethodCode]);
+
+  /** Get human-readable label for a refund's payment method. */
+  const getRefundPaymentLabel = useCallback((refund: TransactionRefund): string => {
+    const pmId = refund.payment_method_id;
+    const bank = refund.refund_bank_name ? ` ${refund.refund_bank_name}` : '';
+    if (!pmId) {
+      // Legacy refunds: cash_delta > 0 means cash was given back
+      return refund.cash_delta > 0 ? 'Cash' : 'Sesuai pembayaran asal';
+    }
+    const map: Record<number, string> = {
+      1: 'Cash',
+      2: `Transfer${bank}`,
+      3: `QR${bank}`,
+      4: `E-Wallet${bank}`,
+      5: 'City Ledger',
+      6: 'Voucher',
+      14: 'GoFood',
+      15: 'GrabFood',
+      16: 'ShopeeFood',
+      17: 'TikTok Shop',
+      18: 'Qpon',
+    };
+    return map[pmId] ?? `Metode #${pmId}${bank}`;
+  }, []);
 
   // Helper function to calculate customization price adjustments
   const sumCustomizationPrice = useCallback((customizations?: TransactionItem['customizations']) => {
@@ -984,39 +1010,64 @@ const TransactionDetailModal: React.FC<TransactionDetailModalProps> = ({
                         key={refund.uuid_id || refund.id || `${refund.refunded_at}-${refund.refund_amount}`}
                         className="p-3 rounded-lg border border-gray-200 bg-gray-50"
                       >
+                        {/* Top row: amount + status badge */}
                         <div className="flex items-center justify-between">
-                          <p className="text-base font-semibold text-gray-900">
-                            {formatPrice(refund.refund_amount)}
+                          <p className="text-base font-bold text-red-600">
+                            -{formatPrice(refund.refund_amount)}
                           </p>
                           <span
-                            className={`text-xs font-semibold ${refund.status === 'pending'
-                              ? 'text-yellow-700 bg-yellow-100'
-                              : 'text-green-700 bg-green-100'
-                              } px-2 py-0.5 rounded-full`}
+                            className={`text-xs font-semibold ${
+                              refund.status === 'pending'
+                                ? 'text-yellow-700 bg-yellow-100'
+                                : 'text-green-700 bg-green-100'
+                            } px-2 py-0.5 rounded-full`}
                           >
                             {refund.status === 'pending'
-                              ? 'Pending Upload'
+                              ? '⏳ Pending Upload'
                               : refund.status === 'completed'
-                                ? 'Uploaded'
-                                : refund.status ?? 'Uploaded'}
+                                ? '✓ Uploaded'
+                                : refund.status ?? '✓ Uploaded'}
                           </span>
                         </div>
+
+                        {/* Payment method row */}
+                        <div className="flex items-center gap-1.5 mt-1.5">
+                          <span className="text-xs">
+                            {(refund.payment_method_id ?? 0) === 1 || (!refund.payment_method_id && refund.cash_delta > 0) ? '💵' : '🏦'}
+                          </span>
+                          <p className="text-sm font-semibold text-gray-800">
+                            {getRefundPaymentLabel(refund)}
+                          </p>
+                        </div>
+
+                        {/* Date + time + cashier */}
                         <div className="flex items-center justify-between mt-1">
-                          <p className="text-xs text-gray-500">{formatDate(refund.refunded_at)}</p>
+                          <p className="text-xs text-gray-500">
+                            🕐 {(() => {
+                              const d = parseDateSafely(refund.refunded_at);
+                              if (!d) return '-';
+                              return d.toLocaleString('id-ID', {
+                                day: '2-digit', month: '2-digit', year: 'numeric',
+                                hour: '2-digit', minute: '2-digit'
+                              });
+                            })()}
+                          </p>
                           {refund.refunded_by && usersMap.has(refund.refunded_by) && (
-                            <p className="text-xs text-gray-600">
-                              Oleh: <span className="font-medium">{usersMap.get(refund.refunded_by)}</span>
+                            <p className="text-xs text-gray-500">
+                              Oleh: <span className="font-medium text-gray-700">{usersMap.get(refund.refunded_by)}</span>
                             </p>
                           )}
                         </div>
+
+                        {/* Reason & note */}
                         {refund.reason && (
-                          <p className="text-sm text-gray-700 mt-1">
-                            Alasan: {refund.reason}
+                          <p className="text-xs text-gray-600 mt-1 border-t border-gray-200 pt-1">
+                            📋 Alasan: <span className="font-medium">{refund.reason}</span>
                           </p>
                         )}
                         {refund.note && (
-                          <p className="text-xs text-gray-500 mt-1">
-                            Catatan: {refund.note}
+                          <p className="text-xs text-gray-500 mt-0.5">
+                            💬 {refund.note}
                           </p>
                         )}
                       </div>

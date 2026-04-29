@@ -39,6 +39,7 @@ const RefundModal: React.FC<RefundModalProps> = ({
   const [amount, setAmount] = useState<string>('');
   const [reason, setReason] = useState<string>('');
   const [note, setNote] = useState<string>('');
+  const [refundPaymentMethod, setRefundPaymentMethod] = useState<'cash' | 'bca' | 'mandiri' | 'bni' | 'original'>('cash');
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -73,6 +74,39 @@ const RefundModal: React.FC<RefundModalProps> = ({
     return Math.max(0, Number((finalAmount - totalRefunded).toFixed(2)));
   }, [transaction.final_amount, totalRefunded]);
 
+  // Human-readable label for the original payment method (shown in selector)
+  const originalPaymentLabel = useMemo(() => {
+    const method = String(transaction.payment_method ?? '').toLowerCase();
+    const bank = transaction.bank_name ? ` ${transaction.bank_name}` : '';
+    const labels: Record<string, string> = {
+      cash: 'Tunai',
+      debit: `Debit${bank}`,
+      qr: `QR${bank}`,
+      ewallet: `E-Wallet${bank}`,
+      transfer: `Transfer${bank}`,
+      gofood: 'GoFood',
+      grabfood: 'GrabFood',
+      shopeefood: 'ShopeeFood',
+      tiktok: 'TikTok Shop',
+      qpon: 'Qpon',
+    };
+    return labels[method] ?? (method || 'Asal');
+  }, [transaction.payment_method, transaction.bank_name]);
+
+  /** Derive payment_method_id and refund_bank_name from the selected refund option. */
+  const getRefundPaymentDetails = () => {
+    switch (refundPaymentMethod) {
+      case 'cash':     return { payment_method_id: 1, refund_bank_name: null };
+      case 'bca':      return { payment_method_id: 2, refund_bank_name: 'BCA' };
+      case 'mandiri':  return { payment_method_id: 2, refund_bank_name: 'MANDIRI' };
+      case 'bni':      return { payment_method_id: 2, refund_bank_name: 'BNI' };
+      case 'original': return {
+        payment_method_id: Number(transaction.payment_method_id ?? 1),
+        refund_bank_name: null, // server falls back to original tx bank_name
+      };
+    }
+  };
+
   const isOnline = offlineSyncService.getStatus().isOnline;
   const electronAPI = typeof window !== 'undefined' ? (window as { electronAPI?: Record<string, unknown> }).electronAPI : undefined;
 
@@ -81,6 +115,7 @@ const RefundModal: React.FC<RefundModalProps> = ({
     setAmount('');
     setReason('');
     setNote('');
+    setRefundPaymentMethod('cash');
     setError(null);
     onClose();
   };
@@ -134,7 +169,9 @@ const RefundModal: React.FC<RefundModalProps> = ({
     try {
       const refundUuid = generateUuid();
       const refundType = numericAmount >= outstandingAmount - 0.01 ? 'full' : 'partial';
-      const paymentMethodId = Number(transaction.payment_method_id ?? 1);
+      // Use the refund method selected by cashier, NOT the original transaction's method.
+      // Default is cash (id=1) so cash-from-cashier refunds always credit Kas correctly.
+      const { payment_method_id: paymentMethodId, refund_bank_name } = getRefundPaymentDetails();
       const cashDelta = paymentMethodId === 1 ? numericAmount : 0;
       const timestamp = new Date().toISOString();
 
@@ -158,7 +195,7 @@ const RefundModal: React.FC<RefundModalProps> = ({
       // Create refund payload - always use local transaction UUID
       const refundPayload = {
         uuid_id: refundUuid,
-        transaction_uuid: transaction.id, // Always use local transaction UUID
+        transaction_uuid: transaction.id,
         business_id: transaction.business_id,
         shift_uuid: shiftUuid,
         refund_amount: numericAmount,
@@ -167,6 +204,7 @@ const RefundModal: React.FC<RefundModalProps> = ({
         note: note || null,
         refunded_by: refundedBy,
         payment_method_id: paymentMethodId,
+        refund_bank_name: refund_bank_name ?? null,
         cash_delta: cashDelta,
         refunded_at: timestamp
       };
@@ -404,6 +442,52 @@ const RefundModal: React.FC<RefundModalProps> = ({
               required
               disabled={outstandingAmount === 0}
             />
+          </div>
+
+          {/* Refund payment method selector */}
+          <div>
+            <label className="block text-sm font-medium text-gray-900 mb-2">
+              Dikembalikan via
+            </label>
+            <div className="space-y-1.5">
+              {([
+                { key: 'cash',     icon: '💵', label: 'Cash (Tunai)',         sub: 'Kasir kembalikan uang tunai ke pelanggan' },
+                { key: 'bca',      icon: '🏦', label: 'Transfer BCA',         sub: 'Kredit → Bank BCA (11020000002)' },
+                { key: 'mandiri',  icon: '🏦', label: 'Transfer Mandiri',     sub: 'Kredit → Bank Mandiri (11020000004)' },
+                { key: 'bni',      icon: '🏦', label: 'Transfer BNI',         sub: 'Kredit → Bank BNI (11020000003)' },
+                { key: 'original', icon: '🔄', label: `Sesuai asal (${originalPaymentLabel})`, sub: 'Gunakan metode pembayaran transaksi asal' },
+              ] as const).map(({ key, icon, label, sub }) => (
+                <button
+                  key={key}
+                  type="button"
+                  onClick={() => setRefundPaymentMethod(key)}
+                  className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg border text-left text-sm transition-colors ${
+                    refundPaymentMethod === key
+                      ? 'border-blue-500 bg-blue-50'
+                      : 'border-gray-200 bg-white hover:border-gray-300 hover:bg-gray-50'
+                  }`}
+                >
+                  <span className="text-base flex-shrink-0">{icon}</span>
+                  <span className="flex-1 min-w-0">
+                    <span className={`font-medium block ${ refundPaymentMethod === key ? 'text-blue-700' : 'text-gray-800' }`}>
+                      {label}
+                    </span>
+                    {refundPaymentMethod === key && (
+                      <span className="text-xs text-blue-500">{sub}</span>
+                    )}
+                  </span>
+                  <span className={`flex-shrink-0 w-4 h-4 rounded-full border-2 flex items-center justify-center ${
+                    refundPaymentMethod === key
+                      ? 'border-blue-500 bg-blue-500'
+                      : 'border-gray-300'
+                  }`}>
+                    {refundPaymentMethod === key && (
+                      <span className="w-1.5 h-1.5 rounded-full bg-white block" />
+                    )}
+                  </span>
+                </button>
+              ))}
+            </div>
           </div>
 
           <div>
