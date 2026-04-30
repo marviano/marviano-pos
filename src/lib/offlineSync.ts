@@ -643,11 +643,6 @@ class OfflineSyncService {
               };
               await Promise.all([
                 electronAPI.localDbSaveSetting('default_qr_bank_id', resolveBankIdByName(data.paymentSettlementSettings.default_qr_bank_name)),
-                electronAPI.localDbSaveSetting('default_gofood_bank_id', resolveBankIdByName(data.paymentSettlementSettings.default_gofood_bank_name)),
-                electronAPI.localDbSaveSetting('default_grabfood_bank_id', resolveBankIdByName(data.paymentSettlementSettings.default_grabfood_bank_name)),
-                electronAPI.localDbSaveSetting('default_shopeefood_bank_id', resolveBankIdByName(data.paymentSettlementSettings.default_shopeefood_bank_name)),
-                electronAPI.localDbSaveSetting('default_qpon_bank_id', resolveBankIdByName(data.paymentSettlementSettings.default_qpon_bank_name)),
-                electronAPI.localDbSaveSetting('default_tiktok_bank_id', resolveBankIdByName(data.paymentSettlementSettings.default_tiktok_bank_name)),
               ]);
             } catch (settingsSyncErr) {
               console.warn('⚠️ [SYNC] payment settlement settings sync failed (non-fatal):', settingsSyncErr);

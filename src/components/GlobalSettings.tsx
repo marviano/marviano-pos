@@ -129,11 +129,6 @@ export default function GlobalSettings() {
   const [taxToggle, setTaxToggle] = useState<boolean>(false);
   const [banks, setBanks] = useState<Array<{ id: number; bank_name: string; bank_code?: string }>>([]);
   const [defaultQrBankId, setDefaultQrBankId] = useState<string>('');
-  const [defaultGofoodBankId, setDefaultGofoodBankId] = useState<string>('');
-  const [defaultGrabfoodBankId, setDefaultGrabfoodBankId] = useState<string>('');
-  const [defaultShopeefoodBankId, setDefaultShopeefoodBankId] = useState<string>('');
-  const [defaultQponBankId, setDefaultQponBankId] = useState<string>('');
-  const [defaultTiktokBankId, setDefaultTiktokBankId] = useState<string>('');
   const [bankLoadMessage, setBankLoadMessage] = useState<string>('');
   const [paymentBankSaveMessage, setPaymentBankSaveMessage] = useState<string>('');
   const [paymentBankMessageCopied, setPaymentBankMessageCopied] = useState<boolean>(false);
@@ -184,21 +179,9 @@ export default function GlobalSettings() {
         }
       }
 
-      const [qr, gofood, grabfood, shopeefood, qpon, tiktok] = await Promise.all([
-        electronAPI.localDbGetSetting?.('default_qr_bank_id') ?? Promise.resolve(null),
-        electronAPI.localDbGetSetting?.('default_gofood_bank_id') ?? Promise.resolve(null),
-        electronAPI.localDbGetSetting?.('default_grabfood_bank_id') ?? Promise.resolve(null),
-        electronAPI.localDbGetSetting?.('default_shopeefood_bank_id') ?? Promise.resolve(null),
-        electronAPI.localDbGetSetting?.('default_qpon_bank_id') ?? Promise.resolve(null),
-        electronAPI.localDbGetSetting?.('default_tiktok_bank_id') ?? Promise.resolve(null),
-      ]);
+      const qr = await (electronAPI.localDbGetSetting?.('default_qr_bank_id') ?? Promise.resolve(null));
 
       setDefaultQrBankId(qr ?? '');
-      setDefaultGofoodBankId(gofood ?? '');
-      setDefaultGrabfoodBankId(grabfood ?? '');
-      setDefaultShopeefoodBankId(shopeefood ?? '');
-      setDefaultQponBankId(qpon ?? '');
-      setDefaultTiktokBankId(tiktok ?? '');
     } catch (error) {
       console.error('Error loading payment bank settings:', error);
       setBankLoadMessage('Gagal memuat daftar bank.');
@@ -212,11 +195,6 @@ export default function GlobalSettings() {
 
       await Promise.all([
         electronAPI.localDbSaveSetting('default_qr_bank_id', defaultQrBankId || ''),
-        electronAPI.localDbSaveSetting('default_gofood_bank_id', defaultGofoodBankId || ''),
-        electronAPI.localDbSaveSetting('default_grabfood_bank_id', defaultGrabfoodBankId || ''),
-        electronAPI.localDbSaveSetting('default_shopeefood_bank_id', defaultShopeefoodBankId || ''),
-        electronAPI.localDbSaveSetting('default_qpon_bank_id', defaultQponBankId || ''),
-        electronAPI.localDbSaveSetting('default_tiktok_bank_id', defaultTiktokBankId || ''),
       ]);
 
       const businessId = user?.selectedBusinessId;
@@ -237,11 +215,6 @@ export default function GlobalSettings() {
                 business_id: businessId,
                 channels: {
                   qr: pick(defaultQrBankId),
-                  gofood: pick(defaultGofoodBankId),
-                  grabfood: pick(defaultGrabfoodBankId),
-                  shopeefood: pick(defaultShopeefoodBankId),
-                  qpon: pick(defaultQponBankId),
-                  tiktok: pick(defaultTiktokBankId),
                 },
               }),
             }
@@ -623,10 +596,10 @@ export default function GlobalSettings() {
         </div>
       </div>
 
-      {/* Payment Settlement Bank Mapping */}
+      {/* QR Settlement Bank Mapping */}
       <div className="bg-white rounded-lg border border-gray-200 shadow-sm p-6 space-y-4">
         <div className="flex items-center justify-between">
-          <h3 className="text-sm font-semibold text-gray-800">Payment Settlement Bank</h3>
+          <h3 className="text-sm font-semibold text-gray-800">QR Settlement Bank</h3>
           <button
             onClick={savePaymentBankSettings}
             className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors text-sm"
@@ -634,6 +607,10 @@ export default function GlobalSettings() {
             Simpan
           </button>
         </div>
+        <p className="text-xs text-gray-600">
+          Khusus QR. Untuk GoFood/GrabFood/ShopeeFood/Qpon/TikTok, settlement dicatat manual di SalesPulse halaman
+          Accounting &gt; Online Settlement.
+        </p>
         {bankLoadMessage ? (
           <p className="text-xs text-blue-700 bg-blue-50 border border-blue-200 rounded px-2 py-1">{bankLoadMessage}</p>
         ) : null}
@@ -662,61 +639,6 @@ export default function GlobalSettings() {
             <select
               value={defaultQrBankId}
               onChange={(e) => setDefaultQrBankId(e.target.value)}
-              className="px-3 py-2 border border-gray-300 rounded-lg text-sm text-gray-900"
-            >
-              {renderBankOptions()}
-            </select>
-          </label>
-
-          <label className="flex flex-col gap-1">
-            <span className="text-xs font-medium text-gray-700">Default GoFood Settlement Bank</span>
-            <select
-              value={defaultGofoodBankId}
-              onChange={(e) => setDefaultGofoodBankId(e.target.value)}
-              className="px-3 py-2 border border-gray-300 rounded-lg text-sm text-gray-900"
-            >
-              {renderBankOptions()}
-            </select>
-          </label>
-
-          <label className="flex flex-col gap-1">
-            <span className="text-xs font-medium text-gray-700">Default GrabFood Settlement Bank</span>
-            <select
-              value={defaultGrabfoodBankId}
-              onChange={(e) => setDefaultGrabfoodBankId(e.target.value)}
-              className="px-3 py-2 border border-gray-300 rounded-lg text-sm text-gray-900"
-            >
-              {renderBankOptions()}
-            </select>
-          </label>
-
-          <label className="flex flex-col gap-1">
-            <span className="text-xs font-medium text-gray-700">Default ShopeeFood Settlement Bank</span>
-            <select
-              value={defaultShopeefoodBankId}
-              onChange={(e) => setDefaultShopeefoodBankId(e.target.value)}
-              className="px-3 py-2 border border-gray-300 rounded-lg text-sm text-gray-900"
-            >
-              {renderBankOptions()}
-            </select>
-          </label>
-
-          <label className="flex flex-col gap-1">
-            <span className="text-xs font-medium text-gray-700">Default Qpon Settlement Bank</span>
-            <select
-              value={defaultQponBankId}
-              onChange={(e) => setDefaultQponBankId(e.target.value)}
-              className="px-3 py-2 border border-gray-300 rounded-lg text-sm text-gray-900"
-            >
-              {renderBankOptions()}
-            </select>
-          </label>
-
-          <label className="flex flex-col gap-1">
-            <span className="text-xs font-medium text-gray-700">Default TikTok Settlement Bank</span>
-            <select
-              value={defaultTiktokBankId}
-              onChange={(e) => setDefaultTiktokBankId(e.target.value)}
               className="px-3 py-2 border border-gray-300 rounded-lg text-sm text-gray-900"
             >
               {renderBankOptions()}
