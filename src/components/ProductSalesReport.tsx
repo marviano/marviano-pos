@@ -6,8 +6,8 @@
  * Export to .xlsx via SheetJS. Same transaction scope as Daftar Transaksi Grand Total (not cancelled/pending); cancelled line items excluded.
  */
 
-import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
-import { Calendar, FileText, Download, RefreshCw } from 'lucide-react';
+import { useState, useEffect, useCallback, useMemo, useRef, type ReactNode } from 'react';
+import { Calendar, FileText, Download, RefreshCw, ChevronUp, ChevronDown, ChevronsUpDown, Filter } from 'lucide-react';
 import { useAuth } from '@/hooks/useAuth';
 import { appAlert } from '@/components/AppDialog';
 import * as XLSX from 'xlsx';
@@ -172,7 +172,7 @@ function aggregateProductSales(products: ProductSaleRow[]): ProductSalesAggregat
       platform_qty: data.platform_qty,
       platform_revenue: data.platform_revenue,
     }))
-    .sort((a, b) => b.total_quantity - a.total_quantity);
+    .sort((a, b) => b.total_revenue - a.total_revenue);
 }
 
 /** Collect all platform keys that appear in aggregates (by qty or revenue), in PLATFORM_ORDER then rest. */
@@ -230,6 +230,40 @@ function groupAggregatesByCategory1(aggregates: ProductSalesAggregate[]): Array<
   return result;
 }
 
+type SortDir = 'asc' | 'desc';
+
+/** `column` is `product_name` | `total_quantity` | `total_revenue` | `platform:<key>`. */
+function sortAggregateRows(rows: ProductSalesAggregate[], column: string, dir: SortDir): ProductSalesAggregate[] {
+  const mult = dir === 'asc' ? 1 : -1;
+  const compare = (a: ProductSalesAggregate, b: ProductSalesAggregate): number => {
+    if (column === 'product_name') return mult * a.product_name.localeCompare(b.product_name, 'id');
+    if (column === 'total_quantity') return mult * (a.total_quantity - b.total_quantity);
+    if (column === 'total_revenue') return mult * (a.total_revenue - b.total_revenue);
+    if (column.startsWith('platform:')) {
+      const pk = column.slice('platform:'.length);
+      return mult * ((a.platform_revenue[pk] ?? 0) - (b.platform_revenue[pk] ?? 0));
+    }
+    return 0;
+  };
+  return [...rows].sort((a, b) => {
+    const v = compare(a, b);
+    if (v !== 0) return v;
+    return a.product_id - b.product_id;
+  });
+}
+
+function formatSortLabelForExport(column: string, dir: SortDir): string {
+  const lowHigh = dir === 'asc' ? 'terendah → tertinggi' : 'tertinggi → terendah';
+  if (column === 'product_name') return dir === 'asc' ? 'Nama produk (A–Z)' : 'Nama produk (Z–A)';
+  if (column === 'total_quantity') return `Qty (${lowHigh})`;
+  if (column === 'total_revenue') return `Revenue (${lowHigh})`;
+  if (column.startsWith('platform:')) {
+    const pk = column.slice('platform:'.length);
+    return `${formatPlatformLabel(pk)} (${lowHigh})`;
+  }
+  return `${column} (${dir})`;
+}
+
 export default function ProductSalesReport() {
   const { user } = useAuth();
   const businessId = user?.selectedBusinessId;
@@ -243,6 +277,10 @@ export default function ProductSalesReport() {
   const [loading, setLoading] = useState(false);
   const [hasFetched, setHasFetched] = useState(false);
   const [groupByCategory1, setGroupByCategory1] = useState(true);
+  const [productFilterQuery, setProductFilterQuery] = useState('');
+  const [selectedProductIds, setSelectedProductIds] = useState<number[]>([]);
+  const [sortColumn, setSortColumn] = useState<string>('total_revenue');
+  const [sortDir, setSortDir] = useState<SortDir>('desc');
 
   /** Latest fetch wins; overlapping IPC calls (effect + Muat Laporan, Strict Mode, fast date changes) must not apply stale rows. */
   const fetchGenerationRef = useRef(0);
@@ -309,6 +347,60 @@ export default function ProductSalesReport() {
   const aggregates = useMemo(() => aggregateProductSales(rawProducts), [rawProducts]);
   const orderedPlatforms = useMemo(() => getOrderedPlatforms(aggregates), [aggregates]);
 
+  const productIdNameOptions = useMemo(() => {
+    const map = new Map<number, string>();
+    for (const a of aggregates) map.set(a.product_id, a.product_name);
+    return Array.from(map.entries()).sort((x, y) => x[1].localeCompare(y[1], 'id'));
+  }, [aggregates]);
+
+  const productOptionsForSearch = useMemo(() => {
+    const q = productFilterQuery.trim().toLowerCase();
+    if (!q) return productIdNameOptions;
+    return productIdNameOptions.filter(([, name]) => name.toLowerCase().includes(q));
+  }, [productIdNameOptions, productFilterQuery]);
+
+  const filteredAggregates = useMemo(() => {
+    if (selectedProductIds.length === 0) return aggregates;
+    const sel = new Set(selectedProductIds);
+    return aggregates.filter((a) => sel.has(a.product_id));
+  }, [aggregates, selectedProductIds]);
+
+  const filterDescriptionForExport = useMemo(() => {
+    if (selectedProductIds.length === 0) return 'Semua produk';
+    const idToName = new Map(productIdNameOptions);
+    return selectedProductIds.map((id) => idToName.get(id) ?? `ID ${id}`).join('; ');
+  }, [selectedProductIds, productIdNameOptions]);
+
+  const sortedFlatAggregates = useMemo(
+    () => sortAggregateRows(filteredAggregates, sortColumn, sortDir),
+    [filteredAggregates, sortColumn, sortDir]
+  );
+
+  const sortedGroupedByCategory1 = useMemo(() => {
+    return groupAggregatesByCategory1(filteredAggregates).map((g) => ({
+      ...g,
+      rows: sortAggregateRows(g.rows, sortColumn, sortDir),
+    }));
+  }, [filteredAggregates, sortColumn, sortDir]);
+
+  const toggleSortColumn = useCallback((column: string) => {
+    if (sortColumn === column) {
+      setSortDir((d) => (d === 'asc' ? 'desc' : 'asc'));
+    } else {
+      setSortColumn(column);
+      setSortDir(column === 'product_name' ? 'asc' : 'desc');
+    }
+  }, [sortColumn]);
+
+  const toggleProductFilterId = useCallback((id: number) => {
+    setSelectedProductIds((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
+  }, []);
+
+  const clearProductFilter = useCallback(() => {
+    setSelectedProductIds([]);
+    setProductFilterQuery('');
+  }, []);
+
   /** Per-platform total revenue (main report header breakdown only). */
   const mainPlatformRevenue = useMemo(() => {
     const out: Record<string, number> = {};
@@ -337,7 +429,7 @@ export default function ProductSalesReport() {
   const ringkasanNet = Math.max(0, ringkasanAfterVoucher - totalRefundOmset);
 
   const handleExportExcel = useCallback(() => {
-    if (aggregates.length === 0) {
+    if (filteredAggregates.length === 0) {
       appAlert('Tidak ada data untuk diekspor.');
       return;
     }
@@ -347,9 +439,16 @@ export default function ProductSalesReport() {
 
       const wb = XLSX.utils.book_new();
 
+      const metaRows: (string | number)[][] = [
+        ['Periode', `${startDate} s/d ${endDate}`],
+        ['Filter nama produk', filterDescriptionForExport],
+        ['Urutan tabel', formatSortLabelForExport(sortColumn, sortDir)],
+        [],
+      ];
+
       // Always export by Kategori 1: one sheet per category (same as on-screen grouped view)
       // Numbers exported as rounded integers (no decimals), e.g. 1000000
-      const groups = groupAggregatesByCategory1(aggregates);
+      const groups = sortedGroupedByCategory1;
       for (const group of groups) {
         const rows = group.rows.map((row, idx) => {
           const r: (string | number)[] = [
@@ -363,7 +462,7 @@ export default function ProductSalesReport() {
           });
           return r;
         });
-        const wsData = [headers, ...rows];
+        const wsData = [...metaRows, headers, ...rows];
         const ws = XLSX.utils.aoa_to_sheet(wsData);
         const colWidths = [
           { wch: 5 },
@@ -383,10 +482,10 @@ export default function ProductSalesReport() {
       console.error('Export error:', e);
       appAlert('Gagal mengekspor ke Excel.');
     }
-  }, [aggregates, orderedPlatforms, startDate, endDate]);
+  }, [filteredAggregates.length, sortedGroupedByCategory1, orderedPlatforms, startDate, endDate, filterDescriptionForExport, sortColumn, sortDir]);
 
   const handleExportPdf = useCallback(async () => {
-    if (aggregates.length === 0) {
+    if (filteredAggregates.length === 0) {
       appAlert('Tidak ada data untuk diekspor.');
       return;
     }
@@ -426,8 +525,18 @@ export default function ProductSalesReport() {
       doc.setFont('helvetica', 'normal');
       doc.setTextColor(80, 80, 80);
       doc.text(`Periode: ${startDate} s/d ${endDate}`, pageWidth / 2, y, { align: 'center' });
+      y += 6;
+      doc.setFontSize(9);
+      const metaMaxW = pageWidth - margin * 2;
+      const filterLines = doc.splitTextToSize(`Filter nama produk: ${filterDescriptionForExport}`, metaMaxW);
+      doc.text(filterLines, margin, y);
+      y += Math.max(4.5, filterLines.length * 4.2);
+      const sortLines = doc.splitTextToSize(`Urutan tabel: ${formatSortLabelForExport(sortColumn, sortDir)}`, metaMaxW);
+      doc.text(sortLines, margin, y);
+      y += Math.max(4.5, sortLines.length * 4.2);
+      doc.setFontSize(10);
       doc.setTextColor(0, 0, 0);
-      y += 14;
+      y += 6;
 
       const tableTheme = {
         headStyles: { fillColor: [41, 128, 185] as [number, number, number], textColor: 255, fontStyle: 'bold' as const, fontSize: 9 },
@@ -471,8 +580,8 @@ export default function ProductSalesReport() {
       const afterRingkasan = (doc as { lastAutoTable?: { finalY: number } }).lastAutoTable?.finalY ?? summaryStartY;
       y = Math.max(afterPlatform, afterRingkasan) + 12;
 
-      // Detail by category
-      const groups = groupAggregatesByCategory1(aggregates);
+      // Detail by category (filtered + same sort as on screen)
+      const groups = sortedGroupedByCategory1;
       const detailHead = ['No', 'Produk', 'Qty', 'Revenue', ...orderedPlatforms.map((p) => formatPlatformLabel(p))];
 
       for (const group of groups) {
@@ -531,7 +640,8 @@ export default function ProductSalesReport() {
     }
   }, [
     businessId,
-    aggregates,
+    filteredAggregates.length,
+    sortedGroupedByCategory1,
     orderedPlatforms,
     startDate,
     endDate,
@@ -540,7 +650,34 @@ export default function ProductSalesReport() {
     ringkasanDiscount,
     ringkasanNet,
     totalRefundOmset,
+    filterDescriptionForExport,
+    sortColumn,
+    sortDir,
   ]);
+
+  const renderSortIcon = (column: string) => {
+    if (sortColumn !== column) {
+      return <ChevronsUpDown className="w-3.5 h-3.5 shrink-0 text-gray-400 opacity-40" aria-hidden />;
+    }
+    return sortDir === 'asc' ? (
+      <ChevronUp className="w-3.5 h-3.5 shrink-0 text-blue-600" aria-hidden />
+    ) : (
+      <ChevronDown className="w-3.5 h-3.5 shrink-0 text-blue-600" aria-hidden />
+    );
+  };
+
+  const SortTh = ({ column, className = '', children }: { column: string; className?: string; children: ReactNode }) => (
+    <th scope="col" className={`text-left py-3 px-4 ${className}`}>
+      <button
+        type="button"
+        onClick={() => toggleSortColumn(column)}
+        className="inline-flex items-center gap-1 font-semibold text-gray-700 hover:text-blue-700 -mx-1 px-1 py-0.5 rounded focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+      >
+        {children}
+        {renderSortIcon(column)}
+      </button>
+    </th>
+  );
 
   if (!businessId) {
     return (
@@ -618,7 +755,7 @@ export default function ProductSalesReport() {
         </button>
         <button
           onClick={handleExportExcel}
-          disabled={loading || aggregates.length === 0}
+          disabled={loading || filteredAggregates.length === 0}
           className="flex items-center gap-2 px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:opacity-50 disabled:cursor-not-allowed"
         >
           <Download className="w-4 h-4" />
@@ -626,7 +763,7 @@ export default function ProductSalesReport() {
         </button>
         <button
           onClick={handleExportPdf}
-          disabled={loading || aggregates.length === 0}
+          disabled={loading || filteredAggregates.length === 0}
           className="flex items-center gap-2 px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 disabled:opacity-50 disabled:cursor-not-allowed"
         >
           <FileText className="w-4 h-4" />
@@ -657,8 +794,67 @@ export default function ProductSalesReport() {
       <div className="flex-1 overflow-auto p-6">
         {/* Two summary cards: platform attribution + net revenue */}
         {aggregates.length > 0 && (
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6 max-h-[13rem] md:max-h-[14rem]">
-            <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden flex flex-col min-h-0">
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6 md:items-stretch">
+            {/* Same fixed row height on md+ as Ringkasan; scroll inside Filter / Omset. Mobile: filter uses fixed h-56. */}
+            <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden flex flex-col min-h-0 h-56 md:h-[14.5rem]">
+              <div className="px-4 py-3 border-b border-gray-100 bg-gray-50/80 shrink-0 flex items-center justify-between gap-2">
+                <h3 className="text-sm font-semibold text-gray-700 flex items-center gap-2 min-w-0">
+                  <Filter className="w-4 h-4 text-gray-500 shrink-0" aria-hidden />
+                  Filter
+                </h3>
+                {selectedProductIds.length > 0 && (
+                  <button
+                    type="button"
+                    onClick={clearProductFilter}
+                    className="text-xs font-medium text-blue-600 hover:text-blue-800 shrink-0"
+                  >
+                    Reset
+                  </button>
+                )}
+              </div>
+              <div className="px-3 py-2 border-b border-gray-100 shrink-0">
+                <input
+                  type="search"
+                  value={productFilterQuery}
+                  onChange={(e) => setProductFilterQuery(e.target.value)}
+                  placeholder="Cari nama produk…"
+                  className="w-full text-sm border border-gray-200 rounded-lg px-3 py-2 text-gray-900 placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500/30 focus:border-blue-400"
+                  autoComplete="off"
+                />
+                <p className="text-xs text-gray-500 mt-1.5">
+                  {selectedProductIds.length === 0
+                    ? 'Kosongkan = semua produk. Centang satu atau lebih untuk membatasi tabel.'
+                    : `${selectedProductIds.length} produk dipilih`}
+                </p>
+              </div>
+              <div className="px-2 py-2 flex-1 min-h-0 overflow-y-auto">
+                {productIdNameOptions.length === 0 ? (
+                  <p className="text-xs text-gray-500 px-2 py-2">Belum ada produk pada laporan ini.</p>
+                ) : productOptionsForSearch.length === 0 ? (
+                  <p className="text-xs text-gray-500 px-2 py-2">Tidak ada produk cocok dengan pencarian.</p>
+                ) : (
+                  <ul className="space-y-0.5">
+                    {productOptionsForSearch.map(([id, name]) => {
+                      const checked = selectedProductIds.includes(id);
+                      return (
+                        <li key={id}>
+                          <label className="flex items-start gap-2 cursor-pointer rounded-md px-2 py-1.5 hover:bg-gray-50 text-sm">
+                            <input
+                              type="checkbox"
+                              checked={checked}
+                              onChange={() => toggleProductFilterId(id)}
+                              className="mt-0.5 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                            />
+                            <span className="text-gray-900 leading-snug break-words">{name}</span>
+                          </label>
+                        </li>
+                      );
+                    })}
+                  </ul>
+                )}
+              </div>
+            </div>
+            <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden flex flex-col min-h-0 md:h-[14.5rem]">
               <div className="px-4 py-3 border-b border-gray-100 bg-gray-50/80 shrink-0">
                 <h3 className="text-sm font-semibold text-gray-700">Omset per Platform</h3>
               </div>
@@ -675,11 +871,11 @@ export default function ProductSalesReport() {
                 </table>
               </div>
             </div>
-            <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden flex flex-col min-h-0">
+            <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden flex flex-col min-h-0 md:h-[14.5rem]">
               <div className="px-4 py-3 border-b border-gray-100 bg-gray-50/80 shrink-0">
                 <h3 className="text-sm font-semibold text-gray-700">Ringkasan Pendapatan</h3>
               </div>
-              <div className="px-4 py-3 flex-1 min-h-0">
+              <div className="px-4 py-3 flex-1 min-h-0 flex flex-col justify-start">
                 <table className="text-sm border-collapse w-full">
                   <tbody>
                     <tr>
@@ -713,9 +909,13 @@ export default function ProductSalesReport() {
               <div className="p-8 text-center text-gray-500">
                 {hasFetched ? 'Tidak ada penjualan untuk rentang tanggal ini.' : 'Pilih tanggal dan klik Muat Laporan.'}
               </div>
+            ) : filteredAggregates.length === 0 ? (
+              <div className="p-8 text-center text-gray-500">
+                Tidak ada produk yang cocok dengan filter. Ubah pencarian atau reset filter.
+              </div>
             ) : groupByCategory1 ? (
               <div className="divide-y divide-gray-200">
-                {groupAggregatesByCategory1(aggregates).map((group) => {
+                {sortedGroupedByCategory1.map((group) => {
                   const groupRevenue = group.rows.reduce((sum, r) => sum + r.total_revenue, 0);
                   return (
                     <div key={group.category1_name} className="py-4 first:pt-0">
@@ -729,13 +929,13 @@ export default function ProductSalesReport() {
                         <thead>
                           <tr className="bg-gray-50 border-b border-gray-200">
                             <th className="text-left py-3 px-4 font-semibold text-gray-700 w-12">No</th>
-                            <th className="text-left py-3 px-4 font-semibold text-gray-700">Produk</th>
-                            <th className="text-left py-3 px-4 font-semibold text-gray-700">Qty</th>
-                            <th className="text-left py-3 px-4 font-semibold text-gray-700">Revenue</th>
+                            <SortTh column="product_name">Produk</SortTh>
+                            <SortTh column="total_quantity">Qty</SortTh>
+                            <SortTh column="total_revenue">Revenue</SortTh>
                             {orderedPlatforms.map((p) => (
-                              <th key={p} className="text-left py-3 px-4 font-semibold text-gray-700">
+                              <SortTh key={p} column={`platform:${p}`} className="whitespace-nowrap">
                                 {formatPlatformLabel(p)}
-                              </th>
+                              </SortTh>
                             ))}
                           </tr>
                         </thead>
@@ -766,18 +966,18 @@ export default function ProductSalesReport() {
                 <thead>
                   <tr className="bg-gray-50 border-b border-gray-200">
                     <th className="text-left py-3 px-4 font-semibold text-gray-700 w-12">No</th>
-                    <th className="text-left py-3 px-4 font-semibold text-gray-700">Produk</th>
-                    <th className="text-left py-3 px-4 font-semibold text-gray-700">Qty</th>
-                    <th className="text-left py-3 px-4 font-semibold text-gray-700">Revenue</th>
+                    <SortTh column="product_name">Produk</SortTh>
+                    <SortTh column="total_quantity">Qty</SortTh>
+                    <SortTh column="total_revenue">Revenue</SortTh>
                     {orderedPlatforms.map((p) => (
-                      <th key={p} className="text-left py-3 px-4 font-semibold text-gray-700">
+                      <SortTh key={p} column={`platform:${p}`} className="whitespace-nowrap">
                         {formatPlatformLabel(p)}
-                      </th>
+                      </SortTh>
                     ))}
                   </tr>
                 </thead>
                 <tbody>
-                  {aggregates.map((row, idx) => (
+                  {sortedFlatAggregates.map((row, idx) => (
                     <tr key={row.product_id} className="border-b border-gray-100 hover:bg-gray-50">
                       <td className="py-2 px-4 text-gray-600">{idx + 1}</td>
                       <td className="py-2 px-4 font-medium text-gray-900">{row.product_name}</td>

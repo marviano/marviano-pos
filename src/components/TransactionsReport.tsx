@@ -7,7 +7,7 @@
  * This ensures consistent reporting regardless of the user's local timezone.
  */
 
-import { useState, useEffect, useCallback, useRef, useLayoutEffect } from 'react';
+import { useState, useEffect, useCallback, useRef, useLayoutEffect, useMemo } from 'react';
 import { appAlert } from '@/components/AppDialog';
 import { createPortal } from 'react-dom';
 import {
@@ -84,6 +84,21 @@ const formatRupiah = (amount: number): string => {
     minimumFractionDigits: 0,
     maximumFractionDigits: 0,
   }).format(amount);
+};
+
+/** Money fields from SQLite/IPC are often strings; `0 + "157500"` would string-concat in a reduce. */
+const toAmountNumber = (value: unknown): number => {
+  if (value == null) return 0;
+  if (typeof value === 'number') return Number.isFinite(value) ? value : 0;
+  if (typeof value === 'bigint') return Number(value);
+  if (typeof value === 'string') {
+    const t = value.trim();
+    if (t === '') return 0;
+    const n = Number(t);
+    return Number.isFinite(n) ? n : 0;
+  }
+  const n = Number(value);
+  return Number.isFinite(n) ? n : 0;
 };
 
 // Convert UTC date to GMT+7 and format for display
@@ -446,11 +461,17 @@ export default function TransactionsReport() {
     const fromNum = parseAmountDisplay(amountFrom);
     const toNum = parseAmountDisplay(amountTo);
     if (fromNum != null && toNum != null) {
-      filtered = filtered.filter(tx => (tx.total_amount ?? 0) >= fromNum && (tx.total_amount ?? 0) <= toNum);
+      filtered = filtered.filter(tx => {
+        const t = toAmountNumber(tx.total_amount);
+        return t >= fromNum && t <= toNum;
+      });
     } else if (toNum != null) {
-      filtered = filtered.filter(tx => (tx.total_amount ?? 0) > 0 && (tx.total_amount ?? 0) <= toNum);
+      filtered = filtered.filter(tx => {
+        const t = toAmountNumber(tx.total_amount);
+        return t > 0 && t <= toNum;
+      });
     } else if (fromNum != null) {
-      filtered = filtered.filter(tx => (tx.total_amount ?? 0) >= fromNum);
+      filtered = filtered.filter(tx => toAmountNumber(tx.total_amount) >= fromNum);
     }
 
     setFilteredTransactions(filtered);
@@ -582,9 +603,9 @@ export default function TransactionsReport() {
       tx.customer_unit || '',
       formatPaymentMethod(tx.payment_method),
       formatPlatform(tx.platform),
-      tx.total_amount,
-      (tx.total_amount - tx.final_amount),
-      tx.final_amount,
+      toAmountNumber(tx.total_amount),
+      toAmountNumber(tx.total_amount) - toAmountNumber(tx.final_amount),
+      toAmountNumber(tx.final_amount),
       tx.status,
       tx.synced_at ? 'Yes' : 'No',
       tx.id
@@ -664,10 +685,10 @@ export default function TransactionsReport() {
         waktu: formatDate(tx.created_at) + ' ' + formatTime(tx.created_at),
         metode: getPaymentLabel(tx.payment_method),
         diTa: (tx.pickup_method || '').replace('-', ' ') || '-',
-        total: formatRupiah(tx.total_amount || 0),
-        discVc: (tx.voucher_discount ?? 0) > 0 ? formatRupiah(tx.voucher_discount ?? 0) : '-',
-        final: formatRupiah(tx.final_amount || 0),
-        refund: (tx.refund_total ?? 0) > 0 ? formatRupiah(tx.refund_total ?? 0) : '-',
+        total: formatRupiah(toAmountNumber(tx.total_amount)),
+        discVc: toAmountNumber(tx.voucher_discount) > 0 ? formatRupiah(toAmountNumber(tx.voucher_discount)) : '-',
+        final: formatRupiah(toAmountNumber(tx.final_amount)),
+        refund: toAmountNumber(tx.refund_total) > 0 ? formatRupiah(toAmountNumber(tx.refund_total)) : '-',
         pelanggan: tx.customer_name || 'Guest',
         waiter: waiterName,
         kasir: userIdToName[tx.user_id] ?? '-',
@@ -691,12 +712,20 @@ export default function TransactionsReport() {
   // Get unique payment methods from transactions
   const paymentMethods = Array.from(new Set(transactions.map(tx => tx.payment_method))).sort();
 
+  /** Row count + mean Total (total_amount) for currently filtered rows — aligns with Total (min/max) filters. */
+  const filteredSummary = useMemo(() => {
+    const n = filteredTransactions.length;
+    if (n === 0) return { count: 0, avgTotalAmount: null as number | null };
+    const sumTotal = filteredTransactions.reduce((acc, tx) => acc + toAmountNumber(tx.total_amount), 0);
+    return { count: n, avgTotalAmount: sumTotal / n };
+  }, [filteredTransactions]);
+
   // List View — row click opens TransactionDetailModal (same as Daftar Transaksi)
   return (
     <>
-      <div className="flex-1 flex flex-col overflow-hidden bg-gray-50">
+      <div className="flex-1 flex flex-col min-h-0 overflow-hidden bg-gray-50">
         {/* Header — filters and Export/Print in one row; Export/Print stuck right */}
-        <div className="bg-white border-b border-gray-200 px-6 py-3">
+        <div className="flex-shrink-0 bg-white border-b border-gray-200 px-6 py-3">
           <div className="bg-gray-50 rounded-lg p-3">
             <div className="flex flex-wrap items-center gap-2">
               <div className="flex flex-wrap items-center gap-2 flex-1 min-w-0">
@@ -874,25 +903,26 @@ export default function TransactionsReport() {
           </div>
         </div>
 
-        {/* Table — Daftar Transaksi style: #, UUID, Waktu, Metode, DI/TA, Total, Disc/Vc, Final, Refund, Pelanggan, Waiter, Kasir */}
-        <div className="flex-1 overflow-auto p-4">
-          <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
-            <table className="w-full text-sm text-left">
-              <thead className="bg-gray-50 text-gray-900 font-semibold border-b border-gray-200">
+        {/* Table card: scroll = rows only; ringkasan pinned below so it is always visible */}
+        <div className="flex-1 min-h-0 flex flex-col p-3 sm:p-4">
+          <div className="flex-1 min-h-0 min-w-0 flex flex-col rounded-xl shadow-sm border border-gray-200 bg-white overflow-hidden">
+            <div className="flex-1 min-h-0 overflow-auto overscroll-contain">
+            <table className="w-full text-sm text-left min-w-[720px]">
+              <thead className="text-gray-900 font-semibold border-b border-gray-200">
                 <tr>
-                  <th className="pl-3 pr-2 py-3 text-[10px] font-medium text-gray-500 uppercase tracking-wider" style={{ minWidth: '4rem' }}>#</th>
-                  <th className="px-2 py-3 text-[10px] font-medium text-gray-500 uppercase tracking-wider">UUID</th>
-                  <th className="px-2 py-3 text-[10px] font-medium text-gray-500 uppercase tracking-wider">Waktu</th>
-                  <th className="px-2 py-3 text-[10px] font-medium text-gray-500 uppercase tracking-wider">Metode</th>
-                  <th className="px-2 py-3 text-[10px] font-medium text-gray-500 uppercase tracking-wider w-16">DI/TA</th>
-                  <th className="px-2 py-3 text-[10px] font-medium text-gray-500 uppercase tracking-wider">Total</th>
-                  <th className="px-2 py-3 text-[10px] font-medium text-gray-500 uppercase tracking-wider">Disc/Vc</th>
-                  <th className="px-2 py-3 text-[10px] font-medium text-gray-500 uppercase tracking-wider">Final</th>
-                  <th className="px-4 py-3 text-[10px] font-medium text-gray-500 uppercase tracking-wider">Refund</th>
-                  <th className="px-2 py-3 text-[10px] font-medium text-gray-500 uppercase tracking-wider">Pelanggan</th>
-                  <th className="px-2 py-3 text-[10px] font-medium text-gray-500 uppercase tracking-wider w-24">Waiter</th>
-                  <th className="px-2 py-3 text-[10px] font-medium text-gray-500 uppercase tracking-wider" style={{ width: '12%' }}>Kasir</th>
-                  <th className="px-2 py-3 w-8"></th>
+                  <th className="sticky top-0 z-20 pl-3 pr-2 py-3 text-[10px] font-medium text-gray-500 uppercase tracking-wider bg-gray-50 shadow-[inset_0_-1px_0_0_rgb(229,231,235)]" style={{ minWidth: '4rem' }}>#</th>
+                  <th className="sticky top-0 z-20 px-2 py-3 text-[10px] font-medium text-gray-500 uppercase tracking-wider bg-gray-50 shadow-[inset_0_-1px_0_0_rgb(229,231,235)]">UUID</th>
+                  <th className="sticky top-0 z-20 px-2 py-3 text-[10px] font-medium text-gray-500 uppercase tracking-wider bg-gray-50 shadow-[inset_0_-1px_0_0_rgb(229,231,235)]">Waktu</th>
+                  <th className="sticky top-0 z-20 px-2 py-3 text-[10px] font-medium text-gray-500 uppercase tracking-wider bg-gray-50 shadow-[inset_0_-1px_0_0_rgb(229,231,235)]">Metode</th>
+                  <th className="sticky top-0 z-20 px-2 py-3 text-[10px] font-medium text-gray-500 uppercase tracking-wider w-16 bg-gray-50 shadow-[inset_0_-1px_0_0_rgb(229,231,235)]">DI/TA</th>
+                  <th className="sticky top-0 z-20 px-2 py-3 text-[10px] font-medium text-gray-500 uppercase tracking-wider bg-gray-50 shadow-[inset_0_-1px_0_0_rgb(229,231,235)]">Total</th>
+                  <th className="sticky top-0 z-20 px-2 py-3 text-[10px] font-medium text-gray-500 uppercase tracking-wider bg-gray-50 shadow-[inset_0_-1px_0_0_rgb(229,231,235)]">Disc/Vc</th>
+                  <th className="sticky top-0 z-20 px-2 py-3 text-[10px] font-medium text-gray-500 uppercase tracking-wider bg-gray-50 shadow-[inset_0_-1px_0_0_rgb(229,231,235)]">Final</th>
+                  <th className="sticky top-0 z-20 px-4 py-3 text-[10px] font-medium text-gray-500 uppercase tracking-wider bg-gray-50 shadow-[inset_0_-1px_0_0_rgb(229,231,235)]">Refund</th>
+                  <th className="sticky top-0 z-20 px-2 py-3 text-[10px] font-medium text-gray-500 uppercase tracking-wider bg-gray-50 shadow-[inset_0_-1px_0_0_rgb(229,231,235)]">Pelanggan</th>
+                  <th className="sticky top-0 z-20 px-2 py-3 text-[10px] font-medium text-gray-500 uppercase tracking-wider w-24 bg-gray-50 shadow-[inset_0_-1px_0_0_rgb(229,231,235)]">Waiter</th>
+                  <th className="sticky top-0 z-20 px-2 py-3 text-[10px] font-medium text-gray-500 uppercase tracking-wider bg-gray-50 shadow-[inset_0_-1px_0_0_rgb(229,231,235)]" style={{ width: '12%' }}>Kasir</th>
+                  <th className="sticky top-0 z-20 px-2 py-3 w-8 bg-gray-50 shadow-[inset_0_-1px_0_0_rgb(229,231,235)]"></th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-100">
@@ -946,18 +976,18 @@ export default function TransactionsReport() {
                           </span>
                         </td>
                         <td className="px-2 py-3 whitespace-nowrap text-xs text-gray-900 capitalize">{(transaction.pickup_method || '').replace('-', ' ')}</td>
-                        <td className="px-2 py-3 whitespace-nowrap text-xs font-medium text-gray-900">{formatRupiah(transaction.total_amount ?? 0)}</td>
+                        <td className="px-2 py-3 whitespace-nowrap text-xs font-medium text-gray-900">{formatRupiah(toAmountNumber(transaction.total_amount))}</td>
                         <td className="px-2 py-3 whitespace-nowrap">
-                          {(transaction.voucher_discount ?? 0) > 0 ? (
-                            <span className="text-xs text-green-600 font-medium">-{formatRupiah(transaction.voucher_discount ?? 0)}</span>
+                          {toAmountNumber(transaction.voucher_discount) > 0 ? (
+                            <span className="text-xs text-green-600 font-medium">-{formatRupiah(toAmountNumber(transaction.voucher_discount))}</span>
                           ) : (
                             <span className="text-xs text-gray-400">-</span>
                           )}
                         </td>
-                        <td className="px-2 py-3 whitespace-nowrap text-xs font-bold text-gray-900">{formatRupiah(transaction.final_amount ?? 0)}</td>
+                        <td className="px-2 py-3 whitespace-nowrap text-xs font-bold text-gray-900">{formatRupiah(toAmountNumber(transaction.final_amount))}</td>
                         <td className="px-4 py-3 whitespace-nowrap">
-                          {(transaction.refund_total ?? 0) > 0 ? (
-                            <span className="text-xs text-red-600 font-medium">-{formatRupiah(transaction.refund_total ?? 0)}</span>
+                          {toAmountNumber(transaction.refund_total) > 0 ? (
+                            <span className="text-xs text-red-600 font-medium">-{formatRupiah(toAmountNumber(transaction.refund_total))}</span>
                           ) : (
                             <span className="text-xs text-gray-400">-</span>
                           )}
@@ -1013,6 +1043,35 @@ export default function TransactionsReport() {
                 )}
               </tbody>
             </table>
+            </div>
+            {!isLoading && (
+              <div
+                className="flex-shrink-0 border-t-2 border-gray-300 bg-gray-100 px-3 py-2.5 sm:px-4 sm:py-3"
+                role="region"
+                aria-label="Ringkasan sesuai filter"
+              >
+                <div className="flex min-w-0 flex-col gap-2 sm:flex-row sm:flex-wrap sm:items-center sm:justify-between sm:gap-x-4 sm:gap-y-2">
+                  <div className="text-xs font-semibold text-gray-800">
+                    Ringkasan <span className="font-normal text-gray-500">(sesuai filter)</span>
+                  </div>
+                  <div className="flex min-w-0 flex-wrap items-baseline gap-x-4 gap-y-2 text-xs">
+                    <div className="flex flex-wrap items-baseline gap-x-1.5 gap-y-0">
+                      <span className="text-[10px] font-medium uppercase tracking-wide text-gray-500">Jumlah baris</span>
+                      <span className="text-sm font-bold tabular-nums text-gray-900">{filteredSummary.count}</span>
+                    </div>
+                    <div className="flex flex-wrap items-baseline gap-x-1.5 gap-y-0">
+                      <span className="text-[10px] font-medium uppercase tracking-wide text-gray-500">Rata-rata Total</span>
+                      <span className="text-sm font-bold tabular-nums text-gray-900">
+                        {filteredSummary.avgTotalAmount != null ? formatRupiah(Math.round(filteredSummary.avgTotalAmount)) : '—'}
+                      </span>
+                    </div>
+                    <p className="w-full text-[11px] text-gray-500 sm:w-auto sm:max-w-md">
+                      Rata-rata dari kolom Total (sama seperti filter minimal/maksimal).
+                    </p>
+                  </div>
+                </div>
+              </div>
+            )}
           </div>
         </div>
       </div>

@@ -36,9 +36,9 @@ export default function Laporan() {
   };
 
   return (
-    <div className="flex-1 flex flex-col h-full bg-gray-50 overflow-hidden">
+    <div className="flex-1 flex flex-col min-h-0 min-w-0 h-full bg-gray-50 overflow-hidden">
       {/* Header & Tabs */}
-      <div className="bg-white border-b border-gray-200 px-6 pt-4">
+      <div className="flex-shrink-0 bg-white border-b border-gray-200 px-6 pt-4">
         {/* Tab strip — tab-like appearance */}
         <div className="flex border-b border-gray-200 -mb-px gap-0">
           <button
@@ -110,8 +110,8 @@ export default function Laporan() {
         </div>
       </div>
 
-      {/* Content */}
-      <div className="flex-1 overflow-hidden flex flex-col">
+      {/* Content — min-h-0 so nested reports can scroll inside viewport (e.g. 1366×768) */}
+      <div className="flex-1 min-h-0 overflow-hidden flex flex-col">
         {renderContent()}
       </div>
     </div>

@@ -1783,7 +1783,9 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
       )}
 
       {/* Main Content Area - Blurred when shift modal or waiter message is shown on Kasir page */}
-      <div className={`flex-1 relative ${(showStartShiftModal || showWaiterNoShiftMessage) && activeMenuItem === 'Kasir' ? 'blur-sm pointer-events-none' : ''}`}>
+      <div
+        className={`flex-1 relative flex flex-col min-h-0 overflow-hidden ${(showStartShiftModal || showWaiterNoShiftMessage) && activeMenuItem === 'Kasir' ? 'blur-sm pointer-events-none' : ''}`}
+      >
         {renderMainContent()}
       </div>
 
