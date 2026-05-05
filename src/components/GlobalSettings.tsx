@@ -5,6 +5,11 @@ import { Printer, Tag, Power, Globe, ChevronRight, TestTube, CheckCircle, XCircl
 import { appAlert } from '@/components/AppDialog';
 import { useAuth } from '@/hooks/useAuth';
 import { fetchFromVps, initApiUrlCache } from '@/lib/api';
+import {
+  DEFAULT_QRIS_MDR_RATE_PERCENT,
+  MAX_QRIS_MDR_RATE_PERCENT,
+  parseQrisMdrRatePercent,
+} from '@/lib/qrisMdr';
 
 interface SystemPrinter {
   name: string;
@@ -132,6 +137,7 @@ export default function GlobalSettings() {
   const [bankLoadMessage, setBankLoadMessage] = useState<string>('');
   const [paymentBankSaveMessage, setPaymentBankSaveMessage] = useState<string>('');
   const [paymentBankMessageCopied, setPaymentBankMessageCopied] = useState<boolean>(false);
+  const [qrisMdrRatePercent, setQrisMdrRatePercent] = useState<string>(String(DEFAULT_QRIS_MDR_RATE_PERCENT));
   // const [isScanning, setIsScanning] = useState(false);
   const [isTesting, setIsTesting] = useState<string | null>(null);
   const [isModalOpen, setIsModalOpen] = useState<{ type: 'receiptize' | 'label' | null }>({ type: null });
@@ -180,8 +186,14 @@ export default function GlobalSettings() {
       }
 
       const qr = await (electronAPI.localDbGetSetting?.('default_qr_bank_id') ?? Promise.resolve(null));
+      const mdr = await (electronAPI.localDbGetSetting?.('qris_mdr_rate_percent') ?? Promise.resolve(null));
 
       setDefaultQrBankId(qr ?? '');
+      if (mdr != null && String(mdr).trim() !== '') {
+        setQrisMdrRatePercent(String(parseQrisMdrRatePercent(mdr)));
+      } else {
+        setQrisMdrRatePercent(String(DEFAULT_QRIS_MDR_RATE_PERCENT));
+      }
     } catch (error) {
       console.error('Error loading payment bank settings:', error);
       setBankLoadMessage('Gagal memuat daftar bank.');
@@ -193,8 +205,15 @@ export default function GlobalSettings() {
       const electronAPI = window.electronAPI;
       if (!electronAPI?.localDbSaveSetting) return;
 
+      const mdrParsed = parseQrisMdrRatePercent(qrisMdrRatePercent);
+      if (mdrParsed > MAX_QRIS_MDR_RATE_PERCENT) {
+        appAlert(`MDR maksimum ${MAX_QRIS_MDR_RATE_PERCENT}%.`);
+        return;
+      }
+
       await Promise.all([
         electronAPI.localDbSaveSetting('default_qr_bank_id', defaultQrBankId || ''),
+        electronAPI.localDbSaveSetting('qris_mdr_rate_percent', String(mdrParsed)),
       ]);
 
       const businessId = user?.selectedBusinessId;
@@ -607,10 +626,6 @@ export default function GlobalSettings() {
             Simpan
           </button>
         </div>
-        <p className="text-xs text-gray-600">
-          Khusus QR. Untuk GoFood/GrabFood/ShopeeFood/Qpon/TikTok, settlement dicatat manual di SalesPulse halaman
-          Accounting &gt; Online Settlement.
-        </p>
         {bankLoadMessage ? (
           <p className="text-xs text-blue-700 bg-blue-50 border border-blue-200 rounded px-2 py-1">{bankLoadMessage}</p>
         ) : null}
@@ -633,7 +648,7 @@ export default function GlobalSettings() {
           </div>
         ) : null}
 
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
           <label className="flex flex-col gap-1">
             <span className="text-xs font-medium text-gray-700">Default QR Bank</span>
             <select
@@ -643,6 +658,17 @@ export default function GlobalSettings() {
             >
               {renderBankOptions()}
             </select>
+          </label>
+          <label className="flex flex-col gap-1">
+            <span className="text-xs font-medium text-gray-700">Tarif MDR QR/QRIS (%)</span>
+            <input
+              type="text"
+              inputMode="decimal"
+              value={qrisMdrRatePercent}
+              onChange={(e) => setQrisMdrRatePercent(e.target.value)}
+              className="px-3 py-2 border border-gray-300 rounded-lg text-sm text-gray-900"
+              placeholder={`${DEFAULT_QRIS_MDR_RATE_PERCENT}`}
+            />
           </label>
         </div>
       </div>

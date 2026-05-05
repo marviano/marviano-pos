@@ -9,6 +9,11 @@ import { generateTransactionId, generateTransactionItemId } from '@/lib/uuid';
 import { useAuth } from '@/hooks/useAuth';
 import { appAlert } from '@/components/AppDialog';
 import { getApiUrl } from '@/lib/api';
+import {
+  computeQrisMdrBreakdown,
+  isQrisMdrPaymentMethod,
+  parseQrisMdrRatePercent,
+} from '@/lib/qrisMdr';
 import { type PackageSelection, getPackageBreakdownLines, getPackageBreakdownLinesWithProductId, formatPackageLineDisplay } from './PackageSelectionModal';
 
 interface BundleSelection {
@@ -1005,6 +1010,29 @@ export default function PaymentModal({
 
         if (process.env.NODE_ENV === 'development') {
           console.log('💳 PAYMENT DEBUG: Transaction', localTransactionData.id, 'Items:', transactionItems.length);
+        }
+
+        const txRow = localTransactionData as Record<string, unknown>;
+        const pmStr = String(txRow.payment_method ?? '');
+        const grossFinal = Number(txRow.final_amount);
+        if (isQrisMdrPaymentMethod(pmStr) && Number.isFinite(grossFinal) && grossFinal > 0 && electronAPI.localDbGetSetting) {
+          try {
+            const rawRate = await electronAPI.localDbGetSetting('qris_mdr_rate_percent');
+            const rate = parseQrisMdrRatePercent(rawRate);
+            const b = computeQrisMdrBreakdown(grossFinal, rate);
+            txRow.mdr_rate_percent = b.ratePercentSnapshot;
+            txRow.mdr_amount = b.mdrAmount;
+            txRow.net_after_mdr = b.netAfterMdr;
+          } catch (mErr) {
+            console.warn('[PAYMENT] QRIS MDR snapshot failed:', mErr);
+            txRow.mdr_rate_percent = null;
+            txRow.mdr_amount = null;
+            txRow.net_after_mdr = null;
+          }
+        } else {
+          txRow.mdr_rate_percent = null;
+          txRow.mdr_amount = null;
+          txRow.net_after_mdr = null;
         }
 
         // Save transaction to local database (Blocking but fast)

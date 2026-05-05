@@ -910,6 +910,9 @@ async function ensureSystemPosSchema(): Promise<void> {
     'ALTER TABLE transactions ADD COLUMN paid_at DATETIME DEFAULT NULL COMMENT \'When the transaction was paid\' AFTER updated_at',
     'ALTER TABLE transactions ADD INDEX idx_transactions_sync_status (sync_status)',
     "ALTER TABLE transactions ADD COLUMN system_pos_synced_at DATETIME DEFAULT NULL COMMENT 'When refund data was last synced from main DB' AFTER last_refunded_at",
+    "ALTER TABLE transactions ADD COLUMN mdr_rate_percent DECIMAL(8,4) NULL DEFAULT NULL COMMENT 'QR/QRIS MDR %% snapshot at payment time' AFTER final_amount",
+    'ALTER TABLE transactions ADD COLUMN mdr_amount DECIMAL(15,2) NULL DEFAULT NULL COMMENT \'QR/QRIS MDR fee amount\' AFTER mdr_rate_percent',
+    'ALTER TABLE transactions ADD COLUMN net_after_mdr DECIMAL(15,2) NULL DEFAULT NULL COMMENT \'Expected net settlement after MDR\' AFTER mdr_amount',
   ];
   for (const sql of alterColumns) {
     await executeSystemPosDdlIgnoreDup(sql);
@@ -962,6 +965,15 @@ function createWindows(): void {
         await executeDdlIgnoreDup('ALTER TABLE transaction_items ADD INDEX idx_transaction_items_waiter (waiter_id)');
         await executeDdlIgnoreDup('ALTER TABLE transactions ADD COLUMN paid_at DATETIME DEFAULT NULL COMMENT \'When the transaction was paid\' AFTER updated_at');
         await executeDdlIgnoreDup("ALTER TABLE transactions ADD COLUMN last_sync_error VARCHAR(512) DEFAULT NULL COMMENT 'Last sync failure reason' AFTER last_sync_attempt");
+        await executeDdlIgnoreDup(
+          "ALTER TABLE transactions ADD COLUMN mdr_rate_percent DECIMAL(8,4) NULL DEFAULT NULL COMMENT 'QR/QRIS MDR %% snapshot at payment time' AFTER final_amount"
+        );
+        await executeDdlIgnoreDup(
+          'ALTER TABLE transactions ADD COLUMN mdr_amount DECIMAL(15,2) NULL DEFAULT NULL COMMENT \'QR/QRIS MDR fee amount\' AFTER mdr_rate_percent'
+        );
+        await executeDdlIgnoreDup(
+          'ALTER TABLE transactions ADD COLUMN net_after_mdr DECIMAL(15,2) NULL DEFAULT NULL COMMENT \'Expected net settlement after MDR\' AFTER mdr_amount'
+        );
       } catch (migErr) {
         console.warn('⚠️ Main DB migration (transaction_items.waiter_id) failed (non-fatal):', (migErr as Error)?.message);
       }
@@ -4451,6 +4463,16 @@ function createWindows(): void {
           }
           return null;
         };
+        const getNullableDecimal = (key: string): number | null => {
+          const val = r[key];
+          if (val === null || val === undefined || val === '') return null;
+          if (typeof val === 'number') return Number.isFinite(val) ? val : null;
+          if (typeof val === 'string') {
+            const n = Number(String(val).replace(',', '.'));
+            return Number.isFinite(n) ? n : null;
+          }
+          return null;
+        };
         const getDate = (key: string) => {
           const val = r[key];
           if (val instanceof Date) return val;
@@ -4505,6 +4527,9 @@ function createWindows(): void {
           getNumber('voucher_value'),
           getString('voucher_label'),
           getNumber('final_amount') ?? 0,
+          getNullableDecimal('mdr_rate_percent'),
+          getNullableDecimal('mdr_amount'),
+          getNullableDecimal('net_after_mdr'),
           getNumber('amount_received') ?? 0,
           getNumber('change_amount') ?? 0.0,
           statusVal,
@@ -4536,16 +4561,16 @@ function createWindows(): void {
         queries.push({
           sql: `INSERT INTO transactions (
             uuid_id, business_id, user_id, waiter_id, shift_uuid, payment_method, pickup_method, total_amount,
-            voucher_discount, voucher_type, voucher_value, voucher_label, final_amount, amount_received, change_amount, status,
+            voucher_discount, voucher_type, voucher_value, voucher_label, final_amount, mdr_rate_percent, mdr_amount, net_after_mdr, amount_received, change_amount, status,
             created_at, updated_at, synced_at, sync_status, sync_attempts, last_sync_attempt, contact_id, customer_name, customer_unit, note, bank_name,
             card_number, cl_account_id, cl_account_name, bank_id, receipt_number,
             transaction_type, payment_method_id, table_id, paid_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
           ON DUPLICATE KEY UPDATE
             business_id=VALUES(business_id), user_id=VALUES(user_id), waiter_id=VALUES(waiter_id), shift_uuid=VALUES(shift_uuid), payment_method=VALUES(payment_method),
             pickup_method=VALUES(pickup_method), total_amount=VALUES(total_amount), voucher_discount=VALUES(voucher_discount),
             voucher_type=VALUES(voucher_type), voucher_value=VALUES(voucher_value), voucher_label=VALUES(voucher_label),
-            final_amount=VALUES(final_amount), amount_received=VALUES(amount_received), change_amount=VALUES(change_amount),
+            final_amount=VALUES(final_amount), mdr_rate_percent=VALUES(mdr_rate_percent), mdr_amount=VALUES(mdr_amount), net_after_mdr=VALUES(net_after_mdr), amount_received=VALUES(amount_received), change_amount=VALUES(change_amount),
             status=VALUES(status), created_at=VALUES(created_at), updated_at=VALUES(updated_at), synced_at=VALUES(synced_at),
             sync_status=VALUES(sync_status), sync_attempts=VALUES(sync_attempts), last_sync_attempt=VALUES(last_sync_attempt),
             contact_id=VALUES(contact_id), customer_name=VALUES(customer_name), customer_unit=VALUES(customer_unit), note=VALUES(note),
@@ -5384,7 +5409,11 @@ function createWindows(): void {
       // Fetch transaction items only when requested (skip for sync path to reduce RAM; smartSync fetches per-tx)
       if (includeItems && Array.isArray(transactions) && transactions.length > 0) {
         for (const transaction of transactions as any[]) {
-          const items = await executeQuery('SELECT * FROM transaction_items WHERE transaction_id = ?', [transaction.id]);
+          const txUuid = transaction.uuid_id || transaction.id;
+          const items = await executeQuery(
+            'SELECT * FROM transaction_items WHERE uuid_transaction_id = ? OR transaction_id = ?',
+            [txUuid, transaction.id]
+          );
           transaction.items = items || [];
         }
       } else if (Array.isArray(transactions) && transactions.length > 0) {
@@ -5474,10 +5503,15 @@ function createWindows(): void {
 
       const transactions = await executeQuery(query, params);
 
-      // Fetch transaction items for each transaction
+      // Fetch transaction items for each transaction.
+      // Prefer uuid_transaction_id; some legacy rows have missing/zero transaction_id links.
       if (Array.isArray(transactions) && transactions.length > 0) {
         for (const transaction of transactions as any[]) {
-          const items = await executeQuery('SELECT * FROM transaction_items WHERE transaction_id = ?', [transaction.id]);
+          const txUuid = transaction.uuid_id || transaction.id;
+          const items = await executeQuery(
+            'SELECT * FROM transaction_items WHERE uuid_transaction_id = ? OR transaction_id = ?',
+            [txUuid, transaction.id]
+          );
           transaction.items = items || [];
         }
 

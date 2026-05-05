@@ -1039,6 +1039,44 @@ export async function initializeMySQLSchema(): Promise<void> {
       }
     }
 
+    // QR/QRIS MDR (snapshot at payment; gross remains final_amount)
+    try {
+      await pool.execute(
+        `ALTER TABLE transactions ADD COLUMN mdr_rate_percent DECIMAL(8,4) NULL DEFAULT NULL COMMENT 'QR/QRIS MDR %% snapshot at payment time' AFTER final_amount`
+      );
+      console.log('✅ transactions: added mdr_rate_percent column');
+    } catch (alterErr: unknown) {
+      const err = alterErr as { code?: string; errno?: number };
+      if (err.code === 'ER_DUP_FIELDNAME' || err.errno === 1060) {
+      } else {
+        console.warn('⚠️ transactions mdr_rate_percent migration:', err);
+      }
+    }
+    try {
+      await pool.execute(
+        `ALTER TABLE transactions ADD COLUMN mdr_amount DECIMAL(15,2) NULL DEFAULT NULL COMMENT 'QR/QRIS MDR fee amount' AFTER mdr_rate_percent`
+      );
+      console.log('✅ transactions: added mdr_amount column');
+    } catch (alterErr: unknown) {
+      const err = alterErr as { code?: string; errno?: number };
+      if (err.code === 'ER_DUP_FIELDNAME' || err.errno === 1060) {
+      } else {
+        console.warn('⚠️ transactions mdr_amount migration:', err);
+      }
+    }
+    try {
+      await pool.execute(
+        `ALTER TABLE transactions ADD COLUMN net_after_mdr DECIMAL(15,2) NULL DEFAULT NULL COMMENT 'Expected net settlement after MDR' AFTER mdr_amount`
+      );
+      console.log('✅ transactions: added net_after_mdr column');
+    } catch (alterErr: unknown) {
+      const err = alterErr as { code?: string; errno?: number };
+      if (err.code === 'ER_DUP_FIELDNAME' || err.errno === 1060) {
+      } else {
+        console.warn('⚠️ transactions net_after_mdr migration:', err);
+      }
+    }
+
     // One-time migration: add is_package to products (1 = package product, 0 = regular/bundle)
     try {
       await pool.execute(

@@ -553,6 +553,9 @@ class SmartSyncService {
         if (transactionData.receipt_number === undefined) transactionData.receipt_number = null;
         if (transactionData.table_id === undefined) transactionData.table_id = null;
         if (transactionData.waiter_id === undefined) transactionData.waiter_id = null;
+        if (transactionData.mdr_rate_percent === undefined) transactionData.mdr_rate_percent = null;
+        if (transactionData.mdr_amount === undefined) transactionData.mdr_amount = null;
+        if (transactionData.net_after_mdr === undefined) transactionData.net_after_mdr = null;
 
         // Ensure items array exists (even if empty)
         if (!Array.isArray(transactionData.items)) {
@@ -742,10 +745,19 @@ class SmartSyncService {
         // Fetch transaction items and normalized customizations from actual database tables
         // This ensures we get the latest data with UUIDs and proper structure
         const electronAPI = typeof window !== 'undefined' ? (window as { electronAPI?: UnknownRecord }).electronAPI : undefined;
-        if (electronAPI?.localDbGetTransactionItems && electronAPI?.localDbGetTransactionItemCustomizationsNormalized && transactionData.id) {
+        if (electronAPI?.localDbGetTransactionItems && electronAPI?.localDbGetTransactionItemCustomizationsNormalized && (transactionData.id || transactionData.uuid_id)) {
           try {
-            // Fetch transaction items from transaction_items table (source of truth)
-            const rawItems = await (electronAPI.localDbGetTransactionItems as (transactionId: string) => Promise<Array<UnknownRecord>>)(String(transactionData.id));
+            // Fetch transaction items from transaction_items table (source of truth).
+            // Try UUID first (more stable for old/migrated rows), then fallback to numeric/local id.
+            const txUuid = transactionData.uuid_id != null ? String(transactionData.uuid_id) : '';
+            const txId = transactionData.id != null ? String(transactionData.id) : '';
+            let rawItems: Array<UnknownRecord> = [];
+            if (txUuid) {
+              rawItems = await (electronAPI.localDbGetTransactionItems as (transactionId: string) => Promise<Array<UnknownRecord>>)(txUuid);
+            }
+            if ((!Array.isArray(rawItems) || rawItems.length === 0) && txId && txId !== txUuid) {
+              rawItems = await (electronAPI.localDbGetTransactionItems as (transactionId: string) => Promise<Array<UnknownRecord>>)(txId);
+            }
 
             // Map items to upload format (with UUIDs and ALL columns)
             if (Array.isArray(rawItems) && rawItems.length > 0) {
@@ -794,7 +806,7 @@ class SmartSyncService {
 
                 return itemData;
               });
-              if (SMART_SYNC_VERBOSE) console.log(`✅ [SMART SYNC] Fetched ${rawItems.length} items from transaction_items table for transaction ${transactionData.id}`);
+              if (SMART_SYNC_VERBOSE) console.log(`✅ [SMART SYNC] Fetched ${rawItems.length} items from transaction_items table for transaction ${txUuid || txId}`);
             }
 
             // Fetch normalized customizations
@@ -816,7 +828,7 @@ class SmartSyncService {
                 price_adjustment: number;
                 created_at: string;
               }>;
-            }>)(String(transactionData.id));
+            }>)(txUuid || txId);
 
             // Add normalized customization arrays to transaction data
             transactionData.transaction_item_customizations = normalizedCustomizations.customizations;

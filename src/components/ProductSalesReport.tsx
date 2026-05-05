@@ -264,6 +264,20 @@ function formatSortLabelForExport(column: string, dir: SortDir): string {
   return `${column} (${dir})`;
 }
 
+/**
+ * jsPDF's standard Helvetica only covers Latin-1; Unicode arrows, en-dashes, smart quotes, etc.
+ * render as spaced or garbled glyphs. Use ASCII-safe text for PDF meta lines.
+ */
+function sanitizeTextForJsPdf(input: string): string {
+  return input
+    .replace(/\u2192/g, '->') // RIGHTWARDS ARROW
+    .replace(/\u2013/g, '-') // EN DASH (e.g. A–Z)
+    .replace(/\u2014/g, '-') // EM DASH
+    .replace(/\u00a0/g, ' ') // NBSP
+    .replace(/[\u2018\u2019\u2032\u2035]/g, "'")
+    .replace(/[\u201c\u201d]/g, '"');
+}
+
 export default function ProductSalesReport() {
   const { user } = useAuth();
   const businessId = user?.selectedBusinessId;
@@ -528,10 +542,16 @@ export default function ProductSalesReport() {
       y += 6;
       doc.setFontSize(9);
       const metaMaxW = pageWidth - margin * 2;
-      const filterLines = doc.splitTextToSize(`Filter nama produk: ${filterDescriptionForExport}`, metaMaxW);
+      const filterLines = doc.splitTextToSize(
+        sanitizeTextForJsPdf(`Filter nama produk: ${filterDescriptionForExport}`),
+        metaMaxW
+      );
       doc.text(filterLines, margin, y);
       y += Math.max(4.5, filterLines.length * 4.2);
-      const sortLines = doc.splitTextToSize(`Urutan tabel: ${formatSortLabelForExport(sortColumn, sortDir)}`, metaMaxW);
+      const sortLines = doc.splitTextToSize(
+        sanitizeTextForJsPdf(`Urutan tabel: ${formatSortLabelForExport(sortColumn, sortDir)}`),
+        metaMaxW
+      );
       doc.text(sortLines, margin, y);
       y += Math.max(4.5, sortLines.length * 4.2);
       doc.setFontSize(10);
