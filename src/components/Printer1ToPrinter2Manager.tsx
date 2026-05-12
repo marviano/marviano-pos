@@ -428,6 +428,9 @@ export default function Printer1ToPrinter2Manager({ onClose }: { onClose: () => 
   const totalAmount = printer1Total + printer2Total;
   const printer1Percentage = totalAmount > 0 ? (printer1Total / totalAmount) * 100 : 0;
   const printer2Percentage = totalAmount > 0 ? (printer2Total / totalAmount) * 100 : 0;
+  useEffect(() => {
+    if (totalAmount <= 0) return;
+  }, [businessId, fromDate, toDate, printer1DisplayRows.length, printer2DisplayRows.length, printer1Total, printer2Total, totalAmount, printer1Percentage, printer2Percentage]);
 
   // Sort transactions
   const sortedTransactions = useMemo(() => {

@@ -1252,6 +1252,8 @@ export default function PaymentModal({
         // Check for Single Printer Mode setting
         let singlePrinterModeEnabled = false;
         let printer2AuditLogChance: number | null = null;
+        let printer2AuditDistributionMode = 'chance';
+        let printer2AuditTargetPercent = 30;
         try {
           const configsRaw = cachedPrinterConfigs;
           if (Array.isArray(configsRaw)) {
@@ -1272,6 +1274,18 @@ export default function PaymentModal({
                       printer2AuditLogChance = chance;
                     }
                   }
+                  if (extra && typeof extra === 'object' && 'printer2AuditDistributionMode' in extra) {
+                    const mode = (extra as { printer2AuditDistributionMode?: unknown }).printer2AuditDistributionMode;
+                    if (mode === 'chance' || mode === 'amountRatio') {
+                      printer2AuditDistributionMode = mode;
+                    }
+                  }
+                  if (extra && typeof extra === 'object' && 'printer2AuditTargetPercent' in extra) {
+                    const target = (extra as { printer2AuditTargetPercent?: unknown }).printer2AuditTargetPercent;
+                    if (typeof target === 'number' && target >= 1 && target <= 99) {
+                      printer2AuditTargetPercent = target;
+                    }
+                  }
                 } catch (parseError) {
                   console.warn('⚠️ Failed to parse singlePrinterMode extra_settings:', parseError);
                 }
@@ -1289,21 +1303,104 @@ export default function PaymentModal({
           }
         }
 
-        // Helper function to determine which audit log to use when Single Printer Mode + Randomization is enabled
-        // This function is called once per transaction to ensure consistent randomization
-        let randomizationResult: boolean | null = null;
-        const shouldLogToPrinter2Audit = (): boolean => {
-          if (!singlePrinterModeEnabled || printer2AuditLogChance === null || printer2AuditLogChance <= 0) {
-            return false; // No randomization, use default behavior
+        // Helper function to determine which audit log to use when Single Printer Mode distribution is enabled.
+        // This function is called once per transaction to keep decision consistent within the flow.
+        let distributionDecisionResult: boolean | null = null;
+        const shouldLogToPrinter2Audit = async (): Promise<boolean> => {
+          if (!singlePrinterModeEnabled) {
+            return false;
           }
-          // Only calculate once per transaction
-          if (randomizationResult === null) {
-            // Generate random number between 0-100 and check if it's less than the percentage
+          if (distributionDecisionResult !== null) {
+            return distributionDecisionResult;
+          }
+
+          if (printer2AuditDistributionMode === 'amountRatio') {
+            try {
+              const txAmount =
+                typeof (transactionData as Record<string, unknown>).final_amount === 'number' &&
+                Number.isFinite((transactionData as Record<string, unknown>).final_amount as number)
+                  ? ((transactionData as Record<string, unknown>).final_amount as number)
+                  : finalTotal;
+              const safeTargetPercent = Math.max(1, Math.min(99, Math.round(printer2AuditTargetPercent)));
+              const targetP2Ratio = safeTargetPercent / 100;
+              const maxP2Ratio = Math.min(0.99, targetP2Ratio + 0.02);
+              const businessTxRaw = await window.electronAPI?.localDbGetTransactions?.(businessId, 50000, { todayOnly: true });
+              const businessTx = Array.isArray(businessTxRaw) ? businessTxRaw : [];
+              const p2AuditRaw = await window.electronAPI?.getPrinter2AuditLog?.(undefined, undefined, 50000);
+              const p2AuditEntries = Array.isArray(p2AuditRaw?.entries) ? p2AuditRaw.entries : [];
+              const p2Ids = new Set(
+                p2AuditEntries
+                  .map((entry) => {
+                    if (!entry || typeof entry !== 'object') return null;
+                    const txId = (entry as { transaction_id?: unknown }).transaction_id;
+                    return txId != null ? String(txId) : null;
+                  })
+                  .filter((id): id is string => Boolean(id))
+              );
+
+              let totalAmount = 0;
+              let p2Amount = 0;
+              for (const tx of businessTx) {
+                if (!tx || typeof tx !== 'object') continue;
+                const row = tx as { uuid_id?: unknown; id?: unknown; final_amount?: unknown };
+                const txId = row.uuid_id != null ? String(row.uuid_id) : (row.id != null ? String(row.id) : '');
+                const amountRaw = row.final_amount;
+                const amount =
+                  typeof amountRaw === 'number' && Number.isFinite(amountRaw)
+                    ? amountRaw
+                    : (typeof amountRaw === 'string' && Number.isFinite(parseFloat(amountRaw)) ? parseFloat(amountRaw) : 0);
+                if (!txId || amount <= 0) continue;
+                totalAmount += amount;
+                if (p2Ids.has(txId)) {
+                  p2Amount += amount;
+                }
+              }
+
+              const projectedTotal = totalAmount + txAmount;
+              if (projectedTotal <= 0) {
+                distributionDecisionResult = false;
+                return distributionDecisionResult;
+              }
+
+              const currentRatio = totalAmount > 0 ? p2Amount / totalAmount : 0;
+              const ratioIfP1 = p2Amount / projectedTotal;
+              const ratioIfP2 = (p2Amount + txAmount) / projectedTotal;
+              // Deficit-first routing: if P2 is currently below target share, prioritize P2.
+              // This matches operational expectation better for large-ticket transactions.
+              if (currentRatio < targetP2Ratio) {
+                distributionDecisionResult = true;
+              } else if (ratioIfP2 > maxP2Ratio && ratioIfP1 <= maxP2Ratio) {
+                distributionDecisionResult = false;
+              } else {
+                const errIfP1 = Math.abs(ratioIfP1 - targetP2Ratio);
+                const errIfP2 = Math.abs(ratioIfP2 - targetP2Ratio);
+                distributionDecisionResult = errIfP2 <= errIfP1;
+              }
+
+              console.log(
+                `📊 [AMOUNT-RATIO] total=${totalAmount.toFixed(0)} p2=${p2Amount.toFixed(0)} tx=${txAmount.toFixed(0)} ` +
+                  `currentRatio=${(currentRatio * 100).toFixed(2)}% ` +
+                  `ratioIfP1=${(ratioIfP1 * 100).toFixed(2)}% ratioIfP2=${(ratioIfP2 * 100).toFixed(2)}% ` +
+                  `targetP2=${safeTargetPercent}% decision=${distributionDecisionResult ? 'P2' : 'P1'}`
+              );
+              return distributionDecisionResult;
+            } catch (amountModeError) {
+              console.warn('⚠️ [AMOUNT-RATIO] Failed to compute amount-ratio distribution, fallback to chance mode:', amountModeError);
+            }
+          }
+
+          if (printer2AuditLogChance !== null && printer2AuditLogChance > 0) {
             const randomValue = Math.random() * 100;
-            randomizationResult = randomValue < printer2AuditLogChance;
-            console.log(`🎲 [RANDOMIZATION] Random value: ${randomValue.toFixed(2)}%, Threshold: ${printer2AuditLogChance}%, Result: ${randomizationResult ? 'Printer 2 audit log' : 'Printer 1 audit log'}`);
+            distributionDecisionResult = randomValue < printer2AuditLogChance;
+            console.log(
+              `🎲 [RANDOMIZATION] Random value: ${randomValue.toFixed(2)}%, ` +
+                `Threshold: ${printer2AuditLogChance}%, Result: ${distributionDecisionResult ? 'Printer 2 audit log' : 'Printer 1 audit log'}`
+            );
+            return distributionDecisionResult;
           }
-          return randomizationResult;
+
+          distributionDecisionResult = false;
+          return distributionDecisionResult;
         };
 
         // Online platform orders require 100% audit tracking on Printer 2 when Single Printer Mode is enabled
@@ -1670,15 +1767,15 @@ export default function PaymentModal({
                 // Platform orders must always be tracked in Printer 2 audit log for reconciliation
                 shouldLogToPrinter1 = false;
                 console.log('🖨️ [SINGLE PRINTER MODE] Online platform transaction detected → forcing Printer 2 audit log (skip Printer 1 audit log)');
-              } else if (singlePrinterModeEnabled && printer2AuditLogChance !== null && printer2AuditLogChance > 0) {
-                // Randomization is enabled - randomly decide which audit log to use
-                const logToPrinter2 = shouldLogToPrinter2Audit();
+              } else if (singlePrinterModeEnabled && ((printer2AuditDistributionMode === 'amountRatio') || (printer2AuditLogChance !== null && printer2AuditLogChance > 0))) {
+                // Distribution is enabled - decide which audit log to use
+                const logToPrinter2 = await shouldLogToPrinter2Audit();
                 if (logToPrinter2) {
-                  // Randomization decided Printer 2 - skip logging here, will be handled in Single Printer Mode section
+                  // Distribution decided Printer 2 - skip logging here, will be handled in Single Printer Mode section
                   shouldLogToPrinter1 = false;
-                  console.log(`🖨️ [SINGLE PRINTER MODE + RANDOMIZATION] Randomization decided Printer 2 audit log, skipping Printer 1 audit log (will log in Single Printer Mode section)`);
+                  console.log(`🖨️ [SINGLE PRINTER MODE + DISTRIBUTION] Decision = Printer 2 audit log, skipping Printer 1 audit log (will log in Single Printer Mode section)`);
                 } else {
-                  // Randomization decided Printer 1 - log here
+                  // Distribution decided Printer 1 - log here
                   shouldLogToPrinter1 = true;
                 }
               } else if (singlePrinterModeEnabled && originalTarget === 'receiptize') {
@@ -1698,7 +1795,11 @@ export default function PaymentModal({
                 } else if (!isSuccessResponse(logResult)) {
                   console.warn('⚠️ Failed to log Printer 1 audit: Invalid response', logResult);
                 } else {
-                  console.log(`✅ [SINGLE PRINTER MODE${printer2AuditLogChance !== null && printer2AuditLogChance > 0 ? ' + RANDOMIZATION' : ''}] Logged to Printer 1 audit log`);
+                  const distributionTag =
+                    printer2AuditDistributionMode === 'amountRatio'
+                      ? ' + AMOUNT-RATIO'
+                      : (printer2AuditLogChance !== null && printer2AuditLogChance > 0 ? ' + RANDOMIZATION' : '');
+                  console.log(`✅ [SINGLE PRINTER MODE${distributionTag}] Logged to Printer 1 audit log`);
                 }
               } else {
                 // Skipping Printer 1 audit log - will be handled in Single Printer Mode section (for Printer 2 audit) or already handled
@@ -1823,7 +1924,7 @@ export default function PaymentModal({
         // OR if randomization decided to log to Printer 2 audit
         if (
           singlePrinterModeEnabled &&
-          (forcePrinter2AuditForPlatform || originalTarget === 'receiptize' || (printer2AuditLogChance !== null && printer2AuditLogChance > 0))
+          (forcePrinter2AuditForPlatform || originalTarget === 'receiptize' || (printer2AuditDistributionMode === 'amountRatio') || (printer2AuditLogChance !== null && printer2AuditLogChance > 0))
         ) {
           // Check if we should log to Printer 2 audit
           let shouldLogToPrinter2 = false;
@@ -1831,9 +1932,9 @@ export default function PaymentModal({
           if (forcePrinter2AuditForPlatform) {
             // Platform orders must always be tracked in Printer 2 audit log for reconciliation
             shouldLogToPrinter2 = true;
-          } else if (printer2AuditLogChance !== null && printer2AuditLogChance > 0) {
-            // Randomization is enabled - use randomization result
-            shouldLogToPrinter2 = shouldLogToPrinter2Audit();
+          } else if ((printer2AuditDistributionMode === 'amountRatio') || (printer2AuditLogChance !== null && printer2AuditLogChance > 0)) {
+            // Distribution is enabled - reuse same transaction decision
+            shouldLogToPrinter2 = await shouldLogToPrinter2Audit();
           } else {
             // No randomization - use original target behavior
             shouldLogToPrinter2 = originalTarget === 'receiptize';
@@ -1859,7 +1960,11 @@ export default function PaymentModal({
                   console.error('❌ Failed to log Printer 2 audit (Single Printer Mode):', logResult?.error);
                 } else {
                   auditLogSuccess = true;
-                  console.log(`✅ [SINGLE PRINTER MODE${printer2AuditLogChance !== null && printer2AuditLogChance > 0 ? ' + RANDOMIZATION' : ''}] Logged to Printer 2 audit (Printer 1 counter: ${counterForP2Audit}) for database tracking`);
+                  const distributionTag =
+                    printer2AuditDistributionMode === 'amountRatio'
+                      ? ' + AMOUNT-RATIO'
+                      : (printer2AuditLogChance !== null && printer2AuditLogChance > 0 ? ' + RANDOMIZATION' : '');
+                  console.log(`✅ [SINGLE PRINTER MODE${distributionTag}] Logged to Printer 2 audit (Printer 1 counter: ${counterForP2Audit}) for database tracking`);
                 }
               } catch (logError) {
                 console.error('❌ Error logging Printer 2 audit (Single Printer Mode):', logError);
@@ -1884,9 +1989,9 @@ export default function PaymentModal({
               console.error('❌ Error processing Printer 2 database tracking (Single Printer Mode):', error);
             }
           } else {
-            // Randomization decided Printer 1, but we're in Single Printer Mode with original target 'receiptize'
+            // Distribution decided Printer 1, but we're in Single Printer Mode with original target 'receiptize'
             // The Printer 1 audit logging section should have already handled this, so we skip here
-            console.log(`🖨️ [SINGLE PRINTER MODE + RANDOMIZATION] Randomization decided Printer 1 audit log, skipping Printer 2 audit log`);
+            console.log(`🖨️ [SINGLE PRINTER MODE + DISTRIBUTION] Decision = Printer 1 audit log, skipping Printer 2 audit log`);
           }
         }
 

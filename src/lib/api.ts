@@ -153,11 +153,16 @@ export async function fetchFromVps<T = unknown>(
   const posKey = getPosWriteApiKey();
   if (posKey) headers['X-POS-API-Key'] = posKey;
 
-  const response = await fetch(url, {
-    ...rest,
-    headers,
-    signal: signal ?? undefined,
-  });
+  let response: Response;
+  try {
+    response = await fetch(url, {
+      ...rest,
+      headers,
+      signal: signal ?? undefined,
+    });
+  } catch (e) {
+    throw e;
+  }
 
   if (!response.ok) {
     const text = await response.text();

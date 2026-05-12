@@ -706,7 +706,6 @@ export default function TransactionList({ businessId, onLoadTransaction }: Trans
         refund_status: refundStatusValue
       };
 
-
       setSelectedTransaction(response);
       setIsDetailModalOpen(true);
     } catch (error: unknown) {
@@ -2494,6 +2493,9 @@ export default function TransactionList({ businessId, onLoadTransaction }: Trans
                                 {transaction.status === 'pending' && (
                                   <span className="inline-flex px-1.5 py-0.5 text-[10px] font-semibold rounded-full bg-orange-100 text-orange-800">Belum Bayar</span>
                                 )}
+                                {(transaction.status || '').toLowerCase() === 'cancelled' && (
+                                  <span className="inline-flex px-1.5 py-0.5 text-[10px] font-semibold rounded-full bg-stone-200 text-stone-700">Dibatalkan</span>
+                                )}
                               </div>
                             )}
                             {col.key === 'pickup_method' && <span className="text-xs text-gray-900 capitalize">{transaction.pickup_method.replace('-', ' ')}</span>}
@@ -2502,7 +2504,14 @@ export default function TransactionList({ businessId, onLoadTransaction }: Trans
                                 ? <span className="inline-flex px-1.5 py-0.5 text-[10px] font-medium rounded bg-amber-100 text-amber-800" title="Memiliki item paket">Pkg</span>
                                 : <span className="text-xs text-gray-400">-</span>
                             )}
-                            {col.key === 'total_amount' && <span className="text-xs font-medium text-gray-900 tabular-nums">{formatPrice(transaction.total_amount)}</span>}
+                            {col.key === 'total_amount' && (() => {
+                              const isCancelled = (transaction.status || '').toLowerCase() === 'cancelled';
+                              const bothZero = Number(transaction.total_amount || 0) === 0 && Number(transaction.final_amount || 0) === 0;
+                              if (isCancelled && bothZero) {
+                                return <span className="text-xs text-gray-400" title="Transaksi dibatalkan; nominal tidak dijumlahkan (sama seperti Grand Total).">—</span>;
+                              }
+                              return <span className="text-xs font-medium text-gray-900 tabular-nums">{formatPrice(transaction.total_amount)}</span>;
+                            })()}
                             {col.key === 'voucher_discount' && (
                               transaction.voucher_discount > 0 ? (
                                 <div style={{ textAlign: 'center' }} className="flex flex-col items-center">
@@ -2511,7 +2520,14 @@ export default function TransactionList({ businessId, onLoadTransaction }: Trans
                                 </div>
                               ) : <span className="text-xs text-gray-400">-</span>
                             )}
-                            {col.key === 'final_amount' && <span className="text-xs font-bold text-gray-900 tabular-nums">{formatPrice(transaction.final_amount)}</span>}
+                            {col.key === 'final_amount' && (() => {
+                              const isCancelled = (transaction.status || '').toLowerCase() === 'cancelled';
+                              const bothZero = Number(transaction.total_amount || 0) === 0 && Number(transaction.final_amount || 0) === 0;
+                              if (isCancelled && bothZero) {
+                                return <span className="text-xs text-gray-400" title="Transaksi dibatalkan; nominal tidak dijumlahkan (sama seperti Grand Total).">—</span>;
+                              }
+                              return <span className="text-xs font-bold text-gray-900 tabular-nums">{formatPrice(transaction.final_amount)}</span>;
+                            })()}
                             {col.key === 'refund_total' && (() => {
                               const refundAmount = transaction.refund_total != null ? (typeof transaction.refund_total === 'number' ? transaction.refund_total : parseFloat(String(transaction.refund_total))) : 0;
                               if (refundAmount > 0) return (

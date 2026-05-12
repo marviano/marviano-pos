@@ -326,6 +326,17 @@ declare global {
       localDbUpsertTransactionItemCustomizations?: (rows: unknown[]) => Promise<{ success: boolean; count: number; error?: string }>;
       localDbUpsertTransactionItemCustomizationOptions?: (rows: unknown[]) => Promise<{ success: boolean; count: number; error?: string }>;
       localDbGetTransactionRefunds?: (transactionUuid: string) => Promise<unknown[]>;
+      localDbGetWaiterPerformanceReport?: (payload: {
+        businessId: number;
+        startDate: string;
+        endDate: string;
+        productId?: number | null;
+        productIds?: number[] | null;
+      }) => Promise<{
+        waiters: unknown[];
+        topProductsLimit?: number;
+        rankByQuantity?: boolean;
+      }>;
       localDbGetShiftRefunds?: (payload: {
         userId: number;
         businessId: number;

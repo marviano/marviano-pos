@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import { Printer, Save, TestTube, CheckCircle, XCircle, AlertCircle } from 'lucide-react';
+import { Printer, Save, TestTube, CheckCircle, XCircle, AlertCircle, Info } from 'lucide-react';
 import { useAuth } from '@/hooks/useAuth';
 import { appAlert } from '@/components/AppDialog';
 
@@ -30,6 +30,8 @@ type ElectronPrinter = {
   status?: string;
   isDefault?: boolean;
 };
+
+type Printer2AuditDistributionMode = 'chance' | 'amountRatio';
 
 const normalizePrinterStatus = (status?: string): SystemPrinter['status'] => {
   if (status === 'printing' || status === 'stopped' || status === 'offline' || status === 'idle') {
@@ -76,10 +78,13 @@ export default function PrinterSelector() {
   const [labelPrinterNonOfflineCopies, setLabelPrinterNonOfflineCopies] = useState<number>(1);
   const [singlePrinterMode, setSinglePrinterMode] = useState<boolean>(false);
   const [printer2AuditLogChance, setPrinter2AuditLogChance] = useState<number | null>(null);
+  const [printer2AuditDistributionMode, setPrinter2AuditDistributionMode] = useState<Printer2AuditDistributionMode>('chance');
+  const [printer2AuditTargetPercent, setPrinter2AuditTargetPercent] = useState<number>(30);
   const [isScanning, setIsScanning] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [isTesting, setIsTesting] = useState<string | null>(null);
   const [saveStatus, setSaveStatus] = useState<'idle' | 'success' | 'error'>('idle');
+  const [showSinglePrinterInfo, setShowSinglePrinterInfo] = useState(false);
 
   // Load saved printer selections and auto-scan printers on component mount
   useEffect(() => {
@@ -118,6 +123,8 @@ export default function PrinterSelector() {
         let labelPrinterNonOfflineValue = 1;
         let singlePrinterModeValue = false;
         let printer2AuditLogChanceValue: number | null = null;
+        let printer2AuditDistributionModeValue: Printer2AuditDistributionMode = 'chance';
+        let printer2AuditTargetPercentValue = 30;
 
         configs.forEach((config: PrinterConfigRow) => {
           if (!config) {
@@ -150,6 +157,27 @@ export default function PrinterSelector() {
                   const chance = (extra as { printer2AuditLogChance: number }).printer2AuditLogChance;
                   if (chance >= 0 && chance <= 100) {
                     printer2AuditLogChanceValue = chance;
+                  }
+                }
+                if (
+                  extra &&
+                  typeof extra === 'object' &&
+                  'printer2AuditDistributionMode' in extra
+                ) {
+                  const distributionMode = (extra as { printer2AuditDistributionMode?: unknown }).printer2AuditDistributionMode;
+                  if (distributionMode === 'chance' || distributionMode === 'amountRatio') {
+                    printer2AuditDistributionModeValue = distributionMode;
+                  }
+                }
+                if (
+                  extra &&
+                  typeof extra === 'object' &&
+                  'printer2AuditTargetPercent' in extra &&
+                  typeof (extra as { printer2AuditTargetPercent?: number }).printer2AuditTargetPercent === 'number'
+                ) {
+                  const target = (extra as { printer2AuditTargetPercent: number }).printer2AuditTargetPercent;
+                  if (target >= 1 && target <= 99) {
+                    printer2AuditTargetPercentValue = target;
                   }
                 }
               } catch (parseError) {
@@ -239,6 +267,8 @@ export default function PrinterSelector() {
 
         setSinglePrinterMode(singlePrinterModeValue);
         setPrinter2AuditLogChance(printer2AuditLogChanceValue);
+        setPrinter2AuditDistributionMode(printer2AuditDistributionModeValue);
+        setPrinter2AuditTargetPercent(printer2AuditTargetPercentValue);
 
         setSelectedPrinters(selections);
         setMarginOffsets(margins);
@@ -339,12 +369,22 @@ export default function PrinterSelector() {
       }
 
       // Save singlePrinterMode setting with printer2AuditLogChance
-      const singlePrinterModeSettings: { enabled: boolean; printer2AuditLogChance?: number | null } = {
+      const singlePrinterModeSettings: {
+        enabled: boolean;
+        printer2AuditLogChance?: number | null;
+        printer2AuditDistributionMode?: Printer2AuditDistributionMode;
+        printer2AuditTargetPercent?: number;
+      } = {
         enabled: singlePrinterMode
       };
       if (printer2AuditLogChance !== null && printer2AuditLogChance >= 0 && printer2AuditLogChance <= 100) {
         singlePrinterModeSettings.printer2AuditLogChance = printer2AuditLogChance;
       }
+      singlePrinterModeSettings.printer2AuditDistributionMode = printer2AuditDistributionMode;
+      singlePrinterModeSettings.printer2AuditTargetPercent =
+        typeof printer2AuditTargetPercent === 'number' && !Number.isNaN(printer2AuditTargetPercent)
+          ? Math.max(1, Math.min(99, Math.round(printer2AuditTargetPercent)))
+          : 30;
       savePromises.push(
         window.electronAPI?.localDbSavePrinterConfig?.('singlePrinterMode', 'enabled', singlePrinterModeSettings)
       );
@@ -602,12 +642,12 @@ Please try:
   };
 
   return (
-    <div className="space-y-6 px-6 pt-6">
-      <div className="flex items-center gap-3">
+    <div className="space-y-6 px-6 pt-3">
+      <div className="flex items-center gap-3 my-0">
         <button
           onClick={scanForPrinters}
           disabled={isScanning}
-          className="flex-1 flex items-center justify-center space-x-2 bg-blue-500 hover:bg-blue-600 disabled:bg-blue-300 text-white px-4 py-2 rounded-lg transition-colors"
+          className="flex-1 flex items-center justify-center space-x-2 bg-blue-500 hover:bg-blue-600 disabled:bg-blue-300 text-white px-4 py-1.5 rounded-t-lg rounded-b-none transition-colors"
         >
           <Printer className={`w-4 h-4 ${isScanning ? 'animate-pulse' : ''}`} />
           <span>{isScanning ? 'Scanning...' : 'Scan Printers'}</span>
@@ -617,7 +657,7 @@ Please try:
       {/* Printer Selection Cards */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
         {/* Printer 1: Receipt Printer */}
-        <div className="bg-white rounded-lg border border-gray-200 p-6 shadow-sm">
+        <div className="bg-white rounded-lg rounded-l-none border border-gray-200 p-6 shadow-sm">
           <div className="flex items-center justify-between mb-4">
             <div className="flex items-center space-x-3">
               <Printer className="w-6 h-6 text-blue-600" />
@@ -631,28 +671,26 @@ Please try:
 
           <div className="space-y-3">
             <div>
-              <div className="flex items-center gap-2">
-                <div className="flex-1">
+              <div className="grid grid-cols-[minmax(0,1fr)_72px_90px] gap-2 items-end">
+                <div className="min-w-0">
                   <label className="block text-sm font-medium text-gray-700">
                     Select Printer
                   </label>
                 </div>
-                <div className="w-16">
-                  <label className="block text-sm font-medium text-gray-700">
+                <div>
+                  <label className="block text-xs font-medium text-gray-700 leading-tight">
                     Copies (cash)
                   </label>
                 </div>
-                <div className="w-20">
-                  <label className="block text-sm font-medium text-gray-700">
+                <div>
+                  <label className="block text-xs font-medium text-gray-700 leading-tight">
                     Non-cash copies
                   </label>
                 </div>
-              </div>
-              <div className="flex items-center gap-2 -mt-1">
                 <select
                   value={selectedPrinters.receiptPrinter}
                   onChange={(e) => handlePrinterSelection('receiptPrinter', e.target.value)}
-                  className="flex-1 border border-gray-300 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500 text-gray-900 bg-white"
+                  className="min-w-0 w-full border border-gray-300 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500 text-gray-900 bg-white"
                 >
                   <option value="">Choose a printer...</option>
                   {systemPrinters.map((printer) => (
@@ -667,7 +705,7 @@ Please try:
                   max={10}
                   value={copies.receiptPrinter}
                   onChange={(e) => handleCopiesChange('receiptPrinter', Number(e.target.value))}
-                  className="w-16 border border-gray-300 rounded-lg px-2 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500 text-gray-900 bg-white text-center"
+                  className="w-full border border-gray-300 rounded-lg px-2 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500 text-gray-900 bg-white text-center"
                 />
                 <input
                   type="number"
@@ -675,7 +713,7 @@ Please try:
                   max={10}
                   value={nonCashCopies.receiptPrinter}
                   onChange={(e) => handleNonCashCopiesChange('receiptPrinter', Number(e.target.value))}
-                  className="w-20 border border-gray-300 rounded-lg px-2 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500 text-gray-900 bg-white text-center"
+                  className="w-full border border-gray-300 rounded-lg px-2 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500 text-gray-900 bg-white text-center"
                   title="Copies when payment is not cash (e.g. card, QR, e-wallet)"
                 />
               </div>
@@ -730,7 +768,7 @@ Please try:
         </div>
 
         {/* Printer 2: Receiptize Printer */}
-        <div className="bg-white rounded-lg border border-gray-200 p-6 shadow-sm">
+        <div className="bg-white rounded-lg rounded-r-none border border-gray-200 p-6 shadow-sm">
           <div className="flex items-center justify-between mb-4">
             <div className="flex items-center space-x-3">
               <Printer className="w-6 h-6 text-purple-600" />
@@ -744,28 +782,26 @@ Please try:
 
           <div className="space-y-3">
             <div>
-              <div className="flex items-center gap-2">
-                <div className="flex-1">
+              <div className="grid grid-cols-[minmax(0,1fr)_72px_90px] gap-2 items-end">
+                <div className="min-w-0">
                   <label className="block text-sm font-medium text-gray-700">
                     Select Printer
                   </label>
                 </div>
-                <div className="w-16">
-                  <label className="block text-sm font-medium text-gray-700">
+                <div>
+                  <label className="block text-xs font-medium text-gray-700 leading-tight">
                     Copies (cash)
                   </label>
                 </div>
-                <div className="w-20">
-                  <label className="block text-sm font-medium text-gray-700">
+                <div>
+                  <label className="block text-xs font-medium text-gray-700 leading-tight">
                     Non-cash copies
                   </label>
                 </div>
-              </div>
-              <div className="flex items-center gap-2 -mt-1">
                 <select
                   value={selectedPrinters.receiptizePrinter}
                   onChange={(e) => handlePrinterSelection('receiptizePrinter', e.target.value)}
-                  className="flex-1 border border-gray-300 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-purple-500 text-gray-900 bg-white"
+                  className="min-w-0 w-full border border-gray-300 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-purple-500 text-gray-900 bg-white"
                 >
                   <option value="">Choose a printer...</option>
                   {systemPrinters.map((printer) => (
@@ -780,7 +816,7 @@ Please try:
                   max={10}
                   value={copies.receiptizePrinter}
                   onChange={(e) => handleCopiesChange('receiptizePrinter', Number(e.target.value))}
-                  className="w-16 border border-gray-300 rounded-lg px-2 py-2 focus:outline-none focus:ring-2 focus:ring-purple-500 text-gray-900 bg-white text-center"
+                  className="w-full border border-gray-300 rounded-lg px-2 py-2 focus:outline-none focus:ring-2 focus:ring-purple-500 text-gray-900 bg-white text-center"
                 />
                 <input
                   type="number"
@@ -788,7 +824,7 @@ Please try:
                   max={10}
                   value={nonCashCopies.receiptizePrinter}
                   onChange={(e) => handleNonCashCopiesChange('receiptizePrinter', Number(e.target.value))}
-                  className="w-20 border border-gray-300 rounded-lg px-2 py-2 focus:outline-none focus:ring-2 focus:ring-purple-500 text-gray-900 bg-white text-center"
+                  className="w-full border border-gray-300 rounded-lg px-2 py-2 focus:outline-none focus:ring-2 focus:ring-purple-500 text-gray-900 bg-white text-center"
                   title="Copies when payment is not cash (e.g. card, QR, e-wallet)"
                 />
               </div>
@@ -857,28 +893,26 @@ Please try:
 
           <div className="space-y-3">
             <div>
-              <div className="flex items-center gap-2">
-                <div className="flex-1">
+              <div className="grid grid-cols-[minmax(0,1fr)_72px_90px] gap-2 items-end">
+                <div className="min-w-0">
                   <label className="block text-sm font-medium text-gray-700">
                     Select Printer
                   </label>
                 </div>
-                <div className="w-16">
-                  <label className="block text-sm font-medium text-gray-700">
+                <div>
+                  <label className="block text-xs font-medium text-gray-700 leading-tight">
                     Copies (offline)
                   </label>
                 </div>
-                <div className="w-20">
-                  <label className="block text-sm font-medium text-gray-700">
+                <div>
+                  <label className="block text-xs font-medium text-gray-700 leading-tight">
                     Copies (non-offline)
                   </label>
                 </div>
-              </div>
-              <div className="flex items-center gap-2 -mt-1">
                 <select
                   value={selectedPrinters.labelPrinter}
                   onChange={(e) => handlePrinterSelection('labelPrinter', e.target.value)}
-                  className="flex-1 border border-gray-300 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-green-500 text-gray-900 bg-white"
+                  className="min-w-0 w-full border border-gray-300 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-green-500 text-gray-900 bg-white"
                 >
                   <option value="">Choose a printer...</option>
                   {systemPrinters.map((printer) => (
@@ -893,7 +927,7 @@ Please try:
                   max={10}
                   value={copies.labelPrinter}
                   onChange={(e) => handleCopiesChange('labelPrinter', Number(e.target.value))}
-                  className="w-16 border border-gray-300 rounded-lg px-2 py-2 focus:outline-none focus:ring-2 focus:ring-green-500 text-gray-900 bg-white text-center"
+                  className="w-full border border-gray-300 rounded-lg px-2 py-2 focus:outline-none focus:ring-2 focus:ring-green-500 text-gray-900 bg-white text-center"
                   title="Copies for offline orders"
                 />
                 <input
@@ -902,7 +936,7 @@ Please try:
                   max={10}
                   value={labelPrinterNonOfflineCopies}
                   onChange={(e) => handleLabelPrinterNonOfflineCopiesChange(Number(e.target.value))}
-                  className="w-20 border border-gray-300 rounded-lg px-2 py-2 focus:outline-none focus:ring-2 focus:ring-green-500 text-gray-900 bg-white text-center"
+                  className="w-full border border-gray-300 rounded-lg px-2 py-2 focus:outline-none focus:ring-2 focus:ring-green-500 text-gray-900 bg-white text-center"
                   title="Copies for GoFood, Grab, Shopee, Qpon, TikTok"
                 />
               </div>
@@ -933,11 +967,18 @@ Please try:
       <div className="bg-white rounded-lg border border-gray-200 shadow-sm p-6">
         <div className="flex items-center justify-between mb-4">
           <div className="flex-1">
-            <h3 className="text-lg font-semibold text-gray-800 mb-2">Single Printer Mode</h3>
-            <p className="text-sm text-gray-600">
-              When enabled, all transactions will be printed on Printer 1 only, regardless of which side of the confirmation button is clicked.
-              The receipt will show Printer 1's daily counter, but the database will still track the original printer assignment.
-            </p>
+            <div className="flex items-center gap-2">
+              <h3 className="text-lg font-semibold text-gray-800">Single Printer Mode</h3>
+              <button
+                type="button"
+                onClick={() => setShowSinglePrinterInfo((prev) => !prev)}
+                className="text-blue-600 hover:text-blue-700"
+                aria-label="Show Single Printer Mode info"
+                title="Show info"
+              >
+                <Info className="w-4 h-4" />
+              </button>
+            </div>
           </div>
           <label className="relative inline-flex items-center cursor-pointer ml-4">
             <input
@@ -955,43 +996,118 @@ Please try:
             <div className="w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-blue-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-600"></div>
           </label>
         </div>
+        {showSinglePrinterInfo && (
+          <p className="text-sm text-gray-600 mb-4">
+            When enabled, all transactions will be printed on Printer 1 only, regardless of which side of the confirmation button is clicked. The receipt will show Printer 1&apos;s daily counter, but the database will still track the original printer assignment.
+          </p>
+        )}
 
         {/* Randomize Printer 1 and Printer 2 Audit Log Database Saving */}
         {singlePrinterMode && (
           <div className="mt-4 pt-4 border-t border-gray-200">
-            <div className="flex items-center justify-between mb-2">
-              <div className="flex-1">
-                <h4 className="text-sm font-semibold text-gray-800 mb-1">Randomize Printer 1 and Printer 2 Audit Log Database Saving</h4>
-                <p className="text-xs text-gray-600">
-                  When enabled, transactions will randomly be saved to Printer 1 or Printer 2 audit log based on the percentage below.
-                  Leave empty or set to 0 to disable randomization (default behavior).
-                </p>
-              </div>
-            </div>
             <div className="flex items-center gap-3 mt-3">
               <label className="text-sm font-medium text-gray-700 whitespace-nowrap">
-                Printer 2 Audit Log Chance (%):
+                Audit Distribution Mode:
               </label>
-              <input
-                type="number"
-                min={0}
-                max={100}
-                step={1}
-                value={printer2AuditLogChance === null ? '' : printer2AuditLogChance}
-                onChange={(e) => {
-                  const value = e.target.value === '' ? null : Number(e.target.value);
-                  if (value === null || (value >= 0 && value <= 100)) {
-                    setPrinter2AuditLogChance(value);
-                    // Auto-save on change
-                    setTimeout(() => {
-                      handleSave();
-                    }, 500);
-                  }
+              <button
+                type="button"
+                onClick={() => {
+                  const nextMode: Printer2AuditDistributionMode =
+                    printer2AuditDistributionMode === 'chance' ? 'amountRatio' : 'chance';
+                  setPrinter2AuditDistributionMode(nextMode);
+                  setTimeout(() => {
+                    handleSave();
+                  }, 300);
                 }}
-                placeholder="0-100"
-                className="w-24 border border-gray-300 rounded-lg px-3 py-2 text-black focus:outline-none focus:ring-2 focus:ring-blue-500"
-              />
+                className="relative inline-flex h-8 w-56 items-center rounded-full bg-gray-200 transition-colors focus:outline-none focus:ring-2 focus:ring-blue-500"
+                aria-label="Toggle audit distribution mode"
+                title="Toggle between Chance mode and Distribution mode"
+              >
+                <span
+                  className={`absolute top-1 h-6 w-[108px] rounded-full bg-white shadow transition-transform ${
+                    printer2AuditDistributionMode === 'amountRatio' ? 'translate-x-[112px]' : 'translate-x-1'
+                  }`}
+                />
+                <span className="relative z-10 w-1/2 text-center text-xs font-medium text-gray-800">Chance</span>
+                <span className="relative z-10 w-1/2 text-center text-xs font-medium text-gray-800">Distribution</span>
+              </button>
             </div>
+            {printer2AuditDistributionMode === 'chance' ? (
+              <div className="flex items-center gap-3 mt-3">
+                <label className="text-sm font-medium text-gray-700 whitespace-nowrap">
+                  Printer 2 Audit Log Chance (%):
+                </label>
+                <input
+                  type="number"
+                  min={0}
+                  max={100}
+                  step={1}
+                  value={printer2AuditLogChance === null ? '' : printer2AuditLogChance}
+                  onChange={(e) => {
+                    const value = e.target.value === '' ? null : Number(e.target.value);
+                    if (value === null || (value >= 0 && value <= 100)) {
+                      setPrinter2AuditLogChance(value);
+                      // Auto-save on change
+                      setTimeout(() => {
+                        handleSave();
+                      }, 500);
+                    }
+                  }}
+                  placeholder="0-100"
+                  className="w-24 border border-gray-300 rounded-lg px-3 py-2 text-black focus:outline-none focus:ring-2 focus:ring-blue-500"
+                />
+              </div>
+            ) : (
+              <div className="mt-3 space-y-2">
+                <div className="flex items-center gap-3">
+                  <label className="text-sm font-medium text-gray-700 whitespace-nowrap">
+                    Target P1 (%):
+                  </label>
+                  <input
+                    type="number"
+                    min={1}
+                    max={99}
+                    step={1}
+                    value={Math.max(1, Math.min(99, 100 - printer2AuditTargetPercent))}
+                    onChange={(e) => {
+                      const p1 = Number(e.target.value);
+                      if (!Number.isNaN(p1) && p1 >= 1 && p1 <= 99) {
+                        setPrinter2AuditTargetPercent(100 - p1);
+                        setTimeout(() => {
+                          handleSave();
+                        }, 500);
+                      }
+                    }}
+                    className="w-24 border border-gray-300 rounded-lg px-3 py-2 text-black focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  />
+                </div>
+                <div className="flex items-center gap-3">
+                  <label className="text-sm font-medium text-gray-700 whitespace-nowrap">
+                    Target P2 (%):
+                  </label>
+                  <input
+                    type="number"
+                    min={1}
+                    max={99}
+                    step={1}
+                    value={printer2AuditTargetPercent}
+                    onChange={(e) => {
+                      const p2 = Number(e.target.value);
+                      if (!Number.isNaN(p2) && p2 >= 1 && p2 <= 99) {
+                        setPrinter2AuditTargetPercent(p2);
+                        setTimeout(() => {
+                          handleSave();
+                        }, 500);
+                      }
+                    }}
+                    className="w-24 border border-gray-300 rounded-lg px-3 py-2 text-black focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  />
+                </div>
+                <p className="text-xs text-gray-600">
+                  P2 will be auto-controlled by transaction amount around the selected target, with a small upper tolerance.
+                </p>
+              </div>
+            )}
           </div>
         )}
       </div>

@@ -520,6 +520,8 @@ type TransactionItemRow = {
   final_amount?: number | null;
   total_amount?: number | null;
   tx_items_total?: number;
+  waiter_id?: number | null;
+  tx_status?: string;
 };
 
 type TransactionRefundRow = {
@@ -6750,13 +6752,37 @@ function createWindows(): void {
    * Returns: waiters (waiter_id, waiter_name, color, total_items_sold, total_revenue, transaction_count, avg_transaction_value, top_products). */
   ipcMain.handle('localdb-get-waiter-performance-report', async (
     _event,
-    payload: { businessId: number; startDate: string; endDate: string }
+    payload: {
+      businessId: number;
+      startDate: string;
+      endDate: string;
+      /** @deprecated prefer productIds — still supported */
+      productId?: number | null;
+      /** When non-empty, only these SKUs; rank by combined qty. */
+      productIds?: number[] | null;
+    }
   ) => {
     try {
       await ensureTransactionItemsWaiterIdColumn();
-      const { businessId, startDate, endDate } = payload || {};
+      const { businessId, startDate, endDate, productId: rawProductId, productIds: rawProductIds } = payload || {};
+      // #region agent log
+      fetch('http://127.0.0.1:7242/ingest/176c0b85-d0c0-41ef-a970-2527232dc552',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'fe0565'},body:JSON.stringify({sessionId:'fe0565',runId:'waiters-entry',hypothesisId:'H2_H3',location:'electron/main.ts:6751',message:'waiters-report request payload',data:{businessId,startDate,endDate,rawProductId,rawProductIds},timestamp:Date.now()})}).catch(()=>{});
+      // #endregion
+
+      const normalizedFromArray = Array.isArray(rawProductIds)
+        ? rawProductIds
+            .map((x) => Math.floor(Number(x)))
+            .filter((n) => Number.isFinite(n) && n > 0)
+        : [];
+      const productFilterIds =
+        normalizedFromArray.length > 0
+          ? [...new Set(normalizedFromArray)].sort((a, b) => a - b)
+          : rawProductId != null && Number.isFinite(Number(rawProductId)) && Number(rawProductId) > 0
+            ? [Math.floor(Number(rawProductId))]
+            : [];
+      const hasProductFilter = productFilterIds.length > 0;
       if (!businessId) {
-        return { waiters: [], topProductsLimit: 5 };
+        return { waiters: [], topProductsLimit: 5, rankByQuantity: false };
       }
 
       const startIso = startDate ? (startDate.includes('T') ? startDate : `${startDate}T00:00:00`) : null;
@@ -6780,7 +6806,7 @@ function createWindows(): void {
 
       const transactions = await executeQuery<{ uuid_id: string; tx_int_id: number; final_amount: number; created_at: string }>(txQuery, txParams);
       if (transactions.length === 0) {
-        return { waiters: [], topProductsLimit: 5 };
+        return { waiters: [], topProductsLimit: 5, rankByQuantity: hasProductFilter };
       }
 
       const txUuids = transactions.map(t => t.uuid_id);
@@ -6815,7 +6841,7 @@ function createWindows(): void {
       }
 
       // 4. Get items: waiter_id, transaction_uuid, product_id, quantity, total_price (exclude cancelled)
-      const itemsQuery = `
+      let itemsQuery = `
         SELECT ti.waiter_id, ti.uuid_transaction_id, ti.product_id, ti.quantity, ti.total_price, COALESCE(p.nama, 'Unknown') as product_name
         FROM transaction_items ti
         LEFT JOIN products p ON ti.product_id = p.id
@@ -6824,6 +6850,12 @@ function createWindows(): void {
           AND (ti.production_status IS NULL OR ti.production_status != 'cancelled')
           AND ti.waiter_id IS NOT NULL
       `;
+      const itemsParams: (string | number)[] = [...txUuids];
+      if (hasProductFilter) {
+        const pidPh = productFilterIds.map(() => '?').join(',');
+        itemsQuery += ` AND ti.product_id IN (${pidPh})`;
+        itemsParams.push(...productFilterIds);
+      }
       const items = await executeQuery<{
         waiter_id: number;
         uuid_transaction_id: string;
@@ -6831,7 +6863,13 @@ function createWindows(): void {
         quantity: number;
         total_price: number;
         product_name: string;
-      }>(itemsQuery, txUuids);
+      }>(itemsQuery, itemsParams);
+      const timusWaiterQty = items
+        .filter((it) => String(it.product_name || '').toLowerCase().includes('timus'))
+        .reduce((sum, it) => sum + (Number(it.quantity) || 0), 0);
+      // #region agent log
+      fetch('http://127.0.0.1:7242/ingest/176c0b85-d0c0-41ef-a970-2527232dc552',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'fe0565'},body:JSON.stringify({sessionId:'fe0565',runId:'waiters-items',hypothesisId:'H1_H4',location:'electron/main.ts:6854',message:'waiters filtered items stats',data:{hasProductFilter,productFilterIds,itemsRows:items.length,itemsQtyTotal:items.reduce((s,it)=>s+(Number(it.quantity)||0),0),uniqueWaiterIds:[...new Set(items.map((it)=>it.waiter_id))].length,timusWaiterQty},timestamp:Date.now()})}).catch(()=>{});
+      // #endregion
 
       // 5. Aggregate per waiter (items only - waiter items)
       type WaiterAgg = {
@@ -6893,6 +6931,9 @@ function createWindows(): void {
 
       // 7. Get employee names and colors
       const waiterIds = Array.from(waiterAgg.keys());
+      if (waiterIds.length === 0) {
+        return { waiters: [], topProductsLimit: 5, rankByQuantity: hasProductFilter };
+      }
       const empPlaceholders = waiterIds.map(() => '?').join(',');
       const employees = await executeQuery<{ id: number; nama_karyawan: string; color: string | null }>(
         `SELECT id, nama_karyawan, color FROM employees WHERE id IN (${empPlaceholders})`,
@@ -6920,14 +6961,23 @@ function createWindows(): void {
           ...a,
           net_revenue: (a as WaiterAgg & { net_revenue?: number }).net_revenue ?? a.gross_revenue,
         }))
-        .sort((a, b) => b.net_revenue - a.net_revenue);
+        .sort((a, b) => {
+          if (hasProductFilter) {
+            const dq = b.total_items_sold - a.total_items_sold;
+            if (dq !== 0) return dq;
+          }
+          return b.net_revenue - a.net_revenue;
+        });
 
       sorted.forEach((w, idx) => {
         const emp = empMap.get(w.wid);
-        const topProducts = Array.from(w.products.entries())
-          .map(([pid, p]) => ({ product_id: pid, ...p, total_quantity: p.quantity, total_revenue: p.revenue }))
-          .sort((a, b) => b.total_revenue - a.total_revenue)
-          .slice(0, TOP_PRODUCTS_LIMIT);
+        const topProducts =
+          hasProductFilter
+            ? []
+            : Array.from(w.products.entries())
+                .map(([pid, p]) => ({ product_id: pid, ...p, total_quantity: p.quantity, total_revenue: p.revenue }))
+                .sort((a, b) => b.total_revenue - a.total_revenue)
+                .slice(0, TOP_PRODUCTS_LIMIT);
 
         waitersResult.push({
           waiter_id: w.wid,
@@ -6942,10 +6992,14 @@ function createWindows(): void {
         });
       });
 
-      return { waiters: waitersResult, topProductsLimit: TOP_PRODUCTS_LIMIT };
+      return {
+        waiters: waitersResult,
+        topProductsLimit: TOP_PRODUCTS_LIMIT,
+        rankByQuantity: hasProductFilter,
+      };
     } catch (error) {
       console.error('Error getting waiter performance report:', error);
-      return { waiters: [], topProductsLimit: 5 };
+      return { waiters: [], topProductsLimit: 5, rankByQuantity: false };
     }
   });
 
@@ -9556,9 +9610,11 @@ function createWindows(): void {
           p.harga_qpon,
           p.harga_tiktok,
           COALESCE(t.refund_total, 0) as refund_total,
+          t.status as tx_status,
           t.final_amount,
           t.total_amount,
-          (SELECT COALESCE(SUM(ti2.total_price), 0) FROM transaction_items ti2 WHERE ti2.transaction_id = ti.transaction_id AND (ti2.production_status IS NULL OR ti2.production_status != 'cancelled')) as tx_items_total
+          (SELECT COALESCE(SUM(ti2.total_price), 0) FROM transaction_items ti2 WHERE ti2.transaction_id = ti.transaction_id AND (ti2.production_status IS NULL OR ti2.production_status != 'cancelled')) as tx_items_total,
+          ti.waiter_id as waiter_id
         FROM transaction_items ti
         INNER JOIN transactions t ON ti.transaction_id = t.id
         LEFT JOIN payment_methods pm ON t.payment_method_id = pm.id
@@ -9590,6 +9646,13 @@ function createWindows(): void {
       }
 
       const rows = await executeQuery<TransactionItemRow>(query, params);
+      const timusRows = rows.filter((row) => String(row.product_name || '').toLowerCase().includes('timus'));
+      const timusProductSalesQty = timusRows.reduce((sum, row) => sum + (Number(row.quantity) || 0), 0);
+      const timusWithoutWaiterQty = timusRows.reduce((sum, row) => sum + ((row.waiter_id == null ? Number(row.quantity) || 0 : 0)), 0);
+      const timusWithWaiterQty = timusRows.reduce((sum, row) => sum + ((row.waiter_id != null ? Number(row.quantity) || 0 : 0)), 0);
+      // #region agent log
+      fetch('http://127.0.0.1:7242/ingest/176c0b85-d0c0-41ef-a970-2527232dc552',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'fe0565'},body:JSON.stringify({sessionId:'fe0565',runId:'product-sales-rows',hypothesisId:'H1_H2_H3',location:'electron/main.ts:9635',message:'product-sales base rows stats',data:{businessId,userId,shiftStart,shiftEnd,shiftUuid,shiftUuidsCount:Array.isArray(shiftUuids)?shiftUuids.length:0,rowsCount:rows.length,timusRows:timusRows.length,timusProductSalesQty,timusWithWaiterQty,timusWithoutWaiterQty,statuses:[...new Set(rows.map((r)=>String(r.tx_status||''))).values()]},timestamp:Date.now()})}).catch(()=>{});
+      // #endregion
 
       type ProductAccumulator = {
         product_id: number;

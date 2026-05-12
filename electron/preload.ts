@@ -220,8 +220,15 @@ contextBridge.exposeInMainWorld('electronAPI', {
   localDbUpsertTransactionItemCustomizations: (rows: UnknownRecord[]) => ipcRenderer.invoke('localdb-upsert-transaction-item-customizations', rows),
   localDbUpsertTransactionItemCustomizationOptions: (rows: UnknownRecord[]) => ipcRenderer.invoke('localdb-upsert-transaction-item-customization-options', rows),
   localDbGetTransactionRefunds: (transactionUuid: string) => ipcRenderer.invoke('localdb-get-transaction-refunds', transactionUuid),
-  localDbGetWaiterPerformanceReport: (payload: { businessId: number; startDate: string; endDate: string }) =>
-    ipcRenderer.invoke('localdb-get-waiter-performance-report', payload),
+  localDbGetWaiterPerformanceReport: (payload: {
+    businessId: number;
+    startDate: string;
+    endDate: string;
+    /** When set, only aggregate line items for this product (rank by qty sold). */
+    productId?: number | null;
+    /** When non-empty, aggregate only these products; combined qty determines rank. */
+    productIds?: number[] | null;
+  }) => ipcRenderer.invoke('localdb-get-waiter-performance-report', payload),
   // System POS database handlers
   localDbGetSystemPosTransactions: (businessId?: number, limit?: number) => ipcRenderer.invoke('localdb-get-system-pos-transactions', businessId, limit),
   localDbGetSystemPosTransactionItems: (transactionId?: number | string) => ipcRenderer.invoke('localdb-get-system-pos-transaction-items', transactionId),

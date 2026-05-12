@@ -102,6 +102,11 @@ export default function ReservationPage({ businessId, userEmail, userId, onPickP
       const list = res?.reservations ?? [];
       setReservations(Array.isArray(list) ? list : []);
     } catch (e) {
+      const name = e instanceof Error ? e.name : typeof e === 'object' && e !== null && 'name' in e ? String((e as { name?: string }).name) : '';
+      const msg = e instanceof Error ? e.message : String(e);
+      if (name === 'AbortError' || signal?.aborted) {
+        return;
+      }
       const errorMessage = e instanceof Error ? e.message : 'Gagal memuat reservasi dari server.';
       console.error('Fetch reservations error:', e);
       setReservations([]);
@@ -114,7 +119,9 @@ export default function ReservationPage({ businessId, userEmail, userId, onPickP
   useEffect(() => {
     const ctrl = new AbortController();
     fetchReservations(ctrl.signal);
-    return () => ctrl.abort();
+    return () => {
+      ctrl.abort();
+    };
   }, [fetchReservations]);
 
   const fetchReservationLogs = useCallback(async (signal?: AbortSignal) => {
@@ -128,6 +135,11 @@ export default function ReservationPage({ businessId, userEmail, userId, onPickP
       const reservationActions = Array.isArray(list) ? list : [];
       setReservationLogs(reservationActions);
     } catch (e) {
+      const name = e instanceof Error ? e.name : '';
+      const msg = e instanceof Error ? e.message : String(e);
+      if (name === 'AbortError' || signal?.aborted) {
+        return;
+      }
       console.error('Fetch reservation logs error:', e);
       setReservationLogs([]);
       setVpsError(e instanceof Error ? e.message : 'Gagal memuat log dari server.');
@@ -137,7 +149,9 @@ export default function ReservationPage({ businessId, userEmail, userId, onPickP
   useEffect(() => {
     const ctrl = new AbortController();
     fetchReservationLogs(ctrl.signal);
-    return () => ctrl.abort();
+    return () => {
+      ctrl.abort();
+    };
   }, [fetchReservationLogs]);
 
   useEffect(() => {
